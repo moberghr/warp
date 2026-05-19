@@ -51,6 +51,21 @@ public sealed class BackgroundServiceLifecycleLogger
     }
 
     /// <summary>
+    /// Emits a <c>Lifecycle / Error</c> row: a supervisor-side operation (status write, fault
+    /// record, restart-count reset) failed. Distinct from <see cref="LogFaulted"/>, which is for
+    /// failures originating in user code. Treated by the supervisor as a faulted iteration:
+    /// backoff applies and the next iteration retries the whole cycle.
+    /// </summary>
+    public void LogSupervisorFault(Exception ex)
+    {
+        _collector.Enqueue(
+            BackgroundServiceLogSource.Lifecycle,
+            LogLevel.Error,
+            $"Supervisor faulted: {ex.GetType().Name}: {ex.Message}",
+            ex);
+    }
+
+    /// <summary>
     /// Emits a <c>Lifecycle / Warning</c> row: the supervisor is waiting
     /// <paramref name="delay"/> before the next <c>ExecuteAsync</c> invocation.
     /// </summary>

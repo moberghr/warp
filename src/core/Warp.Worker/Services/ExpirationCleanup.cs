@@ -63,9 +63,14 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         var now = _time.GetUtcNow().UtcDateTime;
         var batchSize = _configuration.ExpirationBatchSize;
 
+        // Only delete jobs that have no children at all. Internal nodes of an expired tree
+        // wait until their (already-expired) children are cleaned in an earlier tick — this
+        // prevents the self-FK fk_job_job_parent_job_id from firing when Take(batchSize)
+        // would otherwise return a parent without all of its children. Trees drain one level
+        // per tick.
         var expiredJobIds = await _context.Set<Job>()
             .Where(x => x.ExpireAt != null && x.ExpireAt < now)
-            .Where(x => !x.ChildJobs.Any(c => c.ExpireAt == null || c.ExpireAt >= now))
+            .Where(x => !x.ChildJobs.Any())
             .Select(x => x.Id)
             .Take(batchSize)
             .ToListAsync(ct);
@@ -157,11 +162,13 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             }
 
             var toDelete = Math.Min(expirableCount - maxCount, batchSize);
-            var now = _time.GetUtcNow().UtcDateTime;
 
+            // Same FK-safety constraint as RunCleanupAsync: only delete leaves so the
+            // self-FK fk_job_job_parent_job_id can't fire on a parent whose children
+            // happen to land in a different batch.
             var jobIds = await _context.Set<Job>()
                 .Where(x => x.ExpireAt != null)
-                .Where(x => !x.ChildJobs.Any(c => c.ExpireAt == null || c.ExpireAt >= now))
+                .Where(x => !x.ChildJobs.Any())
                 .OrderBy(x => x.ExpireAt)
                 .Select(x => x.Id)
                 .Take(toDelete)

@@ -121,148 +121,182 @@ internal sealed class BackgroundServiceSupervisor<TContext>
         }
 
         // Step 2: Main restart loop.
+        //
+        // Each iteration is wrapped in a supervisor-fault catch: if any of the supervisor's
+        // own DB writes (SetStatus, RecordFault, ResetRestartCount) throws, the iteration is
+        // treated as faulted — log an Error, emit a SupervisorFault lifecycle entry, advance
+        // backoff, and retry the iteration. Service execution is gated on the supervisor's
+        // ability to persist status: dashboard truthfulness is preferred over running blind.
+        // The user-fault counter (RestartCount) is NOT incremented for supervisor faults.
         var backoffIndex = 0;
         var attempt = 0;
 
         while (!hostStoppingToken.IsCancellationRequested)
         {
-            // Try to acquire execution rights (always succeeds for per-server; may return null
-            // for singleton while another server holds the lease).
-            BackgroundServiceExecutionScope? executionScope;
+            BackgroundServiceExecutionScope? executionScope = null;
             try
             {
                 executionScope = await _strategy.AcquireAsync(hostStoppingToken);
-            }
-            catch (OperationCanceledException) when (hostStoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
 
-            if (executionScope == null)
-            {
-                // Singleton waiting for the lease — set Waiting status and poll.
-                await TrySetStatusAsync(_service.Name, BackgroundServiceStatus.Waiting, hostStoppingToken);
+                if (executionScope == null)
+                {
+                    // Singleton waiting for the lease — set Waiting status and poll.
+                    await SetStatusAsync(_service.Name, BackgroundServiceStatus.Waiting, hostStoppingToken);
+                    await Task.Delay(_acquirePollInterval, hostStoppingToken);
+
+                    continue;
+                }
+
+                // Acquired — set Running status and emit lifecycle log.
+                await SetStatusAsync(_service.Name, BackgroundServiceStatus.Running, hostStoppingToken);
+
+                if (_strategy.Scope == ServiceScope.Singleton)
+                {
+                    _lifecycleLogger.LogLeaseAcquired();
+                }
+                else
+                {
+                    _lifecycleLogger.LogStarted();
+                }
+
+                var startedAt = _time.GetUtcNow();
+                var faultException = default(Exception?);
+                var leaseLost = false;
+
+                WarpTelemetry.BackgroundServicesStarted.Add(1, new KeyValuePair<string, object?>("service_name", _service.Name));
+
                 try
                 {
-                    await Task.Delay(_acquirePollInterval, hostStoppingToken);
+                    await _service.InvokeExecuteAsync(executionScope.Token);
+
+                    // User code returned without cancellation — treat as fault.
+                    faultException = new InvalidOperationException(
+                        $"{_service.Name}.ExecuteAsync returned without cancellation. " +
+                        "WarpBackgroundService must run until its CancellationToken is cancelled.");
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (hostStoppingToken.IsCancellationRequested)
                 {
-                    break;
+                    // Graceful host shutdown — let it bubble to the outer catch.
+                    throw;
+                }
+                catch (OperationCanceledException) when (
+                    executionScope.Token.IsCancellationRequested
+                    && !hostStoppingToken.IsCancellationRequested)
+                {
+                    // Lease was lost (singleton: internal CTS fired). Release scope and restart.
+                    leaseLost = true;
+                }
+                catch (Exception ex)
+                {
+                    faultException = ex;
                 }
 
-                continue;
-            }
+                // Release the scope (unsubscribes signal, disposes linked CTS, releases lease).
+                // Null out the local so the iteration's finally block doesn't double-release.
+                await TryReleaseAsync(executionScope);
+                executionScope = null;
 
-            // Acquired — set Running status and emit lifecycle log.
-            await TrySetStatusAsync(_service.Name, BackgroundServiceStatus.Running, hostStoppingToken);
+                if (leaseLost)
+                {
+                    _lifecycleLogger.LogLeaseLost("lease lost between heartbeats");
 
-            if (_strategy.Scope == ServiceScope.Singleton)
-            {
-                _lifecycleLogger.LogLeaseAcquired();
-            }
-            else
-            {
-                _lifecycleLogger.LogStarted();
-            }
+                    // Emit Faulted then Waiting so the dashboard timeline shows the full
+                    // Running → Faulted → Waiting transition deterministically.
+                    // Without the Waiting write the next AcquireAsync may immediately re-acquire
+                    // and the timeline jumps from Faulted straight to Running.
+                    await SetStatusAsync(_service.Name, BackgroundServiceStatus.Faulted, hostStoppingToken);
+                    await SetStatusAsync(_service.Name, BackgroundServiceStatus.Waiting, hostStoppingToken);
 
-            var startedAt = _time.GetUtcNow();
-            var faultException = default(Exception?);
-            var leaseLost = false;
+                    // Re-enter acquire loop as a waiter — backoff resets so the lease attempt is immediate.
+                    backoffIndex = 0;
+                    attempt = 0;
+                    continue;
+                }
 
-            WarpTelemetry.BackgroundServicesStarted.Add(1, new KeyValuePair<string, object?>("service_name", _service.Name));
+                if (faultException != null)
+                {
+                    WarpTelemetry.BackgroundServicesFaulted.Add(
+                        1,
+                        new KeyValuePair<string, object?>("service_name", _service.Name),
+                        new KeyValuePair<string, object?>("exception_type", faultException.GetType().Name));
+                    _lifecycleLogger.LogFaulted(faultException);
+                    _logger.LogError(faultException, "BackgroundService {Name} faulted", _service.Name);
+                    await RecordFaultAsync(_service.Name, faultException, hostStoppingToken);
+                }
 
-            try
-            {
-                await _service.InvokeExecuteAsync(executionScope.Token);
+                // Healthy-reset check: if the service ran for ≥5 min before this fault, reset
+                // the backoff — it was a transient blip on an otherwise healthy service.
+                //
+                // ORDER CONTRACT: RecordFaultAsync (above) increments RestartCount BEFORE this
+                // block clears it. HealthyResetTests asserts RestartCount == 1 after a second
+                // fault, which only holds if the order stays Record→Reset (not Reset→Record).
+                // If you reorder these, update HealthyResetTestsBase's assertion accordingly.
+                var ranFor = _time.GetUtcNow() - startedAt;
+                if (ranFor >= BackgroundServiceSupervisorConstants.HealthyResetThreshold)
+                {
+                    await ResetRestartCountAsync(_service.Name, hostStoppingToken);
+                    backoffIndex = 0;
+                }
 
-                // User code returned without cancellation — treat as fault.
-                faultException = new InvalidOperationException(
-                    $"{_service.Name}.ExecuteAsync returned without cancellation. " +
-                    "WarpBackgroundService must run until its CancellationToken is cancelled.");
+                var backoffSequence = BackgroundServiceSupervisorConstants.BackoffSequence;
+                var backoff = backoffSequence[Math.Min(backoffIndex, backoffSequence.Length - 1)];
+                backoffIndex++;
+                attempt++;
+
+                await SetStatusAsync(_service.Name, BackgroundServiceStatus.Restarting, hostStoppingToken);
+                _lifecycleLogger.LogRestarting(attempt, backoff);
+
+                WarpTelemetry.BackgroundServicesRestarts.Add(1, new KeyValuePair<string, object?>("service_name", _service.Name));
+
+                await Task.Delay(backoff, _time, hostStoppingToken);
             }
             catch (OperationCanceledException) when (hostStoppingToken.IsCancellationRequested)
             {
-                // Graceful host shutdown — release scope and exit loop.
-                await TryReleaseAsync(executionScope);
                 _lifecycleLogger.LogStopped();
                 break;
-            }
-            catch (OperationCanceledException) when (
-                executionScope.Token.IsCancellationRequested
-                && !hostStoppingToken.IsCancellationRequested)
-            {
-                // Lease was lost (singleton: internal CTS fired). Release scope and restart.
-                leaseLost = true;
             }
             catch (Exception ex)
             {
-                faultException = ex;
-            }
+                // Supervisor-side fault — typically a DB write that failed (timeout under load,
+                // pool exhaustion, transient connection error). Log an Error, emit a
+                // SupervisorFault lifecycle entry, advance backoff, and retry the iteration.
+                // RestartCount stays untouched: it counts user-code faults, not infrastructure ones.
+                _logger.LogError(ex, "BackgroundService {Name}: supervisor iteration faulted", _service.Name);
+                _lifecycleLogger.LogSupervisorFault(ex);
 
-            // Release the scope (unsubscribes signal, disposes linked CTS, releases lease).
-            await TryReleaseAsync(executionScope);
-
-            if (leaseLost)
-            {
-                _lifecycleLogger.LogLeaseLost("lease lost between heartbeats");
-
-                // Emit Faulted then Waiting so the dashboard timeline shows the full
-                // Running → Faulted → Waiting transition deterministically.
-                // Without the Waiting write the next AcquireAsync may immediately re-acquire
-                // and the timeline jumps from Faulted straight to Running.
-                await TrySetStatusAsync(_service.Name, BackgroundServiceStatus.Faulted, hostStoppingToken);
-                await TrySetStatusAsync(_service.Name, BackgroundServiceStatus.Waiting, hostStoppingToken);
-
-                // Re-enter acquire loop as a waiter — backoff resets so the lease attempt is immediate.
-                backoffIndex = 0;
-                attempt = 0;
-                continue;
-            }
-
-            if (faultException != null)
-            {
                 WarpTelemetry.BackgroundServicesFaulted.Add(
                     1,
                     new KeyValuePair<string, object?>("service_name", _service.Name),
-                    new KeyValuePair<string, object?>("exception_type", faultException.GetType().Name));
-                _lifecycleLogger.LogFaulted(faultException);
-                _logger.LogError(faultException, "BackgroundService {Name} faulted", _service.Name);
-                await TryRecordFaultAsync(_service.Name, faultException, hostStoppingToken);
+                    new KeyValuePair<string, object?>("exception_type", ex.GetType().Name));
+
+                var backoffSequence = BackgroundServiceSupervisorConstants.BackoffSequence;
+                var backoff = backoffSequence[Math.Min(backoffIndex, backoffSequence.Length - 1)];
+                backoffIndex++;
+
+                try
+                {
+                    // Supervisor-fault recovery uses REAL time, not `_time`. The injected
+                    // TimeProvider exists so user-fault backoff (1s, 2s, 4s...) can be compressed
+                    // by fake-time tests, but supervisor faults are infrastructure-recovery delays
+                    // (DB blip, pool exhaustion) that should pass on the wall clock regardless of
+                    // what fake-time the test is driving for its own choreography.
+                    await Task.Delay(backoff, hostStoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    _lifecycleLogger.LogStopped();
+                    break;
+                }
             }
-
-            // Healthy-reset check: if the service ran for ≥5 min before this fault, reset
-            // the backoff — it was a transient blip on an otherwise healthy service.
-            //
-            // ORDER CONTRACT: RecordFaultAsync (above) increments RestartCount BEFORE this
-            // block clears it. HealthyResetTests asserts RestartCount == 1 after a second
-            // fault, which only holds if the order stays Record→Reset (not Reset→Record).
-            // If you reorder these, update HealthyResetTestsBase's assertion accordingly.
-            var ranFor = _time.GetUtcNow() - startedAt;
-            if (ranFor >= BackgroundServiceSupervisorConstants.HealthyResetThreshold)
+            finally
             {
-                await TryResetRestartCountAsync(_service.Name, hostStoppingToken);
-                backoffIndex = 0;
-            }
-
-            var backoffSequence = BackgroundServiceSupervisorConstants.BackoffSequence;
-            var backoff = backoffSequence[Math.Min(backoffIndex, backoffSequence.Length - 1)];
-            backoffIndex++;
-            attempt++;
-
-            await TrySetStatusAsync(_service.Name, BackgroundServiceStatus.Restarting, hostStoppingToken);
-            _lifecycleLogger.LogRestarting(attempt, backoff);
-
-            WarpTelemetry.BackgroundServicesRestarts.Add(1, new KeyValuePair<string, object?>("service_name", _service.Name));
-
-            try
-            {
-                await Task.Delay(backoff, _time, hostStoppingToken);
-            }
-            catch (OperationCanceledException)
-            {
-                _lifecycleLogger.LogStopped();
-                break;
+                // Release the execution scope if the iteration body threw before the inline
+                // release call. Prevents singleton-lease leaks when a status write fails
+                // between AcquireAsync and the explicit release point.
+                if (executionScope != null)
+                {
+                    await TryReleaseAsync(executionScope);
+                }
             }
         }
 
@@ -302,60 +336,39 @@ internal sealed class BackgroundServiceSupervisor<TContext>
         return null;
     }
 
-    private async Task TrySetStatusAsync(string name, BackgroundServiceStatus status, CancellationToken ct)
+    // Status / fault / reset writes propagate exceptions to the supervisor's outer iteration
+    // catch. The observer is only invoked after the DB write succeeds — observers can rely on
+    // "if I was called, the transition was persisted." This is the contract documented on
+    // IBackgroundServiceStatusObserver.
+    private async Task SetStatusAsync(string name, BackgroundServiceStatus status, CancellationToken ct)
     {
-        try
-        {
-            using var scope = _scopes.CreateScope();
-            var stateService = scope.ServiceProvider.GetRequiredService<IBackgroundServiceStateService>();
-            await stateService.SetStatusAsync(name, status, ct);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            _logger.LogWarning(ex, "BackgroundService {Name}: failed to set status {Status}", name, status);
+        using var scope = _scopes.CreateScope();
+        var stateService = scope.ServiceProvider.GetRequiredService<IBackgroundServiceStateService>();
+        await stateService.SetStatusAsync(name, status, ct);
 
-            return;
-        }
-
-        // Fire the observer only after the DB write succeeds — observers can rely on
-        // "if I was called, the transition was persisted." This is the contract documented
-        // on IBackgroundServiceStatusObserver.
         try
         {
             _statusObserver.OnStatusChanged(name, status);
         }
         catch (Exception ex)
         {
+            // A misbehaving observer must not take the supervisor down.
             _logger.LogWarning(ex, "BackgroundService {Name}: status observer threw on transition to {Status}", name, status);
         }
     }
 
-    private async Task TryRecordFaultAsync(string name, Exception ex, CancellationToken ct)
+    private async Task RecordFaultAsync(string name, Exception ex, CancellationToken ct)
     {
-        try
-        {
-            using var scope = _scopes.CreateScope();
-            var stateService = scope.ServiceProvider.GetRequiredService<IBackgroundServiceStateService>();
-            await stateService.RecordFaultAsync(name, ex, ct);
-        }
-        catch (Exception innerEx) when (!ct.IsCancellationRequested)
-        {
-            _logger.LogWarning(innerEx, "BackgroundService {Name}: failed to record fault", name);
-        }
+        using var scope = _scopes.CreateScope();
+        var stateService = scope.ServiceProvider.GetRequiredService<IBackgroundServiceStateService>();
+        await stateService.RecordFaultAsync(name, ex, ct);
     }
 
-    private async Task TryResetRestartCountAsync(string name, CancellationToken ct)
+    private async Task ResetRestartCountAsync(string name, CancellationToken ct)
     {
-        try
-        {
-            using var scope = _scopes.CreateScope();
-            var stateService = scope.ServiceProvider.GetRequiredService<IBackgroundServiceStateService>();
-            await stateService.ResetRestartCountAsync(name, ct);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            _logger.LogWarning(ex, "BackgroundService {Name}: failed to reset restart count", name);
-        }
+        using var scope = _scopes.CreateScope();
+        var stateService = scope.ServiceProvider.GetRequiredService<IBackgroundServiceStateService>();
+        await stateService.ResetRestartCountAsync(name, ct);
     }
 
     private async Task<ServiceScope?> TryGetDefinedScopeAsync(string name, CancellationToken ct)

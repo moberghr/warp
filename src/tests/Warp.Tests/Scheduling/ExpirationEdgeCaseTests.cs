@@ -398,13 +398,16 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
     }
 
     /// <summary>
-    /// BUG: Expiration cleanup fails with FK violation when parent job has ExpireAt
-    /// but child jobs still reference it via ParentJobId.
+    /// Expired parent + expired child must drain without violating the self-FK
+    /// <c>fk_job_job_parent_job_id</c>. The cleanup only deletes leaves on any given
+    /// tick, so this two-level tree clears in exactly two ticks: tick 1 removes the
+    /// child, tick 2 removes the (now-leaf) parent. Earlier code attempted to delete
+    /// parent + child in one batch and intermittently hit the FK when
+    /// <c>Take(batchSize)</c> dropped the child but kept the parent.
     /// </summary>
     [TimedFact]
-    public async Task ExpirationCleanup_ParentWithChildren_DoesNotThrowFkViolation()
+    public async Task ExpirationCleanup_ParentWithChildren_DrainsAcrossTicks()
     {
-        // Arrange: parent with ExpireAt in the past, child referencing it
         var ctx = _fixture.CreateContext();
         var parentId = Guid.NewGuid();
         var childId = Guid.NewGuid();
@@ -417,7 +420,7 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
             CreateTime = DateTime.UtcNow,
             ScheduleTime = DateTime.UtcNow,
             Queue = "default",
-            ExpireAt = DateTime.UtcNow.AddHours(-1), // expired
+            ExpireAt = DateTime.UtcNow.AddHours(-1),
         });
         ctx.Set<Job>().Add(new Job
         {
@@ -428,21 +431,105 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
             ScheduleTime = DateTime.UtcNow,
             Queue = "default",
             ParentJobId = parentId,
-            ExpireAt = DateTime.UtcNow.AddHours(-1), // also expired
+            ExpireAt = DateTime.UtcNow.AddHours(-1),
         });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Act: should not throw FK violation
-        var cleanCtx = _fixture.CreateContext();
+        // Tick 1: only the child (a leaf) is eligible.
+        var firstTick = _fixture.CreateContext();
         await Should.NotThrowAsync(async () =>
-            await Warp.Tests.Helpers.TestTasks.CreateExpirationCleanup(cleanCtx, TimeProvider.System).RunCleanupAsync(CancellationToken.None));
+            await Warp.Tests.Helpers.TestTasks.CreateExpirationCleanup(firstTick, TimeProvider.System).RunCleanupAsync(CancellationToken.None));
 
-        // Assert: both should be deleted
-        var readCtx = _fixture.CreateContext();
-        var parent = await readCtx.Set<Job>().FindAsync([parentId], Xunit.TestContext.Current.CancellationToken);
-        var child = await readCtx.Set<Job>().FindAsync([childId], Xunit.TestContext.Current.CancellationToken);
-        parent.ShouldBeNull("Parent should be cleaned up");
-        child.ShouldBeNull("Child should be cleaned up");
+        var afterTick1 = _fixture.CreateContext();
+        (await afterTick1.Set<Job>().FindAsync([childId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeNull("Child is a leaf and should be deleted on the first tick");
+        (await afterTick1.Set<Job>().FindAsync([parentId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldNotBeNull("Parent has a remaining child reference on tick 1 — must wait for tick 2");
+
+        // Tick 2: parent is now a leaf (its child is gone) and eligible.
+        var secondTick = _fixture.CreateContext();
+        await Should.NotThrowAsync(async () =>
+            await Warp.Tests.Helpers.TestTasks.CreateExpirationCleanup(secondTick, TimeProvider.System).RunCleanupAsync(CancellationToken.None));
+
+        var afterTick2 = _fixture.CreateContext();
+        (await afterTick2.Set<Job>().FindAsync([parentId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeNull("Parent should be cleaned up on the second tick");
+    }
+
+    /// <summary>
+    /// Three-level tree (grandparent → parent → child) all expired. Drains one level per
+    /// tick: tick 1 removes child, tick 2 removes parent (now a leaf), tick 3 removes
+    /// grandparent (now a leaf). No tick should violate <c>fk_job_job_parent_job_id</c>.
+    /// </summary>
+    [TimedFact]
+    public async Task ExpirationCleanup_ThreeLevelTree_DrainsOneLevelPerTick()
+    {
+        var ctx = _fixture.CreateContext();
+        var grandparentId = Guid.NewGuid();
+        var parentId = Guid.NewGuid();
+        var childId = Guid.NewGuid();
+        var expired = DateTime.UtcNow.AddHours(-1);
+
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = grandparentId,
+            Kind = JobKind.Batch,
+            CurrentState = State.Completed,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ExpireAt = expired,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = parentId,
+            Kind = JobKind.Batch,
+            CurrentState = State.Completed,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = grandparentId,
+            ExpireAt = expired,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = childId,
+            Kind = JobKind.Job,
+            CurrentState = State.Completed,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = parentId,
+            ExpireAt = expired,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        async Task RunCleanupTickAsync()
+        {
+            var tickCtx = _fixture.CreateContext();
+            await Should.NotThrowAsync(async () =>
+                await Warp.Tests.Helpers.TestTasks
+                    .CreateExpirationCleanup(tickCtx, TimeProvider.System)
+                    .RunCleanupAsync(CancellationToken.None));
+        }
+
+        await RunCleanupTickAsync();
+        (await _fixture.CreateContext().Set<Job>().FindAsync([childId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeNull("tick 1: child is a leaf");
+        (await _fixture.CreateContext().Set<Job>().FindAsync([parentId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldNotBeNull("tick 1: parent still has child reference");
+        (await _fixture.CreateContext().Set<Job>().FindAsync([grandparentId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldNotBeNull("tick 1: grandparent still has parent reference");
+
+        await RunCleanupTickAsync();
+        (await _fixture.CreateContext().Set<Job>().FindAsync([parentId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeNull("tick 2: parent is now a leaf");
+        (await _fixture.CreateContext().Set<Job>().FindAsync([grandparentId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldNotBeNull("tick 2: grandparent still has parent reference");
+
+        await RunCleanupTickAsync();
+        (await _fixture.CreateContext().Set<Job>().FindAsync([grandparentId], Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeNull("tick 3: grandparent is now a leaf");
     }
 
     /// <summary>

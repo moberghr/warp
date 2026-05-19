@@ -4,6 +4,44 @@ sidebar_position: 6
 
 # Releases
 
+## 0.15.2
+
+*2026-05-18*
+
+Two bug fixes — one correctness fix in `ExpirationCleanup`, one supervisor behavior change that stops silently dropping `BackgroundService` state writes. No public API changes.
+
+### Fixed: `ExpirationCleanup` foreign-key violation when batch splits a parent from its children
+
+`ExpirationCleanup.RunCleanupAsync` and `RunCountBasedCleanupAsync` selected expired jobs whose children were all expired and then `ExecuteDeleteAsync`-ed the batch in one statement. When `Take(ExpirationBatchSize)` (default 100) cut off mid-tree — parent included, some expired children outside the batch — the DELETE intermittently violated the self-FK `fk_job_job_parent_job_id`:
+
+```
+23503: update or delete on table "job" violates foreign key constraint
+       "fk_job_job_parent_job_id" on table "job"
+```
+
+The fix tightens both predicates to delete only **leaves** (`!x.ChildJobs.Any()`). An expired job with any child rows still pointing at it stays in place; on the next cleanup tick its (already-expired) children are gone and the parent itself becomes a leaf and is deleted. Trees of expired jobs drain one level per tick — a 3-level chain takes 3 ticks of `ExpirationCleanupInterval` (default 5 minutes) to fully clear, but never violates the FK.
+
+Behavior preserved:
+- Failed jobs still never auto-expire (`ExpireAt = null`, §8.2). An expired ancestor of a `Failed` descendant remains uncleanable until an operator requeues/deletes the failed leaf — same as before.
+- Sibling successes still expire and clean up independently of failed siblings — also the same as before. Trace context for failure investigations should come from your OTel export, not the operational DB.
+
+No action required on upgrade.
+
+### Changed: supervisor no longer silently swallows DB write failures
+
+`BackgroundServiceSupervisor` previously caught and logged any DB exception from its own state writes (`SetStatus`, `RecordFault`, `ResetRestartCount`) and continued as if the write had succeeded. Under DB contention (pool exhaustion, command-timeout under load) this meant the dashboard timeline could quietly stop matching reality — the service would still run, but the row's `Status` and the lifecycle log would diverge from the actual supervisor state. Observers never fired for the dropped transition, so anyone watching `IBackgroundServiceStatusObserver` would just see gaps.
+
+The supervisor now lets those exceptions propagate to a single outer iteration-level `try/catch` that treats the failure exactly like a faulted service: emits `LogSupervisorFault` (a new `Lifecycle / Error` log entry distinct from `LogFaulted`, which is reserved for user-code faults), increments `warp.background_services.faulted` (tagged with `exception_type`), waits out the next entry in the backoff sequence on real wall-clock time, and re-runs the iteration. `RestartCount` is **not** incremented for supervisor-side faults — that counter remains reserved for user-code faults.
+
+The trade-off this codifies: service execution is now gated on the supervisor's ability to persist its status. A `BackgroundService` whose own `ExecuteAsync` doesn't touch the DB at all will be briefly paused (1s+ backoff) during a Warp-DB blip rather than running with a stale dashboard reading. This was judged the better default — silent staleness on a thrashing service is worse to diagnose than a delayed-but-visible fault.
+
+Operator-facing changes:
+- Lifecycle log now has a new entry type `Supervisor faulted: <ExceptionType>: <message>` (Lifecycle / Error) — distinct from `Service faulted: …` which is still emitted for user-code throws.
+- `warp.background_services.faulted` counter is now incremented for supervisor-side faults too. If you alert on this counter, expect a small bump under DB contention; the `exception_type` tag will distinguish infrastructure faults (`NpgsqlException`, `SqlException`) from user faults.
+- For deployments using `WarpBackgroundService` with no scoped DB dependencies, expect occasional brief restart-backoff cycles during DB pressure rather than silent execution.
+
+No public API changes.
+
 ## 0.15.1
 
 *2026-05-18*
