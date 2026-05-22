@@ -8,13 +8,14 @@ import * as api from '@/api';
 import type { ExtensionManifest } from '@/extensions/types';
 import WarpSidebar from '@/layouts/WarpSidebar';
 import WarpTopbar from '@/layouts/WarpTopbar';
+import WarpStatusbar from '@/layouts/WarpStatusbar';
 import MobileDrawer from '@/layouts/MobileDrawer';
 import { buildWarpNavItems } from '@/layouts/warpNavItems';
 import { useRealtimeInvalidation } from '@/hooks/useRealtimeInvalidation';
 import { startRealtimeFeed, stopRealtimeFeed } from '@/lib/realtimeFeed';
 
 export default function MainLayout({ extensions = [] }: { extensions?: ExtensionManifest[] }) {
-  const { error, fetchStats } = useDashboardStore();
+  const error = useDashboardStore((s) => s.error);
   const location = useLocation();
   const [concurrencyAvailable, setConcurrencyAvailable] = useState(false);
   const [rateLimitsAvailable, setRateLimitsAvailable] = useState(false);
@@ -30,8 +31,8 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
 
   // Initial fetch for first paint. Further updates arrive via SignalR push.
   useEffect(() => {
-    fetchStats();
-  }, [fetchStats]);
+    void useDashboardStore.getState().fetchStats();
+  }, []);
 
   useEffect(() => {
     startRealtimeFeed();
@@ -106,12 +107,12 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   );
 
   return (
-    <div className="relative min-h-screen flex bg-background text-foreground">
+    <div className="relative h-screen flex bg-background text-foreground overflow-hidden">
       <div className="warp-ambient" aria-hidden />
 
       <WarpSidebar items={navItems} />
 
-      <div className="flex-1 flex flex-col min-w-0 relative">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
         <WarpTopbar
           title={title}
           subtitle={subtitle}
@@ -132,6 +133,8 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         <main className="flex-1 p-4 lg:p-6 min-w-0 overflow-auto">
           <Outlet />
         </main>
+
+        <WarpStatusbar />
       </div>
 
       <MobileDrawer open={drawerOpen} onOpenChange={setDrawerOpen}>

@@ -9,6 +9,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
 import { usePageStore } from '@/stores/page';
 import { useBatchesList } from '@/api/hooks/useBatches';
+import { GroupStateRail } from '@/pages/jobs/GroupStateRail';
 
 export default function BatchesPage() {
   const { state } = useParams<{ state?: string }>();
@@ -32,7 +33,9 @@ export default function BatchesPage() {
   const data = query.data;
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col lg:flex-row h-full min-h-0">
+      <GroupStateRail kind="batches" active={state} />
+      <div className="flex-1 overflow-auto p-5 min-w-0 flex flex-col gap-3">
       <Panel className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full border-collapse">
@@ -89,6 +92,7 @@ export default function BatchesPage() {
       </Panel>
 
       <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(s) => { setPageSize(s); setPage(0); }} />
+      </div>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import api from './client';
-import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
+import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo, WarpInfo } from '@/types';
 import type { ExtensionManifest } from '@/extensions/types';
 
 // Dashboard
@@ -8,6 +8,9 @@ export const getStatus = () => api.get<DashboardStatistics>('/status').then(r =>
 // Addon discovery — one call replaces three speculative hide-on-404 probes from MainLayout.
 // Always 200; per-addon booleans reflect server-side DI registration.
 export const getAddons = () => api.get<WarpAddonsInfo>('/addons').then(r => r.data);
+
+// One-shot deployment metadata for the statusbar (version, provider, host, db, schema).
+export const getInfo = () => api.get<WarpInfo>('/info').then(r => r.data);
 
 // Jobs by state
 export const getEnqueuedJobs = (page = 0, pageSize = 20) =>

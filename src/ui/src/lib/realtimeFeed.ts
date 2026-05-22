@@ -19,7 +19,10 @@ import { useRealtimeStore, type RealtimeStatus } from '@/stores/realtime';
  * the same whether they stayed on the dashboard or navigated away and back.
  */
 
-const SAMPLE_INTERVAL_MS = 1000;
+// Sole sampler for `useDashboardStore.realtimeData`. ThroughputChart used to
+// run a duplicate 5Hz sampler locally; that was removed so the store sees one
+// caller and React only re-renders chart consumers on a single cadence.
+const SAMPLE_INTERVAL_MS = 200; // 5Hz
 const POLL_INTERVAL_MS = 1000;
 
 let samplerId: ReturnType<typeof setInterval> | null = null;

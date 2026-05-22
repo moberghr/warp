@@ -3,34 +3,55 @@ import { useQueryClient } from '@tanstack/react-query';
 import { subscribeRealtime } from '@/lib/realtimeBus';
 import { queryScopes } from '@/lib/queryClient';
 
+const COALESCE_MS = 400;
+
 /**
  * Single mounted bridge between the realtime event bus and React Query.
  *
- * Replaces the per-page `useRealtimeRefetch` pattern. Mounted once in
- * `MainLayout`; routes hub events to broad query invalidations so every
- * mounted page picks up fresh data without re-implementing the bridge.
+ * Mounted once in `MainLayout`; routes hub events to broad query
+ * invalidations so every mounted page picks up fresh data.
  *
- * Counters are also invalidated on `JobFinalized` because the dashboard's
- * succeeded/failed counters update on every completion.
+ * Bursts of `JobFinalized` (workers draining a 100-job queue in seconds)
+ * are coalesced into one invalidation per scope per ~400ms. Without this,
+ * the Enqueued list flips between empty and full on every event and the
+ * table thrashes.
  */
 export function useRealtimeInvalidation() {
   const qc = useQueryClient();
 
   useEffect(() => {
+    const pending = new Map<string, ReturnType<typeof setTimeout>>();
+    const schedule = (key: string, scopes: readonly (readonly unknown[])[]) => {
+      if (pending.has(key)) {
+        return;
+      }
+      const handle = setTimeout(() => {
+        pending.delete(key);
+        for (const scope of scopes) {
+          qc.invalidateQueries({ queryKey: scope });
+        }
+      }, COALESCE_MS);
+      pending.set(key, handle);
+    };
+
     const onJobFinalized = () => {
-      qc.invalidateQueries({ queryKey: queryScopes.jobs });
-      qc.invalidateQueries({ queryKey: queryScopes.detail });
-      qc.invalidateQueries({ queryKey: queryScopes.counters });
-      qc.invalidateQueries({ queryKey: queryScopes.stats });
-      qc.invalidateQueries({ queryKey: queryScopes.dashboard });
-      qc.invalidateQueries({ queryKey: queryScopes.messages });
-      qc.invalidateQueries({ queryKey: queryScopes.batches });
+      schedule('jobFinalized', [
+        queryScopes.jobs,
+        queryScopes.detail,
+        queryScopes.counters,
+        queryScopes.stats,
+        queryScopes.dashboard,
+        queryScopes.messages,
+        queryScopes.batches,
+      ]);
     };
 
     const onMessageEnqueued = () => {
-      qc.invalidateQueries({ queryKey: queryScopes.messages });
-      qc.invalidateQueries({ queryKey: queryScopes.jobs });
-      qc.invalidateQueries({ queryKey: queryScopes.dashboard });
+      schedule('messageEnqueued', [
+        queryScopes.messages,
+        queryScopes.jobs,
+        queryScopes.dashboard,
+      ]);
     };
 
     const unsubJob = subscribeRealtime('JobFinalized', onJobFinalized);
@@ -39,6 +60,10 @@ export function useRealtimeInvalidation() {
     return () => {
       unsubJob();
       unsubMsg();
+      for (const handle of pending.values()) {
+        clearTimeout(handle);
+      }
+      pending.clear();
     };
   }, [qc]);
 }

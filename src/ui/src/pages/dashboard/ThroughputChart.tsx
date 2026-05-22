@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   createChart,
   AreaSeries,
@@ -21,11 +21,9 @@ const RANGE_SECONDS: Record<Range, number> = {
   '1h': 3600,
 };
 
-// Rate-sampler frequency. 5Hz (200ms) gives a much smoother chart than 1Hz
-// because the EMA has 5× more data points to average. The store buffer
-// (WINDOW_SIZE in stores/dashboard.ts) is sized for this rate.
+// Rate-sampler frequency. The actual setInterval lives in `realtimeFeed`; this
+// constant is kept here for header window math (samples per second).
 const SAMPLE_HZ = 5;
-const SAMPLE_INTERVAL_MS = 1000 / SAMPLE_HZ;
 
 // EMA smoothing factor. Source-side already produces 1-second moving-avg
 // rates (see stores/dashboard.ts), so EMA is light here — just enough to
@@ -41,36 +39,41 @@ const EMA_ALPHA: Record<Range, number> = {
 const H = 220;
 
 export function ThroughputChart() {
-  const [range, setRange] = useState<Range>('1m');
+  const [range, setRange] = useState<Range>('15m');
   const realtimeData = useDashboardStore((s) => s.realtimeData);
 
-  // High-frequency rate sampler.
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      useDashboardStore.getState().sampleRate();
-    }, SAMPLE_INTERVAL_MS);
-
-    return () => window.clearInterval(id);
-  }, []);
+  // Sampler lives in `realtimeFeed` — single setInterval owned by MainLayout.
 
   const windowSec = RANGE_SECONDS[range];
   const alpha = EMA_ALPHA[range];
 
-  // Header metrics: take the last second of samples to compute "now" (avoids
-  // single-sample noise), and slice by samples-per-second for window math.
+  // Header metrics: single pass over the visible window. Avoids
+  // `.slice(-N).map(...)` plus `Math.max(...spread)`, which on a 1h × 5Hz
+  // window means three full 18k-element passes plus a function-argument
+  // spread that can hit the JS engine's arg cap.
   const windowSamples = windowSec * SAMPLE_HZ;
-  const visibleSucc = useMemo(
-    () => realtimeData.slice(-windowSamples).map((p) => p.succeeded),
-    [realtimeData, windowSamples],
-  );
-  const lastSecond = visibleSucc.slice(-SAMPLE_HZ);
-  const now = lastSecond.length
-    ? Math.round(lastSecond.reduce((a, b) => a + b, 0) / lastSecond.length)
-    : 0;
-  const peak = visibleSucc.length ? Math.round(Math.max(...visibleSucc)) : 0;
-  const avg = visibleSucc.length >= SAMPLE_HZ * 5
-    ? Math.round(visibleSucc.reduce((a, b) => a + b, 0) / visibleSucc.length)
-    : null;
+  const start = Math.max(0, realtimeData.length - windowSamples);
+  const lastSecondStart = Math.max(start, realtimeData.length - SAMPLE_HZ);
+  let peakVal = 0;
+  let sumAll = 0;
+  let countAll = 0;
+  let sumLast = 0;
+  let countLast = 0;
+  for (let i = start; i < realtimeData.length; i++) {
+    const v = realtimeData[i].succeeded;
+    if (v > peakVal) {
+      peakVal = v;
+    }
+    sumAll += v;
+    countAll++;
+    if (i >= lastSecondStart) {
+      sumLast += v;
+      countLast++;
+    }
+  }
+  const now = countLast > 0 ? Math.round(sumLast / countLast) : 0;
+  const peak = countAll > 0 ? Math.round(peakVal) : 0;
+  const avg = countAll >= SAMPLE_HZ * 5 ? Math.round(sumAll / countAll) : null;
 
   return (
     <Panel className="flex h-full min-h-[260px] flex-col gap-2 px-4 py-3.5">
@@ -206,22 +209,27 @@ function TVChart({ data, windowSec, alpha }: TVChartProps) {
       autoSize: false,
     });
 
-    // Force the auto-range floor at 0 so the y-axis never shows negative
-    // ticks when the series sits at zero (auto-scale otherwise pads the
-    // bottom margin into negative territory).
-    //
-    // When `original()` returns null (no data yet on cold start), lightweight-
-    // charts falls back to a default range that can dip negative. Return a
-    // sane [0, 10] range so the empty chart renders cleanly above zero.
+    // Pin the y-axis to a fixed [0, MIN_MAX] range until data demands more
+    // headroom. Two reasons:
+    //   1. min=0 — auto-scale otherwise pads the bottom margin into negative
+    //      territory whenever the series is flat at zero.
+    //   2. max=MIN_MAX — reserves vertical layout space as if there were ~10
+    //      jobs/s on screen, so the chart doesn't visibly resize the moment
+    //      the first real sample arrives. The ceiling grows when actual data
+    //      exceeds it.
+    const MIN_MAX = 10;
     const floorAtZero = (original: () => { priceRange: { minValue: number; maxValue: number } } | null) => {
       const r = original();
       if (r) {
         r.priceRange.minValue = 0;
+        if (r.priceRange.maxValue < MIN_MAX) {
+          r.priceRange.maxValue = MIN_MAX;
+        }
 
         return r;
       }
 
-      return { priceRange: { minValue: 0, maxValue: 10 } };
+      return { priceRange: { minValue: 0, maxValue: MIN_MAX } };
     };
 
     const succ = chart.addSeries(AreaSeries, {

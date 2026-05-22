@@ -56,7 +56,7 @@ const builtInNavItems: WarpNavItem[] = [
     },
   },
   {
-    to: '/messages/enqueued',
+    to: '/messages',
     label: 'Messages',
     icon: Mail,
     badges: (s) => {
@@ -70,7 +70,7 @@ const builtInNavItems: WarpNavItem[] = [
     },
   },
   {
-    to: '/batches/processing',
+    to: '/batches',
     label: 'Batches',
     icon: Layers,
     badges: (s) => {

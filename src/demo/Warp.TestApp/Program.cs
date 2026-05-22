@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core;
 using Warp.Core.BackgroundServices;
@@ -95,6 +97,13 @@ builder.Services.AddWarpWorker<TestContext>(options =>
 builder.Services.AddSagaHandler<OrderSagaWorkflow>();
 
 var app = builder.Build();
+
+// Refuse to run Migrate() if another instance is already bound to our HTTP port.
+// Migrate() does DROP DATABASE warp WITH (FORCE) when WARP_DEMO_PRESERVE_DB is
+// unset; a second start that crashes at port-binding would otherwise destroy
+// the live instance's DB state before Kestrel ever fails. Bail out before the
+// destructive step instead.
+EnsurePortFree(5104);
 
 await Migrate();
 
@@ -612,6 +621,32 @@ app.MapGet("/perf-trace/dump", () =>
 });
 
 await app.RunAsync();
+
+static void EnsurePortFree(int port)
+{
+    if (string.Equals(Environment.GetEnvironmentVariable("WARP_DEMO_PRESERVE_DB"), "1", StringComparison.Ordinal))
+    {
+        return;
+    }
+
+    var listener = new TcpListener(IPAddress.Loopback, port);
+    try
+    {
+        listener.Start();
+    }
+    catch (SocketException)
+    {
+        Console.Error.WriteLine(
+            $"Warp.TestApp: port {port} is in use — another instance appears to be running. "
+            + "Refusing to start because Migrate() would DROP the live database. "
+            + "Stop the running instance or set WARP_DEMO_PRESERVE_DB=1 to keep the existing schema.");
+        Environment.Exit(2);
+    }
+    finally
+    {
+        listener.Stop();
+    }
+}
 
 async Task Migrate()
 {

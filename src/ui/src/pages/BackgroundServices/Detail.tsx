@@ -34,6 +34,8 @@ export default function BackgroundServiceDetail() {
   // Log filter state
   const [sourceFilter, setSourceFilter] = useState<BackgroundServiceLogSource | 0>(0);
   const [levelFilter, setLevelFilter] = useState<LogLevel | -1>(-1);
+  const [logPage, setLogPage] = useState(0);
+  const LOG_PAGE_SIZE = 50;
 
   // Track highest seen log id for incremental polling
   const maxLogIdRef = useRef<number>(0);
@@ -76,6 +78,13 @@ export default function BackgroundServiceDetail() {
       return;
     }
 
+    // Pause incremental prepends while the user is browsing older pages so the
+    // visible rows don't shift under them. Polling resumes once they return to
+    // page 0.
+    if (logPage !== 0 && maxLogIdRef.current > 0) {
+      return;
+    }
+
     try {
       const opts: GetBackgroundServiceLogsOptions = { limit: 100 };
       if (sourceFilter !== 0) {
@@ -99,18 +108,20 @@ export default function BackgroundServiceDetail() {
     } catch {
       // Non-critical — log polling failures are silent
     }
-  }, [decodedName, sourceFilter, levelFilter]);
+  }, [decodedName, sourceFilter, levelFilter, logPage]);
 
   // Reset log cursor when filters change so we re-fetch from scratch
   const handleSourceFilterChange = (val: BackgroundServiceLogSource | 0) => {
     maxLogIdRef.current = 0;
     setLogs([]);
+    setLogPage(0);
     setSourceFilter(val);
   };
 
   const handleLevelFilterChange = (val: LogLevel | -1) => {
     maxLogIdRef.current = 0;
     setLogs([]);
+    setLogPage(0);
     setLevelFilter(val);
   };
 
@@ -274,22 +285,32 @@ export default function BackgroundServiceDetail() {
           {logs.length === 0 ? (
             <div className="py-8 text-center text-muted-foreground text-sm">No logs captured yet</div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-44">Timestamp</TableHead>
-                  <TableHead className="w-40">Server</TableHead>
-                  <TableHead className="w-24">Level</TableHead>
-                  <TableHead className="w-24">Source</TableHead>
-                  <TableHead>Message</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {logs.map((log) => (
-                  <LogRow key={log.id} log={log} />
-                ))}
-              </TableBody>
-            </Table>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-44">Timestamp</TableHead>
+                    <TableHead className="w-40">Server</TableHead>
+                    <TableHead className="w-24">Level</TableHead>
+                    <TableHead className="w-24">Source</TableHead>
+                    <TableHead>Message</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {logs
+                    .slice(logPage * LOG_PAGE_SIZE, (logPage + 1) * LOG_PAGE_SIZE)
+                    .map((log) => (
+                      <LogRow key={log.id} log={log} />
+                    ))}
+                </TableBody>
+              </Table>
+              <LogPagination
+                page={logPage}
+                pageSize={LOG_PAGE_SIZE}
+                total={logs.length}
+                onPageChange={setLogPage}
+              />
+            </>
           )}
         </CardContent>
       </Card>
@@ -492,6 +513,50 @@ function LeaseCountdown({ expiresAt }: { expiresAt: string }) {
         ({expired ? 'expired' : `in ${secsLeft}s`})
       </span>
     </span>
+  );
+}
+
+function LogPagination({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  onPageChange: (next: number) => void;
+}) {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const from = total === 0 ? 0 : page * pageSize + 1;
+  const to = Math.min((page + 1) * pageSize, total);
+  const isLive = page === 0;
+
+  return (
+    <div className="flex items-center justify-between border-t px-4 py-2 text-xs text-muted-foreground">
+      <span>
+        Showing {from}–{to} of {total}
+        {!isLive && <span className="ml-2 text-amber-600 dark:text-amber-400">(live updates paused)</span>}
+      </span>
+      <div className="flex gap-1.5">
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page === 0}
+          className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-text-dim hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          ‹ Prev
+        </button>
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= pageCount - 1}
+          className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-foreground hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          Next ›
+        </button>
+      </div>
+    </div>
   );
 }
 

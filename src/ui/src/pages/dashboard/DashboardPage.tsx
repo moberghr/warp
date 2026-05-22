@@ -11,7 +11,7 @@ import { HistoryChart } from './HistoryChart';
 import { ServerHealth } from './ServerHealth';
 
 export default function DashboardPage() {
-  const { stats } = useDashboardStore();
+  const stats = useDashboardStore((s) => s.stats);
 
   useEffect(() => {
     usePageStore.getState().set({
@@ -69,7 +69,7 @@ export default function DashboardPage() {
           label="Messages"
           value={stats.messages}
           icon={Mail}
-          href="/messages"
+          href="/messages/enqueued"
           as={Link}
           sub={
             stats.messagesFailed > 0

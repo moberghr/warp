@@ -54,6 +54,7 @@ export default function WarpSidebar({ items, onNavigate, mobile = false }: Props
   });
   const serverCount = servers?.length ?? 0;
   const totalServers = stats?.servers ?? serverCount;
+  const workerCount = servers?.reduce((acc, s) => acc + (s.workers?.length ?? 0), 0) ?? 0;
   const healthy = serverCount > 0;
 
   return (
@@ -149,7 +150,7 @@ export default function WarpSidebar({ items, onNavigate, mobile = false }: Props
         </div>
         <div className="mono flex justify-between text-[11px] text-text-mute mb-1.5">
           <span>workers</span>
-          <span className="text-foreground">—</span>
+          <span className="text-foreground">{workerCount > 0 ? workerCount : '—'}</span>
         </div>
         <div className="h-[3px] bg-panel-2 rounded-[2px] overflow-hidden">
           <div

@@ -221,7 +221,7 @@ export function JobDetailBold({ job, handlerLogs }: JobDetailBoldProps) {
                   <span className="inline-flex items-center gap-1.5">
                     <span className="mono text-[10.5px] uppercase tracking-[0.06em] text-text-mute">Trace</span>
                     <Link
-                      to={`/traces/${job.traceId}`}
+                      to={`/trace/${job.traceId}`}
                       className="mono text-[12px] font-medium text-warp-blue underline underline-offset-[3px]"
                     >
                       {job.traceId.slice(0, 12)} ↗
@@ -248,7 +248,7 @@ export function JobDetailBold({ job, handlerLogs }: JobDetailBoldProps) {
             <div className="flex gap-1.5">
               {job.traceId ? (
                 <Link
-                  to={`/traces/${job.traceId}`}
+                  to={`/trace/${job.traceId}`}
                   className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-panel px-2.5 py-2 text-[12px] font-medium text-foreground hover:bg-panel-2"
                 >
                   <ExternalLink size={12} /> View trace
@@ -508,7 +508,7 @@ function IdentityCard({ job }: { job: UnifiedJobDetailModel }) {
           <StatRow
             k="Trace"
             v={
-              <Link to={`/traces/${job.traceId}`} className="text-warp-blue underline underline-offset-[3px]">
+              <Link to={`/trace/${job.traceId}`} className="text-warp-blue underline underline-offset-[3px]">
                 {job.traceId.slice(0, 12)} ↗
               </Link>
             }

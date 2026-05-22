@@ -30,6 +30,72 @@ const WINDOW_SIZE = BUFFER_SECONDS * SAMPLE_HZ;
 // while still absorbing single-burst quantization noise.
 const RATE_WINDOW_MS = 500;
 
+// sessionStorage key for the rolling realtime buffer. Persisting the buffer
+// means a hard reload (or backend-asset refresh) keeps the last hour of
+// throughput history available, so selecting 15m / 1h shows real data
+// instead of waiting to re-accumulate samples from scratch.
+const STORAGE_KEY = 'warp:realtimeData:v1';
+// Persist the buffer ~1×/second so we never write more than once per second
+// even at 5Hz sampling. Old entries beyond the buffer window are dropped on
+// rehydration.
+const PERSIST_INTERVAL_MS = 1000;
+
+// Cold-start seed: fill the buffer with zero-valued points covering the chart's
+// longest selectable window so the graph renders a flat baseline immediately
+// instead of an empty pane with "collecting samples…". Real samples overwrite
+// the tail; the head ages out via the sliding-window trim in sampleRate.
+function seedZeroBuffer(): RealtimePoint[] {
+  const nowSec = Date.now() / 1000;
+  const seedSeconds = 900; // 15m — matches the chart's default range.
+  const points: RealtimePoint[] = [];
+  for (let i = seedSeconds; i > 0; i--) {
+    points.push({ ts: nowSec - i, succeeded: 0, failed: 0 });
+  }
+
+  return points;
+}
+
+function loadPersistedBuffer(): RealtimePoint[] {
+  if (typeof window === 'undefined' || !window.sessionStorage) {
+    return seedZeroBuffer();
+  }
+  try {
+    const raw = window.sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return seedZeroBuffer();
+    }
+    const parsed = JSON.parse(raw) as RealtimePoint[];
+    if (!Array.isArray(parsed)) {
+      return seedZeroBuffer();
+    }
+    // Trim anything older than the buffer window — the user may have come back
+    // hours later, in which case the gap will reset itself on the next sample.
+    const minTs = Date.now() / 1000 - BUFFER_SECONDS;
+
+    const filtered = parsed.filter((p) =>
+      typeof p?.ts === 'number'
+      && p.ts >= minTs
+      && Number.isFinite(p.succeeded)
+      && Number.isFinite(p.failed),
+    );
+
+    return filtered.length > 0 ? filtered : seedZeroBuffer();
+  } catch {
+    return seedZeroBuffer();
+  }
+}
+
+function savePersistedBuffer(data: RealtimePoint[]) {
+  if (typeof window === 'undefined' || !window.sessionStorage) {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch {
+    // Quota / privacy mode — silently skip.
+  }
+}
+
 export const useDashboardStore = create<DashboardStore>((set, get) => {
   // Sliding window of recent stats snapshots. Each sample emits the rate
   // measured over the oldest snapshot still within RATE_WINDOW_MS — i.e. a
@@ -39,12 +105,13 @@ export const useDashboardStore = create<DashboardStore>((set, get) => {
   type Snap = { ts: number; succeeded: number; failed: number };
   const snaps: Snap[] = [];
   let lastEmitMs: number | null = null;
+  let lastPersistMs = 0;
 
   return {
     stats: null,
     loading: false,
     error: null,
-    realtimeData: [],
+    realtimeData: loadPersistedBuffer(),
     fetchStats: async () => {
       try {
         const stats = await getStatus();
@@ -69,7 +136,9 @@ export const useDashboardStore = create<DashboardStore>((set, get) => {
       // sample starts a fresh smooth-curve.
       if (lastEmitMs !== null && nowMs - lastEmitMs > 2000) {
         snaps.length = 0;
-        set({ realtimeData: [] });
+        const reseed = seedZeroBuffer();
+        set({ realtimeData: reseed });
+        savePersistedBuffer(reseed);
       }
       lastEmitMs = nowMs;
 
@@ -110,9 +179,29 @@ export const useDashboardStore = create<DashboardStore>((set, get) => {
         failed: failRate,
       };
 
-      set((state) => ({
-        realtimeData: [...state.realtimeData, newPoint].slice(-WINDOW_SIZE),
-      }));
+      let nextBuffer: RealtimePoint[] = [];
+      set((state) => {
+        const data = state.realtimeData;
+        if (data.length < WINDOW_SIZE) {
+          nextBuffer = data.concat(newPoint);
+        } else {
+          // One O(N) copy starting from offset 1, then append. Replaces the
+          // previous `[...data, x].slice(-N)` which paid two full copies per tick.
+          const next = data.slice(1);
+          next.push(newPoint);
+          nextBuffer = next;
+        }
+
+        return { realtimeData: nextBuffer };
+      });
+
+      // Throttle sessionStorage writes to ~1Hz. Persisting the rolling buffer
+      // means selecting 15m / 1h after a page reload shows real history
+      // instead of an empty chart that takes 15m to refill.
+      if (nowMs - lastPersistMs >= PERSIST_INTERVAL_MS) {
+        lastPersistMs = nowMs;
+        savePersistedBuffer(nextBuffer);
+      }
     },
   };
 });

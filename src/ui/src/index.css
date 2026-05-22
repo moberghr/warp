@@ -249,9 +249,14 @@
   body {
     @apply bg-background text-foreground;
     font-feature-settings: 'cv11', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
   html {
     @apply font-sans;
+    /* Prevent rubber-band bleed-through on macOS / iOS. */
+    overscroll-behavior-y: none;
   }
   .mono,
   code,
@@ -316,5 +321,28 @@
   }
   .warp-pulse-halo {
     animation: warp-pulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    /* Keep the halo on its own compositor layer so the scale/opacity
+       animation never thrashes the surrounding text layout. */
+    will-change: transform, opacity;
+  }
+
+  /* Horizontal streaks flying across the login brand pane (warp-speed effect). */
+  @keyframes warp-streak {
+    0%   { transform: translateX(-30vw); opacity: 0; }
+    12%  { opacity: 1; }
+    88%  { opacity: 1; }
+    100% { transform: translateX(110vw); opacity: 0; }
+  }
+
+  /* Respect users who opted out of motion at the OS level. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }

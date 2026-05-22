@@ -37,6 +37,8 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("status", async ([FromServices] IDashboardStatsService statsService) => await statsService.GetWarpStatus());
 
+        apiGroup.MapGet("info", ([FromServices] IDashboardStatsService statsService) => Results.Ok(statsService.GetWarpInfo()));
+
         apiGroup.MapGet("jobs/enqueued", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetJobsList(request, State.Enqueued));
 
         apiGroup.MapGet("jobs/completed", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetJobsList(request, State.Completed));

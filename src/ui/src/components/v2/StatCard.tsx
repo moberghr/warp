@@ -55,7 +55,7 @@ export function StatCard({
   const trendUp = trend?.direction === 'up';
   const trendGood = trend ? trendUp !== Boolean(trend.inverse) : false;
   const Comp = (as ?? (href ? 'a' : 'div')) as React.ElementType;
-  const linkProps = href ? { href } : {};
+  const linkProps = href ? (as ? { to: href } : { href }) : {};
 
   return (
     <Comp

@@ -1,12 +1,60 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { ArrowRight, Zap } from 'lucide-react';
 import api from '@/api/client';
+
+// Mulberry32 seeded PRNG — deterministic so streak positions stay stable
+// across re-renders (avoids layout jank) without persisting state.
+function seeded(seed: number) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function LoginStreaks() {
+  const streaks = useMemo(() => {
+    const r = seeded(57);
+    return Array.from({ length: 22 }, () => {
+      const accent = r() > 0.82;
+      return {
+        top: r() * 100,
+        len: 90 + r() * 280,
+        delay: -r() * 14,
+        dur: 7 + r() * 9,
+        opacity: 0.06 + r() * 0.14,
+        accent,
+      };
+    });
+  }, []);
+
+  return (
+    <div className="pointer-events-none absolute inset-0 overflow-hidden">
+      {streaks.map((s, i) => (
+        <div
+          key={i}
+          className="absolute h-px"
+          style={{
+            top: `${s.top}%`,
+            left: 0,
+            width: `${s.len}px`,
+            opacity: s.opacity,
+            background: `linear-gradient(90deg, transparent, ${s.accent ? '#22c55e' : '#18181b'} 60%, transparent)`,
+            animation: `warp-streak ${s.dur}s linear ${s.delay}s infinite`,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
 
 export default function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [remember, setRemember] = useState(true);
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -33,6 +81,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
     <div className="min-h-screen w-full bg-white text-zinc-900 grid grid-cols-1 lg:grid-cols-2">
       {/* Left / brand pane */}
       <aside className="relative hidden lg:flex flex-col justify-between overflow-hidden p-10 bg-gradient-to-br from-zinc-50 via-white to-zinc-100">
+        <LoginStreaks />
         <div className="flex items-center gap-3 z-10">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500 text-white shadow-sm">
             <Zap className="h-5 w-5" strokeWidth={2.5} />
@@ -46,30 +95,15 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center select-none">
           <span
             className="text-[18rem] font-black leading-none tracking-tighter text-transparent"
-            style={{ WebkitTextStroke: '1px rgba(24,24,27,0.08)' }}
+            style={{
+              WebkitTextStroke: '1px rgba(24,24,27,0.18)',
+              filter: 'drop-shadow(0 0 24px rgba(34,197,94,0.25)) drop-shadow(0 0 60px rgba(34,197,94,0.12))',
+            }}
           >
             WARP
           </span>
         </div>
 
-        <div className="pointer-events-none absolute inset-x-0 top-1/3 flex flex-col items-center gap-12 opacity-60">
-          <div className="h-px w-40 bg-zinc-300" />
-          <div className="h-px w-24 bg-zinc-300" />
-        </div>
-
-        <div className="z-10 flex items-end justify-between">
-          <div>
-            <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-500">Workspace</div>
-            <div className="mt-1 text-sm font-medium text-zinc-700">warp-prod · us-east-1</div>
-          </div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50/80 px-3 py-1 text-[11px] font-medium text-emerald-700">
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
-            </span>
-            Cluster online
-          </div>
-        </div>
       </aside>
 
       {/* Right / form pane */}
@@ -128,16 +162,6 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
                 </div>
               </div>
 
-              <label className="flex cursor-pointer items-center gap-2.5 text-sm text-zinc-700 select-none">
-                <input
-                  type="checkbox"
-                  checked={remember}
-                  onChange={(e) => setRemember(e.target.checked)}
-                  className="h-4 w-4 rounded border-zinc-300 text-emerald-600 accent-emerald-600 focus:ring-emerald-500/30"
-                />
-                Keep me signed in
-              </label>
-
               <button
                 type="submit"
                 disabled={loading}
@@ -155,8 +179,8 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
         </div>
 
         <footer className="flex items-center justify-between px-6 pb-6 text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400 sm:px-10">
-          <span>warp v0.14.1</span>
-          <span>build 2026.05.18</span>
+          <span>warp v{import.meta.env.VITE_APP_VERSION}</span>
+          <span>build {import.meta.env.VITE_APP_BUILD_DATE} · {import.meta.env.VITE_APP_COMMIT}</span>
         </footer>
       </main>
     </div>

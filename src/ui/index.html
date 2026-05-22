@@ -8,6 +8,14 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Dev-only: mirror the script the .NET host injects in production
+      // (see WarpUIMiddleware.cs). Without these globals, the auth-aware
+      // boot path short-circuits and the app stalls on a blank screen.
+      window.apiPath = '/warp/api/';
+      window.basePath = '/warp';
+      window.hasBuiltInLogin = true;
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

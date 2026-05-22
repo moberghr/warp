@@ -26,7 +26,7 @@ export function JobLogs({ jobId, logs }: JobLogsProps) {
             return (
               <div key={log.id} className={`flex gap-2 ${tone}`}>
                 <span className="shrink-0 text-text-mute">{formatDateTime(log.timestamp)}</span>
-                <span className="w-16 shrink-0 uppercase tracking-[0.06em] text-text-mute">[{log.level}]</span>
+                <span className="shrink-0 uppercase tracking-[0.06em] text-text-mute">[{log.level}]</span>
                 <span className="break-all">{log.message}</span>
               </div>
             );

@@ -113,8 +113,10 @@ function AppRoutes() {
           <Route path="/jobs/:state" element={<JobListPage />} />
           <Route path="/messages/detail/:id" element={<DetailPage />} />
           <Route path="/messages/:state" element={<MessagesPage />} />
+          <Route path="/messages" element={<MessagesPage />} />
           <Route path="/batches/detail/:id" element={<DetailPage />} />
           <Route path="/batches/:state" element={<BatchesPage />} />
+          <Route path="/batches" element={<BatchesPage />} />
           <Route path="/recurring/:id" element={<RecurringDetailPage />} />
           <Route path="/recurring" element={<RecurringPage />} />
           <Route path="/trace/:traceId/:highlightId?" element={<TracePage />} />

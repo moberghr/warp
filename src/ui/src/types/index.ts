@@ -331,6 +331,14 @@ export interface WarpAddonsInfo {
   services: boolean;
 }
 
+export interface WarpInfo {
+  version: string | null;
+  provider: string | null;
+  host: string | null;
+  database: string | null;
+  schema: string | null;
+}
+
 export type {
   ServiceScope,
   BackgroundServiceStatus,
