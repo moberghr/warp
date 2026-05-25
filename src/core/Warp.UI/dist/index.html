@@ -5,19 +5,18 @@
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Warp</title>
-    <script type="module" crossorigin src="./assets/index-Cq76pADA.js"></script>
-    <link rel="modulepreload" crossorigin href="./assets/chunk-62oNxeRG.js">
-    <link rel="modulepreload" crossorigin href="./assets/jsx-runtime-B-0fj2_8.js">
-    <link rel="modulepreload" crossorigin href="./assets/react-BODHa9E3.js">
-    <link rel="modulepreload" crossorigin href="./assets/Panel-DBwfkVNF.js">
-    <link rel="modulepreload" crossorigin href="./assets/dist-DALFuP1J.js">
-    <link rel="modulepreload" crossorigin href="./assets/client-DnsE22QU.js">
-    <link rel="modulepreload" crossorigin href="./assets/react-dom-B0eFalie.js">
-    <link rel="modulepreload" crossorigin href="./assets/react-BM5nUqYn.js">
-    <link rel="modulepreload" crossorigin href="./assets/api-wIfqVQqN.js">
-    <link rel="stylesheet" crossorigin href="./assets/index-DtP987x2.css">
+    <script type="module" crossorigin src="./assets/index-DGs2-hVU.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-b_FdFCzJ.css">
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Dev-only: mirror the script the .NET host injects in production
+      // (see WarpUIMiddleware.cs). Without these globals, the auth-aware
+      // boot path short-circuits and the app stalls on a blank screen.
+      window.apiPath = '/warp/api/';
+      window.basePath = '/warp';
+      window.hasBuiltInLogin = true;
+    </script>
   </body>
 </html>

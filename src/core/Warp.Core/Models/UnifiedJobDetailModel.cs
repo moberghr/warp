@@ -27,6 +27,10 @@ public class UnifiedJobDetailModel
 
     public DateTime? ScheduleTime { get; set; }
 
+    public int RetriedTimes { get; set; }
+
+    public int MaxRetries { get; set; }
+
     // Batch-specific
     public int TotalJobs { get; set; }
 

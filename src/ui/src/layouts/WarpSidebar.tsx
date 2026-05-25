@@ -1,13 +1,12 @@
 import { NavLink, useLocation } from 'react-router-dom';
-import { Zap } from 'lucide-react';
+import { Zap, Settings } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useDashboardStore } from '@/stores/dashboard';
 import { PulseDot } from '@/components/v2/PulseDot';
+import { useInfo } from '@/api/hooks/useInfo';
 import * as api from '@/api';
 import { cn } from '@/lib/utils';
 import type { WarpNavItem, NavBadge } from './warpNavItems';
-
-const VERSION_TAG = 'v4.2.1 · prod';
 
 function Badge({ badge, muted }: { badge: NavBadge; muted: boolean }) {
   if (muted) {
@@ -45,6 +44,8 @@ interface Props {
 export default function WarpSidebar({ items, onNavigate, mobile = false }: Props) {
   const stats = useDashboardStore((s) => s.stats);
   const location = useLocation();
+  const { data: info } = useInfo();
+  const versionTag = info?.version ? `v${info.version}` : '';
 
   const { data: servers } = useQuery({
     queryKey: ['servers'],
@@ -82,9 +83,11 @@ export default function WarpSidebar({ items, onNavigate, mobile = false }: Props
             <div className="font-display font-bold text-[15px] leading-none tracking-tight">
               Warp
             </div>
-            <div className="mono text-[9.5px] text-text-mute mt-[3px] tracking-wider uppercase">
-              {VERSION_TAG}
-            </div>
+            {versionTag && (
+              <div className="mono text-[9.5px] text-text-mute mt-[3px] tracking-wider uppercase">
+                {versionTag}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -130,7 +133,27 @@ export default function WarpSidebar({ items, onNavigate, mobile = false }: Props
         </nav>
       </div>
 
-      <div className="mt-auto px-3.5 py-3 border-t border-border bg-gradient-to-b from-transparent to-white/[0.012] dark:to-white/[0.012]">
+      <div className="mt-auto">
+        <div className="px-2.5 pb-2 pt-1">
+          <NavLink
+            to="/settings"
+            onClick={onNavigate}
+            className={({ isActive }) =>
+              cn(
+                'flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[13px] font-medium',
+                'border-l-2 transition-colors',
+                isActive
+                  ? 'border-warp-green bg-panel-2 text-foreground bg-gradient-to-r from-warp-green/[0.10] to-transparent'
+                  : 'border-transparent text-text-dim hover:text-foreground hover:bg-panel-2/60',
+              )
+            }
+          >
+            <Settings className="w-[15px] h-[15px] shrink-0 opacity-85" />
+            <span className="flex-1 truncate">Settings</span>
+          </NavLink>
+        </div>
+
+      <div className="px-3.5 py-3 border-t border-border bg-gradient-to-b from-transparent to-white/[0.012] dark:to-white/[0.012]">
         <div className="warp-eyebrow mb-2.5">Cluster</div>
         <div className="flex items-center gap-2 mb-2.5">
           <PulseDot colorClass={healthy ? 'text-warp-green' : 'text-warp-amber'} size={5} />
@@ -158,6 +181,7 @@ export default function WarpSidebar({ items, onNavigate, mobile = false }: Props
             style={{ width: healthy ? '100%' : '0%' }}
           />
         </div>
+      </div>
       </div>
     </div>
   );

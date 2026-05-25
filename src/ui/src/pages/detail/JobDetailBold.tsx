@@ -1,7 +1,9 @@
-import { Repeat, ExternalLink, Trash2 } from 'lucide-react';
+import { Repeat, Trash2, ExternalLink, ChevronDown, Copy } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { useState } from 'react';
+import { PageHeader, type PageHeaderMetaItem } from '@/components/v2/PageHeader';
 import { Panel, PanelHeader, Eyebrow } from '@/components/v2/Panel';
-import { shortId, shortType } from '@/utils/format';
+import { shortId, shortType, stateName, formatDateTime } from '@/utils/format';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import { JobLogs } from './JobLogs';
@@ -103,14 +105,6 @@ function parseException(raw: string | null): ParsedException | null {
   return { type: exceptionType, message: message || 'Job failed.', thrownAt, frames };
 }
 
-function shortenJobId(id: string): { short: string; tail: string } {
-  if (id.length <= 8) {
-    return { short: id, tail: '' };
-  }
-
-  return { short: id.slice(0, 8), tail: id.slice(8) };
-}
-
 interface JobDetailBoldProps {
   job: UnifiedJobDetailModel;
   handlerLogs: JobLogModel[];
@@ -124,182 +118,104 @@ export function JobDetailBold({ job, handlerLogs }: JobDetailBoldProps) {
   const parsed = parseException(failedLog?.exception ?? null);
   const heroMessage = parsed?.message ?? failedLog?.message ?? 'Job failed.';
   const exceptionType = parsed?.type ?? null;
-  const thrownAt = parsed?.thrownAt ?? null;
 
   const finalizedAt = failedLog?.timestamp ?? null;
-  const elapsedMs = finalizedAt ? new Date(finalizedAt).getTime() - new Date(job.createTime).getTime() : null;
   const stoppedAgo = relativeFromNow(finalizedAt);
   const attemptCount = job.retriedTimes + 1;
   const maxAttempts = job.maxRetries + 1;
+  const exhausted = attemptCount >= maxAttempts;
 
   const lastAttemptDuration = formatDuration(failedLog?.durationMs ?? null);
   const lastWorker = failedLog?.workerId ?? null;
+  const createdAgo = relativeFromNow(job.createTime);
 
-  const idParts = shortenJobId(job.id);
+  const meta: PageHeaderMetaItem[] = [];
+  if (job.type) {
+    meta.push({ k: 'Type', v: shortType(job.type) });
+  }
+  if (job.queue) {
+    meta.push({ k: 'Queue', v: job.queue });
+  }
+  meta.push({
+    k: 'Attempts',
+    v: (
+      <span style={{ color: 'var(--state-failed)' }}>
+        {attemptCount}
+        <span className="rel">
+          / {maxAttempts} max{exhausted ? ' — exhausted' : ''}
+        </span>
+      </span>
+    ),
+  });
+  meta.push({
+    k: 'Failed at',
+    v: finalizedAt ? formatDateTime(finalizedAt) : '—',
+    rel: stoppedAgo ?? undefined,
+  });
+  meta.push({ k: 'ID', v: job.id, copy: job.id });
 
   return (
-    <div className="space-y-3.5">
-      {/* HERO */}
-      <div className="relative overflow-hidden rounded-[14px] border border-border bg-panel shadow-[inset_0_1px_0_rgba(255,255,255,0.03),0_1px_2px_rgba(0,0,0,0.25)]">
-        {/* red wash */}
-        <div
-          className="pointer-events-none absolute inset-0"
-          style={{ background: 'radial-gradient(50% 100% at 0% 0%, rgba(220,38,38,0.18), transparent 60%)' }}
-        />
-        {/* diagonal scanlines */}
-        <div
-          className="pointer-events-none absolute inset-0 opacity-[0.14]"
-          style={{
-            backgroundImage:
-              'repeating-linear-gradient(135deg, transparent 0 9px, rgba(220,38,38,0.16) 9px 10px)',
-          }}
-        />
-        {/* left red bar */}
-        <div
-          className="pointer-events-none absolute left-0 top-0 bottom-0 w-[3px]"
-          style={{ background: 'linear-gradient(180deg, var(--warp-red), rgba(220,38,38,0.55) 60%, transparent)' }}
-        />
-
-        <div className="relative flex flex-col gap-6 px-6 py-6 lg:flex-row lg:items-start">
-          <div className="min-w-0 flex-1">
-            <div className="mb-3.5 flex flex-wrap items-center gap-2.5">
-              <span
-                className="mono inline-flex items-center gap-1.5 rounded px-2 py-1 text-[10px] font-bold uppercase tracking-[0.14em] text-white"
-                style={{ background: 'var(--warp-red)' }}
-              >
-                <span className="h-1 w-1 rounded-full bg-white" />
-                Failed permanently
-              </span>
-              <span className="mono text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-dim">
-                {attemptCount} / {maxAttempts} attempts
-                {stoppedAgo ? ` · stopped ${stoppedAgo}` : ''}
-                {elapsedMs != null ? ` · ${formatDuration(elapsedMs)} elapsed` : ''}
-              </span>
-            </div>
-
-            <div className="font-display text-[36px] font-semibold leading-[1.04] tracking-[-0.03em] text-foreground lg:text-[46px]">
-              {heroMessage}
-            </div>
-
-            {(exceptionType || thrownAt) && (
-              <div className="mono mt-2 text-[12.5px] font-medium text-warp-red">
-                {exceptionType ?? 'Exception'}
-                {thrownAt && (
-                  <>
-                    {' · at '}
-                    <span className="underline underline-offset-[3px]">{thrownAt}</span>()
-                  </>
-                )}
-              </div>
-            )}
-
-            <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-dim">
-              <span className="inline-flex items-center gap-1.5">
-                <span className="mono text-[10.5px] uppercase tracking-[0.06em] text-text-mute">Job</span>
-                <span className="mono text-[13px] font-semibold text-foreground">{idParts.short}</span>
-                {idParts.tail && <span className="mono text-[11px] text-text-mute">{idParts.tail}…</span>}
-              </span>
-              <span className="hidden h-3.5 w-px bg-border sm:block" />
-              <span className="inline-flex items-center gap-1.5">
-                <span className="mono text-[10.5px] uppercase tracking-[0.06em] text-text-mute">Type</span>
-                <span className="text-[13px] font-medium text-foreground">{shortType(job.type)}</span>
-              </span>
-              {job.queue && (
-                <>
-                  <span className="hidden h-3.5 w-px bg-border sm:block" />
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className="mono text-[10.5px] uppercase tracking-[0.06em] text-text-mute">Queue</span>
-                    <span className="mono rounded border border-border bg-panel-2 px-1.5 py-0.5 text-[12px] font-medium text-foreground">
-                      {job.queue}
-                    </span>
-                  </span>
-                </>
-              )}
-              {job.traceId && (
-                <>
-                  <span className="hidden h-3.5 w-px bg-border sm:block" />
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className="mono text-[10.5px] uppercase tracking-[0.06em] text-text-mute">Trace</span>
-                    <Link
-                      to={`/trace/${job.traceId}`}
-                      className="mono text-[12px] font-medium text-warp-blue underline underline-offset-[3px]"
-                    >
-                      {job.traceId.slice(0, 12)} ↗
-                    </Link>
-                  </span>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* action stack */}
-          <div className="flex w-full flex-col gap-2 lg:w-[220px] lg:flex-shrink-0">
+    <div className="flex flex-col gap-[18px]">
+      <PageHeader
+        kindLabel="Job"
+        title={shortId(job.id)}
+        pill={<span className="warp-pill failed">{stateName(job.currentState)}</span>}
+        actions={
+          <>
             <button
+              type="button"
               onClick={() => requeue.mutate(job.id)}
               disabled={requeue.isPending}
-              className="inline-flex items-center justify-center gap-2 rounded-[9px] border px-3.5 py-2.5 text-[13.5px] font-semibold text-white shadow-[0_0_24px_rgba(34,197,94,0.20),inset_0_1px_0_rgba(255,255,255,0.20)] transition hover:brightness-110 disabled:opacity-60"
-              style={{
-                borderColor: 'var(--warp-green)',
-                background: 'linear-gradient(180deg, var(--warp-green), #15803d)',
-              }}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-foreground hover:bg-panel-2 disabled:opacity-60"
             >
-              <Repeat size={15} /> Requeue job
+              <Repeat size={13} /> Requeue
             </button>
-            <div className="flex gap-1.5">
-              {job.traceId ? (
-                <Link
-                  to={`/trace/${job.traceId}`}
-                  className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-panel px-2.5 py-2 text-[12px] font-medium text-foreground hover:bg-panel-2"
-                >
-                  <ExternalLink size={12} /> View trace
-                </Link>
-              ) : (
-                <button
-                  disabled
-                  className="flex-1 cursor-not-allowed rounded-lg border border-border bg-panel px-2.5 py-2 text-[12px] font-medium text-text-mute"
-                >
-                  No trace
-                </button>
-              )}
-              <button
-                onClick={() => deleteJob.mutate(job.id)}
-                disabled={deleteJob.isPending}
-                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border bg-transparent px-2.5 py-2 text-[12px] font-medium text-warp-red transition hover:bg-warp-red-soft disabled:opacity-60"
-                style={{ borderColor: 'rgba(220,38,38,0.35)' }}
+            {job.traceId && (
+              <Link
+                to={`/trace/${job.traceId}`}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-foreground hover:bg-panel-2"
               >
-                <Trash2 size={12} /> Delete
-              </button>
-            </div>
-            <div className="mt-1.5 rounded-lg border border-border bg-panel-2 px-2.5 py-2">
-              <Eyebrow>Last attempt</Eyebrow>
-              <div className="mt-1 flex items-center justify-between text-xs">
-                <span className="text-text-dim">duration</span>
-                <span className="mono font-semibold text-foreground">{lastAttemptDuration ?? '—'}</span>
-              </div>
-              <div className="mt-0.5 flex items-center justify-between text-xs">
-                <span className="text-text-dim">worker</span>
-                <span className="mono font-semibold text-foreground">{lastWorker ?? '—'}</span>
-              </div>
-            </div>
-          </div>
-        </div>
+                <ExternalLink size={13} /> Trace
+              </Link>
+            )}
+            <button
+              type="button"
+              onClick={() => deleteJob.mutate(job.id)}
+              disabled={deleteJob.isPending}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-warp-red hover:bg-warp-red-soft disabled:opacity-60"
+            >
+              <Trash2 size={13} /> Delete
+            </button>
+          </>
+        }
+        meta={meta}
+      />
+
+      {/* Last-error card + payload (info row) */}
+      <div className="warp-info-row">
+        <ErrorCard
+          exception={parsed}
+          message={heroMessage}
+          exceptionType={exceptionType}
+          attemptCount={attemptCount}
+          maxAttempts={maxAttempts}
+          finalizedAt={finalizedAt}
+          workerId={lastWorker}
+          duration={lastAttemptDuration}
+          createdAgo={createdAgo}
+        />
+        {(job.message || (job.metadata && Object.keys(job.metadata).length > 0)) && (
+          <PayloadCard payload={job.message} metadata={job.metadata} />
+        )}
       </div>
 
-      {/* BODY GRID */}
-      <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-[1.6fr_1fr]">
-        <div className="flex flex-col gap-3.5">
+      {/* Logs + stack frames + context cards */}
+      <div className="grid grid-cols-1 gap-[18px] lg:grid-cols-[1.6fr_1fr]">
+        <div className="flex flex-col gap-[18px]">
           {handlerLogs.length > 0 && <JobLogs jobId={job.id} logs={handlerLogs} />}
-          <StackTraceCard
-            exception={parsed}
-            rawException={failedLog?.exception ?? null}
-            thrownAtIso={failedLog?.timestamp ?? null}
-            workerId={lastWorker}
-          />
-          {(job.message || (job.metadata && Object.keys(job.metadata).length > 0)) && (
-            <PayloadCard payload={job.message} metadata={job.metadata} />
-          )}
+          {parsed?.frames && parsed.frames.length > 0 && <StackTraceCard frames={parsed.frames} />}
         </div>
-        <div className="flex flex-col gap-3.5">
+        <div className="flex flex-col gap-[18px]">
           <ExecutionContextCard job={job} workerId={lastWorker} />
           <IdentityCard job={job} />
         </div>
@@ -308,76 +224,140 @@ export function JobDetailBold({ job, handlerLogs }: JobDetailBoldProps) {
   );
 }
 
-// ----- StackTraceCard -----
-function StackTraceCard({
+// ----- ErrorCard -----
+function ErrorCard({
   exception,
-  rawException,
-  thrownAtIso,
+  message,
+  exceptionType,
+  attemptCount,
+  maxAttempts,
+  finalizedAt,
   workerId,
+  duration,
+  createdAgo: _createdAgo,
 }: {
   exception: ParsedException | null;
-  rawException: string | null;
-  thrownAtIso: string | null;
+  message: string;
+  exceptionType: string | null;
+  attemptCount: number;
+  maxAttempts: number;
+  finalizedAt: string | null;
   workerId: string | null;
+  duration: string | null;
+  createdAgo: string | null;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const frames = exception?.frames ?? [];
-  const hasFrames = frames.length > 0;
+  const userFrames = frames.filter(f => f.isUser);
+  const visibleFrames = expanded ? frames : userFrames.length > 0 ? userFrames.slice(0, 5) : frames.slice(0, 5);
+  const hiddenCount = frames.length - visibleFrames.length;
 
   return (
-    <Panel accent="var(--warp-red)">
-      <PanelHeader eyebrow={`Stack trace · ${frames.length} frames`} eyebrowColor="var(--warp-red)" />
-      <div className="mono bg-[color:var(--panel-2)] text-[11.5px] leading-[1.65]">
-        {exception && (
-          <div className="border-b border-border bg-warp-red-soft px-4 py-3">
-            <div className="font-semibold text-warp-red">
-              {exception.type ?? 'Exception'}: {exception.message}
-            </div>
-            <div className="mt-1 text-[10.5px] text-text-dim">
-              {workerId ? `thrown in ${workerId}` : 'thrown'} {thrownAtIso ? `at ${new Date(thrownAtIso).toISOString()}` : ''}
-            </div>
+    <div
+      className="warp-inner-card relative"
+      style={{
+        borderLeft: '3px solid var(--state-failed)',
+        background: 'linear-gradient(180deg, var(--state-failed-bg) 0%, var(--card) 60%)',
+      }}
+    >
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="warp-card-label" style={{ color: 'var(--state-failed)' }}>
+          Last error
+        </span>
+        <span className="warp-pill failed dot">
+          Failed · attempt {attemptCount}/{maxAttempts}
+        </span>
+      </div>
+
+      <div className="mt-3">
+        {exceptionType && (
+          <div
+            className="font-semibold"
+            style={{
+              color: 'var(--state-failed)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 13.5,
+              letterSpacing: '-0.005em',
+            }}
+          >
+            {exceptionType}
           </div>
         )}
-        {hasFrames ? (
-          <>
-            {frames.map((f, n) => {
-              const lineNo = n + 1;
+        <div className="mt-1 text-[13px] leading-[1.5] text-text-dim">{message}</div>
+      </div>
 
-              return (
-                <div
-                  key={n}
-                  className="grid items-baseline py-1"
-                  style={{
-                    gridTemplateColumns: '34px 28px 1fr',
-                    background: f.isThrowSite ? 'var(--warp-red-soft)' : 'transparent',
-                    borderLeft: `2px solid ${f.isThrowSite ? 'var(--warp-red)' : 'transparent'}`,
-                    color: f.isUser ? 'var(--foreground)' : 'var(--text-dim)',
-                    opacity: f.isUser ? 1 : 0.75,
-                  }}
-                >
-                  <span className="pr-2 text-right text-[10.5px] text-text-mute">{lineNo}</span>
-                  <span>
-                    {f.isThrowSite && <span className="font-bold text-warp-red">▶ </span>}
-                    {f.isUser && !f.isThrowSite && <span className="text-warp-green">● </span>}
-                    {!f.isUser && <span className="text-text-mute">○ </span>}
-                  </span>
-                  <span className="pr-3.5 break-all">{f.text.replace(/^at /, '')}</span>
-                </div>
-              );
-            })}
-            <div className="flex items-center justify-between border-t border-border px-4 py-2 text-[10.5px] text-text-mute">
-              <span>
-                <span className="text-warp-green">●</span> your code &nbsp;
-                <span className="text-warp-red">▶</span> origin &nbsp;
-                <span className="text-text-mute">○</span> framework
-              </span>
-              <span>{frames.filter(f => !f.isUser).length} framework frames</span>
+      {frames.length > 0 && (
+        <pre
+          className="mono mt-3 overflow-x-auto rounded-lg px-3.5 py-3 text-[11.5px] leading-[1.55] whitespace-pre"
+          style={{ background: '#1f1c18', color: '#e6e1d3' }}
+        >
+          {visibleFrames.map((f, i) => (
+            <div key={i}>
+              {f.isThrowSite && <span style={{ color: '#f4c87f' }}>▶ </span>}
+              {f.text}
             </div>
-          </>
-        ) : rawException ? (
-          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap p-4 text-[11.5px] text-text-dim">{rawException}</pre>
+          ))}
+        </pre>
+      )}
+
+      <div className="mt-3 flex items-center justify-between gap-2">
+        {hiddenCount > 0 ? (
+          <button
+            type="button"
+            className="mono inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11.5px] text-text-dim hover:bg-accent"
+            onClick={() => setExpanded(e => !e)}
+          >
+            <ChevronDown size={11} style={{ transform: expanded ? 'rotate(180deg)' : undefined }} />
+            {expanded ? 'Hide framework frames' : `Show full backtrace (${frames.length} frames)`}
+          </button>
         ) : (
-          <div className="px-4 py-6 text-center text-[11.5px] text-text-mute">No stack trace recorded.</div>
+          <span />
         )}
+        <span className="mono text-[11px] text-text-mute">
+          {finalizedAt ? formatDateTime(finalizedAt) : ''}
+          {duration ? ` · ${duration}` : ''}
+          {workerId ? ` · ${workerId}` : ''}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ----- StackTraceCard (full frames, body grid) -----
+function StackTraceCard({ frames }: { frames: StackFrame[] }) {
+  return (
+    <Panel accent="var(--state-failed)">
+      <PanelHeader eyebrow={`Stack trace · ${frames.length} frames`} eyebrowColor="var(--state-failed)" />
+      <div className="mono bg-[color:var(--panel-2)] text-[11.5px] leading-[1.65]">
+        {frames.map((f, n) => (
+          <div
+            key={n}
+            className="grid items-baseline py-1"
+            style={{
+              gridTemplateColumns: '34px 28px 1fr',
+              background: f.isThrowSite ? 'var(--state-failed-bg)' : 'transparent',
+              borderLeft: `2px solid ${f.isThrowSite ? 'var(--state-failed)' : 'transparent'}`,
+              color: f.isUser ? 'var(--foreground)' : 'var(--text-dim)',
+              opacity: f.isUser ? 1 : 0.75,
+            }}
+          >
+            <span className="pr-2 text-right text-[10.5px] text-text-mute">{n + 1}</span>
+            <span>
+              {f.isThrowSite && <span className="font-bold text-warp-red">▶ </span>}
+              {f.isUser && !f.isThrowSite && <span className="text-warp-green">● </span>}
+              {!f.isUser && <span className="text-text-mute">○ </span>}
+            </span>
+            <span className="pr-3.5 break-all">{f.text.replace(/^at /, '')}</span>
+          </div>
+        ))}
+        <div className="flex items-center justify-between border-t border-border px-4 py-2 text-[10.5px] text-text-mute">
+          <span>
+            <span className="text-warp-green">●</span> your code &nbsp;
+            <span className="text-warp-red">▶</span> origin &nbsp;
+            <span className="text-text-mute">○</span> framework
+          </span>
+          <span>{frames.filter(f => !f.isUser).length} framework frames</span>
+        </div>
       </div>
     </Panel>
   );
@@ -393,11 +373,11 @@ function tokenizeJsonLine(line: string): React.ReactNode {
   let valEl: React.ReactNode;
   const trimmed = val.trim();
   if (val.startsWith('"')) {
-    valEl = <span className="text-warp-amber">{val}</span>;
+    valEl = <span style={{ color: '#bfe0a8' }}>{val}</span>;
   } else if (/^(true|false|null)$/.test(trimmed)) {
-    valEl = <span style={{ color: 'var(--warp-purple)' }}>{val}</span>;
+    valEl = <span style={{ color: '#d99a64' }}>{val}</span>;
   } else if (/^-?\d/.test(trimmed)) {
-    valEl = <span className="text-warp-blue">{val}</span>;
+    valEl = <span style={{ color: '#e8b97a' }}>{val}</span>;
   } else {
     valEl = <span>{val}</span>;
   }
@@ -405,7 +385,7 @@ function tokenizeJsonLine(line: string): React.ReactNode {
   return (
     <span>
       {ind}
-      <span className="text-warp-green">{key}</span>
+      <span style={{ color: '#9bb6e0' }}>{key}</span>
       {sep}
       {valEl}
       {tail}
@@ -427,13 +407,22 @@ function PayloadCard({ payload, metadata }: { payload: string | null; metadata: 
   const hasMeta = metadata && Object.keys(metadata).length > 0;
 
   return (
-    <Panel>
-      <PanelHeader
-        eyebrow="Payload · the input that failed"
-        action={byteCount > 0 ? <span className="mono text-[10.5px] text-text-mute">{byteCount} bytes</span> : undefined}
-      />
+    <div className="warp-table-wrap">
+      <div className="warp-table-toolbar">
+        <span className="grouped">application/json · {byteCount} bytes</span>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 rounded px-2 py-1 text-[11.5px] text-text-dim hover:bg-accent"
+          onClick={() => payload && navigator.clipboard?.writeText(payload)}
+        >
+          <Copy size={11} /> Copy
+        </button>
+      </div>
       {pretty && (
-        <pre className="mono m-0 max-h-[60vh] overflow-auto bg-[color:var(--panel-2)] px-4 py-3 text-[11.5px] leading-[1.7] text-text-dim">
+        <pre
+          className="mono m-0 overflow-x-auto whitespace-pre px-4 py-3 text-[12px] leading-[1.6]"
+          style={{ background: '#1f1c18', color: '#e6e1d3', maxHeight: 360 }}
+        >
           {pretty.split('\n').map((l, i) => (
             <div key={i}>{tokenizeJsonLine(l)}</div>
           ))}
@@ -447,22 +436,12 @@ function PayloadCard({ payload, metadata }: { payload: string | null; metadata: 
           </pre>
         </div>
       )}
-    </Panel>
+    </div>
   );
 }
 
-// ----- StatRow -----
-function StatRow({
-  k,
-  v,
-  mono,
-  accent,
-}: {
-  k: string;
-  v: React.ReactNode;
-  mono?: boolean;
-  accent?: string;
-}) {
+// ----- StatRow / context cards -----
+function StatRow({ k, v, mono, accent }: { k: string; v: React.ReactNode; mono?: boolean; accent?: string }) {
   return (
     <div className="flex items-center justify-between border-b border-dashed border-border py-2 last:border-b-0">
       <span className="mono text-[11px] uppercase tracking-[0.06em] text-text-mute">{k}</span>
@@ -502,8 +481,8 @@ function IdentityCard({ job }: { job: UnifiedJobDetailModel }) {
         <StatRow k="ID" v={shortId(job.id)} mono />
         {job.type && <StatRow k="Type" v={shortType(job.type)} />}
         {job.handlerType && <StatRow k="Handler" v={shortType(job.handlerType)} />}
-        <StatRow k="Created" v={new Date(job.createTime).toLocaleString()} mono />
-        {job.scheduleTime && <StatRow k="Scheduled" v={new Date(job.scheduleTime).toLocaleString()} mono />}
+        <StatRow k="Created" v={formatDateTime(job.createTime)} mono />
+        {job.scheduleTime && <StatRow k="Scheduled" v={formatDateTime(job.scheduleTime)} mono />}
         {job.traceId && (
           <StatRow
             k="Trace"

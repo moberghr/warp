@@ -1,16 +1,20 @@
 import { formatDistanceToNow, format } from 'date-fns';
 import { State } from '@/types';
+import { useSettingsStore } from '@/stores/settings';
 
 export function formatRelativeTime(dateString: string): string {
   return formatDistanceToNow(new Date(dateString), { addSuffix: true });
 }
 
-export function formatDateTime(dateString: string): string {
-  return format(new Date(dateString), 'yyyy-MM-dd HH:mm:ss.SSS');
+export function formatDateTime(dateString: string | Date, pattern?: string): string {
+  const fmt = pattern ?? useSettingsStore.getState().dateFormat;
+  const date = typeof dateString === 'string' ? new Date(dateString) : dateString;
+
+  return format(date, fmt);
 }
 
-export function formatDateTimeExact(dateString: string): string {
-  return format(new Date(dateString), 'yyyy-MM-dd HH:mm:ss.SSS');
+export function formatDateTimeExact(dateString: string | Date, pattern?: string): string {
+  return formatDateTime(dateString, pattern);
 }
 
 export function shortType(fullType: string | null | undefined): string {

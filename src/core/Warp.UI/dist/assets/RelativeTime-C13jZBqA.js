@@ -1,1 +1,0 @@
-import{t as e}from"./jsx-runtime-B-0fj2_8.js";import{i as t,r as n}from"./format-6DCUpPDN.js";var r=e();function i({date:e}){return(0,r.jsxs)(`span`,{children:[n(e),` `,(0,r.jsxs)(`span`,{className:`text-muted-foreground`,children:[`(`,t(e),`)`]})]})}export{i as t};

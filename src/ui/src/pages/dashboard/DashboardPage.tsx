@@ -5,25 +5,35 @@ import { StatCard } from '@/components/v2/StatCard';
 import { DashboardSkeleton } from '@/components/skeletons/DashboardSkeleton';
 import { useDashboardStore } from '@/stores/dashboard';
 import { usePageStore } from '@/stores/page';
+import { useInfo } from '@/api/hooks/useInfo';
 import { ThroughputChart } from './ThroughputChart';
-import { LiveActivityFeed } from './LiveActivityFeed';
 import { HistoryChart } from './HistoryChart';
-import { ServerHealth } from './ServerHealth';
 
 export default function DashboardPage() {
   const stats = useDashboardStore((s) => s.stats);
+  const { data: info } = useInfo();
 
   useEffect(() => {
+    // Subtitle: "<schema> · <provider>" if we have it, otherwise just "live".
+    const parts: string[] = [];
+    if (info?.schema) {
+      parts.push(info.schema);
+    }
+    if (info?.provider) {
+      parts.push(info.provider);
+    }
+    parts.push('live');
+
     usePageStore.getState().set({
       title: 'Dashboard',
-      subtitle: 'warp-prod · live',
+      subtitle: parts.join(' · '),
       right: undefined,
     });
 
     return () => {
       usePageStore.getState().reset();
     };
-  }, []);
+  }, [info?.schema, info?.provider]);
 
   if (!stats) {
     return <DashboardSkeleton />;
@@ -91,21 +101,8 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Throughput + Live feed */}
-      <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[1fr_380px]">
-        <ThroughputChart />
-        <div className="hidden lg:block">
-          <LiveActivityFeed />
-        </div>
-      </div>
-
-      {/* History + Server health */}
-      <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[1fr_380px]">
-        <HistoryChart />
-        <div className="hidden lg:block">
-          <ServerHealth />
-        </div>
-      </div>
+      <ThroughputChart />
+      <HistoryChart />
     </div>
   );
 }

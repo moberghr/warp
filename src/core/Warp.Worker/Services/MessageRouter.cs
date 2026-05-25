@@ -165,6 +165,14 @@ public sealed class MessageRouter<TContext> : IServerTask
             }
 
             message.CurrentState = State.Processing;
+            _context.Set<JobLog>().Add(new JobLog
+            {
+                JobId = message.Id,
+                EventType = "Processing",
+                Timestamp = now,
+                Level = "Information",
+                Message = $"Routed to {handlerTypes.Count} handler{(handlerTypes.Count == 1 ? string.Empty : "s")}",
+            });
 
             // Capture pending JobEnqueued notifications before commit so push wakes the
             // dispatcher as soon as the child rows are visible. Without this, push works

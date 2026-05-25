@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as api from '@/api';
 import { queryKeys, queryScopes } from '@/lib/queryClient';
@@ -28,6 +28,7 @@ export function useJobsList(state: string, page: number, pageSize: number) {
       return fetcher(page, pageSize);
     },
     enabled: state in stateEndpoints,
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -36,6 +37,7 @@ export function useFailedJobsByType(type: string, page: number, pageSize: number
     queryKey: queryKeys.failedJobsByType(type, page, pageSize),
     queryFn: () => api.getFailedJobsByType(type, page, pageSize),
     enabled,
+    placeholderData: keepPreviousData,
   });
 }
 

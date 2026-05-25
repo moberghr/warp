@@ -1,6 +1,6 @@
-import { FilteredJobsTable } from '@/components/FilteredJobsTable';
-import type { UnifiedJobDetailModel, PagedList, JobModel } from '@/types';
-import * as api from '@/api';
+import { useState } from 'react';
+import { BatchJobsTable } from '@/pages/batches/BatchJobsTable';
+import type { UnifiedJobDetailModel } from '@/types';
 
 interface RelatedJobsSectionProps {
   job: UnifiedJobDetailModel;
@@ -9,28 +9,28 @@ interface RelatedJobsSectionProps {
 
 export function RelatedJobsSection({ job, onCountsUpdate }: RelatedJobsSectionProps) {
   const isBatch = job.kind === 3;
+  const parentKind = isBatch ? 'batch' : 'message';
+  const [counts, setCounts] = useState<Record<string, number>>({});
 
-  const fetchJobs = (page: number, pageSize: number, state?: string): Promise<PagedList<JobModel>> =>
-    isBatch
-      ? api.getBatchJobs(job.id, page, pageSize, state)
-      : api.getMessageJobs(job.id, page, pageSize, state);
-
-  const fetchCounts = () =>
-    isBatch
-      ? api.getBatchJobCounts(job.id)
-      : api.getMessageJobCounts(job.id);
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
 
   return (
-    <div className="mt-6">
-      <FilteredJobsTable
+    <section className="mt-6 flex flex-col gap-[14px]">
+      <div className="warp-section-head">
+        <div className="warp-section-title">
+          <h2>Jobs</h2>
+          <span className="ct">({total || job.totalJobs})</span>
+        </div>
+      </div>
+      <BatchJobsTable
         key={job.id}
-        title="Jobs"
         parentId={job.id}
-        parentKind={isBatch ? 'batch' : 'message'}
-        fetchJobs={fetchJobs}
-        fetchCounts={fetchCounts}
-        onCountsUpdate={onCountsUpdate}
+        parentKind={parentKind}
+        onCountsUpdate={c => {
+          setCounts(c);
+          onCountsUpdate(c);
+        }}
       />
-    </div>
+    </section>
   );
 }

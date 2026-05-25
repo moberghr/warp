@@ -36,7 +36,18 @@ const EMA_ALPHA: Record<Range, number> = {
   '1h': 0.02,
 };
 
+// Tick interval per range — used to draw a deterministic vertical grid + axis
+// labels in the overlay (lightweight-charts' own tick spacing is auto-fit and
+// changes with width, which makes the grid feel arbitrary).
+const TICK_INTERVAL_SECONDS: Record<Range, number> = {
+  '1m': 5,
+  '5m': 30,
+  '15m': 60,
+  '1h': 300,
+};
+
 const H = 220;
+const AXIS_H = 18;
 
 export function ThroughputChart() {
   const [range, setRange] = useState<Range>('15m');
@@ -122,7 +133,12 @@ export function ThroughputChart() {
       </div>
 
       <div className="relative flex-1">
-        <TVChart data={realtimeData} windowSec={windowSec} alpha={alpha} />
+        <TVChart
+          data={realtimeData}
+          windowSec={windowSec}
+          alpha={alpha}
+          tickIntervalSec={TICK_INTERVAL_SECONDS[range]}
+        />
         {realtimeData.length < 2 && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <span className="mono text-[11px] text-text-mute">collecting samples…</span>
@@ -137,6 +153,7 @@ interface TVChartProps {
   data: { ts: number; succeeded: number; failed: number }[];
   windowSec: number;
   alpha: number;
+  tickIntervalSec: number;
 }
 
 /**
@@ -144,8 +161,10 @@ interface TVChartProps {
  * time-series — produces buttery-smooth time-axis scrolling and animated
  * series updates out of the box. Replaces the hand-rolled SVG attempt.
  */
-function TVChart({ data, windowSec, alpha }: TVChartProps) {
+function TVChart({ data, windowSec, alpha, tickIntervalSec }: TVChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<SVGSVGElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const succRef = useRef<ISeriesApi<'Area'> | null>(null);
   const failRef = useRef<ISeriesApi<'Line'> | null>(null);
@@ -154,9 +173,11 @@ function TVChart({ data, windowSec, alpha }: TVChartProps) {
   const dataRef = useRef(data);
   const windowRef = useRef(windowSec);
   const alphaRef = useRef(alpha);
+  const tickIntervalRef = useRef(tickIntervalSec);
   dataRef.current = data;
   windowRef.current = windowSec;
   alphaRef.current = alpha;
+  tickIntervalRef.current = tickIntervalSec;
 
   // Mount the chart once.
   useEffect(() => {
@@ -173,12 +194,13 @@ function TVChart({ data, windowSec, alpha }: TVChartProps) {
 
     const chart = createChart(container, {
       width: container.clientWidth,
-      height: H,
+      height: H - AXIS_H,
       layout: {
         background: { color: 'transparent' },
         textColor: muted,
         fontSize: 10,
         fontFamily: '"Geist Mono Variable", ui-monospace, monospace',
+        attributionLogo: false,
       },
       grid: {
         vertLines: { visible: false },
@@ -198,9 +220,13 @@ function TVChart({ data, windowSec, alpha }: TVChartProps) {
         secondsVisible: true,
         rightOffset: 0,
         barSpacing: 1,
+        // Hide the built-in time axis — we render our own deterministic ticks
+        // in the SVG overlay so vertical-grid spacing always matches the
+        // selected range (5s / 30s / 1m / 5m).
+        visible: false,
       },
       crosshair: {
-        mode: 0,
+        mode: 1,
         vertLine: { color: muted, width: 1, style: 2, labelVisible: false },
         horzLine: { color: muted, width: 1, style: 2, labelVisible: false },
       },
@@ -255,6 +281,50 @@ function TVChart({ data, windowSec, alpha }: TVChartProps) {
     succRef.current = succ;
     failRef.current = fail;
 
+    const plotH = H - AXIS_H;
+    chart.subscribeCrosshairMove((param) => {
+      const tip = tooltipRef.current;
+      if (!tip) {
+        return;
+      }
+      if (
+        !param.point ||
+        param.time === undefined ||
+        param.point.x < 0 ||
+        param.point.y < 0 ||
+        param.point.x > container.clientWidth ||
+        param.point.y > plotH
+      ) {
+        tip.style.display = 'none';
+
+        return;
+      }
+
+      const succVal = param.seriesData.get(succ) as { value?: number } | undefined;
+      const failVal = param.seriesData.get(fail) as { value?: number } | undefined;
+      const s = (succVal?.value ?? 0).toFixed(1);
+      const f = (failVal?.value ?? 0).toFixed(1);
+      const d = new Date((param.time as number) * 1000);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+
+      tip.innerHTML =
+        `<div class="mono text-[10.5px] text-text-mute mb-0.5">${hh}:${mm}:${ss}</div>` +
+        `<div class="mono flex items-center gap-1.5 text-[11px]"><span class="inline-block size-1.5 rounded-full bg-warp-green"></span><span class="text-text-mute">succ</span><span class="ml-auto font-semibold text-warp-green">${s}/s</span></div>` +
+        `<div class="mono flex items-center gap-1.5 text-[11px]"><span class="inline-block size-1.5 rounded-full bg-warp-red"></span><span class="text-text-mute">fail</span><span class="ml-auto font-semibold text-warp-red">${f}/s</span></div>`;
+      tip.style.display = 'block';
+
+      const w = tip.offsetWidth;
+      const cw = container.clientWidth;
+      let left = param.point.x + 12;
+      if (left + w > cw - 4) {
+        left = param.point.x - w - 12;
+      }
+      tip.style.left = `${Math.max(4, left)}px`;
+      tip.style.top = '4px';
+    });
+
     const ro = new ResizeObserver(() => {
       const w = container.clientWidth;
       if (w > 0 && chartRef.current) {
@@ -298,6 +368,17 @@ function TVChart({ data, windowSec, alpha }: TVChartProps) {
           from: fromSec as UTCTimestamp,
           to: nowSec as UTCTimestamp,
         });
+
+        // Use the chart's actual plot width (excludes the right price-scale
+        // gutter) so vertical lines align with the series, not the panel edge.
+        const plotWidth = chartRef.current?.timeScale().width() ?? container.clientWidth;
+        renderTimeOverlay(
+          overlayRef.current,
+          fromSec,
+          nowSec,
+          tickIntervalRef.current,
+          plotWidth,
+        );
       }
       raf = requestAnimationFrame(tick);
     };
@@ -313,7 +394,67 @@ function TVChart({ data, windowSec, alpha }: TVChartProps) {
     };
   }, []);
 
-  return <div ref={containerRef} className="h-full w-full" style={{ height: H }} />;
+  return (
+    <div className="relative h-full w-full" style={{ height: H }}>
+      <div ref={containerRef} className="absolute inset-x-0 top-0" style={{ height: H - AXIS_H }} />
+      <svg
+        ref={overlayRef}
+        className="pointer-events-none absolute inset-0 h-full w-full"
+        aria-hidden="true"
+      />
+      <div
+        ref={tooltipRef}
+        className="pointer-events-none absolute z-10 hidden min-w-[120px] rounded-md border border-border bg-panel/95 px-2 py-1.5 shadow-md backdrop-blur"
+      />
+    </div>
+  );
+}
+
+/**
+ * Draws vertical grid lines + bottom-axis labels at fixed time intervals.
+ * Runs every animation frame so the marks slide smoothly with the chart pan.
+ */
+function renderTimeOverlay(
+  svg: SVGSVGElement | null,
+  fromSec: number,
+  nowSec: number,
+  intervalSec: number,
+  width: number,
+) {
+  if (!svg || width <= 0) {
+    return;
+  }
+
+  // Snap the first tick to a multiple of `intervalSec` >= fromSec so labels
+  // sit at clean wall-clock times (e.g. 12:00:05, 12:00:10).
+  const firstTick = Math.ceil(fromSec / intervalSec) * intervalSec;
+  const span = nowSec - fromSec;
+
+  const css = getComputedStyle(svg);
+  const border = css.getPropertyValue('--border').trim() || '#e5e7eb';
+  const muted = css.getPropertyValue('--text-mute').trim() || '#71717a';
+
+  const labelY = svg.clientHeight - 4;
+  let dom = '';
+  for (let t = firstTick; t <= nowSec; t += intervalSec) {
+    const x = ((t - fromSec) / span) * width;
+    dom += `<line x1="${x.toFixed(1)}" y1="0" x2="${x.toFixed(1)}" y2="${(svg.clientHeight - AXIS_H).toFixed(1)}" stroke="${border}" stroke-dasharray="2 3" stroke-width="1" />`;
+    dom += `<text x="${x.toFixed(1)}" y="${labelY}" fill="${muted}" font-size="10" font-family="'Geist Mono Variable', ui-monospace, monospace" text-anchor="middle">${formatTickLabel(t, intervalSec)}</text>`;
+  }
+  svg.innerHTML = dom;
+}
+
+function formatTickLabel(unixSec: number, intervalSec: number): string {
+  const d = new Date(unixSec * 1000);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  // Sub-minute intervals need seconds; minute+ intervals don't.
+  if (intervalSec < 60) {
+    return `${hh}:${mm}:${ss}`;
+  }
+
+  return `${hh}:${mm}`;
 }
 
 /** Returns a CSS color with the given alpha. Handles hex / falls back to color-mix. */

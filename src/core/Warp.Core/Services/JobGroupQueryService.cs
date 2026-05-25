@@ -149,10 +149,12 @@ public class JobGroupQueryService<TContext> : IJobGroupQueryService
         query = state switch
         {
             "awaiting" => query.Where(x => x.CurrentState == State.Awaiting),
+            "scheduled" => query.Where(x => x.CurrentState == State.Scheduled),
             "enqueued" => query.Where(x => x.CurrentState == State.Enqueued),
             "processing" => query.Where(x => x.CurrentState == State.Processing),
             "completed" => query.Where(x => x.CurrentState == State.Completed),
             "failed" => query.Where(x => x.CurrentState == State.Failed),
+            "deleted" => query.Where(x => x.CurrentState == State.Deleted),
             _ => query,
         };
 

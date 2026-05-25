@@ -22,6 +22,7 @@ const BackgroundServiceDetail = lazy(() => import('@/pages/BackgroundServices/De
 const WorkerDetailPage = lazy(() => import('@/pages/workers/WorkerDetailPage'));
 const TracePage = lazy(() => import('@/pages/trace/TracePage'));
 const DetailPage = lazy(() => import('@/pages/detail/DetailPage'));
+const SettingsPage = lazy(() => import('@/pages/settings/SettingsPage'));
 const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
 const ExtensionPage = lazy(() => import('@/extensions/ExtensionPage'));
 import { setOnUnauthorized } from '@/api/client';
@@ -130,6 +131,7 @@ function AppRoutes() {
           <Route path="/sagas" element={<SagasListPage />} />
           <Route path="/services/:name" element={<BackgroundServiceDetail />} />
           <Route path="/services" element={<BackgroundServicesList />} />
+          <Route path="/settings" element={<SettingsPage />} />
 
           {extensionPages.map((page) => (
             <Route
