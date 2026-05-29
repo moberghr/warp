@@ -17,6 +17,24 @@ import {
   useTriggerRecurringJob,
   useDeleteRecurringJob,
 } from '@/api/hooks/useRecurring';
+import { useConfirm } from '@/components/forms/useConfirm';
+import cronstrue from 'cronstrue';
+
+const TZ_SHORT = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return 'UTC';
+  }
+})();
+
+function describeCron(expr: string): string | null {
+  try {
+    return cronstrue.toString(expr, { use24HourTimeFormat: true });
+  } catch {
+    return null;
+  }
+}
 
 export default function RecurringDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -33,6 +51,7 @@ export default function RecurringDetailPage() {
   const disableJob = useDisableRecurringJob();
   const triggerJob = useTriggerRecurringJob();
   const deleteJob = useDeleteRecurringJob();
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   const detail = detailQuery.data;
 
@@ -54,7 +73,16 @@ export default function RecurringDetailPage() {
       triggerJob.mutate(detail.id);
     };
 
-    const handleDelete = () => {
+    const handleDelete = async () => {
+      const ok = await confirm({
+        title: 'Delete recurring job?',
+        description: `Remove "${detail.name}"? Future runs will not be scheduled. Existing in-flight jobs are unaffected.`,
+        confirmLabel: 'Delete',
+        destructive: true,
+      });
+      if (!ok) {
+        return;
+      }
       deleteJob.mutate(detail.id, { onSuccess: () => navigate('/recurring') });
     };
 
@@ -71,7 +99,7 @@ export default function RecurringDetailPage() {
         </div>
       ),
     });
-  }, [detail, enableJob, disableJob, triggerJob, deleteJob, navigate]);
+  }, [detail, enableJob, disableJob, triggerJob, deleteJob, navigate, confirm]);
 
   useEffect(() => {
     return () => usePageStore.getState().reset();
@@ -86,6 +114,9 @@ export default function RecurringDetailPage() {
     <div className="flex flex-col gap-3 p-5">
       <div className="flex flex-wrap items-center gap-3 text-[12.5px]">
         <span className="font-mono bg-panel-2 border border-border px-2 py-0.5 rounded">{detail.cron}</span>
+        {describeCron(detail.cron) && (
+          <span className="text-text-mute italic">{describeCron(detail.cron)}</span>
+        )}
         {detail.disabledAt ? (
           <span className="inline-flex items-center rounded-full bg-orange-100 px-2.5 py-0.5 text-xs font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
             Disabled <RelativeTime date={detail.disabledAt} />
@@ -111,9 +142,13 @@ export default function RecurringDetailPage() {
                     <dd className="font-mono">{formatDateTime(detail.updatedAt)}</dd>
                   </>
                 )}
-                <dt className="warp-eyebrow text-text-mute">Next execution</dt>
+                <dt className="warp-eyebrow text-text-mute" title={`Times shown in ${TZ_SHORT}`}>
+                  Next execution
+                </dt>
                 <dd>{detail.nextExecution ? <RelativeTime date={detail.nextExecution} /> : 'N/A'}</dd>
-                <dt className="warp-eyebrow text-text-mute">Last execution</dt>
+                <dt className="warp-eyebrow text-text-mute" title={`Times shown in ${TZ_SHORT}`}>
+                  Last execution
+                </dt>
                 <dd>{detail.lastExecution ? <RelativeTime date={detail.lastExecution} /> : 'Never'}</dd>
                 <dt className="warp-eyebrow text-text-mute">ID</dt>
                 <dd className="font-mono text-xs">{detail.id}</dd>
@@ -133,7 +168,7 @@ export default function RecurringDetailPage() {
 
         <div className="flex flex-col gap-3">
           <Panel className="overflow-hidden">
-            <PanelHeader eyebrow="Execution history" />
+            <PanelHeader eyebrow="Execution history" action={<span className="text-[10.5px] text-text-mute">Retains last 100 runs</span>} />
             {jobs && jobs.items.length > 0 ? (
               <>
                 <div className="overflow-x-auto">
@@ -186,6 +221,7 @@ export default function RecurringDetailPage() {
           </Panel>
         </div>
       </div>
+      {confirmDialog}
     </div>
   );
 }

@@ -34,6 +34,7 @@ import { State } from '@/types';
 import { JobsStateRail } from './JobsStateRail';
 import { JobTypeBar } from './JobTypeBar';
 import { BulkActionBar } from './BulkActionBar';
+import { useConfirm } from '@/components/forms/useConfirm';
 
 const PAGE_SIZE = 20;
 
@@ -83,6 +84,7 @@ export default function JobListPage() {
 
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [sorting, setSorting] = useState<SortingState>([{ id: 'createTime', desc: true }]);
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   // Reset selection when navigating between state/type/page.
   useEffect(() => {
@@ -216,7 +218,17 @@ export default function JobListPage() {
               )}
               <button
                 type="button"
-                onClick={() => deleteJob.mutate(row.original.id)}
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: 'Delete job?',
+                    description: `Delete ${shortId(row.original.id)} (${shortType(row.original.type)})? This cannot be undone.`,
+                    confirmLabel: 'Delete',
+                    destructive: true,
+                  });
+                  if (ok) {
+                    deleteJob.mutate(row.original.id);
+                  }
+                }}
                 className="px-2.5 py-1 text-[11.5px] font-medium rounded-md border border-warp-red text-warp-red hover:bg-warp-red-soft transition-colors"
               >
                 Delete
@@ -226,7 +238,7 @@ export default function JobListPage() {
         },
       },
     ],
-    [requeueJob, deleteJob],
+    [requeueJob, deleteJob, confirm],
   );
 
   const table = useReactTable({
@@ -249,7 +261,17 @@ export default function JobListPage() {
     });
   };
 
-  const handleBulkDelete = () => {
+  const handleBulkDelete = async () => {
+    const ok = await confirm({
+      title: `Delete ${selectedIds.length} jobs?`,
+      description: 'This cannot be undone.',
+      confirmLabel: `Delete ${selectedIds.length}`,
+      destructive: true,
+    });
+    if (!ok) {
+      return;
+    }
+
     bulkDelete.mutate(selectedIds, {
       onSuccess: () => setRowSelection({}),
     });
@@ -284,6 +306,7 @@ export default function JobListPage() {
 
   return (
     <div className="flex flex-col lg:flex-row h-full min-h-0">
+      {confirmDialog}
       <JobsStateRail active={resolvedState} />
       <div className="flex-1 overflow-auto p-5 min-w-0">
         <header className="mb-4">

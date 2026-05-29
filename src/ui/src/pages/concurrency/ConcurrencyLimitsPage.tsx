@@ -62,6 +62,28 @@ export default function ConcurrencyLimitsPage() {
       cell: ({ row }) => <span className="font-mono">{row.original.limit}</span>,
     },
     {
+      id: 'kind',
+      header: 'Kind',
+      enableSorting: false,
+      cell: ({ row }) => {
+        const isMutex = row.original.limit === 1;
+
+        return (
+          <span
+            className={
+              'inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ' +
+              (isMutex
+                ? 'bg-warp-purple-soft text-warp-purple'
+                : 'bg-warp-blue-soft text-warp-blue')
+            }
+            title={isMutex ? 'Limit = 1 (Mutex semantics)' : 'Limit ≥ 2 (Semaphore semantics)'}
+          >
+            {isMutex ? 'Mutex' : 'Semaphore'}
+          </span>
+        );
+      },
+    },
+    {
       accessorKey: 'updatedAt',
       header: 'Updated',
       cell: ({ row }) => (
@@ -155,7 +177,7 @@ export default function ConcurrencyLimitsPage() {
       </div>
 
       {!query.data ? (
-        <TableSkeleton rows={6} headers={['Name', 'Limit', 'Updated', '']} />
+        <TableSkeleton rows={6} headers={['Name', 'Limit', 'Kind', 'Updated', '']} />
       ) : (
         <Panel className="overflow-hidden">
           <div className="overflow-x-auto">

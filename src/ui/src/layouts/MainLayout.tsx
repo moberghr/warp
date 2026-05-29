@@ -127,6 +127,13 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
           >
             <span className="font-medium">Connection lost</span>
             <span className="opacity-80">— Unable to connect to Warp API. Retrying...</span>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="ml-auto rounded border border-warp-red/40 px-2 py-0.5 text-xs font-medium hover:bg-warp-red/10"
+            >
+              Retry now
+            </button>
           </div>
         )}
 

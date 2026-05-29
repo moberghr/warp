@@ -5,6 +5,7 @@ import { PageHeader, type PageHeaderMetaItem } from '@/components/v2/PageHeader'
 import { Panel, PanelHeader, Eyebrow } from '@/components/v2/Panel';
 import { shortId, shortType, stateName, formatDateTime } from '@/utils/format';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
+import { useConfirm } from '@/components/forms/useConfirm';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import { JobLogs } from './JobLogs';
 
@@ -113,6 +114,19 @@ interface JobDetailBoldProps {
 export function JobDetailBold({ job, handlerLogs }: JobDetailBoldProps) {
   const requeue = useRequeueJob();
   const deleteJob = useDeleteJob();
+  const { confirm, dialog: confirmDialog } = useConfirm();
+
+  const askDelete = async () => {
+    const ok = await confirm({
+      title: 'Delete job?',
+      description: `Delete ${shortId(job.id)}? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (ok) {
+      deleteJob.mutate(job.id);
+    }
+  };
 
   const failedLog = findLastFailedLog(job.logs);
   const parsed = parseException(failedLog?.exception ?? null);
@@ -180,7 +194,7 @@ export function JobDetailBold({ job, handlerLogs }: JobDetailBoldProps) {
             )}
             <button
               type="button"
-              onClick={() => deleteJob.mutate(job.id)}
+              onClick={askDelete}
               disabled={deleteJob.isPending}
               className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-warp-red hover:bg-warp-red-soft disabled:opacity-60"
             >
@@ -220,6 +234,7 @@ export function JobDetailBold({ job, handlerLogs }: JobDetailBoldProps) {
           <IdentityCard job={job} />
         </div>
       </div>
+      {confirmDialog}
     </div>
   );
 }

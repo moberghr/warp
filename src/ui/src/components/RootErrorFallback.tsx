@@ -5,6 +5,8 @@ import { Panel } from '@/components/v2/Panel';
 
 export function RootErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
   const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : null;
+
   return (
     <div className="min-h-screen flex items-center justify-center p-6 bg-background">
       <Panel className="max-w-lg w-full">
@@ -16,9 +18,15 @@ export function RootErrorFallback({ error, resetErrorBoundary }: FallbackProps) 
               The dashboard hit an unexpected error. Reloading usually fixes it.
             </p>
           </div>
-          <pre className="text-[11px] text-left bg-panel-2 rounded p-3 overflow-auto max-h-40">
-            {message}
-          </pre>
+          <details className="text-left" open={import.meta.env.DEV}>
+            <summary className="cursor-pointer text-[12px] text-text-mute hover:text-foreground select-none">
+              Show details
+            </summary>
+            <pre className="mt-2 text-[11px] bg-panel-2 rounded p-3 overflow-auto max-h-40">
+              {message}
+              {import.meta.env.DEV && stack ? `\n\n${stack}` : ''}
+            </pre>
+          </details>
           <div className="flex gap-2 justify-center">
             <Button variant="outline" onClick={resetErrorBoundary}>
               Try again

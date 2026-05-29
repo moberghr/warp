@@ -672,6 +672,7 @@
   .warp-tl-item.progress::before   { border-color: var(--state-awaiting); }
   .warp-tl-item.completed::before  { border-color: var(--state-completed); background: var(--state-completed); }
   .warp-tl-item.failed::before     { border-color: var(--state-failed); background: var(--state-failed); }
+  .warp-tl-item.deleted::before    { border-color: var(--state-deleted, var(--text-dim)); background: var(--state-deleted, var(--text-dim)); }
   .warp-tl-item.future::before     { border-color: var(--border-hi); background: var(--card); }
   .warp-tl-row {
     display: flex;
@@ -694,6 +695,7 @@
   .warp-tl-kind.progress   { color: var(--state-awaiting); }
   .warp-tl-kind.completed  { color: var(--state-completed); }
   .warp-tl-kind.failed     { color: var(--state-failed); }
+  .warp-tl-kind.deleted    { color: var(--state-deleted, var(--text-dim)); }
   .warp-tl-when {
     font-size: 11.5px;
     color: var(--text-mute);

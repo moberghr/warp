@@ -11,6 +11,7 @@ import { HistoryChart } from './HistoryChart';
 
 export default function DashboardPage() {
   const stats = useDashboardStore((s) => s.stats);
+  const error = useDashboardStore((s) => s.error);
   const { data: info } = useInfo();
 
   useEffect(() => {
@@ -36,11 +37,34 @@ export default function DashboardPage() {
   }, [info?.schema, info?.provider]);
 
   if (!stats) {
+    if (error) {
+      return (
+        <div className="p-6">
+          <div className="max-w-xl rounded-lg border border-warp-red/40 bg-warp-red-soft px-4 py-3 text-[13px] text-warp-red">
+            <div className="font-semibold mb-1">Dashboard unavailable</div>
+            <div className="opacity-90">{error}</div>
+          </div>
+        </div>
+      );
+    }
     return <DashboardSkeleton />;
   }
 
+  const dbStatus = stats.databaseConnection;
+  const dbHealthy = !dbStatus || dbStatus === 'Healthy' || dbStatus === 'Open';
+
   return (
     <div className="flex flex-col gap-3">
+      {error && (
+        <div className="rounded-lg border border-warp-amber/40 bg-warp-amber-soft px-3 py-2 text-[12px] text-warp-amber">
+          {error} — showing last known data.
+        </div>
+      )}
+      {dbStatus && !dbHealthy && (
+        <div className="rounded-lg border border-warp-red/40 bg-warp-red-soft px-3 py-2 text-[12px] text-warp-red">
+          Database: {dbStatus}
+        </div>
+      )}
       {/* 6-up stat row */}
       <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 lg:grid-cols-6">
         <StatCard

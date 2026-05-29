@@ -300,12 +300,18 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
 
 export default function TracePage() {
   const { traceId: rawTraceId, highlightId } = useParams<{ traceId: string; highlightId?: string }>();
+  const navigate = useNavigate();
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
 
   // Normalize: accept both "4bf92f3577b34da6a3ce929d0e0e4736" and "4bf92f35-77b3-4da6-a3ce-929d0e0e4736"
-  const traceId = rawTraceId && /^[0-9a-f]{32}$/i.test(rawTraceId)
-    ? `${rawTraceId.slice(0,8)}-${rawTraceId.slice(8,12)}-${rawTraceId.slice(12,16)}-${rawTraceId.slice(16,20)}-${rawTraceId.slice(20)}`
-    : rawTraceId;
+  const isHex32 = !!rawTraceId && /^[0-9a-f]{32}$/i.test(rawTraceId);
+  const isDashed = !!rawTraceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawTraceId);
+  const isValidTraceId = isHex32 || isDashed;
+  const traceId = isHex32
+    ? `${rawTraceId!.slice(0,8)}-${rawTraceId!.slice(8,12)}-${rawTraceId!.slice(12,16)}-${rawTraceId!.slice(16,20)}-${rawTraceId!.slice(20)}`
+    : isDashed
+      ? rawTraceId
+      : undefined;
 
   // Display without dashes (W3C format)
   const traceIdDisplay = traceId?.replace(/-/g, '') ?? '';
@@ -372,11 +378,65 @@ export default function TracePage() {
     return () => usePageStore.getState().reset();
   }, []);
 
+  if (!isValidTraceId) {
+    return (
+      <div className="flex flex-col gap-3 p-5">
+        <Panel>
+          <div className="py-10 px-6 text-center space-y-3">
+            <div className="text-[15px] font-semibold">Invalid trace ID</div>
+            <div className="text-[13px] text-text-mute">
+              Expected a 32-character hex W3C trace ID (with or without dashes).
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/jobs/enqueued')}
+              className="mt-2 inline-flex items-center gap-1 rounded-md border border-border bg-card px-3 py-1.5 text-[12.5px] font-medium hover:bg-panel-2"
+            >
+              ← Back to Jobs
+            </button>
+          </div>
+        </Panel>
+      </div>
+    );
+  }
   if (error) return <ErrorState message={(error as Error).message} />;
   if (!jobs) return <LoadingState />;
 
+  if (jobs.length === 0) {
+    return (
+      <div className="flex flex-col gap-3 p-5">
+        <Panel>
+          <div className="py-10 px-6 text-center space-y-3">
+            <div className="text-[15px] font-semibold">Trace not found</div>
+            <div className="text-[13px] text-text-mute">
+              No jobs were recorded for trace <code className="font-mono">{traceIdDisplay}</code>.
+              The trace may have expired or the IDs may not match.
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/jobs/enqueued')}
+              className="mt-2 inline-flex items-center gap-1 rounded-md border border-border bg-card px-3 py-1.5 text-[12.5px] font-medium hover:bg-panel-2"
+            >
+              ← Back to Jobs
+            </button>
+          </div>
+        </Panel>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-3 p-5">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => navigate(-1)}
+          className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[11.5px] font-medium hover:bg-panel-2"
+          aria-label="Go back"
+        >
+          ←&nbsp;Back
+        </button>
+      </div>
       <Panel style={{ height: 'calc(100vh - 12rem)' }} className="overflow-hidden">
         <ReactFlow
           nodes={styledNodes}

@@ -69,8 +69,10 @@ export default function ServersPage() {
                   <Button
                     variant="ghost"
                     size="sm"
+                    disabled={pause.isPending || resume.isPending}
                     onClick={(e) => { e.preventDefault(); handleTogglePause(server); }}
-                    title={server.pausedAt ? 'Resume server' : 'Pause server'}
+                    title={server.pausedAt ? 'Resume server (takes effect on next heartbeat, ~3s)' : 'Pause server (takes effect on next heartbeat, ~3s)'}
+                    aria-label={server.pausedAt ? 'Resume server' : 'Pause server'}
                   >
                     {server.pausedAt ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
                   </Button>

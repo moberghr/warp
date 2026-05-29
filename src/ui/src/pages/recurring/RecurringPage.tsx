@@ -14,6 +14,24 @@ import {
   useTriggerRecurringJob,
   useDeleteRecurringJob,
 } from '@/api/hooks/useRecurring';
+import { useConfirm } from '@/components/forms/useConfirm';
+import cronstrue from 'cronstrue';
+
+const TZ_SHORT = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return 'UTC';
+  }
+})();
+
+function describeCron(expr: string): string | null {
+  try {
+    return cronstrue.toString(expr, { use24HourTimeFormat: true });
+  } catch {
+    return null;
+  }
+}
 
 export default function RecurringPage() {
   const [page, setPage] = useState(0);
@@ -24,6 +42,7 @@ export default function RecurringPage() {
   const disableJob = useDisableRecurringJob();
   const triggerJob = useTriggerRecurringJob();
   const deleteJob = useDeleteRecurringJob();
+  const { confirm, dialog: confirmDialog } = useConfirm();
 
   useEffect(() => {
     usePageStore.getState().set({ title: 'Recurring Jobs' });
@@ -46,7 +65,7 @@ export default function RecurringPage() {
                 <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Cron</th>
                 <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Type</th>
                 <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Status</th>
-                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Next Execution</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold" title={`Times shown in ${TZ_SHORT}`}>Next Execution</th>
                 <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Last Execution</th>
                 <th className="warp-eyebrow text-right px-3.5 py-2.5 text-text-mute font-semibold">Actions</th>
               </tr>
@@ -64,7 +83,12 @@ export default function RecurringPage() {
                     <td className="px-3.5 py-2 text-[12.5px] font-medium">
                       <Link to={`/recurring/${rj.id}`} className="text-primary hover:underline">{rj.name}</Link>
                     </td>
-                    <td className="px-3.5 py-2 font-mono text-[12.5px]">{rj.cron}</td>
+                    <td className="px-3.5 py-2 text-[12.5px]">
+                      <div className="font-mono">{rj.cron}</div>
+                      {describeCron(rj.cron) && (
+                        <div className="text-[11px] text-text-mute mt-0.5">{describeCron(rj.cron)}</div>
+                      )}
+                    </td>
                     <td className="px-3.5 py-2 text-[12.5px]">{rj.type.split(',')[0].split('.').pop()}</td>
                     <td className="px-3.5 py-2 text-[12.5px]">
                       {rj.disabledAt ? (
@@ -92,7 +116,22 @@ export default function RecurringPage() {
                       <Button variant="ghost" size="sm" onClick={() => triggerJob.mutate(rj.id)}>
                         Trigger
                       </Button>
-                      <Button variant="ghost" size="sm" className="text-destructive" onClick={() => deleteJob.mutate(rj.id)}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive"
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: 'Delete recurring job?',
+                            description: `Remove "${rj.name}"? Future runs will not be scheduled. Existing in-flight jobs are unaffected.`,
+                            confirmLabel: 'Remove',
+                            destructive: true,
+                          });
+                          if (ok) {
+                            deleteJob.mutate(rj.id);
+                          }
+                        }}
+                      >
                         Remove
                       </Button>
                     </td>
@@ -105,6 +144,7 @@ export default function RecurringPage() {
       </Panel>
 
       <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} />
+      {confirmDialog}
     </div>
   );
 }

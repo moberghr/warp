@@ -1,10 +1,11 @@
 import { NavLink, useLocation } from 'react-router-dom';
-import { Zap, Settings } from 'lucide-react';
+import { Zap, Settings, LogOut } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useDashboardStore } from '@/stores/dashboard';
 import { PulseDot } from '@/components/v2/PulseDot';
 import { useInfo } from '@/api/hooks/useInfo';
 import * as api from '@/api';
+import { config } from '@/config';
 import { cn } from '@/lib/utils';
 import type { WarpNavItem, NavBadge } from './warpNavItems';
 
@@ -151,6 +152,22 @@ export default function WarpSidebar({ items, onNavigate, mobile = false }: Props
             <Settings className="w-[15px] h-[15px] shrink-0 opacity-85" />
             <span className="flex-1 truncate">Settings</span>
           </NavLink>
+          {config.hasBuiltInLogin && (
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await api.logout();
+                } finally {
+                  window.location.reload();
+                }
+              }}
+              className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[13px] font-medium border-l-2 border-transparent text-text-dim hover:text-foreground hover:bg-panel-2/60 w-full"
+            >
+              <LogOut className="w-[15px] h-[15px] shrink-0 opacity-85" />
+              <span className="flex-1 truncate text-left">Log out</span>
+            </button>
+          )}
         </div>
 
       <div className="px-3.5 py-3 border-t border-border bg-gradient-to-b from-transparent to-white/[0.012] dark:to-white/[0.012]">

@@ -232,7 +232,12 @@ function HistoryChart({ points, hours }: { points: CounterHistoryPoint[] | null;
   }, [data]);
 
   if (!points) {
-    return <div style={{ height: 240 }} className="flex items-center justify-center text-[13px] text-text-mute">Loading...</div>;
+    return (
+      <div style={{ height: 240 }} className="flex flex-col gap-2 p-3">
+        <div className="h-4 w-32 rounded bg-panel-2 animate-pulse" />
+        <div className="flex-1 rounded bg-panel-2 animate-pulse" />
+      </div>
+    );
   }
 
   if (data && data.series.length === 0) {

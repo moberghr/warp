@@ -179,8 +179,14 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
         </div>
 
         <footer className="flex items-center justify-between px-6 pb-6 text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400 sm:px-10">
-          <span>warp v{import.meta.env.VITE_APP_VERSION}</span>
-          <span>build {import.meta.env.VITE_APP_BUILD_DATE} · {import.meta.env.VITE_APP_COMMIT}</span>
+          <span>warp{import.meta.env.VITE_APP_VERSION ? ` v${import.meta.env.VITE_APP_VERSION}` : ' · dev build'}</span>
+          {(import.meta.env.VITE_APP_BUILD_DATE || import.meta.env.VITE_APP_COMMIT) && (
+            <span>
+              {import.meta.env.VITE_APP_BUILD_DATE && `build ${import.meta.env.VITE_APP_BUILD_DATE}`}
+              {import.meta.env.VITE_APP_BUILD_DATE && import.meta.env.VITE_APP_COMMIT && ' · '}
+              {import.meta.env.VITE_APP_COMMIT}
+            </span>
+          )}
         </footer>
       </main>
     </div>

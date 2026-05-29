@@ -1,0 +1,1 @@
+var e={PerServer:1,Singleton:2},t={Running:1,Waiting:2,Faulted:3,Restarting:4,ConfigurationMismatch:5},n={Lifecycle:1,User:2},r={Trace:0,Debug:1,Information:2,Warning:3,Error:4,Critical:5,None:6};export{e as i,t as n,r,n as t};

@@ -90,7 +90,7 @@ export function ThroughputChart() {
     <Panel className="flex h-full min-h-[260px] flex-col gap-2 px-4 py-3.5">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <PulseDot />
+          <PulseDot aria-label="Live data indicator" />
           <span className="text-[13.5px] font-semibold">Throughput</span>
           <span className="text-[11.5px] text-text-mute">
             jobs / second · {range} window
@@ -113,11 +113,13 @@ export function ThroughputChart() {
               <span className="text-foreground">{peak}</span>
             </span>
           </div>
-          <div className="flex gap-0.5 rounded-md bg-panel-2 p-0.5">
+          <div className="flex gap-0.5 rounded-md bg-panel-2 p-0.5" role="group" aria-label="Throughput time range">
             {(Object.keys(RANGE_SECONDS) as Range[]).map((r) => (
               <button
                 key={r}
                 onClick={() => setRange(r)}
+                aria-label={`Show last ${r}`}
+                aria-pressed={range === r}
                 className={
                   'mono rounded px-2 py-0.5 text-[10.5px] font-semibold transition-colors ' +
                   (range === r

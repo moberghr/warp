@@ -283,7 +283,12 @@ export default function BackgroundServiceDetail() {
         </CardHeader>
         <CardContent className="p-0">
           {logs.length === 0 ? (
-            <div className="py-8 text-center text-muted-foreground text-sm">No logs captured yet</div>
+            <div className="py-8 text-center text-muted-foreground text-sm">
+              No logs captured yet
+              <div className="text-xs text-text-mute mt-1">
+                Logs are rate-capped (100/s) and capped to 1,000 rows or 7 days per service; recent events may be filtered.
+              </div>
+            </div>
           ) : (
             <>
               <Table>

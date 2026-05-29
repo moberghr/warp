@@ -6,6 +6,7 @@ import { shortId, shortType, stateName, formatDateTime } from '@/utils/format';
 import { State } from '@/types';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
+import { useConfirm } from '@/components/forms/useConfirm';
 import { JobTimeline } from './JobTimeline';
 import { JobProgress } from './JobProgress';
 import { JobLogs } from './JobLogs';
@@ -73,9 +74,27 @@ export function JobDetailStandard({
 }: JobDetailStandardProps) {
   const requeue = useRequeueJob();
   const deleteJob = useDeleteJob();
+  const { confirm, dialog: confirmDialog } = useConfirm();
+
+  const askDelete = async (action: 'cancel' | 'delete') => {
+    const ok = await confirm({
+      title: action === 'cancel' ? 'Cancel running job?' : 'Delete job?',
+      description:
+        action === 'cancel'
+          ? `Request graceful cancellation of ${shortId(job.id)}. The handler may still complete if it ignores the cancellation token.`
+          : `Delete ${shortId(job.id)}? This cannot be undone.`,
+      confirmLabel: action === 'cancel' ? 'Cancel job' : 'Delete',
+      destructive: true,
+    });
+    if (ok) {
+      deleteJob.mutate(job.id);
+    }
+  };
 
   const isJob = job.kind === 1;
+  const isMessage = job.kind === 2;
   const isProcessing = job.currentState === State.Processing;
+  const showActions = isJob || isMessage;
   const hasChildJobs = job.kind === 2 || job.kind === 3;
   const kind = kindLabel(job.kind);
 
@@ -122,11 +141,11 @@ export function JobDetailStandard({
         pill={<span className={`warp-pill ${pillClass}`}>{stateName(job.currentState)}</span>}
         actions={
           <>
-            {isJob && (
-              isProcessing ? (
+            {showActions && (
+              isJob && isProcessing ? (
                 <button
                   type="button"
-                  onClick={() => deleteJob.mutate(job.id)}
+                  onClick={() => askDelete('cancel')}
                   disabled={deleteJob.isPending}
                   className="inline-flex items-center gap-1.5 rounded-md border border-warp-red bg-warp-red-soft px-2.5 py-1.5 text-[12.5px] font-medium text-warp-red disabled:opacity-60"
                 >
@@ -144,7 +163,7 @@ export function JobDetailStandard({
                   </button>
                   <button
                     type="button"
-                    onClick={() => deleteJob.mutate(job.id)}
+                    onClick={() => askDelete('delete')}
                     disabled={deleteJob.isPending}
                     className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-warp-red hover:bg-warp-red-soft disabled:opacity-60"
                   >
@@ -203,6 +222,7 @@ export function JobDetailStandard({
       </div>
 
       {hasChildJobs && <RelatedJobsSection job={job} onCountsUpdate={onCountsUpdate} />}
+      {confirmDialog}
     </div>
   );
 }

@@ -45,7 +45,7 @@ export default function RateLimitsPage() {
   useEffect(() => {
     usePageStore.getState().set({
       title: 'Rate Limits',
-      subtitle: 'Runtime overrides for [RateLimit] keys',
+      subtitle: 'Runtime overrides for [RateLimit] keys (count + window only; style and policy stay on the handler attribute)',
     });
     return () => usePageStore.getState().reset();
   }, []);

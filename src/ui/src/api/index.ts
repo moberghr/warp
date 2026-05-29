@@ -202,6 +202,9 @@ export const getExtensions = () =>
 export const getAuthStatus = () =>
   api.get<AuthStatus>('/auth/status').then(r => r.data);
 
+export const logout = () =>
+  api.post('/auth/logout').then(() => undefined);
+
 // Background services
 export {
   getBackgroundServices,

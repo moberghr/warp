@@ -11,17 +11,22 @@ type StateDef = {
 };
 
 const MESSAGES_STATES: StateDef[] = [
-  { slug: null,         label: 'All',        accent: 'text-foreground',  accentBg: 'bg-panel-2',         countKey: 'messages' },
+  { slug: null,         label: 'All',        accent: 'text-foreground',  accentBg: 'bg-panel-2',          countKey: 'messages' },
+  { slug: 'awaiting',   label: 'Awaiting',   accent: 'text-warp-amber',  accentBg: 'bg-warp-amber-soft',  countKey: null },
+  { slug: 'scheduled',  label: 'Scheduled',  accent: 'text-warp-amber',  accentBg: 'bg-warp-amber-soft',  countKey: null },
   { slug: 'enqueued',   label: 'Enqueued',   accent: 'text-warp-blue',   accentBg: 'bg-warp-blue-soft',   countKey: 'messagesEnqueued' },
   { slug: 'processing', label: 'Processing', accent: 'text-warp-purple', accentBg: 'bg-warp-purple-soft', countKey: 'messagesProcessing' },
   { slug: 'completed',  label: 'Completed',  accent: 'text-warp-green',  accentBg: 'bg-warp-green-soft',  countKey: 'messagesCompleted' },
   { slug: 'failed',     label: 'Failed',     accent: 'text-warp-red',    accentBg: 'bg-warp-red-soft',    countKey: 'messagesFailed' },
+  { slug: 'deleted',    label: 'Deleted',    accent: 'text-text-mute',   accentBg: 'bg-panel-2',          countKey: null },
 ];
 
 const BATCHES_STATES: StateDef[] = [
   { slug: null,         label: 'All',        accent: 'text-foreground',  accentBg: 'bg-panel-2',          countKey: 'batches' },
-  { slug: 'processing', label: 'Processing', accent: 'text-warp-purple', accentBg: 'bg-warp-purple-soft', countKey: 'batchesProcessing' },
   { slug: 'awaiting',   label: 'Awaiting',   accent: 'text-warp-amber',  accentBg: 'bg-warp-amber-soft',  countKey: 'batchesAwaiting' },
+  { slug: 'scheduled',  label: 'Scheduled',  accent: 'text-warp-amber',  accentBg: 'bg-warp-amber-soft',  countKey: null },
+  { slug: 'enqueued',   label: 'Enqueued',   accent: 'text-warp-blue',   accentBg: 'bg-warp-blue-soft',   countKey: null },
+  { slug: 'processing', label: 'Processing', accent: 'text-warp-purple', accentBg: 'bg-warp-purple-soft', countKey: 'batchesProcessing' },
   { slug: 'completed',  label: 'Completed',  accent: 'text-warp-green',  accentBg: 'bg-warp-green-soft',  countKey: 'batchesCompleted' },
   { slug: 'failed',     label: 'Failed',     accent: 'text-warp-red',    accentBg: 'bg-warp-red-soft',    countKey: 'batchesFailed' },
   { slug: 'deleted',    label: 'Deleted',    accent: 'text-text-mute',   accentBg: 'bg-panel-2',          countKey: 'batchesDeleted' },
@@ -58,15 +63,17 @@ export function GroupStateRail({ kind, active }: GroupStateRailProps) {
               }`}
             >
               <span>{s.label}</span>
-              <span
-                className={`mono text-[10.5px] font-semibold px-1.5 py-0.5 rounded-full ${
-                  isActive
-                    ? `${s.accentBg} ${s.accent}`
-                    : 'bg-panel-2 text-text-mute border border-border'
-                }`}
-              >
-                {count.toLocaleString()}
-              </span>
+              {s.countKey && (
+                <span
+                  className={`mono text-[10.5px] font-semibold px-1.5 py-0.5 rounded-full ${
+                    isActive
+                      ? `${s.accentBg} ${s.accent}`
+                      : 'bg-panel-2 text-text-mute border border-border'
+                  }`}
+                >
+                  {count.toLocaleString()}
+                </span>
+              )}
             </Link>
           );
         })}

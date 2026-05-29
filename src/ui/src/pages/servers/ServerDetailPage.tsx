@@ -68,7 +68,13 @@ export default function ServerDetailPage() {
           <button onClick={refetchAll} className="p-2 rounded-md hover:bg-panel-2 text-text-mute" title="Refresh">
             <RefreshCw className="h-4 w-4" />
           </button>
-          <Button variant="outline" size="sm" onClick={handleTogglePause} title={server.pausedAt ? 'Resume server' : 'Pause server'}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleTogglePause}
+            disabled={pause.isPending || resume.isPending}
+            title={server.pausedAt ? 'Resume server (takes effect on next heartbeat, ~3s)' : 'Pause server (takes effect on next heartbeat, ~3s)'}
+          >
             {server.pausedAt ? <><Play className="h-4 w-4 mr-1" /> Resume</> : <><Pause className="h-4 w-4 mr-1" /> Pause</>}
           </Button>
         </div>
@@ -216,7 +222,9 @@ function WorkerGroupSection({ queues, pollingMs, workers, activeCount, groupId, 
                 variant="ghost"
                 size="sm"
                 onClick={handleToggleGroupPause}
-                title={groupPausedAt ? 'Resume group' : 'Pause group'}
+                disabled={pauseGroup.isPending || resumeGroup.isPending}
+                title={groupPausedAt ? 'Resume group (takes effect on next heartbeat, ~3s)' : 'Pause group (takes effect on next heartbeat, ~3s)'}
+                aria-label={groupPausedAt ? 'Resume worker group' : 'Pause worker group'}
                 className="h-7 px-2"
               >
                 {groupPausedAt ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}

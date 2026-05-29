@@ -16,6 +16,7 @@ function useUtcClock(): string {
 
 export default function WarpStatusbar() {
   const [info, setInfo] = useState<WarpInfo | null>(null);
+  const [offline, setOffline] = useState(false);
   const utc = useUtcClock();
 
   useEffect(() => {
@@ -25,10 +26,13 @@ export default function WarpStatusbar() {
       .then((data) => {
         if (!cancelled) {
           setInfo(data);
+          setOffline(false);
         }
       })
       .catch(() => {
-        // Statusbar is informational — silently hide on failure.
+        if (!cancelled) {
+          setOffline(true);
+        }
       });
 
     return () => {
@@ -69,6 +73,12 @@ export default function WarpStatusbar() {
               <span className="text-text-dim">{info.schema}</span>
             </>
           )}
+        </span>
+      )}
+      {offline && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-warp-red-soft px-1.5 py-px text-[10px] font-semibold text-warp-red">
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-warp-red" />
+          Offline
         </span>
       )}
       <span className="ml-auto">
