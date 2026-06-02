@@ -20,9 +20,10 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
   const rafId = useRef(0);
   const realtimeData = useDashboardStore((s) => s.realtimeData);
 
+  const round2 = (x: number) => Math.round(x * 100) / 100;
   const vals = realtimeData.map((p) => p.succeeded + p.failed);
-  const current = vals.length > 0 ? vals[vals.length - 1] : 0;
-  const max = vals.length > 0 ? Math.max(...vals) : 0;
+  const current = vals.length > 0 ? round2(vals[vals.length - 1]) : 0;
+  const max = vals.length > 0 ? round2(Math.max(...vals)) : 0;
   const avg = vals.length >= 5 ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
 
   useEffect(() => {
@@ -45,8 +46,8 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
         datasets: [
           {
             label: 'Succeeded/s',
-            borderColor: '#22c55e',
-            backgroundColor: 'rgba(34, 197, 94, 0.15)',
+            borderColor: '#B4541F',
+            backgroundColor: 'rgba(180, 84, 31, 0.15)',
             borderWidth: 2,
             fill: true,
             pointRadius: 0,
