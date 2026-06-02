@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Warp.Core;
 using Warp.Core.Handlers;
 using Warp.Http;
@@ -252,6 +253,17 @@ public sealed record WebhookEcho : IRequest<string>;
 public sealed class WebhookEchoHandler : IRequestHandler<WebhookEcho, string>
 {
     public Task<string> HandleAsync(WebhookEcho request, CancellationToken cancellationToken) => Task.FromResult("authorized");
+}
+
+// Rate-limit metadata — [EnableRateLimiting] on the handler must surface as endpoint
+// metadata so ASP.NET's rate-limiting middleware applies the named policy.
+public sealed record RateLimitedEcho : IRequest<string>;
+
+[EnableRateLimiting("WarpHttpTestRateLimit")]
+[WarpHttpGet("/api/rate-limited/echo")]
+public sealed class RateLimitedEchoHandler : IRequestHandler<RateLimitedEcho, string>
+{
+    public Task<string> HandleAsync(RateLimitedEcho request, CancellationToken cancellationToken) => Task.FromResult("rate-limited");
 }
 
 // Stream endpoints with array binding via Minimal API.

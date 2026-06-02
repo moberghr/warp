@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
-using System.Reflection;
 using System.Runtime.CompilerServices;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -76,18 +74,20 @@ public static class EndpointRouteBuilderExtensions
             builder.Produces(StatusCodes.Status200OK, descriptor.ResponseType, "application/json");
         }
 
-        // Surface [Authorize] / [AllowAnonymous] declared on the handler class as standard
-        // ASP.NET endpoint metadata so group-level RequireAuthorization() composes naturally.
-        var authzAttrs = descriptor.HandlerType.GetCustomAttributes<AuthorizeAttribute>(inherit: false);
-        foreach (var attr in authzAttrs)
+        // Surface attributes declared on the handler class as standard ASP.NET endpoint
+        // metadata so the matching middleware picks them up — [Authorize] / [AllowAnonymous]
+        // (RequireAuthorization composes naturally), [EnableRateLimiting] / [DisableRateLimiting],
+        // [Tags], [OutputCache], [ProducesResponseType], and any future metadata attribute.
+        // Warp's own [WarpHttp*] routing markers carry route/verb info, not endpoint metadata,
+        // and are already consumed by the source generator — skip them.
+        foreach (var attribute in descriptor.HandlerType.GetCustomAttributes(inherit: false))
         {
-            builder.WithMetadata(attr);
-        }
+            if (attribute is WarpHttpAttribute)
+            {
+                continue;
+            }
 
-        var anonAttr = descriptor.HandlerType.GetCustomAttribute<AllowAnonymousAttribute>(inherit: false);
-        if (anonAttr is not null)
-        {
-            builder.WithMetadata(anonAttr);
+            builder.WithMetadata(attribute);
         }
     }
 
