@@ -137,9 +137,16 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 
     public async Task<List<ServerModel>> GetServers()
     {
-        var servers = await _context.Set<Server>().OrderBy(s => s.StartedTime).ToListAsync();
+        var servers = await _context.Set<Server>()
+            .OrderBy(s => s.StartedTime)
+            .ThenBy(s => s.Id)
+            .ToListAsync();
 
-        var workers = await _context.Set<Worker>().Include(w => w.WorkerGroup).OrderBy(w => w.WorkerGroupId).ThenBy(w => w.Id).ToListAsync();
+        var workers = await _context.Set<Worker>()
+            .Include(w => w.WorkerGroup)
+            .OrderBy(w => w.WorkerGroupId)
+            .ThenBy(w => w.Id)
+            .ToListAsync();
 
         var processingJobs = await _context.Set<Job>()
             .Where(x => x.CurrentState == State.Processing)
@@ -197,7 +204,8 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
         var workers = await _context.Set<Worker>()
             .Include(w => w.WorkerGroup)
             .Where(w => w.ServerId == serverId)
-            .OrderBy(w => w.WorkerGroupId).ThenBy(w => w.Id)
+            .OrderBy(w => w.WorkerGroupId)
+            .ThenBy(w => w.Id)
             .ToListAsync();
 
         var processingJobs = await _context.Set<Job>()
@@ -240,6 +248,7 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
     {
         return await _context.Set<ServerTask>()
             .Where(x => x.ServerId == serverId)
+            .OrderBy(x => x.TaskName)
             .Select(x => new ServerTaskSummary
             {
                 TaskName = x.TaskName,

@@ -45,6 +45,7 @@ public class RecurringJobService<TContext> : IRecurringJobService
     {
         return await _context.Set<RecurringJob>()
             .OrderBy(x => x.NextExecution)
+            .ThenBy(x => x.Name)
             .Select(x => new RecurringJobModel
             {
                 Id = x.Id,

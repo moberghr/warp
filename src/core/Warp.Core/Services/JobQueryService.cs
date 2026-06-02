@@ -336,6 +336,7 @@ public class JobQueryService<TContext> : IJobQueryService
             .GroupBy(x => x.Type)
             .Select(g => new TypeCountModel { Type = g.Key!, Count = g.Count() })
             .OrderByDescending(x => x.Count)
+            .ThenBy(x => x.Type)
             .ToListAsync();
     }
 

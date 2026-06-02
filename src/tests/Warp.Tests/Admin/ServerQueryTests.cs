@@ -188,4 +188,63 @@ public abstract class ServerQueryTestsBase : IAsyncLifetime
         recovery.LastMessage.ShouldBe("Requeued 2 stale jobs");
         recovery.LastDurationMs.ShouldBe(42.5);
     }
+
+    [TimedFact]
+    public async Task GetServerTaskSummaries_OrdersByTaskName()
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var serverId = Guid.NewGuid();
+
+        ctx.Set<Server>().Add(new Server
+        {
+            Id = serverId,
+            StartedTime = DateTime.UtcNow,
+            LastHeartbeatTime = DateTime.UtcNow,
+            ServiceCount = 1,
+        });
+
+        // Insert in deliberately non-alphabetical order
+        foreach (var name in new[] { "StaleJobRecovery", "Heartbeat", "MessageRouter", "ExpirationCleanup" })
+        {
+            ctx.Set<ServerTask>().Add(new ServerTask
+            {
+                ServerId = serverId,
+                TaskName = name,
+                IntervalSeconds = 60,
+            });
+        }
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var summaries = await svc.GetServerTaskSummaries(serverId);
+
+        // Assert
+        summaries.Select(s => s.TaskName).ShouldBe(["ExpirationCleanup", "Heartbeat", "MessageRouter", "StaleJobRecovery"]);
+    }
+
+    [TimedFact]
+    public async Task GetServers_OrdersByStartedTime()
+    {
+        // Arrange — insert in non-chronological order; the query must return them by StartedTime
+        var ctx = _fixture.CreateContext();
+        var baseTime = DateTime.UtcNow.AddMinutes(-10);
+        var oldest = new Server { Id = Guid.NewGuid(), StartedTime = baseTime, LastHeartbeatTime = baseTime, ServiceCount = 1 };
+        var middle = new Server { Id = Guid.NewGuid(), StartedTime = baseTime.AddMinutes(3), LastHeartbeatTime = baseTime, ServiceCount = 1 };
+        var newest = new Server { Id = Guid.NewGuid(), StartedTime = baseTime.AddMinutes(6), LastHeartbeatTime = baseTime, ServiceCount = 1 };
+
+        ctx.Set<Server>().Add(middle);
+        ctx.Set<Server>().Add(newest);
+        ctx.Set<Server>().Add(oldest);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var servers = await svc.GetServers();
+
+        // Assert
+        servers.Select(s => s.Id).ShouldBe([oldest.Id, middle.Id, newest.Id]);
+    }
 }

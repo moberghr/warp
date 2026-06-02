@@ -4,6 +4,21 @@ sidebar_position: 6
 
 # Releases
 
+## 0.17.2
+
+*2026-06-02*
+
+Bug-fix release. No API changes, no schema changes — just deterministic ordering on dashboard queries.
+
+### Fix: stable ordering for servers, server tasks, and other dashboard lists
+
+Several dashboard query paths fetched collections without a fully-specified `ORDER BY`, so the database was free to return rows in any order. Because the UI renders rows in API order and refetches every ~10s, lists visibly reshuffled between refreshes.
+
+- **Server tasks** (`GetServerTaskSummaries`) had no ordering at all — now ordered by task name.
+- **Servers** (`GetServers`) were ordered only by `StartedTime`; servers in a cluster can share a start instant, leaving the tie unresolved. An `Id` tiebreaker now keeps the order stable. Worker groups are derived from the already-deterministic worker query (`WorkerGroupId`, then worker `Id`), so they were unaffected.
+- **Failed-job type counts** (`GetFailedJobTypeCounts`) were ordered by count only; equal counts now break ties by type name.
+- **Recurring jobs** (`GetRecurringJobs`) were ordered by `NextExecution` only; equal schedules now break ties by name.
+
 ## 0.17.1
 
 *2026-05-26*
