@@ -377,3 +377,5 @@ tasks/todo.md
 .claude/.mtk-cache/
 .claude/references.index
 .mtk/
+.claude/settings.local.json
+.DS_Store

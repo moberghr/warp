@@ -1,0 +1,1 @@
+import{wn as e}from"./index-0Qf3xBGc.js";import{i as t,r as n}from"./format-mlVrhvdV.js";var r=e();function i({date:e}){return(0,r.jsxs)(`span`,{children:[n(e),` `,(0,r.jsxs)(`span`,{className:`text-muted-foreground`,children:[`(`,t(e),`)`]})]})}export{i as t};
