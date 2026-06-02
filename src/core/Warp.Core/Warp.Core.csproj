@@ -9,10 +9,6 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<FrameworkReference Include="Microsoft.AspNetCore.App" />
-	</ItemGroup>
-
-	<ItemGroup>
 		<InternalsVisibleTo Include="Warp.Worker" />
 		<InternalsVisibleTo Include="Warp.Tests" />
 		<!-- Benchmarks need access to JobDispatcher to measure the reflection path against
@@ -23,6 +19,11 @@
 	<ItemGroup>
 		<PackageReference Include="Cronos" Version="0.11.1" />
 		<PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.5" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.5" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
+		<PackageReference Include="Microsoft.Extensions.Options" Version="10.0.5" />
+		<PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.5" />
+		<PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.5" />
 	</ItemGroup>
 
 	<ItemGroup>
