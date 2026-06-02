@@ -1,10 +1,10 @@
 import { useCallback, useState } from 'react';
-import { Repeat, Trash2 } from 'lucide-react';
-import { PageHeader, type PageHeaderMetaItem } from '@/components/v2/PageHeader';
+import { Link } from 'react-router-dom';
+import { Copy, RotateCw, Trash2 } from 'lucide-react';
 import { ProgressCard } from '@/components/v2/ProgressCard';
 import { LifecycleCard, type LifecycleEvent } from '@/components/v2/LifecycleCard';
 import { BatchJobsTable } from './BatchJobsTable';
-import { shortId, shortType, stateName, formatDateTime } from '@/utils/format';
+import { shortType, stateName, formatDateTime } from '@/utils/format';
 import { State } from '@/types';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
@@ -69,7 +69,7 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
   const askDelete = async () => {
     const ok = await confirm({
       title: 'Delete batch?',
-      description: `Delete batch ${shortId(job.id)} and stop activating its children? This cannot be undone.`,
+      description: `Delete batch ${job.id.slice(0, 8)} and stop activating its children? This cannot be undone.`,
       confirmLabel: 'Delete',
       destructive: true,
     });
@@ -92,50 +92,105 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
   const createdAgo = relativeFromNow(job.createTime);
   const events = logsToEvents(systemEvents);
 
-  const meta: PageHeaderMetaItem[] = [];
-  if (job.type) {
-    meta.push({ k: 'Type', v: shortType(job.type) });
-  }
-  if (job.queue) {
-    meta.push({ k: 'Queue', v: job.queue });
-  }
-  meta.push({
-    k: 'Created',
-    v: formatDateTime(job.createTime),
-    rel: createdAgo ?? undefined,
-  });
-  meta.push({ k: 'ID', v: job.id, copy: job.id });
-
   const pillClass = pillClassForState(job.currentState);
+  const stateLabel = stateName(job.currentState);
+
+  const metaItems: Array<[string, string, boolean]> = [];
+  if (job.type) metaItems.push(['Type', shortType(job.type), false]);
+  if (job.queue) metaItems.push(['Queue', job.queue, false]);
+  metaItems.push([
+    'Created',
+    `${formatDateTime(job.createTime)}${createdAgo ? ` · ${createdAgo}` : ''}`,
+    false,
+  ]);
+  metaItems.push(['ID', job.id, true]);
 
   return (
     <div className="flex flex-col gap-[18px]">
-      <PageHeader
-        kindLabel="Batch"
-        title={shortId(job.id)}
-        pill={<span className={`warp-pill ${pillClass}`}>{stateName(job.currentState)}</span>}
-        actions={
-          <>
+      <div style={{ padding: '20px 0 18px', borderBottom: '1px solid var(--hair)' }}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div
+            className="mono"
+            style={{
+              fontSize: 11.5,
+              color: 'var(--text-mute)',
+              letterSpacing: 0.4,
+            }}
+          >
+            <Link to="/batches" className="hover:text-foreground">
+              Batches
+            </Link>
+            <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>
+            <span>{stateLabel}</span>
+            <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>
+            <span style={{ color: 'var(--foreground)' }}>{job.id.slice(0, 8)}</span>
+          </div>
+          <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => requeue.mutate(job.id)}
               disabled={requeue.isPending}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-foreground hover:bg-panel-2 disabled:opacity-60"
+              className="soft-btn soft-btn-ghost"
             >
-              <Repeat size={13} /> Retry
+              <RotateCw size={14} /> Retry
             </button>
             <button
               type="button"
               onClick={askDelete}
               disabled={deleteJob.isPending}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-warp-red hover:bg-warp-red-soft disabled:opacity-60"
+              className="soft-btn soft-btn-danger"
             >
-              <Trash2 size={13} /> Delete
+              <Trash2 size={14} /> Delete
             </button>
-          </>
-        }
-        meta={meta}
-      />
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-center gap-3.5 flex-wrap">
+          <span
+            className="font-semibold text-foreground"
+            style={{ fontSize: 32, letterSpacing: '-0.6px', lineHeight: 1 }}
+          >
+            Batch
+          </span>
+          <span
+            className="mono font-medium text-foreground tabular-nums"
+            style={{ fontSize: 32, letterSpacing: '-0.6px', lineHeight: 1 }}
+          >
+            {job.id.slice(0, 8)}
+          </span>
+          <span className={`soft-pill ${pillClass}`}>{stateLabel}</span>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center">
+          {metaItems.map(([k, v, copy], i) => (
+            <div
+              key={k}
+              className="flex items-baseline gap-2.5 px-5"
+              style={{
+                borderLeft: i === 0 ? 'none' : '1px solid var(--hair-soft)',
+              }}
+            >
+              <span className="soft-eyebrow">{k}</span>
+              <span
+                className="mono text-foreground break-all"
+                style={{ fontSize: 12.5, letterSpacing: 0.2 }}
+              >
+                {v}
+              </span>
+              {copy && (
+                <button
+                  type="button"
+                  onClick={() => void navigator.clipboard?.writeText(v)}
+                  className="text-text-mute hover:text-foreground"
+                  aria-label="Copy ID"
+                >
+                  <Copy size={12} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
 
       <div className="warp-info-row">
         <ProgressCard

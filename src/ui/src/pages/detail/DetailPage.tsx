@@ -4,10 +4,8 @@ import { ErrorState } from '@/components/PageState';
 import { DetailSkeleton } from '@/components/skeletons/DetailSkeleton';
 import { useJobDetail } from '@/api/hooks/useJobs';
 import { usePageStore } from '@/stores/page';
-import { State } from '@/types';
 import { shortId } from '@/utils/format';
 import { stateName } from '@/utils/format';
-import { JobDetailBold } from './JobDetailBold';
 import { JobDetailStandard } from './JobDetailStandard';
 import { BatchDetailPage } from '@/pages/batches/BatchDetailPage';
 
@@ -72,14 +70,9 @@ export default function DetailPage() {
   const reportedBars = Array.from(progressByName.entries());
 
   const isBatch = job.kind === 3;
-  const isFailedJob = job.kind === 1 && job.currentState === State.Failed;
 
   if (isBatch) {
     return <BatchDetailPage job={job} systemEvents={systemEvents} />;
-  }
-
-  if (isFailedJob) {
-    return <JobDetailBold job={job} handlerLogs={handlerLogs} />;
   }
 
   return (

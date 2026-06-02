@@ -44,10 +44,15 @@ export default function RecurringPage() {
   const deleteJob = useDeleteRecurringJob();
   const { confirm, dialog: confirmDialog } = useConfirm();
 
+  const total = query.data?.totalCount ?? 0;
+
   useEffect(() => {
-    usePageStore.getState().set({ title: 'Recurring Jobs' });
+    usePageStore.getState().set({
+      title: 'Recurring Jobs',
+      subtitle: query.data ? `${total.toLocaleString()} total` : undefined,
+    });
     return () => usePageStore.getState().reset();
-  }, []);
+  }, [total, query.data]);
 
   if (query.error) return <ErrorState message={(query.error as Error).message} />;
   if (!query.data) return <LoadingState />;
@@ -55,7 +60,7 @@ export default function RecurringPage() {
   const data = query.data;
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       <Panel className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full border-collapse">

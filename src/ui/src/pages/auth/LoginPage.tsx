@@ -1,9 +1,10 @@
 import { useState, useMemo } from 'react';
+import axios from 'axios';
 import { ArrowRight, Zap } from 'lucide-react';
 import api from '@/api/client';
 
 // Mulberry32 seeded PRNG — deterministic so streak positions stay stable
-// across re-renders (avoids layout jank) without persisting state.
+// across re-renders without persisting state.
 function seeded(seed: number) {
   let s = seed >>> 0;
   return () => {
@@ -15,17 +16,17 @@ function seeded(seed: number) {
   };
 }
 
-function LoginStreaks() {
+function BackdropStreaks() {
   const streaks = useMemo(() => {
     const r = seeded(57);
-    return Array.from({ length: 22 }, () => {
-      const accent = r() > 0.82;
+    return Array.from({ length: 24 }, () => {
+      const accent = r() > 0.78;
       return {
         top: r() * 100,
-        len: 90 + r() * 280,
+        len: 120 + r() * 360,
         delay: -r() * 14,
         dur: 7 + r() * 9,
-        opacity: 0.06 + r() * 0.14,
+        opacity: 0.05 + r() * 0.12,
         accent,
       };
     });
@@ -42,11 +43,34 @@ function LoginStreaks() {
             left: 0,
             width: `${s.len}px`,
             opacity: s.opacity,
-            background: `linear-gradient(90deg, transparent, ${s.accent ? '#22c55e' : '#18181b'} 60%, transparent)`,
-            animation: `warp-streak ${s.dur}s linear ${s.delay}s infinite`,
+            background: `linear-gradient(90deg, transparent, ${s.accent ? '#B4541F' : '#1F1708'} 60%, transparent)`,
+            animation: `soft-streak ${s.dur}s linear ${s.delay}s infinite`,
           }}
         />
       ))}
+    </div>
+  );
+}
+
+function Supergraphic() {
+  return (
+    <div
+      aria-hidden
+      className="pointer-events-none absolute inset-0 flex items-center justify-center select-none"
+    >
+      <span
+        style={{
+          fontSize: 360,
+          fontWeight: 700,
+          letterSpacing: -16,
+          lineHeight: 0.85,
+          color: 'transparent',
+          WebkitTextStroke: '1px rgba(31,23,8,0.07)',
+          fontFamily: 'var(--font-sans)',
+        }}
+      >
+        WARP
+      </span>
     </div>
   );
 }
@@ -55,12 +79,15 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState(false);
+  const [remember, setRemember] = useState(true);
+  const [usernameFocused, setUsernameFocused] = useState(false);
+  const [passwordFocused, setPasswordFocused] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(false);
+    setError(null);
     setLoading(true);
 
     try {
@@ -70,125 +97,243 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
 
       await api.post('/auth/login', formData);
       onLogin();
-    } catch {
-      setError(true);
+    } catch (e) {
+      if (axios.isAxiosError(e) && e.response?.status === 401) {
+        setError('Invalid username or password.');
+      } else if (axios.isAxiosError(e) && !e.response) {
+        setError("Can't reach Warp API — is the backend running?");
+      } else {
+        setError('Login failed. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  const buildDate = import.meta.env.VITE_APP_BUILD_DATE;
+  const commit = import.meta.env.VITE_APP_COMMIT;
+  const versionLeft = buildDate ? `build ${buildDate}` : 'dev build';
+  const versionRight = commit ? commit : null;
+
   return (
-    <div className="min-h-screen w-full bg-white text-zinc-900 grid grid-cols-1 lg:grid-cols-2">
-      {/* Left / brand pane */}
-      <aside className="relative hidden lg:flex flex-col justify-between overflow-hidden p-10 bg-gradient-to-br from-zinc-50 via-white to-zinc-100">
-        <LoginStreaks />
-        <div className="flex items-center gap-3 z-10">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500 text-white shadow-sm">
-            <Zap className="h-5 w-5" strokeWidth={2.5} />
-          </div>
-          <div className="leading-tight">
-            <div className="text-sm font-semibold tracking-wide">WARP</div>
-            <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-500">Job Engine</div>
-          </div>
-        </div>
+    <div
+      className="relative min-h-screen w-full overflow-hidden text-foreground"
+      style={{
+        background:
+          'linear-gradient(135deg, #FBF7F0 0%, #FFFFFF 55%, #FBF4EC 100%)',
+      }}
+    >
+      {/* Warm radial accent washes */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            'radial-gradient(70% 60% at 10% 0%, rgba(180,84,31,0.08), transparent 60%), radial-gradient(60% 60% at 100% 100%, rgba(124,58,237,0.04), transparent 60%)',
+        }}
+      />
 
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center select-none">
-          <span
-            className="text-[18rem] font-black leading-none tracking-tighter text-transparent"
-            style={{
-              WebkitTextStroke: '1px rgba(24,24,27,0.18)',
-              filter: 'drop-shadow(0 0 24px rgba(34,197,94,0.25)) drop-shadow(0 0 60px rgba(34,197,94,0.12))',
-            }}
-          >
-            WARP
-          </span>
-        </div>
+      <Supergraphic />
+      <BackdropStreaks />
 
-      </aside>
-
-      {/* Right / form pane */}
-      <main className="relative flex flex-col">
-        <div className="flex flex-1 items-center justify-center px-6 py-12 sm:px-10">
-          <div className="w-full max-w-sm">
-            <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-600">
-              <span className="h-px w-6 bg-emerald-500" />
-              Sign in
+      {/* Card */}
+      <main className="relative z-10 flex min-h-screen items-center justify-center px-6 py-12">
+        <div
+          className="w-full max-w-[400px] rounded-2xl bg-white"
+          style={{
+            border: '1px solid rgba(40,28,10,0.06)',
+            padding: '36px 36px 32px',
+            boxShadow:
+              '0 1px 2px rgba(40,28,10,0.04), 0 24px 60px rgba(40,28,10,0.10), 0 8px 22px rgba(40,28,10,0.06)',
+          }}
+        >
+          {/* Brand row */}
+          <div className="flex items-center gap-3">
+            <div
+              className="flex h-[34px] w-[34px] items-center justify-center rounded-[10px] text-white shrink-0"
+              style={{
+                background:
+                  'linear-gradient(135deg, var(--brand-bright), var(--brand))',
+                boxShadow:
+                  '0 6px 18px var(--brand-soft), inset 0 1px 0 rgba(255,255,255,0.4)',
+              }}
+            >
+              <Zap className="h-[17px] w-[17px]" strokeWidth={2.4} />
             </div>
-            <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 sm:text-4xl">Welcome back.</h1>
-
-            {error && (
-              <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                Invalid username or password.
+            <div className="leading-tight">
+              <div
+                className="font-bold tracking-tight text-foreground"
+                style={{ fontSize: 18 }}
+              >
+                WARP
               </div>
-            )}
+              <div className="mt-1 mono text-[10px] font-semibold uppercase tracking-[0.16em] text-text-mute">
+                Job Engine
+              </div>
+            </div>
+          </div>
 
-            <form onSubmit={handleSubmit} className="mt-8 space-y-5">
-              <div>
-                <label htmlFor="username" className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
-                  Username
-                </label>
+          {/* Eyebrow */}
+          <div className="mt-7 mb-3 inline-flex items-center gap-2 mono text-[10.5px] font-semibold uppercase tracking-[0.16em] text-text-mute">
+            <span className="h-px w-[18px] bg-brand" aria-hidden />
+            Sign in
+          </div>
+
+          {/* Title */}
+          <h1
+            className="m-0 font-semibold leading-[1.05] tracking-tight text-foreground"
+            style={{ fontSize: 32, letterSpacing: '-1px' }}
+          >
+            Welcome back.
+          </h1>
+
+          {error && (
+            <div className="mt-4 rounded-md border border-warp-red/30 bg-warp-red-soft px-3 py-2 text-sm text-warp-red">
+              {error}
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="mt-7 space-y-3.5">
+            <div>
+              <label
+                htmlFor="username"
+                className="block mb-1.5 mono text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-mute"
+              >
+                Username
+              </label>
+              <div
+                className="relative flex items-center rounded-[10px] border bg-white transition"
+                style={{
+                  borderColor: usernameFocused
+                    ? 'var(--brand)'
+                    : 'var(--border-hi)',
+                  boxShadow: usernameFocused
+                    ? '0 0 0 3px var(--brand-soft)'
+                    : 'none',
+                }}
+              >
                 <input
                   id="username"
-                  className="mt-1.5 block w-full rounded-md border border-zinc-200 bg-white px-3.5 py-2.5 text-sm text-zinc-900 placeholder:text-zinc-400 shadow-sm transition focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                  className="block w-full bg-transparent px-3.5 py-3 text-[14px] text-foreground placeholder:text-ink-light outline-none"
                   placeholder="e.g. mreichl"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  onFocus={() => setUsernameFocused(true)}
+                  onBlur={() => setUsernameFocused(false)}
                   autoComplete="username"
                   autoFocus
                 />
               </div>
+            </div>
 
-              <div>
-                <label htmlFor="password" className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
-                  Password
-                </label>
-                <div className="relative mt-1.5">
-                  <input
-                    id="password"
-                    type={showPassword ? 'text' : 'password'}
-                    className="block w-full rounded-md border border-zinc-200 bg-white px-3.5 py-2.5 pr-14 text-sm text-zinc-900 placeholder:text-zinc-400 shadow-sm transition focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
-                    placeholder="••••••••••••"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    autoComplete="current-password"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword((v) => !v)}
-                    className="absolute inset-y-0 right-3 my-auto text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500 hover:text-zinc-900"
-                  >
-                    {showPassword ? 'Hide' : 'Show'}
-                  </button>
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="group inline-flex w-full items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
+            <div>
+              <label
+                htmlFor="password"
+                className="block mb-1.5 mono text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-mute"
               >
-                {loading ? 'Signing in...' : (
-                  <>
-                    Sign in
-                    <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-                  </>
-                )}
-              </button>
-            </form>
-          </div>
-        </div>
+                Password
+              </label>
+              <div
+                className="relative flex items-center rounded-[10px] border bg-white transition"
+                style={{
+                  borderColor: passwordFocused
+                    ? 'var(--brand)'
+                    : 'var(--border-hi)',
+                  boxShadow: passwordFocused
+                    ? '0 0 0 3px var(--brand-soft)'
+                    : 'none',
+                }}
+              >
+                <input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  className="block w-full bg-transparent px-3.5 py-3 text-[14px] text-foreground placeholder:text-ink-light outline-none"
+                  placeholder="••••••••••••"
+                  style={{
+                    fontFamily: showPassword ? undefined : 'var(--font-mono)',
+                    letterSpacing: showPassword ? undefined : 2,
+                  }}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onFocus={() => setPasswordFocused(true)}
+                  onBlur={() => setPasswordFocused(false)}
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setShowPassword((v) => !v);
+                  }}
+                  className="h-full px-3 mono text-[11.5px] font-semibold tracking-[0.06em] text-text-dim hover:text-foreground"
+                >
+                  {showPassword ? 'HIDE' : 'SHOW'}
+                </button>
+              </div>
+            </div>
 
-        <footer className="flex items-center justify-between px-6 pb-6 text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400 sm:px-10">
-          <span>warp{import.meta.env.VITE_APP_VERSION ? ` v${import.meta.env.VITE_APP_VERSION}` : ' · dev build'}</span>
-          {(import.meta.env.VITE_APP_BUILD_DATE || import.meta.env.VITE_APP_COMMIT) && (
-            <span>
-              {import.meta.env.VITE_APP_BUILD_DATE && `build ${import.meta.env.VITE_APP_BUILD_DATE}`}
-              {import.meta.env.VITE_APP_BUILD_DATE && import.meta.env.VITE_APP_COMMIT && ' · '}
-              {import.meta.env.VITE_APP_COMMIT}
-            </span>
-          )}
-        </footer>
+            <label
+              onClick={() => setRemember((r) => !r)}
+              className="inline-flex cursor-pointer items-center gap-2.5 pt-1 pb-2 text-[13px] text-text-dim"
+            >
+              <span
+                className="inline-flex h-4 w-4 items-center justify-center rounded-[4px] border-[1.5px] transition"
+                style={{
+                  borderColor: remember ? 'var(--brand)' : 'var(--border-hi)',
+                  background: remember ? 'var(--brand)' : 'transparent',
+                }}
+              >
+                {remember && (
+                  <svg
+                    viewBox="0 0 12 12"
+                    width="10"
+                    height="10"
+                    fill="none"
+                    stroke="#fff"
+                    strokeWidth={2.4}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M2 6.5 L5 9 L10 3" />
+                  </svg>
+                )}
+              </span>
+              Keep me signed in
+            </label>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="group inline-flex w-full items-center justify-center gap-2 rounded-[10px] py-3 text-[14px] font-semibold text-white disabled:opacity-60"
+              style={{
+                background:
+                  'linear-gradient(180deg, var(--brand-bright), var(--brand))',
+                border: '1px solid var(--brand)',
+                boxShadow:
+                  '0 6px 18px var(--brand-soft), inset 0 1px 0 rgba(255,255,255,0.3)',
+              }}
+            >
+              {loading ? (
+                'Signing in...'
+              ) : (
+                <>
+                  Sign in
+                  <ArrowRight
+                    className="h-[14px] w-[14px] transition-transform group-hover:translate-x-0.5"
+                    strokeWidth={2.4}
+                  />
+                </>
+              )}
+            </button>
+          </form>
+        </div>
       </main>
+
+      {/* Footer (full-screen edges) */}
+      <footer className="absolute bottom-5 left-6 right-6 z-10 flex items-center justify-between mono text-[11px] text-text-mute">
+        <span>{versionLeft}</span>
+        {versionRight && <span className="truncate max-w-[40%]">{versionRight}</span>}
+      </footer>
     </div>
   );
 }

@@ -38,7 +38,7 @@ export default function ServersPage() {
   const servers = query.data;
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       {servers.length === 0 ? (
         <Panel>
           <div className="py-10 text-center text-[13px] text-text-mute">

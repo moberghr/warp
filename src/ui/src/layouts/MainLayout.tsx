@@ -3,12 +3,12 @@ import axios from 'axios';
 import { Outlet, useLocation } from 'react-router-dom';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useRealtimeStore } from '@/stores/realtime';
-import { usePageStore } from '@/stores/page';
 import * as api from '@/api';
 import type { ExtensionManifest } from '@/extensions/types';
 import WarpSidebar from '@/layouts/WarpSidebar';
-import WarpTopbar from '@/layouts/WarpTopbar';
+import WarpTopnav from '@/layouts/WarpTopnav';
 import WarpStatusbar from '@/layouts/WarpStatusbar';
+import PageHeader from '@/layouts/PageHeader';
 import MobileDrawer from '@/layouts/MobileDrawer';
 import { buildWarpNavItems } from '@/layouts/warpNavItems';
 import { useRealtimeInvalidation } from '@/hooks/useRealtimeInvalidation';
@@ -22,10 +22,6 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sagasAvailable, setSagasAvailable] = useState(false);
   const [servicesAvailable, setServicesAvailable] = useState(false);
-
-  const title = usePageStore((s) => s.title);
-  const subtitle = usePageStore((s) => s.subtitle);
-  const right = usePageStore((s) => s.right);
 
   useRealtimeInvalidation();
 
@@ -107,23 +103,14 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   );
 
   return (
-    <div className="relative h-screen flex bg-background text-foreground overflow-hidden">
-      <div className="warp-ambient" aria-hidden />
-
-      <WarpSidebar items={navItems} />
+    <div className="relative h-screen flex flex-col bg-background text-foreground overflow-hidden">
+      <WarpTopnav items={navItems} onMenuClick={() => setDrawerOpen(true)} />
 
       <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
-        <WarpTopbar
-          title={title}
-          subtitle={subtitle}
-          right={right}
-          onMenuClick={() => setDrawerOpen(true)}
-        />
-
         {error && (
           <div
             role="alert"
-            className="mx-4 lg:mx-6 mt-3 rounded-md bg-warp-red-soft ring-1 ring-warp-red/30 px-3 py-2 text-sm text-warp-red flex items-center gap-2"
+            className="mx-4 lg:mx-8 mt-3 rounded-md bg-warp-red-soft ring-1 ring-warp-red/30 px-3 py-2 text-sm text-warp-red flex items-center gap-2"
           >
             <span className="font-medium">Connection lost</span>
             <span className="opacity-80">— Unable to connect to Warp API. Retrying...</span>
@@ -137,7 +124,8 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
           </div>
         )}
 
-        <main className="flex-1 p-4 lg:p-6 min-w-0 overflow-auto">
+        <main className="flex-1 px-6 lg:px-8 pb-4 min-w-0 overflow-auto">
+          <PageHeader />
           <Outlet />
         </main>
 

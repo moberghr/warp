@@ -63,17 +63,16 @@ export function GroupStateRail({ kind, active }: GroupStateRailProps) {
               }`}
             >
               <span>{s.label}</span>
-              {s.countKey && (
-                <span
-                  className={`mono text-[10.5px] font-semibold px-1.5 py-0.5 rounded-full ${
-                    isActive
-                      ? `${s.accentBg} ${s.accent}`
-                      : 'bg-panel-2 text-text-mute border border-border'
-                  }`}
-                >
-                  {count.toLocaleString()}
-                </span>
-              )}
+              <span
+                className={`mono text-[10.5px] font-semibold px-1.5 py-0.5 rounded-full ${
+                  isActive
+                    ? `${s.accentBg} ${s.accent}`
+                    : 'bg-panel-2 text-text-mute border border-border'
+                }`}
+                aria-label={s.countKey ? undefined : 'count unavailable'}
+              >
+                {s.countKey ? count.toLocaleString() : '—'}
+              </span>
             </Link>
           );
         })}

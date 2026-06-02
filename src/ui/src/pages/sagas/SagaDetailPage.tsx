@@ -90,7 +90,7 @@ export default function SagaDetailPage() {
 
   if (gone) {
     return (
-      <div className="flex flex-col gap-3 p-5">
+      <div className="flex flex-col gap-3 py-5">
         <div>
           <Link to="/sagas" className="text-sm text-text-mute hover:underline">← Sagas</Link>
         </div>
@@ -107,7 +107,7 @@ export default function SagaDetailPage() {
   if (!saga || !activity) return <LoadingState />;
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       <Panel>
         <PanelHeader eyebrow="Metadata" />
         <div className="px-4 py-3">

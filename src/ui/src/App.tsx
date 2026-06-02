@@ -80,6 +80,14 @@ function AppRoutes() {
 
   const handleLogin = useCallback(() => {
     setNeedsLogin(false);
+    // The URL is still /login (the bare-LoginPage render path doesn't go
+    // through BrowserRouter), so when the router mounts it has no matching
+    // route and renders blank. Rewrite to the base path before unmounting
+    // LoginPage so the dashboard route catches.
+    const target = (config.basePath || '/').replace(/\/+$/, '') + '/';
+    if (window.location.pathname !== target) {
+      window.history.replaceState(null, '', target);
+    }
     // Now authenticated — load extensions. MainLayout's mount-effect re-runs
     // getAddons() and drives connectIfEnabled, so we don't duplicate it here.
     initExtensions();

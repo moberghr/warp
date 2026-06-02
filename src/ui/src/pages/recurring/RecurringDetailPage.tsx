@@ -111,7 +111,7 @@ export default function RecurringDetailPage() {
   const jobs = jobsQuery.data ?? null;
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       <div className="flex flex-wrap items-center gap-3 text-[12.5px]">
         <span className="font-mono bg-panel-2 border border-border px-2 py-0.5 rounded">{detail.cron}</span>
         {describeCron(detail.cron) && (

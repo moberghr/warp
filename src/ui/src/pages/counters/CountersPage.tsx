@@ -9,10 +9,10 @@ import { useCounters, useCountersHistory } from '@/api/hooks/useCounters';
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, ChartTooltip, Legend);
 
 const builtInColors: Record<string, string> = {
-  'stats:succeeded': '#22c55e',
-  'stats:failed': '#ef4444',
-  'stats:deleted': '#9ca3af',
-  'stats:requeued': '#f59e0b',
+  'stats:succeeded': '#15803D',
+  'stats:failed': '#B91C1C',
+  'stats:deleted': '#8E815F',
+  'stats:requeued': '#B45309',
 };
 
 // Deterministic color from key for addon-defined metrics. Same key → same color across reloads.
@@ -52,7 +52,7 @@ export default function CountersPage() {
   const history = historyQuery.data ?? null;
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       <p className="text-[12.5px] text-text-mute">
         Built-in: <code className="font-mono text-text-default">stats:succeeded</code>,{' '}
         <code className="font-mono text-text-default">stats:failed</code>,{' '}

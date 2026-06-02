@@ -58,7 +58,7 @@ export default function WorkerDetailPage() {
   const data = logsQuery.data;
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       <div className="flex items-center gap-2 text-[12.5px] text-text-mute">
         <span className={`inline-block w-3 h-3 rounded-full ${worker?.currentJobId ? 'bg-purple-500' : 'bg-green-500'}`} />
         {worker?.currentJobId ? 'Processing' : 'Idle'}

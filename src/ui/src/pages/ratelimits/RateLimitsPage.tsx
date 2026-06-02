@@ -131,7 +131,7 @@ export default function RateLimitsPage() {
 
   if (unavailable) {
     return (
-      <div className="flex flex-col gap-3 p-5">
+      <div className="flex flex-col gap-3 py-5">
         <Panel>
           <div className="py-10 text-center text-[13px] text-text-mute">
             Rate limits addon not registered. Add <code className="font-mono">opt.AddRateLimit()</code> to enable.
@@ -156,7 +156,7 @@ export default function RateLimitsPage() {
   };
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       <div className="flex items-center justify-between">
         <p className="text-[12.5px] text-text-mute">
           Runtime overrides for <code>[RateLimit]</code> keys. Admin row beats the attribute count and window; takes effect on next pickup.

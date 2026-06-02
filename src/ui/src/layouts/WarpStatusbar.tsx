@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import * as api from '@/api';
 import type { WarpInfo } from '@/types';
-import { cn } from '@/lib/utils';
+import { useDashboardStore } from '@/stores/dashboard';
+import { useRealtimeStore } from '@/stores/realtime';
 
 function useUtcClock(): string {
   const [now, setNow] = useState(() => new Date());
@@ -18,6 +20,15 @@ export default function WarpStatusbar() {
   const [info, setInfo] = useState<WarpInfo | null>(null);
   const [offline, setOffline] = useState(false);
   const utc = useUtcClock();
+  const stats = useDashboardStore((s) => s.stats);
+  const realtimeStatus = useRealtimeStore((s) => s.status);
+
+  const { data: servers } = useQuery({
+    queryKey: ['servers-status'],
+    queryFn: () => api.getServers(),
+    staleTime: 10_000,
+    refetchInterval: 15_000,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -40,50 +51,63 @@ export default function WarpStatusbar() {
     };
   }, []);
 
+  const serverCount = servers?.length ?? stats?.servers ?? 0;
+  const workerCount = servers?.reduce((acc, s) => acc + (s.workers?.length ?? 0), 0) ?? 0;
+  const live = realtimeStatus === 'connected' && !offline;
+
   return (
-    <div
-      className={cn(
-        'h-7 px-6 bg-panel-2/40 border-t border-border/60 shrink-0',
-        'flex items-center gap-4 text-[10.5px] text-text-mute mono',
-      )}
-    >
-      {info?.version && (
-        <span>
-          Warp <span className="text-text-dim">{info.version}</span>
-        </span>
-      )}
+    <div className="soft-systembar">
+      <span className="inline-flex items-center gap-1.5">
+        <span className="font-semibold text-foreground tracking-wide">WARP</span>
+        {info?.version && <span className="opacity-60">{info.version}</span>}
+      </span>
+
       {info?.provider && (
+        <>
+          <span className="hair-v" aria-hidden />
+          <span>
+            <span className="text-text-dim">{info.provider.toUpperCase()}</span>
+            {info.host && (
+              <>
+                {' '}
+                {info.database ? `${info.database}@${info.host}` : info.host}
+              </>
+            )}
+          </span>
+        </>
+      )}
+
+      {info?.schema && (
+        <>
+          <span className="hair-v" aria-hidden />
+          <span>SCHEMA {info.schema}</span>
+        </>
+      )}
+
+      <span className="ml-auto inline-flex items-center gap-2 tracking-wide">
+        {offline ? (
+          <>
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-warp-red" aria-hidden />
+            <span className="font-semibold text-warp-red">OFFLINE</span>
+          </>
+        ) : (
+          <>
+            <span
+              className="relative inline-flex h-1.5 w-1.5 items-center justify-center"
+              aria-hidden
+            >
+              <span className="absolute inset-0 rounded-full bg-brand opacity-25" />
+              <span className="relative inline-block h-1.5 w-1.5 rounded-full bg-brand" />
+            </span>
+            <span className="font-semibold text-brand">{live ? 'LIVE' : 'IDLE'}</span>
+          </>
+        )}
+        <span className="opacity-60">·</span>
         <span>
-          {info.provider}
-          {info.host && (
-            <>
-              <span className="text-text-mute"> · Host: </span>
-              <span className="text-text-dim">{info.host}</span>
-            </>
-          )}
-          {info.database && (
-            <>
-              <span className="text-text-mute"> · DB: </span>
-              <span className="text-text-dim">{info.database}</span>
-            </>
-          )}
-          {info.schema && (
-            <>
-              <span className="text-text-mute"> · Schema: </span>
-              <span className="text-text-dim">{info.schema}</span>
-            </>
-          )}
+          {serverCount} SRV · {workerCount} WRK
         </span>
-      )}
-      {offline && (
-        <span className="inline-flex items-center gap-1 rounded-full bg-warp-red-soft px-1.5 py-px text-[10px] font-semibold text-warp-red">
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-warp-red" />
-          Offline
-        </span>
-      )}
-      <span className="ml-auto">
-        <span className="text-text-mute">UTC </span>
-        <span className="text-text-dim">{utc}</span>
+        <span className="opacity-60">·</span>
+        <span>UTC {utc}</span>
       </span>
     </div>
   );

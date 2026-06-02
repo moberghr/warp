@@ -62,7 +62,7 @@ export default function SagasListPage() {
 
   if (unavailable) {
     return (
-      <div className="flex flex-col gap-3 p-5">
+      <div className="flex flex-col gap-3 py-5">
         <Panel>
           <div className="py-8 text-center text-[13px] text-text-mute">
             Sagas addon is not registered. Call <code className="font-mono text-xs text-text-default">opt.AddSagas()</code> in your Warp configuration to enable.
@@ -76,7 +76,7 @@ export default function SagasListPage() {
   if (!data) return <LoadingState />;
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       {stats && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <Panel>

@@ -380,7 +380,7 @@ export default function TracePage() {
 
   if (!isValidTraceId) {
     return (
-      <div className="flex flex-col gap-3 p-5">
+      <div className="flex flex-col gap-3 py-5">
         <Panel>
           <div className="py-10 px-6 text-center space-y-3">
             <div className="text-[15px] font-semibold">Invalid trace ID</div>
@@ -404,7 +404,7 @@ export default function TracePage() {
 
   if (jobs.length === 0) {
     return (
-      <div className="flex flex-col gap-3 p-5">
+      <div className="flex flex-col gap-3 py-5">
         <Panel>
           <div className="py-10 px-6 text-center space-y-3">
             <div className="text-[15px] font-semibold">Trace not found</div>
@@ -426,7 +426,7 @@ export default function TracePage() {
   }
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       <div className="flex items-center gap-2">
         <button
           type="button"

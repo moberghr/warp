@@ -1,24 +1,20 @@
-import { ExternalLink, Repeat, Trash2, X } from 'lucide-react';
+import { Fragment, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Panel, PanelHeader } from '@/components/v2/Panel';
-import { PageHeader, type PageHeaderMetaItem } from '@/components/v2/PageHeader';
-import { shortId, shortType, stateName, formatDateTime } from '@/utils/format';
+import { Copy, RotateCw, Trash2, ExternalLink, X } from 'lucide-react';
+import { shortType, stateName, formatDateTime } from '@/utils/format';
 import { State } from '@/types';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
 import { useConfirm } from '@/components/forms/useConfirm';
-import { JobTimeline } from './JobTimeline';
-import { JobProgress } from './JobProgress';
-import { JobLogs } from './JobLogs';
-import { RelatedJobsSection } from './RelatedJobsSection';
+import { RelativeTime } from '@/components/RelativeTime';
+
+// ============================================================================
+// A·Soft job detail — pixel port of warp/project/soft/job-detail.jsx
+// ============================================================================
 
 function kindLabel(kind: number) {
-  if (kind === 3) {
-    return 'Batch';
-  }
-  if (kind === 2) {
-    return 'Message';
-  }
+  if (kind === 3) return 'Batch';
+  if (kind === 2) return 'Message';
 
   return 'Job';
 }
@@ -32,19 +28,66 @@ function pillClassForState(state: State): string {
     case State.Completed:   return 'completed';
     case State.Failed:      return 'failed';
     case State.Deleted:     return 'deleted';
-    default:                return '';
+    default:                return 'deleted';
   }
 }
 
-function relativeFromNow(iso: string | null | undefined): string | null {
-  if (!iso) {
-    return null;
+function eventStateClass(eventType: string): string {
+  switch (eventType) {
+    case 'Created':    return 'enqueued';
+    case 'Enqueued':   return 'enqueued';
+    case 'Scheduled':  return 'scheduled';
+    case 'Processing': return 'processing';
+    case 'Completed':  return 'completed';
+    case 'Failed':     return 'failed';
+    case 'Deleted':    return 'deleted';
+    case 'Requeued':
+    case 'Retried':    return 'awaiting';
+    default:           return 'enqueued';
   }
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 60_000)        return `${Math.max(1, Math.floor(diff / 1000))}s ago`;
-  if (diff < 3_600_000)     return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000)    return `${Math.floor(diff / 3_600_000)}h ago`;
-  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+function eventStateVar(eventType: string): string {
+  const cls = eventStateClass(eventType);
+  if (cls === 'enqueued')   return 'var(--state-enqueued)';
+  if (cls === 'scheduled')  return 'var(--state-scheduled)';
+  if (cls === 'awaiting')   return 'var(--state-awaiting)';
+  if (cls === 'processing') return 'var(--state-processing)';
+  if (cls === 'completed')  return 'var(--state-completed)';
+  if (cls === 'failed')     return 'var(--state-failed)';
+  return 'var(--state-deleted)';
+}
+
+function eventStateBgVar(eventType: string): string {
+  const cls = eventStateClass(eventType);
+  if (cls === 'enqueued')   return 'var(--state-enqueued-bg)';
+  if (cls === 'scheduled')  return 'var(--state-scheduled-bg)';
+  if (cls === 'awaiting')   return 'var(--state-awaiting-bg)';
+  if (cls === 'processing') return 'var(--state-processing-bg)';
+  if (cls === 'completed')  return 'var(--state-completed-bg)';
+  if (cls === 'failed')     return 'var(--state-failed-bg)';
+  return 'var(--state-deleted-bg)';
+}
+
+function formatDuration(ms: number | null | undefined): string | null {
+  if (ms == null) return null;
+  if (ms < 1) return '<1ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60000);
+  const secs = ((ms % 60000) / 1000).toFixed(0);
+
+  return `${mins}m ${secs}s`;
+}
+
+function getDuration(logs: JobLogModel[], idx: number): string | null {
+  const log = logs[idx];
+  if (log.durationMs != null) return formatDuration(log.durationMs);
+  if (idx >= logs.length - 1) return null;
+  const current = new Date(logs[idx].timestamp).getTime();
+  const previous = new Date(logs[idx + 1].timestamp).getTime();
+
+  return formatDuration(current - previous);
 }
 
 function formatJson(raw: string): string {
@@ -54,6 +97,562 @@ function formatJson(raw: string): string {
     return raw;
   }
 }
+
+// JSON syntax-coloring per the design: keys green, strings amber, numbers purple.
+function tokenizeJsonLine(line: string): ReactNode {
+  const kv = line.match(/^(\s*)("[^"]+")(:\s*)(.+?)(,?\s*)$/);
+  if (kv) {
+    const [, ind, key, sep, val, tail] = kv;
+    const trimmed = val.trim();
+    let valEl: ReactNode;
+    if (val.startsWith('"')) {
+      valEl = <span style={{ color: 'var(--warp-amber)' }}>{val}</span>;
+    } else if (/^(true|false|null)$/.test(trimmed)) {
+      valEl = <span style={{ color: 'var(--warp-amber)' }}>{val}</span>;
+    } else if (/^-?\d/.test(trimmed)) {
+      valEl = <span style={{ color: 'var(--warp-purple)' }}>{val}</span>;
+    } else {
+      valEl = <span>{val}</span>;
+    }
+
+    return (
+      <>
+        {ind}
+        <span style={{ color: 'var(--warp-green)' }}>{key}</span>
+        <span style={{ color: 'var(--text-mute)' }}>{sep}</span>
+        {valEl}
+        {tail}
+      </>
+    );
+  }
+  const num = line.match(/^(\s*)(-?\d+(?:\.\d+)?)(,?)$/);
+  if (num) {
+    const [, ind, n, tail] = num;
+
+    return (
+      <>
+        {ind}
+        <span style={{ color: 'var(--warp-purple)' }}>{n}</span>
+        {tail}
+      </>
+    );
+  }
+
+  return <span style={{ color: 'var(--text-dim)' }}>{line}</span>;
+}
+
+// ----- TitleStrip -----
+interface TitleStripProps {
+  job: UnifiedJobDetailModel;
+  onRequeue: () => void;
+  onDelete: () => void;
+  isRequeuing: boolean;
+  isDeleting: boolean;
+}
+
+function TitleStrip({ job, onRequeue, onDelete, isRequeuing, isDeleting }: TitleStripProps) {
+  const kind = kindLabel(job.kind);
+  const pill = pillClassForState(job.currentState);
+  const stateLabel = stateName(job.currentState);
+  const isFailed = job.currentState === State.Failed;
+  const isProcessing = job.currentState === State.Processing;
+  const isJob = job.kind === 1;
+  const isMessage = job.kind === 2;
+  const showActions = isJob || isMessage;
+  const totalAttempts = job.maxRetries + 1;
+  const currentAttempt = job.retriedTimes + 1;
+  const hasRetryPolicy = job.maxRetries > 0;
+  const attemptsLabel = `${currentAttempt} / ${totalAttempts}`;
+  const crumbState = stateLabel;
+
+  return (
+    <div style={{ padding: '20px 0 18px', borderBottom: '1px solid var(--hair)' }}>
+      <div
+        className="mono"
+        style={{
+          fontSize: 11.5,
+          color: 'var(--text-mute)',
+          letterSpacing: 0.4,
+          marginBottom: 14,
+        }}
+      >
+        <Link to={`/jobs/${stateLabel.toLowerCase()}`} className="hover:text-foreground">
+          {kind === 'Job' ? 'Jobs' : `${kind}s`}
+        </Link>
+        <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>
+        <span>{crumbState}</span>
+        <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>
+        <span style={{ color: 'var(--foreground)' }}>{job.id.slice(0, 8)}</span>
+      </div>
+
+      <div className="flex items-end justify-between gap-6 flex-wrap">
+        <div className="min-w-0">
+          <span className="soft-eyebrow" style={{ color: 'var(--brand)' }}>
+            {kind} detail
+          </span>
+          <div className="mt-2 flex items-center gap-3.5 flex-wrap">
+            <span
+              className="font-semibold text-foreground"
+              style={{ fontSize: 32, letterSpacing: '-0.6px', lineHeight: 1 }}
+            >
+              {kind}
+            </span>
+            <span
+              className="mono font-medium text-foreground tabular-nums"
+              style={{ fontSize: 32, letterSpacing: '-0.6px', lineHeight: 1 }}
+            >
+              {job.id.slice(0, 8)}
+            </span>
+            <span className={`soft-pill ${pill}`}>{stateLabel}</span>
+            {job.type && (
+              <span className="text-text-dim font-medium" style={{ fontSize: 14 }}>
+                {shortType(job.type)}
+              </span>
+            )}
+          </div>
+          {job.parentJob && (
+            <div className="mt-3">
+              <Link
+                to={`/detail/${job.parentJob.id}`}
+                className="inline-flex items-center gap-2 rounded-full px-2.5 py-1 hover:opacity-90 transition-opacity"
+                style={{
+                  background: 'var(--brand-wash)',
+                  border: '1px solid color-mix(in srgb, var(--brand) 20%, transparent)',
+                  color: 'var(--brand)',
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                <span className="soft-eyebrow" style={{ color: 'var(--brand)' }}>
+                  Part of
+                </span>
+                <span className="mono">
+                  {kindLabel(job.parentJob.kind).toLowerCase()} {job.parentJob.id.slice(0, 8)}
+                </span>
+                {job.parentJob.type && (
+                  <span
+                    className="font-medium"
+                    style={{ color: 'var(--text-dim)' }}
+                  >
+                    · {shortType(job.parentJob.type)}
+                  </span>
+                )}
+              </Link>
+            </div>
+          )}
+        </div>
+
+        {showActions && (
+          <div className="flex items-center gap-2 shrink-0">
+            {isJob && isProcessing ? (
+              <button
+                type="button"
+                onClick={onDelete}
+                disabled={isDeleting}
+                className="soft-btn soft-btn-danger"
+              >
+                <X size={14} /> Cancel
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={onRequeue}
+                  disabled={isRequeuing}
+                  className={`soft-btn ${isFailed ? 'soft-btn-primary' : 'soft-btn-dark'}`}
+                >
+                  <RotateCw size={14} /> Requeue
+                </button>
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  disabled={isDeleting}
+                  className="soft-btn soft-btn-danger"
+                >
+                  <Trash2 size={14} /> Delete
+                </button>
+              </>
+            )}
+            {job.traceId && (
+              <Link to={`/trace/${job.traceId}`} className="soft-btn soft-btn-ghost">
+                <ExternalLink size={14} /> Trace
+              </Link>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center">
+        {([
+          ['Created', formatDateTime(job.createTime), false],
+          ['Queue', job.queue ?? 'default', false],
+          hasRetryPolicy ? ['Attempt', attemptsLabel, false] : null,
+          ['ID', job.id, true],
+        ].filter(Boolean) as Array<[string, string, boolean]>).map((row, i) => {
+          const [k, v, copy] = row;
+
+          return (
+            <div
+              key={k}
+              className="flex items-baseline gap-2.5 px-5"
+              style={{
+                borderLeft: i === 0 ? 'none' : '1px solid var(--hair-soft)',
+              }}
+            >
+              <span className="soft-eyebrow">{k}</span>
+              <span
+                className="mono text-foreground"
+                style={{ fontSize: 12.5, letterSpacing: 0.2 }}
+              >
+                {v}
+              </span>
+              {copy && (
+                <button
+                  type="button"
+                  onClick={() => void navigator.clipboard?.writeText(v)}
+                  className="text-text-mute hover:text-foreground"
+                  aria-label="Copy ID"
+                >
+                  <Copy size={12} />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ----- Section -----
+function Section({
+  label,
+  action,
+  children,
+  noBorder,
+}: {
+  label: string;
+  action?: ReactNode;
+  children: ReactNode;
+  noBorder?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        padding: '22px 0 22px',
+        borderBottom: noBorder ? 'none' : '1px solid var(--hair)',
+      }}
+    >
+      <div className="mb-3.5 flex items-center justify-between gap-3">
+        <span className="soft-eyebrow">{label}</span>
+        {action && <span>{action}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ----- JSON block -----
+function JsonBlock({ text }: { text: string }) {
+  return (
+    <pre
+      className="mono m-0"
+      style={{
+        fontSize: 13,
+        lineHeight: 1.85,
+        color: 'var(--text-dim)',
+        whiteSpace: 'pre',
+        overflowX: 'auto',
+      }}
+    >
+      {text.split('\n').map((l, i) => (
+        <div key={i}>{tokenizeJsonLine(l)}</div>
+      ))}
+    </pre>
+  );
+}
+
+// ----- Details (definition list) -----
+function DetailsList({ job }: { job: UnifiedJobDetailModel }) {
+  const rows: Array<[string, string]> = [];
+  if (job.type) rows.push(['Type', shortType(job.type)]);
+  if (job.handlerType) rows.push(['Handler', shortType(job.handlerType)]);
+  if (job.scheduleTime) rows.push(['Scheduled', formatDateTime(job.scheduleTime)]);
+  if (job.traceId) rows.push(['Trace', job.traceId]);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div>
+      {rows.map(([k, v], i) => (
+        <div
+          key={k}
+          className="grid items-baseline gap-3.5"
+          style={{
+            gridTemplateColumns: '120px 1fr',
+            padding: '10px 0',
+            borderBottom:
+              i < rows.length - 1 ? '1px solid var(--hair-soft)' : 'none',
+          }}
+        >
+          <span className="soft-eyebrow" style={{ letterSpacing: '1.4px' }}>
+            {k}
+          </span>
+          <span
+            className="mono text-foreground break-all"
+            style={{ fontSize: 12.5 }}
+          >
+            {v}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ----- Lifecycle (flush card of state-colored entries) -----
+function LifecycleCard({ events, jobId }: { events: JobLogModel[]; jobId: string }) {
+  if (events.length === 0) return null;
+
+  return (
+    <div
+      data-warp-slot="detail.history"
+      data-warp-context={JSON.stringify({ jobId })}
+      className="soft-card flush"
+      key={`lc-${jobId}`}
+    >
+      {events.map((ev, i) => {
+        const isLast = i === events.length - 1;
+        const dur = getDuration(events, i);
+        const color = eventStateVar(ev.eventType);
+        const bg = eventStateBgVar(ev.eventType);
+
+        return (
+          <div
+            key={ev.id}
+            className="relative"
+            style={{
+              padding: '14px 18px 16px 22px',
+              borderBottom: isLast ? 'none' : '1px solid var(--hair-soft)',
+            }}
+          >
+            <span
+              aria-hidden
+              className="absolute"
+              style={{
+                left: 0,
+                top: 14,
+                bottom: 16,
+                width: 3,
+                background: color,
+                borderRadius: 2,
+              }}
+            />
+            <div className="flex items-baseline justify-between gap-3 flex-wrap">
+              <span
+                className="mono"
+                style={{
+                  fontSize: 10.5,
+                  color,
+                  fontWeight: 700,
+                  letterSpacing: '1.6px',
+                  textTransform: 'uppercase',
+                }}
+              >
+                {ev.eventType}
+              </span>
+              <span
+                className="mono inline-flex items-center gap-2"
+                style={{ fontSize: 11, color: 'var(--text-mute)' }}
+              >
+                <span style={{ color: 'var(--text-dim)' }}>
+                  {formatDateTime(ev.timestamp)}
+                </span>
+                <span style={{ opacity: 0.5 }}>·</span>
+                <span>
+                  <RelativeTime date={ev.timestamp} />
+                </span>
+                {dur && (
+                  <span
+                    className="font-semibold"
+                    style={{
+                      padding: '1px 6px',
+                      borderRadius: 4,
+                      background: bg,
+                      color,
+                    }}
+                  >
+                    {dur}
+                  </span>
+                )}
+              </span>
+            </div>
+            {ev.message && (
+              <div className="mt-2 text-text-dim" style={{ fontSize: 13, lineHeight: 1.5 }}>
+                {ev.message}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ----- Handler output (flush card, mono grid) -----
+function HandlerOutputCard({ logs, jobId }: { logs: JobLogModel[]; jobId: string }) {
+  if (logs.length === 0) return null;
+
+  const levelColor = (level: string): string => {
+    const l = level.toLowerCase();
+    if (l === 'error' || l === 'critical' || l === 'fatal') return 'var(--warp-red)';
+    if (l === 'warning' || l === 'warn') return 'var(--warp-amber)';
+    if (l === 'debug' || l === 'trace') return 'var(--text-mute)';
+
+    return 'var(--warp-blue)';
+  };
+
+  return (
+    <div data-warp-slot="detail.logs" data-warp-context={JSON.stringify({ jobId })}>
+      <div className="mb-3 flex items-center gap-2">
+        <span className="soft-eyebrow">Handler output</span>
+        <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-mute)' }}>
+          · {logs.length}
+        </span>
+      </div>
+      <div className="soft-card flush">
+        {logs.map((log, i) => {
+          const color = levelColor(log.level);
+          const isLast = i === logs.length - 1;
+
+          return (
+            <div
+              key={log.id}
+              className="mono grid items-baseline"
+              style={{
+                gridTemplateColumns: '170px 92px 1fr',
+                gap: 12,
+                padding: '12px 14px',
+                borderBottom: isLast ? 'none' : '1px solid var(--hair-soft)',
+                fontSize: 11.5,
+                lineHeight: 1.5,
+              }}
+            >
+              <span style={{ color: 'var(--text-mute)', letterSpacing: 0.3 }}>
+                {formatDateTime(log.timestamp)}
+              </span>
+              <span
+                className="font-bold uppercase text-center"
+                style={{
+                  fontSize: 9.5,
+                  letterSpacing: '1.2px',
+                  color,
+                  background: `color-mix(in srgb, ${color} 12%, transparent)`,
+                  border: `1px solid color-mix(in srgb, ${color} 18%, transparent)`,
+                  borderRadius: 4,
+                  padding: '1px 7px',
+                  width: 'fit-content',
+                }}
+              >
+                {log.level}
+              </span>
+              <span style={{ color: 'var(--text-dim)' }} className="break-words">
+                <span style={{ color: color, fontWeight: log.level.toLowerCase() === 'error' ? 600 : 400 }}>
+                  {log.message}
+                </span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ----- Exception (collapsible stack trace, preserved from the old Bold view) -----
+function ExceptionSection({ exception }: { exception: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = exception.split(/\r?\n/);
+  const first = lines[0] ?? '';
+  const match = first.match(/^([A-Za-z0-9_.]+Exception(?:`\d+)?)(?::\s*(.*))?$/);
+  const exceptionType = match?.[1] ?? null;
+  const exceptionMessage = match?.[2] ?? first;
+  const frames = lines.slice(1).filter((l) => l.trim().startsWith('at '));
+  const visible = expanded ? frames : frames.slice(0, 6);
+  const hiddenCount = frames.length - visible.length;
+
+  return (
+    <Section
+      label="Exception"
+      action={
+        <span
+          className="mono"
+          style={{ fontSize: 11, color: 'var(--text-mute)' }}
+        >
+          {frames.length} frames
+        </span>
+      }
+    >
+      <div
+        className="rounded-lg"
+        style={{
+          background: 'var(--state-failed-bg)',
+          border: '1px solid color-mix(in srgb, var(--state-failed) 25%, transparent)',
+          padding: '14px 16px',
+        }}
+      >
+        {exceptionType && (
+          <div
+            className="mono font-semibold"
+            style={{
+              color: 'var(--state-failed)',
+              fontSize: 13.5,
+              letterSpacing: '-0.005em',
+            }}
+          >
+            {exceptionType}
+          </div>
+        )}
+        <div className="mt-1 text-text-dim" style={{ fontSize: 13, lineHeight: 1.5 }}>
+          {exceptionMessage}
+        </div>
+      </div>
+
+      {frames.length > 0 && (
+        <pre
+          className="mono mt-3 overflow-x-auto rounded-lg"
+          style={{
+            background: '#1f1c18',
+            color: '#e6e1d3',
+            padding: '12px 14px',
+            fontSize: 11.5,
+            lineHeight: 1.55,
+            whiteSpace: 'pre',
+          }}
+        >
+          {visible.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </pre>
+      )}
+
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((e) => !e)}
+          className="mono mt-2 text-text-dim hover:text-foreground"
+          style={{ fontSize: 11.5 }}
+        >
+          {expanded ? 'Hide framework frames' : `Show full backtrace (${frames.length} frames)`}
+        </button>
+      )}
+    </Section>
+  );
+}
+
+// ============================================================================
+// Page
+// ============================================================================
 
 interface JobDetailStandardProps {
   job: UnifiedJobDetailModel;
@@ -68,9 +667,6 @@ export function JobDetailStandard({
   job,
   systemEvents,
   handlerLogs,
-  reportedBars,
-  jobCounts,
-  onCountsUpdate,
 }: JobDetailStandardProps) {
   const requeue = useRequeueJob();
   const deleteJob = useDeleteJob();
@@ -81,8 +677,8 @@ export function JobDetailStandard({
       title: action === 'cancel' ? 'Cancel running job?' : 'Delete job?',
       description:
         action === 'cancel'
-          ? `Request graceful cancellation of ${shortId(job.id)}. The handler may still complete if it ignores the cancellation token.`
-          : `Delete ${shortId(job.id)}? This cannot be undone.`,
+          ? `Request graceful cancellation of ${job.id.slice(0, 8)}. The handler may still complete if it ignores the cancellation token.`
+          : `Delete ${job.id.slice(0, 8)}? This cannot be undone.`,
       confirmLabel: action === 'cancel' ? 'Cancel job' : 'Delete',
       destructive: true,
     });
@@ -91,138 +687,106 @@ export function JobDetailStandard({
     }
   };
 
-  const isJob = job.kind === 1;
-  const isMessage = job.kind === 2;
-  const isProcessing = job.currentState === State.Processing;
-  const showActions = isJob || isMessage;
-  const hasChildJobs = job.kind === 2 || job.kind === 3;
-  const kind = kindLabel(job.kind);
+  const hasMessage = !!job.message;
+  const messageJson = hasMessage ? formatJson(job.message!) : '';
+  const metaEntries = job.metadata ? Object.entries(job.metadata) : [];
+  const hasMetadata = metaEntries.length > 0;
+  const metadataJson = hasMetadata
+    ? JSON.stringify(Object.fromEntries(metaEntries), null, 2)
+    : '';
 
-  const totalJobs =
-    Object.keys(jobCounts).length > 0 ? Object.values(jobCounts).reduce((a, b) => a + b, 0) : job.totalJobs;
-  const completedJobs = jobCounts['completed'] ?? job.completedJobs;
-  const failedJobs = jobCounts['failed'] ?? job.failedJobs;
+  const failedLog = systemEvents.find((e) => e.eventType === 'Failed') ?? null;
+  const exception = failedLog?.exception ?? null;
 
-  const createdAgo = relativeFromNow(job.createTime);
-
-  const meta: PageHeaderMetaItem[] = [];
-  if (job.type) {
-    meta.push({ k: 'Type', v: shortType(job.type) });
-  }
-  if (job.handlerType) {
-    meta.push({ k: 'Handler', v: shortType(job.handlerType) });
-  }
-  if (job.queue) {
-    meta.push({ k: 'Queue', v: job.queue });
-  }
-  meta.push({
-    k: 'Created',
-    v: formatDateTime(job.createTime),
-    rel: createdAgo ?? undefined,
-  });
-  if (job.scheduleTime) {
-    meta.push({ k: 'Scheduled', v: formatDateTime(job.scheduleTime) });
-  }
-  if (job.maxRetries > 0) {
-    meta.push({ k: 'Attempts', v: `${job.retriedTimes + 1} / ${job.maxRetries + 1}` });
-  }
-  if (job.traceId) {
-    meta.push({ k: 'Trace', v: job.traceId.slice(0, 12), copy: job.traceId });
-  }
-  meta.push({ k: 'ID', v: job.id, copy: job.id });
-
-  const pillClass = pillClassForState(job.currentState);
+  const eventCount = systemEvents.length;
 
   return (
-    <div className="flex flex-col gap-[18px]">
-      <PageHeader
-        kindLabel={kind}
-        title={shortId(job.id)}
-        pill={<span className={`warp-pill ${pillClass}`}>{stateName(job.currentState)}</span>}
-        actions={
-          <>
-            {showActions && (
-              isJob && isProcessing ? (
-                <button
-                  type="button"
-                  onClick={() => askDelete('cancel')}
-                  disabled={deleteJob.isPending}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-warp-red bg-warp-red-soft px-2.5 py-1.5 text-[12.5px] font-medium text-warp-red disabled:opacity-60"
-                >
-                  <X size={13} /> Cancel
-                </button>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => requeue.mutate(job.id)}
-                    disabled={requeue.isPending}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-foreground hover:bg-panel-2 disabled:opacity-60"
-                  >
-                    <Repeat size={13} /> Requeue
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => askDelete('delete')}
-                    disabled={deleteJob.isPending}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-warp-red hover:bg-warp-red-soft disabled:opacity-60"
-                  >
-                    <Trash2 size={13} /> Delete
-                  </button>
-                </>
-              )
-            )}
-            {job.traceId && (
-              <Link
-                to={`/trace/${job.traceId}`}
-                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[12.5px] font-medium text-foreground hover:bg-panel-2"
-              >
-                <ExternalLink size={13} /> Trace
-              </Link>
-            )}
-          </>
+    <Fragment>
+      <TitleStrip
+        job={job}
+        onRequeue={() => requeue.mutate(job.id)}
+        onDelete={() =>
+          askDelete(
+            job.kind === 1 && job.currentState === State.Processing
+              ? 'cancel'
+              : 'delete',
+          )
         }
-        meta={meta}
+        isRequeuing={requeue.isPending}
+        isDeleting={deleteJob.isPending}
       />
 
-      {/* BODY GRID */}
-      <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
-        <div className="flex flex-col gap-3.5">
-          <JobProgress jobId={job.id} batch={{ totalJobs, completedJobs, failedJobs }} reportedBars={reportedBars} />
-          {job.message && (
-            <Panel>
-              <PanelHeader eyebrow="Payload" />
-              <pre className="mono m-0 max-h-[60vh] overflow-auto bg-[color:var(--panel-2)] px-4 py-3 text-[11.5px] leading-[1.7] text-text-dim">
-                {formatJson(job.message)}
-              </pre>
-            </Panel>
-          )}
+      <div
+        className="grid gap-x-12 gap-y-0"
+        style={{ gridTemplateColumns: 'minmax(0, 1.05fr) minmax(0, 1fr)' }}
+      >
+        {/* LEFT */}
+        <div>
+          <Section label="Payload">
+            {hasMessage ? (
+              <JsonBlock text={messageJson} />
+            ) : (
+              <span
+                className="mono"
+                style={{ fontSize: 24, color: 'var(--ink-light)', lineHeight: 1 }}
+              >
+                {'{ }'}
+              </span>
+            )}
+          </Section>
 
-          {job.metadata && Object.keys(job.metadata).length > 0 && (
-            <Panel>
-              <PanelHeader eyebrow="Metadata" />
-              <pre className="mono m-0 max-h-60 overflow-auto bg-[color:var(--panel-2)] px-4 py-3 text-[11.5px] leading-[1.7] text-text-dim">
-                {JSON.stringify(job.metadata, null, 2)}
-              </pre>
-            </Panel>
+          <Section
+            label="Metadata"
+            action={
+              <span
+                className="mono"
+                style={{ fontSize: 11, color: 'var(--text-mute)' }}
+              >
+                {metaEntries.length} {metaEntries.length === 1 ? 'key' : 'keys'}
+              </span>
+            }
+          >
+            {hasMetadata ? (
+              <JsonBlock text={metadataJson} />
+            ) : (
+              <span
+                className="mono"
+                style={{ fontSize: 24, color: 'var(--ink-light)', lineHeight: 1 }}
+              >
+                {'{ }'}
+              </span>
+            )}
+          </Section>
+
+          {exception && <ExceptionSection exception={exception} />}
+
+          {((job.type || job.handlerType) || job.scheduleTime || job.traceId) && (
+            <Section label="Details" noBorder>
+              <DetailsList job={job} />
+            </Section>
           )}
-          {handlerLogs.length > 0 && <JobLogs jobId={job.id} logs={handlerLogs} />}
         </div>
 
-        <div className="flex flex-col gap-3.5">
-          {systemEvents.length > 0 && (
-            <Panel>
-              <PanelHeader eyebrow="Lifecycle" />
-              <div className="px-4 py-3">
-                <JobTimeline jobId={job.id} events={systemEvents} />
-              </div>
-            </Panel>
-          )}
+        {/* RIGHT */}
+        <div style={{ paddingTop: 22 }}>
+          <div className="mb-6">
+            <div className="mb-3 flex items-center gap-2">
+              <span className="soft-eyebrow">Lifecycle</span>
+              <span
+                className="mono"
+                style={{ fontSize: 10.5, color: 'var(--text-mute)' }}
+              >
+                · {eventCount} {eventCount === 1 ? 'event' : 'events'}
+              </span>
+            </div>
+            <LifecycleCard events={systemEvents} jobId={job.id} />
+          </div>
+
+          <HandlerOutputCard logs={handlerLogs} jobId={job.id} />
         </div>
       </div>
 
-      {hasChildJobs && <RelatedJobsSection job={job} onCountsUpdate={onCountsUpdate} />}
       {confirmDialog}
-    </div>
+    </Fragment>
   );
 }

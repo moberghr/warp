@@ -144,7 +144,7 @@ export default function ConcurrencyLimitsPage() {
 
   if (unavailable) {
     return (
-      <div className="flex flex-col gap-3 p-5">
+      <div className="flex flex-col gap-3 py-5">
         <Panel>
           <div className="py-10 text-center text-[13px] text-text-mute">
             Concurrency limits addon not registered. Add <code className="font-mono">opt.AddConcurrency()</code> to enable.
@@ -165,7 +165,7 @@ export default function ConcurrencyLimitsPage() {
   };
 
   return (
-    <div className="flex flex-col gap-3 p-5">
+    <div className="flex flex-col gap-3 py-5">
       <div className="flex items-center justify-between">
         <p className="text-[12.5px] text-text-mute">
           Runtime overrides for <code>[Mutex]</code> and <code>[Semaphore]</code> keys. Admin row beats the attribute limit; takes effect on next pickup.
