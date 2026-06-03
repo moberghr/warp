@@ -44,7 +44,7 @@ function BackdropStreaks() {
             left: 0,
             width: `${s.len}px`,
             opacity: s.opacity,
-            background: `linear-gradient(90deg, transparent, ${s.accent ? '#B4541F' : '#1F1708'} 60%, transparent)`,
+            background: `linear-gradient(90deg, transparent, ${s.accent ? '#4338CA' : '#1F1708'} 60%, transparent)`,
             animation: `soft-streak ${s.dur}s linear ${s.delay}s infinite`,
           }}
         />
@@ -119,10 +119,12 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
 
   return (
     <div
-      className="relative min-h-screen w-full overflow-hidden text-foreground"
+      className="relative min-h-screen w-full overflow-hidden bg-background text-foreground"
       style={{
-        background:
-          'linear-gradient(135deg, #FBF7F0 0%, #FFFFFF 55%, #FBF4EC 100%)',
+        backgroundImage:
+          theme === 'dark'
+            ? 'linear-gradient(135deg, var(--panel) 0%, var(--background) 55%, var(--panel) 100%)'
+            : 'linear-gradient(135deg, #FBF7F0 0%, #FFFFFF 55%, #FBF4EC 100%)',
       }}
     >
       {/* Warm radial accent washes */}
@@ -131,7 +133,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
         className="pointer-events-none absolute inset-0"
         style={{
           background:
-            'radial-gradient(70% 60% at 10% 0%, rgba(180,84,31,0.08), transparent 60%), radial-gradient(60% 60% at 100% 100%, rgba(124,58,237,0.04), transparent 60%)',
+            'radial-gradient(70% 60% at 10% 0%, rgba(67,56,202,0.08), transparent 60%), radial-gradient(60% 60% at 100% 100%, rgba(124,58,237,0.04), transparent 60%)',
         }}
       />
 
@@ -156,12 +158,14 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
       {/* Card */}
       <main className="relative z-10 flex min-h-screen items-center justify-center px-6 py-12">
         <div
-          className="w-full max-w-[400px] rounded-2xl bg-white"
+          className="w-full max-w-[400px] rounded-2xl bg-panel"
           style={{
-            border: '1px solid rgba(40,28,10,0.06)',
+            border: '1px solid var(--border)',
             padding: '36px 36px 32px',
             boxShadow:
-              '0 1px 2px rgba(40,28,10,0.04), 0 24px 60px rgba(40,28,10,0.10), 0 8px 22px rgba(40,28,10,0.06)',
+              theme === 'dark'
+                ? '0 1px 2px rgba(0,0,0,0.4), 0 24px 60px rgba(0,0,0,0.5), 0 8px 22px rgba(0,0,0,0.35)'
+                : '0 1px 2px rgba(40,28,10,0.04), 0 24px 60px rgba(40,28,10,0.10), 0 8px 22px rgba(40,28,10,0.06)',
           }}
         >
           {/* Brand row */}
@@ -219,7 +223,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
                 Username
               </label>
               <div
-                className="relative flex items-center rounded-[10px] border bg-white transition"
+                className="relative flex items-center rounded-[10px] border bg-panel transition"
                 style={{
                   borderColor: usernameFocused
                     ? 'var(--brand)'
@@ -251,7 +255,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
                 Password
               </label>
               <div
-                className="relative flex items-center rounded-[10px] border bg-white transition"
+                className="relative flex items-center rounded-[10px] border bg-panel transition"
                 style={{
                   borderColor: passwordFocused
                     ? 'var(--brand)'

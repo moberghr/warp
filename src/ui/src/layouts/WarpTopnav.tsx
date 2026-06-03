@@ -42,7 +42,7 @@ export default function WarpTopnav({ items, onMenuClick }: Props) {
           <button
             type="button"
             onClick={onMenuClick}
-            className="lg:hidden -ml-1 mr-1 inline-flex h-9 w-9 items-center justify-center rounded-md text-text-dim hover:bg-paper"
+            className="xl:hidden -ml-1 mr-1 inline-flex h-9 w-9 items-center justify-center rounded-md text-text-dim hover:bg-paper"
             aria-label="Open navigation"
           >
             <Menu className="h-5 w-5" />
@@ -61,7 +61,7 @@ export default function WarpTopnav({ items, onMenuClick }: Props) {
         </NavLink>
       </div>
 
-      <div className="soft-topnav-items hidden lg:flex">
+      <div className="soft-topnav-items hidden xl:flex">
         {items.map((item) => {
           const Icon = item.icon;
           const badges = item.badges?.(stats) ?? [];
@@ -88,19 +88,21 @@ export default function WarpTopnav({ items, onMenuClick }: Props) {
         })}
       </div>
 
-      <button
-        type="button"
-        onClick={toggleTheme}
-        className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-md text-text-dim hover:bg-paper transition-colors"
-        aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-        title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-      >
-        {theme === 'dark' ? (
-          <Sun className="h-4 w-4" />
-        ) : (
-          <Moon className="h-4 w-4" />
-        )}
-      </button>
+      <div className="ml-auto flex items-center gap-2 pl-3 border-l border-hair">
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className="inline-flex h-9 w-9 items-center justify-center rounded-md text-text-dim hover:bg-paper hover:text-foreground transition-colors"
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        >
+          {theme === 'dark' ? (
+            <Sun className="h-4 w-4" />
+          ) : (
+            <Moon className="h-4 w-4" />
+          )}
+        </button>
+      </div>
     </nav>
   );
 }

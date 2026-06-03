@@ -27,15 +27,18 @@ export default function MessagesPage() {
     return () => usePageStore.getState().reset();
   }, [state, query.data]);
 
-  if (query.error) return <ErrorState message={(query.error as Error).message} />;
-  if (!query.data) return <LoadingState />;
-
   const data = query.data;
 
   return (
     <div className="flex flex-col lg:flex-row">
       <GroupStateRail kind="messages" active={state} />
       <div className="flex-1 p-5 min-w-0 flex flex-col gap-3">
+      {query.error ? (
+        <ErrorState message={(query.error as Error).message} />
+      ) : !data ? (
+        <LoadingState />
+      ) : (
+      <>
       <Panel className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full border-collapse">
@@ -80,6 +83,8 @@ export default function MessagesPage() {
       </Panel>
 
       <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} />
+      </>
+      )}
       </div>
     </div>
   );

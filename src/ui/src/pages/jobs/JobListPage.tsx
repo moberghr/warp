@@ -362,26 +362,24 @@ export default function JobListPage() {
     });
   };
 
-  if (error) {
-    return <ErrorState message={(error as Error).message} />;
-  }
-
-  if (!data) {
-    return <LoadingState />;
-  }
-
   const stateLabel = resolvedState;
   const tone = getStateTone(resolvedState);
-  const total = data.totalCount;
+  const total = data?.totalCount ?? 0;
   const showingFrom = total === 0 ? 0 : page * pageSize + 1;
   const showingTo = Math.min((page + 1) * pageSize, total);
-  const pageCount = data.pageCount;
+  const pageCount = data?.pageCount ?? 0;
 
   return (
     <div className="flex flex-col lg:flex-row">
       {confirmDialog}
       <JobsStateRail active={resolvedState} />
       <div className="flex-1 p-5 min-w-0">
+      {error ? (
+        <ErrorState message={(error as Error).message} />
+      ) : !data ? (
+        <LoadingState />
+      ) : (
+      <>
         <header className="mb-4">
           <h1 className="font-display text-[22px] font-semibold tracking-tight">
             {capitalize(stateLabel)} jobs
@@ -505,6 +503,8 @@ export default function JobListPage() {
             </div>
           </div>
         </div>
+      </>
+      )}
       </div>
     </div>
   );

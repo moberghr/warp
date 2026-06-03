@@ -29,15 +29,18 @@ export default function BatchesPage() {
     return () => usePageStore.getState().reset();
   }, [state, query.data]);
 
-  if (query.error) return <ErrorState message={(query.error as Error).message} />;
-  if (!query.data) return <LoadingState />;
-
   const data = query.data;
 
   return (
     <div className="flex flex-col lg:flex-row">
       <GroupStateRail kind="batches" active={state} />
       <div className="flex-1 p-5 min-w-0 flex flex-col gap-3">
+      {query.error ? (
+        <ErrorState message={(query.error as Error).message} />
+      ) : !data ? (
+        <LoadingState />
+      ) : (
+      <>
       <Panel className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full border-collapse">
@@ -94,6 +97,8 @@ export default function BatchesPage() {
       </Panel>
 
       <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(s) => { setPageSize(s); setPage(0); }} />
+      </>
+      )}
       </div>
     </div>
   );

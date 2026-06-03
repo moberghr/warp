@@ -46,8 +46,8 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
         datasets: [
           {
             label: 'Succeeded/s',
-            borderColor: '#B4541F',
-            backgroundColor: 'rgba(180, 84, 31, 0.15)',
+            borderColor: '#4338CA',
+            backgroundColor: 'rgba(67, 56, 202, 0.15)',
             borderWidth: 2,
             fill: true,
             pointRadius: 0,
