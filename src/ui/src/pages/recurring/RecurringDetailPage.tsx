@@ -61,22 +61,38 @@ export default function RecurringDetailPage() {
       return;
     }
 
-    const handleToggleEnabled = () => {
+    const handleToggleEnabled = async () => {
       if (detail.disabledAt) {
         enableJob.mutate(detail.id);
-      } else {
+
+        return;
+      }
+      const ok = await confirm({
+        title: 'Disable recurring job?',
+        description: `Future runs of "${detail.name}" will be paused until you re-enable it. Disabling a job that drives critical work (reconciliation, billing, etc.) can stall downstream processes — make sure this is intended.`,
+        confirmLabel: 'Disable',
+        destructive: true,
+      });
+      if (ok) {
         disableJob.mutate(detail.id);
       }
     };
 
-    const handleTrigger = () => {
-      triggerJob.mutate(detail.id);
+    const handleTrigger = async () => {
+      const ok = await confirm({
+        title: 'Trigger recurring job now?',
+        description: `A job will be enqueued immediately, on top of the normal cron schedule. Use this for manual reruns — not for backfills.`,
+        confirmLabel: 'Trigger',
+      });
+      if (ok) {
+        triggerJob.mutate(detail.id);
+      }
     };
 
     const handleDelete = async () => {
       const ok = await confirm({
         title: 'Delete recurring job?',
-        description: `Remove "${detail.name}"? Future runs will not be scheduled. Existing in-flight jobs are unaffected.`,
+        description: `Remove "${detail.name}"? Future runs will not be scheduled and history will be removed permanently. Existing in-flight jobs are unaffected. This cannot be undone.`,
         confirmLabel: 'Delete',
         destructive: true,
       });

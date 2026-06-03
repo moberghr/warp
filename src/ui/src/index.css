@@ -101,6 +101,8 @@
 
 /* ============ A·Soft system — white bg, terracotta, warm hairlines ============ */
 :root {
+    color-scheme: light;
+
     /* surfaces */
     --background:      #ffffff;
     --panel:           #ffffff;
@@ -198,6 +200,7 @@
 
 /* ============ Dark = near-black ============ */
 .dark {
+    color-scheme: dark;
     --background:      #0a0a0b;
     --panel:           #111114;
     --panel-2:         #16161a;
@@ -1001,7 +1004,7 @@
   /* Top nav (60px white bar, brand block, item row, terracotta accent underline) */
   .soft-topnav {
     height: 60px;
-    background: #ffffff;
+    background: var(--panel);
     border-bottom: 1px solid var(--hair);
     box-shadow: var(--soft-nav-shadow);
     display: flex;
@@ -1106,7 +1109,7 @@
     font-size: 10.5px;
     color: var(--text-mute);
     letter-spacing: 0.6px;
-    background: #ffffff;
+    background: var(--panel);
     border-top: 1px solid var(--hair);
     font-family: var(--font-mono);
     flex-shrink: 0;
@@ -1162,7 +1165,7 @@
   }
   .soft-btn.soft-btn-dark:hover:not(:disabled) { background: #2A1E0E; }
   .soft-btn.soft-btn-ghost {
-    background: #ffffff;
+    background: var(--panel);
     color: var(--foreground);
     border: 1px solid var(--border-hi);
   }

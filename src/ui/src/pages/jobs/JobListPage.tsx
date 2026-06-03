@@ -15,7 +15,7 @@ import { Panel } from '@/components/v2/Panel';
 import { StateBadge } from '@/components/StateBadge';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
-import { shortType, shortId } from '@/utils/format';
+import { shortType, shortId, formatDateTime } from '@/utils/format';
 import { getStateTone } from '@/lib/styles';
 import { usePageStore } from '@/stores/page';
 import { useDashboardStore } from '@/stores/dashboard';
@@ -26,6 +26,7 @@ import {
   useBulkRequeueJobs,
   useBulkDeleteJobs,
   useRequeueFailedJobsByType,
+  useDeleteFailedJobsByType,
   useRequeueJob,
   useDeleteJob,
 } from '@/api/hooks/useJobs';
@@ -35,8 +36,7 @@ import { JobsStateRail } from './JobsStateRail';
 import { JobTypeBar } from './JobTypeBar';
 import { BulkActionBar } from './BulkActionBar';
 import { useConfirm } from '@/components/forms/useConfirm';
-
-const PAGE_SIZE = 20;
+import { usePersistedPageSize, PAGE_SIZES } from '@/hooks/usePersistedPageSize';
 
 const SUBTEXT: Record<string, string> = {
   enqueued: 'Awaiting a worker pickup.',
@@ -60,6 +60,7 @@ export default function JobListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const page = Number(searchParams.get('page') ?? '0') || 0;
   const activeType = searchParams.get('type');
+  const [pageSize, setPageSize] = usePersistedPageSize();
 
   const setPage = (next: number) => {
     const params = new URLSearchParams(searchParams);
@@ -91,11 +92,11 @@ export default function JobListPage() {
     setRowSelection({});
   }, [resolvedState, activeType, page]);
 
-  const jobsQuery = useJobsList(resolvedState, page, PAGE_SIZE);
+  const jobsQuery = useJobsList(resolvedState, page, pageSize);
   const filteredQuery = useFailedJobsByType(
     activeType ?? '',
     page,
-    PAGE_SIZE,
+    pageSize,
     isFailed && !!activeType,
   );
   const typeCountsQuery = useFailedJobTypes(isFailed);
@@ -110,6 +111,7 @@ export default function JobListPage() {
   const bulkRequeue = useBulkRequeueJobs();
   const bulkDelete = useBulkDeleteJobs();
   const requeueByType = useRequeueFailedJobsByType();
+  const deleteByType = useDeleteFailedJobsByType();
 
   const stats = useDashboardStore((s) => s.stats);
 
@@ -127,6 +129,19 @@ export default function JobListPage() {
   useEffect(() => () => usePageStore.getState().reset(), []);
 
   const rows = useMemo<JobModel[]>(() => data?.items ?? [], [data]);
+
+  const isScheduledView = resolvedState === 'scheduled';
+
+  const askRequeueOne = async (job: JobModel) => {
+    const ok = await confirm({
+      title: 'Requeue job?',
+      description: `The job will be re-enqueued and picked up by a worker on the next poll.`,
+      confirmLabel: 'Requeue',
+    });
+    if (ok) {
+      requeueJob.mutate(job.id);
+    }
+  };
 
   const columns = useMemo<ColumnDef<JobModel>[]>(
     () => [
@@ -198,22 +213,40 @@ export default function JobListPage() {
           </span>
         ),
       },
+      ...(isScheduledView
+        ? [
+            {
+              accessorKey: 'scheduleTime',
+              header: 'Scheduled',
+              enableSorting: false,
+              cell: ({ row }: { row: { original: JobModel } }) => (
+                <span className="text-[12px] text-text-dim mono">
+                  {row.original.scheduleTime ? formatDateTime(row.original.scheduleTime) : '—'}
+                </span>
+              ),
+            } as ColumnDef<JobModel>,
+          ]
+        : []),
       {
         id: 'actions',
         header: '',
         enableSorting: false,
         cell: ({ row }) => {
-          const isFailedRow = row.original.currentState === State.Failed;
+          const rowState = row.original.currentState;
+          const isFailedRow = rowState === State.Failed;
+          const isProcessingRow = rowState === State.Processing;
+          const isCompletedRow = rowState === State.Completed;
+          const showRequeue = !isProcessingRow && !isCompletedRow;
 
           return (
             <div className="flex justify-end gap-2">
-              {isFailedRow && (
+              {showRequeue && (
                 <button
                   type="button"
-                  onClick={() => requeueJob.mutate(row.original.id)}
+                  onClick={() => void askRequeueOne(row.original)}
                   className="px-2.5 py-1 text-[11.5px] font-medium rounded-md border border-border bg-panel-2 text-foreground hover:bg-panel transition-colors"
                 >
-                  Retry
+                  {isFailedRow ? 'Retry' : 'Requeue'}
                 </button>
               )}
               <button
@@ -238,7 +271,8 @@ export default function JobListPage() {
         },
       },
     ],
-    [requeueJob, deleteJob, confirm],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [requeueJob, deleteJob, confirm, isScheduledView],
   );
 
   const table = useReactTable({
@@ -255,7 +289,15 @@ export default function JobListPage() {
 
   const selectedIds = Object.keys(rowSelection).filter((id) => rowSelection[id]);
 
-  const handleBulkRequeue = () => {
+  const handleBulkRequeue = async () => {
+    const ok = await confirm({
+      title: `Requeue ${selectedIds.length} jobs?`,
+      description: 'Selected jobs will be re-enqueued and picked up by workers on the next poll.',
+      confirmLabel: `Requeue ${selectedIds.length}`,
+    });
+    if (!ok) {
+      return;
+    }
     bulkRequeue.mutate(selectedIds, {
       onSuccess: () => setRowSelection({}),
     });
@@ -277,8 +319,16 @@ export default function JobListPage() {
     });
   };
 
-  const handleRequeueAllType = () => {
+  const handleRequeueAllType = async () => {
     if (!activeType) {
+      return;
+    }
+    const ok = await confirm({
+      title: `Requeue all ${shortType(activeType)}?`,
+      description: `Every failed job of type ${shortType(activeType)} will be re-enqueued.`,
+      confirmLabel: 'Requeue all',
+    });
+    if (!ok) {
       return;
     }
 
@@ -286,6 +336,28 @@ export default function JobListPage() {
       onSuccess: () => {
         setRowSelection({});
         toast.success(`Requeued all ${shortType(activeType)}`);
+      },
+    });
+  };
+
+  const handleDeleteAllType = async () => {
+    if (!activeType) {
+      return;
+    }
+    const ok = await confirm({
+      title: `Delete all ${shortType(activeType)}?`,
+      description: `Every failed job of type ${shortType(activeType)} will be removed permanently. This cannot be undone.`,
+      confirmLabel: 'Delete all',
+      destructive: true,
+    });
+    if (!ok) {
+      return;
+    }
+
+    deleteByType.mutate(activeType, {
+      onSuccess: () => {
+        setRowSelection({});
+        toast.success(`Deleted all ${shortType(activeType)}`);
       },
     });
   };
@@ -301,14 +373,15 @@ export default function JobListPage() {
   const stateLabel = resolvedState;
   const tone = getStateTone(resolvedState);
   const total = data.totalCount;
-  const showingFrom = total === 0 ? 0 : page * PAGE_SIZE + 1;
-  const showingTo = Math.min((page + 1) * PAGE_SIZE, total);
+  const showingFrom = total === 0 ? 0 : page * pageSize + 1;
+  const showingTo = Math.min((page + 1) * pageSize, total);
+  const pageCount = data.pageCount;
 
   return (
-    <div className="flex flex-col lg:flex-row h-full min-h-0">
+    <div className="flex flex-col lg:flex-row">
       {confirmDialog}
       <JobsStateRail active={resolvedState} />
-      <div className="flex-1 overflow-auto p-5 min-w-0">
+      <div className="flex-1 p-5 min-w-0">
         <header className="mb-4">
           <h1 className="font-display text-[22px] font-semibold tracking-tight">
             {capitalize(stateLabel)} jobs
@@ -329,6 +402,7 @@ export default function JobListPage() {
           onRequeue={handleBulkRequeue}
           onDelete={handleBulkDelete}
           onRequeueAllType={isFailed && activeType ? handleRequeueAllType : undefined}
+          onDeleteAllType={isFailed && activeType ? handleDeleteAllType : undefined}
         />
 
         {isFailed && typeCounts.length > 0 && (
@@ -388,27 +462,47 @@ export default function JobListPage() {
           </div>
         </Panel>
 
-        <div className="flex items-center justify-between mt-3 text-[12px] text-text-mute">
+        <div className="flex items-center justify-between mt-3 text-[12px] text-text-mute gap-3 flex-wrap">
           <span className="mono">
             Showing {showingFrom}–{showingTo} of {total.toLocaleString()}
           </span>
-          <div className="flex gap-1.5">
-            <button
-              type="button"
-              onClick={() => setPage(page - 1)}
-              disabled={page === 0}
-              className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-text-dim hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              ‹ Prev
-            </button>
-            <button
-              type="button"
-              onClick={() => setPage(page + 1)}
-              disabled={page >= data.pageCount - 1}
-              className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-foreground hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              Next ›
-            </button>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-[11.5px]">
+              <span>Per page</span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setPage(0);
+                }}
+                className="px-1.5 py-0.5 text-[11.5px] rounded-md border border-border bg-panel text-foreground"
+              >
+                {PAGE_SIZES.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </label>
+            <span className="mono">
+              Page {pageCount === 0 ? 0 : page + 1} of {pageCount}
+            </span>
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                onClick={() => setPage(page - 1)}
+                disabled={page === 0}
+                className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-text-dim hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                ‹ Prev
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage(page + 1)}
+                disabled={page >= pageCount - 1}
+                className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-foreground hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                Next ›
+              </button>
+            </div>
           </div>
         </div>
       </div>

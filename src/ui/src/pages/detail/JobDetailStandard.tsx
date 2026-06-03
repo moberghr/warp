@@ -1,12 +1,14 @@
-import { Fragment, useState, type ReactNode } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Copy, RotateCw, Trash2, ExternalLink, X } from 'lucide-react';
-import { shortType, stateName, formatDateTime } from '@/utils/format';
+import { shortType, shortId, stateName, formatDateTime } from '@/utils/format';
 import { State } from '@/types';
-import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
+import type { UnifiedJobDetailModel, JobLogModel, ContinuationInfo } from '@/types';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
 import { useConfirm } from '@/components/forms/useConfirm';
 import { RelativeTime } from '@/components/RelativeTime';
+import { StateBadge } from '@/components/StateBadge';
+import { RelatedJobsSection } from './RelatedJobsSection';
 
 // ============================================================================
 // A·Soft job detail — pixel port of warp/project/soft/job-detail.jsx
@@ -378,6 +380,8 @@ function DetailsList({ job }: { job: UnifiedJobDetailModel }) {
   if (job.type) rows.push(['Type', shortType(job.type)]);
   if (job.handlerType) rows.push(['Handler', shortType(job.handlerType)]);
   if (job.scheduleTime) rows.push(['Scheduled', formatDateTime(job.scheduleTime)]);
+  const mutex = job.metadata?.['ConcurrencyKey'];
+  if (mutex) rows.push(['Mutex', String(mutex)]);
   if (job.traceId) rows.push(['Trace', job.traceId]);
 
   if (rows.length === 0) return null;
@@ -492,10 +496,179 @@ function LifecycleCard({ events, jobId }: { events: JobLogModel[]; jobId: string
                 {ev.message}
               </div>
             )}
+            {ev.exception && (
+              <pre
+                className="mono mt-2 overflow-auto rounded-md"
+                style={{
+                  background: 'var(--state-failed-bg)',
+                  color: 'var(--state-failed)',
+                  padding: '10px 12px',
+                  fontSize: 11.5,
+                  lineHeight: 1.5,
+                  maxHeight: 240,
+                  whiteSpace: 'pre',
+                }}
+              >
+                {ev.exception}
+              </pre>
+            )}
           </div>
         );
       })}
     </div>
+  );
+}
+
+// ----- Reported progress bars -----
+function ReportedProgressSection({ bars }: { bars: Array<[string, number]> }) {
+  if (bars.length === 0) return null;
+
+  return (
+    <Section label={`Reported progress · ${bars.length}`}>
+      <div className="flex flex-col gap-3">
+        {bars.map(([name, value]) => (
+          <div key={name}>
+            <div className="flex items-baseline justify-between mb-1.5">
+              <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
+                {name === '' ? 'Progress' : name}
+              </span>
+              <span className="mono font-medium tabular-nums" style={{ fontSize: 11.5, color: 'var(--foreground)' }}>
+                {value}%
+              </span>
+            </div>
+            <div
+              style={{
+                height: 6,
+                background: 'var(--hair)',
+                borderRadius: 999,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  height: '100%',
+                  width: `${Math.min(100, Math.max(0, value))}%`,
+                  background: 'var(--brand)',
+                  transition: 'width 200ms ease',
+                }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+// ----- Batch / Message progress (completed + failed split) -----
+function BatchProgressSection({
+  total,
+  completed,
+  failed,
+}: {
+  total: number;
+  completed: number;
+  failed: number;
+}) {
+  if (total <= 0) return null;
+  const done = completed + failed;
+  const pct = Math.round((done / total) * 100);
+  const greenPct = (completed / total) * 100;
+  const redPct = (failed / total) * 100;
+
+  return (
+    <Section label="Progress">
+      <div className="flex items-center gap-4">
+        <div
+          className="flex-1"
+          style={{
+            height: 8,
+            background: 'var(--hair)',
+            borderRadius: 999,
+            overflow: 'hidden',
+            display: 'flex',
+          }}
+        >
+          {greenPct > 0 && (
+            <div style={{ height: '100%', width: `${greenPct}%`, background: 'var(--state-completed)' }} />
+          )}
+          {redPct > 0 && (
+            <div style={{ height: '100%', width: `${redPct}%`, background: 'var(--state-failed)' }} />
+          )}
+        </div>
+        <span className="mono font-medium tabular-nums" style={{ fontSize: 12.5, color: 'var(--foreground)' }}>
+          {done}/{total} ({pct}%)
+        </span>
+      </div>
+    </Section>
+  );
+}
+
+// ----- Flow (parent / spawned-by / continuations / spawned jobs) -----
+function FlowSection({ job }: { job: UnifiedJobDetailModel }) {
+  const hasAnything =
+    job.parentJob ||
+    job.spawnedByJob ||
+    (job.continuations && job.continuations.length > 0) ||
+    (job.spawnedJobs && job.spawnedJobs.length > 0);
+  if (!hasAnything) return null;
+
+  const kindWord = (k: number | null | undefined) => {
+    if (k === 3) return 'Batch';
+    if (k === 2) return 'Message';
+
+    return 'Job';
+  };
+
+  const renderRow = (item: ContinuationInfo) => (
+    <div
+      key={item.id}
+      className="grid items-center gap-3"
+      style={{
+        gridTemplateColumns: '100px 1fr 1fr 80px auto',
+        padding: '8px 0',
+        borderBottom: '1px solid var(--hair-soft)',
+        fontSize: 12.5,
+      }}
+    >
+      <Link to={`/detail/${item.id}`} className="mono" style={{ color: 'var(--brand)' }}>
+        {shortId(item.id)}
+      </Link>
+      <span className="mono truncate" style={{ color: 'var(--foreground)' }}>
+        {shortType(item.type)}
+      </span>
+      <span className="mono truncate" style={{ color: 'var(--text-dim)' }}>
+        {item.handlerType ? shortType(item.handlerType) : '—'}
+      </span>
+      <span className="mono" style={{ fontSize: 11, color: 'var(--text-mute)' }}>
+        {kindWord(item.kind)}
+      </span>
+      <StateBadge state={item.currentState} />
+    </div>
+  );
+
+  const renderGroup = (label: string, items: ContinuationInfo[]) => {
+    if (items.length === 0) return null;
+
+    return (
+      <div key={label} style={{ marginTop: 6 }}>
+        <div className="soft-eyebrow" style={{ marginBottom: 4 }}>
+          {label} · {items.length}
+        </div>
+        {items.map(renderRow)}
+      </div>
+    );
+  };
+
+  return (
+    <Section label="Flow">
+      <div className="flex flex-col gap-1">
+        {job.parentJob && renderGroup('Parent', [job.parentJob])}
+        {job.spawnedByJob && renderGroup('Spawned by', [job.spawnedByJob])}
+        {job.continuations && job.continuations.length > 0 && renderGroup('Continuations', job.continuations)}
+        {job.spawnedJobs && job.spawnedJobs.length > 0 && renderGroup('Spawned jobs', job.spawnedJobs)}
+      </div>
+    </Section>
   );
 }
 
@@ -569,87 +742,6 @@ function HandlerOutputCard({ logs, jobId }: { logs: JobLogModel[]; jobId: string
   );
 }
 
-// ----- Exception (collapsible stack trace, preserved from the old Bold view) -----
-function ExceptionSection({ exception }: { exception: string }) {
-  const [expanded, setExpanded] = useState(false);
-  const lines = exception.split(/\r?\n/);
-  const first = lines[0] ?? '';
-  const match = first.match(/^([A-Za-z0-9_.]+Exception(?:`\d+)?)(?::\s*(.*))?$/);
-  const exceptionType = match?.[1] ?? null;
-  const exceptionMessage = match?.[2] ?? first;
-  const frames = lines.slice(1).filter((l) => l.trim().startsWith('at '));
-  const visible = expanded ? frames : frames.slice(0, 6);
-  const hiddenCount = frames.length - visible.length;
-
-  return (
-    <Section
-      label="Exception"
-      action={
-        <span
-          className="mono"
-          style={{ fontSize: 11, color: 'var(--text-mute)' }}
-        >
-          {frames.length} frames
-        </span>
-      }
-    >
-      <div
-        className="rounded-lg"
-        style={{
-          background: 'var(--state-failed-bg)',
-          border: '1px solid color-mix(in srgb, var(--state-failed) 25%, transparent)',
-          padding: '14px 16px',
-        }}
-      >
-        {exceptionType && (
-          <div
-            className="mono font-semibold"
-            style={{
-              color: 'var(--state-failed)',
-              fontSize: 13.5,
-              letterSpacing: '-0.005em',
-            }}
-          >
-            {exceptionType}
-          </div>
-        )}
-        <div className="mt-1 text-text-dim" style={{ fontSize: 13, lineHeight: 1.5 }}>
-          {exceptionMessage}
-        </div>
-      </div>
-
-      {frames.length > 0 && (
-        <pre
-          className="mono mt-3 overflow-x-auto rounded-lg"
-          style={{
-            background: '#1f1c18',
-            color: '#e6e1d3',
-            padding: '12px 14px',
-            fontSize: 11.5,
-            lineHeight: 1.55,
-            whiteSpace: 'pre',
-          }}
-        >
-          {visible.map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-        </pre>
-      )}
-
-      {hiddenCount > 0 && (
-        <button
-          type="button"
-          onClick={() => setExpanded((e) => !e)}
-          className="mono mt-2 text-text-dim hover:text-foreground"
-          style={{ fontSize: 11.5 }}
-        >
-          {expanded ? 'Hide framework frames' : `Show full backtrace (${frames.length} frames)`}
-        </button>
-      )}
-    </Section>
-  );
-}
-
 // ============================================================================
 // Page
 // ============================================================================
@@ -667,10 +759,32 @@ export function JobDetailStandard({
   job,
   systemEvents,
   handlerLogs,
+  reportedBars,
+  jobCounts,
+  onCountsUpdate,
 }: JobDetailStandardProps) {
   const requeue = useRequeueJob();
   const deleteJob = useDeleteJob();
   const { confirm, dialog: confirmDialog } = useConfirm();
+
+  const askRequeue = async () => {
+    const ok = await confirm({
+      title: 'Requeue job?',
+      description: 'The job will be re-enqueued and picked up by a worker on the next poll.',
+      confirmLabel: 'Requeue',
+    });
+    if (ok) {
+      requeue.mutate(job.id);
+    }
+  };
+
+  const totalJobs = Object.keys(jobCounts).length > 0
+    ? Object.values(jobCounts).reduce((a, b) => a + b, 0)
+    : job.totalJobs;
+  const completedJobs = jobCounts['completed'] ?? job.completedJobs;
+  const failedJobs = jobCounts['failed'] ?? job.failedJobs;
+
+  const isMessage = job.kind === 2;
 
   const askDelete = async (action: 'cancel' | 'delete') => {
     const ok = await confirm({
@@ -695,16 +809,13 @@ export function JobDetailStandard({
     ? JSON.stringify(Object.fromEntries(metaEntries), null, 2)
     : '';
 
-  const failedLog = systemEvents.find((e) => e.eventType === 'Failed') ?? null;
-  const exception = failedLog?.exception ?? null;
-
   const eventCount = systemEvents.length;
 
   return (
     <Fragment>
       <TitleStrip
         job={job}
-        onRequeue={() => requeue.mutate(job.id)}
+        onRequeue={() => void askRequeue()}
         onDelete={() =>
           askDelete(
             job.kind === 1 && job.currentState === State.Processing
@@ -722,6 +833,12 @@ export function JobDetailStandard({
       >
         {/* LEFT */}
         <div>
+          {((job.type || job.handlerType) || job.scheduleTime || job.traceId || job.metadata?.['ConcurrencyKey']) && (
+            <Section label="Details">
+              <DetailsList job={job} />
+            </Section>
+          )}
+
           <Section label="Payload">
             {hasMessage ? (
               <JsonBlock text={messageJson} />
@@ -758,13 +875,12 @@ export function JobDetailStandard({
             )}
           </Section>
 
-          {exception && <ExceptionSection exception={exception} />}
+          <BatchProgressSection total={totalJobs} completed={completedJobs} failed={failedJobs} />
 
-          {((job.type || job.handlerType) || job.scheduleTime || job.traceId) && (
-            <Section label="Details" noBorder>
-              <DetailsList job={job} />
-            </Section>
-          )}
+          <ReportedProgressSection bars={reportedBars} />
+
+          <FlowSection job={job} />
+
         </div>
 
         {/* RIGHT */}
@@ -785,6 +901,10 @@ export function JobDetailStandard({
           <HandlerOutputCard logs={handlerLogs} jobId={job.id} />
         </div>
       </div>
+
+      {isMessage && (
+        <RelatedJobsSection job={job} onCountsUpdate={onCountsUpdate} />
+      )}
 
       {confirmDialog}
     </Fragment>

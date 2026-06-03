@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react';
 import axios from 'axios';
-import { ArrowRight, Zap } from 'lucide-react';
+import { ArrowRight, Zap, Sun, Moon } from 'lucide-react';
 import api from '@/api/client';
+import { useTheme } from '@/hooks/useTheme';
 
 // Mulberry32 seeded PRNG — deterministic so streak positions stay stable
 // across re-renders without persisting state.
@@ -84,6 +85,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [passwordFocused, setPasswordFocused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const { theme, toggle: toggleTheme } = useTheme();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -135,6 +137,21 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
 
       <Supergraphic />
       <BackdropStreaks />
+
+      {/* Theme toggle (top-right) */}
+      <button
+        type="button"
+        onClick={toggleTheme}
+        className="absolute right-4 top-4 z-20 inline-flex h-9 w-9 items-center justify-center rounded-md text-text-dim hover:bg-paper transition-colors"
+        aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      >
+        {theme === 'dark' ? (
+          <Sun className="h-4 w-4" />
+        ) : (
+          <Moon className="h-4 w-4" />
+        )}
+      </button>
 
       {/* Card */}
       <main className="relative z-10 flex min-h-screen items-center justify-center px-6 py-12">

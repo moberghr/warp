@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import axios from 'axios';
 import { Outlet, useLocation } from 'react-router-dom';
 import { useDashboardStore } from '@/stores/dashboard';
@@ -126,7 +126,9 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
 
         <main className="flex-1 px-6 lg:px-8 pb-4 min-w-0 overflow-auto">
           <PageHeader />
-          <Outlet />
+          <Suspense fallback={null}>
+            <Outlet />
+          </Suspense>
         </main>
 
         <WarpStatusbar />

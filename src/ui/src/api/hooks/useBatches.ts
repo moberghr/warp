@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import * as api from '@/api';
 import { queryKeys } from '@/lib/queryClient';
 
@@ -6,6 +6,7 @@ export function useBatchesList(state: string | undefined, page: number, pageSize
   return useQuery({
     queryKey: queryKeys.batches(state, page, pageSize),
     queryFn: () => api.getBatches(page, pageSize, state),
+    placeholderData: keepPreviousData,
   });
 }
 

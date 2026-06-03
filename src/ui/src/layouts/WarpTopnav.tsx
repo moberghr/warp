@@ -1,7 +1,8 @@
 import { NavLink } from 'react-router-dom';
-import { Zap, Menu } from 'lucide-react';
+import { Zap, Menu, Sun, Moon } from 'lucide-react';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useInfo } from '@/api/hooks/useInfo';
+import { useTheme } from '@/hooks/useTheme';
 import { cn } from '@/lib/utils';
 import type { WarpNavItem, NavBadge } from './warpNavItems';
 
@@ -32,6 +33,7 @@ export default function WarpTopnav({ items, onMenuClick }: Props) {
   const stats = useDashboardStore((s) => s.stats);
   const { data: info } = useInfo();
   const versionTag = info?.version ? `V${info.version}` : '';
+  const { theme, toggle: toggleTheme } = useTheme();
 
   return (
     <nav className="soft-topnav" aria-label="Primary">
@@ -85,6 +87,20 @@ export default function WarpTopnav({ items, onMenuClick }: Props) {
           );
         })}
       </div>
+
+      <button
+        type="button"
+        onClick={toggleTheme}
+        className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-md text-text-dim hover:bg-paper transition-colors"
+        aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      >
+        {theme === 'dark' ? (
+          <Sun className="h-4 w-4" />
+        ) : (
+          <Moon className="h-4 w-4" />
+        )}
+      </button>
     </nav>
   );
 }

@@ -118,7 +118,20 @@ export default function RecurringPage() {
                           Disable
                         </Button>
                       )}
-                      <Button variant="ghost" size="sm" onClick={() => triggerJob.mutate(rj.id)}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: 'Trigger recurring job now?',
+                            description: `A job will be enqueued immediately, on top of the normal cron schedule. Use this for manual reruns — not for backfills.`,
+                            confirmLabel: 'Trigger',
+                          });
+                          if (ok) {
+                            triggerJob.mutate(rj.id);
+                          }
+                        }}
+                      >
                         Trigger
                       </Button>
                       <Button
@@ -128,7 +141,7 @@ export default function RecurringPage() {
                         onClick={async () => {
                           const ok = await confirm({
                             title: 'Delete recurring job?',
-                            description: `Remove "${rj.name}"? Future runs will not be scheduled. Existing in-flight jobs are unaffected.`,
+                            description: `Remove "${rj.name}"? Future runs will not be scheduled and history will be removed permanently. Existing in-flight jobs are unaffected. This cannot be undone.`,
                             confirmLabel: 'Remove',
                             destructive: true,
                           });

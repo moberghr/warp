@@ -6,6 +6,7 @@ import { useJobDetail } from '@/api/hooks/useJobs';
 import { usePageStore } from '@/stores/page';
 import { shortId } from '@/utils/format';
 import { stateName } from '@/utils/format';
+import { useRealtimeRefetch } from '@/hooks/useRealtimeRefetch';
 import { JobDetailStandard } from './JobDetailStandard';
 import { BatchDetailPage } from '@/pages/batches/BatchDetailPage';
 
@@ -27,6 +28,10 @@ export default function DetailPage() {
   const query = useJobDetail(id);
   const setPage = usePageStore(s => s.set);
   const resetPage = usePageStore(s => s.reset);
+
+  useRealtimeRefetch('JobFinalized', () => {
+    void query.refetch();
+  });
 
   const job = query.data;
 

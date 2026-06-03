@@ -140,6 +140,8 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 
         var batchesProcessing = batchStateCounts.Where(x => x.State == State.Processing).Sum(x => x.Count);
         var batchesAwaiting = batchStateCounts.Where(x => x.State == State.Awaiting).Sum(x => x.Count);
+        var batchesScheduled = batchStateCounts.Where(x => x.State == State.Scheduled).Sum(x => x.Count);
+        var batchesEnqueued = batchStateCounts.Where(x => x.State == State.Enqueued).Sum(x => x.Count);
 
         // Per-state message counts
         var messageStateCounts = await _context.Set<Job>()
@@ -148,10 +150,13 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(g => new { State = g.Key, Count = g.Count() })
             .ToListAsync();
 
+        var messagesAwaiting = messageStateCounts.Where(x => x.State == State.Awaiting).Sum(x => x.Count);
+        var messagesScheduled = messageStateCounts.Where(x => x.State == State.Scheduled).Sum(x => x.Count);
         var messagesEnqueued = messageStateCounts.Where(x => x.State == State.Enqueued).Sum(x => x.Count);
         var messagesProcessing = messageStateCounts.Where(x => x.State == State.Processing).Sum(x => x.Count);
         var messagesCompleted = messageStateCounts.Where(x => x.State == State.Completed).Sum(x => x.Count);
         var messagesFailed = messageStateCounts.Where(x => x.State == State.Failed).Sum(x => x.Count);
+        var messagesDeleted = messageStateCounts.Where(x => x.State == State.Deleted).Sum(x => x.Count);
 
         var totalSucceeded = await GetCombinedStatValue("stats:succeeded");
         var totalFailed = await GetCombinedStatValue("stats:failed");
@@ -175,10 +180,15 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             BatchesFailed = batchesFailed,
             BatchesAwaiting = batchesAwaiting,
             BatchesDeleted = batchesDeleted,
+            BatchesScheduled = batchesScheduled,
+            BatchesEnqueued = batchesEnqueued,
+            MessagesAwaiting = messagesAwaiting,
+            MessagesScheduled = messagesScheduled,
             MessagesEnqueued = messagesEnqueued,
             MessagesProcessing = messagesProcessing,
             MessagesCompleted = messagesCompleted,
             MessagesFailed = messagesFailed,
+            MessagesDeleted = messagesDeleted,
             TotalSucceeded = totalSucceeded,
             TotalFailed = totalFailed,
             TotalDeleted = totalDeleted,

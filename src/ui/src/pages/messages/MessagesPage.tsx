@@ -33,9 +33,9 @@ export default function MessagesPage() {
   const data = query.data;
 
   return (
-    <div className="flex flex-col lg:flex-row h-full min-h-0">
+    <div className="flex flex-col lg:flex-row">
       <GroupStateRail kind="messages" active={state} />
-      <div className="flex-1 overflow-auto p-5 min-w-0 flex flex-col gap-3">
+      <div className="flex-1 p-5 min-w-0 flex flex-col gap-3">
       <Panel className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full border-collapse">

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export const DEFAULT_DATE_FORMAT = 'd.MM.yyyy HH:mm:ss';
+export const DEFAULT_DATE_FORMAT = 'dd.MM.yyyy HH:mm:ss';
 
 interface SettingsStore {
   dateFormat: string;

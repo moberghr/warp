@@ -28,13 +28,18 @@ export interface DashboardStatistics {
   deleted: number;
   batchesProcessing: number;
   batchesAwaiting: number;
+  batchesScheduled: number;
+  batchesEnqueued: number;
   batchesDeleted: number;
   batchesCompleted: number;
   batchesFailed: number;
+  messagesAwaiting: number;
+  messagesScheduled: number;
   messagesEnqueued: number;
   messagesProcessing: number;
   messagesCompleted: number;
   messagesFailed: number;
+  messagesDeleted: number;
   messages: number;
   totalSucceeded: number;
   totalFailed: number;

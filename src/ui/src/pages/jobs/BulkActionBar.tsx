@@ -6,6 +6,7 @@ interface BulkActionBarProps {
   onRequeue: () => void;
   onDelete: () => void;
   onRequeueAllType?: () => void;
+  onDeleteAllType?: () => void;
 }
 
 export function BulkActionBar({
@@ -16,6 +17,7 @@ export function BulkActionBar({
   onRequeue,
   onDelete,
   onRequeueAllType,
+  onDeleteAllType,
 }: BulkActionBarProps) {
   if (count === 0) {
     return null;
@@ -51,6 +53,15 @@ export function BulkActionBar({
             className="px-3 py-1 text-[12px] font-medium rounded-md border border-border bg-panel text-foreground hover:bg-panel-2 transition-colors"
           >
             Requeue all {activeType}
+          </button>
+        )}
+        {activeType && onDeleteAllType && (
+          <button
+            type="button"
+            onClick={onDeleteAllType}
+            className="px-3 py-1 text-[12px] font-medium rounded-md border border-warp-red text-warp-red hover:bg-warp-red-soft transition-colors"
+          >
+            Delete all {activeType}
           </button>
         )}
       </div>

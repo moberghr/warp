@@ -164,7 +164,7 @@ export default function DashboardPage() {
           label="Messages"
           value={stats.messages}
           icon={Mail}
-          href="/messages/enqueued"
+          href="/messages"
           as={Link}
           sub={
             stats.messagesFailed > 0
