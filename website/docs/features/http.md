@@ -275,9 +275,11 @@ app.MapGroup("/internal/admin").RequireAuthorization("adminPolicy").MapWarpHttp(
 
 `MapWarpHttp(group)` matches strictly — null matches null, "public" matches "public". No overlap. Calling `MapWarpHttp(group)` twice on the same `IEndpointRouteBuilder` instance with the same group throws `InvalidOperationException` at startup.
 
-## Auth
+## Endpoint metadata attributes
 
-Place `[Authorize]` or `[AllowAnonymous]` on the handler class — Warp.Http surfaces them as ASP.NET endpoint metadata, so they compose with group-level `RequireAuthorization()` exactly as Minimal API does:
+Any attribute you place on the handler class is surfaced as ASP.NET endpoint metadata (via `EndpointBuilder.WithMetadata(attr)`) — only Warp's own `[WarpHttp*]` routing markers are excluded. So `[Authorize]`, `[AllowAnonymous]`, `[EnableRateLimiting]` / `[DisableRateLimiting]`, `[Tags]`, `[OutputCache]`, `[ProducesResponseType]`, and any custom metadata attribute all compose with the matching middleware exactly as they would on a hand-written Minimal API endpoint.
+
+### Auth
 
 ```csharp
 [Authorize(Policy = "OrdersWrite")]
@@ -292,6 +294,16 @@ app.MapGroup("/api").RequireAuthorization().MapWarpHttp();
 [AllowAnonymous]
 [WarpHttpGet("/api/health")]
 public sealed class HealthCheckHandler : IRequestHandler<HealthCheck, HealthStatus> { ... }
+```
+
+### Rate limiting
+
+`[EnableRateLimiting("policy")]` on the handler class applies the named policy registered via `builder.Services.AddRateLimiter(...)`, just like on a Minimal API endpoint:
+
+```csharp
+[EnableRateLimiting("per-user")]
+[WarpHttpPost("/orders")]
+public sealed class CreateOrderHandler : IRequestHandler<CreateOrder, OrderDto> { ... }
 ```
 
 ## OpenAPI / Swagger
