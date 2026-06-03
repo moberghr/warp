@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig, type Plugin, type PluginOption } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
@@ -41,11 +41,21 @@ function serveExtensions(): Plugin {
   }
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(async ({ mode }) => {
   const isDemo = mode === 'demo'
 
+  // Bundle analysis is opt-in: `ANALYZE=1 npm run build` emits bundle-stats.html.
+  // Loaded via dynamic import so normal/CI builds never touch the devDependency.
+  const plugins: PluginOption[] = [react(), tailwindcss(), serveExtensions()]
+  if (process.env.ANALYZE) {
+    const { visualizer } = await import('rollup-plugin-visualizer')
+    plugins.push(
+      visualizer({ filename: 'bundle-stats.html', gzipSize: true, brotliSize: true, template: 'treemap' }) as PluginOption,
+    )
+  }
+
   return {
-    plugins: [react(), tailwindcss(), serveExtensions()],
+    plugins,
     base: './',
     resolve: {
       alias: {

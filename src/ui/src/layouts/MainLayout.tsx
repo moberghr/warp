@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useDashboardStore } from '@/stores/dashboard';
 import * as LucideIcons from 'lucide-react';
@@ -256,7 +256,11 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
               converge on. Section sidebars live outside this wrapper so they hug the
               viewport edge. */}
           <div className="max-w-screen-2xl mx-auto">
-            <Outlet />
+            {/* Boundary for the code-split route pages (see App.tsx). The shell/nav
+                above stays mounted while the next page's chunk loads. */}
+            <Suspense fallback={null}>
+              <Outlet />
+            </Suspense>
           </div>
         </main>
       </div>
