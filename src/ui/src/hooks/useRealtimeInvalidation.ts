@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { subscribeRealtime } from '@/lib/realtimeBus';
 import { queryScopes } from '@/lib/queryClient';
+import { useDashboardStore } from '@/stores/dashboard';
 
 const COALESCE_MS = 400;
 
@@ -31,6 +32,10 @@ export function useRealtimeInvalidation() {
         for (const scope of scopes) {
           qc.invalidateQueries({ queryKey: scope });
         }
+        // The state-rail and dashboard cards read counts from the zustand
+        // dashboard store, which lives outside React Query. Refresh it here
+        // so per-state badges stay in sync after enqueue/finalize bursts.
+        void useDashboardStore.getState().fetchStats();
       }, COALESCE_MS);
       pending.set(key, handle);
     };

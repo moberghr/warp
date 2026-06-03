@@ -20,10 +20,9 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
   const rafId = useRef(0);
   const realtimeData = useDashboardStore((s) => s.realtimeData);
 
-  const round2 = (x: number) => Math.round(x * 100) / 100;
   const vals = realtimeData.map((p) => p.succeeded + p.failed);
-  const current = vals.length > 0 ? round2(vals[vals.length - 1]) : 0;
-  const max = vals.length > 0 ? round2(Math.max(...vals)) : 0;
+  const current = vals.length > 0 ? Math.round(vals[vals.length - 1]) : 0;
+  const max = vals.length > 0 ? Math.round(Math.max(...vals)) : 0;
   const avg = vals.length >= 5 ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
 
   useEffect(() => {

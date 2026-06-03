@@ -304,8 +304,8 @@ function TVChart({ data, windowSec, alpha, tickIntervalSec }: TVChartProps) {
 
       const succVal = param.seriesData.get(succ) as { value?: number } | undefined;
       const failVal = param.seriesData.get(fail) as { value?: number } | undefined;
-      const s = (succVal?.value ?? 0).toFixed(1);
-      const f = (failVal?.value ?? 0).toFixed(1);
+      const s = Math.round(succVal?.value ?? 0).toString();
+      const f = Math.round(failVal?.value ?? 0).toString();
       const d = new Date((param.time as number) * 1000);
       const hh = String(d.getHours()).padStart(2, '0');
       const mm = String(d.getMinutes()).padStart(2, '0');

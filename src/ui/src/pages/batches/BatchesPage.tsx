@@ -24,10 +24,12 @@ export default function BatchesPage() {
 
   useEffect(() => {
     const title = state ? `${state.charAt(0).toUpperCase() + state.slice(1)} Batches` : 'Batches';
-    const subtitle = query.data ? `${query.data.totalCount} total` : undefined;
-    usePageStore.getState().set({ title, subtitle });
+    usePageStore.getState().set({
+      title,
+      subtitle: 'Groups of child jobs tracked as a single unit',
+    });
     return () => usePageStore.getState().reset();
-  }, [state, query.data]);
+  }, [state]);
 
   const data = query.data;
 

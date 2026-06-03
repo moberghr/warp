@@ -49,7 +49,9 @@ export function JobsStateRail({ active }: JobsStateRailProps) {
                 className={`mono text-[10.5px] font-semibold px-1.5 py-0.5 rounded-full ${
                   isActive
                     ? `${s.accentBg} ${s.accent}`
-                    : 'bg-panel-2 text-text-mute border border-border'
+                    : s.slug === 'failed' && count > 0
+                      ? `${s.accentBg} ${s.accent}`
+                      : 'bg-panel-2 text-text-mute border border-border'
                 }`}
               >
                 {count.toLocaleString()}

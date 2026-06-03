@@ -110,7 +110,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         {error && (
           <div
             role="alert"
-            className="mx-4 lg:mx-8 mt-3 rounded-md bg-warp-red-soft ring-1 ring-warp-red/30 px-3 py-2 text-sm text-warp-red flex items-center gap-2"
+            className="mx-3 sm:mx-4 lg:mx-8 mt-3 rounded-md bg-warp-red-soft ring-1 ring-warp-red/30 px-3 py-2 text-sm text-warp-red flex items-center gap-2"
           >
             <span className="font-medium">Connection lost</span>
             <span className="opacity-80">— Unable to connect to Warp API. Retrying...</span>
@@ -124,7 +124,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
           </div>
         )}
 
-        <main className="flex-1 px-6 lg:px-8 pb-4 min-w-0 overflow-auto">
+        <main className="flex-1 px-3 sm:px-6 lg:px-8 pb-4 min-w-0 overflow-auto">
           <PageHeader />
           <Suspense fallback={null}>
             <Outlet />

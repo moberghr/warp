@@ -1,0 +1,1 @@
+import{Wn as e,ht as t,qn as n}from"./index-DjLC2F4y.js";var r=n(e(),1);function i(e,n,i=3e4){let a=(0,r.useRef)(n);(0,r.useEffect)(()=>{a.current=n},[n]);let o=Array.isArray(e)?e:[e];(0,r.useEffect)(()=>{let e=()=>a.current(),n=o.map(n=>t(n,e)),r=setInterval(e,i);return()=>{for(let e of n)e();clearInterval(r)}},[o.join(`,`),i])}export{i as t};

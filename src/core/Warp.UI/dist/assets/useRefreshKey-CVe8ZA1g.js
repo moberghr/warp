@@ -1,0 +1,1 @@
+import{Rn as e}from"./index-DjLC2F4y.js";function t(){return e().state?.refreshKey}export{t};

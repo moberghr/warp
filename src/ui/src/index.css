@@ -1009,15 +1009,21 @@
     box-shadow: var(--soft-nav-shadow);
     display: flex;
     align-items: stretch;
-    padding: 0 22px;
+    padding: 0 12px;
     flex-shrink: 0;
+  }
+  @media (min-width: 640px) {
+    .soft-topnav { padding: 0 22px; }
   }
   .soft-topnav-brand {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding-right: 22px;
+    padding-right: 12px;
     border-right: 1px solid var(--hair);
+  }
+  @media (min-width: 640px) {
+    .soft-topnav-brand { padding-right: 22px; }
   }
   .soft-topnav-mark {
     width: 30px;
@@ -1102,10 +1108,10 @@
   /* System bar (28px, mono, slim) */
   .soft-systembar {
     height: 28px;
-    padding: 0 22px;
+    padding: 0 12px;
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 10px;
     font-size: 10.5px;
     color: var(--text-mute);
     letter-spacing: 0.6px;
@@ -1113,6 +1119,11 @@
     border-top: 1px solid var(--hair);
     font-family: var(--font-mono);
     flex-shrink: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  @media (min-width: 640px) {
+    .soft-systembar { padding: 0 22px; gap: 14px; }
   }
   .soft-systembar .hair-v {
     display: inline-block;
@@ -1160,10 +1171,10 @@
   .soft-btn.soft-btn-primary:hover:not(:disabled) { background: #9F4A1B; }
   .soft-btn.soft-btn-dark {
     background: var(--foreground);
-    color: #ffffff;
+    color: var(--background);
     box-shadow: var(--soft-btn-dark-shadow);
   }
-  .soft-btn.soft-btn-dark:hover:not(:disabled) { background: #2A1E0E; }
+  .soft-btn.soft-btn-dark:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground) 88%, var(--background)); }
   .soft-btn.soft-btn-ghost {
     background: var(--panel);
     color: var(--foreground);

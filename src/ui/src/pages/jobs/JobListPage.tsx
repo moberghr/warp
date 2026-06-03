@@ -18,7 +18,6 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import { shortType, shortId, formatDateTime } from '@/utils/format';
 import { getStateTone } from '@/lib/styles';
 import { usePageStore } from '@/stores/page';
-import { useDashboardStore } from '@/stores/dashboard';
 import {
   useJobsList,
   useFailedJobsByType,
@@ -113,19 +112,14 @@ export default function JobListPage() {
   const requeueByType = useRequeueFailedJobsByType();
   const deleteByType = useDeleteFailedJobsByType();
 
-  const stats = useDashboardStore((s) => s.stats);
-
-  // Drive the topbar via the page store.
+  // Drive the topbar via the page store. Re-set on state navigation so the
+  // title doesn't get cleared by PageHeader's path-change handler.
   useEffect(() => {
-    if (!stats) {
-      usePageStore.getState().set({ title: 'Jobs', subtitle: undefined });
-
-      return;
-    }
-
-    const subtitle = `${stats.failed} failed · ${stats.processing} processing · ${stats.created} enqueued`;
-    usePageStore.getState().set({ title: 'Jobs', subtitle });
-  }, [stats]);
+    usePageStore.getState().set({
+      title: `${capitalize(resolvedState)} Jobs`,
+      subtitle: 'Background work items dispatched to workers',
+    });
+  }, [resolvedState]);
   useEffect(() => () => usePageStore.getState().reset(), []);
 
   const rows = useMemo<JobModel[]>(() => data?.items ?? [], [data]);

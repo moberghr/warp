@@ -64,8 +64,8 @@ export default function WarpStatusbar() {
 
       {info?.provider && (
         <>
-          <span className="hair-v" aria-hidden />
-          <span>
+          <span className="hair-v hidden sm:inline-block" aria-hidden />
+          <span className="hidden sm:inline truncate">
             <span className="text-text-dim">{info.provider.toUpperCase()}</span>
             {info.host && (
               <>
@@ -79,12 +79,12 @@ export default function WarpStatusbar() {
 
       {info?.schema && (
         <>
-          <span className="hair-v" aria-hidden />
-          <span>SCHEMA {info.schema}</span>
+          <span className="hair-v hidden md:inline-block" aria-hidden />
+          <span className="hidden md:inline">SCHEMA {info.schema}</span>
         </>
       )}
 
-      <span className="ml-auto inline-flex items-center gap-2 tracking-wide">
+      <span className="ml-auto inline-flex items-center gap-2 tracking-wide shrink-0">
         {offline ? (
           <>
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-warp-red" aria-hidden />
@@ -102,12 +102,12 @@ export default function WarpStatusbar() {
             <span className="font-semibold text-brand">{live ? 'LIVE' : 'IDLE'}</span>
           </>
         )}
-        <span className="opacity-60">·</span>
-        <span>
+        <span className="opacity-60 hidden sm:inline">·</span>
+        <span className="hidden sm:inline">
           {serverCount} SRV · {workerCount} WRK
         </span>
         <span className="opacity-60">·</span>
-        <span>UTC {utc}</span>
+        <span><span className="hidden sm:inline">UTC </span>{utc.slice(11)}</span>
       </span>
     </div>
   );

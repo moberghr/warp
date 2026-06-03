@@ -19,25 +19,21 @@ export default function PageHeader() {
   const location = useLocation();
   const suppressed = isSuppressed(location.pathname);
 
-  // Hold the last fresh title across the brief unmount→remount window when
-  // navigating between pages (outgoing page resets the store to 'Warp' on
-  // cleanup, incoming page sets a new title on mount). Without this guard
-  // the header collapses and reappears, causing a layout flicker.
+  // Hold the last real title so the header stays put during the brief
+  // unmount→remount window when navigating between pages (outgoing page's
+  // cleanup resets the store to 'Warp', incoming page sets the new title a
+  // tick later). Mirror the store as soon as a real title arrives — do NOT
+  // clear on pathname change, otherwise navigating within the same component
+  // (e.g. /jobs/enqueued → /jobs/completed) causes a visible flicker.
   const [displayed, setDisplayed] = useState({ title, subtitle, right });
-  const lastPath = useRef(location.pathname);
+  const lastTitle = useRef(title);
 
   useEffect(() => {
-    if (location.pathname !== lastPath.current) {
-      lastPath.current = location.pathname;
-      // Clear the held title; the new page will set its own.
-      setDisplayed({ title: '', subtitle: undefined, right: undefined });
-
-      return;
-    }
     if (title && title !== 'Warp') {
       setDisplayed({ title, subtitle, right });
+      lastTitle.current = title;
     }
-  }, [title, subtitle, right, location.pathname]);
+  }, [title, subtitle, right]);
 
   if (suppressed) return null;
   const t = displayed.title;

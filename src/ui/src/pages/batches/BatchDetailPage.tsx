@@ -96,14 +96,15 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
   const stateLabel = stateName(job.currentState);
 
   const metaItems: Array<[string, string, boolean]> = [];
-  if (job.type) metaItems.push(['Type', shortType(job.type), false]);
-  if (job.queue) metaItems.push(['Queue', job.queue, false]);
   metaItems.push([
     'Created',
     `${formatDateTime(job.createTime)}${createdAgo ? ` · ${createdAgo}` : ''}`,
     false,
   ]);
+  if (job.queue) metaItems.push(['Queue', job.queue, false]);
+  if (job.scheduleTime) metaItems.push(['Scheduled', formatDateTime(job.scheduleTime), false]);
   metaItems.push(['ID', job.id, true]);
+  if (job.traceId) metaItems.push(['Trace', job.traceId, true]);
 
   return (
     <div className="flex flex-col gap-[18px]">
@@ -159,18 +160,27 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
             {job.id.slice(0, 8)}
           </span>
           <span className={`soft-pill ${pillClass}`}>{stateLabel}</span>
+          {job.type && (
+            <span className="inline-flex items-baseline gap-1.5" style={{ fontSize: 14 }}>
+              <span className="soft-eyebrow">Request</span>
+              <span className="text-text-dim font-medium">{shortType(job.type)}</span>
+            </span>
+          )}
+          {job.handlerType && (
+            <span className="inline-flex items-baseline gap-1.5" style={{ fontSize: 14 }}>
+              <span className="soft-eyebrow">Handler</span>
+              <span className="text-text-dim font-medium">{shortType(job.handlerType)}</span>
+            </span>
+          )}
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center">
-          {metaItems.map(([k, v, copy], i) => (
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-7 sm:gap-y-2 min-w-0">
+          {metaItems.map(([k, v, copy]) => (
             <div
               key={k}
-              className="flex items-baseline gap-2.5 px-5"
-              style={{
-                borderLeft: i === 0 ? 'none' : '1px solid var(--hair-soft)',
-              }}
+              className="flex items-baseline gap-2.5 min-w-0"
             >
-              <span className="soft-eyebrow">{k}</span>
+              <span className="soft-eyebrow shrink-0">{k}</span>
               <span
                 className="mono text-foreground break-all"
                 style={{ fontSize: 12.5, letterSpacing: 0.2 }}
@@ -181,8 +191,8 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
                 <button
                   type="button"
                   onClick={() => void navigator.clipboard?.writeText(v)}
-                  className="text-text-mute hover:text-foreground"
-                  aria-label="Copy ID"
+                  className="text-text-mute hover:text-foreground shrink-0"
+                  aria-label={`Copy ${k}`}
                 >
                   <Copy size={12} />
                 </button>

@@ -44,15 +44,13 @@ export default function RecurringPage() {
   const deleteJob = useDeleteRecurringJob();
   const { confirm, dialog: confirmDialog } = useConfirm();
 
-  const total = query.data?.totalCount ?? 0;
-
   useEffect(() => {
     usePageStore.getState().set({
       title: 'Recurring Jobs',
-      subtitle: query.data ? `${total.toLocaleString()} total` : undefined,
+      subtitle: 'Cron-scheduled jobs that re-enqueue automatically',
     });
     return () => usePageStore.getState().reset();
-  }, [total, query.data]);
+  }, []);
 
   if (query.error) return <ErrorState message={(query.error as Error).message} />;
   if (!query.data) return <LoadingState />;

@@ -207,8 +207,15 @@ function TitleStrip({ job, onRequeue, onDelete, isRequeuing, isDeleting }: Title
             </span>
             <span className={`soft-pill ${pill}`}>{stateLabel}</span>
             {job.type && (
-              <span className="text-text-dim font-medium" style={{ fontSize: 14 }}>
-                {shortType(job.type)}
+              <span className="inline-flex items-baseline gap-1.5" style={{ fontSize: 14 }}>
+                <span className="soft-eyebrow">Request</span>
+                <span className="text-text-dim font-medium">{shortType(job.type)}</span>
+              </span>
+            )}
+            {job.handlerType && (
+              <span className="inline-flex items-baseline gap-1.5" style={{ fontSize: 14 }}>
+                <span className="soft-eyebrow">Handler</span>
+                <span className="text-text-dim font-medium">{shortType(job.handlerType)}</span>
               </span>
             )}
           </div>
@@ -284,26 +291,25 @@ function TitleStrip({ job, onRequeue, onDelete, isRequeuing, isDeleting }: Title
         )}
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center">
+      <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-7 sm:gap-y-2 min-w-0">
         {([
           ['Created', formatDateTime(job.createTime), false],
           ['Queue', job.queue ?? 'default', false],
+          job.scheduleTime ? ['Scheduled', formatDateTime(job.scheduleTime), false] : null,
           hasRetryPolicy ? ['Attempt', attemptsLabel, false] : null,
           ['ID', job.id, true],
-        ].filter(Boolean) as Array<[string, string, boolean]>).map((row, i) => {
+          job.traceId ? ['Trace', job.traceId, true] : null,
+        ].filter(Boolean) as Array<[string, string, boolean]>).map((row) => {
           const [k, v, copy] = row;
 
           return (
             <div
               key={k}
-              className="flex items-baseline gap-2.5 px-5"
-              style={{
-                borderLeft: i === 0 ? 'none' : '1px solid var(--hair-soft)',
-              }}
+              className="flex items-baseline gap-2.5 min-w-0"
             >
-              <span className="soft-eyebrow">{k}</span>
+              <span className="soft-eyebrow shrink-0">{k}</span>
               <span
-                className="mono text-foreground"
+                className="mono text-foreground break-all"
                 style={{ fontSize: 12.5, letterSpacing: 0.2 }}
               >
                 {v}
@@ -312,8 +318,8 @@ function TitleStrip({ job, onRequeue, onDelete, isRequeuing, isDeleting }: Title
                 <button
                   type="button"
                   onClick={() => void navigator.clipboard?.writeText(v)}
-                  className="text-text-mute hover:text-foreground"
-                  aria-label="Copy ID"
+                  className="text-text-mute hover:text-foreground shrink-0"
+                  aria-label={`Copy ${k}`}
                 >
                   <Copy size={12} />
                 </button>
@@ -371,46 +377,6 @@ function JsonBlock({ text }: { text: string }) {
         <div key={i}>{tokenizeJsonLine(l)}</div>
       ))}
     </pre>
-  );
-}
-
-// ----- Details (definition list) -----
-function DetailsList({ job }: { job: UnifiedJobDetailModel }) {
-  const rows: Array<[string, string]> = [];
-  if (job.type) rows.push(['Type', shortType(job.type)]);
-  if (job.handlerType) rows.push(['Handler', shortType(job.handlerType)]);
-  if (job.scheduleTime) rows.push(['Scheduled', formatDateTime(job.scheduleTime)]);
-  const mutex = job.metadata?.['ConcurrencyKey'];
-  if (mutex) rows.push(['Mutex', String(mutex)]);
-  if (job.traceId) rows.push(['Trace', job.traceId]);
-
-  if (rows.length === 0) return null;
-
-  return (
-    <div>
-      {rows.map(([k, v], i) => (
-        <div
-          key={k}
-          className="grid items-baseline gap-3.5"
-          style={{
-            gridTemplateColumns: '120px 1fr',
-            padding: '10px 0',
-            borderBottom:
-              i < rows.length - 1 ? '1px solid var(--hair-soft)' : 'none',
-          }}
-        >
-          <span className="soft-eyebrow" style={{ letterSpacing: '1.4px' }}>
-            {k}
-          </span>
-          <span
-            className="mono text-foreground break-all"
-            style={{ fontSize: 12.5 }}
-          >
-            {v}
-          </span>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -701,35 +667,35 @@ function HandlerOutputCard({ logs, jobId }: { logs: JobLogModel[]; jobId: string
           return (
             <div
               key={log.id}
-              className="mono grid items-baseline"
+              className="mono flex flex-col gap-1.5 sm:grid sm:items-baseline sm:gap-3 sm:[grid-template-columns:170px_92px_1fr]"
               style={{
-                gridTemplateColumns: '170px 92px 1fr',
-                gap: 12,
                 padding: '12px 14px',
                 borderBottom: isLast ? 'none' : '1px solid var(--hair-soft)',
                 fontSize: 11.5,
                 lineHeight: 1.5,
               }}
             >
-              <span style={{ color: 'var(--text-mute)', letterSpacing: 0.3 }}>
-                {formatDateTime(log.timestamp)}
-              </span>
-              <span
-                className="font-bold uppercase text-center"
-                style={{
-                  fontSize: 9.5,
-                  letterSpacing: '1.2px',
-                  color,
-                  background: `color-mix(in srgb, ${color} 12%, transparent)`,
-                  border: `1px solid color-mix(in srgb, ${color} 18%, transparent)`,
-                  borderRadius: 4,
-                  padding: '1px 7px',
-                  width: 'fit-content',
-                }}
-              >
-                {log.level}
-              </span>
-              <span style={{ color: 'var(--text-dim)' }} className="break-words">
+              <div className="flex items-center gap-2 sm:contents">
+                <span style={{ color: 'var(--text-mute)', letterSpacing: 0.3 }}>
+                  {formatDateTime(log.timestamp)}
+                </span>
+                <span
+                  className="font-bold uppercase text-center"
+                  style={{
+                    fontSize: 9.5,
+                    letterSpacing: '1.2px',
+                    color,
+                    background: `color-mix(in srgb, ${color} 12%, transparent)`,
+                    border: `1px solid color-mix(in srgb, ${color} 18%, transparent)`,
+                    borderRadius: 4,
+                    padding: '1px 7px',
+                    width: 'fit-content',
+                  }}
+                >
+                  {log.level}
+                </span>
+              </div>
+              <span style={{ color: 'var(--text-dim)' }} className="break-words min-w-0">
                 <span style={{ color: color, fontWeight: log.level.toLowerCase() === 'error' ? 600 : 400 }}>
                   {log.message}
                 </span>
@@ -827,18 +793,9 @@ export function JobDetailStandard({
         isDeleting={deleteJob.isPending}
       />
 
-      <div
-        className="grid gap-x-12 gap-y-0"
-        style={{ gridTemplateColumns: 'minmax(0, 1.05fr) minmax(0, 1fr)' }}
-      >
+      <div className="grid grid-cols-1 gap-x-12 gap-y-0 lg:[grid-template-columns:minmax(0,1.05fr)_minmax(0,1fr)]">
         {/* LEFT */}
-        <div>
-          {((job.type || job.handlerType) || job.scheduleTime || job.traceId || job.metadata?.['ConcurrencyKey']) && (
-            <Section label="Details">
-              <DetailsList job={job} />
-            </Section>
-          )}
-
+        <div className="min-w-0">
           <Section label="Payload">
             {hasMessage ? (
               <JsonBlock text={messageJson} />
@@ -884,7 +841,7 @@ export function JobDetailStandard({
         </div>
 
         {/* RIGHT */}
-        <div style={{ paddingTop: 22 }}>
+        <div className="min-w-0 lg:pt-[22px]">
           <div className="mb-6">
             <div className="mb-3 flex items-center gap-2">
               <span className="soft-eyebrow">Lifecycle</span>
