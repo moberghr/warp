@@ -164,7 +164,7 @@ export function FilteredJobsTable({ title, parentId, parentKind, fetchJobs, fetc
       header: 'Id',
       enableSorting: false,
       cell: ({ row }) => (
-        <Link to={`/detail/${row.original.id}`} className="text-foreground hover:underline font-mono text-[11px]">
+        <Link to={`/jobs/detail/${row.original.id}`} className="text-foreground hover:underline font-mono text-[11px]">
           {shortId(row.original.id)}
         </Link>
       ),

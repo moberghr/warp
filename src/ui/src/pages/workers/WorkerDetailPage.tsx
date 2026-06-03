@@ -81,7 +81,7 @@ export default function WorkerDetailPage() {
               <dd>
                 {worker.currentJobId ? (
                   <>
-                    <Link to={`/detail/${worker.currentJobId}`} className="text-primary hover:underline font-mono text-xs">
+                    <Link to={`/jobs/detail/${worker.currentJobId}`} className="text-primary hover:underline font-mono text-xs">
                       {shortId(worker.currentJobId)}
                     </Link>
                     {worker.currentJobType && (
@@ -129,7 +129,7 @@ export default function WorkerDetailPage() {
                       </span>
                     </td>
                     <td className="px-3.5 py-2 font-mono text-[12.5px]">
-                      <Link to={`/detail/${log.jobId}`} className="text-primary hover:underline">
+                      <Link to={`/jobs/detail/${log.jobId}`} className="text-primary hover:underline">
                         {shortId(log.jobId)}
                       </Link>
                     </td>

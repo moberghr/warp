@@ -63,7 +63,7 @@ export default function MessagesPage() {
                 data.items.map((msg) => (
                   <tr key={msg.id} className="border-b border-border last:border-b-0 hover:bg-panel-2/60">
                     <td className="px-3.5 py-2 font-mono text-[12.5px]">
-                      <Link to={`/detail/${msg.id}`} className="text-primary hover:underline">
+                      <Link to={`/messages/detail/${msg.id}`} className="text-primary hover:underline">
                         {shortId(msg.id)}
                       </Link>
                     </td>

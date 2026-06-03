@@ -257,7 +257,7 @@ function WorkerGroupSection({ queues, pollingMs, workers, activeCount, groupId, 
                   </td>
                   <td className="px-3.5 py-2 text-[12.5px]">
                     {w.currentJobId ? (
-                      <Link to={`/detail/${w.currentJobId}`} className="text-primary hover:underline font-mono">
+                      <Link to={`/jobs/detail/${w.currentJobId}`} className="text-primary hover:underline font-mono">
                         {shortId(w.currentJobId)}
                       </Link>
                     ) : (

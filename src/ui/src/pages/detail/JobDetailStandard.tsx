@@ -1,7 +1,7 @@
 import { Fragment, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Copy, RotateCw, Trash2, ExternalLink, X } from 'lucide-react';
-import { shortType, shortId, stateName, formatDateTime } from '@/utils/format';
+import { shortType, shortId, stateName, formatDateTime, detailPath } from '@/utils/format';
 import { State } from '@/types';
 import type { UnifiedJobDetailModel, JobLogModel, ContinuationInfo } from '@/types';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
@@ -215,7 +215,7 @@ function TitleStrip({ job, onRequeue, onDelete, isRequeuing, isDeleting }: Title
           {job.parentJob && (
             <div className="mt-3">
               <Link
-                to={`/detail/${job.parentJob.id}`}
+                to={detailPath(job.parentJob.id, job.parentJob.kind)}
                 className="inline-flex items-center gap-2 rounded-full px-2.5 py-1 hover:opacity-90 transition-opacity"
                 style={{
                   background: 'var(--brand-wash)',
@@ -631,7 +631,7 @@ function FlowSection({ job }: { job: UnifiedJobDetailModel }) {
         fontSize: 12.5,
       }}
     >
-      <Link to={`/detail/${item.id}`} className="mono" style={{ color: 'var(--brand)' }}>
+      <Link to={detailPath(item.id, item.kind)} className="mono" style={{ color: 'var(--brand)' }}>
         {shortId(item.id)}
       </Link>
       <span className="mono truncate" style={{ color: 'var(--foreground)' }}>

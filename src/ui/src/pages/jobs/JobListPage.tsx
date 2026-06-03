@@ -171,7 +171,7 @@ export default function JobListPage() {
         enableSorting: false,
         cell: ({ row }) => (
           <Link
-            to={`/detail/${row.original.id}`}
+            to={`/jobs/detail/${row.original.id}`}
             className="mono text-[12px] text-foreground hover:text-warp-blue transition-colors"
           >
             {shortId(row.original.id)}

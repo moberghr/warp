@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Navigate, useLocation, useParams } from 'react-router-dom';
 import { ErrorState } from '@/components/PageState';
 import { DetailSkeleton } from '@/components/skeletons/DetailSkeleton';
 import { useJobDetail } from '@/api/hooks/useJobs';
 import { usePageStore } from '@/stores/page';
-import { shortId } from '@/utils/format';
+import { detailPath, shortId } from '@/utils/format';
 import { stateName } from '@/utils/format';
 import { useRealtimeRefetch } from '@/hooks/useRealtimeRefetch';
 import { JobDetailStandard } from './JobDetailStandard';
@@ -23,6 +23,7 @@ function kindLabel(kind: number) {
 
 export default function DetailPage() {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const [jobCounts, setJobCounts] = useState<Record<string, number>>({});
 
   const query = useJobDetail(id);
@@ -60,6 +61,11 @@ export default function DetailPage() {
   }
   if (!job) {
     return <DetailSkeleton />;
+  }
+
+  const canonical = detailPath(job.id, job.kind);
+  if (location.pathname !== canonical) {
+    return <Navigate to={canonical} replace />;
   }
 
   const systemEvents = job.logs.filter(l => l.eventType !== 'Log' && l.eventType !== 'Progress').reverse();
