@@ -333,6 +333,7 @@ export interface WarpAddonsInfo {
   rateLimits: boolean;
   push: boolean;
   sagas: boolean;
+  services: boolean;
 }
 
 export interface WarpInfo {

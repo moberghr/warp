@@ -16,12 +16,6 @@
 
 	<Target Name="BuildUI" BeforeTargets="BeforeBuild" Condition="'$(BuildingInsideVisualStudio)' != 'true'">
 		<Exec Command="npm run build" WorkingDirectory="$(ProjectDir)..\..\ui" />
-		<!-- Include dist after Vite rebuilds. Vite emits content-hashed
-		     filenames that change with every build; resolving the glob here
-		     (target execution time, post-npm) captures the fresh names. -->
-		<ItemGroup>
-			<EmbeddedResource Include="dist/**/*" />
-		</ItemGroup>
 	</Target>
 
 	<!-- Populate the embedded SPA resources AFTER BuildUI has rebuilt dist/ but BEFORE the

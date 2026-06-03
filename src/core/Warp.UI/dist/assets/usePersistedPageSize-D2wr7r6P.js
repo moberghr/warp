@@ -1,1 +1,0 @@
-import{Kn as e,Un as t}from"./index-CQHsb_ve.js";var n=e(t(),1),r=[10,20,50,100],i=`warp:pageSize`;function a(){let[e,t]=(0,n.useState)(()=>{let e=localStorage.getItem(i),t=e?parseInt(e,10):NaN;return r.includes(t)?t:20});return[e,e=>{t(e),localStorage.setItem(i,String(e))}]}export{a as n,r as t};

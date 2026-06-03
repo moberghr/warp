@@ -140,13 +140,15 @@ public static class WarpEndpoints
             [FromServices] IConcurrencyLimitManager? concurrency,
             [FromServices] IRateLimitManager? rateLimits,
             [FromServices] IDashboardPushMarker? push,
-            [FromServices] ISagaQueryService? sagas) =>
+            [FromServices] ISagaQueryService? sagas,
+            [FromServices] IBackgroundServiceQueryService? services) =>
             Results.Ok(new WarpAddonsInfo
             {
                 Concurrency = concurrency is not null,
                 Push = push is not null,
                 RateLimits = rateLimits is not null,
                 Sagas = sagas is not null,
+                Services = services is not null,
             }));
 
         apiGroup.MapGet("concurrency", async ([FromServices] IConcurrencyLimitManager? mgr, CancellationToken ct) =>
