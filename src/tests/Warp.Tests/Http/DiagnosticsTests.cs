@@ -383,4 +383,178 @@ public sealed class DiagnosticsTests
 
         diagnostics.ShouldNotContain(d => d.Id == "WHTTP002");
     }
+
+    [TimedFact]
+    public void WHTTP005_FiresOnGetWithNonNullableScalarPropertyInitializer()
+    {
+        // The exact trap: GET request with a non-nullable scalar property carrying a C# default.
+        // [AsParameters] ignores the initializer and makes Take a required query param → bare GET 400s.
+        const string source = """
+            using Warp.Core.Handlers;
+            using Warp.Http;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace TestSamples;
+
+            public sealed class ListTodos : IRequest<string>
+            {
+                public int Take { get; set; } = 20;
+            }
+
+            [WarpHttpGet("/api/todos")]
+            public sealed class ListTodosHandler : IRequestHandler<ListTodos, string>
+            {
+                public Task<string> HandleAsync(ListTodos request, CancellationToken ct) => Task.FromResult(string.Empty);
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.Run(source).Diagnostics;
+
+        diagnostics.ShouldContain(d =>
+            d.Id == "WHTTP005"
+            && d.Severity == DiagnosticSeverity.Warning
+            && d.GetMessage().Contains("Take"));
+    }
+
+    [TimedFact]
+    public void WHTTP005_FiresOnRecordPositionalParameterDefault()
+    {
+        const string source = """
+            using Warp.Core.Handlers;
+            using Warp.Http;
+            using Microsoft.AspNetCore.Mvc;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace TestSamples;
+
+            public sealed record SearchTodos([FromQuery] int Page = 1) : IRequest<string>;
+
+            [WarpHttpGet("/api/todos/search")]
+            public sealed class SearchTodosHandler : IRequestHandler<SearchTodos, string>
+            {
+                public Task<string> HandleAsync(SearchTodos request, CancellationToken ct) => Task.FromResult(string.Empty);
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.Run(source).Diagnostics;
+
+        diagnostics.ShouldContain(d => d.Id == "WHTTP005" && d.GetMessage().Contains("Page"));
+    }
+
+    [TimedFact]
+    public void WHTTP005_DoesNotFireWhenScalarIsNullable()
+    {
+        // Nullable value type is the prescribed fix — ASP.NET treats it as optional. No warning.
+        const string source = """
+            using Warp.Core.Handlers;
+            using Warp.Http;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace TestSamples;
+
+            public sealed class ListTodos : IRequest<string>
+            {
+                public int? Take { get; set; } = 20;
+            }
+
+            [WarpHttpGet("/api/todos")]
+            public sealed class ListTodosHandler : IRequestHandler<ListTodos, string>
+            {
+                public Task<string> HandleAsync(ListTodos request, CancellationToken ct) => Task.FromResult(string.Empty);
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.Run(source).Diagnostics;
+
+        diagnostics.ShouldNotContain(d => d.Id == "WHTTP005");
+    }
+
+    [TimedFact]
+    public void WHTTP005_DoesNotFireWhenNoDefaultValue()
+    {
+        // No C# default means the author intends a required filter — that's not the silent trap.
+        const string source = """
+            using Warp.Core.Handlers;
+            using Warp.Http;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace TestSamples;
+
+            public sealed class ListTodos : IRequest<string>
+            {
+                public int Take { get; set; }
+            }
+
+            [WarpHttpGet("/api/todos")]
+            public sealed class ListTodosHandler : IRequestHandler<ListTodos, string>
+            {
+                public Task<string> HandleAsync(ListTodos request, CancellationToken ct) => Task.FromResult(string.Empty);
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.Run(source).Diagnostics;
+
+        diagnostics.ShouldNotContain(d => d.Id == "WHTTP005");
+    }
+
+    [TimedFact]
+    public void WHTTP005_DoesNotFireOnBodyVerb()
+    {
+        // POST binds TRequest from the JSON body, which honors C# defaults for omitted members.
+        const string source = """
+            using Warp.Core.Handlers;
+            using Warp.Http;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace TestSamples;
+
+            public sealed class CreateTodo : IRequest<string>
+            {
+                public int Priority { get; set; } = 3;
+            }
+
+            [WarpHttpPost("/api/todos")]
+            public sealed class CreateTodoHandler : IRequestHandler<CreateTodo, string>
+            {
+                public Task<string> HandleAsync(CreateTodo request, CancellationToken ct) => Task.FromResult(string.Empty);
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.Run(source).Diagnostics;
+
+        diagnostics.ShouldNotContain(d => d.Id == "WHTTP005");
+    }
+
+    [TimedFact]
+    public void WHTTP005_DoesNotFireForStringQueryParameter()
+    {
+        // Reference-typed query params are already optional under ASP.NET binding — only
+        // non-nullable value types become required. A defaulted string must not warn.
+        const string source = """
+            using Warp.Core.Handlers;
+            using Warp.Http;
+            using Microsoft.AspNetCore.Mvc;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace TestSamples;
+
+            public sealed record SearchTodos([FromQuery] string Term = "") : IRequest<string>;
+
+            [WarpHttpGet("/api/todos/search")]
+            public sealed class SearchTodosHandler : IRequestHandler<SearchTodos, string>
+            {
+                public Task<string> HandleAsync(SearchTodos request, CancellationToken ct) => Task.FromResult(string.Empty);
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.Run(source).Diagnostics;
+
+        diagnostics.ShouldNotContain(d => d.Id == "WHTTP005");
+    }
 }

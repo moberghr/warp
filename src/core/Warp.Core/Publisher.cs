@@ -14,43 +14,79 @@ using Warp.Core.Notifications;
 
 namespace Warp.Core;
 
+/// <summary>
+/// Persists jobs and messages to the Warp store via the calling scope's <c>DbContext</c>.
+/// The publish methods only <em>stage</em> rows on the change tracker — nothing is committed (and
+/// no worker can pick the work up) until <see cref="SaveChangesAsync"/> runs, which is what makes
+/// the outbox pattern work: enqueue alongside your own entities and a single
+/// <c>SaveChanges</c> either commits everything or nothing. All methods return the new job's id.
+/// Resolved as a scoped service; inject <c>IPublisher</c>.
+/// </summary>
 public interface IPublisher
 {
-    // Queue: create Message-kind Job (IMessage), immediate routing by worker
+    /// <summary>Stages an <see cref="IMessage"/> on the default queue. The message fans out to all
+    /// registered <c>IMessageHandler&lt;T&gt;</c> as independent child jobs once routed.</summary>
+    /// <returns>The id of the created message job.</returns>
     Task<Guid> Publish<T>(T message)
         where T : class, IMessage;
 
+    /// <summary>Stages an <see cref="IMessage"/> on the given queue (null = default queue).</summary>
+    /// <returns>The id of the created message job.</returns>
     Task<Guid> Publish<T>(T message, string? queue)
         where T : class, IMessage;
 
-    // Orchestration: create Job directly (IJob)
+    /// <summary>Stages an <see cref="IJob"/> for immediate execution on the default queue.</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Enqueue<T>(T job)
         where T : class, IJob;
 
+    /// <summary>Stages an <see cref="IJob"/> for immediate execution on the given queue (null = default).</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Enqueue<T>(T job, string? queue)
         where T : class, IJob;
 
+    /// <summary>Stages an <see cref="IJob"/> as a continuation of <paramref name="parentJobId"/> —
+    /// it runs after the parent reaches a terminal state (subject to the parent's continuation options).</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Enqueue<T>(T job, Guid parentJobId)
         where T : class, IJob;
 
+    /// <summary>Stages an <see cref="IJob"/> as a continuation of <paramref name="parentJobId"/> on the given queue.</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Enqueue<T>(T job, Guid parentJobId, string? queue)
         where T : class, IJob;
 
+    /// <summary>Stages an <see cref="IJob"/> using a fully-specified <see cref="JobParameters"/>
+    /// (schedule time, queue, parent id, ad-hoc metadata).</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Enqueue<T>(T job, JobParameters jobParameters)
         where T : class, IJob;
 
+    /// <summary>Stages an <see cref="IJob"/> to become eligible for execution at
+    /// <paramref name="scheduleTime"/> (UTC). It sits in <c>State.Scheduled</c> until then; a
+    /// past time runs immediately.</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Schedule<T>(T job, DateTime scheduleTime)
         where T : class, IJob;
 
+    /// <summary>Schedules an <see cref="IJob"/> for <paramref name="scheduleTime"/> (UTC) on the given queue.</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Schedule<T>(T job, DateTime scheduleTime, string? queue)
         where T : class, IJob;
 
+    /// <summary>Schedules an <see cref="IJob"/> for <paramref name="scheduleTime"/> (UTC) as a continuation of <paramref name="parentJobId"/>.</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Schedule<T>(T job, DateTime scheduleTime, Guid parentJobId)
         where T : class, IJob;
 
+    /// <summary>Schedules an <see cref="IJob"/> for <paramref name="scheduleTime"/> (UTC) as a continuation of <paramref name="parentJobId"/> on the given queue.</summary>
+    /// <returns>The id of the created job.</returns>
     Task<Guid> Schedule<T>(T job, DateTime scheduleTime, Guid parentJobId, string? queue)
         where T : class, IJob;
 
+    /// <summary>Commits all staged jobs/messages (and any other tracked changes on the scope's
+    /// <c>DbContext</c>) in one transaction, then dispatches push notifications for what was saved.
+    /// Nothing published becomes visible to workers until this completes.</summary>
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 

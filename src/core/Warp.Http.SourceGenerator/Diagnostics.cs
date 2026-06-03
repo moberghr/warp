@@ -32,6 +32,14 @@ internal static class Diagnostics
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    public static readonly DiagnosticDescriptor RequiredScalarWithIgnoredDefault = new(
+        id: "WHTTP005",
+        title: "Non-nullable query parameter with a C# default becomes a required query parameter",
+        messageFormat: "'{0}' is a non-nullable value type bound from the query string with a C# default value. ASP.NET model binding ([AsParameters]) ignores the default and treats the parameter as REQUIRED, so a request that omits it returns 400 — not the default. Make it nullable (e.g. 'int?') and apply the default inside the handler if it should be optional.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor InternalGeneratorError = new(
         id: "WHTTP999",
         title: "Warp.Http source generator encountered an internal error",

@@ -55,6 +55,27 @@ Warp ships as a small set of NuGet packages — pick the provider package that m
 
 You only add the provider package for your database; Warp.Core no longer has a hard dependency on either EF provider.
 
+> **Pin one coherent version across every Warp package.** The packages have inter-dependencies (e.g. `Warp.Http` requires a matching `Warp.Core`), so floating different floors per package can resolve to an incompatible mix. Set the same explicit version on all of them:
+>
+> ```xml
+> <PackageReference Include="Moberg.Warp.Core" Version="0.17.1" />
+> <PackageReference Include="Moberg.Warp.Worker" Version="0.17.1" />
+> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="0.17.1" />
+> <PackageReference Include="Moberg.Warp.UI" Version="0.17.1" />
+> <PackageReference Include="Moberg.Warp.Http" Version="0.17.1" />
+> ```
+
+> **Package IDs are `Moberg.Warp.*`; namespaces are `Warp.*`.** Install `Moberg.Warp.Core`, but write `using Warp.Core;`. The public surface is also split across a few namespaces — here's where the common types live:
+>
+> | You want… | Types / methods | `using` |
+> |---|---|---|
+> | Register Warp / worker | `AddWarp`, `AddWarpWorker`, `AddBackgroundService`, `IPublisher`, `IBatchPublisher`, `IRecurringJobPublisher` | `Warp.Core` |
+> | Define & handle work | `IJob`, `IMessage`, `IRequest<T>`, `IStreamRequest<T>`, `IJobHandler<>`, `IMessageHandler<>`, `IRequestHandler<,>`, `IStreamRequestHandler<,>`, `IPipelineBehavior<,>`, `IJobContext`, `Unit`, `IMediator` | `Warp.Core.Handlers` |
+> | Addon builder methods | `AddRetry` / `AddConcurrency` / `AddTimeout` / `AddRateLimit` / `AddSagas` | `Warp.Core.Retry` / `.Concurrency` / `.Timeout` / `.RateLimit` / `.Sagas` |
+> | Dashboard | `UseWarpUI` | `Warp.UI.UIMiddleware` |
+> | HTTP exposure | `WarpHttpGet`/`Post`/…, `AddWarpHttp`, `MapWarpHttp` | `Warp.Http` |
+> | Provider opt-in | `UsePostgreSql` / `UseSqlServer` | `Warp.Provider.PostgreSql` / `Warp.Provider.SqlServer` |
+
 ### 2. Register Services
 
 Register your DbContext as usual — Warp hooks into it automatically when you call `AddWarp` or `AddWarpWorker`. Opt into a provider from the lambda:
@@ -84,8 +105,10 @@ builder.Services.AddWarpWorker<AppDbContext>(opt =>
     opt.AddRateLimit();     // [RateLimit] (Fixed/Sliding windows)
 });
 
-// Scan assembly for IJobHandler<T> and IMessageHandler<T> implementations
-builder.Services.AddHandlers(typeof(Program).Assembly);
+// Handlers (IJobHandler<T>, IMessageHandler<T>, IRequestHandler<T,R>,
+// IStreamRequestHandler<T,R>) and IPipelineBehavior<,> implementations are discovered and
+// registered automatically by the Warp source generator at compile time — there is no
+// AddHandlers(...) / AddPipelineBehaviors(...) call to make.
 
 var app = builder.Build();
 
@@ -286,11 +309,11 @@ public class LoggingBehavior<T, TResponse> : IPipelineBehavior<T, TResponse>
         return result;
     }
 }
-
-builder.Services.AddPipelineBehaviors(typeof(Program).Assembly);
 ```
 
 For jobs and messages, `TResponse` is `Unit`. For requests, it's your custom response type. For streams, it's `IAsyncEnumerable<T>`.
+
+Behaviors are registered automatically by the source generator — like handlers, there is no `AddPipelineBehaviors(...)` call. Open-generic behaviors (e.g. `LoggingBehavior<T, TResponse>`) are registered as open generics and closed by the DI container per request. The pipeline runs outer → inner in DI registration order, and the addon builder methods (`AddRetry`, `AddTimeout`, …) insert in call order — which is why, for example, `AddRetry()` must be called before `AddTimeout()`.
 
 ### 8. Named Queues
 
@@ -509,6 +532,42 @@ app.MapGroup("/api/public").RequireAuthorization("publicPolicy").MapWarpHttp("pu
 ```
 
 **Binding** — handled by ASP.NET Minimal API. Use the standard `Microsoft.AspNetCore.Mvc` attributes: `[FromRoute]`, `[FromQuery]`, `[FromHeader]`, `[FromBody]`. ASP.NET handles `IParsable<T>`, `TryParse`, query arrays, content negotiation, etc. The whole-body POST DTO case (no per-property attributes) just works — ASP.NET binds `TRequest` from the JSON body directly.
+
+> ⚠️ **GET/DELETE query params: a non-nullable scalar is REQUIRED, even with a C# default.** For non-body verbs, Warp binds the request via ASP.NET's `[AsParameters]`, which decomposes `TRequest` into per-property query/route arguments. A C# property initializer or parameter default is **ignored** by the binder, so a non-nullable scalar becomes a *required* query parameter — a request that omits it returns **400**, not your default:
+>
+> ```csharp
+> // ✗ Bare GET /api/todos → 400: "Take" and "AsOf" are required query params.
+> public sealed class ListTodos : IRequest<IReadOnlyList<TodoDto>>
+> {
+>     public int Take { get; set; } = 20;        // default ignored by the binder
+>     public DateTime AsOf { get; set; } = DateTime.UtcNow;
+> }
+>
+> // ✓ Make optional params nullable; apply the default inside the handler.
+> public sealed class ListTodos : IRequest<IReadOnlyList<TodoDto>>
+> {
+>     public int? Take { get; set; }
+>     public DateTime? AsOf { get; set; }
+> }
+> // handler: var take = request.Take ?? 20; var asOf = request.AsOf ?? clock.UtcNow;
+> ```
+>
+> The `WHTTP005` build warning flags exactly this case (non-nullable value-typed query param with a C# default) so you catch it at compile time instead of at the first request.
+
+> **Mixed route + body (PATCH/PUT with an id in the path and fields in the body).** `[AsParameters]` cannot bind a `[FromBody]` member, so use a class with a `[FromRoute]` scalar plus a single `[FromBody]` nested DTO. Positional `record` parameters confuse the binder here — prefer a class with settable properties:
+>
+> ```csharp
+> public sealed class UpdateTodo
+> {
+>     [FromRoute] public Guid Id { get; set; }
+>     [FromBody]  public UpdateTodoBody Body { get; set; } = default!;
+> }
+>
+> public sealed record UpdateTodoBody(string Title, bool Done);
+>
+> [WarpHttpPatch("/api/todos/{id}")]
+> public sealed class UpdateTodoHandler : IRequestHandler<UpdateTodo, TodoDto> { ... }
+> ```
 
 **Response semantics**
 
