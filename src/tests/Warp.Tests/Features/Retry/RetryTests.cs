@@ -754,9 +754,10 @@ public abstract class RetryTestsBase : IAsyncLifetime
     public async Task GetAndProcessJob_RetryRequeued_JobLogRecordsScheduledTime()
     {
         // Regression for PR #124 review F4: jitter may randomize the retry delay by ±100%
-        // of the configured value, but the "Requeued" JobLog entry did not include the
-        // resulting ScheduleTime. An operator reading the dashboard after a retry storm
-        // cannot confirm how jitter actually affected the rescheduling without this data.
+        // of the configured value, so the retry log entry must record the resulting
+        // ScheduleTime. After the Requeued-split (2026-05), a retry emits two logs: a
+        // "Failed" with the exception and a "Scheduled"/"Enqueued" with "Retry scheduled
+        // for <timestamp>". Assert against the scheduled log specifically.
         var ctx = _fixture.CreateContext();
         var jobId = Guid.NewGuid();
         var now = DateTime.UtcNow;
@@ -781,19 +782,18 @@ public abstract class RetryTestsBase : IAsyncLifetime
         var job = await readCtx.Set<Job>().FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
         var log = await readCtx.Set<JobLog>()
             .Where(x => x.JobId == jobId)
-            .Where(x => x.EventType == "Requeued")
+            .Where(x => x.EventType == "Scheduled" || x.EventType == "Enqueued")
             .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
 
         log.ShouldNotBeNull();
 
-        // Assert the log contains the scheduled-at marker and a parseable timestamp close to
-        // the persisted ScheduleTime. Exact string equality is brittle across DB backends
+        // Assert the log contains the scheduled-for marker and a parseable timestamp close
+        // to the persisted ScheduleTime. Exact string equality is brittle across DB backends
         // (Postgres truncates to microseconds while .NET DateTime has 100-ns precision).
-        log.Message.ShouldContain("next attempt scheduled:");
-        const string marker = "next attempt scheduled: ";
+        log.Message.ShouldContain("Retry scheduled for ");
+        const string marker = "Retry scheduled for ";
         var startIndex = log.Message.IndexOf(marker, StringComparison.Ordinal) + marker.Length;
-        var endIndex = log.Message.IndexOf(')', startIndex);
-        var logged = DateTime.Parse(log.Message[startIndex..endIndex], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+        var logged = DateTime.Parse(log.Message[startIndex..], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
         (logged - job.ScheduleTime).Duration().ShouldBeLessThan(TimeSpan.FromSeconds(1));
     }
 

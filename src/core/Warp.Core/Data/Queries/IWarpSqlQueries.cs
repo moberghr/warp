@@ -35,11 +35,16 @@ public interface IWarpSqlQueries<TContext>
         CancellationToken ct);
 
     /// <summary>
-    /// Locks the next <c>Kind=Message</c> row in <c>State=Enqueued</c> with SKIP LOCKED semantics
-    /// and returns it as a tracked entity. Caller runs inside a transaction, mutates the entity
-    /// + adds child jobs, then SaveChanges to commit atomically.
+    /// Atomically claims up to <paramref name="limit"/> rows of <c>Kind=Message</c> in
+    /// <c>State=Enqueued</c>, flipping them to <c>State=Processing</c> in one round-trip and
+    /// returning the post-update rows as tracked entities. Uses <c>FOR NO KEY UPDATE SKIP LOCKED</c>
+    /// (PG) / <c>WITH (ROWLOCK, UPDLOCK, READPAST)</c> (SQL Server) so concurrent routers across
+    /// servers — when not serialised by the routing advisory lock — would still get distinct rows.
+    /// Routing decisions are then made in-memory; child jobs and any state corrections
+    /// (no-handler → Failed) commit together in a single <c>SaveChanges</c> at the end of the
+    /// caller's batch.
     /// </summary>
-    Task<Job?> LockNextEnqueuedMessageAsync(TContext context, CancellationToken ct);
+    Task<List<Job>> ClaimEnqueuedMessagesAsync(TContext context, int limit, CancellationToken ct);
 
     /// <summary>
     /// Locks <c>Kind=Job</c> rows in <c>State=Processing</c> whose <c>LastKeepAlive</c> is older
@@ -88,12 +93,14 @@ public interface IWarpSqlQueries<TContext>
 
     /// <summary>
     /// Atomic activation of due scheduled jobs: flips <c>State.Scheduled</c> rows whose
-    /// <c>ScheduleTime</c> has elapsed to <c>State.Enqueued</c> and RETURNS the queue of each
-    /// activated row. Caller deduplicates to fire one <c>JobEnqueued</c> notification per
-    /// distinct queue. Replaces a separate SELECT DISTINCT + UPDATE and saves one DB hop per
-    /// ScheduledJobActivation tick (every 5s by default).
+    /// <c>ScheduleTime</c> has elapsed to <c>State.Enqueued</c> and RETURNS one row per activated
+    /// job carrying <c>(Id, Queue, ScheduleTime)</c>. <c>ScheduleTime</c> is the row's existing
+    /// value — the UPDATE does not change it — so it documents when the job had been scheduled to
+    /// run. Caller deduplicates queues to fire one <c>JobEnqueued</c> notification per distinct
+    /// queue, and writes one <c>Activated</c> <see cref="JobLog"/> per Id so operators have a
+    /// per-row trail of the Scheduled→Enqueued transition.
     /// </summary>
-    Task<List<string>> ActivateScheduledJobsAsync(
+    Task<List<(Guid Id, string Queue, DateTime ScheduleTime)>> ActivateScheduledJobsAsync(
         TContext context,
         DateTime now,
         CancellationToken ct);

@@ -6,6 +6,7 @@ using Warp.Core;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Core;
@@ -23,7 +24,7 @@ public abstract class BatchPublisherUnitTestsBase : IAsyncLifetime
 
     private static BatchPublisher<TestContext> CreateBatchPublisher(TestContext ctx)
     {
-        return new BatchPublisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        return new BatchPublisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
     }
 
     [TimedFact]
@@ -160,7 +161,7 @@ public abstract class BatchPublisherUnitTestsBase : IAsyncLifetime
     {
         // Arrange: parent and continuation batch in same context (not committed yet)
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         var batchPublisher = CreateBatchPublisher(ctx);
 
         var parentId = await publisher.Enqueue(new UnitRequest());
@@ -185,7 +186,7 @@ public abstract class BatchPublisherUnitTestsBase : IAsyncLifetime
     {
         // Arrange: parent already committed
         var setupCtx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(setupCtx, TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        var publisher = new Publisher<TestContext>(setupCtx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         var parentId = await publisher.Enqueue(new UnitRequest());
         await setupCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 

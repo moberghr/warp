@@ -26,7 +26,7 @@ internal enum BindingShape
 
 internal sealed class BindingTarget
 {
-    public BindingTarget(string memberName, ITypeSymbol type, BindingSource source, string sourceKey, int? ctorParameterIndex, string? propertyName)
+    public BindingTarget(string memberName, ITypeSymbol type, BindingSource source, string sourceKey, int? ctorParameterIndex, string? propertyName, bool hasClrDefault, Location? location)
     {
         MemberName = memberName;
         Type = type;
@@ -34,6 +34,8 @@ internal sealed class BindingTarget
         SourceKey = sourceKey;
         CtorParameterIndex = ctorParameterIndex;
         PropertyName = propertyName;
+        HasClrDefault = hasClrDefault;
+        Location = location;
     }
 
     public string MemberName { get; }
@@ -49,6 +51,16 @@ internal sealed class BindingTarget
 
     /// <summary>Set when the request type uses a parameterless ctor + property setters.</summary>
     public string? PropertyName { get; }
+
+    /// <summary>
+    /// True when the member carries a C# default value — a ctor-parameter default or a property
+    /// initializer. ASP.NET's <c>[AsParameters]</c> binding ignores these for non-body verbs, so a
+    /// non-nullable scalar with a default still binds as a required query parameter (WHTTP005).
+    /// </summary>
+    public bool HasClrDefault { get; }
+
+    /// <summary>Declaration location of the member, for diagnostics. Null when unavailable.</summary>
+    public Location? Location { get; }
 }
 
 internal sealed class BindingPlan

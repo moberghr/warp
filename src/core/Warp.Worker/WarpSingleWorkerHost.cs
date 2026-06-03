@@ -84,7 +84,8 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
                     registration.Config,
                     _pauseStateHolder,
                     _timeProvider,
-                    registration.GroupEntityId);
+                    registration.GroupEntityId,
+                    _signals);
 
                 await worker.StartAsync(cancellationToken);
                 _workers.Add(worker);

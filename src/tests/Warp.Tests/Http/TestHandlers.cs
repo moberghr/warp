@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Warp.Core;
 using Warp.Core.Handlers;
 using Warp.Http;
@@ -241,6 +242,30 @@ public sealed class AnonEchoHandler : IRequestHandler<AnonEcho, string>
     public Task<string> HandleAsync(AnonEcho request, CancellationToken cancellationToken) => Task.FromResult(request.GetType().Name);
 }
 
+// Custom-requirement policy — exercises IAuthorizationHandler<TRequirement> on a [WarpHttp*]
+// endpoint. The requirement validates a custom header against an expected value; the
+// authorization handler is the only thing that can grant access. Used by
+// CustomAuthorizationRequirementTests to confirm the colleague's §1.3 scenario works.
+public sealed record WebhookEcho : IRequest<string>;
+
+[Authorize(Policy = "WebhookPasswordPolicy")]
+[WarpHttpPost("/api/secure/webhook")]
+public sealed class WebhookEchoHandler : IRequestHandler<WebhookEcho, string>
+{
+    public Task<string> HandleAsync(WebhookEcho request, CancellationToken cancellationToken) => Task.FromResult("authorized");
+}
+
+// Rate-limit metadata — [EnableRateLimiting] on the handler must surface as endpoint
+// metadata so ASP.NET's rate-limiting middleware applies the named policy.
+public sealed record RateLimitedEcho : IRequest<string>;
+
+[EnableRateLimiting("WarpHttpTestRateLimit")]
+[WarpHttpGet("/api/rate-limited/echo")]
+public sealed class RateLimitedEchoHandler : IRequestHandler<RateLimitedEcho, string>
+{
+    public Task<string> HandleAsync(RateLimitedEcho request, CancellationToken cancellationToken) => Task.FromResult("rate-limited");
+}
+
 // Stream endpoints with array binding via Minimal API.
 public sealed record NumbersStream([FromQuery] int Count) : IStreamRequest<int>;
 
@@ -439,6 +464,20 @@ public sealed class BindingInitOnlyHandler : IRequestHandler<BindingInitOnlyQuer
 {
     public Task<BindingInitOnlyResponse> HandleAsync(BindingInitOnlyQuery request, CancellationToken cancellationToken)
         => Task.FromResult(new BindingInitOnlyResponse(request.Name, request.Count));
+}
+
+// Mixed shape with a single body target — POST with [FromRoute] route param + one bare
+// scalar body param. Regression coverage for #208: this is the working Mixed path and
+// must not trip WHTTP004.
+public sealed record PromoteUser([FromRoute(Name = "id")] Guid Id, string NewRole) : IRequest<PromoteUserResponse>;
+
+public sealed record PromoteUserResponse(Guid Id, string NewRole);
+
+[WarpHttpPost("/api/users/{id}/promote")]
+public sealed class PromoteUserHandler : IRequestHandler<PromoteUser, PromoteUserResponse>
+{
+    public Task<PromoteUserResponse> HandleAsync(PromoteUser request, CancellationToken cancellationToken)
+        => Task.FromResult(new PromoteUserResponse(request.Id, request.NewRole));
 }
 
 // Submit-a-job pattern (#4) — IRequest<Guid> wrapper. We use a fake IPublisher in tests

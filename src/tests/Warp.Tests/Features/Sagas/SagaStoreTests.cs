@@ -5,6 +5,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Notifications;
 using Warp.Core.Sagas;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 
 namespace Warp.Tests.Features.Sagas;
 
@@ -22,7 +23,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task Load_UnknownKey_ReturnsNull()
     {
-        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
 
         var saga = await store.Load<TestSaga>("never-existed", TestCancellation);
 
@@ -44,7 +45,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         });
         await ctx.SaveChangesAsync(TestCancellation);
 
-        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var saga = await store.Load<TestSaga>("abc", TestCancellation);
 
         saga.ShouldNotBeNull();
@@ -56,7 +57,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
     public async Task Add_NewSaga_PersistsWithVersionSet()
     {
         var ctx = _fixture.CreateContext();
-        var store = new SagaStore<TestContext>(ctx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(ctx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
 
         var saga = new TestSaga { CorrelationKey = "new", Counter = 1 };
         store.Add(saga);
@@ -93,7 +94,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         await arrangeCtx.SaveChangesAsync(TestCancellation);
 
         var actCtx = _fixture.CreateContext();
-        var store = new SagaStore<TestContext>(actCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(actCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var loaded = await store.Load<TestSaga>("v", TestCancellation);
         loaded!.Counter = 99;
         store.Update(loaded);
@@ -123,7 +124,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         await arrangeCtx.SaveChangesAsync(TestCancellation);
 
         var actCtx = _fixture.CreateContext();
-        var store = new SagaStore<TestContext>(actCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(actCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var loaded = await store.Load<TestSaga>("rm", TestCancellation);
         store.Remove(loaded!);
         await store.SaveChangesAsync(TestCancellation);
@@ -257,7 +258,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         });
         await ctx.SaveChangesAsync(TestCancellation);
 
-        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var loaded = await store.Load<TestSaga>("schema-evo", TestCancellation);
 
         loaded.ShouldNotBeNull();
@@ -286,7 +287,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(TestCancellation);
 
         var actCtx = _fixture.CreateContext();
-        var store = new SagaStore<TestContext>(actCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(actCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var loaded = await store.Load<TestSaga>("additive", TestCancellation);
         loaded.ShouldNotBeNull();
         loaded.Counter.ShouldBe(0); // default — absent from JSON
@@ -296,7 +297,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         await store.SaveChangesAsync(TestCancellation);
 
         var verifyCtx = _fixture.CreateContext();
-        var roundTripStore = new SagaStore<TestContext>(verifyCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var roundTripStore = new SagaStore<TestContext>(verifyCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var reloaded = await roundTripStore.Load<TestSaga>("additive", TestCancellation);
         reloaded.ShouldNotBeNull();
         reloaded.Counter.ShouldBe(77);
@@ -309,7 +310,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         var canonical = orderId.ToString("N");
 
         var actCtx = _fixture.CreateContext();
-        var store = new SagaStore<TestContext>(actCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(actCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var saga = new GuidKeyedSaga { Counter = 5, Key = orderId };
         store.Add(saga);
         await store.SaveChangesAsync(TestCancellation);
@@ -334,7 +335,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
 
         // Re-load through SagaStore to confirm typed Key access reads back the Guid intact.
         var reloadCtx = _fixture.CreateContext();
-        var reloadStore = new SagaStore<TestContext>(reloadCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var reloadStore = new SagaStore<TestContext>(reloadCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var loaded = await reloadStore.Load<GuidKeyedSaga>(canonical, TestCancellation);
         loaded.ShouldNotBeNull();
         loaded.Key.ShouldBe(orderId);
@@ -361,7 +362,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         var orderId = 4242;
         var canonical = orderId.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
-        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var saga = new IntKeyedSaga { Counter = 7, Key = orderId };
         store.Add(saga);
         await store.SaveChangesAsync(TestCancellation);
@@ -372,7 +373,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         row.ShouldNotBeNull();
         row.StateJson.ShouldNotContain("\"Key\"");
 
-        var loaded = await new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier()).Load<IntKeyedSaga>(canonical, TestCancellation);
+        var loaded = await new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals).Load<IntKeyedSaga>(canonical, TestCancellation);
         loaded.ShouldNotBeNull();
         loaded.Key.ShouldBe(orderId);
         loaded.Counter.ShouldBe(7);
@@ -384,7 +385,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         var orderId = 9_000_000_000L;
         var canonical = orderId.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
-        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var saga = new LongKeyedSaga { Counter = 11, Key = orderId };
         store.Add(saga);
         await store.SaveChangesAsync(TestCancellation);
@@ -395,7 +396,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         row.ShouldNotBeNull();
         row.StateJson.ShouldNotContain("\"Key\"");
 
-        var loaded = await new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier()).Load<LongKeyedSaga>(canonical, TestCancellation);
+        var loaded = await new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals).Load<LongKeyedSaga>(canonical, TestCancellation);
         loaded.ShouldNotBeNull();
         loaded.Key.ShouldBe(orderId);
         loaded.Counter.ShouldBe(11);
@@ -435,7 +436,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         for (var i = 1; i <= 3; i++)
         {
             var ctx = _fixture.CreateContext();
-            var store = new SagaStore<TestContext>(ctx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+            var store = new SagaStore<TestContext>(ctx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
             var loaded = await store.Load<TestSaga>("v-mono", TestCancellation);
             loaded!.Counter = i;
             store.Update(loaded);
@@ -458,7 +459,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         // If JSON serialization ever changes (e.g. someone adds custom options), this catches
         // round-trip corruption for the kinds of types real sagas hold.
         var arrangeCtx = _fixture.CreateContext();
-        var store = new SagaStore<TestContext>(arrangeCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier());
+        var store = new SagaStore<TestContext>(arrangeCtx, TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals);
         var saga = new ComplexSaga
         {
             CorrelationKey = "complex",
@@ -473,7 +474,7 @@ public abstract class SagaStoreTestsBase : IAsyncLifetime
         store.Add(saga);
         await store.SaveChangesAsync(TestCancellation);
 
-        var loaded = await new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier())
+        var loaded = await new SagaStore<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), new FakeExceptionClassifier(), TestTasks.NullSignals)
             .Load<ComplexSaga>("complex", TestCancellation);
 
         loaded.ShouldNotBeNull();

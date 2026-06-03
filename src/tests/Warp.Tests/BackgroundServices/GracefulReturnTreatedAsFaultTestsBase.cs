@@ -23,7 +23,7 @@ public abstract class GracefulReturnTreatedAsFaultTestsBase : IntegrationTestBas
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, ImmediateReturnService>(),
+            configure: cfg => cfg.AddBackgroundService<ImmediateReturnService>(),
             configureServices: services => services.AddSingleton(state));
 
         // Wait until the fault path was taken: RestartCount > 0 means the supervisor incremented

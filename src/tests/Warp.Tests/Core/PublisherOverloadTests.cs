@@ -7,6 +7,7 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Helper;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Core;
@@ -24,7 +25,7 @@ public abstract class PublisherOverloadTestsBase : IAsyncLifetime
 
     private static Publisher<TestContext> CreatePublisher(TestContext ctx)
     {
-        return new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        return new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
     }
 
     [TimedFact]

@@ -1,126 +1,87 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
-import { Card, CardContent } from '@/components/ui/card';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import type { ColumnDef } from '@tanstack/react-table';
 import { LoadingState, ErrorState } from '@/components/PageState';
+import { DataTable } from '@/components/DataTable';
+import { useBackgroundServices } from '@/api/hooks/useBackgroundServices';
 import { ServiceScope } from '@/types/backgroundServices';
 import type { BackgroundServiceListItem } from '@/types/backgroundServices';
-import * as api from '@/api';
 
 export default function BackgroundServicesList() {
   const navigate = useNavigate();
-  const [items, setItems] = useState<BackgroundServiceListItem[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [unavailable, setUnavailable] = useState(false);
+  const { data: items, isLoading, isError } = useBackgroundServices();
 
-  const fetchData = useCallback(async () => {
-    try {
-      const list = await api.getBackgroundServices();
-      setItems(list);
-      setError(null);
-      setUnavailable(false);
-    } catch (e) {
-      if (axios.isAxiosError(e) && e.response?.status === 404) {
-        setUnavailable(true);
-        setError(null);
-        return;
-      }
-      setError('Unable to load background services');
-    }
-  }, []);
+  const columns = useMemo<ColumnDef<BackgroundServiceListItem>[]>(
+    () => [
+      {
+        accessorKey: 'name',
+        header: 'Name',
+        cell: ({ row }) => (
+          <span className="flex items-center gap-2 font-medium">
+            {row.original.name}
+            {row.original.configurationMismatchCount > 0 && (
+              <span
+                className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
+                title={`${row.original.configurationMismatchCount} instance(s) have a configuration mismatch`}
+              >
+                Mismatch
+              </span>
+            )}
+          </span>
+        ),
+      },
+      {
+        accessorKey: 'scope',
+        header: 'Scope',
+        cell: ({ row }) => <ScopeBadge scope={row.original.scope} />,
+      },
+      {
+        id: 'status',
+        header: 'Status',
+        cell: ({ row }) => <StatusSummary item={row.original} />,
+      },
+      {
+        accessorKey: 'totalRestartCount',
+        header: 'Restarts',
+        cell: ({ row }) =>
+          row.original.totalRestartCount > 0 ? (
+            <span className="tabular-nums text-amber-600 dark:text-amber-400">
+              {row.original.totalRestartCount}
+            </span>
+          ) : (
+            <span className="tabular-nums text-muted-foreground">0</span>
+          ),
+      },
+      {
+        accessorKey: 'lastErrorType',
+        header: 'Last Error',
+        cell: ({ row }) =>
+          row.original.lastErrorType ? (
+            <span className="text-red-600 dark:text-red-400 font-mono text-xs">
+              {shortTypeName(row.original.lastErrorType)}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+      },
+    ],
+    [],
+  );
 
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 2000);
-
-    return () => clearInterval(interval);
-  }, [fetchData]);
-
-  if (unavailable) {
-    return (
-      <div>
-        <h1 className="text-2xl font-bold mb-4">Background Services</h1>
-        <Card>
-          <CardContent className="py-8 text-center text-muted-foreground">
-            Background services addon is not registered. Call <code className="font-mono text-xs">opt.AddBackgroundServices()</code> in your Warp configuration to enable.
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
-  if (error) return <ErrorState message={error} />;
-  if (!items) return <LoadingState />;
+  if (isError) return <ErrorState message="Unable to load background services" />;
+  if (isLoading || !items) return <LoadingState />;
 
   return (
     <div>
       <h1 className="text-2xl font-bold mb-4">Background Services</h1>
 
-      <div className="rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Scope</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Restarts</TableHead>
-              <TableHead>Last Error</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {items.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
-                  No background services registered
-                </TableCell>
-              </TableRow>
-            ) : (
-              items.map((item) => (
-                <TableRow
-                  key={item.name}
-                  className="cursor-pointer hover:bg-accent/50"
-                  onClick={() => navigate(`/services/${encodeURIComponent(item.name)}`)}
-                >
-                  <TableCell className="font-medium">
-                    <span className="flex items-center gap-2">
-                      {item.name}
-                      {item.configurationMismatchCount > 0 && (
-                        <span
-                          className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
-                          title={`${item.configurationMismatchCount} instance(s) have a configuration mismatch`}
-                        >
-                          Mismatch
-                        </span>
-                      )}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <ScopeBadge scope={item.scope} />
-                  </TableCell>
-                  <TableCell>
-                    <StatusSummary item={item} />
-                  </TableCell>
-                  <TableCell className="tabular-nums">
-                    {item.totalRestartCount > 0 ? (
-                      <span className="text-amber-600 dark:text-amber-400">{item.totalRestartCount}</span>
-                    ) : (
-                      <span className="text-muted-foreground">0</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {item.lastErrorType ? (
-                      <span className="text-red-600 dark:text-red-400 font-mono text-xs">{shortTypeName(item.lastErrorType)}</span>
-                    ) : (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </div>
+      <DataTable
+        columns={columns}
+        data={items}
+        emptyMessage="No background services registered"
+        getRowId={(row) => row.name}
+        onRowClick={(row) => navigate(`/services/${encodeURIComponent(row.name)}`)}
+      />
     </div>
   );
 }

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Shouldly;
@@ -104,6 +105,24 @@ public sealed class BindingTests
         var body = await resp.Content.ReadFromJsonAsync<InitOnlyResponse>();
         body!.Name.ShouldBe("init-set");
         body.Count.ShouldBe(7);
+    }
+
+    [TimedFact]
+    public async Task RouteAndBodyScalar_BindsBothInMixedShape()
+    {
+        // POST with [FromRoute] route param + a single unattributed scalar body param —
+        // exercises the Mixed shape with one body target end-to-end. Regression coverage
+        // for #208. Minimal API binds a scalar [FromBody] from a raw JSON string body.
+        await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
+
+        var id = Guid.NewGuid();
+        using var content = new StringContent("\"admin\"", Encoding.UTF8, "application/json");
+        var resp = await app.Client.PostAsync("/api/users/" + id + "/promote", content);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<PromoteUserResponse>();
+        body!.Id.ShouldBe(id);
+        body.NewRole.ShouldBe("admin");
     }
 
     [TimedFact]

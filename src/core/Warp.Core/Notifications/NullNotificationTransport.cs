@@ -18,4 +18,6 @@ public sealed class NullNotificationTransport : IWarpNotificationTransport
         await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, ct);
         yield break;
     }
+
+    public Task ListenerReady { get; } = Task.CompletedTask;
 }

@@ -12,6 +12,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 using Warp.Worker.Services;
@@ -98,7 +99,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     {
         // Arrange
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         var jobId = await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
@@ -153,7 +154,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     {
         // Arrange
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
 
         var statBefore = await _fixture.CreateContext().Set<Statistic>()
             .Where(x => x.Key == "stats:succeeded")
@@ -262,7 +263,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     {
         // Arrange — enqueue and process a job so stats:succeeded is incremented
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         var jobId = await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 

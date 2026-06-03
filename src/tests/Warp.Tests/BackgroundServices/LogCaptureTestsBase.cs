@@ -74,7 +74,7 @@ public abstract class LogCaptureTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, LoggingService>(),
+            configure: cfg => cfg.AddBackgroundService<LoggingService>(),
             configureServices: services => services.AddSingleton(signal));
 
         // Wait until the service has emitted its log messages.
@@ -104,7 +104,7 @@ public abstract class LogCaptureTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, LoggingService>(),
+            configure: cfg => cfg.AddBackgroundService<LoggingService>(),
             configureServices: services => services.AddSingleton(signal));
 
         await signal.Logged.WaitAsync(Xunit.TestContext.Current.CancellationToken);
@@ -130,7 +130,7 @@ public abstract class LogCaptureTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, LoggingService>(),
+            configure: cfg => cfg.AddBackgroundService<LoggingService>(),
             configureServices: services => services.AddSingleton(signal));
 
         await signal.Logged.WaitAsync(Xunit.TestContext.Current.CancellationToken);
@@ -161,7 +161,7 @@ public abstract class LogCaptureTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, LoggingService>(),
+            configure: cfg => cfg.AddBackgroundService<LoggingService>(),
             configureServices: services => services.AddSingleton(signal));
 
         await signal.Logged.WaitAsync(Xunit.TestContext.Current.CancellationToken);

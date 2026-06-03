@@ -4,7 +4,7 @@ sidebar_position: 5.5
 
 # Background Services
 
-Dashboard view of `WarpBackgroundService` instances — long-running in-process work managed by Warp (restart-on-fault, optional cluster-singleton coordination, captured `ILogger<T>` output). Visible when at least one `opt.AddBackgroundService<T>()` is registered; hidden otherwise via the `/api/addons` discovery flag.
+Dashboard view of `WarpBackgroundService` instances — long-running in-process work managed by Warp (restart-on-fault, optional cluster-singleton coordination, captured `ILogger<T>` output). The Services nav entry is always available; the list page is empty when no service is registered.
 
 ## List Page
 

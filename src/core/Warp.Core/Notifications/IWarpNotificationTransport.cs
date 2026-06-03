@@ -26,4 +26,14 @@ public interface IWarpNotificationTransport
     /// failures and only terminate when <paramref name="ct"/> is cancelled.
     /// </summary>
     IAsyncEnumerable<Notification> ListenAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Completes the first time the listener has registered with the underlying transport
+    /// (Postgres <c>LISTEN</c> on the wire / SQL Server Service Broker setup done). Tests use
+    /// this to gate the first publish so notifications can't be dropped by a race between
+    /// host startup and the listener's <c>ListenAsync</c> call. Once set, stays set for the
+    /// transport's lifetime — reconnect drops are handled by the listener task's reconnect
+    /// drain, not by re-arming this signal.
+    /// </summary>
+    Task ListenerReady { get; }
 }

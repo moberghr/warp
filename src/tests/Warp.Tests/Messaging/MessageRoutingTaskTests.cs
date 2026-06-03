@@ -244,4 +244,74 @@ public abstract class MessageRoutingTaskTestsBase : IAsyncLifetime
         logs.ShouldNotBeEmpty("Failed message should have a log entry explaining the failure");
         logs.ShouldContain(l => l.EventType == "Failed");
     }
+
+    [TimedFact]
+    public async Task RunMessageRouting_WritesRoutedJobLog_OnTheMessage_WithHandlerCount()
+    {
+        // Per-message audit: when MessageRouter picks up a Kind=Message and creates handler
+        // children, the message row gets its own "Routed" JobLog entry recording when the
+        // pickup happened and how many handlers got fan-out. Closes the per-row observability
+        // gap that previously hid MessageRouter pickup latency from the dashboard / dump.
+        var ctx = _fixture.CreateContext();
+        var messageId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = messageId,
+            Kind = JobKind.Message,
+            CurrentState = State.Enqueued,
+            Type = typeof(MultiRequest).AssemblyQualifiedName,
+            Message = "{}",
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var scopeFactory = BuildScopeFactory();
+
+        var routeCtx = _fixture.CreateContext();
+        var task = TestTasks.CreateMessageRouter(routeCtx, scopeFactory, TimeProvider.System);
+        await task.RunMessageRoutingAsync(CancellationToken.None);
+
+        var readCtx = _fixture.CreateContext();
+        var logs = await readCtx.Set<JobLog>()
+            .Where(l => l.JobId == messageId && l.EventType == "Routed")
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        logs.ShouldHaveSingleItem();
+        logs[0].Level.ShouldBe("Information");
+        logs[0].Message.ShouldBe("Routed to 2 handler(s)");
+    }
+
+    [TimedFact]
+    public async Task RunMessageRouting_FailedMessage_DoesNotWriteRoutedJobLog()
+    {
+        // Defensive: a message that fails to route (unknown type) must NOT emit a "Routed"
+        // log. The Routed event is reserved for the successful routing path.
+        var ctx = _fixture.CreateContext();
+        var messageId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = messageId,
+            Kind = JobKind.Message,
+            CurrentState = State.Enqueued,
+            Type = "Definitely.Does.Not.Exist, NoSuchAssembly",
+            Message = "{}",
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var scopeFactory = CreateScopeFactory();
+
+        var routeCtx = _fixture.CreateContext();
+        var task = TestTasks.CreateMessageRouter(routeCtx, scopeFactory, TimeProvider.System);
+        await task.RunMessageRoutingAsync(CancellationToken.None);
+
+        var readCtx = _fixture.CreateContext();
+        var routedLogs = await readCtx.Set<JobLog>()
+            .Where(l => l.JobId == messageId && l.EventType == "Routed")
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        routedLogs.ShouldBeEmpty();
+    }
 }

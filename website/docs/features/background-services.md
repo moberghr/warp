@@ -70,7 +70,7 @@ public sealed class KafkaDrainService : WarpBackgroundService
 }
 ```
 
-`AddBackgroundService<T>()` registers `T` as a singleton, adds the four persistence tables to your EF Core model, and wires the supervisor host. After enabling the addon, run a migration:
+`AddBackgroundService<T>()` registers `T` as a singleton and aliases it for host discovery. The four persistence tables (`Definition`/`Instance`/`Lease`/`Log`) ship with every Warp install (added by `AddWarp<TContext>`), so the only thing you do when adopting Background Services is register your concrete service classes. The first time you upgrade you'll need an EF Core migration to materialise the four tables; after that, schema changes only when Warp itself ships entity changes:
 
 ```bash
 dotnet ef migrations add AddWarpBackgroundServices
@@ -219,7 +219,7 @@ public override LogLevel MinLogLevel => LogLevel.Debug;
 
 ## Dashboard
 
-When `opt.AddBackgroundService<T>()` is registered, a `Services` entry appears in the dashboard nav (hidden if the addon is absent — probed via `/api/addons`).
+The `Services` entry in the dashboard nav is always present. When no `WarpBackgroundService` is registered, the list page is simply empty.
 
 ### List page (`/warp/services`)
 

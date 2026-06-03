@@ -46,6 +46,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
         await CleanupRecurringJobLogsAsync(ct);
         await CleanupBackgroundServiceLogsAsync(ct);
+        await CleanupOrphanedBackgroundServiceDefinitionsAsync(ct);
 
         var total = timeExpired + countCleaned;
         if (total == 0)
@@ -218,13 +219,6 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
     internal async Task CleanupBackgroundServiceLogsAsync(CancellationToken ct)
     {
-        // BackgroundServiceLog is only in the model when AddBackgroundService<T>() was called.
-        // Deployments without the addon must not throw — skip silently.
-        if (_context.Model.FindEntityType(typeof(BackgroundServiceLog)) == null)
-        {
-            return;
-        }
-
         var globalRetentionCount = _configuration.BackgroundServiceLogRetentionCount;
         var globalRetentionAge = _configuration.BackgroundServiceLogRetentionAge;
         var now = _time.GetUtcNow().UtcDateTime;
@@ -315,5 +309,33 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 .Where(l => l.Timestamp < ageCutoff)
                 .ExecuteDeleteAsync(ct);
         }
+    }
+
+    // Removes BackgroundServiceDefinition rows whose service is no longer registered on any
+    // server. Orphan signal: no live BackgroundServiceInstance row references the name AND
+    // LastSeenAt is older than the deploy-race grace window. The Instance check is the primary
+    // live-presence indicator (Heartbeat task refreshes Instance.LastHeartbeatAt every ~3s,
+    // ServerCleanup removes them on server departure); the LastSeenAt threshold protects
+    // against deleting and immediately recreating a Definition during a rolling deploy gap
+    // (losing FirstSeenAt history but no data). Order relative to CleanupBackgroundServiceLogsAsync
+    // doesn't matter: BackgroundServiceLog has a FK cascade from Instance (§8.18), not from
+    // Definition, so log rows tied to a deleted Definition were already removed when their
+    // Instance disappeared.
+    internal async Task CleanupOrphanedBackgroundServiceDefinitionsAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var threshold = now.Subtract(_configuration.BackgroundServiceDefinitionOrphanGrace);
+
+        // Single statement so the active-Instance check and the row delete share one DB
+        // snapshot — eliminates any window between SELECT and DELETE where a concurrent
+        // RegisterAsync could insert an Instance row we'd miss. §5.2 forbids _context.Set<>()
+        // subqueries inside .Select() projections; .Where() with .Any() is permitted. EF Core
+        // 10.0.5 emits a NOT EXISTS subquery on both providers — covered by the
+        // OrphanDefinitionCleanupTests_PostgreSql / _SqlServer integration tests.
+        await _context.Set<BackgroundServiceDefinition>()
+            .Where(x => x.LastSeenAt < threshold)
+            .Where(x => !_context.Set<BackgroundServiceInstance>()
+                .Any(y => y.ServiceName == x.Name))
+            .ExecuteDeleteAsync(ct);
     }
 }

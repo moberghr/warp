@@ -14,6 +14,7 @@ using Warp.Core.Handlers.Generated;
 using Warp.Core.Helper;
 using Warp.Core.RateLimit;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 
@@ -221,7 +222,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
 
         var log = await readCtx.Set<JobLog>()
             .Where(x => x.JobId == jobId)
-            .Where(x => x.EventType == "Requeued")
+            .Where(x => x.EventType == "Scheduled")
             .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
         log.ShouldNotBeNull();
         log.Message.ShouldContain("Throttled");
@@ -521,7 +522,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
 
         var log = await readCtx.Set<JobLog>()
             .Where(x => x.JobId == jobId)
-            .Where(x => x.EventType == "Requeued")
+            .Where(x => x.EventType == "Scheduled")
             .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
         log.ShouldNotBeNull();
         log.Message.ShouldContain("lock contention");
@@ -640,7 +641,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider);
+        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(new RateLimitAttributeRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -667,7 +668,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider);
+        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(
             new UnitRequest(),
@@ -693,7 +694,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider);
+        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(new RateLimitWaitAttributeRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);

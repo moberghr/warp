@@ -45,7 +45,8 @@ public abstract class JobExpirationTimeoutTestsBase : IAsyncLifetime
             TimeProvider.System,
             Options.Create(config),
             Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.QueriesFor(ctxForSvc));
+            Warp.Tests.Helpers.TestTasks.QueriesFor(ctxForSvc),
+            Warp.Tests.Helpers.TestTasks.NullSignals);
 
         // Act
         var before = DateTime.UtcNow;

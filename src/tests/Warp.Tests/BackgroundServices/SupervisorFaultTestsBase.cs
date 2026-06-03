@@ -26,7 +26,7 @@ public abstract class SupervisorFaultTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, CountingService>(),
+            configure: cfg => cfg.AddBackgroundService<CountingService>(),
             configureServices: services =>
             {
                 services.AddSingleton(counter);

@@ -24,9 +24,17 @@ public static class FixtureDiagnostics
         => DumpAsync(fixture.CreateContext(), header, ct);
 
     /// <summary>
-    /// Shared failure-dump tail for integration test bases. On any non-passing test result,
-    /// invokes <paramref name="dumper"/> with a fresh CancellationToken (xunit's is already
-    /// cancelled) and writes the result to stderr so flakes are diagnosable in CI.
+    /// Failure-dump tail for integration test bases. On any non-passing test result, runs
+    /// <paramref name="dumper"/> against the (possibly post-stop) DB and writes the result to
+    /// stderr. Useful for tests that don't construct a <see cref="WarpTestServer"/> — DB-only
+    /// tests against the fixture, or tests where the failure happened before <c>StartAsync</c>
+    /// ran.
+    /// <para>
+    /// Tests that use <see cref="WarpTestServer"/> get a richer, live pre-stop dump emitted
+    /// directly by <see cref="WarpTestServer.DisposeAsync"/> (search stderr for the
+    /// <c>[WARP-PRE-STOP-DIAG …]</c> marker). This method's post-shutdown dump is
+    /// complementary, not a substitute.
+    /// </para>
     /// </summary>
     public static async ValueTask DumpOnFailureAsync(Func<string, CancellationToken, Task<string>> dumper)
     {
@@ -40,7 +48,7 @@ public static class FixtureDiagnostics
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var dump = await dumper(
-                $"Test failed ({testState.Result}). Server-state diagnostics:",
+                $"Test failed ({testState.Result}). Server-state diagnostics (post-shutdown):",
                 cts.Token);
             await Console.Error.WriteLineAsync(dump);
         }

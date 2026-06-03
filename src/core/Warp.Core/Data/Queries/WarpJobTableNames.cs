@@ -86,77 +86,40 @@ public sealed class WarpJobTableNames
 
     public required string WorkerGroupPausedAt { get; init; }
 
-    /// <summary>
-    /// Schema for <c>BackgroundServiceDefinition</c>, <c>BackgroundServiceInstance</c> and <c>BackgroundServiceLease</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered in this deployment.
-    /// </summary>
+    /// <summary>Schema for the BG-service entities (always present per §2.13).</summary>
     public string? BackgroundServiceSchema { get; init; }
 
-    /// <summary>
-    /// Table name for <c>BackgroundServiceDefinition</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
-    public string? BackgroundServiceDefinitionTable { get; init; }
+    /// <summary>Table name for <c>BackgroundServiceDefinition</c>.</summary>
+    public required string BackgroundServiceDefinitionTable { get; init; }
 
-    /// <summary>
-    /// <c>name</c> column (primary key) on <c>BackgroundServiceDefinition</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
+    /// <summary><c>name</c> column (primary key) on <c>BackgroundServiceDefinition</c>.</summary>
     public string? BackgroundServiceDefinitionName { get; init; }
 
-    /// <summary>
-    /// Table name for <c>BackgroundServiceInstance</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
-    public string? BackgroundServiceInstanceTable { get; init; }
+    /// <summary>Table name for <c>BackgroundServiceInstance</c>.</summary>
+    public required string BackgroundServiceInstanceTable { get; init; }
 
-    /// <summary>
-    /// <c>server_id</c> column on <c>BackgroundServiceInstance</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
+    /// <summary><c>server_id</c> column on <c>BackgroundServiceInstance</c>.</summary>
     public string? BackgroundServiceInstanceServerId { get; init; }
 
-    /// <summary>
-    /// <c>last_heartbeat_at</c> column on <c>BackgroundServiceInstance</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
+    /// <summary><c>last_heartbeat_at</c> column on <c>BackgroundServiceInstance</c>.</summary>
     public string? BackgroundServiceInstanceLastHeartbeatAt { get; init; }
 
-    /// <summary>
-    /// Table name for <c>BackgroundServiceLease</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
-    public string? BackgroundServiceLeaseTable { get; init; }
+    /// <summary>Table name for <c>BackgroundServiceLease</c>.</summary>
+    public required string BackgroundServiceLeaseTable { get; init; }
 
-    /// <summary>
-    /// <c>holder_server_id</c> column on <c>BackgroundServiceLease</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
+    /// <summary><c>holder_server_id</c> column on <c>BackgroundServiceLease</c>.</summary>
     public string? BackgroundServiceLeaseHolderServerId { get; init; }
 
-    /// <summary>
-    /// <c>lease_expires_at</c> column on <c>BackgroundServiceLease</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
+    /// <summary><c>lease_expires_at</c> column on <c>BackgroundServiceLease</c>.</summary>
     public string? BackgroundServiceLeaseExpiresAt { get; init; }
 
-    /// <summary>
-    /// <c>service_name</c> column on <c>BackgroundServiceLease</c>.
-    /// <c>null</c> when the BackgroundServices addon has not been registered.
-    /// </summary>
+    /// <summary><c>service_name</c> column on <c>BackgroundServiceLease</c>.</summary>
     public string? BackgroundServiceLeaseServiceName { get; init; }
-
-    /// <summary>
-    /// Whether the BackgroundServices addon entities are present in the model.
-    /// </summary>
-    public bool HasBackgroundServiceTables =>
-        BackgroundServiceInstanceTable != null && BackgroundServiceLeaseTable != null;
 
     /// <summary>
     /// Lease TTL in seconds to use when renewing <c>BackgroundServiceLease</c> rows during
     /// the heartbeat round-trip. Defaults to 30 (the spec default). Set by the provider
-    /// factory from <c>WarpWorkerConfiguration.BackgroundServiceLeaseTtl</c> when
-    /// the BackgroundServices addon is registered.
+    /// factory from <c>WarpWorkerConfiguration.BackgroundServiceLeaseTtl</c>.
     /// </summary>
     public int LeaseTtlSeconds { get; init; } = 30;
 
@@ -198,39 +161,25 @@ public sealed class WarpJobTableNames
                 ?? throw new InvalidOperationException($"WorkerGroup.{propertyName} has no resolved column name.");
         }
 
-        // BackgroundService addon entities are optional — only registered when
-        // AddBackgroundService<T> is called. Resolve their names if present; leave null otherwise.
-        var definitionEntity = model.FindEntityType(typeof(BackgroundServiceDefinition));
-        var instanceEntity = model.FindEntityType(typeof(BackgroundServiceInstance));
-        var leaseEntity = model.FindEntityType(typeof(BackgroundServiceLease));
+        var definitionEntity = model.FindEntityType(typeof(BackgroundServiceDefinition))
+            ?? throw new InvalidOperationException("BackgroundServiceDefinition entity not found in model.");
+        var instanceEntity = model.FindEntityType(typeof(BackgroundServiceInstance))
+            ?? throw new InvalidOperationException("BackgroundServiceInstance entity not found in model.");
+        var leaseEntity = model.FindEntityType(typeof(BackgroundServiceLease))
+            ?? throw new InvalidOperationException("BackgroundServiceLease entity not found in model.");
 
         string? DefinitionCol(string propertyName)
         {
-            if (definitionEntity == null)
-            {
-                return null;
-            }
-
             return definitionEntity.FindProperty(propertyName)?.GetColumnName();
         }
 
         string? InstanceCol(string propertyName)
         {
-            if (instanceEntity == null)
-            {
-                return null;
-            }
-
             return instanceEntity.FindProperty(propertyName)?.GetColumnName();
         }
 
         string? LeaseCol(string propertyName)
         {
-            if (leaseEntity == null)
-            {
-                return null;
-            }
-
             return leaseEntity.FindProperty(propertyName)?.GetColumnName();
         }
 
@@ -275,13 +224,16 @@ public sealed class WarpJobTableNames
             CancellationMode = Col(nameof(Job.CancellationMode)),
             Metadata = Col(nameof(Job.Metadata)),
             ParentSpanId = Col(nameof(Job.ParentSpanId)),
-            BackgroundServiceSchema = instanceEntity?.GetSchema() ?? definitionEntity?.GetSchema(),
-            BackgroundServiceDefinitionTable = definitionEntity?.GetTableName(),
+            BackgroundServiceSchema = instanceEntity.GetSchema() ?? definitionEntity.GetSchema(),
+            BackgroundServiceDefinitionTable = definitionEntity.GetTableName()
+                ?? throw new InvalidOperationException("BackgroundServiceDefinition entity has no resolved table name."),
             BackgroundServiceDefinitionName = DefinitionCol(nameof(BackgroundServiceDefinition.Name)),
-            BackgroundServiceInstanceTable = instanceEntity?.GetTableName(),
+            BackgroundServiceInstanceTable = instanceEntity.GetTableName()
+                ?? throw new InvalidOperationException("BackgroundServiceInstance entity has no resolved table name."),
             BackgroundServiceInstanceServerId = InstanceCol(nameof(BackgroundServiceInstance.ServerId)),
             BackgroundServiceInstanceLastHeartbeatAt = InstanceCol(nameof(BackgroundServiceInstance.LastHeartbeatAt)),
-            BackgroundServiceLeaseTable = leaseEntity?.GetTableName(),
+            BackgroundServiceLeaseTable = leaseEntity.GetTableName()
+                ?? throw new InvalidOperationException("BackgroundServiceLease entity has no resolved table name."),
             BackgroundServiceLeaseHolderServerId = LeaseCol(nameof(BackgroundServiceLease.HolderServerId)),
             BackgroundServiceLeaseExpiresAt = LeaseCol(nameof(BackgroundServiceLease.LeaseExpiresAt)),
             BackgroundServiceLeaseServiceName = LeaseCol(nameof(BackgroundServiceLease.ServiceName)),

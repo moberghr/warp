@@ -21,9 +21,9 @@ public class SagaTelemetryTests
             }
         });
 
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         var proxy = new SagaHandlerProxy<TelemetrySaga, StartTelemetry>(
-            new TelemetryHandler(), store, semaphore, jobContext, time, cache);
+            new TelemetryHandler(), store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new StartTelemetry { CorrelationKey = "started" }, CancellationToken.None);
 
@@ -42,10 +42,10 @@ public class SagaTelemetryTests
             }
         });
 
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("done", new TelemetrySaga { CorrelationKey = "done" });
         var proxy = new SagaHandlerProxy<TelemetrySaga, CompleteTelemetry>(
-            new TelemetryHandler(), store, semaphore, jobContext, time, cache);
+            new TelemetryHandler(), store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new CompleteTelemetry { CorrelationKey = "done" }, CancellationToken.None);
 
@@ -68,12 +68,12 @@ public class SagaTelemetryTests
             }
         });
 
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("conflict", new TelemetrySaga { CorrelationKey = "conflict" });
         store.ThrowConflictKindOnNextSave = SagaSaveConflictKind.Version;
 
         var proxy = new SagaHandlerProxy<TelemetrySaga, CompleteTelemetry>(
-            new TelemetryHandler(), store, semaphore, jobContext, time, cache);
+            new TelemetryHandler(), store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new CompleteTelemetry { CorrelationKey = "conflict" }, CancellationToken.None);
 
@@ -98,10 +98,10 @@ public class SagaTelemetryTests
             }
         });
 
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.ThrowConflictKindOnNextSave = SagaSaveConflictKind.UniqueConstraint;
         var proxy = new SagaHandlerProxy<TelemetrySaga, StartTelemetry>(
-            new TelemetryHandler(), store, semaphore, jobContext, time, cache);
+            new TelemetryHandler(), store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new StartTelemetry { CorrelationKey = "race" }, CancellationToken.None);
 
@@ -124,16 +124,16 @@ public class SagaTelemetryTests
         });
 
         // 1) Start: a new saga via [StartsSaga] should bump the gauge by 1.
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         var startProxy = new SagaHandlerProxy<TelemetrySaga, StartTelemetry>(
-            new TelemetryHandler(), store, semaphore, jobContext, time, cache);
+            new TelemetryHandler(), store, locks, jobContext, time, cache);
         await startProxy.HandleAsync(new StartTelemetry { CorrelationKey = "lifecycle" }, CancellationToken.None);
         live.ShouldBe(1);
 
         // 2) Complete: a follow-up message that calls MarkCompleted brings it back to 0.
         var completeCtx = new JobContext();
         var completeProxy = new SagaHandlerProxy<TelemetrySaga, CompleteTelemetry>(
-            new TelemetryHandler(), store, semaphore, completeCtx, time, cache);
+            new TelemetryHandler(), store, locks, completeCtx, time, cache);
         await completeProxy.HandleAsync(new CompleteTelemetry { CorrelationKey = "lifecycle" }, CancellationToken.None);
         live.ShouldBe(0);
     }
@@ -150,10 +150,10 @@ public class SagaTelemetryTests
             }
         });
 
-        var (store, semaphore, jobContext, cache, time) = SetUp();
-        await using var holder = semaphore.HoldSlot($"warp:saga:{typeof(TelemetrySaga).FullName}:contended", 1);
+        var (store, locks, jobContext, cache, time) = SetUp();
+        await using var holder = locks.HoldLock($"warp:saga:{typeof(TelemetrySaga).FullName}:contended");
         var proxy = new SagaHandlerProxy<TelemetrySaga, CompleteTelemetry>(
-            new TelemetryHandler(), store, semaphore, jobContext, time, cache);
+            new TelemetryHandler(), store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new CompleteTelemetry { CorrelationKey = "contended" }, CancellationToken.None);
 
@@ -192,9 +192,9 @@ public class SagaTelemetryTests
         return false;
     }
 
-    private static (FakeSagaStore store, FakeSemaphoreProvider semaphore, JobContext jobContext, SagaCorrelationCache cache, TimeProvider time) SetUp()
+    private static (FakeSagaStore store, FakeLockProvider locks, JobContext jobContext, SagaCorrelationCache cache, TimeProvider time) SetUp()
     {
-        return (new FakeSagaStore(), new FakeSemaphoreProvider(), new JobContext(), new SagaCorrelationCache(), TimeProvider.System);
+        return (new FakeSagaStore(), new FakeLockProvider(), new JobContext(), new SagaCorrelationCache(), TimeProvider.System);
     }
 
     public sealed class TelemetrySaga : Saga;

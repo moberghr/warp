@@ -34,7 +34,7 @@ public abstract class SingletonFailoverTestsBase : IntegrationTestBase
 
         void Configure(WarpWorkerBuilder<TestContext> cfg)
         {
-            cfg.AddBackgroundService<TestContext, CountingBarrierService>();
+            cfg.AddBackgroundService<CountingBarrierService>();
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
             cfg.BackgroundServiceLeaseTtl = TimeSpan.FromSeconds(30);
         }
@@ -83,7 +83,7 @@ public abstract class SingletonFailoverTestsBase : IntegrationTestBase
 
         void Configure(WarpWorkerBuilder<TestContext> cfg)
         {
-            cfg.AddBackgroundService<TestContext, CountingBarrierService>();
+            cfg.AddBackgroundService<CountingBarrierService>();
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
 
             // Long TTL — the only way the waiter can acquire within the test budget is

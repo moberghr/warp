@@ -1,5 +1,9 @@
 using Shouldly;
+using Warp.Core;
+using Warp.Core.Concurrency;
+using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Helper;
 
 namespace Warp.Tests.Core;
 
@@ -249,5 +253,39 @@ public class MetadataSerializerTests
 
         var second = list[1].ShouldBeOfType<Dictionary<string, object>>();
         second["Name"].ShouldBe("B");
+    }
+
+    [TimedFact]
+    public void Serialize_EnumValue_WritesEnumNameAsString()
+    {
+        // Enums are persisted as their declared name so the dashboard and any external
+        // metadata consumer renders "Skip" / "Wait" instead of the integer value.
+        var dict = new Dictionary<string, object>
+        {
+            [nameof(IConcurrencyMetadata.ConcurrencyMode)] = ConcurrencyMode.Skip,
+        };
+
+        var json = MetadataSerializer.Serialize(dict);
+
+        json.ShouldNotBeNull();
+        json.ShouldContain("\"ConcurrencyMode\":\"Skip\"");
+        json.ShouldNotContain("\"ConcurrencyMode\":1");
+    }
+
+    [TimedFact]
+    public void RoundTrip_EnumThroughGeneratedAccessor_ReturnsTypedValue()
+    {
+        // End-to-end: write via the strongly-typed metadata interface, serialize, parse
+        // back, read via the same interface. The string-name round-trip must produce the
+        // same typed value the caller set.
+        var parameters = new JobParameters().WithMutex("payment-42", ConcurrencyMode.Wait);
+
+        var json = MetadataSerializer.Serialize(parameters.Metadata);
+        var roundTripped = MetadataSerializer.Deserialize(json);
+        var meta = MetadataFactory.Create<IConcurrencyMetadata>(roundTripped);
+
+        meta.ConcurrencyKey.ShouldBe("payment-42");
+        meta.ConcurrencyMode.ShouldBe(ConcurrencyMode.Wait);
+        meta.ConcurrencyLimit.ShouldBe(1);
     }
 }

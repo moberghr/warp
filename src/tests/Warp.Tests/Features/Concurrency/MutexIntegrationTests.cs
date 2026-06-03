@@ -110,11 +110,12 @@ public abstract class MutexIntegrationTestsBase : IntegrationTestBase
         await server.WaitForJobState(job1Id, State.Deleted);
         await server.WaitForJobState(job2Id, State.Completed);
 
-        // Audit-trail contract: every bounce leaves a Requeued log entry naming the mutex
-        // key and slot count. Queried after both jobs reach terminal states — by then any
-        // bounces that occurred are guaranteed to be committed.
+        // Audit-trail contract: every bounce leaves an Enqueued log entry whose message
+        // names the mutex key and slot count. EventType is the literal post-bounce state
+        // (Enqueued for Wait-mode mutex); the explanatory text lives in Message.
         var requeuedLog = (await server.GetJobLogs(job2Id))
-            .FirstOrDefault(x => string.Equals(x.EventType, "Requeued", StringComparison.Ordinal));
+            .FirstOrDefault(x => string.Equals(x.EventType, "Enqueued", StringComparison.Ordinal)
+                && x.Message.Contains("test-wait", StringComparison.Ordinal));
         requeuedLog.ShouldNotBeNull();
         requeuedLog.Message.ShouldContain("Requeued");
         requeuedLog.Message.ShouldContain("test-wait");

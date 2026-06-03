@@ -30,7 +30,7 @@ public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage
 
     private readonly ISagaHandler<TSaga, TMessage> _inner;
     private readonly ISagaStore _store;
-    private readonly IWarpSemaphoreProvider _semaphoreProvider;
+    private readonly IWarpLockProvider _lockProvider;
     private readonly IJobContext _jobContext;
     private readonly TimeProvider _time;
     private readonly SagaCorrelationCache _correlationCache;
@@ -38,14 +38,14 @@ public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage
     public SagaHandlerProxy(
         ISagaHandler<TSaga, TMessage> inner,
         ISagaStore store,
-        IWarpSemaphoreProvider semaphoreProvider,
+        IWarpLockProvider lockProvider,
         IJobContext jobContext,
         TimeProvider time,
         SagaCorrelationCache correlationCache)
     {
         _inner = inner;
         _store = store;
-        _semaphoreProvider = semaphoreProvider;
+        _lockProvider = lockProvider;
         _jobContext = jobContext;
         _time = time;
         _correlationCache = correlationCache;
@@ -56,7 +56,15 @@ public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage
         var correlationKey = _correlationCache.GetCorrelationKey(message);
         var lockName = $"warp:saga:{typeof(TSaga).FullName}:{correlationKey}";
 
-        var handle = await _semaphoreProvider.TryAcquireAsync(lockName, 1, TimeSpan.Zero, cancellationToken);
+        // Lock provider (sp_getapplock / pg_try_advisory_lock with timeout 0) rather than
+        // semaphore (maxCount=1) — the latter is Medallion's row-based protocol, which under
+        // SQL Server contention can BLOCK on transaction row locks even with timeout 0.
+        // Reproduced as a 20s TimedFact hang in TwoConcurrentMessagesSameSaga
+        // (#211 investigation): first contender fast-failed (~80 ms) but a second concurrent
+        // attempt on the same key wedged on the semaphore-state row lock for the test budget.
+        // The maxCount-1 semaphore is semantically a mutex; sp_getapplock is the correct
+        // primitive.
+        var handle = await _lockProvider.TryAcquireAsync(lockName, TimeSpan.Zero, cancellationToken);
         if (handle == null)
         {
             _jobContext.Outcome = BuildBusyOutcome(correlationKey, _time.GetUtcNow().UtcDateTime);

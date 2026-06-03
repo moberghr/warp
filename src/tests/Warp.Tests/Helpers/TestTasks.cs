@@ -75,7 +75,8 @@ public static class TestTasks
             TimeProvider.System,
             Options.Create(new WarpConfiguration()),
             NullTransport,
-            Warp.Tests.Helpers.TestTasks.QueriesFor(context));
+            Warp.Tests.Helpers.TestTasks.QueriesFor(context),
+            new ServerTaskSignals<TContext>());
     }
 
     public static MessageRouter<TContext> CreateMessageRouter<TContext>(
@@ -90,6 +91,7 @@ public static class TestTasks
             scopeFactory,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),
             NullTransport,
+            new ServerTaskSignals<TContext>(),
             Options.Create(new WarpWorkerConfiguration()));
     }
 
@@ -130,7 +132,8 @@ public static class TestTasks
             timeProvider,
             transport ?? NullTransport,
             Options.Create(new WarpWorkerConfiguration()),
-            QueriesFor(context));
+            QueriesFor(context),
+            new ServerTaskSignals<TContext>());
     }
 
     public static Orchestrator<TContext> CreateOrchestrator<TContext>(

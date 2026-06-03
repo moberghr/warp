@@ -72,71 +72,22 @@ public sealed class WarpHttpGenerator : IIncrementalGenerator
                 continue;
             }
 
-            var httpAttributes = candidate.GetAttributes()
-                .Where(a => InheritsFrom(a.AttributeClass, warpHttpAttributeSymbol))
-                .ToArray();
-
-            if (httpAttributes.Length == 0)
+            try
             {
-                continue;
-            }
-
-            var classification = ClassifyHandler(candidate, iRequestHandlerSymbol, iStreamRequestHandlerSymbol);
-            if (classification is null)
-            {
-                ReportInvalidHandler(
+                ProcessCandidate(
                     context,
+                    compilation,
                     candidate,
-                    "must implement IRequestHandler<TRequest, TResponse> or IStreamRequestHandler<TRequest, TResponse>");
-                continue;
+                    warpHttpAttributeSymbol,
+                    iRequestHandlerSymbol,
+                    iStreamRequestHandlerSymbol,
+                    iJobSymbol,
+                    iMessageSymbol,
+                    endpoints);
             }
-
-            var requestType = classification.Value.RequestType;
-            if (RequestImplementsBackgroundWorkInterface(requestType, iJobSymbol, iMessageSymbol))
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                ReportInvalidHandler(
-                    context,
-                    candidate,
-                    $"request type '{requestType.ToDisplayString()}' implements IJob or IMessage and cannot be HTTP-exposed (write a thin IRequest<Guid> wrapper that calls IPublisher.Enqueue instead)");
-                continue;
-            }
-
-            if (httpAttributes.Length > 1)
-            {
-                var anyMissingName = httpAttributes.Any(a => ReadNamedArg(a, "Name") is null);
-                if (anyMissingName)
-                {
-                    var location = candidate.Locations.FirstOrDefault() ?? Location.None;
-                    context.ReportDiagnostic(Diagnostic.Create(
-                        Diagnostics.MissingNameOnMultiAttribute,
-                        location,
-                        candidate.ToDisplayString()));
-                }
-            }
-
-            foreach (var attr in httpAttributes)
-            {
-                var (method, route) = ReadRouteAndMethod(attr);
-                if (method is null || route is null)
-                {
-                    continue;
-                }
-
-                var group = ReadNamedArg(attr, "Group") as string;
-                var name = ReadNamedArg(attr, "Name") as string;
-
-                var model = new HttpEndpointModel(
-                    handlerType: candidate,
-                    requestType: requestType,
-                    responseType: classification.Value.ResponseType,
-                    kind: classification.Value.Kind,
-                    method: method,
-                    route: route,
-                    group: group,
-                    name: name);
-
-                var plan = Emitters.BindingEmitter.Build(compilation, requestType, method);
-                endpoints.Add((model, plan));
+                ReportInternalError(context, candidate, ex);
             }
         }
 
@@ -148,6 +99,99 @@ public sealed class WarpHttpGenerator : IIncrementalGenerator
         var assemblySafe = SanitizeIdentifier(compilation.AssemblyName ?? "Unknown");
         var source = RegistryEmitter.Emit(assemblySafe, endpoints);
         context.AddSource("WarpHttpRegistry.g.cs", source);
+    }
+
+    private static void ProcessCandidate(
+        SourceProductionContext context,
+        Compilation compilation,
+        INamedTypeSymbol candidate,
+        INamedTypeSymbol warpHttpAttributeSymbol,
+        INamedTypeSymbol? iRequestHandlerSymbol,
+        INamedTypeSymbol? iStreamRequestHandlerSymbol,
+        INamedTypeSymbol? iJobSymbol,
+        INamedTypeSymbol? iMessageSymbol,
+        List<(HttpEndpointModel Model, BindingPlan Plan)> endpoints)
+    {
+        var httpAttributes = candidate.GetAttributes()
+            .Where(a => InheritsFrom(a.AttributeClass, warpHttpAttributeSymbol))
+            .ToArray();
+
+        if (httpAttributes.Length == 0)
+        {
+            return;
+        }
+
+        var classification = ClassifyHandler(candidate, iRequestHandlerSymbol, iStreamRequestHandlerSymbol);
+        if (classification is null)
+        {
+            ReportInvalidHandler(
+                context,
+                candidate,
+                "must implement IRequestHandler<TRequest, TResponse> or IStreamRequestHandler<TRequest, TResponse>");
+            return;
+        }
+
+        var requestType = classification.Value.RequestType;
+        if (RequestImplementsBackgroundWorkInterface(requestType, iJobSymbol, iMessageSymbol))
+        {
+            ReportInvalidHandler(
+                context,
+                candidate,
+                $"request type '{requestType.ToDisplayString()}' implements IJob or IMessage and cannot be HTTP-exposed (write a thin IRequest<Guid> wrapper that calls IPublisher.Enqueue instead)");
+            return;
+        }
+
+        if (httpAttributes.Length > 1)
+        {
+            var anyMissingName = httpAttributes.Any(a => ReadNamedArg(a, "Name") is null);
+            if (anyMissingName)
+            {
+                var location = candidate.Locations.FirstOrDefault() ?? Location.None;
+                context.ReportDiagnostic(Diagnostic.Create(
+                    Diagnostics.MissingNameOnMultiAttribute,
+                    location,
+                    candidate.ToDisplayString()));
+            }
+        }
+
+        foreach (var attr in httpAttributes)
+        {
+            var (method, route) = ReadRouteAndMethod(attr);
+            if (method is null || route is null)
+            {
+                continue;
+            }
+
+            var group = ReadNamedArg(attr, "Group") as string;
+            var name = ReadNamedArg(attr, "Name") as string;
+
+            var plan = Emitters.BindingEmitter.Build(compilation, requestType, method);
+
+            // Mixed shape with more than one body-bound target is unsupported — Minimal API
+            // accepts at most one body parameter, and emitting the lambda would throw
+            // KeyNotFoundException because EmitMixedHandler captures only the first body
+            // target. Diagnose explicitly so the rest of the assembly's endpoints still emit.
+            if (plan.Shape == BindingShape.Mixed
+                && plan.Targets.Count(t => t.Source == BindingSource.Body) > 1)
+            {
+                ReportMultipleBodyTargets(context, candidate);
+                continue;
+            }
+
+            ReportRequiredScalarDefaults(context, plan);
+
+            var model = new HttpEndpointModel(
+                handlerType: candidate,
+                requestType: requestType,
+                responseType: classification.Value.ResponseType,
+                kind: classification.Value.Kind,
+                method: method,
+                route: route,
+                group: group,
+                name: name);
+
+            endpoints.Add((model, plan));
+        }
     }
 
     private static (HttpHandlerKind Kind, INamedTypeSymbol RequestType, ITypeSymbol ResponseType)? ClassifyHandler(
@@ -251,6 +295,61 @@ public sealed class WarpHttpGenerator : IIncrementalGenerator
             location,
             type.ToDisplayString(),
             reason));
+    }
+
+    // WHTTP005: only the [AsParameters] shape (non-body verbs, no [FromBody] member) is affected —
+    // whole-body and mixed shapes deserialize the body via JSON, which honors C# defaults for
+    // omitted members. Within AsParameters, a query-bound non-nullable value type with a C#
+    // default still binds as a required query parameter, silently turning the default into a 400.
+    private static void ReportRequiredScalarDefaults(SourceProductionContext context, BindingPlan plan)
+    {
+        if (plan.Shape != BindingShape.AsParameters)
+        {
+            return;
+        }
+
+        foreach (var target in plan.Targets)
+        {
+            if (target.Source != BindingSource.Query)
+            {
+                continue;
+            }
+
+            if (!target.HasClrDefault || !IsNonNullableValueType(target.Type))
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(
+                Diagnostics.RequiredScalarWithIgnoredDefault,
+                target.Location ?? Location.None,
+                target.MemberName));
+        }
+    }
+
+    private static bool IsNonNullableValueType(ITypeSymbol type)
+    {
+        return type.IsValueType
+            && type.OriginalDefinition.SpecialType != SpecialType.System_Nullable_T;
+    }
+
+    private static void ReportMultipleBodyTargets(SourceProductionContext context, INamedTypeSymbol type)
+    {
+        var location = type.Locations.FirstOrDefault() ?? Location.None;
+        context.ReportDiagnostic(Diagnostic.Create(
+            Diagnostics.MultipleBodyTargets,
+            location,
+            type.ToDisplayString()));
+    }
+
+    private static void ReportInternalError(SourceProductionContext context, INamedTypeSymbol type, Exception ex)
+    {
+        var location = type.Locations.FirstOrDefault() ?? Location.None;
+        context.ReportDiagnostic(Diagnostic.Create(
+            Diagnostics.InternalGeneratorError,
+            location,
+            type.ToDisplayString(),
+            ex.GetType().Name + ": " + ex.Message));
     }
 
     private static string SanitizeIdentifier(string raw)

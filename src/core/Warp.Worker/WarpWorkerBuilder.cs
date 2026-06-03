@@ -21,5 +21,5 @@ public sealed class WarpWorkerBuilder<TContext> : WarpWorkerConfiguration, IWarp
 
     public IServiceCollection Services { get; }
 
-    WarpConfiguration IWarpBuilder<TContext>.Configuration => this;
+    WarpConfiguration IWarpBuilder.Configuration => this;
 }

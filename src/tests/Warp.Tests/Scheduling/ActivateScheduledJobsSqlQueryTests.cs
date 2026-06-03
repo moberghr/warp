@@ -24,17 +24,25 @@ public abstract class ActivateScheduledJobsSqlQueryTestsBase : IAsyncLifetime
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     [TimedFact]
-    public async Task ActivateScheduledJobsAsync_DueRow_FlippedToEnqueuedAndQueueReturned()
+    public async Task ActivateScheduledJobsAsync_DueRow_FlippedToEnqueuedAndIdQueueScheduleTimeReturned()
     {
         var now = DateTime.UtcNow;
-        await SeedScheduledJobAsync("q1", scheduleTime: now.AddMinutes(-1));
+        var scheduledAt = now.AddMinutes(-1);
+        var jobId = await SeedScheduledJobAsync("q1", scheduleTime: scheduledAt);
 
         var queries = TestTasks.QueriesFor(_fixture.CreateContext());
         await using var ctx = _fixture.CreateContext();
         var returned = await queries.ActivateScheduledJobsAsync(ctx, now, default);
 
         returned.ShouldHaveSingleItem();
-        returned[0].ShouldBe("q1");
+        returned[0].Id.ShouldBe(jobId);
+        returned[0].Queue.ShouldBe("q1");
+
+        // The UPDATE doesn't touch ScheduleTime — the value carried back is the row's existing
+        // (pre-activation) schedule time so the per-row JobLog can record "was scheduled at X".
+        // SQL Server's datetime2 stores microsecond precision; allow 1 ms tolerance for any
+        // round-trip rounding across providers.
+        returned[0].ScheduleTime.ShouldBe(scheduledAt, TimeSpan.FromMilliseconds(1));
 
         await using var readCtx = _fixture.CreateContext();
         var states = await readCtx.Set<Job>().AsNoTracking().Select(j => j.CurrentState).ToListAsync();
@@ -83,8 +91,8 @@ public abstract class ActivateScheduledJobsSqlQueryTestsBase : IAsyncLifetime
         // The contract returns one entry per ACTIVATED row (not distinct queues) — the
         // caller deduplicates for notification fan-out. Verifying the raw shape here.
         returned.Count.ShouldBe(3);
-        returned.Count(q => string.Equals(q, "q1", StringComparison.Ordinal)).ShouldBe(2);
-        returned.Count(q => string.Equals(q, "q2", StringComparison.Ordinal)).ShouldBe(1);
+        returned.Count(r => string.Equals(r.Queue, "q1", StringComparison.Ordinal)).ShouldBe(2);
+        returned.Count(r => string.Equals(r.Queue, "q2", StringComparison.Ordinal)).ShouldBe(1);
     }
 
     [TimedFact]
@@ -133,7 +141,7 @@ public abstract class ActivateScheduledJobsSqlQueryTestsBase : IAsyncLifetime
 
         var returned = await queries.ActivateScheduledJobsAsync(actCtx, now, default);
         returned.ShouldHaveSingleItem();
-        returned[0].ShouldBe("q1");
+        returned[0].Queue.ShouldBe("q1");
 
         await outerTx.CommitAsync();
 

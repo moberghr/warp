@@ -59,7 +59,8 @@ public abstract class CircuitBreakerIntegrationTestsBase : IntegrationTestBase
         var nextJobId = await nextPublisher.Enqueue(new ThrowExceptionRequest());
         await nextPublisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await server.WaitForJobLog(nextJobId, "Requeued", timeout: TimeSpan.FromSeconds(15));
+        // Circuit breaker reschedules to a future time → state becomes Scheduled.
+        await server.WaitForJobLog(nextJobId, "Scheduled", timeout: TimeSpan.FromSeconds(15));
 
         // Worker writes Scheduled when the reschedule time is in the future; the activation
         // task only flips it back to Enqueued once OpenUntil has elapsed (several minutes here).

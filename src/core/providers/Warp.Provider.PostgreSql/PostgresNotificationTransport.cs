@@ -20,6 +20,7 @@ public sealed class PostgresNotificationTransport : IWarpNotificationTransport
     private readonly string? _connectionString;
     private readonly string _channelName;
     private readonly ILogger<PostgresNotificationTransport>? _logger;
+    private readonly TaskCompletionSource _listenerReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public PostgresNotificationTransport(string connectionString, WarpDatabasePushConfiguration options, ILogger<PostgresNotificationTransport>? logger = null)
     {
@@ -38,6 +39,8 @@ public sealed class PostgresNotificationTransport : IWarpNotificationTransport
         _channelName = options.ChannelName;
         _logger = logger;
     }
+
+    public Task ListenerReady => _listenerReady.Task;
 
     public async Task PublishAsync(NotificationKind kind, string? queue, CancellationToken ct)
     {
@@ -65,20 +68,7 @@ public sealed class PostgresNotificationTransport : IWarpNotificationTransport
         }
     }
 
-    public IAsyncEnumerable<Notification> ListenAsync(CancellationToken ct)
-    {
-        return ListenCoreAsync(readySignal: null, ct);
-    }
-
-    // Test hook: deterministic listener-ready signal. Fires after LISTEN has been
-    // executed on the wire, before the first WaitAsync. Lets tests await readiness
-    // instead of guessing with Task.Delay — see PostgresNotificationTransportTests.
-    internal IAsyncEnumerable<Notification> ListenAsync(TaskCompletionSource ready, CancellationToken ct)
-    {
-        return ListenCoreAsync(ready, ct);
-    }
-
-    private async IAsyncEnumerable<Notification> ListenCoreAsync(TaskCompletionSource? readySignal, [EnumeratorCancellation] CancellationToken ct)
+    public async IAsyncEnumerable<Notification> ListenAsync([EnumeratorCancellation] CancellationToken ct)
     {
         await using var conn = await OpenConnectionAsync(ct);
 
@@ -89,7 +79,9 @@ public sealed class PostgresNotificationTransport : IWarpNotificationTransport
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
-        readySignal?.TrySetResult();
+        // First-LISTEN-on-the-wire signal. Latches once; reconnects rely on the listener
+        // task's drain-on-reconnect to catch up, not on re-arming this TCS.
+        _listenerReady.TrySetResult();
 
         // Npgsql fires the Notification event synchronously during WaitAsync on the same thread
         // the iterator runs on — so a plain Queue is safe, no Channel/Task.Run needed. The event

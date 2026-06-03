@@ -367,10 +367,13 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
     return [{ name: 'retry', scriptUrl: '/_ext/retry/index.js', pages: [] }];
   }
 
-  // Addons discovery — demo mode pretends every opt-in addon is wired so the screenshots
-  // have full nav. push:false keeps SignalR off in demo (no backend hub).
+  // Addons discovery — demo mode reports the addon-conditional nav items (Concurrency,
+  // Rate Limits, Sagas) as OFF so the top nav stays compact in marketing screenshots.
+  // The dedicated pages still render fine via direct URL — this flag only controls
+  // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
+  // off in demo (no backend hub).
   if (url === '/addons') {
-    return { concurrency: true, rateLimits: true, push: false, sagas: true, services: true };
+    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true };
   }
 
   // Dashboard

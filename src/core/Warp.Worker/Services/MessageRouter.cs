@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
@@ -25,6 +26,7 @@ public sealed class MessageRouter<TContext> : IServerTask
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly IWarpNotificationTransport _notificationTransport;
+    private readonly ServerTaskSignals<TContext> _signals;
     private readonly WarpWorkerConfiguration _configuration;
 
     public MessageRouter(
@@ -33,6 +35,7 @@ public sealed class MessageRouter<TContext> : IServerTask
         IServiceScopeFactory scopeFactory,
         IWarpSqlQueries<TContext> sqlQueries,
         IWarpNotificationTransport notificationTransport,
+        ServerTaskSignals<TContext> signals,
         IOptions<WarpWorkerConfiguration> configuration)
     {
         _context = context;
@@ -40,38 +43,31 @@ public sealed class MessageRouter<TContext> : IServerTask
         _scopeFactory = scopeFactory;
         _sqlQueries = sqlQueries;
         _notificationTransport = notificationTransport;
+        _signals = signals;
         _configuration = configuration.Value;
     }
 
     public string Name => "MessageRouting";
 
-    // Distributed advisory lock serializes routing across servers. This is necessary for
-    // correctness, not just optimisation: the Job entity has no concurrency token, and
-    // `LockNextEnqueuedMessageAsync`'s `FOR NO KEY UPDATE SKIP LOCKED` releases the row
-    // lock at statement end since this loop doesn't wrap each iteration in a transaction.
-    // Without the advisory lock, two servers could load the same message row, both
-    // discover handlers, and both insert duplicate child Job rows — handlers would fire
-    // twice per message.
-    // <para>
-    // For high-volume multi-server message routing this becomes a throughput ceiling
-    // (only one server routes at a time). The right scaling fix is an atomic
-    // UPDATE-RETURNING claim like <c>WarpDispatcher.ClaimEnqueuedJobsAsync</c> plus
-    // stale-message recovery. Tracked as a follow-up.
-    // </para>
+    // Distributed advisory lock serializes routing across servers. With the new atomic
+    // batch-claim (<see cref="IWarpSqlQueries{TContext}.ClaimEnqueuedMessagesAsync"/>)
+    // the lock is no longer strictly required for correctness — SKIP LOCKED guarantees
+    // distinct rows across concurrent callers — but the lock is kept because:
+    //   1. Handler discovery + child-job creation happens in-memory between claim and
+    //      commit, so two servers concurrently routing N messages still buy N×handler
+    //      lookups of identical work and 2× the SaveChanges traffic for the same outcome.
+    //   2. Existing tests assert "exactly one server routes at a time" semantics; relaxing
+    //      that is a separate decision.
     public string? LockKey => "warp:message-routing";
 
     public TimeSpan? DefaultInterval => _configuration.MessageRoutingInterval;
 
     public IEnumerable<ServerTaskSignal> Signals => [ServerTaskSignal.MessageEnqueued];
 
-    // Hard requirement, not stylistic. RunMessageRoutingAsync commits once per message
-    // (SaveChangesAsync inside the for-loop), so a single ExecuteAsync call produces
-    // multiple distinct transactions. The xact-lock model wraps the entire ExecuteAsync
-    // in ONE transaction — folding this task into that path would prevent intermediate
-    // commits and either deadlock or batch all routed messages into a single mega-tx
-    // (defeating the point of per-message visibility for retry / failure isolation).
-    // The Medallion session-scoped lock (selected by LockKey above + this flag = false)
-    // is what allows multi-iteration commits inside one held lock.
+    // The whole iteration runs inside an explicit transaction we open in ExecuteAsync, so
+    // we cannot use the xact-lock model (which would wrap ExecuteAsync in its own outer
+    // transaction). The Medallion session-scoped lock fits: it holds a connection from the
+    // pool while we open / commit our own transaction on a separate connection inside.
     public bool LocksWithTransaction => false;
 
     public async Task<string?> ExecuteAsync(CancellationToken ct)
@@ -83,107 +79,139 @@ public sealed class MessageRouter<TContext> : IServerTask
 
     internal async Task<int> RunMessageRoutingAsync(CancellationToken ct)
     {
-        var totalRouted = 0;
         var batchSize = _configuration.ServerTaskBatchSize;
 
-        // Bound the per-call loop: if there's a backlog of N >> batchSize messages, we
-        // process up to batchSize then return. ServerTaskLoop's RerunImmediately = true
-        // re-ticks us instantly so the backlog still drains, but each iteration is short
-        // enough for cancellation to propagate and other servers (with the lock dropped
-        // here) can pick up rows we haven't reached yet.
-        for (var i = 0; i < batchSize; i++)
+        // The transaction wraps the atomic claim AND the SaveChanges that adds child jobs,
+        // so a process crash anywhere in between rolls everything back — messages stay in
+        // Enqueued and the next router tick re-routes them. Without this wrap, the
+        // ClaimEnqueuedMessagesAsync UPDATE auto-commits on its own, and a crash before
+        // SaveChanges would leave the message rows orphaned in Processing with no children.
+        await using var transaction = await _context.Database.BeginTransactionAsync(ct);
+
+        var messages = await _sqlQueries.ClaimEnqueuedMessagesAsync(_context, batchSize, ct);
+        if (messages.Count == 0)
         {
-            var message = await _sqlQueries.LockNextEnqueuedMessageAsync(_context, ct);
-
-            if (message == null)
-            {
-                break;
-            }
-
-            var messageType = Type.GetType(message.Type!);
-            if (messageType == null)
-            {
-                message.CurrentState = State.Failed;
-                _context.Set<JobLog>().Add(new JobLog
-                {
-                    JobId = message.Id,
-                    EventType = "Failed",
-                    Timestamp = _time.GetUtcNow().UtcDateTime,
-                    Level = "Error",
-                    Message = $"Unknown message type: {message.Type}",
-                });
-                await _context.SaveChangesAsync(ct);
-
-                continue;
-            }
-
-            using var handlerScope = _scopeFactory.CreateScope();
-            var handlerTypes = JobDispatcher.DiscoverMessageHandlers(messageType, handlerScope.ServiceProvider);
-
-            if (handlerTypes.Count == 0)
-            {
-                message.CurrentState = State.Failed;
-                _context.Set<JobLog>().Add(new JobLog
-                {
-                    JobId = message.Id,
-                    EventType = "Failed",
-                    Timestamp = _time.GetUtcNow().UtcDateTime,
-                    Level = "Error",
-                    Message = $"No handlers registered for message type {messageType.Name}",
-                });
-                await _context.SaveChangesAsync(ct);
-
-                continue;
-            }
-
-            var now = _time.GetUtcNow().UtcDateTime;
-            foreach (var handlerType in handlerTypes)
-            {
-                var job = JobHelper.CreateJob(
-                    message: message.Message!,
-                    type: message.Type!,
-                    scheduleTime: null,
-                    queue: message.Queue,
-                    parentId: message.Id,
-                    state: State.Enqueued,
-                    now: now);
-
-                job.HandlerType = handlerType.AssemblyQualifiedName;
-                job.TraceId = message.TraceId;
-                job.ParentSpanId = message.ParentSpanId;
-                job.Metadata = message.Metadata;
-
-                _context.Set<Job>().Add(job);
-                _context.Set<JobLog>().Add(new JobLog
-                {
-                    JobId = job.Id,
-                    EventType = "Created",
-                    Timestamp = now,
-                    Level = "Information",
-                    Message = $"Job {job.Id} created from message {message.Id}",
-                });
-            }
-
-            message.CurrentState = State.Processing;
-            _context.Set<JobLog>().Add(new JobLog
-            {
-                JobId = message.Id,
-                EventType = "Processing",
-                Timestamp = now,
-                Level = "Information",
-                Message = $"Routed to {handlerTypes.Count} handler{(handlerTypes.Count == 1 ? string.Empty : "s")}",
-            });
-
-            // Capture pending JobEnqueued notifications before commit so push wakes the
-            // dispatcher as soon as the child rows are visible. Without this, push works
-            // for direct enqueues but messages-via-routing fall back to polling.
-            var pending = NotificationDispatch.CapturePending(_context);
-            await _context.SaveChangesAsync(ct);
-            await NotificationDispatch.FireAsync(_notificationTransport, pending, ct);
-
-            totalRouted++;
+            await transaction.RollbackAsync(ct);
+            return 0;
         }
 
-        return totalRouted;
+        var routed = RouteInMemory(messages);
+
+        // CapturePending walks the change tracker BEFORE SaveChanges so the snapshot still
+        // sees the Added entries. The push notifications fire after the commit so subscribers
+        // wake to visible rows, not uncommitted ones.
+        var pending = NotificationDispatch.CapturePending(_context);
+        await _context.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
+        await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport, ct);
+
+        return routed;
+    }
+
+    private int RouteInMemory(List<Job> messages)
+    {
+        var routed = 0;
+
+        // Disable change detection across the in-memory loop. At batchSize=1000 the
+        // auto-detect O(tracked-entity-count) sweep on every Add would dominate. The
+        // happy-path message rows need no UPDATE — the claim SQL already committed
+        // Processing to the DB and our in-memory tracked entity reflects that same
+        // value, so EF has nothing to write. The error branches DO change CurrentState
+        // post-claim (Processing → Failed), so they signal that explicitly with
+        // Entry().State = Modified, which is the contract under AutoDetectChangesEnabled = false.
+        var previousAutoDetect = _context.ChangeTracker.AutoDetectChangesEnabled;
+        _context.ChangeTracker.AutoDetectChangesEnabled = false;
+        try
+        {
+            foreach (var message in messages)
+            {
+                var now = _time.GetUtcNow().UtcDateTime;
+
+                var messageType = Type.GetType(message.Type!);
+                if (messageType == null)
+                {
+                    message.CurrentState = State.Failed;
+                    _context.Entry(message).State = EntityState.Modified;
+                    _context.Set<JobLog>().Add(new JobLog
+                    {
+                        JobId = message.Id,
+                        EventType = "Failed",
+                        Timestamp = now,
+                        Level = "Error",
+                        Message = $"Unknown message type: {message.Type}",
+                    });
+                    continue;
+                }
+
+                using var handlerScope = _scopeFactory.CreateScope();
+                var handlerTypes = JobDispatcher.DiscoverMessageHandlers(messageType, handlerScope.ServiceProvider);
+
+                if (handlerTypes.Count == 0)
+                {
+                    message.CurrentState = State.Failed;
+                    _context.Entry(message).State = EntityState.Modified;
+                    _context.Set<JobLog>().Add(new JobLog
+                    {
+                        JobId = message.Id,
+                        EventType = "Failed",
+                        Timestamp = now,
+                        Level = "Error",
+                        Message = $"No handlers registered for message type {messageType.Name}",
+                    });
+                    continue;
+                }
+
+                foreach (var handlerType in handlerTypes)
+                {
+                    var job = JobHelper.CreateJob(
+                        message: message.Message!,
+                        type: message.Type!,
+                        scheduleTime: null,
+                        queue: message.Queue,
+                        parentId: message.Id,
+                        state: State.Enqueued,
+                        now: now);
+
+                    job.HandlerType = handlerType.AssemblyQualifiedName;
+                    job.TraceId = message.TraceId;
+                    job.ParentSpanId = message.ParentSpanId;
+                    job.Metadata = message.Metadata;
+
+                    _context.Set<Job>().Add(job);
+                    _context.Set<JobLog>().Add(new JobLog
+                    {
+                        JobId = job.Id,
+                        EventType = "Created",
+                        Timestamp = now,
+                        Level = "Information",
+                        Message = $"Job {job.Id} created from message {message.Id}",
+                    });
+                }
+
+                // Per-message audit row: when MessageRouter actually picked up this message
+                // and how many handlers got fan-out. Atomic with the claim-flip + child
+                // INSERTs because they all commit in the single end-of-batch SaveChanges
+                // inside the surrounding transaction. Operators reading the dashboard can
+                // correlate "Created" (publisher commit) → "Routed" (this row) → children's
+                // "Created" → handler activity, closing the gap that previously made
+                // MessageRouter pickup latency invisible per-row.
+                _context.Set<JobLog>().Add(new JobLog
+                {
+                    JobId = message.Id,
+                    EventType = "Routed",
+                    Timestamp = now,
+                    Level = "Information",
+                    Message = $"Routed to {handlerTypes.Count} handler(s)",
+                });
+
+                routed++;
+            }
+
+            return routed;
+        }
+        finally
+        {
+            _context.ChangeTracker.AutoDetectChangesEnabled = previousAutoDetect;
+        }
     }
 }

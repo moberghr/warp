@@ -25,15 +25,14 @@ public class PostgresNotificationTransportTests : IAsyncLifetime, IClassFixture<
             new WarpDatabasePushConfiguration { ChannelName = "warp_notify_test" });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var enumerator = transport.ListenAsync(ready, cts.Token).GetAsyncEnumerator(cts.Token);
+        var enumerator = transport.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
         try
         {
             // Kick off MoveNextAsync first so the iterator runs OpenAsync+LISTEN before we publish.
-            // Then await the listener-ready signal — deterministic, no Task.Delay race.
+            // Then await the public ListenerReady signal — deterministic, no Task.Delay race.
             var moveTask = enumerator.MoveNextAsync();
-            await ready.Task.WaitAsync(cts.Token);
+            await transport.ListenerReady.WaitAsync(cts.Token);
 
             await transport.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token);
 
@@ -63,13 +62,12 @@ public class PostgresNotificationTransportTests : IAsyncLifetime, IClassFixture<
             new WarpDatabasePushConfiguration { ChannelName = "warp_notify_test2" });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var enumerator = transport.ListenAsync(ready, cts.Token).GetAsyncEnumerator(cts.Token);
+        var enumerator = transport.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
         try
         {
             var firstMoveTask = enumerator.MoveNextAsync();
-            await ready.Task.WaitAsync(cts.Token);
+            await transport.ListenerReady.WaitAsync(cts.Token);
 
             await transport.PublishAsync(NotificationKind.MessageEnqueued, null, cts.Token);
             await transport.PublishAsync(NotificationKind.JobFinalized, null, cts.Token);
@@ -113,13 +111,12 @@ public class PostgresNotificationTransportTests : IAsyncLifetime, IClassFixture<
             new WarpDatabasePushConfiguration { ChannelName = "warp_notify_ds_test" });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var enumerator = transport.ListenAsync(ready, cts.Token).GetAsyncEnumerator(cts.Token);
+        var enumerator = transport.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
         try
         {
             var moveTask = enumerator.MoveNextAsync();
-            await ready.Task.WaitAsync(cts.Token);
+            await transport.ListenerReady.WaitAsync(cts.Token);
 
             await transport.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token);
 

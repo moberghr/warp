@@ -8,8 +8,9 @@ const COALESCE_MS = 400;
 /**
  * Single mounted bridge between the realtime event bus and React Query.
  *
- * Mounted once in `MainLayout`; routes hub events to broad query
- * invalidations so every mounted page picks up fresh data.
+ * Replaces the per-page `useRealtimeRefetch` pattern. Mounted once in
+ * `MainLayout`; routes hub events to broad query invalidations so every
+ * mounted page picks up fresh data without re-implementing the bridge.
  *
  * Bursts of `JobFinalized` (workers draining a 100-job queue in seconds)
  * are coalesced into one invalidation per scope per ~400ms. Without this,

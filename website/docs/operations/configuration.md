@@ -94,7 +94,7 @@ builder.Services.AddWarpWorker<AppDbContext>(opt =>
 | `Duration` | `TimeSpan` | `1 minute` | How long the circuit stays open before the half-open probe window |
 | `ResetJitter` | `TimeSpan` | `10 seconds` | Jitter added to each rescheduled `ScheduleTime` so rescheduled jobs don't all hit the downstream at the exact moment the circuit expires |
 
-Per-handler overrides on `[CircuitBreaker]` use `Group`, `Threshold`, `DurationSeconds`, and `ResetJitterSeconds`. The addon adds a `CircuitBreakerState` entity to your DbContext — an EF Core migration is required after enabling it. See [Circuit Breaker](/docs/features/circuit-breaker) for details.
+Per-handler overrides on `[CircuitBreaker]` use `Group`, `Threshold`, `DurationSeconds`, and `ResetJitterSeconds`. The `CircuitBreakerState` entity is part of Warp's base schema (registered by `AddWarp` unconditionally), so no separate migration is required when you turn the addon on. See [Circuit Breaker](/docs/features/circuit-breaker) for details.
 
 ## NoRestart Configuration
 

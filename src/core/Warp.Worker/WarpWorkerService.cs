@@ -13,6 +13,7 @@ using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
 using Warp.Core.Notifications;
+using Warp.Worker.Logging;
 using Warp.Worker.Services;
 
 namespace Warp.Worker;
@@ -181,7 +182,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
             var handlerPending = NotificationDispatch.CapturePending(handlerContext);
             await handlerContext.SaveChangesAsync(default);
-            await NotificationDispatch.FireAsync(_notificationTransport, handlerPending, cancellationToken);
+            await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, cancellationToken);
 
             // Read metadata and outcome from handler scope before disposing
             job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
@@ -386,6 +387,9 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             JobExecutionContext.Current = null;
         }
 
+        // SignalJobFinalized fires the in-process signal; the transport publish covers
+        // cross-process subscribers (other servers' Orchestrator instances, dashboard hub).
+        // DispatchAsync would double-fire the local signal — handled here separately.
         _signals.SignalJobFinalized();
         await NotificationDispatch.FireAsync(
             _notificationTransport,
@@ -553,41 +557,12 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             AddCounters(context, "stats:requeued", $"stats:requeued:{hourSuffix}");
         }
 
-        var logMessage = outcome?.LogMessage
-            ?? (error != null ? error.Message : $"Job {job.Id} completed");
-        var logException = error?.ToString();
-
-        // Both Enqueued (immediate retry) and Scheduled (delayed retry) log as "Requeued" —
-        // operators reading the dashboard think in terms of "the job was retried", not its
-        // transient EF-state spelling.
-        var eventType = state switch
+        // Event-type, level, and split-on-retry are shared with WarpDispatcherWorker via
+        // FinalizationLogs.Build — both worker paths emit identical log shapes.
+        foreach (var log in FinalizationLogs.Build(job, error, durationMs, _workerId, now, outcome))
         {
-            State.Completed => "Completed",
-            State.Failed => "Failed",
-            State.Enqueued or State.Scheduled => "Requeued",
-            State.Deleted => "Deleted",
-            _ => state.ToString(),
-        };
-
-        // Retries apply jitter to ScheduleTime; recording it here so operators debugging a
-        // retry storm can see the actual delay applied (otherwise the factor is invisible).
-        if (state == State.Enqueued || state == State.Scheduled)
-        {
-            var scheduledAt = job.ScheduleTime.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
-            logMessage = $"{logMessage} (next attempt scheduled: {scheduledAt})";
+            context.Set<JobLog>().Add(log);
         }
-
-        context.Set<JobLog>().Add(new JobLog
-        {
-            JobId = job.Id,
-            EventType = eventType,
-            Timestamp = now,
-            Level = state == State.Failed ? "Error" : "Information",
-            Message = logMessage,
-            Exception = logException,
-            DurationMs = durationMs,
-            WorkerId = _workerId,
-        });
     }
 
     private static async Task SaveJobLogs(TContext context, JobLogCollector collector)

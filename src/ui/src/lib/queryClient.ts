@@ -25,7 +25,8 @@ export const queryKeys = {
   dashboardStatus: ['dashboard', 'status'] as const,
   dashboardStats: (range?: string) => ['dashboard', 'stats', range ?? '24h'] as const,
   statsHistory: (hours: number) => ['stats', 'history', hours] as const,
-  jobs: (state: string, page: number, pageSize: number) => ['jobs', state, page, pageSize] as const,
+  jobs: (state: string, page: number, pageSize: number) =>
+    ['jobs', state, page, pageSize] as const,
   failedJobsByType: (type: string, page: number, pageSize: number) =>
     ['jobs', 'failed', 'by-type', type, page, pageSize] as const,
   failedJobTypes: ['jobs', 'failed', 'types'] as const,
@@ -51,7 +52,8 @@ export const queryKeys = {
   serverLogs: (id: string, page: number, pageSize: number, taskName?: string) =>
     ['servers', id, 'logs', taskName ?? 'all', page, pageSize] as const,
   workerDetail: (id: string) => ['workers', id] as const,
-  workerLogs: (id: string, page: number, pageSize: number) => ['workers', id, 'logs', page, pageSize] as const,
+  workerLogs: (id: string, page: number, pageSize: number) =>
+    ['workers', id, 'logs', page, pageSize] as const,
   counters: ['counters'] as const,
   countersHistory: (hours: number) => ['counters', 'history', hours] as const,
   concurrencyLimits: ['concurrency-limits'] as const,

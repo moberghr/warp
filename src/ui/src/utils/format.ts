@@ -1,9 +1,16 @@
-import { formatDistanceToNow, format } from 'date-fns';
+import { format } from 'date-fns';
+import { DateTime } from 'luxon';
 import { State } from '@/types';
 import { useSettingsStore } from '@/stores/settings';
 
+// Uses `Date.now()` rather than `new Date()` for the "now" baseline so demo
+// mode can pin the clock via a single `Date.now` override and keep "X ago"
+// labels stable across screenshot runs. Luxon (already pulled in by
+// chartjs-adapter-luxon) replaces date-fns here so the bundle ships a single
+// date library instead of two.
 export function formatRelativeTime(dateString: string): string {
-  return formatDistanceToNow(new Date(dateString), { addSuffix: true });
+  return DateTime.fromJSDate(new Date(dateString))
+    .toRelative({ base: DateTime.fromMillis(Date.now()) }) ?? '';
 }
 
 export function formatDateTime(dateString: string | Date, pattern?: string): string {

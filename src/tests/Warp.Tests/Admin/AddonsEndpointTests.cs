@@ -6,7 +6,6 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using Shouldly;
-using Warp.Core.BackgroundServices;
 using Warp.Core.Concurrency;
 using Warp.Core.RateLimit;
 using Warp.Core.Sagas;
@@ -54,7 +53,6 @@ public class AddonsEndpointTests
             info.RateLimits.ShouldBeFalse();
             info.Push.ShouldBeFalse();
             info.Sagas.ShouldBeFalse();
-            info.Services.ShouldBeFalse();
         }
         finally
         {
@@ -72,7 +70,6 @@ public class AddonsEndpointTests
             services.AddScoped(_ => Mock.Of<IRateLimitManager>());
             services.AddSingleton<IDashboardPushMarker>(new DashboardPushMarker());
             services.AddScoped(_ => Mock.Of<ISagaQueryService>());
-            services.AddScoped(_ => Mock.Of<IBackgroundServiceQueryService>());
         });
         try
         {
@@ -85,7 +82,6 @@ public class AddonsEndpointTests
             info.RateLimits.ShouldBeTrue();
             info.Push.ShouldBeTrue();
             info.Sagas.ShouldBeTrue();
-            info.Services.ShouldBeTrue();
         }
         finally
         {
@@ -109,7 +105,6 @@ public class AddonsEndpointTests
             body.ShouldContain("\"push\":");
             body.ShouldContain("\"rateLimits\":");
             body.ShouldContain("\"sagas\":");
-            body.ShouldContain("\"services\":");
         }
         finally
         {
@@ -119,20 +114,17 @@ public class AddonsEndpointTests
     }
 
     [TimedTheory]
-    [InlineData(true, false, false, false, false)]
-    [InlineData(false, true, false, false, false)]
-    [InlineData(false, false, true, false, false)]
-    [InlineData(false, false, false, true, false)]
-    [InlineData(false, false, false, false, true)]
-    [InlineData(true, true, false, false, false)]
-    [InlineData(false, false, true, true, false)]
-    [InlineData(true, false, false, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, true, false, false)]
+    [InlineData(false, false, true, true)]
     public async Task GetAddons_PerAddonPermutation_FlagsMatchRegistration(
         bool concurrency,
         bool rateLimits,
         bool push,
-        bool sagas,
-        bool services)
+        bool sagas)
     {
         var (app, client) = await CreateApp(svc =>
         {
@@ -155,11 +147,6 @@ public class AddonsEndpointTests
             {
                 svc.AddScoped(_ => Mock.Of<ISagaQueryService>());
             }
-
-            if (services)
-            {
-                svc.AddScoped(_ => Mock.Of<IBackgroundServiceQueryService>());
-            }
         });
         try
         {
@@ -172,7 +159,6 @@ public class AddonsEndpointTests
             info.RateLimits.ShouldBe(rateLimits);
             info.Push.ShouldBe(push);
             info.Sagas.ShouldBe(sagas);
-            info.Services.ShouldBe(services);
         }
         finally
         {

@@ -18,7 +18,12 @@ public class OrderController : ControllerBase
 
     public async Task<IActionResult> PlaceOrder(CreateOrderRequest request)
     {
-        var order = new Order { CustomerId = request.CustomerId, Total = request.Total };
+        var order = new Order
+        {
+            Id = Guid.NewGuid(),
+            CustomerId = request.CustomerId,
+            Total = request.Total,
+        };
         _context.Orders.Add(order);
 
         // These jobs are written to the same DbContext — not yet committed
@@ -35,6 +40,10 @@ public class OrderController : ControllerBase
 ```
 
 If `SaveChangesAsync()` throws (constraint violation, connection failure, etc.), both the order and the jobs are rolled back. There is no window where a job exists without its corresponding business data.
+
+:::warning Database-generated ids
+The example assigns `order.Id` in application code (`Guid.NewGuid()`) so its value is known before the job is published. If your entity uses a **database-generated** id (identity column, `serial`), `order.Id` is still `0` when `Enqueue` serializes the message — the job payload will silently capture the wrong value. See [Referencing New Entities in Jobs](./db-generated-ids.md) for the three patterns that avoid this.
+:::
 
 ## Why This Matters
 

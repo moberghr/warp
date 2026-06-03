@@ -106,6 +106,7 @@ public class NotificationListenerTask<TContext> : BackgroundService
     private void DrainSignals()
     {
         _dispatcherRegistry.SignalAll();
+        _signals.SignalJobEnqueued();
         _signals.SignalMessageEnqueued();
         _signals.SignalJobFinalized();
     }
@@ -115,7 +116,11 @@ public class NotificationListenerTask<TContext> : BackgroundService
         switch (notification.Kind)
         {
             case NotificationKind.JobEnqueued:
+                // Two consumers: dispatcher-mode WarpDispatcher (via DispatcherRegistry) and
+                // bare-worker WarpWorker instances (via ServerTaskSignals.JobEnqueued). Firing
+                // both is harmless — each consumer's semaphore caps at 1.
                 _dispatcherRegistry.SignalAll();
+                _signals.SignalJobEnqueued();
                 break;
             case NotificationKind.MessageEnqueued:
                 _signals.SignalMessageEnqueued();

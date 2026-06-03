@@ -17,10 +17,8 @@ public static class RateLimitServiceConfiguration
     public static IWarpBuilder<TContext> AddRateLimit<TContext>(this IWarpBuilder<TContext> builder)
         where TContext : DbContext
     {
-        // Contribute the rate-limit entities only when the addon is opted in.
-        builder.Configuration.EntityConfigurators.Add(ServiceConfiguration.AddRateLimitBucketEntity);
-        builder.Configuration.EntityConfigurators.Add(ServiceConfiguration.AddRateLimitOverrideEntity);
-
+        // RateLimitBucket and RateLimitOverride entities are registered unconditionally by
+        // WarpModelCustomizer. This opt-in only wires the runtime behavior + admin manager.
         builder.Services.AddScoped<IRateLimitManager, RateLimitManager<TContext>>();
         builder.Services.AddScoped<IRateLimitStore, RateLimitStore<TContext>>();
         builder.Services.AddScoped<RateLimitResolver>();

@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core;
 using Warp.Core.BackgroundServices;
@@ -16,6 +18,7 @@ using Warp.Provider.PostgreSql;
 using Warp.Test.Shared;
 using Warp.Test.Shared.Handlers.BackgroundServices;
 using Warp.Test.Shared.Handlers.Sagas;
+using Warp.TestApp.Authentication;
 using Warp.UI;
 using Warp.UI.DashboardPush;
 using Warp.UI.Extensions;
@@ -42,6 +45,19 @@ builder.Services.AddWarpHttp();
 
 builder.Services.AddDataProtection();
 builder.Services.AddScoped<IWarpCredentialValidator, DemoCredentialValidator>();
+
+// Webhook-password authorization demo. Proves a custom IAuthorizationRequirement +
+// AuthorizationHandler composes with [Authorize(Policy = "WebhookPassword")] on a
+// [WarpHttpPost] handler — see WebhookEcho in HttpEndpoints.cs and the README/curl
+// snippet in WebhookAuthorization.cs. The permissive scheme exists so authentication
+// always succeeds with an empty identity; the policy is the only gatekeeper.
+builder.Services
+    .AddAuthentication(PermissiveAuthHandler.SchemeName)
+    .AddScheme<AuthenticationSchemeOptions, PermissiveAuthHandler>(PermissiveAuthHandler.SchemeName, _ => { });
+builder.Services.AddSingleton<IAuthorizationHandler, WebhookPasswordAuthorizationHandler>();
+builder.Services.AddAuthorization(opts => opts.AddPolicy(
+    "WebhookPassword",
+    policy => policy.AddRequirements(new WebhookPasswordRequirement("secret"))));
 
 builder.Services.AddCors(options =>
 {
@@ -91,8 +107,8 @@ builder.Services.AddWarpWorker<TestContext>(options =>
     // service runs once on every host (per-server scope). The second uses singleton scope —
     // one host across the cluster holds the lease and reports job stats every 10 seconds.
     // Watch the lease panel on the detail page to see which host currently holds it.
-    options.AddBackgroundService<TestContext, TickCounterService>();
-    options.AddBackgroundService<TestContext, JobStatsLoggerService>();
+    options.AddBackgroundService<TickCounterService>();
+    options.AddBackgroundService<JobStatsLoggerService>();
 });
 builder.Services.AddSagaHandler<OrderSagaWorkflow>();
 
@@ -114,6 +130,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors();
+app.UseAuthentication();
 app.UseAuthorization();
 app.UseWarpUI(options => options.UseBuiltInLogin<DemoCredentialValidator>());
 app.MapControllers();

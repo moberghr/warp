@@ -7,7 +7,17 @@ public static class MetadataSerializer
 {
     private static readonly JsonSerializerOptions Options = new()
     {
-        Converters = { new NativeObjectConverter() },
+        Converters =
+        {
+            new NativeObjectConverter(),
+
+            // Write enums as their declared name and accept the same on read. Makes the
+            // metadata column human-readable and makes API responses ship `"Skip"` instead
+            // of `1` so the dashboard and any external consumer render the enum directly.
+            // Read-side parse delegates to MetadataConvert.To (the dict carries the raw
+            // string from NativeObjectConverter; the generated property getter converts).
+            new JsonStringEnumConverter(),
+        },
     };
 
     public static Dictionary<string, object> Deserialize(string? json)
@@ -27,7 +37,7 @@ public static class MetadataSerializer
             return null;
         }
 
-        return JsonSerializer.Serialize(metadata);
+        return JsonSerializer.Serialize(metadata, Options);
     }
 
     private sealed class NativeObjectConverter : JsonConverter<object>

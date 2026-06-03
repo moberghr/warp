@@ -16,7 +16,9 @@ export default function BatchesPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = usePersistedPageSize();
 
-  useEffect(() => { setPage(0); }, [state]);
+  useEffect(() => {
+    setPage(0);
+  }, [state]);
 
   const query = useBatchesList(state, page, pageSize);
 

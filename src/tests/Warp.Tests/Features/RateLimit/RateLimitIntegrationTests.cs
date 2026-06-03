@@ -95,7 +95,10 @@ public abstract class RateLimitIntegrationTestsBase : IntegrationTestBase
         throttled.ExpireAt.ShouldBeNull();
 
         var logs = await server.GetJobLogs(throttled.Id);
-        logs.ShouldContain(l => l.EventType == "Requeued" && l.Message.Contains("Throttled", StringComparison.Ordinal) && l.Message.Contains(key, StringComparison.Ordinal));
+
+        // Rate-limit reschedules to a future time → state is Scheduled. The explanatory
+        // "Throttled — '{key}'..." message lives in Message; EventType is the literal state.
+        logs.ShouldContain(l => l.EventType == "Scheduled" && l.Message.Contains("Throttled", StringComparison.Ordinal) && l.Message.Contains(key, StringComparison.Ordinal));
 
         // Cancel the throttled job so the fixture doesn't leave a long-scheduled row behind.
         var cmd = server.CreateCommandService();

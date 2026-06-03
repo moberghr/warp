@@ -68,9 +68,12 @@ public class WarpWorkerConfiguration : WarpConfiguration
     /// <see cref="Services.Orchestrator{TContext}"/> process in a single ExecuteAsync call.
     /// When the limit is hit the task returns and the host re-ticks immediately (RerunImmediately
     /// = true) — bounded latency keeps cancellation responsive and prevents one server from
-    /// hogging the lock through a huge backlog.
+    /// hogging the lock through a huge backlog. The trade-off is multi-server fairness: a larger
+    /// value drains backlogs faster on the routing server but keeps the routing advisory lock
+    /// held longer, so peer servers wait longer to take a turn. Tune down if you run many
+    /// routing servers against the same DB and notice one server monopolising work.
     /// </summary>
-    public int ServerTaskBatchSize { get; set; } = 100;
+    public int ServerTaskBatchSize { get; set; } = 1000;
 
     /// <summary>
     /// Cadence at which <see cref="Services.Heartbeat{TContext}"/> refreshes

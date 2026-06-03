@@ -39,7 +39,7 @@ public abstract class ConfigurationMismatchTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, MismatchSingletonCountingService>(),
+            configure: cfg => cfg.AddBackgroundService<MismatchSingletonCountingService>(),
             configureServices: services => services.AddSingleton(state));
 
         // The supervisor should detect the mismatch and write ConfigurationMismatch status.
@@ -70,7 +70,7 @@ public abstract class ConfigurationMismatchTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, MismatchPerServerCountingService>(),
+            configure: cfg => cfg.AddBackgroundService<MismatchPerServerCountingService>(),
             configureServices: services => services.AddSingleton(state));
 
         await server.WaitForBackgroundServiceState(
@@ -99,7 +99,7 @@ public abstract class ConfigurationMismatchTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, MismatchSingletonCountingService>(),
+            configure: cfg => cfg.AddBackgroundService<MismatchSingletonCountingService>(),
             configureServices: services => services.AddSingleton(state));
 
         // Wait for the mismatch status to be written — proves the supervisor reached the mismatch branch.
@@ -156,7 +156,7 @@ public abstract class ConfigurationMismatchTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, MismatchSingletonCountingService>(),
+            configure: cfg => cfg.AddBackgroundService<MismatchSingletonCountingService>(),
             configureServices: services => services.AddSingleton(state));
 
         await server.WaitForBackgroundServiceState(

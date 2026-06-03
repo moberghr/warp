@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Helper;
 using Warp.Core.Logging;
@@ -32,14 +33,16 @@ public class BatchPublisher<TContext> : IBatchPublisher
     private readonly TimeProvider _timeProvider;
     private readonly IServiceProvider _serviceProvider;
     private readonly IWarpNotificationTransport _notificationTransport;
+    private readonly ServerTaskSignals<TContext> _signals;
 
-    public BatchPublisher(TContext context, IOptions<WarpConfiguration> configuration, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport? notificationTransport = null)
+    public BatchPublisher(TContext context, IOptions<WarpConfiguration> configuration, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
         _context = context;
         _warpConfiguration = configuration.Value;
         _timeProvider = timeProvider;
         _serviceProvider = serviceProvider;
-        _notificationTransport = notificationTransport ?? new NullNotificationTransport();
+        _notificationTransport = notificationTransport;
+        _signals = signals;
     }
 
     public async Task<Guid> StartNew<T>(List<T> batchJobMessages, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null)
@@ -181,7 +184,7 @@ public class BatchPublisher<TContext> : IBatchPublisher
     {
         var pending = NotificationDispatch.CapturePending(_context);
         await _context.SaveChangesAsync(cancellationToken);
-        await NotificationDispatch.FireAsync(_notificationTransport, pending, cancellationToken);
+        await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport, cancellationToken);
     }
 
     private async Task<Dictionary<string, object>> RunPublishPipeline<T>(T job, Dictionary<string, object>? seed = null, CancellationToken ct = default)

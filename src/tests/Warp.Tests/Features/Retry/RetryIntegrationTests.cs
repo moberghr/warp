@@ -56,15 +56,17 @@ public abstract class RetryIntegrationTestsBase : IntegrationTestBase
             .CountAsync(l => l.JobId == jobId && l.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
         processingLogs.ShouldBe(4);
 
-        // Should have 3 "Requeued" log entries (one per retry)
-        var requeuedLogs = await ctx.Set<JobLog>()
-            .CountAsync(l => l.JobId == jobId && l.EventType == "Requeued", Xunit.TestContext.Current.CancellationToken);
-        requeuedLogs.ShouldBe(3);
-
-        // Should have 1 "Failed" log entry (final failure)
+        // Each retry now emits a Failed + Scheduled pair instead of a single Requeued,
+        // so 3 retries × (1 Failed + 1 Scheduled) + 1 terminal Failed = 4 Failed total and
+        // 3 Scheduled total. The Failed counts include the per-retry exception rows AND the
+        // final terminal-failure row.
         var failedLogs = await ctx.Set<JobLog>()
             .CountAsync(l => l.JobId == jobId && l.EventType == "Failed", Xunit.TestContext.Current.CancellationToken);
-        failedLogs.ShouldBe(1);
+        failedLogs.ShouldBe(4);
+
+        var scheduledLogs = await ctx.Set<JobLog>()
+            .CountAsync(l => l.JobId == jobId && l.EventType == "Scheduled", Xunit.TestContext.Current.CancellationToken);
+        scheduledLogs.ShouldBe(3);
     }
 
     [TimedFact]
@@ -91,12 +93,11 @@ public abstract class RetryIntegrationTestsBase : IntegrationTestBase
             .CountAsync(l => l.JobId == jobId && l.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
         processingLogs.ShouldBe(1);
 
-        // Should have 0 "Requeued" entries (no retries)
-        var requeuedLogs = await ctx.Set<JobLog>()
-            .CountAsync(l => l.JobId == jobId && l.EventType == "Requeued", Xunit.TestContext.Current.CancellationToken);
-        requeuedLogs.ShouldBe(0);
+        // No retries → no Scheduled-for-retry log, just one terminal Failed.
+        var scheduledLogs = await ctx.Set<JobLog>()
+            .CountAsync(l => l.JobId == jobId && l.EventType == "Scheduled", Xunit.TestContext.Current.CancellationToken);
+        scheduledLogs.ShouldBe(0);
 
-        // Should have 1 "Failed" log entry
         var failedLogs = await ctx.Set<JobLog>()
             .CountAsync(l => l.JobId == jobId && l.EventType == "Failed", Xunit.TestContext.Current.CancellationToken);
         failedLogs.ShouldBe(1);
@@ -116,9 +117,12 @@ public abstract class RetryIntegrationTestsBase : IntegrationTestBase
         await server.WaitForJobState(jobId, State.Failed, timeout: TimeSpan.FromSeconds(8));
 
         var ctx = Fixture.CreateContext();
-        var requeuedLogs = await ctx.Set<JobLog>()
-            .CountAsync(x => x.JobId == jobId && x.EventType == "Requeued", Xunit.TestContext.Current.CancellationToken);
-        requeuedLogs.ShouldBe(1);
+
+        // 1 retry → 1 Scheduled log (the retry was scheduled); the matching Failed lives
+        // alongside it from the split-log emission.
+        var scheduledLogs = await ctx.Set<JobLog>()
+            .CountAsync(x => x.JobId == jobId && x.EventType == "Scheduled", Xunit.TestContext.Current.CancellationToken);
+        scheduledLogs.ShouldBe(1);
 
         var job = await ctx.Set<Job>()
             .Where(x => x.Id == jobId)

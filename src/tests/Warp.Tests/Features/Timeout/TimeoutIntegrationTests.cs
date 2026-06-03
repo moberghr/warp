@@ -111,8 +111,11 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
             .CountAsync(x => x.JobId == jobId && x.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
         processingLogs.ShouldBe(1);
 
+        // No retry → no per-retry Scheduled/Enqueued log was emitted by the worker.
         var requeuedLogs = await ctx.Set<JobLog>()
-            .CountAsync(x => x.JobId == jobId && x.EventType == "Requeued", Xunit.TestContext.Current.CancellationToken);
+            .CountAsync(
+                x => x.JobId == jobId && (x.EventType == "Enqueued" || x.EventType == "Scheduled"),
+                Xunit.TestContext.Current.CancellationToken);
         requeuedLogs.ShouldBe(0);
     }
 
@@ -165,8 +168,11 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
             .CountAsync(x => x.JobId == jobId && x.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
         processingLogs.ShouldBe(3);
 
+        // 2 retries → 2 per-retry Scheduled/Enqueued logs (RetryDelays = [0] → immediate, Enqueued).
         var requeuedLogs = await ctx.Set<JobLog>()
-            .CountAsync(x => x.JobId == jobId && x.EventType == "Requeued", Xunit.TestContext.Current.CancellationToken);
+            .CountAsync(
+                x => x.JobId == jobId && (x.EventType == "Enqueued" || x.EventType == "Scheduled"),
+                Xunit.TestContext.Current.CancellationToken);
         requeuedLogs.ShouldBe(2);
     }
 

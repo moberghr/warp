@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
+using Warp.Core.Events;
 using Warp.Core.Notifications;
 
 namespace Warp.Core.Sagas;
@@ -45,17 +46,20 @@ public sealed class SagaStore<TContext> : ISagaStore
     private readonly TimeProvider _time;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
+    private readonly ServerTaskSignals<TContext> _signals;
 
     public SagaStore(
         TContext context,
         TimeProvider time,
         IWarpNotificationTransport notificationTransport,
-        IDatabaseExceptionClassifier exceptionClassifier)
+        IDatabaseExceptionClassifier exceptionClassifier,
+        ServerTaskSignals<TContext> signals)
     {
         _context = context;
         _time = time;
         _notificationTransport = notificationTransport;
         _exceptionClassifier = exceptionClassifier;
+        _signals = signals;
     }
 
     public async Task<TSaga?> Load<TSaga>(string correlationKey, CancellationToken cancellationToken)
@@ -155,7 +159,7 @@ public sealed class SagaStore<TContext> : ISagaStore
             throw new SagaSaveConflictException(SagaSaveConflictKind.UniqueConstraint, ex);
         }
 
-        await NotificationDispatch.FireAsync(_notificationTransport, pending, cancellationToken);
+        await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport, cancellationToken);
     }
 
     public void DiscardPendingChanges() => _context.ChangeTracker.Clear();

@@ -44,12 +44,19 @@ public static class MetadataConvert
             return (T)(object)Convert.ToDouble(value);
         }
 
-        // Enum / Nullable<Enum> ← long (NativeObjectConverter returns long for integer JSON numbers).
-        // Defensive against non-integral values (e.g. a string mistakenly stored against an enum
-        // key) — fall through to default rather than throwing from a metadata accessor.
+        // Enum / Nullable<Enum>. After enums-as-strings (2026-05-25), persisted metadata
+        // carries the enum name as a JSON string, which NativeObjectConverter returns as
+        // string. Try name parse first; fall back to integer-value conversion for any
+        // path that still hands us a long (e.g. an in-memory dict constructed by hand or
+        // a future deserializer change).
         var underlying = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
         if (underlying.IsEnum)
         {
+            if (value is string s && Enum.TryParse(underlying, s, ignoreCase: true, out var parsed))
+            {
+                return (T)parsed;
+            }
+
             try
             {
                 return (T)Enum.ToObject(underlying, value);

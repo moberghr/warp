@@ -766,7 +766,11 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
         List<(string BehaviorFullName, string InterfaceFullName)> pipelineBehaviorRegistrations,
         List<(string BehaviorFullName, string InterfaceFullName)> streamPipelineBehaviorRegistrations)
     {
-        sb.AppendLine("    public static class WarpMediatorServiceExtensions");
+        // Internal (not public) so consumer projects that each emit their own copy don't
+        // collide with CS0436 across project references. Module-initializer wiring below
+        // calls the extension intra-assembly; cross-assembly registration happens via the
+        // emitted ModuleInitializer in each consuming assembly, not via direct calls.
+        sb.AppendLine("    internal static class WarpMediatorServiceExtensions");
         sb.AppendLine("    {");
         sb.AppendLine("        public static global::Microsoft.Extensions.DependencyInjection.IServiceCollection AddWarpMediator(this global::Microsoft.Extensions.DependencyInjection.IServiceCollection services)");
         sb.AppendLine("        {");

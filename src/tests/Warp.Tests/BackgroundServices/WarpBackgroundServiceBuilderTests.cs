@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Shouldly;
@@ -9,10 +10,30 @@ namespace Warp.Tests.BackgroundServices;
 [Trait("Category", "NoDb")]
 public class WarpBackgroundServiceBuilderTests
 {
+    private const string DummyConnectionString = "Host=x;Database=x;Username=x;Password=x";
+
     private static WarpBuilder<TestContext> CreateBuilder()
     {
         var services = new ServiceCollection();
         return new WarpBuilder<TestContext>(services);
+    }
+
+    // Pins the dashboard-only / publisher-only deployment path: AddWarp<TContext> alone
+    // (without AddWarpWorker) must register IBackgroundServiceQueryService so the
+    // /api/services endpoints can resolve it. Regression guard — a previous iteration
+    // registered the query service inside AddWarpWorker, silently breaking dashboard-only
+    // processes whose endpoints inject IBackgroundServiceQueryService non-nullably.
+    [TimedFact]
+    public void AddWarp_RegistersBackgroundServiceQueryService_WithoutAddWarpWorker()
+    {
+        var services = new ServiceCollection();
+        services.AddDbContext<TestContext>(o => o.UseNpgsql(DummyConnectionString));
+
+        services.AddWarp<TestContext>();
+
+        services.ShouldContain(
+            d => d.ServiceType == typeof(IBackgroundServiceQueryService)
+                && d.Lifetime == ServiceLifetime.Scoped);
     }
 
     [TimedFact]
@@ -20,7 +41,7 @@ public class WarpBackgroundServiceBuilderTests
     {
         var builder = CreateBuilder();
 
-        builder.AddBackgroundService<TestContext, TestService>();
+        builder.AddBackgroundService<TestService>();
 
         var sp = builder.Services.BuildServiceProvider();
         var first = sp.GetRequiredService<TestService>();
@@ -34,7 +55,7 @@ public class WarpBackgroundServiceBuilderTests
     {
         var builder = CreateBuilder();
 
-        builder.AddBackgroundService<TestContext, TestService>();
+        builder.AddBackgroundService<TestService>();
 
         var sp = builder.Services.BuildServiceProvider();
         var concrete = sp.GetRequiredService<TestService>();
@@ -48,8 +69,8 @@ public class WarpBackgroundServiceBuilderTests
     {
         var builder = CreateBuilder();
 
-        builder.AddBackgroundService<TestContext, TestService>();
-        builder.AddBackgroundService<TestContext, TestService>();
+        builder.AddBackgroundService<TestService>();
+        builder.AddBackgroundService<TestService>();
 
         var sp = builder.Services.BuildServiceProvider();
         var aliases = sp.GetServices<WarpBackgroundService>()
@@ -64,8 +85,8 @@ public class WarpBackgroundServiceBuilderTests
     {
         var builder = CreateBuilder();
 
-        builder.AddBackgroundService<TestContext, TestService>();
-        builder.AddBackgroundService<TestContext, AnotherTestService>();
+        builder.AddBackgroundService<TestService>();
+        builder.AddBackgroundService<AnotherTestService>();
 
         var sp = builder.Services.BuildServiceProvider();
         var aliases = sp.GetServices<WarpBackgroundService>().ToList();
@@ -105,19 +126,6 @@ public class WarpBackgroundServiceBuilderTests
         var service = new CustomNameService();
 
         service.Name.ShouldBe("my-custom-name");
-    }
-
-    [TimedFact]
-    public void AddBackgroundService_ContributesEntityConfiguratorsExactlyOnce()
-    {
-        var builder = CreateBuilder();
-
-        builder.AddBackgroundService<TestContext, TestService>();
-        builder.AddBackgroundService<TestContext, AnotherTestService>();
-
-        builder.EntityConfigurators
-            .Count(c => c == ServiceConfiguration.AddBackgroundServiceDefinitionEntity)
-            .ShouldBe(1);
     }
 
     public sealed class TestService : WarpBackgroundService

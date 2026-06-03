@@ -23,7 +23,7 @@ public abstract class RestartBackoffTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, ThrowingService>(),
+            configure: cfg => cfg.AddBackgroundService<ThrowingService>(),
             configureServices: services => services.AddSingleton(state));
 
         // Wait for the second attempt to reach user code — proves the fault-then-restart walk.
@@ -61,7 +61,7 @@ public abstract class RestartBackoffTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, ThrowingService>(),
+            configure: cfg => cfg.AddBackgroundService<ThrowingService>(),
             configureServices: services => services.AddSingleton(state));
 
         // Wait until the second attempt starts (post-fault restart).

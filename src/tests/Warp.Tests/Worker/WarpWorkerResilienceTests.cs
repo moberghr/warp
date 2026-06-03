@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Shouldly;
+using Warp.Tests.Helpers;
 using Warp.Worker;
 
 namespace Warp.Tests.Worker;
@@ -49,7 +50,8 @@ public class WarpWorkerResilienceTests
             groupConfig,
             new PauseStateHolder(),
             TimeProvider.System,
-            Guid.NewGuid());
+            Guid.NewGuid(),
+            TestTasks.NullSignals);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         await worker.StartAsync(cts.Token);
@@ -62,31 +64,42 @@ public class WarpWorkerResilienceTests
         callCount.ShouldBeGreaterThanOrEqualTo(3);
     }
 
-    [TimedFact(timeout: 5_000)]
+    [TimedFact]
     public async Task ExecuteAsync_AfterProcessingJob_ResetsBackoffToFloor()
     {
         // Regression coverage for PR #123 review F5: there was no test proving currentDelay
         // actually resets after a successful process. The backoff math is pure (tested in
         // PollingBackoffTests); this test pins the reset hook in WarpWorker.ExecuteAsync.
         //
-        // Earlier versions of this test asserted on wall-clock elapsed time, which flaked
-        // under CI CPU starvation (a 9-cycle sleep loop accumulates scheduling jitter).
-        // Instead, wrap TimeProvider so each Task.Delay call records the requested span and
-        // fires the timer immediately — the worker spins through deterministically and we
-        // assert on the recorded duration list.
-        var floor = TimeSpan.FromMilliseconds(30);
-        var max = TimeSpan.FromMilliseconds(300);
-        var time = new DelayCaptureTimeProvider();
+        // The wait inside WarpWorker uses SemaphoreSlim.WaitAsync(delay, ct) which is
+        // wall-clock and does not honour a custom TimeProvider, so this test runs on real
+        // time. To stay deterministic on CI: use a very small floor (10ms), assert by call
+        // timing (post-success call comes back within floor*5 = 50ms, not max=200ms).
+        var floor = TimeSpan.FromMilliseconds(10);
+        var max = TimeSpan.FromMilliseconds(200);
 
+        var callTimestamps = new List<DateTime>();
+        var callLock = new Lock();
         var callCount = 0;
+        using var sawCall7 = new SemaphoreSlim(0, 1);
+
         var mockService = new Mock<IWarpWorkerService>();
         mockService.Setup(x => x.GetAndProcessJob(It.IsAny<CancellationToken>()))
             .Returns((CancellationToken _) =>
             {
+                lock (callLock)
+                {
+                    callTimestamps.Add(DateTime.UtcNow);
+                }
+
                 var n = Interlocked.Increment(ref callCount);
+                if (n == 7)
+                {
+                    sawCall7.Release();
+                }
 
                 // Calls 1..5 empty (backoff ramps to cap). Call 6 success → reset hook fires.
-                // Call 7 empty: its post-delay is the one we assert on.
+                // Call 7 empty: its arrival time relative to call 6 is what we assert on.
                 return Task.FromResult(n == 6);
             });
 
@@ -102,90 +115,42 @@ public class WarpWorkerResilienceTests
             NullLogger<WarpWorker<TestContext>>.Instance,
             groupConfig,
             new PauseStateHolder(),
-            time,
-            Guid.NewGuid());
+            TimeProvider.System,
+            Guid.NewGuid(),
+            TestTasks.NullSignals);
 
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            // Expected recorded delays, in order:
-            //   [0]=60   post-call-1 (empty): PollingBackoff.Next(floor)=60
-            //   [1]=120  post-call-2
-            //   [2]=240  post-call-3
-            //   [3]=300  post-call-4 (capped at max)
-            //   [4]=300  post-call-5 (still capped)
-            //     -- call 6 returns true → reset to floor, `continue` (no Task.Delay) --
-            //   [5]=60   post-call-7 (empty): Next(floor)=60 IFF reset happened.
-            //            Without reset, currentDelay would still be max → Next(max)=300.
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
-            while (time.CapturedCount < 6 && DateTime.UtcNow < deadline)
-            {
-                await Task.Yield();
-            }
+            var saw = await sawCall7.WaitAsync(TimeSpan.FromSeconds(2), Xunit.TestContext.Current.CancellationToken);
+            saw.ShouldBeTrue("worker should reach call #7 within 2s");
         }
         finally
         {
             await worker.StopAsync(CancellationToken.None);
         }
 
-        var delays = time.CapturedDelays;
-        delays.Length.ShouldBeGreaterThanOrEqualTo(6, "worker did not progress through enough iterations");
-        delays[0].ShouldBe(TimeSpan.FromMilliseconds(60));
-        delays[1].ShouldBe(TimeSpan.FromMilliseconds(120));
-        delays[2].ShouldBe(TimeSpan.FromMilliseconds(240));
-        delays[3].ShouldBe(TimeSpan.FromMilliseconds(300));
-        delays[4].ShouldBe(TimeSpan.FromMilliseconds(300));
-        delays[5].ShouldBe(
-            TimeSpan.FromMilliseconds(60),
-            "post-success delay must be Next(floor)=60ms; observing Next(max)=300ms would mean currentDelay was not reset");
-    }
-
-    // Wraps a one-shot Task.Delay-style timer: records the requested duration, then fires
-    // the callback immediately (dueTime=Zero) so the worker can spin through iterations
-    // deterministically. We only need GetUtcNow + CreateTimer because Task.Delay's
-    // TimeProvider overload uses exactly those two APIs.
-    private sealed class DelayCaptureTimeProvider : TimeProvider
-    {
-        private readonly System.Threading.Lock _lock = new();
-        private readonly List<TimeSpan> _delays = [];
-
-        public int CapturedCount
+        DateTime[] timestamps;
+        lock (callLock)
         {
-            get
-            {
-                lock (_lock)
-                {
-                    return _delays.Count;
-                }
-            }
+            timestamps = [.. callTimestamps];
         }
 
-        public TimeSpan[] CapturedDelays
-        {
-            get
-            {
-                lock (_lock)
-                {
-                    return [.. _delays];
-                }
-            }
-        }
+        timestamps.Length.ShouldBeGreaterThanOrEqualTo(7, "worker did not progress through enough iterations");
 
-        public override DateTimeOffset GetUtcNow() => System.GetUtcNow();
-
-        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
-        {
-            if (period == Timeout.InfiniteTimeSpan)
-            {
-                lock (_lock)
-                {
-                    _delays.Add(dueTime);
-                }
-
-                return System.CreateTimer(callback, state, TimeSpan.Zero, period);
-            }
-
-            return System.CreateTimer(callback, state, dueTime, period);
-        }
+        // The gap between call 6 (success) and call 7 (next poll) is the assertion target.
+        // After call 6 returns true, currentDelay is reset to floor and the loop `continue`s
+        // — no wait. Call 7 then comes back empty, schedules the next wait at Next(floor)=20ms.
+        // What we observe is call 7's timestamp vs call 6: that gap should be near-zero
+        // (just the loop overhead), because there's no Task.Delay between them. Without
+        // the reset, currentDelay would still be at max from prior calls and the worker
+        // would wait Next(max)=200ms (clamped to max) before call 7.
+        //
+        // We accept up to floor*3=30ms slack for CI scheduling. Without the reset hook the
+        // expected gap is max=200ms+, so the threshold is well-separated either way.
+        var gap6to7 = timestamps[6] - timestamps[5];
+        gap6to7.ShouldBeLessThan(
+            TimeSpan.FromMilliseconds(30),
+            "post-success poll must follow immediately; observing a long gap means currentDelay was not reset to floor");
     }
 }

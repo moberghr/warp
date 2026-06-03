@@ -12,9 +12,9 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task NewCorrelation_StartsSagaMessage_CreatesAndInvokesHandler()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         var handler = new RecordingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new StartOrder { OrderId = "O-1" }, CancellationToken.None);
 
@@ -30,10 +30,10 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task ExistingSaga_LoadsAndInvokesHandler()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("O-2", new OrderSaga { CorrelationKey = "O-2", PaymentCaptured = false });
         var handler = new RecordingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new ContinueOrder { OrderId = "O-2" }, CancellationToken.None);
 
@@ -50,10 +50,10 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task MutexBusy_SetsRequeueOutcome_HandlerNotInvoked()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
-        await using var holder = semaphore.HoldSlot($"warp:saga:{typeof(OrderSaga).FullName}:O-3", 1);
+        var (store, locks, jobContext, cache, time) = SetUp();
+        await using var holder = locks.HoldLock($"warp:saga:{typeof(OrderSaga).FullName}:O-3");
         var handler = new RecordingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new ContinueOrder { OrderId = "O-3" }, CancellationToken.None);
 
@@ -68,9 +68,9 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task NoSagaAndNoStartsSaga_DefaultNotFound_SetsFailedOutcome()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         var handler = new RecordingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new ContinueOrder { OrderId = "missing" }, CancellationToken.None);
 
@@ -86,9 +86,9 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task NoSagaAndNoStartsSaga_OverriddenNotFound_PreservesHandlerSetOutcome()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         var handler = new OverridingNotFoundHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new ContinueOrder { OrderId = "ignore-me" }, CancellationToken.None);
 
@@ -102,10 +102,10 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task MarkCompleted_RemovesRow()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("O-4", new OrderSaga { CorrelationKey = "O-4" });
         var handler = new CompletingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new ContinueOrder { OrderId = "O-4" }, CancellationToken.None);
 
@@ -119,11 +119,11 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task VersionConflictOnSave_SetsRequeueOutcome()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("O-5", new OrderSaga { CorrelationKey = "O-5" });
         store.ThrowOnNextSave = true;
         var handler = new RecordingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new ContinueOrder { OrderId = "O-5" }, CancellationToken.None);
 
@@ -140,10 +140,10 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task UniqueConstraintConflictOnSave_SetsRequeueOutcome_WithUniqueReason()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.ThrowConflictKindOnNextSave = SagaSaveConflictKind.UniqueConstraint;
         var handler = new RecordingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new StartOrder { OrderId = "O-race" }, CancellationToken.None);
 
@@ -156,9 +156,9 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task MutexBusy_RequeueOutcome_HasJitteredScheduleTime()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
-        await using var holder = semaphore.HoldSlot($"warp:saga:{typeof(OrderSaga).FullName}:O-jitter", 1);
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(new RecordingHandler(), store, semaphore, jobContext, time, cache);
+        var (store, locks, jobContext, cache, time) = SetUp();
+        await using var holder = locks.HoldLock($"warp:saga:{typeof(OrderSaga).FullName}:O-jitter");
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(new RecordingHandler(), store, locks, jobContext, time, cache);
 
         var before = DateTime.UtcNow;
         await proxy.HandleAsync(new ContinueOrder { OrderId = "O-jitter" }, CancellationToken.None);
@@ -173,8 +173,8 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task SuccessfulStart_WritesSagaStartedCounters_BothCumulativeAndHourBucket()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
-        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(new RecordingHandler(), store, semaphore, jobContext, time, cache);
+        var (store, locks, jobContext, cache, time) = SetUp();
+        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(new RecordingHandler(), store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new StartOrder { OrderId = "O-counter" }, CancellationToken.None);
 
@@ -197,8 +197,8 @@ public class SagaHandlerProxyTests
     {
         // [StartsSaga] handler calls MarkCompleted in the same invocation — both lifecycle
         // counters must fire so observability records the ephemeral saga.
-        var (store, semaphore, jobContext, cache, time) = SetUp();
-        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(new InstantCompleteStartHandler(), store, semaphore, jobContext, time, cache);
+        var (store, locks, jobContext, cache, time) = SetUp();
+        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(new InstantCompleteStartHandler(), store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new StartOrder { OrderId = "O-ephemeral" }, CancellationToken.None);
 
@@ -212,11 +212,11 @@ public class SagaHandlerProxyTests
         // The DB counters are staged in the change tracker so they commit atomically with the
         // saga's own state. On conflict the tracker clears; the counter rows must vanish too
         // so a retry's increment lands exactly once. Mirrors the SagasCompleted OTel gate.
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("O-rollback", new OrderSaga { CorrelationKey = "O-rollback" });
         store.ThrowConflictKindOnNextSave = SagaSaveConflictKind.Version;
 
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(new CompletingHandler(), store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(new CompletingHandler(), store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new ContinueOrder { OrderId = "O-rollback" }, CancellationToken.None);
 
@@ -231,10 +231,10 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task MarkCompleted_CalledTwice_IsIdempotent()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("O-double", new OrderSaga { CorrelationKey = "O-double" });
         var handler = new DoubleCompletingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new ContinueOrder { OrderId = "O-double" }, CancellationToken.None);
 
@@ -251,9 +251,9 @@ public class SagaHandlerProxyTests
         // no row is Added/Removed (never inserted), but SaveChangesAsync MUST still fire so
         // any IPublisher.Publish(child) calls inside the handler commit with notifications.
         // Both Started and Completed counters fire so observability records the ephemeral saga.
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         var handler = new InstantCompleteStartHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, StartOrder>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new StartOrder { OrderId = "instant" }, CancellationToken.None);
 
@@ -268,9 +268,9 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task TimeoutMessage_NoSaga_SetsDeletedOutcome_DoesNotCallNotFound()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         var handler = new TimeoutAwareHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, OrderDeadline>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, OrderDeadline>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new OrderDeadline { OrderId = "expired" }, CancellationToken.None);
 
@@ -284,10 +284,10 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task TimeoutMessage_ExistingSaga_InvokesHandler()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("live", new OrderSaga { CorrelationKey = "live" });
         var handler = new TimeoutAwareHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, OrderDeadline>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, OrderDeadline>(handler, store, locks, jobContext, time, cache);
 
         await proxy.HandleAsync(new OrderDeadline { OrderId = "live" }, CancellationToken.None);
 
@@ -298,17 +298,17 @@ public class SagaHandlerProxyTests
     [TimedFact]
     public async Task HandlerThrows_PropagatesException_AndReleasesMutex()
     {
-        var (store, semaphore, jobContext, cache, time) = SetUp();
+        var (store, locks, jobContext, cache, time) = SetUp();
         store.Seed("O-6", new OrderSaga { CorrelationKey = "O-6" });
         var handler = new ThrowingHandler();
-        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, semaphore, jobContext, time, cache);
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(handler, store, locks, jobContext, time, cache);
 
         await Should.ThrowAsync<InvalidOperationException>(() =>
             proxy.HandleAsync(new ContinueOrder { OrderId = "O-6" }, CancellationToken.None));
 
         // Mutex released — a second invocation should acquire successfully (no busy outcome).
         var probeContext = new JobContext();
-        var probe = new SagaHandlerProxy<OrderSaga, ContinueOrder>(new RecordingHandler(), store, semaphore, probeContext, time, cache);
+        var probe = new SagaHandlerProxy<OrderSaga, ContinueOrder>(new RecordingHandler(), store, locks, probeContext, time, cache);
         await probe.HandleAsync(new ContinueOrder { OrderId = "O-6" }, CancellationToken.None);
 
         // If the lock had not been released, the probe would have short-circuited with a busy
@@ -316,9 +316,9 @@ public class SagaHandlerProxyTests
         probeContext.Outcome.ShouldBeNull();
     }
 
-    private static (FakeSagaStore store, FakeSemaphoreProvider semaphore, JobContext jobContext, SagaCorrelationCache cache, TimeProvider time) SetUp()
+    private static (FakeSagaStore store, FakeLockProvider locks, JobContext jobContext, SagaCorrelationCache cache, TimeProvider time) SetUp()
     {
-        return (new FakeSagaStore(), new FakeSemaphoreProvider(), new JobContext(), new SagaCorrelationCache(), TimeProvider.System);
+        return (new FakeSagaStore(), new FakeLockProvider(), new JobContext(), new SagaCorrelationCache(), TimeProvider.System);
     }
 
     public sealed class OrderSaga : Saga

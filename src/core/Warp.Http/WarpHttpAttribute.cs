@@ -16,8 +16,10 @@ public class WarpHttpAttribute : Attribute
         Route = route;
     }
 
+    /// <summary>The HTTP method (e.g. <c>GET</c>, <c>POST</c>) the endpoint responds to.</summary>
     public string Method { get; }
 
+    /// <summary>The route template, e.g. <c>/orders/{id}</c>. Route tokens bind to request members.</summary>
     public string Route { get; }
 
     /// <summary>
@@ -34,6 +36,8 @@ public class WarpHttpAttribute : Attribute
     public string? Name { get; set; }
 }
 
+/// <summary>Exposes the tagged handler as an HTTP <c>GET</c> endpoint at the given route.
+/// Non-body verb: request members bind from route / query / header via <c>[AsParameters]</c>.</summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
 public sealed class WarpHttpGetAttribute : WarpHttpAttribute
 {
@@ -43,6 +47,8 @@ public sealed class WarpHttpGetAttribute : WarpHttpAttribute
     }
 }
 
+/// <summary>Exposes the tagged handler as an HTTP <c>POST</c> endpoint at the given route.
+/// Body verb: an unattributed request type binds from the JSON body.</summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
 public sealed class WarpHttpPostAttribute : WarpHttpAttribute
 {
@@ -52,6 +58,8 @@ public sealed class WarpHttpPostAttribute : WarpHttpAttribute
     }
 }
 
+/// <summary>Exposes the tagged handler as an HTTP <c>PUT</c> endpoint at the given route.
+/// Body verb: an unattributed request type binds from the JSON body.</summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
 public sealed class WarpHttpPutAttribute : WarpHttpAttribute
 {
@@ -61,6 +69,8 @@ public sealed class WarpHttpPutAttribute : WarpHttpAttribute
     }
 }
 
+/// <summary>Exposes the tagged handler as an HTTP <c>PATCH</c> endpoint at the given route.
+/// Body verb: typically a <c>[FromRoute]</c> id plus a single <c>[FromBody]</c> sub-DTO.</summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
 public sealed class WarpHttpPatchAttribute : WarpHttpAttribute
 {
@@ -70,6 +80,8 @@ public sealed class WarpHttpPatchAttribute : WarpHttpAttribute
     }
 }
 
+/// <summary>Exposes the tagged handler as an HTTP <c>DELETE</c> endpoint at the given route.
+/// Non-body verb: request members bind from route / query / header via <c>[AsParameters]</c>.</summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
 public sealed class WarpHttpDeleteAttribute : WarpHttpAttribute
 {

@@ -63,21 +63,34 @@ public class MetadataConvertTests
     }
 
     [TimedFact]
-    public void To_Enum_FromString_ReturnsDefault()
+    public void To_Enum_FromString_ParsesEnumName()
     {
-        // Defensive: a string under an enum-typed key shouldn't blow up the metadata accessor —
-        // fall through to default(T) so the caller's `?? Fallback` recovers.
+        // Enums round-trip through JSON as their declared name (JsonStringEnumConverter
+        // is registered on MetadataSerializer.Options). Reading the metadata back via
+        // the generated accessor hands a string to MetadataConvert; case-insensitive
+        // Enum.TryParse turns it into the typed value.
         var result = MetadataConvert.To<SampleMode>("Second");
 
-        result.ShouldBe(default);
+        result.ShouldBe(SampleMode.Second);
     }
 
     [TimedFact]
-    public void To_NullableEnum_FromString_ReturnsNull()
+    public void To_NullableEnum_FromString_ParsesEnumName()
     {
         var result = MetadataConvert.To<SampleMode?>("Second");
 
-        result.ShouldBeNull();
+        result.ShouldBe(SampleMode.Second);
+    }
+
+    [TimedFact]
+    public void To_Enum_FromUnknownString_ReturnsDefault()
+    {
+        // A string that doesn't match any declared name on the enum falls through to
+        // default(T) rather than throwing, preserving the metadata accessor's
+        // can't-blow-up contract.
+        var result = MetadataConvert.To<SampleMode>("NotARealValue");
+
+        result.ShouldBe(default);
     }
 
     [TimedFact]

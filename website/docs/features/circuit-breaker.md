@@ -23,7 +23,7 @@ builder.Services.AddWarpWorker<AppDbContext>(opt =>
 });
 ```
 
-The addon adds a new `CircuitBreakerState` entity to your DbContext via `WarpConfiguration.EntityConfigurators`, so an EF Core migration is required after enabling it.
+The `CircuitBreakerState` entity is part of Warp's base schema — `AddWarp` registers it unconditionally — so no separate migration is required when you turn the addon on. If your DbContext was set up against an earlier Warp version that didn't include this entity, run `dotnet ef migrations add UpgradeWarp` to add it.
 
 ## Usage
 

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Models;
 using Warp.Core.Notifications;
 
@@ -30,18 +31,21 @@ public class RecurringJobService<TContext> : IRecurringJobService
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly IWarpNotificationTransport _notificationTransport;
+    private readonly ServerTaskSignals<TContext> _signals;
 
-    public RecurringJobService(TContext context, TimeProvider timeProvider, IWarpNotificationTransport notificationTransport)
+    public RecurringJobService(TContext context, TimeProvider timeProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
         _context = context;
         _timeProvider = timeProvider;
         _notificationTransport = notificationTransport;
+        _signals = signals;
     }
 
     public async Task<PagedList<RecurringJobModel>> GetRecurringJobs(BaseListRequest request)
     {
         return await _context.Set<RecurringJob>()
             .OrderBy(x => x.NextExecution)
+            .ThenBy(x => x.Name)
             .Select(x => new RecurringJobModel
             {
                 Id = x.Id,
@@ -127,7 +131,7 @@ public class RecurringJobService<TContext> : IRecurringJobService
 
         var pending = NotificationDispatch.CapturePending(_context);
         await _context.SaveChangesAsync();
-        await NotificationDispatch.FireAsync(_notificationTransport, pending);
+        await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport);
     }
 
     public async Task DeleteRecurringJob(int id)

@@ -130,22 +130,19 @@ public class WarpServerRegistration<TContext> : IHostedService
             .ToListAsync(ct);
         context.Set<Warp.Core.Data.Entities.WorkerGroup>().RemoveRange(workerGroups);
 
-        // BackgroundServiceLease and BackgroundServiceInstance rows are also FK-restricted
+        // BackgroundServiceLease and BackgroundServiceInstance rows are FK-restricted
         // (no cascade). Remove them here as a belt-and-suspenders safety net; the primary
         // graceful-shutdown path is BackgroundServiceHost.StopAsync which fires a fire-and-forget
         // delete before waiting on user code. Remove Lease first so its FK to Definition is
         // satisfied before Instance is removed; neither has a FK to Server, so order vs. Server
         // delete is independent — we place them before the Server delete as a safe convention.
-        if (context.Model.FindEntityType(typeof(BackgroundServiceLease)) != null)
-        {
-            await context.Set<BackgroundServiceLease>()
-                .Where(x => x.HolderServerId == server.Id)
-                .ExecuteDeleteAsync(ct);
+        await context.Set<BackgroundServiceLease>()
+            .Where(x => x.HolderServerId == server.Id)
+            .ExecuteDeleteAsync(ct);
 
-            await context.Set<BackgroundServiceInstance>()
-                .Where(x => x.ServerId == server.Id)
-                .ExecuteDeleteAsync(ct);
-        }
+        await context.Set<BackgroundServiceInstance>()
+            .Where(x => x.ServerId == server.Id)
+            .ExecuteDeleteAsync(ct);
 
         context.Set<Server>().Remove(server);
         await context.SaveChangesAsync(ct);

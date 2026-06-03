@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -75,6 +76,20 @@ internal static class DelegateEmitter
         //   3. The single body target (if any), [FromBody]-attributed, with TRequest body shape
         //
         // Inside the lambda, we construct TRequest from the bound parts and dispatch.
+        var bodyTargetCount = plan.Targets.Count(t => t.Source == BindingSource.Body);
+        if (bodyTargetCount > 1)
+        {
+            // Minimal API only accepts one body parameter, and the param-name dictionary below
+            // only captures the first body target — so emission would fail with a cryptic
+            // KeyNotFoundException on construction. This case must be diagnosed earlier as
+            // WHTTP004 in WarpHttpGenerator.ProcessCandidate. Throwing here is defense-in-depth:
+            // if the gate is ever bypassed, the outer try/catch surfaces a clear WHTTP999.
+            throw new InvalidOperationException(
+                "EmitMixedHandler invariant violated: BindingPlan has "
+                + bodyTargetCount
+                + " body-bound targets but at most one is supported. This should have been diagnosed as WHTTP004 before reaching emission.");
+        }
+
         sb.Append("            static async global::System.Threading.Tasks.Task (global::Microsoft.AspNetCore.Http.HttpContext ctx");
 
         var bodyTarget = plan.Targets.FirstOrDefault(t => t.Source == BindingSource.Body);

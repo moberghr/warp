@@ -80,7 +80,10 @@ public static class ServiceConfiguration
         services.TryAddScoped<IBackgroundServiceLogStore, BackgroundServiceLogStore<TContext>>();
 
         services.AddSingleton<ServerRegistrationState>();
-        services.AddSingleton<ServerTaskSignals<TContext>>();
+
+        // ServerTaskSignals<TContext> is registered in Warp.Core.AddWarp (via TryAddSingleton)
+        // so publish-only processes can resolve it. AddWarp is called by AddWarpWorker above,
+        // so the registration is in place by the time we get here — no duplicate needed.
         services.AddSingleton<ProcessCpuTracker>();
         services.AddSingleton<HeartbeatLeaseTracker>();
         services.AddScoped<IServerTask, Heartbeat<TContext>>();

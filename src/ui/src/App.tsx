@@ -4,6 +4,10 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { ErrorBoundary } from 'react-error-boundary';
 import MainLayout from '@/layouts/MainLayout';
 
+// Route pages are code-split: each becomes its own chunk loaded on navigation,
+// so the initial bundle no longer carries every page (notably the trace graph's
+// @xyflow/@dagrejs and the chart stack). MainLayout renders the Suspense boundary
+// around <Outlet>, so the shell/nav stays put while a page chunk loads.
 const DashboardPage = lazy(() => import('@/pages/dashboard/DashboardPage'));
 const JobListPage = lazy(() => import('@/pages/jobs/JobListPage'));
 const MessagesPage = lazy(() => import('@/pages/messages/MessagesPage'));
@@ -93,6 +97,8 @@ function AppRoutes() {
     initExtensions();
   }, [initExtensions]);
 
+  const extensionPages = extensionsLoaded ? extensionRuntime.getPages() : [];
+
   if (!authProbeDone) {
     return null;
   }
@@ -109,45 +115,44 @@ function AppRoutes() {
     return null;
   }
 
-  const extensionPages = extensionRuntime.getPages();
-
   return (
     <BrowserRouter basename={config.basePath}>
       <Suspense fallback={null}>
         <Routes>
           <Route element={<MainLayout extensions={extensions} />}>
-          <Route index element={<DashboardPage />} />
-          <Route path="/detail/:id" element={<DetailPage />} />
-          <Route path="/jobs/detail/:id" element={<DetailPage />} />
-          <Route path="/jobs/:state" element={<JobListPage />} />
-          <Route path="/messages/detail/:id" element={<DetailPage />} />
-          <Route path="/messages/:state" element={<MessagesPage />} />
-          <Route path="/messages" element={<MessagesPage />} />
-          <Route path="/batches/detail/:id" element={<DetailPage />} />
-          <Route path="/batches/:state" element={<BatchesPage />} />
-          <Route path="/batches" element={<BatchesPage />} />
-          <Route path="/recurring/:id" element={<RecurringDetailPage />} />
-          <Route path="/recurring" element={<RecurringPage />} />
-          <Route path="/trace/:traceId/:highlightId?" element={<TracePage />} />
-          <Route path="/workers/:id" element={<WorkerDetailPage />} />
-          <Route path="/servers/:id" element={<ServerDetailPage />} />
-          <Route path="/servers" element={<ServersPage />} />
-          <Route path="/counters" element={<CountersPage />} />
-          <Route path="/concurrency" element={<ConcurrencyLimitsPage />} />
-          <Route path="/ratelimits" element={<RateLimitsPage />} />
-          <Route path="/sagas/:id" element={<SagaDetailPage />} />
-          <Route path="/sagas" element={<SagasListPage />} />
-          <Route path="/services/:name" element={<BackgroundServiceDetail />} />
-          <Route path="/services" element={<BackgroundServicesList />} />
-          <Route path="/settings" element={<SettingsPage />} />
+            <Route index element={<DashboardPage />} />
+            <Route path="/detail/:id" element={<DetailPage />} />
+            <Route path="/jobs/detail/:id" element={<DetailPage />} />
+            <Route path="/jobs/:state" element={<JobListPage />} />
+            <Route path="/messages/detail/:id" element={<DetailPage />} />
+            <Route path="/messages/:state" element={<MessagesPage />} />
+            <Route path="/messages" element={<MessagesPage />} />
+            <Route path="/batches/detail/:id" element={<DetailPage />} />
+            <Route path="/batches/:state" element={<BatchesPage />} />
+            <Route path="/batches" element={<BatchesPage />} />
+            <Route path="/recurring/:id" element={<RecurringDetailPage />} />
+            <Route path="/recurring" element={<RecurringPage />} />
+            <Route path="/trace/:traceId/:highlightId?" element={<TracePage />} />
+            <Route path="/workers/:id" element={<WorkerDetailPage />} />
+            <Route path="/servers/:id" element={<ServerDetailPage />} />
+            <Route path="/servers" element={<ServersPage />} />
+            <Route path="/counters" element={<CountersPage />} />
+            <Route path="/concurrency" element={<ConcurrencyLimitsPage />} />
+            <Route path="/ratelimits" element={<RateLimitsPage />} />
+            <Route path="/sagas/:id" element={<SagaDetailPage />} />
+            <Route path="/sagas" element={<SagasListPage />} />
+            <Route path="/services/:name" element={<BackgroundServiceDetail />} />
+            <Route path="/services" element={<BackgroundServicesList />} />
+            <Route path="/settings" element={<SettingsPage />} />
 
-          {extensionPages.map((page) => (
-            <Route
-              key={page.path}
-              path={page.path}
-              element={<ExtensionPage component={page.component} />}
-            />
-          ))}
+            {/* Extension pages */}
+            {extensionPages.map((page) => (
+              <Route
+                key={page.path}
+                path={page.path}
+                element={<ExtensionPage component={page.component} />}
+              />
+            ))}
           </Route>
         </Routes>
       </Suspense>

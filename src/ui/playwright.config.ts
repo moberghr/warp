@@ -8,7 +8,10 @@ export default defineConfig({
   workers: process.env.CI ? 2 : undefined,
   use: {
     baseURL: 'http://localhost:5179',
-    viewport: { width: 1280, height: 800 },
+    // 1920×1080. Bigger than the prior 1280×800 because the section sidebars
+    // (Jobs / Batches / Messages add a 256px aside) plus the action columns on
+    // list pages were getting horizontally cropped at 1280.
+    viewport: { width: 1920, height: 1080 },
     actionTimeout: 10000,
   },
   webServer: {

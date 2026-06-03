@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Warp.Core;
@@ -82,4 +83,21 @@ public sealed class HttpCreateOrderHandler : IRequestHandler<HttpCreateOrder, Ht
 {
     public Task<HttpCreatedOrder> HandleAsync(HttpCreateOrder request, CancellationToken cancellationToken)
         => Task.FromResult(new HttpCreatedOrder(Guid.NewGuid(), request.CustomerName));
+}
+
+// 6. Custom-policy authorization on a [WarpHttpPost] endpoint. Verifies §1.3 from the
+// Arctic Adventures feedback: a custom IAuthorizationRequirement + AuthorizationHandler
+// composes with [Authorize(Policy = "...")] on a Warp.Http endpoint exactly like on a
+// raw MapPost. The handler in Warp.TestApp/Authentication/WebhookAuthorization.cs logs
+// every invocation so an operator can confirm it fires for both grant and deny paths.
+public sealed record WebhookEcho(string Payload) : IRequest<WebhookEchoResponse>;
+
+public sealed record WebhookEchoResponse(string Payload, DateTime At);
+
+[Authorize(Policy = "WebhookPassword")]
+[WarpHttpPost("/http/webhook")]
+public sealed class WebhookEchoHandler : IRequestHandler<WebhookEcho, WebhookEchoResponse>
+{
+    public Task<WebhookEchoResponse> HandleAsync(WebhookEcho request, CancellationToken cancellationToken)
+        => Task.FromResult(new WebhookEchoResponse(request.Payload, DateTime.UtcNow));
 }

@@ -29,7 +29,7 @@ public abstract class SingletonAcquisitionTestsBase : IntegrationTestBase
 
         void Configure(WarpWorkerBuilder<TestContext> cfg)
         {
-            cfg.AddBackgroundService<TestContext, SingletonBarrierService>();
+            cfg.AddBackgroundService<SingletonBarrierService>();
 
             // Use a short acquire-poll interval so the waiting server quickly checks the lease.
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
@@ -63,7 +63,7 @@ public abstract class SingletonAcquisitionTestsBase : IntegrationTestBase
 
         void Configure(WarpWorkerBuilder<TestContext> cfg)
         {
-            cfg.AddBackgroundService<TestContext, SingletonBarrierService>();
+            cfg.AddBackgroundService<SingletonBarrierService>();
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
             cfg.BackgroundServiceLeaseTtl = TimeSpan.FromSeconds(30);
         }
@@ -104,7 +104,7 @@ public abstract class SingletonAcquisitionTestsBase : IntegrationTestBase
 
         void Configure(WarpWorkerBuilder<TestContext> cfg)
         {
-            cfg.AddBackgroundService<TestContext, SingletonBarrierService>();
+            cfg.AddBackgroundService<SingletonBarrierService>();
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
             cfg.BackgroundServiceLeaseTtl = TimeSpan.FromSeconds(30);
         }

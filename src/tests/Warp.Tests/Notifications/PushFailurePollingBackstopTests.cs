@@ -107,5 +107,7 @@ public abstract class PushFailurePollingBackstopTestsBase : IntegrationTestBase
             yield break;
 #pragma warning restore CS0162
         }
+
+        public Task ListenerReady { get; } = Task.CompletedTask;
     }
 }

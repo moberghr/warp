@@ -1,3 +1,4 @@
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -12,6 +13,7 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.NoRestart;
+using Warp.Core.Notifications;
 using Warp.Core.RateLimit;
 using Warp.Core.Retry;
 using Warp.Core.Services;
@@ -308,9 +310,33 @@ public class WarpTestServer : IAsyncDisposable
         TestLifecycleTrace.Record("Host.Build returned");
 
         var serverId = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WarpWorkerConfiguration>>().Value.ServerId;
+
+        // SQL Server only: warm the per-test connection pool with a single sequential Open
+        // before IHost.StartAsync fans out the worker + server-task fleet. Without this, the
+        // 5 workers + ~8 server-task loops all hit OpenAsync on a cold pool simultaneously and
+        // can trip a server-side State 7 ("error while evaluating the password") under the
+        // login burst — see issue #205. The lonely warm-up call primes SQL Server's auth path
+        // and seeds the pool with one cached physical connection. Npgsql doesn't have the
+        // same pathology, so we skip it there.
+        if (!isPostgres)
+        {
+            ServerLifecycleTrace.Record(serverId, "SqlServer pool warm-up starting");
+            await using var warmup = new SqlConnection(connectionString);
+            await warmup.OpenAsync(Xunit.TestContext.Current.CancellationToken);
+            ServerLifecycleTrace.Record(serverId, "SqlServer pool warm-up returned");
+        }
+
         ServerLifecycleTrace.Record(serverId, "IHost.StartAsync starting");
         await host.StartAsync(Xunit.TestContext.Current.CancellationToken);
         ServerLifecycleTrace.Record(serverId, "IHost.StartAsync returned");
+
+        // Gate test return on the push listener finishing its registration (Postgres LISTEN on
+        // the wire / SQL Server Service Broker setup done). Without this the first publish
+        // races the listener and can be silently dropped — see issue #201. NullNotificationTransport
+        // completes ListenerReady immediately, so tests not using push pay nothing.
+        var transport = host.Services.GetRequiredService<IWarpNotificationTransport>();
+        await transport.ListenerReady.WaitAsync(TimeSpan.FromSeconds(10), Xunit.TestContext.Current.CancellationToken);
+
         TestLifecycleTrace.Record($"WarpTestServer.StartAsync returned (server={serverId})");
 
         return new WarpTestServer(host, fixture, jobLogObserver);
@@ -514,12 +540,19 @@ public class WarpTestServer : IAsyncDisposable
         TimeSpan? timeout = null)
     {
         var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(8);
+
+        // Capture ServerId before building any LINQ predicates. EF's expression-tree funcletizer
+        // evaluates captured members lazily at materialization time, so a getter that reads from
+        // _host.Services would throw ObjectDisposedException if the host disposed between query
+        // build and execution (tests that race DisposeAsync against this method, e.g.
+        // GracefulShutdownOrderingTests). Same rationale in WaitForBackgroundServiceDeleted.
+        var serverId = ServerId;
         var deadline = DateTime.UtcNow + effectiveTimeout;
         while (DateTime.UtcNow < deadline)
         {
             var ctx = CreateContext();
             var current = await ctx.Set<BackgroundServiceInstance>()
-                .Where(x => x.ServerId == ServerId)
+                .Where(x => x.ServerId == serverId)
                 .Where(x => x.ServiceName == serviceName)
                 .Select(x => (BackgroundServiceStatus?)x.Status)
                 .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
@@ -534,13 +567,13 @@ public class WarpTestServer : IAsyncDisposable
 
         var ctx2 = CreateContext();
         var finalStatus = await ctx2.Set<BackgroundServiceInstance>()
-            .Where(x => x.ServerId == ServerId)
+            .Where(x => x.ServerId == serverId)
             .Where(x => x.ServiceName == serviceName)
             .Select(x => (BackgroundServiceStatus?)x.Status)
             .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
 
         throw new TimeoutException(
-            $"BackgroundService '{serviceName}' on server {ServerId} did not reach status {status} within {effectiveTimeout}. " +
+            $"BackgroundService '{serviceName}' on server {serverId} did not reach status {status} within {effectiveTimeout}. " +
             $"Current status: {finalStatus?.ToString() ?? "row not found"}");
     }
 
@@ -552,12 +585,16 @@ public class WarpTestServer : IAsyncDisposable
     public async Task WaitForBackgroundServiceDeleted(string serviceName, TimeSpan? timeout = null)
     {
         var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(8);
+
+        // Capture ServerId before DisposeAsync can race the predicate's lazy funcletization —
+        // see WaitForBackgroundServiceState for the full rationale.
+        var serverId = ServerId;
         var deadline = DateTime.UtcNow + effectiveTimeout;
         while (DateTime.UtcNow < deadline)
         {
             var ctx = CreateContext();
             var exists = await ctx.Set<BackgroundServiceInstance>()
-                .Where(x => x.ServerId == ServerId)
+                .Where(x => x.ServerId == serverId)
                 .Where(x => x.ServiceName == serviceName)
                 .AnyAsync(Xunit.TestContext.Current.CancellationToken);
 
@@ -570,7 +607,7 @@ public class WarpTestServer : IAsyncDisposable
         }
 
         throw new TimeoutException(
-            $"BackgroundService '{serviceName}' instance row on server {ServerId} was not deleted within {effectiveTimeout}");
+            $"BackgroundService '{serviceName}' instance row on server {serverId} was not deleted within {effectiveTimeout}");
     }
 
     /// <summary>
@@ -603,6 +640,40 @@ public class WarpTestServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         GC.SuppressFinalize(this);
+
+        // Pre-stop diagnostic snapshot, written directly to stderr BEFORE IHost.StopAsync. The
+        // earlier design stashed via AsyncLocal expecting IntegrationTestBase.DisposeAsync to
+        // drain it later, but xunit's lifecycle phases run on different ExecutionContexts
+        // (`IAsyncLifetime.InitializeAsync` / test method body / `IAsyncLifetime.DisposeAsync`
+        // are not on a single async flow), so the box reference never made it across.
+        // <para>
+        // Unconditional by design: the alternative is detecting test failure inline, but
+        // <see cref="Xunit.TestContext.Current.TestState"/> isn't yet set when a normal
+        // (non-timeout) failing test's <c>await using var server</c> runs disposal. Always
+        // dumping accepts the ~50 ms diagnostic query + a few KB of stderr per integration
+        // test in exchange for actionable pre-stop state on every flake. Cost was discussed
+        // and accepted as part of the issue #208 follow-up.
+        // </para>
+        // <para>
+        // Header is marker-prefixed so flake hunters can grep CI logs for it directly without
+        // wading through xunit's per-test output.
+        // </para>
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var snapshot = await _fixture.DumpDiagnosticsAsync(
+                $"[WARP-PRE-STOP-DIAG server={ServerId}] state captured before IHost.StopAsync:",
+                cts.Token);
+            await Console.Error.WriteLineAsync(snapshot);
+        }
+#pragma warning disable CA1031 // capture must never throw — failing to dump is not a reason to fail teardown
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            await Console.Error.WriteLineAsync(
+                $"[WARP-PRE-STOP-DIAG server={ServerId}] capture failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
         ServerLifecycleTrace.Record(ServerId, "IHost.StopAsync starting");
         await _host.StopAsync(Xunit.TestContext.Current.CancellationToken);
         ServerLifecycleTrace.Record(ServerId, "IHost.StopAsync returned");

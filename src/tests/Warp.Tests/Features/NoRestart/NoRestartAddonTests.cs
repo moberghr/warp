@@ -9,6 +9,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.NoRestart;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Features.NoRestart;
@@ -49,7 +50,7 @@ public abstract class NoRestartAddonTestsBase : IAsyncLifetime
         var provider = BuildProvider(registerAddon: true);
         await using var scope = provider.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, scope.ServiceProvider);
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(new NoRestartAttributeRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -67,7 +68,7 @@ public abstract class NoRestartAddonTestsBase : IAsyncLifetime
         var provider = BuildProvider(registerAddon: true);
         await using var scope = provider.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, scope.ServiceProvider);
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(new RestartAttributeRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -86,7 +87,7 @@ public abstract class NoRestartAddonTestsBase : IAsyncLifetime
         var provider = BuildProvider(registerAddon: false);
         await using var scope = provider.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, scope.ServiceProvider);
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(new NoRestartAttributeRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -103,7 +104,7 @@ public abstract class NoRestartAddonTestsBase : IAsyncLifetime
         var provider = BuildProvider(registerAddon: false);
         await using var scope = provider.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, scope.ServiceProvider);
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(new UnitRequest(), new Warp.Core.Helper.JobParameters().WithRestart(canBeRestarted: false));
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);

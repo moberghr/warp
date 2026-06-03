@@ -5,8 +5,11 @@ const traceIdForUrl = DEMO_IDS.traceId.replace(/-/g, '');
 
 const SCREENSHOTS_DIR = '../../website/static/img/screenshots';
 
+// fullPage default is true for every entry — list pages, detail pages, dashboards.
+// 1920px viewport + fullPage means horizontal cropping is gone and vertical scroll
+// content (job logs, exception stacks, batch child tables) is captured end-to-end.
 const pages = [
-  { name: '01-dashboard', path: '/', fullPage: true },
+  { name: '01-dashboard', path: '/' },
   { name: '02-jobs-failed', path: '/jobs/failed' },
   { name: '03-job-detail-trace', path: `/detail/${DEMO_IDS.completedJobWithTrace}` },
   { name: '04-jobs-completed', path: '/jobs/completed' },
@@ -14,19 +17,20 @@ const pages = [
   { name: '06-batches', path: '/batches/processing' },
   { name: '07-recurring', path: '/recurring' },
   { name: '08-servers', path: '/servers' },
-  { name: '09-job-detail-failed', path: `/detail/${DEMO_IDS.failedJob}`, fullPage: true },
-  { name: '16-job-detail-retry-extension', path: `/detail/${DEMO_IDS.failedJob}`, fullPage: true },
+  { name: '09-job-detail-failed', path: `/detail/${DEMO_IDS.failedJob}` },
+  { name: '16-job-detail-retry-extension', path: `/detail/${DEMO_IDS.failedJob}` },
   { name: '10-batch-detail', path: `/detail/${DEMO_IDS.batch1}` },
+  { name: '22-message-detail', path: `/detail/${DEMO_IDS.message1}` },
   { name: '11-login', path: '/' },
   { name: '12-trace', path: `/trace/${traceIdForUrl}` },
   { name: '13-worker-detail', path: `/workers/${DEMO_IDS.worker1}` },
   { name: '14-recurring-detail', path: '/recurring/1' },
   { name: '15-server-detail', path: `/servers/${DEMO_IDS.server1}` },
-  { name: '17-counters', path: '/counters', fullPage: true },
-  { name: '18-concurrency-limits', path: '/concurrency', fullPage: true },
+  { name: '17-counters', path: '/counters' },
+  { name: '18-concurrency-limits', path: '/concurrency' },
   { name: '19-services-list', path: '/services' },
-  { name: '20-services-detail-singleton', path: '/services/JobStatsLoggerService', fullPage: true },
-  { name: '21-services-detail-perserver', path: '/services/TickCounterService', fullPage: true },
+  { name: '20-services-detail-singleton', path: '/services/JobStatsLoggerService' },
+  { name: '21-services-detail-perserver', path: '/services/TickCounterService' },
 ];
 
 for (const pg of pages) {
@@ -67,7 +71,7 @@ for (const pg of pages) {
 
       await page.screenshot({
         path: `${SCREENSHOTS_DIR}/${pg.name}${suffix}.png`,
-        fullPage: pg.fullPage ?? false,
+        fullPage: true,
       });
     });
   }

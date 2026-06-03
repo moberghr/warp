@@ -6,9 +6,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
+using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Interceptors;
 using Warp.Core.Notifications;
@@ -20,11 +22,24 @@ public static class ServiceConfiguration
 {
     private static readonly SaveChangesConcurrencyTokenInterceptor _saveChangesInterceptor = new();
 
+    /// <summary>
+    /// Registers Warp's publish-side services against the user's <typeparamref name="TContext"/>:
+    /// <c>IPublisher</c>, <c>IMediator</c>, <c>IRecurringJobPublisher</c>, the query services, and
+    /// the EF Core model customizer / row-lock interceptors. Use this for processes that only
+    /// publish or serve the dashboard; call <c>AddWarpWorker</c> instead (it calls this internally)
+    /// for processes that also execute jobs. <typeparamref name="TContext"/> must already be
+    /// registered via <c>AddDbContext</c> (scoped). Opt into a provider — <c>opt.UsePostgreSql()</c>
+    /// or <c>opt.UseSqlServer()</c> — and any addons from the <paramref name="configure"/> lambda.
+    /// Handlers and pipeline behaviors are discovered by the source generator; there is no
+    /// <c>AddHandlers</c> call.
+    /// </summary>
     public static IServiceCollection AddWarp<TContext>(
         this IServiceCollection services,
         Action<WarpBuilder<TContext>>? configure = null)
         where TContext : DbContext
     {
+        EnsureDbContextRegisteredAsScoped<TContext>(services);
+
         var builder = new WarpBuilder<TContext>(services);
         configure?.Invoke(builder);
 
@@ -46,21 +61,23 @@ public static class ServiceConfiguration
         services.TryAddSingleton(TimeProvider.System);
 
         WarpGeneratedHandlerRegistry.ApplyAll(services);
+        RemoveExcludedHandlerRegistrations(services);
 
         services.AddScoped<IPublisher>(x => new Publisher<TContext>(
             x.GetRequiredService<TContext>(),
             x.GetRequiredService<TimeProvider>(),
             x,
-            x.GetRequiredService<IWarpNotificationTransport>()));
+            x.GetRequiredService<IWarpNotificationTransport>(),
+            x.GetRequiredService<ServerTaskSignals<TContext>>()));
 
         services.AddScoped<IMediator>(x => new Mediator(x));
 
         services.AddScoped<IRecurringJobPublisher>(x =>
             new RecurringJobPublisher<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpLockProvider>()));
         services.AddScoped<IJobQueryService>(x => new JobQueryService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>()));
-        services.AddScoped<IJobCommandService>(x => new JobCommandService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IOptions<WarpConfiguration>>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<IWarpSqlQueries<TContext>>()));
+        services.AddScoped<IJobCommandService>(x => new JobCommandService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IOptions<WarpConfiguration>>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<IWarpSqlQueries<TContext>>(), x.GetRequiredService<ServerTaskSignals<TContext>>()));
         services.AddScoped<IJobGroupQueryService>(x => new JobGroupQueryService<TContext>(x.GetRequiredService<TContext>()));
-        services.AddScoped<IRecurringJobService>(x => new RecurringJobService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpNotificationTransport>()));
+        services.AddScoped<IRecurringJobService>(x => new RecurringJobService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<ServerTaskSignals<TContext>>()));
         services.AddScoped<IDashboardStatsService>(x => new DashboardStatsService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IOptions<WarpConfiguration>>()));
         services.AddScoped<IServerCommandService>(x => new ServerCommandService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>()));
         services.AddScoped<IBatchPublisher>(x => new BatchPublisher<TContext>(
@@ -68,18 +85,110 @@ public static class ServiceConfiguration
             x.GetRequiredService<IOptions<WarpConfiguration>>(),
             x.GetRequiredService<TimeProvider>(),
             x,
-            x.GetRequiredService<IWarpNotificationTransport>()));
+            x.GetRequiredService<IWarpNotificationTransport>(),
+            x.GetRequiredService<ServerTaskSignals<TContext>>()));
 
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
+
+        // Background-services dashboard read service. Registered in AddWarp (not AddWarpWorker)
+        // so dashboard-only / publisher-only processes that call AddWarp without AddWarpWorker
+        // can still serve the /api/services endpoints. Only depends on TContext.
+        services.TryAddScoped<IBackgroundServiceQueryService, BackgroundServiceQueryService<TContext>>();
 
         // Default no-op transport. opt.UseDatabasePush() (inside the AddWarp/AddWarpWorker lambda) replaces this with a
         // provider-specific implementation (Postgres LISTEN/NOTIFY or SQL Server Service Broker).
         services.TryAddSingleton<IWarpNotificationTransport, NullNotificationTransport>();
 
+        // In-process signal bus. Registered here (not in AddWarpWorker) so Core-side publishers
+        // — IPublisher, IBatchPublisher, IJobCommandService, IRecurringJobService, SagaStore —
+        // can inject it from publish-only processes that never call AddWarpWorker. Worker-side
+        // server-task loops and the dashboard broadcaster subscribe to its channels at host
+        // construction; with no subscribers the SignalXxx calls are cheap no-ops.
+        services.TryAddSingleton<ServerTaskSignals<TContext>>();
+
         // IWarpSqlQueries<TContext> is registered by the provider package (Warp.PostgreSql /
         // Warp.SqlServer) via their UsePostgreSql / UseSqlServer builder extensions.
         return services;
+    }
+
+    // Fails fast when TContext isn't registered as Scoped. The common cause is the user
+    // calling AddDbContextFactory<TContext> instead of AddDbContext<TContext>: the factory
+    // overload registers IDbContextFactory<TContext> but not TContext itself, so every
+    // scoped Warp service that takes TContext via constructor injection blows up at first
+    // resolve. Catching this at AddWarp time turns a silent runtime crash into a clear
+    // startup error with the fix in the message.
+    private static void EnsureDbContextRegisteredAsScoped<TContext>(IServiceCollection services)
+        where TContext : DbContext
+    {
+        var descriptor = services.LastOrDefault(d => d.ServiceType == typeof(TContext));
+        if (descriptor is null)
+        {
+            throw new InvalidOperationException(
+                $"AddWarp<{typeof(TContext).Name}>() requires {typeof(TContext).Name} to be registered " +
+                $"via services.AddDbContext<{typeof(TContext).Name}>(...). If you're using " +
+                $"AddDbContextFactory<{typeof(TContext).Name}>(...) (e.g. for Blazor / design-time tooling), " +
+                $"also call AddDbContext<{typeof(TContext).Name}>(...) so Warp's scoped services can resolve " +
+                "the context. For design-time tooling (dotnet ef migrations), the migrations host must " +
+                "use a real Host builder that calls AddDbContext — Warp's model customizer wires in via " +
+                $"DbContextOptions<{typeof(TContext).Name}>, which AddDbContextFactory does not expose to " +
+                "design-time tooling.");
+        }
+
+        if (descriptor.Lifetime != ServiceLifetime.Scoped)
+        {
+            throw new InvalidOperationException(
+                $"AddWarp<{typeof(TContext).Name}>() requires a Scoped {typeof(TContext).Name} registration; " +
+                $"got {descriptor.Lifetime}. AddDbContext<TContext>(...) registers Scoped by default — " +
+                "do not override the lifetime when using Warp.");
+        }
+    }
+
+    // Strips IRequestHandler / IJobHandler / IMessageHandler / IStreamRequestHandler
+    // registrations whose implementation type lives in an excluded assembly. Called once
+    // after WarpGeneratedHandlerRegistry.ApplyAll. No-op when no assemblies are excluded.
+    private static void RemoveExcludedHandlerRegistrations(IServiceCollection services)
+    {
+        var optionsDescriptor = services.LastOrDefault(d => d.ServiceType == typeof(IOptions<WarpConfiguration>));
+        if (optionsDescriptor?.ImplementationInstance is not IOptions<WarpConfiguration> optionsInstance)
+        {
+            return;
+        }
+
+        var excluded = optionsInstance.Value.ExcludedHandlerAssemblies;
+        if (excluded.Count == 0)
+        {
+            return;
+        }
+
+        for (var i = services.Count - 1; i >= 0; i--)
+        {
+            var descriptor = services[i];
+            if (!descriptor.ServiceType.IsGenericType)
+            {
+                continue;
+            }
+
+            var def = descriptor.ServiceType.GetGenericTypeDefinition();
+            if (def != typeof(Handlers.IRequestHandler<,>)
+                && def != typeof(Handlers.IJobHandler<>)
+                && def != typeof(Handlers.IMessageHandler<>)
+                && def != typeof(Handlers.IStreamRequestHandler<,>))
+            {
+                continue;
+            }
+
+            var implType = descriptor.ImplementationType;
+            if (implType is null)
+            {
+                continue;
+            }
+
+            if (excluded.Contains(implType.Assembly))
+            {
+                services.RemoveAt(i);
+            }
+        }
     }
 
     private static void ConfigureDbContextOptions<TContext>(IServiceCollection services)
@@ -126,6 +235,10 @@ public static class ServiceConfiguration
         AddCounterEntity(modelBuilder, schema);
         AddServerTaskEntity(modelBuilder, schema);
         AddServerLogEntity(modelBuilder, schema);
+        AddBackgroundServiceDefinitionEntity(modelBuilder, schema);
+        AddBackgroundServiceInstanceEntity(modelBuilder, schema);
+        AddBackgroundServiceLeaseEntity(modelBuilder, schema);
+        AddBackgroundServiceLogEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -298,7 +411,16 @@ public static class ServiceConfiguration
         jobLog.Property(p => p.Name).HasMaxLength(100);
         jobLog.Property(p => p.Value);
 
-        jobLog.HasIndex(p => p.JobId);
+        // Composite index serving two query shapes:
+        //   1. WHERE job_id = X — the by-job log listing on the detail page. Leading-column
+        //      scan on the composite covers this; no separate (job_id) index needed.
+        //   2. WHERE job_id = X AND event_type IN ('Completed','Failed','Deleted') ORDER BY
+        //      timestamp DESC — the correlated subquery in
+        //      JobQueryService.OrderByFinishedTimeDescending. Without the trailing columns
+        //      the planner would table-scan the per-job slice and filter+sort in memory,
+        //      which scales poorly for jobs with many log rows (handler logs, progress
+        //      reports, retries).
+        jobLog.HasIndex(p => new { p.JobId, p.EventType, p.Timestamp });
 
         jobLog.Metadata.SetSchema(schema);
     }

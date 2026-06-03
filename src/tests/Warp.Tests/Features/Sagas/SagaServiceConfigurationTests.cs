@@ -3,6 +3,7 @@ using Shouldly;
 using Warp.Core;
 using Warp.Core.Handlers;
 using Warp.Core.Sagas;
+using Warp.Core.Services;
 
 namespace Warp.Tests.Features.Sagas;
 
@@ -14,7 +15,7 @@ public class SagaServiceConfigurationTests
     {
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(TimeProvider.System);
-        services.AddSingleton<IWarpSemaphoreProvider, Fixtures.FakeSemaphoreProvider>();
+        services.AddSingleton<IWarpLockProvider, Fixtures.FakeLockProvider>();
         services.AddScoped<IJobContext, JobContext>();
         services.AddSingleton<SagaCorrelationCache>();
         services.AddScoped<ISagaStore, Fixtures.FakeSagaStore>();
@@ -45,7 +46,7 @@ public class SagaServiceConfigurationTests
     {
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(TimeProvider.System);
-        services.AddSingleton<IWarpSemaphoreProvider, Fixtures.FakeSemaphoreProvider>();
+        services.AddSingleton<IWarpLockProvider, Fixtures.FakeLockProvider>();
         services.AddScoped<IJobContext, JobContext>();
         services.AddSingleton<SagaCorrelationCache>();
         services.AddScoped<ISagaStore, Fixtures.FakeSagaStore>();
@@ -122,26 +123,10 @@ public class SagaServiceConfigurationTests
     }
 
     [TimedFact]
-    public void AddSagas_ContributesEntityConfiguratorExactlyOnce()
-    {
-        var services = new ServiceCollection();
-        services.AddSingleton<IWarpSemaphoreProvider, Fixtures.FakeSemaphoreProvider>();
-        var builder = new WarpBuilder<TestContext>(services);
-
-        builder.AddSagas();
-        builder.AddSagas();
-        builder.AddSagas();
-
-        builder.EntityConfigurators
-            .Count(c => c == ServiceConfiguration.AddSagaStateEntity)
-            .ShouldBe(1);
-    }
-
-    [TimedFact]
     public void AddSagas_RegistersStoreAsScoped()
     {
         var services = new ServiceCollection();
-        services.AddSingleton<IWarpSemaphoreProvider, Fixtures.FakeSemaphoreProvider>();
+        services.AddSingleton<IWarpLockProvider, Fixtures.FakeLockProvider>();
         var builder = new WarpBuilder<TestContext>(services);
 
         builder.AddSagas();
@@ -151,13 +136,35 @@ public class SagaServiceConfigurationTests
     }
 
     [TimedFact]
-    public void AddSagas_WithoutSemaphoreProvider_Throws()
+    public void AddSagas_CalledTwice_DoesNotDoubleRegisterServices()
+    {
+        // TryAdd contract: a second AddSagas() call is a no-op. Pin this so a future
+        // regression that swaps TryAddScoped/TryAddSingleton back to plain Add/AddSingleton
+        // (which would double-register, with SagaCorrelationCache as the worst case since
+        // it's a singleton and two instances diverge) doesn't pass silently.
+        var services = new ServiceCollection();
+        services.AddSingleton<IWarpLockProvider, Fixtures.FakeLockProvider>();
+        var builder = new WarpBuilder<TestContext>(services);
+
+        builder.AddSagas();
+        builder.AddSagas();
+        builder.AddSagas();
+
+        services.Count(d => d.ServiceType == typeof(ISagaStore)).ShouldBe(1);
+        services.Count(d => d.ServiceType == typeof(SagaCorrelationCache)).ShouldBe(1);
+        services.Count(d => d.ServiceType == typeof(ISagaQueryService)).ShouldBe(1);
+        services.Count(d => d.ServiceType == typeof(ISagaCommandService)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public void AddSagas_WithoutLockProvider_Throws()
     {
         var services = new ServiceCollection();
         var builder = new WarpBuilder<TestContext>(services);
 
         var ex = Should.Throw<InvalidOperationException>(() => builder.AddSagas());
 
+        ex.Message.ShouldContain("IWarpLockProvider");
         ex.Message.ShouldContain("UsePostgreSql");
         ex.Message.ShouldContain("UseSqlServer");
     }

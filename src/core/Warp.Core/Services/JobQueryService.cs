@@ -68,8 +68,9 @@ public class JobQueryService<TContext> : IJobQueryService
 
     public async Task<PagedList<JobModel>> GetJobStatesInProcess(BaseListRequest request)
     {
-        var jobs = await Jobs()
-            .Where(x => x.CurrentState == State.Processing)
+        var processing = Jobs().Where(x => x.CurrentState == State.Processing);
+
+        var jobs = await OrderByCreateTimeDescending(processing)
             .Select(x => new JobModel
             {
                 Id = x.Id,
@@ -81,7 +82,7 @@ public class JobQueryService<TContext> : IJobQueryService
                 ScheduleTime = x.ScheduleTime,
                 Type = x.Type,
             })
-            .AsQueryable().ToPagedListAsync(request);
+            .ToPagedListAsync(request);
         return jobs;
     }
 
@@ -337,14 +338,15 @@ public class JobQueryService<TContext> : IJobQueryService
             .GroupBy(x => x.Type)
             .Select(g => new TypeCountModel { Type = g.Key!, Count = g.Count() })
             .OrderByDescending(x => x.Count)
+            .ThenBy(x => x.Type)
             .ToListAsync();
     }
 
     public async Task<PagedList<JobModel>> GetFailedJobsByType(BaseListRequest request, string type)
     {
-        return await Jobs()
-            .Where(x => x.CurrentState == State.Failed && x.Type == type)
-            .OrderByDescending(x => x.CreateTime)
+        var failed = Jobs().Where(x => x.CurrentState == State.Failed && x.Type == type);
+
+        return await OrderByFinishedTimeDescending(failed)
             .Select(x => new JobModel
             {
                 Id = x.Id,
@@ -367,10 +369,38 @@ public class JobQueryService<TContext> : IJobQueryService
         return _context.Set<Job>().Where(j => j.Kind == JobKind.Job);
     }
 
+    // Orders jobs by latest terminal-event timestamp descending. Translates to
+    // ORDER BY (SELECT MAX(timestamp) FROM job_log WHERE job_id = j.id AND
+    // event_type IN (...)) DESC. Correlated subquery cost is bounded by the composite
+    // (job_id, event_type, timestamp) index on job_log. Only meaningful for terminal-state
+    // listings (see IsTerminalState) where a terminal log row is guaranteed to exist.
+    private IOrderedQueryable<Job> OrderByFinishedTimeDescending(IQueryable<Job> jobs)
+    {
+        return jobs.OrderByDescending(x =>
+            _context.Set<JobLog>()
+                .Where(l => l.JobId == x.Id)
+                .Where(l => TerminalEvents.EventTypes.Contains(l.EventType))
+                .Max(l => (DateTime?)l.Timestamp) ?? x.CreateTime);
+    }
+
+    // Non-terminal-state pages (Enqueued/Processing/Scheduled/Awaiting) never have a
+    // terminal log row, so OrderByFinishedTimeDescending would issue a correlated subquery
+    // for every row only to fall through to CreateTime. Use a plain CreateTime sort here —
+    // same result, no subquery cost.
+    private static IOrderedQueryable<Job> OrderByCreateTimeDescending(IQueryable<Job> jobs)
+        => jobs.OrderByDescending(x => x.CreateTime);
+
+    // Paired with TerminalEventTypes — both lists must be updated together when a new
+    // terminal State is introduced. The compiler-checked `nameof()` references above and
+    // the enum constants here keep that pairing grep-able.
+    private static bool IsTerminalState(State state)
+        => state is State.Completed or State.Failed or State.Deleted;
+
     private IQueryable<JobModel> GetScheduledJobsQuery()
     {
-        var query = Jobs()
-            .Where(x => x.CurrentState == State.Scheduled)
+        var jobs = Jobs().Where(x => x.CurrentState == State.Scheduled);
+
+        return OrderByCreateTimeDescending(jobs)
             .Select(x =>
                 new JobModel
                 {
@@ -382,10 +412,7 @@ public class JobQueryService<TContext> : IJobQueryService
                     Message = x.Message,
                     ScheduleTime = x.ScheduleTime,
                     Type = x.Type,
-                })
-            .AsQueryable();
-
-        return query;
+                });
     }
 
     private IQueryable<JobModel> GetJobsByState(State state)
@@ -400,7 +427,11 @@ public class JobQueryService<TContext> : IJobQueryService
             jobs = jobs.Where(x => x.ScheduleTime <= now);
         }
 
-        return jobs
+        var ordered = IsTerminalState(state)
+            ? OrderByFinishedTimeDescending(jobs)
+            : OrderByCreateTimeDescending(jobs);
+
+        return ordered
             .Select(x =>
                 new JobModel
                 {
@@ -412,7 +443,21 @@ public class JobQueryService<TContext> : IJobQueryService
                     Message = x.Message,
                     ScheduleTime = x.ScheduleTime,
                     Type = x.Type,
-                })
-            .AsQueryable();
+                });
     }
+}
+
+// Terminal-state event types written by the worker on job finalization. Sourced from
+// the State enum via nameof so adding a new terminal state surfaces the rename here.
+// The IsTerminalState helper in JobQueryService is the paired check on the State side.
+// Non-generic peer class because a static field on a generic type would be duplicated
+// per closed type (S2743).
+internal static class TerminalEvents
+{
+    public static readonly string[] EventTypes =
+    [
+        nameof(State.Completed),
+        nameof(State.Failed),
+        nameof(State.Deleted),
+    ];
 }

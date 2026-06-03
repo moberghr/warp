@@ -31,7 +31,7 @@ public abstract class SagaJobLinkLifecycleTestsBase : IAsyncLifetime
         var sagaId = Guid.NewGuid();
         await SeedSagaWithLinks(sagaId, "force-test", linkCount: 5);
 
-        var command = new SagaCommandService<TestContext>(_fixture.CreateContext(), new FakeSemaphoreProvider(), NullLogger<SagaCommandService<TestContext>>.Instance);
+        var command = new SagaCommandService<TestContext>(_fixture.CreateContext(), new FakeLockProvider(), NullLogger<SagaCommandService<TestContext>>.Instance);
         var removed = await command.ForceComplete(sagaId);
 
         removed.ShouldBeTrue();
@@ -58,7 +58,7 @@ public abstract class SagaJobLinkLifecycleTestsBase : IAsyncLifetime
         var otherSagaId = Guid.NewGuid();
         await SeedSagaWithLinks(otherSagaId, "keep-me", linkCount: 3);
 
-        var command = new SagaCommandService<TestContext>(_fixture.CreateContext(), new FakeSemaphoreProvider(), NullLogger<SagaCommandService<TestContext>>.Instance);
+        var command = new SagaCommandService<TestContext>(_fixture.CreateContext(), new FakeLockProvider(), NullLogger<SagaCommandService<TestContext>>.Instance);
         var removed = await command.ForceComplete(Guid.NewGuid()); // unknown
 
         removed.ShouldBeFalse();
@@ -78,10 +78,10 @@ public abstract class SagaJobLinkLifecycleTestsBase : IAsyncLifetime
         var sagaId = Guid.NewGuid();
         await SeedSagaWithLinks(sagaId, "mutex-held", linkCount: 2);
 
-        var semaphore = new FakeSemaphoreProvider();
-        await using var holder = semaphore.HoldSlot("warp:saga:Test.LifecycleSaga:mutex-held", 1);
+        var locks = new FakeLockProvider();
+        await using var holder = locks.HoldLock("warp:saga:Test.LifecycleSaga:mutex-held");
 
-        var command = new SagaCommandService<TestContext>(_fixture.CreateContext(), semaphore, NullLogger<SagaCommandService<TestContext>>.Instance);
+        var command = new SagaCommandService<TestContext>(_fixture.CreateContext(), locks, NullLogger<SagaCommandService<TestContext>>.Instance);
         var removed = await command.ForceComplete(sagaId);
 
         removed.ShouldBeFalse();

@@ -16,6 +16,7 @@ using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
 using Warp.Core.Notifications;
+using Warp.Worker.Logging;
 using Warp.Worker.Services;
 
 namespace Warp.Worker;
@@ -256,7 +257,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
             var handlerPending = NotificationDispatch.CapturePending(handlerContext);
             await handlerContext.SaveChangesAsync(default);
-            await NotificationDispatch.FireAsync(_notificationTransport, handlerPending, CancellationToken.None);
+            await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, CancellationToken.None);
 
             // Read metadata and outcome from handler scope before disposing
             job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
@@ -315,8 +316,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 job.CurrentState = State.Completed;
             }
 
-            var (counters, finalLog) = BuildFinalization(job, null, durationMs, successOutcome);
-            var logs = CollectLogs(finalLog, logCollector, progressCollector).ToArray();
+            var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome);
+            var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
             _batch.Add(new PendingCompletion(job, counters, logs));
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
@@ -359,7 +360,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 DurationMs = handlerStopwatch?.Elapsed.TotalMilliseconds,
                 WorkerId = _workerId,
             };
-            var logs = CollectLogs(cancelLog, logCollector, progressCollector).ToArray();
+            var logs = CollectLogs([cancelLog], logCollector, progressCollector).ToArray();
             _batch.Add(new PendingCompletion(job, cancelCounters, logs));
         }
         catch (Exception e)
@@ -419,8 +420,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             await jobCts.CancelAsync();
             await monitorTask;
 
-            var (counters, finalLog) = BuildFinalization(job, e, errorDurationMs, outcome);
-            var logs = CollectLogs(finalLog, logCollector, progressCollector).ToArray();
+            var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome);
+            var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
             _batch.Add(new PendingCompletion(job, counters, logs));
         }
         finally
@@ -591,10 +592,12 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     }
 
     /// <summary>
-    /// Clears worker-owned fields on the job and produces the completion counters + final state log.
+    /// Clears worker-owned fields on the job and produces the completion counters + final-state logs.
+    /// Returns one OR two logs: a retry-due-to-error emits both a Failed log (with the exception)
+    /// and a Scheduled/Enqueued log (with the next attempt time). All other transitions emit one.
     /// State must be set on the job before calling this method.
     /// </summary>
-    private (List<Counter> Counters, JobLog FinalLog) BuildFinalization(Job job, Exception? error, double? durationMs, JobOutcome? outcome)
+    private (List<Counter> Counters, List<JobLog> FinalLogs) BuildFinalization(Job job, Exception? error, double? durationMs, JobOutcome? outcome)
     {
         var state = job.CurrentState;
         job.CancellationMode = CancellationMode.None;
@@ -628,48 +631,19 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             counters.Add(new Counter { Key = $"stats:requeued:{hourSuffix}", Value = 1 });
         }
 
-        var logMessage = outcome?.LogMessage
-            ?? (error != null ? error.Message : $"Job {job.Id} completed");
-        var logException = error?.ToString();
+        // Event-type, level, and split-on-retry are shared with WarpWorkerService via
+        // FinalizationLogs.Build — both worker paths emit identical log shapes.
+        var logs = FinalizationLogs.Build(job, error, durationMs, _workerId, now, outcome);
 
-        // Both Enqueued (immediate retry) and Scheduled (delayed retry) log as "Requeued" —
-        // operators reading the dashboard think in terms of "the job was retried", not its
-        // transient EF-state spelling.
-        var eventType = state switch
-        {
-            State.Completed => "Completed",
-            State.Failed => "Failed",
-            State.Enqueued or State.Scheduled => "Requeued",
-            State.Deleted => "Deleted",
-            _ => state.ToString(),
-        };
-
-        // Retries apply jitter to ScheduleTime; recording it here so operators debugging a
-        // retry storm can see the actual delay applied (otherwise the factor is invisible).
-        if (state == State.Enqueued || state == State.Scheduled)
-        {
-            var scheduledAt = job.ScheduleTime.ToString("o", CultureInfo.InvariantCulture);
-            logMessage = $"{logMessage} (next attempt scheduled: {scheduledAt})";
-        }
-
-        var finalLog = new JobLog
-        {
-            JobId = job.Id,
-            EventType = eventType,
-            Timestamp = now,
-            Level = state == State.Failed ? "Error" : "Information",
-            Message = logMessage,
-            Exception = logException,
-            DurationMs = durationMs,
-            WorkerId = _workerId,
-        };
-
-        return (counters, finalLog);
+        return (counters, logs.ToList());
     }
 
-    private IEnumerable<JobLog> CollectLogs(JobLog finalLog, JobLogCollector collector, JobProgressCollector progressCollector)
+    private IEnumerable<JobLog> CollectLogs(IReadOnlyList<JobLog> finalLogs, JobLogCollector collector, JobProgressCollector progressCollector)
     {
-        yield return finalLog;
+        foreach (var log in finalLogs)
+        {
+            yield return log;
+        }
 
         if (_configuration.EnableHandlerLogging)
         {

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 
 namespace Warp.Core.Notifications;
 
@@ -84,6 +85,42 @@ internal static class NotificationDispatch
                 // Publishing must not throw upward — the commit already happened.
             }
         }
+    }
+
+    /// <summary>
+    /// Wakes in-process subscribers via <paramref name="signals"/> AND publishes
+    /// <paramref name="notifications"/> through <paramref name="transport"/> for cross-process
+    /// wake-up. Local signals always fire — independent of transport — so bare workers and
+    /// server-task loops in the same process do not depend on <c>UseDatabasePush()</c> for
+    /// their wake-up. With push enabled, the listener's incoming signal arrives as a duplicate
+    /// that the semaphore-based subscribers harmlessly absorb.
+    /// </summary>
+    public static Task DispatchAsync<TContext>(
+        IReadOnlyList<Notification> notifications,
+        ServerTaskSignals<TContext> signals,
+        IWarpNotificationTransport transport,
+        CancellationToken ct = default)
+        where TContext : DbContext
+    {
+        for (var i = 0; i < notifications.Count; i++)
+        {
+            switch (notifications[i].Kind)
+            {
+                case NotificationKind.JobEnqueued:
+                    signals.SignalJobEnqueued();
+                    break;
+                case NotificationKind.MessageEnqueued:
+                    signals.SignalMessageEnqueued();
+                    break;
+                case NotificationKind.JobFinalized:
+                    signals.SignalJobFinalized();
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        return FireAsync(transport, notifications, ct);
     }
 
     private static bool ShouldEmit(EntityEntry<Job> entry)

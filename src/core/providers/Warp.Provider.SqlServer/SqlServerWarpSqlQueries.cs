@@ -26,14 +26,14 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     private readonly WarpJobTableNames _n;
 
     private readonly string _claimEnqueuedJobsSql;
-    private readonly string _lockNextEnqueuedMessageSql;
+    private readonly string _claimEnqueuedMessagesSql;
     private readonly string _lockStaleProcessingJobsSql;
     private readonly string _lockJobByIdWaitSql;
     private readonly string _lockAllServersSql;
     private readonly string _heartbeatSql;
     private readonly string _activateScheduledJobsSql;
-    private readonly string? _lockLeaseByServiceNameSql;
-    private readonly string? _lockDefinitionByServiceNameSql;
+    private readonly string _lockLeaseByServiceNameSql;
+    private readonly string _lockDefinitionByServiceNameSql;
 
     public SqlServerWarpSqlQueries(WarpJobTableNames names)
     {
@@ -63,12 +63,23 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
                 [{_n.LastKeepAlive}] = {{1}}
             OUTPUT INSERTED.*";
 
-        _lockNextEnqueuedMessageSql = $@"
-            SELECT TOP (1) *
-            FROM {table} WITH (ROWLOCK, UPDLOCK, READPAST)
-            WHERE [{_n.Kind}] = {(int)JobKind.Message}
-              AND [{_n.CurrentState}] = {(int)State.Enqueued}
-            ORDER BY [{_n.Queue}], [{_n.ScheduleTime}]";
+        // Atomic batch-claim for the message router. Mirrors _claimEnqueuedJobsSql shape: a CTE
+        // picks up to N eligible message rows under ROWLOCK+UPDLOCK+READPAST, the UPDATE flips
+        // them to Processing in one round-trip and OUTPUT INSERTED.* streams the post-update
+        // rows back as tracked entities. Replaces the older one-at-a-time LockNextEnqueuedMessage
+        // — that path required per-message commit (otherwise the next select would re-fetch the
+        // same uncommitted row), so it could not scale beyond ~commit-RTT messages per second.
+        _claimEnqueuedMessagesSql = $@"
+            WITH candidates AS (
+                SELECT TOP ({{0}}) *
+                FROM {table} WITH (ROWLOCK, UPDLOCK, READPAST)
+                WHERE [{_n.Kind}] = {(int)JobKind.Message}
+                  AND [{_n.CurrentState}] = {(int)State.Enqueued}
+                ORDER BY [{_n.Queue}], [{_n.ScheduleTime}]
+            )
+            UPDATE candidates
+            SET [{_n.CurrentState}] = {(int)State.Processing}
+            OUTPUT INSERTED.*";
 
         _lockStaleProcessingJobsSql = $@"
             SELECT *
@@ -88,24 +99,24 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             FROM {serverTable} WITH (ROWLOCK, UPDLOCK)";
 
         // Table variable + chained SELECT folds the heartbeat UPDATE, the server paused_at
-        // read, AND the worker_group pause-state read into ONE round-trip. The UPDATE OUTPUTs
-        // the post-update server row into @h; the chained SELECT joins worker_group for this
-        // server. When the BackgroundServices addon is registered, two extra statements
-        // piggyback on the same multi-statement batch:
+        // read, the worker_group pause-state read, the BG-service instance heartbeat bump,
+        // and the BG-service lease renewal into ONE round-trip. The UPDATE OUTPUTs the
+        // post-update server row into @h; the chained SELECT joins worker_group for this
+        // server. Two extra statements:
         //   • UPDATE instance — refreshes last_heartbeat_at for all instances on this server
         //   • UPDATE lease / OUTPUT INTO @renewed — extends held leases and captures names
-        // The TTL is baked in at construction from WarpJobTableNames.LeaseTtlSeconds.
+        // The TTL is baked in at construction from WarpJobTableNames.LeaseTtlSeconds. The BG
+        // tables are always present in the model (§2.13), so the extra UPDATEs run
+        // unconditionally; deployments with no registered WarpBackgroundService simply have
+        // empty Instance/Lease tables, and the UPDATEs are no-ops.
         // Cardinality: 0 rows if the server doesn't exist; max(1, # groups) rows otherwise
         // (LEFT JOIN keeps the server row even with zero groups, group_id NULL).
         var groupTable = QualifiedWorkerGroupTable();
+        var instanceTable = QualifiedBackgroundServiceInstanceTable();
+        var leaseTable = QualifiedBackgroundServiceLeaseTable();
+        var ttlSeconds = _n.LeaseTtlSeconds;
 
-        if (_n.HasBackgroundServiceTables)
-        {
-            var instanceTable = QualifiedBackgroundServiceInstanceTable();
-            var leaseTable = QualifiedBackgroundServiceLeaseTable();
-            var ttlSeconds = _n.LeaseTtlSeconds;
-
-            _heartbeatSql = $@"
+        _heartbeatSql = $@"
             DECLARE @h TABLE (server_id uniqueidentifier, paused_at datetime2);
             UPDATE {serverTable}
             SET [{_n.ServerLastHeartbeatTime}] = {{1}},
@@ -128,51 +139,31 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             FROM @h h
             LEFT JOIN {groupTable} w ON w.[{_n.WorkerGroupServerId}] = h.server_id;
             SELECT service_name FROM @renewed;";
-        }
-        else
-        {
-            _heartbeatSql = $@"
-            DECLARE @h TABLE (server_id uniqueidentifier, paused_at datetime2);
-            UPDATE {serverTable}
-            SET [{_n.ServerLastHeartbeatTime}] = {{1}},
-                [{_n.ServerMemoryWorkingSetBytes}] = ISNULL({{2}}, [{_n.ServerMemoryWorkingSetBytes}]),
-                [{_n.ServerCpuUsagePercent}] = ISNULL({{3}}, [{_n.ServerCpuUsagePercent}])
-            OUTPUT INSERTED.[{_n.ServerId}], INSERTED.[{_n.ServerPausedAt}] INTO @h
-            WHERE [{_n.ServerId}] = {{0}};
-            SELECT h.paused_at AS server_paused_at,
-                   w.[{_n.WorkerGroupId}] AS group_id,
-                   w.[{_n.WorkerGroupPausedAt}] AS group_paused_at
-            FROM @h h
-            LEFT JOIN {groupTable} w ON w.[{_n.WorkerGroupServerId}] = h.server_id;";
-        }
 
-        // Atomic activation: UPDATE ... OUTPUT INSERTED.queue flips due rows AND streams back
-        // the queue names so the caller can fire one JobEnqueued notification per distinct
-        // queue. Replaces the previous SELECT-DISTINCT-then-UPDATE pattern (2 round-trips).
+        // Atomic activation: UPDATE ... OUTPUT INSERTED.(id, queue, schedule_time) flips due rows
+        // AND streams back per-row identity + queue + schedule_time. Caller fires one
+        // JobEnqueued notification per distinct queue AND writes one "Enqueued" JobLog row per
+        // id (atomic with this UPDATE via the ambient xact-lock transaction).
         _activateScheduledJobsSql = $@"
             UPDATE {table}
             SET [{_n.CurrentState}] = {(int)State.Enqueued}
-            OUTPUT INSERTED.[{_n.Queue}]
+            OUTPUT INSERTED.[{_n.Id}], INSERTED.[{_n.Queue}], INSERTED.[{_n.ScheduleTime}]
             WHERE [{_n.CurrentState}] = {(int)State.Scheduled}
               AND [{_n.ScheduleTime}] <= {{0}}";
 
-        // BackgroundService row-lock queries — only built when the addon is registered.
-        // WITH (UPDLOCK, ROWLOCK) so concurrent callers block and serialise, eliminating
-        // the TOCTOU window between SELECT and the caller's INSERT/UPDATE (§1.4).
-        if (_n.HasBackgroundServiceTables)
-        {
-            var leaseTable = QualifiedBackgroundServiceLeaseTable();
-            _lockLeaseByServiceNameSql = $@"
+        // BackgroundService row-lock queries. WITH (UPDLOCK, ROWLOCK) so concurrent callers
+        // block and serialise, eliminating the TOCTOU window between SELECT and the caller's
+        // INSERT/UPDATE (§1.4).
+        _lockLeaseByServiceNameSql = $@"
                 SELECT *
                 FROM {leaseTable} WITH (UPDLOCK, ROWLOCK)
                 WHERE [{_n.BackgroundServiceLeaseServiceName}] = {{0}}";
 
-            var defTable = QualifiedBackgroundServiceDefinitionTable();
-            _lockDefinitionByServiceNameSql = $@"
+        var defTable = QualifiedBackgroundServiceDefinitionTable();
+        _lockDefinitionByServiceNameSql = $@"
                 SELECT *
                 FROM {defTable} WITH (UPDLOCK, ROWLOCK)
                 WHERE [{_n.BackgroundServiceDefinitionName}] = {{0}}";
-        }
     }
 
     public async Task<List<Job>> ClaimEnqueuedJobsAsync(
@@ -189,11 +180,11 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             .ToListAsync(ct);
     }
 
-    public async Task<Job?> LockNextEnqueuedMessageAsync(TContext context, CancellationToken ct)
+    public async Task<List<Job>> ClaimEnqueuedMessagesAsync(TContext context, int limit, CancellationToken ct)
     {
         return await context.Set<Job>()
-            .FromSqlRaw(_lockNextEnqueuedMessageSql)
-            .FirstOrDefaultAsync(ct);
+            .FromSqlRaw(_claimEnqueuedMessagesSql, limit)
+            .ToListAsync(ct);
     }
 
     public async Task<List<Job>> LockStaleProcessingJobsAsync(
@@ -277,10 +268,10 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
                 }
             }
 
-            // Second result set: renewed lease service names. Only emitted when the
-            // BackgroundServices addon is registered (HasBackgroundServiceTables = true).
+            // Second result set: renewed lease service names. Always emitted now that BG
+            // tables are part of base Warp (§2.13).
             var renewedLeases = new List<string>();
-            if (_n.HasBackgroundServiceTables && await reader.NextResultAsync(ct))
+            if (await reader.NextResultAsync(ct))
             {
                 while (await reader.ReadAsync(ct))
                 {
@@ -310,13 +301,14 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         cmd.Parameters.Add(p);
     }
 
-    public async Task<List<string>> ActivateScheduledJobsAsync(
+    public async Task<List<(Guid Id, string Queue, DateTime ScheduleTime)>> ActivateScheduledJobsAsync(
         TContext context,
         DateTime now,
         CancellationToken ct)
     {
         // Raw ADO.NET: EF Core's FromSqlRaw<Job> would try to materialize full Job entities,
-        // but OUTPUT INSERTED.queue only streams back one column.
+        // but the SQL only OUTPUTs three columns. Issuing the command directly keeps the path
+        // narrow and matches how the notification transport opens connections.
         var conn = context.Database.GetDbConnection();
         var openedHere = conn.State != System.Data.ConnectionState.Open;
         if (openedHere)
@@ -338,14 +330,14 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             param.Value = now;
             cmd.Parameters.Add(param);
 
-            var queues = new List<string>();
+            var activated = new List<(Guid Id, string Queue, DateTime ScheduleTime)>();
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
             {
-                queues.Add(reader.GetString(0));
+                activated.Add((reader.GetGuid(0), reader.GetString(1), reader.GetDateTime(2)));
             }
 
-            return queues;
+            return activated;
         }
         finally
         {
@@ -455,11 +447,6 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         string serviceName,
         CancellationToken ct)
     {
-        if (_lockLeaseByServiceNameSql == null)
-        {
-            throw new InvalidOperationException("BackgroundServices addon is not registered in this deployment.");
-        }
-
         return await context.Set<BackgroundServiceLease>()
             .FromSqlRaw(_lockLeaseByServiceNameSql, serviceName)
             .FirstOrDefaultAsync(ct);
@@ -470,11 +457,6 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         string serviceName,
         CancellationToken ct)
     {
-        if (_lockDefinitionByServiceNameSql == null)
-        {
-            throw new InvalidOperationException("BackgroundServices addon is not registered in this deployment.");
-        }
-
         return await context.Set<BackgroundServiceDefinition>()
             .FromSqlRaw(_lockDefinitionByServiceNameSql, serviceName)
             .FirstOrDefaultAsync(ct);

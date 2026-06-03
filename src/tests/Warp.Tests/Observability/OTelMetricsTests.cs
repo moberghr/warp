@@ -16,6 +16,7 @@ using Warp.Core.Handlers.Generated;
 using Warp.Core.Logging;
 using Warp.Core.Retry;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 
@@ -267,7 +268,7 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
         // Arrange — publisher uses unique queue, no worker needed
         var queue = $"metrics-enqueue-{Guid.NewGuid():N}";
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         long enqueuedCount = 0;
 
         using var listener = new MeterListener();
@@ -475,7 +476,7 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
         // Arrange
         var queue = $"metrics-batch-{Guid.NewGuid():N}";
         var ctx = _fixture.CreateContext();
-        var batchPublisher = new BatchPublisher<TestContext>(ctx, Options.Create(new WarpConfiguration { DefaultQueue = queue }), TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        var batchPublisher = new BatchPublisher<TestContext>(ctx, Options.Create(new WarpConfiguration { DefaultQueue = queue }), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         long jobEnqueued = 0;
         long batchEnqueued = 0;
 

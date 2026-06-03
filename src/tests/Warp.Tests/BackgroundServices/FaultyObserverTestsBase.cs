@@ -28,7 +28,7 @@ public abstract class FaultyObserverTestsBase : IntegrationTestBase
         // this AddSingleton (registered after AddWarpWorker) takes precedence via last-wins DI.
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, BarrierPinnedService>(),
+            configure: cfg => cfg.AddBackgroundService<BarrierPinnedService>(),
             configureServices: services =>
             {
                 services.AddSingleton(barrier);

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Warp.Core.Handlers;
 
 namespace Warp.Core.Sagas;
@@ -14,42 +15,42 @@ public static class SagaServiceConfiguration
     /// </summary>
     /// <remarks>
     /// Requires <c>opt.UsePostgreSql()</c> or <c>opt.UseSqlServer()</c> to have been called first —
-    /// the saga proxy depends on <c>IWarpSemaphoreProvider</c>, which the provider package
+    /// the saga proxy depends on <c>IWarpLockProvider</c>, which the provider package
     /// registers. Calling <c>AddSagas()</c> before a provider throws at configuration time.
     /// </remarks>
     public static IWarpBuilder<TContext> AddSagas<TContext>(this IWarpBuilder<TContext> builder)
         where TContext : DbContext
     {
-        // The proxy needs IWarpSemaphoreProvider for cross-process serialization. The provider
-        // is registered by Warp.Provider.PostgreSql / Warp.Provider.SqlServer when the user
-        // calls opt.UsePostgreSql() / opt.UseSqlServer(). Without it, the proxy fails on the
-        // first message with a DI resolution error — better to fail loudly at startup.
-        if (!builder.Services.Any(d => d.ServiceType == typeof(IWarpSemaphoreProvider)))
+        // The proxy needs IWarpLockProvider (sp_getapplock / pg_try_advisory_lock backed) for
+        // cross-process serialization. The provider is registered by Warp.Provider.PostgreSql
+        // and Warp.Provider.SqlServer when the user calls the provider configuration helper.
+        // Without it, the proxy fails on the first message with a DI resolution error — better
+        // to fail loudly at startup. Earlier revisions used the semaphore provider with one
+        // slot, which exhibited a hang under SQL Server contention because Medallion's row-
+        // based semaphore protocol can BLOCK on transaction row locks even with timeout zero
+        // (reproduced as a 20s TimedFact hang in TwoConcurrentMessagesSameSaga in the #211
+        // investigation).
+        if (!builder.Services.Any(d => d.ServiceType == typeof(IWarpLockProvider)))
         {
             throw new InvalidOperationException(
-                "AddSagas() requires IWarpSemaphoreProvider to be registered. " +
+                "AddSagas() requires IWarpLockProvider to be registered. " +
                 "Call opt.UsePostgreSql() or opt.UseSqlServer() BEFORE opt.AddSagas().");
         }
 
-        // Contribute the entities exactly once even if AddSagas is called twice.
-        if (!builder.Configuration.EntityConfigurators.Contains(ServiceConfiguration.AddSagaStateEntity))
-        {
-            builder.Configuration.EntityConfigurators.Add(ServiceConfiguration.AddSagaStateEntity);
-        }
-
-        if (!builder.Configuration.EntityConfigurators.Contains(ServiceConfiguration.AddSagaJobLinkEntity))
-        {
-            builder.Configuration.EntityConfigurators.Add(ServiceConfiguration.AddSagaJobLinkEntity);
-        }
-
-        builder.Services.AddScoped<ISagaStore, SagaStore<TContext>>();
-        builder.Services.AddSingleton<SagaCorrelationCache>();
+        // SagaState and SagaJobLink entities are registered unconditionally by
+        // WarpModelCustomizer. This opt-in only wires the runtime saga services.
+        //
+        // TryAdd* across the board so a second AddSagas() call is a no-op rather than a
+        // silent double-registration. SagaCorrelationCache in particular is a singleton —
+        // plain AddSingleton would register two instances on the second call.
+        builder.Services.TryAddScoped<ISagaStore, SagaStore<TContext>>();
+        builder.Services.TryAddSingleton<SagaCorrelationCache>();
 
         // Dashboard query/command services. Registered as part of the addon so they're available
         // when the user calls AddSagas — the dashboard endpoints probe for them and return 404
         // when they're not registered.
-        builder.Services.AddScoped<Services.ISagaQueryService, Services.SagaQueryService<TContext>>();
-        builder.Services.AddScoped<Services.ISagaCommandService, Services.SagaCommandService<TContext>>();
+        builder.Services.TryAddScoped<Services.ISagaQueryService, Services.SagaQueryService<TContext>>();
+        builder.Services.TryAddScoped<Services.ISagaCommandService, Services.SagaCommandService<TContext>>();
 
         return builder;
     }

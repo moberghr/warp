@@ -32,7 +32,7 @@ public abstract class HealthyResetTestsBase : IntegrationTestBase
         await using var server = await WarpTestServer.StartWithFakeTime(
             Fixture,
             time,
-            configure: cfg => cfg.AddBackgroundService<TestContext, HealthyResetService>(),
+            configure: cfg => cfg.AddBackgroundService<HealthyResetService>(),
             configureServices: services =>
             {
                 services.AddSingleton(state);

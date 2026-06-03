@@ -35,7 +35,7 @@ public abstract class LeaseLossCtsCancellationTestsBase : IntegrationTestBase
             Fixture,
             configure: cfg =>
             {
-                cfg.AddBackgroundService<TestContext, CancellationObserverService>();
+                cfg.AddBackgroundService<CancellationObserverService>();
                 cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
                 cfg.BackgroundServiceLeaseTtl = TimeSpan.FromSeconds(30);
                 cfg.HealthCheckInterval = null;
@@ -84,7 +84,7 @@ public abstract class LeaseLossCtsCancellationTestsBase : IntegrationTestBase
             Fixture,
             configure: cfg =>
             {
-                cfg.AddBackgroundService<TestContext, CancellationObserverService>();
+                cfg.AddBackgroundService<CancellationObserverService>();
                 cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
                 cfg.BackgroundServiceLeaseTtl = TimeSpan.FromSeconds(30);
 

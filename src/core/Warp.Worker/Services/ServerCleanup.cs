@@ -80,22 +80,18 @@ public sealed class ServerCleanup<TContext> : IServerTask
                 .ToListAsync(ct);
             _context.Set<WorkerGroup>().RemoveRange(workerGroups);
 
-            // BackgroundServiceInstance and BackgroundServiceLease rows are also FK-restricted
+            // BackgroundServiceInstance and BackgroundServiceLease rows are FK-restricted
             // (no cascade). Remove them here for the ungraceful-shutdown path, following the same
-            // explicit-deletion pattern as Worker/WorkerGroup above. The addon is optional — only
-            // remove if the entity type is registered in the model.
-            if (_context.Model.FindEntityType(typeof(BackgroundServiceInstance)) != null)
-            {
-                var instances = await _context.Set<BackgroundServiceInstance>()
-                    .Where(x => x.ServerId == server.Id)
-                    .ToListAsync(ct);
-                _context.Set<BackgroundServiceInstance>().RemoveRange(instances);
+            // explicit-deletion pattern as Worker/WorkerGroup above.
+            var instances = await _context.Set<BackgroundServiceInstance>()
+                .Where(x => x.ServerId == server.Id)
+                .ToListAsync(ct);
+            _context.Set<BackgroundServiceInstance>().RemoveRange(instances);
 
-                var leases = await _context.Set<BackgroundServiceLease>()
-                    .Where(x => x.HolderServerId == server.Id)
-                    .ToListAsync(ct);
-                _context.Set<BackgroundServiceLease>().RemoveRange(leases);
-            }
+            var leases = await _context.Set<BackgroundServiceLease>()
+                .Where(x => x.HolderServerId == server.Id)
+                .ToListAsync(ct);
+            _context.Set<BackgroundServiceLease>().RemoveRange(leases);
 
             _context.Set<Server>().Remove(server);
 

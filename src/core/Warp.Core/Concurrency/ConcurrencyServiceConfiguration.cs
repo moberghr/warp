@@ -9,11 +9,8 @@ public static class ConcurrencyServiceConfiguration
     public static IWarpBuilder<TContext> AddConcurrency<TContext>(this IWarpBuilder<TContext> builder)
         where TContext : DbContext
     {
-        // Contribute the ConcurrencyLimit entity only when the addon is opted in.
-        // WarpModelCustomizer invokes these during OnModelCreating so the schema is created
-        // exclusively for users of the addon. Mirrors AddCircuitBreaker's approach.
-        builder.Configuration.EntityConfigurators.Add(ServiceConfiguration.AddConcurrencyLimitEntity);
-
+        // ConcurrencyLimit entity is registered unconditionally by WarpModelCustomizer.
+        // This opt-in only wires the runtime behavior + admin manager service.
         builder.Services.AddScoped<IConcurrencyLimitManager, ConcurrencyLimitManager<TContext>>();
         builder.Services.AddScoped<ConcurrencyLimitResolver>();
         builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ConcurrencyPipelineBehavior<,>));

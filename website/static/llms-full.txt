@@ -4,17 +4,18 @@
 
 Warp provides three patterns — Messages (pub/sub), Jobs (orchestrated background work), and Requests (in-memory mediator) — through a unified pipeline. It uses the transactional outbox pattern: jobs are committed atomically with business data in the same DbContext. No separate message broker required.
 
-Ships as NuGet packages: Moberg.Warp.Core, Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). Supports PostgreSQL and SQL Server.
+Ships as NuGet packages: Moberg.Warp.Core, Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
 
 ---
 
 ## Installation
 
 ```bash
-dotnet add package Moberg.Warp.Core    # Publishing (required)
-dotnet add package Moberg.Warp.Worker  # Worker service (if processing jobs)
-dotnet add package Moberg.Warp.UI      # Dashboard (optional)
-dotnet add package Moberg.Warp.Http    # HTTP exposure for IRequest<T> / IStreamRequest<T> (optional)
+dotnet add package Moberg.Warp.Core              # Publishing (required)
+dotnet add package Moberg.Warp.Provider.PostgreSql  # or Moberg.Warp.Provider.SqlServer (required)
+dotnet add package Moberg.Warp.Worker            # Worker service (if processing jobs)
+dotnet add package Moberg.Warp.UI                # Dashboard (optional)
+dotnet add package Moberg.Warp.Http              # HTTP exposure for IRequest<T> / IStreamRequest<T> (optional)
 ```
 
 ---
@@ -32,26 +33,29 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 ### 2. Register Warp
 
+Handlers (`IJobHandler<>`, `IMessageHandler<>`, `IRequestHandler<,>`) and pipeline behaviors (`IPipelineBehavior<,>`) are discovered by Warp's source generator at compile time — there are no `AddJobHandlers(asm)` / `AddPipelineBehaviors(asm)` extension methods. The source generator emits a `[ModuleInitializer]` per assembly that registers all discovered handlers into a public registry, which `AddWarp` / `AddWarpWorker` replays onto your `IServiceCollection`. Define a handler class, build, and it's wired.
+
 For publisher-only apps (create jobs but don't process them):
 
 ```csharp
-builder.Services.AddWarp<AppDbContext>();
-builder.Services.AddJobHandlers(typeof(Program).Assembly);
+builder.Services.AddWarp<AppDbContext>(opt => opt.UsePostgreSql());
 ```
 
 For worker apps (create AND process jobs):
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpWorker<AppDbContext>(opt =>
 {
-    options.WorkerCount = 10;
-    options.Queues = ["default"];
-    options.PollingInterval = TimeSpan.FromSeconds(1);
+    opt.UsePostgreSql();   // required — provider opt-in
+    opt.WorkerCount = 10;
+    opt.Queues = ["default"];
+    opt.PollingInterval = TimeSpan.FromSeconds(1);
 });
-builder.Services.AddJobHandlers(typeof(Program).Assembly);
 ```
 
-`AddWarpWorker` includes `AddWarp` internally — don't call both.
+`AddWarpWorker` includes `AddWarp` internally — don't call both. `opt.UsePostgreSql()` (or `opt.UseSqlServer()`) **must** be called inside the lambda so the provider package's row-locking and DB-push wiring takes effect.
+
+> **Multi-project solutions.** The source generator scans handlers transitively across project references and registers them all into the host. If a host references an assembly whose handlers it doesn't want in its DI graph (e.g., an API host that pulls in worker-only handlers via a Domain → Worker → Domain chain), opt that assembly out: `opt.ExcludeHandlersFromAssembly(typeof(WorkerOnlyMarker).Assembly)`. See the Multi-Project Source Generation page for the full picture.
 
 ### 3. Create Database Schema
 
@@ -61,6 +65,10 @@ Warp entities are added to your DbContext model automatically. Use standard EF C
 dotnet ef migrations add AddWarp
 dotnet ef database update
 ```
+
+> **DbContext must be registered via `AddDbContext<TContext>(...)`**, not `AddDbContextFactory<TContext>(...)` alone. The factory overload registers `IDbContextFactory<TContext>` but not `TContext`, so Warp's scoped services can't resolve it — `AddWarp` will throw at startup. If your app uses the factory pattern (Blazor, etc.), call both. For design-time tooling (`dotnet ef migrations`) the migrations project must use a real `Host.CreateApplicationBuilder` that calls `AddDbContext` — otherwise EF design-time skips Warp's `IModelCustomizer` and produces an empty migration.
+>
+> **All addon entities are registered unconditionally.** Whether or not your host calls `opt.AddConcurrency()` / `AddCircuitBreaker()` / `AddRateLimit()` / `AddSagas()`, the corresponding tables (`warp.concurrency_limit`, `warp.circuit_breaker_state`, `warp.rate_limit_bucket`, `warp.rate_limit_override`, `warp.saga_state`, `warp.saga_job_link`) are in the schema. One migration covers every deployment shape — no need to mirror addon opt-ins between your API host, Workers host, and migrations host. The opt-in methods still gate the runtime behavior (pipeline behaviors, admin services); the schema is just always there. See the EF Core Integration page for the full picture.
 
 When upgrading the Warp NuGet package:
 
@@ -89,13 +97,12 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
 
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpWorker<AppDbContext>(opt =>
 {
-    options.WorkerCount = 5;
-    options.Queues = ["default"];
+    opt.UsePostgreSql();   // provider opt-in (required)
+    opt.WorkerCount = 5;
+    opt.Queues = ["default"];
 });
-
-builder.Services.AddJobHandlers(typeof(Program).Assembly);
 
 var app = builder.Build();
 
@@ -226,11 +233,17 @@ Declare retry policy on the handler or job class:
 public class GenerateReportHandler : IJobHandler<GenerateReport> { ... }
 ```
 
-Or configure global defaults:
+Or configure global defaults via the builder lambda:
 
 ```csharp
-services.AddWarpRetry(o => { o.MaxRetries = 3; o.Delays = [15, 60, 300]; o.JitterFactor = 0.2; });
+builder.Services.AddWarpWorker<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddRetry(o => { o.MaxRetries = 3; o.Delays = [15, 60, 300]; o.JitterFactor = 0.2; });
+});
 ```
+
+All addon opt-ins (`AddRetry`, `AddTimeout`, `AddConcurrency`, `AddCircuitBreaker`, `AddRateLimit`, `AddNoRestart`, `AddSagas`, `UseDatabasePush`, `AddDashboardPush`) are extension methods on the `IWarpBuilder<TContext>` lambda parameter (`opt`), not service-collection extensions.
 
 Priority: per-enqueue metadata > handler attribute > job attribute > global RetryOptions. Failed jobs are retried automatically. Crash requeues do NOT count against the retry limit.
 
@@ -300,7 +313,7 @@ If a worker picks up a job whose mutex is already held by another processing job
 
 ### NoRestart (stale-recovery opt-out)
 
-Opt-in addon: `services.AddWarpNoRestart()`. Lets specific job types stay `Failed` on worker crash instead of being auto-requeued by `StaleJobRecovery`.
+Opt-in addon: `opt.AddNoRestart()` on the `AddWarp`/`AddWarpWorker` builder. Lets specific job types stay `Failed` on worker crash instead of being auto-requeued by `StaleJobRecovery`.
 
 ```csharp
 [NoRestart]
@@ -311,14 +324,18 @@ Override chain (first non-null wins): per-publish `.WithRestart(bool)` > `[NoRes
 
 ### Circuit Breaker
 
-Opt-in addon: `services.AddWarpCircuitBreaker<TContext>()`. Adds a `CircuitBreakerState` entity (migration required). Opens after `Threshold` consecutive failures, stays open for `Duration`, then transitions to **HalfOpen** where an atomic CAS guarantees exactly one worker probes while others reschedule.
+Opt-in addon: `opt.AddCircuitBreaker(o => ...)` on the `AddWarp`/`AddWarpWorker` builder. The `CircuitBreakerState` entity is part of Warp's base schema (registered unconditionally), so no separate migration is required when you turn the addon on. Opens after `Threshold` consecutive failures, stays open for `Duration`, then transitions to **HalfOpen** where an atomic CAS guarantees exactly one worker probes while others reschedule.
 
 ```csharp
-services.AddWarpCircuitBreaker<AppDbContext>(o =>
+builder.Services.AddWarpWorker<AppDbContext>(opt =>
 {
-    o.Threshold = 5;
-    o.Duration = TimeSpan.FromMinutes(1);
-    o.ResetJitter = TimeSpan.FromSeconds(10);
+    opt.UsePostgreSql();
+    opt.AddCircuitBreaker(o =>
+    {
+        o.Threshold = 5;
+        o.Duration = TimeSpan.FromMinutes(1);
+        o.ResetJitter = TimeSpan.FromSeconds(10);
+    });
 });
 
 [CircuitBreaker(Group = "payments-gateway")]
@@ -468,17 +485,7 @@ public class LoggingBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, 
 
 ### Registration
 
-Auto-scan an assembly:
-
-```csharp
-builder.Services.AddPipelineBehaviors(typeof(Program).Assembly);
-```
-
-Or register manually:
-
-```csharp
-builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
-```
+Pipeline behaviors are picked up by the same source generator that wires handlers — no `AddPipelineBehaviors(asm)` call needed. Define a class implementing `IPipelineBehavior<TRequest, TResponse>`, build, and it's registered. For an open-generic behavior, the generator emits a single `services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>))`.
 
 ### Targeting specific types
 
@@ -486,11 +493,38 @@ builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingBehavi
 // Only for GetUser requests
 public class CacheBehavior : IPipelineBehavior<GetUser, UserDto> { ... }
 
-// Only for jobs (any IJob)
+// Only for jobs (any IJob) — TResponse is Unit for IJob/IMessage
 public class RetryBehavior<T> : IPipelineBehavior<T, Unit> where T : IJob { ... }
 ```
 
-For jobs and messages, `TResponse` is `Unit`. Behaviors execute in registration order, outermost first.
+`IPipelineBehavior<,>` runs on all three dispatch paths: `IMediator.Send` (for `IRequest<>`), the worker's job-execution loop (for `IJob`, with `TResponse = Unit`), and the message-routing path (for `IMessage`, with `TResponse = Unit`). Each path uses its own behavior chain — registering an open-generic `IPipelineBehavior<,>` binds it to all of them. Behaviors execute in registration order, outermost first.
+
+### Short-circuiting from a behavior
+
+To override the default outcome (e.g., refuse retry, mark as deleted), construct a new `JobOutcome` and assign it to `IJobContext.Outcome` — `JobOutcome` is init-only by design, so you cannot mutate an existing instance:
+
+```csharp
+public class RefuseRetryBehavior<T> : IPipelineBehavior<T, Unit> where T : IJob
+{
+    private readonly IJobContext _jobContext;
+
+    public RefuseRetryBehavior(IJobContext jobContext) => _jobContext = jobContext;
+
+    public async Task<Unit> HandleAsync(T request, RequestHandlerDelegate<Unit> next, CancellationToken ct)
+    {
+        try { return await next(); }
+        catch (DomainRefusedException)
+        {
+            _jobContext.Outcome = new JobOutcome
+            {
+                State = State.Failed,
+                LogMessage = "Short-circuited: domain refused this work",
+            };
+            throw;
+        }
+    }
+}
+```
 
 ---
 
@@ -1268,17 +1302,30 @@ public enum CancellationMode { None = 0, Graceful = 1 }
 ### Extension Methods
 
 ```csharp
-// Core registration
+// Core registration. Throws InvalidOperationException at AddWarp time if TContext is
+// not registered as Scoped (most common cause: AddDbContextFactory<T> without AddDbContext<T>).
 IServiceCollection.AddWarp<TContext>();
-IServiceCollection.AddWarp<TContext>(Action<WarpConfiguration> options);
+IServiceCollection.AddWarp<TContext>(Action<WarpBuilder<TContext>> configure);
 
 // Worker registration (includes AddWarp internally)
 IServiceCollection.AddWarpWorker<TContext>();
-IServiceCollection.AddWarpWorker<TContext>(Action<WarpWorkerConfiguration> options);
+IServiceCollection.AddWarpWorker<TContext>(Action<WarpWorkerBuilder<TContext>> configure);
 
-// Handler scanning
-IServiceCollection.AddJobHandlers(Assembly assembly);        // IJobHandler<>, IMessageHandler<>, IRequestHandler<,>
-IServiceCollection.AddPipelineBehaviors(Assembly assembly);  // IPipelineBehavior<,>
+// Addon opt-ins on the builder lambda parameter (IWarpBuilder<TContext>)
+opt.UsePostgreSql() / opt.UseSqlServer();    // required provider opt-in
+opt.AddRetry(Action<RetryOptions>);
+opt.AddTimeout(Action<TimeoutOptions>);
+opt.AddConcurrency();
+opt.AddCircuitBreaker(Action<CircuitBreakerOptions>);
+opt.AddRateLimit();
+opt.AddNoRestart();
+opt.AddSagas();
+opt.UseDatabasePush();
+opt.AddDashboardPush();
+opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi-Project page
+
+// Handlers and pipeline behaviors are source-gen registered — no AddJobHandlers / AddPipelineBehaviors
+// extension methods exist. Define a class implementing the handler/behavior interface and build.
 
 // Dashboard
 WebApplication.UseWarpUI();
@@ -1380,8 +1427,13 @@ Publisher app (web API):
 ```csharp
 // Only creates jobs, doesn't process them
 builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(connStr));
-builder.Services.AddWarp<AppDbContext>();
-builder.Services.AddJobHandlers(typeof(Program).Assembly);
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    // Optional: if the publisher project references a worker-only assembly transitively
+    // and you don't want worker handlers in this process's DI graph:
+    // opt.ExcludeHandlersFromAssembly(typeof(WorkerOnlyMarker).Assembly);
+});
 ```
 
 Worker app (background service):
@@ -1389,15 +1441,15 @@ Worker app (background service):
 ```csharp
 // Only processes jobs
 builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(connStr));
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpWorker<AppDbContext>(opt =>
 {
-    options.WorkerCount = 20;
-    options.Queues = ["default"];
+    opt.UsePostgreSql();
+    opt.WorkerCount = 20;
+    opt.Queues = ["default"];
 });
-builder.Services.AddJobHandlers(typeof(SharedHandlers).Assembly);
 ```
 
-Both apps share the same database. The worker polls for and executes jobs created by the publisher.
+Both apps share the same database. The worker polls for and executes jobs created by the publisher. Handlers are picked up by the source generator in whichever project defines them and replayed into the host's DI graph by `AddWarp` / `AddWarpWorker` — no `AddJobHandlers(asm)` calls.
 
 ---
 

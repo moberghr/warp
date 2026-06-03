@@ -8,6 +8,13 @@ async function boot() {
     || import.meta.env.VITE_DEMO === 'true'
 
   if (isDemoMode) {
+    // Pin the clock so demo data + "X minutes ago" labels are deterministic.
+    // Must run BEFORE the demo module loads — `data.ts` reads `Date.now()`
+    // at the top level into a `const NOW`, so a later override wouldn't
+    // reach that seed.
+    const FROZEN_NOW = Date.UTC(2026, 4, 25, 11, 0, 0)
+    Date.now = () => FROZEN_NOW
+
     const { setupDemo } = await import('@/demo')
     setupDemo()
   }

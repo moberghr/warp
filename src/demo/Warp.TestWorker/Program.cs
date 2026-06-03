@@ -30,8 +30,8 @@ var host = Host.CreateDefaultBuilder(args)
             // demonstrates per-server scope (TickCounterService runs on each host) vs
             // singleton scope (JobStatsLoggerService runs on only one host at a time —
             // cycle the host that holds the lease to watch failover).
-            options.AddBackgroundService<TestContext, TickCounterService>();
-            options.AddBackgroundService<TestContext, JobStatsLoggerService>();
+            options.AddBackgroundService<TickCounterService>();
+            options.AddBackgroundService<JobStatsLoggerService>();
         });
         services.AddSagaHandler<OrderSagaWorkflow>();
     })

@@ -28,6 +28,9 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
     // first awaiter runs the setup, others wait; if it faults, every subsequent await throws
     // the cached exception without reopening any connections.
     private readonly Lazy<Task> _setup;
+    private readonly TaskCompletionSource _listenerReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task ListenerReady => _listenerReady.Task;
 
     public SqlServerNotificationTransport(string connectionString, WarpDatabasePushConfiguration options, ILogger<SqlServerNotificationTransport>? logger = null)
     {
@@ -103,6 +106,12 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct);
+
+        // Service Broker setup is the slow part and the listen connection is now open — from
+        // this point the WAITFOR loop is the listener. Tests use this signal to gate the first
+        // publish so it can't be dropped by a host-startup vs. listener-startup race. Latches
+        // once; reconnects rely on the listener task's drain-on-reconnect to catch up.
+        _listenerReady.TrySetResult();
 
         // WAITFOR RECEIVE blocks the connection until messages arrive or the TIMEOUT fires.
         // The 30s timeout is a heartbeat so we can observe cancellation — not a poll of job state.

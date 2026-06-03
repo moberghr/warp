@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Warp.Http.SourceGenerator.Emitters;
 
@@ -72,7 +73,15 @@ internal static class BindingEmitter
                     break;
             }
 
-            targets.Add(new BindingTarget(memberName, memberType, source, key, ctorIndex, propertyName));
+            targets.Add(new BindingTarget(
+                memberName,
+                memberType,
+                source,
+                key,
+                ctorIndex,
+                propertyName,
+                HasClrDefault(attributedSymbol),
+                attributedSymbol.Locations.FirstOrDefault()));
         }
 
         // Whole-body default: body verb, no attributes anywhere — Minimal API binds TRequest from body.
@@ -187,6 +196,27 @@ internal static class BindingEmitter
         return string.Equals(method, "POST", System.StringComparison.OrdinalIgnoreCase)
             || string.Equals(method, "PUT", System.StringComparison.OrdinalIgnoreCase)
             || string.Equals(method, "PATCH", System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    // True when the member carries a C# default: a ctor-parameter default (record positional
+    // param) or a property initializer. ASP.NET's [AsParameters] binding ignores both on
+    // non-body verbs — the value still binds as a required query parameter (WHTTP005).
+    private static bool HasClrDefault(ISymbol member)
+    {
+        if (member is IParameterSymbol parameter)
+        {
+            return parameter.HasExplicitDefaultValue;
+        }
+
+        if (member is IPropertySymbol property)
+        {
+            return property.DeclaringSyntaxReferences
+                .Select(r => r.GetSyntax())
+                .OfType<PropertyDeclarationSyntax>()
+                .Any(p => p.Initializer is not null);
+        }
+
+        return false;
     }
 
     internal sealed class MemberInfo

@@ -21,6 +21,7 @@ public sealed class ServerTaskSignals<TContext>
 {
     private readonly List<Action> _jobFinalizedWakers = [];
     private readonly List<Action> _messageEnqueuedWakers = [];
+    private readonly List<Action> _jobEnqueuedWakers = [];
     private readonly List<Action<string>> _backgroundServiceLeaseLostWakers = [];
     private readonly Lock _gate = new();
 
@@ -37,6 +38,14 @@ public sealed class ServerTaskSignals<TContext>
     public void SignalMessageEnqueued() => Fire(_messageEnqueuedWakers);
 
     /// <summary>
+    /// Called when a <c>Kind=Job</c> row is enqueued or activated — wakes all subscribers to
+    /// <see cref="ServerTaskSignal.JobEnqueued"/>. Bare workers and dispatchers subscribe so they
+    /// bypass exponential-backoff sleep when work appears, both for local enqueues and (when DB
+    /// push is enabled) for cross-server pushes drained by <c>NotificationListenerTask</c>.
+    /// </summary>
+    public void SignalJobEnqueued() => Fire(_jobEnqueuedWakers);
+
+    /// <summary>
     /// Subscribe <paramref name="wake"/> to the given channel. Dispose the returned handle to
     /// unregister — leaking it would leak a closure across the host's lifetime. Disposal is
     /// idempotent and thread-safe.
@@ -45,6 +54,7 @@ public sealed class ServerTaskSignals<TContext>
     {
         ServerTaskSignal.JobFinalized => Subscribe(_jobFinalizedWakers, wake),
         ServerTaskSignal.MessageEnqueued => Subscribe(_messageEnqueuedWakers, wake),
+        ServerTaskSignal.JobEnqueued => Subscribe(_jobEnqueuedWakers, wake),
         _ => throw new ArgumentOutOfRangeException(nameof(channel), channel, "Unknown server-task signal channel."),
     };
 

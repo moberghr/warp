@@ -26,7 +26,7 @@ public abstract class GracefulShutdownOrderingTestsBase : IntegrationTestBase
 
         var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, BarrierPinnedService>(),
+            configure: cfg => cfg.AddBackgroundService<BarrierPinnedService>(),
             configureServices: services => services.AddSingleton(barrier));
 
         // Wait for service to enter ExecuteAsync.

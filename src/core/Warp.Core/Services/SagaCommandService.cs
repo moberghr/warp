@@ -41,16 +41,16 @@ public class SagaCommandService<TContext> : ISagaCommandService
     where TContext : DbContext
 {
     private readonly TContext _context;
-    private readonly IWarpSemaphoreProvider _semaphoreProvider;
+    private readonly IWarpLockProvider _lockProvider;
     private readonly ILogger<SagaCommandService<TContext>> _logger;
 
     public SagaCommandService(
         TContext context,
-        IWarpSemaphoreProvider semaphoreProvider,
+        IWarpLockProvider lockProvider,
         ILogger<SagaCommandService<TContext>> logger)
     {
         _context = context;
-        _semaphoreProvider = semaphoreProvider;
+        _lockProvider = lockProvider;
         _logger = logger;
     }
 
@@ -66,9 +66,8 @@ public class SagaCommandService<TContext> : ISagaCommandService
         }
 
         var lockName = $"warp:saga:{saga.Type}:{saga.CorrelationKey}";
-        await using var handle = await _semaphoreProvider.TryAcquireAsync(
+        await using var handle = await _lockProvider.TryAcquireAsync(
             lockName,
-            1,
             SagaCommandServiceConstants.ForceCompleteMutexTimeout,
             CancellationToken.None);
 

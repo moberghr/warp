@@ -23,7 +23,7 @@ public abstract class PerServerLifecycleTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, BarrierPinnedService>(),
+            configure: cfg => cfg.AddBackgroundService<BarrierPinnedService>(),
             configureServices: services => services.AddSingleton(barrier));
 
         // Wait for the service to enter ExecuteAsync (it will release Running).
@@ -48,7 +48,7 @@ public abstract class PerServerLifecycleTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, BarrierPinnedService>(),
+            configure: cfg => cfg.AddBackgroundService<BarrierPinnedService>(),
             configureServices: services => services.AddSingleton(barrier));
 
         // The service signals Running on entry — if we get here, user code was reached.
@@ -68,7 +68,7 @@ public abstract class PerServerLifecycleTestsBase : IntegrationTestBase
 
         var server = await WarpTestServer.StartAsync(
             Fixture,
-            configure: cfg => cfg.AddBackgroundService<TestContext, BarrierPinnedService>(),
+            configure: cfg => cfg.AddBackgroundService<BarrierPinnedService>(),
             configureServices: services => services.AddSingleton(barrier));
 
         var serverId = server.ServerId;

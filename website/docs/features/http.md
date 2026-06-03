@@ -125,6 +125,24 @@ public sealed class ListOrdersHandler : IRequestHandler<ListOrders, ListOrdersRe
 
 ASP.NET binds each property from its declared source via `[AsParameters]`. Records with primary constructors and classes with property setters both work.
 
+> ⚠️ **A non-nullable scalar query param is REQUIRED — your C# default is ignored.** Under `[AsParameters]`, ASP.NET treats every non-nullable value-typed property as a required argument. A property initializer or parameter default (`int Take { get; set; } = 20;`) is **not** consulted by the binder, so a request that omits the parameter returns **400** rather than falling back to the default. This is the single most common Warp.Http surprise.
+>
+> ```csharp
+> // ✘ Bare GET /orders → 400: Page is a required query param (the "= 1" is ignored).
+> public sealed class ListOrders : IRequest<ListOrdersResponse>
+> {
+>     public int Page { get; set; } = 1;
+> }
+>
+> // ✓ Make optional params nullable; apply the default in the handler.
+> public sealed class ListOrders : IRequest<ListOrdersResponse>
+> {
+>     public int? Page { get; set; }   // omitted → null → handler applies the default
+> }
+> ```
+>
+> The generator emits a **`WHTTP005`** warning for any non-nullable value-typed query parameter that carries a C# default, so this is caught at build time. Reference-typed params (e.g. `string?`) are already optional and don't trip it. A param you genuinely want required can stay non-nullable with no default — `WHTTP005` only fires when a default is present (and silently dropped).
+
 **3. Mixed body + route/query/header** — class with a `[FromBody]` property *and* other source attributes:
 
 ```csharp
@@ -144,6 +162,19 @@ public sealed class SubmitOrderHandler : IRequestHandler<SubmitOrder, OrderDto> 
 ```
 
 The generator emits explicit lambda parameters per source and constructs `SubmitOrder` from the bound parts. ASP.NET's `[AsParameters]` doesn't support `[FromBody]` properties directly, so the generator handles this case explicitly.
+
+> **One body parameter only.** ASP.NET Minimal API accepts at most one body-bound parameter per endpoint. On a body verb (POST / PUT / PATCH), any parameter that isn't annotated with `[FromRoute]` / `[FromQuery]` / `[FromHeader]` defaults to the body. If more than one parameter ends up body-bound (e.g. `[FromRoute] int Id` plus two bare scalars), the generator emits a `WHTTP004` error. Fix it by wrapping the body fields in a single record and tagging it `[FromBody]`:
+>
+> ```csharp
+> // ✘ WHTTP004: Name and Price both default to the body
+> public sealed record CreateOrder([FromRoute] int TenantId, string Name, decimal Price) : IRequest<OrderDto>;
+>
+> // ✓ one [FromBody] sub-record
+> public sealed record CreateOrderBody(string Name, decimal Price);
+> public sealed record CreateOrder([FromRoute] int TenantId, [FromBody] CreateOrderBody Body) : IRequest<OrderDto>;
+> ```
+>
+> If no parameter is annotated at all, the verb defaults to **whole-body** binding (shape 1 above) and `TRequest` deserializes from the JSON body — that path has no multi-body limitation.
 
 > **Tip:** for mixed binding, prefer **classes with property setters** over records with primary constructors. Attributes on record positional parameters apply to the parameter, not the synthesized property, which can confuse `[AsParameters]`. Classes with `{ get; set; }` or `{ get; init; }` properties are unambiguous.
 
@@ -262,9 +293,11 @@ app.MapGroup("/internal/admin").RequireAuthorization("adminPolicy").MapWarpHttp(
 
 `MapWarpHttp(group)` matches strictly — null matches null, "public" matches "public". No overlap. Calling `MapWarpHttp(group)` twice on the same `IEndpointRouteBuilder` instance with the same group throws `InvalidOperationException` at startup.
 
-## Auth
+## Endpoint metadata attributes
 
-Place `[Authorize]` or `[AllowAnonymous]` on the handler class — Warp.Http surfaces them as ASP.NET endpoint metadata, so they compose with group-level `RequireAuthorization()` exactly as Minimal API does:
+Any attribute you place on the handler class is surfaced as ASP.NET endpoint metadata (via `EndpointBuilder.WithMetadata(attr)`) — only Warp's own `[WarpHttp*]` routing markers are excluded. So `[Authorize]`, `[AllowAnonymous]`, `[EnableRateLimiting]` / `[DisableRateLimiting]`, `[Tags]`, `[OutputCache]`, `[ProducesResponseType]`, and any custom metadata attribute all compose with the matching middleware exactly as they would on a hand-written Minimal API endpoint.
+
+### Auth
 
 ```csharp
 [Authorize(Policy = "OrdersWrite")]
@@ -279,6 +312,16 @@ app.MapGroup("/api").RequireAuthorization().MapWarpHttp();
 [AllowAnonymous]
 [WarpHttpGet("/api/health")]
 public sealed class HealthCheckHandler : IRequestHandler<HealthCheck, HealthStatus> { ... }
+```
+
+### Rate limiting
+
+`[EnableRateLimiting("policy")]` on the handler class applies the named policy registered via `builder.Services.AddRateLimiter(...)`, just like on a Minimal API endpoint:
+
+```csharp
+[EnableRateLimiting("per-user")]
+[WarpHttpPost("/orders")]
+public sealed class CreateOrderHandler : IRequestHandler<CreateOrder, OrderDto> { ... }
 ```
 
 ## OpenAPI / Swagger
@@ -321,6 +364,8 @@ This logs every `IRequest<T>` whether dispatched in-memory or via HTTP.
 |------------|----------|-----------|
 | `WHTTP001` | Error    | Handler class tagged with `[WarpHttp...]` either doesn't implement `IRequestHandler<,>` / `IStreamRequestHandler<,>`, or its request type implements `IJob` / `IMessage` (background-work types cannot be HTTP-exposed). |
 | `WHTTP002` | Error    | Handler class has multiple `[WarpHttp...]` attributes but at least one is missing `Name = "..."`. ASP.NET requires unique route names per endpoint. |
+| `WHTTP004` | Error    | Body verb (POST / PUT / PATCH) handler has more than one body-bound parameter. Minimal API accepts at most one — wrap the body fields in a single `[FromBody]` sub-record. |
+| `WHTTP005` | Warning  | A non-nullable value-typed query parameter on a GET / DELETE handler carries a C# default. `[AsParameters]` binding ignores the default and makes the parameter required, so omitting it returns 400. Make it nullable and apply the default in the handler. |
 
 ## Independence from Warp.UI
 

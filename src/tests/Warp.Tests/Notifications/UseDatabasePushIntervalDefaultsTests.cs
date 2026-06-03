@@ -136,11 +136,14 @@ public class UseDatabasePushIntervalDefaultsTests
     }
 
     [Fact]
-    public void WarpWorkerConfiguration_DefaultServerTaskBatchSize_IsOneHundred()
+    public void WarpWorkerConfiguration_DefaultServerTaskBatchSize_IsOneThousand()
     {
         // Pins the bounded-batching ceiling — a silent change to the default would either
         // hurt throughput (too small) or hold the orchestration lock too long (too large).
-        new WarpWorkerConfiguration().ServerTaskBatchSize.ShouldBe(100);
+        // Raised from 100 → 1000 in fix/task-cadence: combined with batched commits inside
+        // MessageRouter the per-iteration cost is bounded by one SaveChanges round-trip,
+        // and 1000 is the right balance between drain rate and multi-server fairness.
+        new WarpWorkerConfiguration().ServerTaskBatchSize.ShouldBe(1000);
     }
 
     [Fact]

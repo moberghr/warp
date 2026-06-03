@@ -14,6 +14,7 @@ using Warp.Core.Handlers.Generated;
 using Warp.Core.Retry;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 using Warp.Worker.Services;
@@ -175,7 +176,7 @@ public abstract class RetentionEdgeCaseTestsBase : IAsyncLifetime
     {
         // Arrange — create a completed job with existing stats
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider());
+        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         var jobId = await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
