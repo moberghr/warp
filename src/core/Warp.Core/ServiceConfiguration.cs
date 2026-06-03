@@ -22,6 +22,17 @@ public static class ServiceConfiguration
 {
     private static readonly SaveChangesConcurrencyTokenInterceptor _saveChangesInterceptor = new();
 
+    /// <summary>
+    /// Registers Warp's publish-side services against the user's <typeparamref name="TContext"/>:
+    /// <c>IPublisher</c>, <c>IMediator</c>, <c>IRecurringJobPublisher</c>, the query services, and
+    /// the EF Core model customizer / row-lock interceptors. Use this for processes that only
+    /// publish or serve the dashboard; call <c>AddWarpWorker</c> instead (it calls this internally)
+    /// for processes that also execute jobs. <typeparamref name="TContext"/> must already be
+    /// registered via <c>AddDbContext</c> (scoped). Opt into a provider — <c>opt.UsePostgreSql()</c>
+    /// or <c>opt.UseSqlServer()</c> — and any addons from the <paramref name="configure"/> lambda.
+    /// Handlers and pipeline behaviors are discovered by the source generator; there is no
+    /// <c>AddHandlers</c> call.
+    /// </summary>
     public static IServiceCollection AddWarp<TContext>(
         this IServiceCollection services,
         Action<WarpBuilder<TContext>>? configure = null)

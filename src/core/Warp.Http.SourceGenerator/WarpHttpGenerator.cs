@@ -178,6 +178,8 @@ public sealed class WarpHttpGenerator : IIncrementalGenerator
                 continue;
             }
 
+            ReportRequiredScalarDefaults(context, plan);
+
             var model = new HttpEndpointModel(
                 handlerType: candidate,
                 requestType: requestType,
@@ -293,6 +295,42 @@ public sealed class WarpHttpGenerator : IIncrementalGenerator
             location,
             type.ToDisplayString(),
             reason));
+    }
+
+    // WHTTP005: only the [AsParameters] shape (non-body verbs, no [FromBody] member) is affected —
+    // whole-body and mixed shapes deserialize the body via JSON, which honors C# defaults for
+    // omitted members. Within AsParameters, a query-bound non-nullable value type with a C#
+    // default still binds as a required query parameter, silently turning the default into a 400.
+    private static void ReportRequiredScalarDefaults(SourceProductionContext context, BindingPlan plan)
+    {
+        if (plan.Shape != BindingShape.AsParameters)
+        {
+            return;
+        }
+
+        foreach (var target in plan.Targets)
+        {
+            if (target.Source != BindingSource.Query)
+            {
+                continue;
+            }
+
+            if (!target.HasClrDefault || !IsNonNullableValueType(target.Type))
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(
+                Diagnostics.RequiredScalarWithIgnoredDefault,
+                target.Location ?? Location.None,
+                target.MemberName));
+        }
+    }
+
+    private static bool IsNonNullableValueType(ITypeSymbol type)
+    {
+        return type.IsValueType
+            && type.OriginalDefinition.SpecialType != SpecialType.System_Nullable_T;
     }
 
     private static void ReportMultipleBodyTargets(SourceProductionContext context, INamedTypeSymbol type)

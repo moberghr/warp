@@ -1,30 +1,35 @@
-import { useState, useEffect, useCallback } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { queryClient } from '@/lib/queryClient';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import MainLayout from '@/layouts/MainLayout';
-import DashboardPage from '@/pages/dashboard/DashboardPage';
-import JobListPage from '@/pages/jobs/JobListPage';
-import MessagesPage from '@/pages/messages/MessagesPage';
-import BatchesPage from '@/pages/batches/BatchesPage';
-import RecurringPage from '@/pages/recurring/RecurringPage';
-import RecurringDetailPage from '@/pages/recurring/RecurringDetailPage';
-import ServersPage from '@/pages/servers/ServersPage';
-import ServerDetailPage from '@/pages/servers/ServerDetailPage';
-import CountersPage from '@/pages/counters/CountersPage';
-import ConcurrencyLimitsPage from '@/pages/concurrency/ConcurrencyLimitsPage';
-import RateLimitsPage from '@/pages/ratelimits/RateLimitsPage';
-import SagasListPage from '@/pages/sagas/SagasListPage';
-import SagaDetailPage from '@/pages/sagas/SagaDetailPage';
-import BackgroundServicesList from '@/pages/BackgroundServices/List';
-import BackgroundServiceDetail from '@/pages/BackgroundServices/Detail';
-import WorkerDetailPage from '@/pages/workers/WorkerDetailPage';
-import TracePage from '@/pages/trace/TracePage';
-import DetailPage from '@/pages/detail/DetailPage';
-import LoginPage from '@/pages/auth/LoginPage';
 import ExtensionPage from '@/extensions/ExtensionPage';
+
+// Route pages are code-split: each becomes its own chunk loaded on navigation,
+// so the initial bundle no longer carries every page (notably the trace graph's
+// @xyflow/@dagrejs and the chart stack). MainLayout renders the Suspense boundary
+// around <Outlet>, so the shell/nav stays put while a page chunk loads.
+const DashboardPage = lazy(() => import('@/pages/dashboard/DashboardPage'));
+const JobListPage = lazy(() => import('@/pages/jobs/JobListPage'));
+const MessagesPage = lazy(() => import('@/pages/messages/MessagesPage'));
+const BatchesPage = lazy(() => import('@/pages/batches/BatchesPage'));
+const RecurringPage = lazy(() => import('@/pages/recurring/RecurringPage'));
+const RecurringDetailPage = lazy(() => import('@/pages/recurring/RecurringDetailPage'));
+const ServersPage = lazy(() => import('@/pages/servers/ServersPage'));
+const ServerDetailPage = lazy(() => import('@/pages/servers/ServerDetailPage'));
+const CountersPage = lazy(() => import('@/pages/counters/CountersPage'));
+const ConcurrencyLimitsPage = lazy(() => import('@/pages/concurrency/ConcurrencyLimitsPage'));
+const RateLimitsPage = lazy(() => import('@/pages/ratelimits/RateLimitsPage'));
+const SagasListPage = lazy(() => import('@/pages/sagas/SagasListPage'));
+const SagaDetailPage = lazy(() => import('@/pages/sagas/SagaDetailPage'));
+const BackgroundServicesList = lazy(() => import('@/pages/BackgroundServices/List'));
+const BackgroundServiceDetail = lazy(() => import('@/pages/BackgroundServices/Detail'));
+const WorkerDetailPage = lazy(() => import('@/pages/workers/WorkerDetailPage'));
+const TracePage = lazy(() => import('@/pages/trace/TracePage'));
+const DetailPage = lazy(() => import('@/pages/detail/DetailPage'));
+const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
 import { setOnUnauthorized } from '@/api/client';
 import { loadExtensions } from '@/extensions/loader';
 import { extensionRuntime } from '@/extensions/runtime';
@@ -139,7 +144,7 @@ function App() {
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
-        {body()}
+        <Suspense fallback={null}>{body()}</Suspense>
         <Toaster position="bottom-right" richColors closeButton />
       </QueryClientProvider>
     </ErrorBoundary>

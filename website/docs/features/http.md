@@ -125,6 +125,24 @@ public sealed class ListOrdersHandler : IRequestHandler<ListOrders, ListOrdersRe
 
 ASP.NET binds each property from its declared source via `[AsParameters]`. Records with primary constructors and classes with property setters both work.
 
+> ⚠️ **A non-nullable scalar query param is REQUIRED — your C# default is ignored.** Under `[AsParameters]`, ASP.NET treats every non-nullable value-typed property as a required argument. A property initializer or parameter default (`int Take { get; set; } = 20;`) is **not** consulted by the binder, so a request that omits the parameter returns **400** rather than falling back to the default. This is the single most common Warp.Http surprise.
+>
+> ```csharp
+> // ✘ Bare GET /orders → 400: Page is a required query param (the "= 1" is ignored).
+> public sealed class ListOrders : IRequest<ListOrdersResponse>
+> {
+>     public int Page { get; set; } = 1;
+> }
+>
+> // ✓ Make optional params nullable; apply the default in the handler.
+> public sealed class ListOrders : IRequest<ListOrdersResponse>
+> {
+>     public int? Page { get; set; }   // omitted → null → handler applies the default
+> }
+> ```
+>
+> The generator emits a **`WHTTP005`** warning for any non-nullable value-typed query parameter that carries a C# default, so this is caught at build time. Reference-typed params (e.g. `string?`) are already optional and don't trip it. A param you genuinely want required can stay non-nullable with no default — `WHTTP005` only fires when a default is present (and silently dropped).
+
 **3. Mixed body + route/query/header** — class with a `[FromBody]` property *and* other source attributes:
 
 ```csharp
@@ -346,6 +364,8 @@ This logs every `IRequest<T>` whether dispatched in-memory or via HTTP.
 |------------|----------|-----------|
 | `WHTTP001` | Error    | Handler class tagged with `[WarpHttp...]` either doesn't implement `IRequestHandler<,>` / `IStreamRequestHandler<,>`, or its request type implements `IJob` / `IMessage` (background-work types cannot be HTTP-exposed). |
 | `WHTTP002` | Error    | Handler class has multiple `[WarpHttp...]` attributes but at least one is missing `Name = "..."`. ASP.NET requires unique route names per endpoint. |
+| `WHTTP004` | Error    | Body verb (POST / PUT / PATCH) handler has more than one body-bound parameter. Minimal API accepts at most one — wrap the body fields in a single `[FromBody]` sub-record. |
+| `WHTTP005` | Warning  | A non-nullable value-typed query parameter on a GET / DELETE handler carries a C# default. `[AsParameters]` binding ignores the default and makes the parameter required, so omitting it returns 400. Make it nullable and apply the default in the handler. |
 
 ## Independence from Warp.UI
 
