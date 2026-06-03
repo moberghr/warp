@@ -4,6 +4,43 @@ sidebar_position: 6
 
 # Releases
 
+## 1.0.0
+
+*2026-06-03*
+
+The first stable release. Warp has been running the same unified job/message/request model across the 0.x line for months; 1.0.0 draws the line and commits to it.
+
+### Stability commitment
+
+From 1.0.0 onward, Warp follows [semantic versioning](https://semver.org/) as a contract, not just a number scheme:
+
+- **Public API is stable.** The surfaces you build against — `IPublisher`, `IMediator`, `IJob` / `IMessage` / `IRequest<T>` / `IStreamRequest<T>` and their handlers, the `AddWarp` / `AddWarpWorker` builders, the addon methods (`AddRetry`, `AddConcurrency`, `AddTimeout`, `AddRateLimit`, `AddSagas`, `UseDatabasePush`, `AddDashboardPush`), and the `Warp.Http` attributes — will not break within 1.x. Additive changes only.
+- **Database schema is stable.** The `warp` schema (jobs, logs, servers, counters, statistics, recurring jobs, addon tables, background-service tables) will not see breaking migrations within 1.x.
+- **Breaking changes are reserved for 2.0.** Anything that would force a code or schema change waits for the next major.
+
+Upgrading from 0.17.2 is **drop-in**: no schema migration, no required code changes for typical applications. Two things to be aware of:
+
+- **`Warp.Core` no longer pulls in the ASP.NET Core shared framework** (see below). Worker- or publisher-only projects that used `Microsoft.AspNetCore.*` types *transitively through Warp.Core* must now add `<FrameworkReference Include="Microsoft.AspNetCore.App" />` themselves. Projects that reference `Warp.UI` / `Warp.Http`, or that are ASP.NET apps already, are unaffected.
+- **A new `WHTTP005` build warning** (see below) may surface on existing `Warp.Http` GET/DELETE handlers. Builds with `TreatWarningsAsErrors` will need the one-line nullable fix it points to.
+
+### HTTP: all handler-class attributes forwarded to endpoint metadata (#220)
+
+`MapWarpHttp` previously forwarded only `[Authorize]` / `[AllowAnonymous]` from a handler class to its generated endpoint; every other attribute was silently dropped. Now **every** attribute on the handler class is forwarded as ASP.NET endpoint metadata (via `EndpointBuilder.WithMetadata`), excluding only Warp's own `[WarpHttp*]` routing markers. So `[EnableRateLimiting("policy")]`, `[Tags]`, `[OutputCache]`, `[ProducesResponseType]`, and any custom metadata attribute now compose with their middleware exactly as on a hand-written Minimal API endpoint.
+
+### `Warp.Core`: dropped the ASP.NET Core framework reference (#221)
+
+`Warp.Core` replaced its `<FrameworkReference Include="Microsoft.AspNetCore.App" />` with granular `Microsoft.Extensions.*` package references (DI, logging, options, configuration). Core, the worker, and the providers no longer drag the entire ASP.NET Core shared framework into hosts that don't need it — only `Warp.UI` and `Warp.Http` depend on ASP.NET now. See the upgrade note above for the rare case this affects.
+
+### `Warp.Http`: the `[AsParameters]` required-query-param trap is now a build warning (#222)
+
+On a non-body verb (GET / DELETE), `Warp.Http` binds the request via ASP.NET's `[AsParameters]`, which makes any non-nullable value-typed property a **required** query parameter and ignores its C# default. A bare request then returns 400 instead of falling back to the default — a silent, easy-to-ship bug. The source generator now emits **`WHTTP005`** for exactly this shape (non-nullable value-typed query param carrying a C# default), so it's caught at build time. Make the property nullable and apply the default in the handler. The binding docs now cover this and the mixed route + `[FromBody]` PATCH pattern, and the diagnostics table is complete (`WHTTP001`–`WHTTP005`).
+
+### Developer experience (#222)
+
+- **Accurate README & XML docs.** Removed stale `AddHandlers(...)` / `AddPipelineBehaviors(...)` calls from the README — handlers and pipeline behaviors are auto-registered by the source generator. Added a package-id ↔ namespace cheat-sheet (`Moberg.Warp.*` packages, `Warp.*` namespaces) and version-pinning guidance. Added XML-doc summaries to the core public surface (`IPublisher`, `IMediator`, `AddWarp`, the `Warp.Http` verb attributes) so IntelliSense shows signatures.
+- **Smaller dashboard bundle.** The dashboard is now route-code-split: the initial JS payload dropped from ~510 KB to ~296 KB gzip, and the trace-graph and chart stacks load only on the routes that use them. Consolidated on a single date library.
+- **Build resilience.** The embedded dashboard SPA is now collected after the build-time `npm run build`, so dependency bumps no longer break the build with a stale-resource error.
+
 ## 0.17.2
 
 *2026-06-02*
