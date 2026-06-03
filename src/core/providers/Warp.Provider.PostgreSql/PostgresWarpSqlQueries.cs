@@ -92,9 +92,15 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             WHERE ""{_n.Id}"" = {{0}}
             FOR NO KEY UPDATE";
 
+        // FOR UPDATE (not NO KEY): ServerCleanup deletes a stale server's
+        // BackgroundServiceInstance / BackgroundServiceLease children and then the server in one
+        // transaction. FOR NO KEY UPDATE is compatible with the FOR KEY SHARE lock a child INSERT
+        // takes on its parent, so a stale-but-alive server could insert a fresh instance row
+        // referencing the server mid-cleanup and orphan the FK (23503). FOR UPDATE conflicts with
+        // FOR KEY SHARE, so such inserts block until cleanup commits.
         _lockAllServersSql = $@"
             SELECT * FROM {serverTable}
-            FOR NO KEY UPDATE";
+            FOR UPDATE";
 
         // CTE+LEFT JOIN folds the heartbeat UPDATE, the server paused_at read, the
         // worker_group pause-state read, the BG-service instance heartbeat bump, and the

@@ -4,6 +4,18 @@ sidebar_position: 6
 
 # Releases
 
+## 1.0.1
+
+*2026-06-03*
+
+Bug-fix release. No API changes, no schema changes — drop-in upgrade from 1.0.0.
+
+### Fix: ServerCleanup foreign-key crash when reaping a stale server that runs background services
+
+`ServerCleanup` removes servers whose heartbeat has lapsed — deleting their `BackgroundServiceInstance` and `BackgroundServiceLease` child rows and then the server row in one transaction. It locked the server rows with a mode (`FOR NO KEY UPDATE` on Postgres, `UPDLOCK` on SQL Server) that is *compatible* with the lock a child `INSERT` takes on its parent for the foreign-key check. So a server that had only just lapsed — a GC pause or a slow loop — but was still running its `BackgroundServiceHost` could insert a fresh `BackgroundServiceInstance` row for itself between cleanup's child-delete and its server-delete. That orphaned the foreign key and aborted cleanup with `23503` (Postgres) / `547` (SQL Server); the task then failed on every tick and stale servers were never reaped.
+
+The cleanup lock is now exclusive (`FOR UPDATE` on Postgres, `XLOCK` on SQL Server), which conflicts with the FK-check lock: a concurrent instance insert for a server under cleanup now blocks until cleanup commits, then fails cleanly because the server is gone (a still-alive server simply re-registers on its next loop). Regression tests on both providers assert that the cleanup lock blocks the concurrent insert.
+
 ## 1.0.0
 
 *2026-06-03*

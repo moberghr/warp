@@ -94,9 +94,15 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             FROM {table} WITH (ROWLOCK, UPDLOCK)
             WHERE [{_n.Id}] = {{0}}";
 
+        // XLOCK (not UPDLOCK): ServerCleanup deletes a stale server's BackgroundServiceInstance /
+        // BackgroundServiceLease children and then the server in one transaction. UPDLOCK is
+        // compatible with the shared lock a child INSERT's FK check takes on the parent row, so a
+        // stale-but-alive server could insert a fresh instance row referencing the server
+        // mid-cleanup and orphan the FK (error 547). An exclusive XLOCK conflicts with that
+        // FK-check lock, so such inserts block until cleanup commits.
         _lockAllServersSql = $@"
             SELECT *
-            FROM {serverTable} WITH (ROWLOCK, UPDLOCK)";
+            FROM {serverTable} WITH (ROWLOCK, XLOCK)";
 
         // Table variable + chained SELECT folds the heartbeat UPDATE, the server paused_at
         // read, the worker_group pause-state read, the BG-service instance heartbeat bump,
