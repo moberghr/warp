@@ -1,14 +1,14 @@
 # Testing Standards
 
-> 1,024 tests in `src/tests/Warp.Tests/`, xUnit v3 (`xunit.v3.mtp-v2`) + Shouldly + Moq + Respawn + Testcontainers (Postgres + MSSQL). Full suite ~1m 30s; per-category breakdown ~3s (NoDb) / ~1m 10s (PG) / ~1m 20s (SQL Server).
+> ~1,200 tests in `src/tests/Warp.Tests/`, xUnit v3 (`xunit.v3.mtp-v2`) + Shouldly + Moq + Respawn + Testcontainers (Postgres + MSSQL). Full suite ~1m 30s; per-category breakdown ~3s (NoDb) / ~1m 10s (PG) / ~1m 20s (SQL Server).
 
 ## Structure
 
 - **§4.1** Tests are organised by **feature folder** (`Admin/`, `Core/`, `Features/Retry/`, `Worker/`, `Notifications/`, etc.), not by unit-vs-integration split.
 - **§4.2** The `[GenerateDatabaseTests(FixtureKind.X)]` source generator (`src/tests/Warp.Tests.SourceGenerator/`) emits `_PostgreSql` and `_SqlServer` concrete subclasses from a single abstract base. Hand-write only the abstract base; the generator handles fixtures, collections, and the `Category` trait.
 - **§4.3** Test categories (xUnit traits):
-  - `NoDb` — ~135 tests, ~3s. No container, no DB, no fixture. Examples: `PollingBackoffTests`, `MetadataSerializerTests`, `DashboardAuthTests` (uses `Microsoft.AspNetCore.TestHost`).
-  - `PostgreSql` / `SqlServer` — ~445 / ~444 tests. Use `FixtureKind.Default` (unit-style against real DB) or `FixtureKind.Integration` (`WarpTestServer` boots full worker + background tasks). Variants: `FixtureKind.BatchedCompletion`, `FixtureKind.MultiServer`.
+  - `NoDb` — ~150 tests, ~3s. No container, no DB, no fixture. Examples: `PollingBackoffTests`, `MetadataSerializerTests`, `DashboardAuthTests` (uses `Microsoft.AspNetCore.TestHost`).
+  - `PostgreSql` / `SqlServer` — ~530 each (DB-paired tests generated from a single base). Use `FixtureKind.Default` (unit-style against real DB) or `FixtureKind.Integration` (`WarpTestServer` boots full worker + background tasks). Variants: `FixtureKind.BatchedCompletion`, `FixtureKind.MultiServer`.
 
 ## Timing & Determinism
 
