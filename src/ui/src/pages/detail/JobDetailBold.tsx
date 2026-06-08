@@ -4,44 +4,11 @@ import { useState } from 'react';
 import { PageHeader, type PageHeaderMetaItem } from '@/components/v2/PageHeader';
 import { Panel, PanelHeader, Eyebrow } from '@/components/v2/Panel';
 import { shortId, shortType, stateName, formatDateTime } from '@/utils/format';
+import { formatDuration, relativeFromNow } from '@/utils/jobDetailFormatters';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
 import { useConfirm } from '@/components/forms/useConfirm';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import { JobLogs } from './JobLogs';
-
-function formatDuration(ms: number | null | undefined): string | null {
-  if (ms == null) {
-    return null;
-  }
-  if (ms < 1000) {
-    return `${Math.round(ms)}ms`;
-  }
-  if (ms < 60000) {
-    return `${(ms / 1000).toFixed(2)}s`;
-  }
-  const mins = Math.floor(ms / 60000);
-  const secs = Math.floor((ms % 60000) / 1000);
-
-  return `${mins}m ${secs}s`;
-}
-
-function relativeFromNow(iso: string | null | undefined): string | null {
-  if (!iso) {
-    return null;
-  }
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 60_000) {
-    return `${Math.max(1, Math.floor(diff / 1000))}s ago`;
-  }
-  if (diff < 3_600_000) {
-    return `${Math.floor(diff / 60_000)}m ago`;
-  }
-  if (diff < 86_400_000) {
-    return `${Math.floor(diff / 3_600_000)}h ago`;
-  }
-
-  return `${Math.floor(diff / 86_400_000)}d ago`;
-}
 
 function findLastFailedLog(logs: JobLogModel[]): JobLogModel | null {
   for (let i = logs.length - 1; i >= 0; i--) {

@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import { Outlet, useLocation } from 'react-router-dom';
 import { useDashboardStore } from '@/stores/dashboard';
@@ -102,9 +102,12 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
     servicesAvailable,
   );
 
+  const openDrawer = useCallback(() => setDrawerOpen(true), []);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+
   return (
     <div className="relative h-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <WarpTopnav items={navItems} onMenuClick={() => setDrawerOpen(true)} />
+      <WarpTopnav items={navItems} onMenuClick={openDrawer} />
 
       <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
         {error && (
@@ -135,7 +138,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
       </div>
 
       <MobileDrawer open={drawerOpen} onOpenChange={setDrawerOpen}>
-        <WarpSidebar items={navItems} mobile onNavigate={() => setDrawerOpen(false)} />
+        <WarpSidebar items={navItems} mobile onNavigate={closeDrawer} />
       </MobileDrawer>
     </div>
   );

@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { NavLink } from 'react-router-dom';
 import { Zap, Menu, Sun, Moon } from 'lucide-react';
 import { useDashboardStore } from '@/stores/dashboard';
@@ -29,7 +30,9 @@ function Badge({ badge }: { badge: NavBadge }) {
   );
 }
 
-export default function WarpTopnav({ items, onMenuClick }: Props) {
+export default memo(WarpTopnav);
+
+function WarpTopnav({ items, onMenuClick }: Props) {
   const stats = useDashboardStore((s) => s.stats);
   const { data: info } = useInfo();
   const versionTag = info?.version ? `V${info.version}` : '';

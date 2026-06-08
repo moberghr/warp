@@ -23,6 +23,13 @@ import type { StatsHistoryPoint } from '@/types';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, ChartTooltip, Legend);
 
+const HISTORY_RANGES = [
+  { label: '24h', hours: 24 },
+  { label: '7d', hours: 168 },
+] as const;
+
+const CHART_STYLE = { height: 200 } as const;
+
 function padHistory(data: StatsHistoryPoint[], hours: number) {
   const now = new Date();
   now.setMinutes(0, 0, 0);
@@ -195,10 +202,7 @@ export default function DashboardPage() {
         <div className="mb-2 flex items-center justify-between">
           <div className="text-[13px] font-medium text-foreground">History</div>
           <div className="flex gap-1">
-            {[
-              { label: '24h', hours: 24 },
-              { label: '7d', hours: 168 },
-            ].map(({ label, hours }) => (
+            {HISTORY_RANGES.map(({ label, hours }) => (
               <button
                 key={label}
                 type="button"
@@ -312,7 +316,7 @@ function HistoryChart({ data }: { data: { label: string; succeeded: number; fail
   }, [data]);
 
   return (
-    <div style={{ height: 200 }}>
+    <div style={CHART_STYLE}>
       <canvas ref={canvasRef} />
     </div>
   );

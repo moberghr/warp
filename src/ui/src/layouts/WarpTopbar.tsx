@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react';
+import { memo, type ReactNode } from 'react';
 import { Menu } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -9,7 +9,7 @@ interface Props {
   onMenuClick?: () => void;
 }
 
-export default function WarpTopbar({ title, subtitle, right, onMenuClick }: Props) {
+function WarpTopbar({ title, subtitle, right, onMenuClick }: Props) {
   return (
     <div
       className={cn(
@@ -48,3 +48,5 @@ export default function WarpTopbar({ title, subtitle, right, onMenuClick }: Prop
     </div>
   );
 }
+
+export default memo(WarpTopbar);

@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { Zap, Settings, LogOut } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
@@ -42,7 +43,7 @@ interface Props {
   mobile?: boolean;
 }
 
-export default function WarpSidebar({ items, onNavigate, mobile = false }: Props) {
+export default memo(function WarpSidebar({ items, onNavigate, mobile = false }: Props) {
   const stats = useDashboardStore((s) => s.stats);
   const location = useLocation();
   const { data: info } = useInfo();

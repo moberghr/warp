@@ -1,6 +1,5 @@
 import api from './client';
 import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo, WarpInfo } from '@/types';
-import type { ExtensionManifest } from '@/extensions/types';
 
 // Dashboard
 export const getStatus = () => api.get<DashboardStatistics>('/status').then(r => r.data);
@@ -193,10 +192,6 @@ export const getSagaActivity = (id: string) =>
 
 export const forceCompleteSaga = (id: string) =>
   api.delete(`/sagas/${encodeURIComponent(id)}`).then(() => undefined);
-
-// Extensions
-export const getExtensions = () =>
-  api.get<ExtensionManifest[]>('/extensions').then(r => r.data);
 
 // Auth — cookie-free probe so the SPA can render the login page without firing a 401 first.
 export const getAuthStatus = () =>

@@ -10,6 +10,16 @@ type StateDef = {
   countKey: keyof DashboardStatistics | null;
 };
 
+const JOBS_STATES: StateDef[] = [
+  { slug: 'enqueued',   label: 'Enqueued',   accent: 'text-warp-blue',   accentBg: 'bg-warp-blue-soft',   countKey: 'created' },
+  { slug: 'scheduled',  label: 'Scheduled',  accent: 'text-warp-amber',  accentBg: 'bg-warp-amber-soft',  countKey: 'scheduled' },
+  { slug: 'processing', label: 'Processing', accent: 'text-warp-purple', accentBg: 'bg-warp-purple-soft', countKey: 'processing' },
+  { slug: 'completed',  label: 'Completed',  accent: 'text-warp-green',  accentBg: 'bg-warp-green-soft',  countKey: 'completed' },
+  { slug: 'failed',     label: 'Failed',     accent: 'text-warp-red',    accentBg: 'bg-warp-red-soft',    countKey: 'failed' },
+  { slug: 'awaiting',   label: 'Awaiting',   accent: 'text-warp-amber',  accentBg: 'bg-warp-amber-soft',  countKey: 'awaiting' },
+  { slug: 'deleted',    label: 'Deleted',    accent: 'text-text-mute',   accentBg: 'bg-panel-2',          countKey: 'deleted' },
+];
+
 const MESSAGES_STATES: StateDef[] = [
   { slug: null,         label: 'All',        accent: 'text-foreground',  accentBg: 'bg-panel-2',          countKey: 'messages' },
   { slug: 'awaiting',   label: 'Awaiting',   accent: 'text-warp-amber',  accentBg: 'bg-warp-amber-soft',  countKey: 'messagesAwaiting' },
@@ -32,16 +42,34 @@ const BATCHES_STATES: StateDef[] = [
   { slug: 'deleted',    label: 'Deleted',    accent: 'text-text-mute',   accentBg: 'bg-panel-2',          countKey: 'batchesDeleted' },
 ];
 
+const STATE_MAP = {
+  jobs: JOBS_STATES,
+  messages: MESSAGES_STATES,
+  batches: BATCHES_STATES,
+} as const;
+
+const EYEBROW_MAP = {
+  jobs: 'Job state',
+  messages: 'Message state',
+  batches: 'Batch state',
+} as const;
+
+const BASE_PATH_MAP = {
+  jobs: '/jobs',
+  messages: '/messages',
+  batches: '/batches',
+} as const;
+
 interface GroupStateRailProps {
-  kind: 'messages' | 'batches';
+  kind: 'jobs' | 'messages' | 'batches';
   active: string | undefined;
 }
 
 export function GroupStateRail({ kind, active }: GroupStateRailProps) {
   const stats = useDashboardStore((s) => s.stats);
-  const states = kind === 'messages' ? MESSAGES_STATES : BATCHES_STATES;
-  const eyebrow = kind === 'messages' ? 'Message state' : 'Batch state';
-  const basePath = kind === 'messages' ? '/messages' : '/batches';
+  const states = STATE_MAP[kind];
+  const eyebrow = EYEBROW_MAP[kind];
+  const basePath = BASE_PATH_MAP[kind];
 
   return (
     <aside className="bg-background lg:border-r border-border p-3 lg:w-[200px] w-full shrink-0">
@@ -67,9 +95,10 @@ export function GroupStateRail({ kind, active }: GroupStateRailProps) {
                 className={`mono text-[10.5px] font-semibold px-1.5 py-0.5 rounded-full ${
                   isActive
                     ? `${s.accentBg} ${s.accent}`
-                    : 'bg-panel-2 text-text-mute border border-border'
+                    : s.slug === 'failed' && count > 0
+                      ? `${s.accentBg} ${s.accent}`
+                      : 'bg-panel-2 text-text-mute border border-border'
                 }`}
-                aria-label={s.countKey ? undefined : 'count unavailable'}
               >
                 {s.countKey ? count.toLocaleString() : '—'}
               </span>

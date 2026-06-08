@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useMemo } from 'react';
 import {
   Chart,
   LineController,
@@ -20,10 +20,21 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
   const rafId = useRef(0);
   const realtimeData = useDashboardStore((s) => s.realtimeData);
 
-  const vals = realtimeData.map((p) => p.succeeded + p.failed);
-  const current = vals.length > 0 ? Math.round(vals[vals.length - 1]) : 0;
-  const max = vals.length > 0 ? Math.round(Math.max(...vals)) : 0;
-  const avg = vals.length >= 5 ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+  const { current, max, avg } = useMemo(() => {
+    const vals = realtimeData.map((p) => p.succeeded + p.failed);
+    const c = vals.length > 0 ? Math.round(vals[vals.length - 1]) : 0;
+    let m = 0;
+    let sum = 0;
+    for (let i = 0; i < vals.length; i++) {
+      if (vals[i] > m) {
+        m = vals[i];
+      }
+      sum += vals[i];
+    }
+    m = vals.length > 0 ? Math.round(m) : 0;
+    const a = vals.length >= 5 ? Math.round(sum / vals.length) : null;
+    return { current: c, max: m, avg: a };
+  }, [realtimeData]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
