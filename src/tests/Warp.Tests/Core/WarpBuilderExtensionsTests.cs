@@ -84,7 +84,7 @@ public class WarpBuilderExtensionsTests
             })
             .Build();
 
-        var builder = new WarpWorkerBuilder<TestContext>(new ServiceCollection());
+        var builder = new WarpServerBuilder<TestContext>(new ServiceCollection());
 
         builder.BindConfiguration(config.GetSection("Warp"));
 

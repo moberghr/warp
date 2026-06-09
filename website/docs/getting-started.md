@@ -89,10 +89,10 @@ Warp automatically registers `TimeProvider.System` if one is not already registe
 
 ### 4. Add a worker (optional)
 
-For apps that process jobs, use `AddWarpWorker` instead (includes `AddWarp` internally):
+For apps that process jobs, use `AddWarpServer` instead (includes `AddWarp` internally):
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpServer<AppDbContext>(options =>
 {
     options.UsePostgreSql();
     options.WorkerCount = 10;

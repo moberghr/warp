@@ -11,7 +11,7 @@ namespace Warp.Worker.Services;
 
 /// <summary>
 /// Finds jobs in <see cref="State.Processing"/> whose worker stopped refreshing
-/// <c>LastKeepAlive</c> past <see cref="WarpWorkerConfiguration.InvisibilityTimeout"/>
+/// <c>LastKeepAlive</c> past <see cref="WarpServerConfiguration.InvisibilityTimeout"/>
 /// and either requeues them, fails them, or honors a pending cancellation.
 /// </summary>
 public sealed class StaleJobRecovery<TContext> : IServerTask
@@ -20,13 +20,13 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     private readonly TContext _context;
     private readonly TimeProvider _time;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
 
     public StaleJobRecovery(
         TContext context,
         TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
-        IOptions<WarpWorkerConfiguration> configuration)
+        IOptions<WarpServerConfiguration> configuration)
     {
         _context = context;
         _time = time;

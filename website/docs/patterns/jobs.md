@@ -64,10 +64,10 @@ await publisher.Enqueue(new GenerateReport { ReportId = 1 },
     new JobParameters().Configure<IRetryMetadata>(m => m.MaxRetries = 5));
 ```
 
-Configure global defaults inside the `AddWarpWorker` lambda:
+Configure global defaults inside the `AddWarpServer` lambda:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.AddRetry(o =>
     {
@@ -157,7 +157,7 @@ If the job is processing, this sets `CancellationMode = Graceful` instead of imm
 
 ## Concurrency control (Mutex + Semaphore)
 
-Cap the number of concurrent jobs per key. Requires `opt.AddConcurrency()` inside `AddWarpWorker`. Use `[Mutex]` (`WithMutex`) for at-most-one, `[Semaphore]` (`WithSemaphore`) for at-most-N:
+Cap the number of concurrent jobs per key. Requires `opt.AddConcurrency()` inside `AddWarpServer`. Use `[Mutex]` (`WithMutex`) for at-most-one, `[Semaphore]` (`WithSemaphore`) for at-most-N:
 
 ```csharp
 // At most one CallPaymentApi for this customer at a time

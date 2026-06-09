@@ -81,7 +81,7 @@ public sealed class IdleScenario : IAsyncDisposable
                     options.AddInterceptors(_interceptor);
                 });
 
-                services.AddWarpWorker<TestContext>(config =>
+                services.AddWarpServer<TestContext>(config =>
                 {
                     // Defaults only: the point is to measure what an out-of-the-box server
                     // costs while idle. UseDispatcher and UseDatabasePush are the only knobs

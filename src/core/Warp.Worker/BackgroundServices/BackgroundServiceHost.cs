@@ -39,7 +39,7 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
         TimeProvider time,
         ILoggerFactory loggerFactory,
         IOptions<WarpConfiguration> warpConfig,
-        IOptions<WarpWorkerConfiguration> workerConfig,
+        IOptions<WarpServerConfiguration> workerConfig,
         ServerTaskSignals<TContext> signals,
         IBackgroundServiceStatusObserver statusObserver,
         ILogger<BackgroundServiceHost<TContext>> logger)
@@ -151,7 +151,7 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
         using var cleanupCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
         using var configScope = _scopes.CreateScope();
-        var serverId = configScope.ServiceProvider.GetRequiredService<IOptions<WarpWorkerConfiguration>>().Value.ServerId;
+        var serverId = configScope.ServiceProvider.GetRequiredService<IOptions<WarpServerConfiguration>>().Value.ServerId;
 
         try
         {

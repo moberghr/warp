@@ -4,6 +4,53 @@ sidebar_position: 6
 
 # Releases
 
+## 2.0.0
+
+*2026-06-09*
+
+First major after 1.0. One breaking, mechanical rename — the executing-host entry point and its config/builder types — plus a new service-only deployment mode. The upgrade is a find-and-replace; see the migration steps below.
+
+### `AddWarpServer` — one entry point for the worker and background services
+
+A process registers a **server**; the job worker is one component of it. The executing-host entry point is now `AddWarpServer<TContext>(opt => ...)`, which runs the worker by default. Call `opt.DisableWorker()` for a service-only server that runs `WarpBackgroundService` instances (and the supporting heartbeat/cleanup tasks) but processes no jobs.
+
+```csharp
+// Full server (worker runs)
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddBackgroundService<EmailPump>();
+});
+
+// Service-only server (no job worker)
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.DisableWorker();
+    opt.AddBackgroundService<EmailPump>();
+});
+```
+
+### Breaking changes & migration
+
+The old worker-centric names are **removed** (not deprecated) in 2.0 — rename them:
+
+| 1.x | 2.0 |
+|---|---|
+| `services.AddWarpWorker<T>(...)` | `services.AddWarpServer<T>(...)` |
+| `WarpWorkerConfiguration` | `WarpServerConfiguration` |
+| `WarpWorkerBuilder<T>` | `WarpServerBuilder<T>` |
+| `IOptions<WarpWorkerConfiguration>` | `IOptions<WarpServerConfiguration>` |
+
+- The `opt => ...` lambda is otherwise unchanged — config fields (`opt.WorkerCount`, `opt.Queues`, addon methods, `opt.UsePostgreSql()`, …) keep their names and behavior. `AddWarpServer()` with no `DisableWorker()` call behaves exactly like the old `AddWarpWorker()`.
+- These are hard renames: references to the old names are **compile errors** in 2.0, so the compiler points you at every site to change. There is no silent runtime change.
+
+### Service-only servers
+
+`opt.DisableWorker()` runs a server with background services and the supporting infrastructure (registration, heartbeat, lease renewal, cleanup) but no job worker — no worker hosts, no job-orchestration server tasks, no `Worker`/`WorkerGroup` rows. A provider (`UsePostgreSql`/`UseSqlServer`) is still required.
+
+To run a server with no job processing, call `opt.DisableWorker()` — **don't** set `opt.WorkerCount = 0` and leave the worker enabled. `AddWarpServer` **throws at registration** for that contradiction (worker enabled but zero total workers), since it would otherwise produce a server that runs job orchestration but never executes any jobs.
+
 ## 1.0.1
 
 *2026-06-03*

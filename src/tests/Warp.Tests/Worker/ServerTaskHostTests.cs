@@ -143,7 +143,7 @@ public class ServerTaskHostTests
         services.AddSingleton<IWarpLockProvider>(lockProvider ?? new FakeLockProvider());
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<ILoggerFactory>(_ => NullLoggerFactory.Instance);
-        services.AddSingleton(Options.Create(new WarpWorkerConfiguration { ServerId = Guid.NewGuid() }));
+        services.AddSingleton(Options.Create(new WarpServerConfiguration { ServerId = Guid.NewGuid() }));
         services.AddSingleton(signals ?? new ServerTaskSignals<StubContext>());
 
         var provider = services.BuildServiceProvider();

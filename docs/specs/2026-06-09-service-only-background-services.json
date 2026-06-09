@@ -1,0 +1,58 @@
+{
+  "slug": "service-only-background-services",
+  "date": "2026-06-09",
+  "title": "Service-only deployment: AddWarpBackgroundServices<TContext>()",
+  "scope_classification": "feature",
+  "security_impact": "none",
+  "public_contracts": [
+    "Warp.Worker.ServiceConfiguration.AddWarpBackgroundServices<TContext>(IServiceCollection, Action<WarpBackgroundServicesBuilder<TContext>>?)",
+    "Warp.Worker.WarpBackgroundServicesBuilder<TContext> : WarpWorkerConfiguration, IWarpBuilder<TContext>"
+  ],
+  "change_manifest": [
+    "src/core/Warp.Worker/WarpBackgroundServicesBuilder.cs",
+    "src/core/Warp.Worker/ServiceConfiguration.cs",
+    "src/core/Warp.Worker/WarpServerRegistration.cs",
+    "src/tests/Warp.Tests/Admin/DeploymentShapeTests.cs",
+    "src/tests/Warp.Tests/BackgroundServices/ServiceOnlyHostTestsBase.cs",
+    "website/docs/features/background-services.md",
+    ".claude/rules/architecture.md",
+    ".claude/rules/project-specific.md"
+  ],
+  "out_of_scope": [
+    "HTTP dashboard wiring for service-only processes",
+    "Any change to the worker fetch/execute hot path",
+    "A config-flag alternative on AddWarpWorker"
+  ],
+  "open_decisions": [],
+  "plan": {
+    "batches": [
+      {
+        "title": "Production: builder + AddWarpBackgroundServices + AddServerHostCore refactor",
+        "files": [
+          "src/core/Warp.Worker/WarpBackgroundServicesBuilder.cs",
+          "src/core/Warp.Worker/ServiceConfiguration.cs"
+        ],
+        "acceptance": "AddWarpWorker registration set unchanged; AddWarpBackgroundServices registers shared infra only; WorkerCount forced 0; solution builds analyzer-clean."
+      },
+      {
+        "title": "NoDb shape tests",
+        "files": ["src/tests/Warp.Tests/Admin/DeploymentShapeTests.cs"],
+        "acceptance": "Positive + negative registration assertions for the service-only shape pass under Category=NoDb."
+      },
+      {
+        "title": "Integration tests (PG + SQL Server)",
+        "files": ["src/tests/Warp.Tests/BackgroundServices/ServiceOnlyHostTestsBase.cs"],
+        "acceptance": "Service-only host runs a PerServer service; no Worker rows; Server row present; graceful shutdown deletes instance row. Generated _PostgreSql + _SqlServer pass."
+      },
+      {
+        "title": "Docs + rules note",
+        "files": [
+          "website/docs/features/background-services.md",
+          ".claude/rules/architecture.md",
+          ".claude/rules/project-specific.md"
+        ],
+        "acceptance": "background-services.md documents the entry point + shape; §2.13/§8.18 mention the service-only tier."
+      }
+    ]
+  }
+}

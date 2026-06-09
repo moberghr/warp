@@ -85,7 +85,7 @@ Trace context is automatically propagated:
 
 ### Log Correlation
 
-`AddWarpWorker` automatically configures `ActivityTrackingOptions` so TraceId, SpanId, and ParentId appear in your log output:
+`AddWarpServer` automatically configures `ActivityTrackingOptions` so TraceId, SpanId, and ParentId appear in your log output:
 
 ```
 info: MyApp.Handlers.SendReport[0]

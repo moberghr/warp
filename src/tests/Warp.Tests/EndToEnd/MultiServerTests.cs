@@ -23,7 +23,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
     {
     }
 
-    private static void Configure3Workers(WarpWorkerBuilder<TestContext> config)
+    private static void Configure3Workers(WarpServerBuilder<TestContext> config)
         => config.WorkerCount = 3;
 
     [TimedFact]
@@ -36,7 +36,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         // Per-job assertions then confirm exactly one Processing log row per job — duplicate
         // claim by both servers would produce two.
         var barrier = new BarrierSignal();
-        void WithBarrier(WarpWorkerBuilder<TestContext> cfg)
+        void WithBarrier(WarpServerBuilder<TestContext> cfg)
         {
             Configure3Workers(cfg);
             cfg.Services.AddSingleton(barrier);
@@ -257,7 +257,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         // before the pipeline runs (state is committed by the worker before pipeline behaviors
         // execute), and publishing job2 in that window races job1's mutex acquisition.
         var barrier = new BarrierSignal();
-        void WithBarrier(WarpWorkerBuilder<TestContext> cfg)
+        void WithBarrier(WarpServerBuilder<TestContext> cfg)
         {
             Configure3Workers(cfg);
             cfg.Services.AddSingleton(barrier);

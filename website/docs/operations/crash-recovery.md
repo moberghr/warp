@@ -23,7 +23,7 @@ Warp uses a **sliding invisibility timeout** to detect and recover from worker/s
 ## Configuration
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpServer<AppDbContext>(options =>
 {
     // How long before a stale job is requeued (default: 5 minutes)
     options.InvisibilityTimeout = TimeSpan.FromMinutes(5);

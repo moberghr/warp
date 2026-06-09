@@ -29,14 +29,14 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     private readonly Guid _workerId;
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly ILogger<WarpWorkerService<TContext>> _logger;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
     private readonly WorkerGroupConfiguration _groupConfiguration;
     private readonly TimeProvider _timeProvider;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly ServerTaskSignals<TContext> _signals;
 
-    public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpWorkerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
+    public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
         _workerId = workerId;
         _serviceScopeFactory = serviceScopeFactory;

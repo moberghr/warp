@@ -15,14 +15,14 @@ namespace Warp.Worker;
 public class WarpServerRegistration<TContext> : IHostedService
     where TContext : DbContext
 {
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly TimeProvider _timeProvider;
     private readonly PauseStateHolder _pauseStateHolder;
     private readonly ServerRegistrationState _state;
 
     public WarpServerRegistration(
-        IOptions<WarpWorkerConfiguration> configuration,
+        IOptions<WarpServerConfiguration> configuration,
         IServiceScopeFactory serviceScopeFactory,
         TimeProvider timeProvider,
         PauseStateHolder pauseStateHolder,
@@ -37,7 +37,12 @@ public class WarpServerRegistration<TContext> : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        var workerGroups = _configuration.GetEffectiveWorkerGroups();
+        // A service-only server (RunWorker = false, set by DisableWorker()) creates no worker
+        // groups or workers at all, regardless of WorkerCount / AddWorkerGroup. When the worker
+        // runs, zero-worker groups are still skipped per-group below.
+        var workerGroups = _configuration.RunWorker
+            ? _configuration.GetEffectiveWorkerGroups()
+            : [];
         var totalWorkerCount = workerGroups.Sum(g => g.WorkerCount);
 
         using var scope = _serviceScopeFactory.CreateScope();
@@ -57,6 +62,18 @@ public class WarpServerRegistration<TContext> : IHostedService
         var registrations = new List<ServerRegistrationState.GroupRegistration>();
         foreach (var group in workerGroups)
         {
+            // Skip zero-worker groups. A worker-mode server can legitimately set its implicit
+            // default group to 0 workers and add an explicit AddWorkerGroup with workers (the
+            // "no default-queue workers, only my custom group" pattern) — the empty default group
+            // should leave no WorkerGroup/Worker row. Service-only servers never reach this loop
+            // (the disabled worker produced an empty group list above), and AddWarpServer rejects a
+            // worker-enabled server whose total worker count is zero, so a fully-empty config can't
+            // get here either.
+            if (group.WorkerCount == 0)
+            {
+                continue;
+            }
+
             var workerGroup = new Warp.Core.Data.Entities.WorkerGroup
             {
                 ServerId = _configuration.ServerId,

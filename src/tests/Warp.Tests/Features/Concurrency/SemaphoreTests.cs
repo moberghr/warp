@@ -737,13 +737,13 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         services.AddSingleton(TimeProvider.System);
         new Warp.Core.WarpBuilder<TestContext>(services).AddConcurrency();
 
-        var workerConfig = new OptionsWrapper<WarpWorkerConfiguration>(new WarpWorkerConfiguration
+        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
         {
             WorkerCount = 1,
             ServerId = Guid.NewGuid(),
             Queues = ["default"],
         });
-        services.AddSingleton<IOptions<WarpWorkerConfiguration>>(workerConfig);
+        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
         services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
 
         var provider = services.BuildServiceProvider();

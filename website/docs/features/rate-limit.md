@@ -11,7 +11,7 @@ Opt-in addon — register with `opt.AddRateLimit()` on the builder.
 ## Quick start
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddConcurrency();   // optional — register BEFORE AddRateLimit if both apply

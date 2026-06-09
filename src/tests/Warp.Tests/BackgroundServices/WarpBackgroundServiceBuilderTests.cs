@@ -19,12 +19,12 @@ public class WarpBackgroundServiceBuilderTests
     }
 
     // Pins the dashboard-only / publisher-only deployment path: AddWarp<TContext> alone
-    // (without AddWarpWorker) must register IBackgroundServiceQueryService so the
+    // (without AddWarpServer) must register IBackgroundServiceQueryService so the
     // /api/services endpoints can resolve it. Regression guard — a previous iteration
-    // registered the query service inside AddWarpWorker, silently breaking dashboard-only
+    // registered the query service inside AddWarpServer, silently breaking dashboard-only
     // processes whose endpoints inject IBackgroundServiceQueryService non-nullably.
     [TimedFact]
-    public void AddWarp_RegistersBackgroundServiceQueryService_WithoutAddWarpWorker()
+    public void AddWarp_RegistersBackgroundServiceQueryService_WithoutAddWarpServer()
     {
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseNpgsql(DummyConnectionString));

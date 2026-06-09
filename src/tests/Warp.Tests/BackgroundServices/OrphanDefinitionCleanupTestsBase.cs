@@ -29,7 +29,7 @@ public abstract class OrphanDefinitionCleanupTestsBase : IAsyncLifetime
 
     private ExpirationCleanup<TestContext> CreateCleanup(TimeSpan? orphanGrace = null, TimeProvider? time = null)
     {
-        var config = new WarpWorkerConfiguration
+        var config = new WarpServerConfiguration
         {
             BackgroundServiceDefinitionOrphanGrace = orphanGrace ?? TimeSpan.FromMinutes(2),
         };

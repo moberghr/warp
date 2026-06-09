@@ -12,7 +12,7 @@ namespace Warp.Worker;
 
 /// <summary>
 /// Hosted service that constructs and manages the lifecycle of the dispatcher +
-/// dispatcher-workers when <see cref="WarpWorkerConfiguration.UseDispatcher"/> is true.
+/// dispatcher-workers when <see cref="WarpServerConfiguration.UseDispatcher"/> is true.
 /// Depends on <see cref="ServerRegistrationState"/> having been populated by
 /// <see cref="WarpServerRegistration{TContext}"/>, which is registered first.
 /// No-ops when dispatcher mode is disabled.
@@ -20,8 +20,8 @@ namespace Warp.Worker;
 public class WarpDispatcherHost<TContext> : IHostedService
     where TContext : DbContext
 {
-    private readonly WarpWorkerConfiguration _configuration;
-    private readonly IOptions<WarpWorkerConfiguration> _configurationOptions;
+    private readonly WarpServerConfiguration _configuration;
+    private readonly IOptions<WarpServerConfiguration> _configurationOptions;
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly TimeProvider _timeProvider;
     private readonly PauseStateHolder _pauseStateHolder;
@@ -34,7 +34,7 @@ public class WarpDispatcherHost<TContext> : IHostedService
     private readonly List<BackgroundService> _workers = [];
 
     public WarpDispatcherHost(
-        IOptions<WarpWorkerConfiguration> configuration,
+        IOptions<WarpServerConfiguration> configuration,
         IServiceScopeFactory serviceScopeFactory,
         TimeProvider timeProvider,
         PauseStateHolder pauseStateHolder,

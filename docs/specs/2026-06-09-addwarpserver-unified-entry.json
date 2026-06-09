@@ -1,0 +1,62 @@
+{
+  "slug": "addwarpserver-unified-entry",
+  "date": "2026-06-09",
+  "title": "Unify worker/background-services registration under AddWarpServer<TContext>()",
+  "scope_classification": "feature",
+  "security_impact": "none",
+  "supersedes": "2026-06-09-service-only-background-services",
+  "public_contracts": [
+    "Warp.Worker.ServiceConfiguration.AddWarpServer<TContext>(IServiceCollection, Action<WarpServerBuilder<TContext>>?)",
+    "Warp.Worker.WarpServerConfiguration (renamed from WarpWorkerConfiguration)",
+    "Warp.Worker.WarpServerBuilder<TContext> (renamed from WarpWorkerBuilder)",
+    "Warp.Worker.WarpServerConfiguration.RunWorker",
+    "Warp.Worker.WarpServerConfiguration.DisableWorker()",
+    "[Obsolete] Warp.Worker.ServiceConfiguration.AddWarpWorker<TContext> (shim)",
+    "[Obsolete] Warp.Worker.WarpWorkerConfiguration : WarpServerConfiguration",
+    "[Obsolete] Warp.Worker.WarpWorkerBuilder<TContext> : WarpServerBuilder<TContext>"
+  ],
+  "change_manifest": [
+    "src/core/Warp.Worker/Configuration.cs",
+    "src/core/Warp.Worker/WarpServerBuilder.cs",
+    "src/core/Warp.Worker/ServiceConfiguration.cs",
+    "src/core/Warp.Worker/WarpBackgroundServicesBuilder.cs",
+    "src/core/Warp.Worker/WarpServerRegistration.cs",
+    "src/core/Warp.Worker/**/*.cs (rename sweep)",
+    "src/tests/**/*.cs (rename sweep + rewire service-only tests + obsolete-shim test)",
+    "src/benchmarks/**/*.cs (rename sweep)",
+    "src/demo/**/*.cs (rename sweep)",
+    "website/docs/features/background-services.md",
+    ".claude/rules/architecture.md",
+    ".claude/rules/project-specific.md"
+  ],
+  "out_of_scope": [
+    "Explicit AddWorker(...) sub-builder model (worker config stays flat)",
+    "Removing AddWarpWorker outright (kept [Obsolete] for one release)",
+    "Renaming WorkerGroupConfiguration / WorkerCount / queue fields"
+  ],
+  "open_decisions": [],
+  "plan": {
+    "batches": [
+      {
+        "title": "Rename sweep: WarpWorkerConfiguration/Builder -> WarpServerConfiguration/Builder + obsolete aliases",
+        "files": ["src/core/Warp.Worker/Configuration.cs", "src/core/Warp.Worker/WarpServerBuilder.cs", "src/core/** + src/tests/** + src/benchmarks/** + src/demo/** (sweep)"],
+        "acceptance": "Solution builds analyzer-clean; obsolete aliases compile; no internal reference to old names (no CS0618 errors)."
+      },
+      {
+        "title": "AddWarpServer + RunWorker/DisableWorker + obsolete AddWarpWorker shim; delete AddWarpBackgroundServices",
+        "files": ["src/core/Warp.Worker/ServiceConfiguration.cs", "src/core/Warp.Worker/Configuration.cs", "src/core/Warp.Worker/WarpServerRegistration.cs", "src/core/Warp.Worker/WarpBackgroundServicesBuilder.cs"],
+        "acceptance": "AddWarpServer default == old AddWarpWorker registration set; DisableWorker() omits worker hosts + 6 job tasks + worker rows; obsolete shim delegates; build clean."
+      },
+      {
+        "title": "Rewire + extend tests",
+        "files": ["src/tests/Warp.Tests/Admin/DeploymentShapeTests.cs", "src/tests/Warp.Tests/BackgroundServices/ServiceOnlyHostTestsBase.cs", "src/tests/Warp.Tests/Worker/WarpServerRegistrationTests.cs"],
+        "acceptance": "Worker-shape + service-only-shape + obsolete-shim NoDb tests pass; service-only integration tests (PG+SQL) pass; !RunWorker no-groups unit test passes; full suite green."
+      },
+      {
+        "title": "Docs + rules",
+        "files": ["website/docs/features/background-services.md", ".claude/rules/architecture.md", ".claude/rules/project-specific.md"],
+        "acceptance": "Docs describe AddWarpServer + DisableWorker; AddWarpWorker noted obsolete."
+      }
+    ]
+  }
+}

@@ -27,7 +27,7 @@ public abstract class SingletonAcquisitionTestsBase : IntegrationTestBase
         // enters ExecuteAsync.
         var barrier = new SingletonBarrierSignal();
 
-        void Configure(WarpWorkerBuilder<TestContext> cfg)
+        void Configure(WarpServerBuilder<TestContext> cfg)
         {
             cfg.AddBackgroundService<SingletonBarrierService>();
 
@@ -61,7 +61,7 @@ public abstract class SingletonAcquisitionTestsBase : IntegrationTestBase
     {
         var barrier = new SingletonBarrierSignal();
 
-        void Configure(WarpWorkerBuilder<TestContext> cfg)
+        void Configure(WarpServerBuilder<TestContext> cfg)
         {
             cfg.AddBackgroundService<SingletonBarrierService>();
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
@@ -102,7 +102,7 @@ public abstract class SingletonAcquisitionTestsBase : IntegrationTestBase
     {
         var barrier = new SingletonBarrierSignal();
 
-        void Configure(WarpWorkerBuilder<TestContext> cfg)
+        void Configure(WarpServerBuilder<TestContext> cfg)
         {
             cfg.AddBackgroundService<SingletonBarrierService>();
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);

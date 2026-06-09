@@ -15,7 +15,7 @@ public abstract class ProgressReportingDispatcherIntegrationTestsBase : Integrat
     {
     }
 
-    private static void ConfigureDispatcher(WarpWorkerBuilder<TestContext> config)
+    private static void ConfigureDispatcher(WarpServerBuilder<TestContext> config)
     {
         config.UseDispatcher = true;
         config.WorkerCount = 2;

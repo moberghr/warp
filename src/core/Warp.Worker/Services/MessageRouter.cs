@@ -27,7 +27,7 @@ public sealed class MessageRouter<TContext> : IServerTask
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
 
     public MessageRouter(
         TContext context,
@@ -36,7 +36,7 @@ public sealed class MessageRouter<TContext> : IServerTask
         IWarpSqlQueries<TContext> sqlQueries,
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals,
-        IOptions<WarpWorkerConfiguration> configuration)
+        IOptions<WarpServerConfiguration> configuration)
     {
         _context = context;
         _time = time;

@@ -20,7 +20,7 @@ public sealed class ScheduledJobActivation<TContext> : IServerTask
     private readonly TContext _context;
     private readonly TimeProvider _time;
     private readonly IWarpNotificationTransport _transport;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly ServerTaskSignals<TContext> _signals;
 
@@ -28,7 +28,7 @@ public sealed class ScheduledJobActivation<TContext> : IServerTask
         TContext context,
         TimeProvider time,
         IWarpNotificationTransport transport,
-        IOptions<WarpWorkerConfiguration> configuration,
+        IOptions<WarpServerConfiguration> configuration,
         IWarpSqlQueries<TContext> sqlQueries,
         ServerTaskSignals<TContext> signals)
     {

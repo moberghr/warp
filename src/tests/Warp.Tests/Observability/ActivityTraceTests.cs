@@ -83,14 +83,14 @@ public abstract class ActivityTraceTestsBase : IAsyncLifetime
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
 
-        var workerConfig = new OptionsWrapper<WarpWorkerConfiguration>(new WarpWorkerConfiguration
+        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
         {
             WorkerCount = 1,
             ServerId = ServerId,
             Queues = DefaultQueues,
             EnableHandlerLogging = true,
         });
-        services.AddSingleton<IOptions<WarpWorkerConfiguration>>(workerConfig);
+        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
         services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
 
         var provider = services.BuildServiceProvider();

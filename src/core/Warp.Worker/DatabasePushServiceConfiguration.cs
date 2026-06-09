@@ -10,7 +10,7 @@ namespace Warp.Worker;
 
 /// <summary>
 /// Opt-in DB-push extension on the Warp builder. Call <c>opt.UseDatabasePush()</c> inside the
-/// <c>AddWarp</c> or <c>AddWarpWorker</c> lambda (after <c>UsePostgreSql()</c> or
+/// <c>AddWarp</c> or <c>AddWarpServer</c> lambda (after <c>UsePostgreSql()</c> or
 /// <c>UseSqlServer()</c>) to replace the default polling wake-up on the dispatcher,
 /// <c>MessageRouter</c>, and <c>Orchestrator</c> with push notifications delivered via
 /// the provider's native mechanism (Postgres LISTEN/NOTIFY, SQL Server Service Broker). Provider
@@ -32,7 +32,7 @@ public static class DatabasePushServiceConfiguration
         if (!builder.Services.Any(x => x.ServiceType == typeof(IWarpNotificationTransportFactory)))
         {
             throw new InvalidOperationException(
-                "UseDatabasePush requires a provider package. Call opt.UsePostgreSql() or opt.UseSqlServer() inside the AddWarp/AddWarpWorker lambda BEFORE opt.UseDatabasePush().");
+                "UseDatabasePush requires a provider package. Call opt.UsePostgreSql() or opt.UseSqlServer() inside the AddWarp/AddWarpServer lambda BEFORE opt.UseDatabasePush().");
         }
 
         var options = new WarpDatabasePushConfiguration();
@@ -44,7 +44,7 @@ public static class DatabasePushServiceConfiguration
         // backstop. Bump still-at-default intervals so idle bookkeeping doesn't dominate.
         // Explicit override wins: set MessageRoutingInterval/OrchestrationInterval AFTER
         // UseDatabasePush() if a tighter cadence is desired.
-        if (builder is WarpWorkerConfiguration workerConfig)
+        if (builder is WarpServerConfiguration workerConfig)
         {
             if (workerConfig.MessageRoutingInterval == TimeSpan.FromSeconds(1))
             {
@@ -72,7 +72,7 @@ public static class DatabasePushServiceConfiguration
         {
             var factory = sp.GetService<IWarpNotificationTransportFactory>()
                 ?? throw new InvalidOperationException(
-                    "UseDatabasePush requires a provider package. Call opt.UsePostgreSql() or opt.UseSqlServer() inside the AddWarp/AddWarpWorker lambda before opt.UseDatabasePush().");
+                    "UseDatabasePush requires a provider package. Call opt.UsePostgreSql() or opt.UseSqlServer() inside the AddWarp/AddWarpServer lambda before opt.UseDatabasePush().");
 
             // AddDbContext registers DbContextOptions<TContext> as Scoped, so the singleton
             // factory must resolve it inside a scope — otherwise ValidateScopes=true rejects

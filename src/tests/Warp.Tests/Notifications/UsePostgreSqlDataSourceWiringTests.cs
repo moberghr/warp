@@ -27,7 +27,7 @@ public class UsePostgreSqlDataSourceWiringTests
         using var dataSource = NpgsqlDataSource.Create(DummyConnectionString);
         services.AddDbContext<TestContext>(o => o.UseNpgsql(dataSource));
 
-        services.AddWarpWorker<TestContext>(opt => opt.UsePostgreSql());
+        services.AddWarpServer<TestContext>(opt => opt.UsePostgreSql());
 
         using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         var factory = sp.GetRequiredService<IWarpNotificationTransportFactory>();
@@ -46,7 +46,7 @@ public class UsePostgreSqlDataSourceWiringTests
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseNpgsql(DummyConnectionString));
 
-        services.AddWarpWorker<TestContext>(opt => opt.UsePostgreSql());
+        services.AddWarpServer<TestContext>(opt => opt.UsePostgreSql());
 
         using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         var factory = sp.GetRequiredService<IWarpNotificationTransportFactory>();
@@ -72,7 +72,7 @@ public class UsePostgreSqlDataSourceWiringTests
         using var dataSource = NpgsqlDataSource.Create(DummyConnectionString);
         services.AddDbContext<TestContext>(o => o.UseNpgsql(dataSource));
 
-        services.AddWarpWorker<TestContext>(opt =>
+        services.AddWarpServer<TestContext>(opt =>
         {
             opt.UsePostgreSql();
             opt.UseDatabasePush();

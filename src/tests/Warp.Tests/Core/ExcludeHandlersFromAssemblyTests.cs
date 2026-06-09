@@ -58,15 +58,15 @@ public sealed class ExcludeHandlersFromAssemblyTests
     }
 
     [TimedFact]
-    public void Excludes_RequestHandler_WhenWiredViaAddWarpWorker()
+    public void Excludes_RequestHandler_WhenWiredViaAddWarpServer()
     {
-        // AddWarpWorker internally calls AddWarp, but registers IOptions<WarpConfiguration>
+        // AddWarpServer internally calls AddWarp, but registers IOptions<WarpConfiguration>
         // first via TryAddSingleton. The exclusion set on the WORKER builder must still take
         // effect — verifying that the post-hoc filter in CreateWarpServices reads from the
         // registered options instance, not from a fresh WarpBuilder created by AddWarp.
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseNpgsql(DummyConnectionString));
-        services.AddWarpWorker<TestContext>(opt =>
+        services.AddWarpServer<TestContext>(opt =>
         {
             opt.UsePostgreSql();
             opt.ExcludeHandlersFromAssembly(typeof(EchoHandler).Assembly);
@@ -76,7 +76,7 @@ public sealed class ExcludeHandlersFromAssemblyTests
             d.ServiceType == typeof(IRequestHandler<EchoRequest, EchoResponse>)
             && d.ImplementationType == typeof(EchoHandler));
 
-        hasEcho.ShouldBeFalse("exclusion set on AddWarpWorker builder is honored by the post-hoc filter");
+        hasEcho.ShouldBeFalse("exclusion set on AddWarpServer builder is honored by the post-hoc filter");
     }
 }
 
@@ -113,15 +113,15 @@ public sealed class AddWarpDbContextValidationTests
     }
 
     [TimedFact]
-    public void AddWarpWorker_Throws_WhenDbContextNotRegistered()
+    public void AddWarpServer_Throws_WhenDbContextNotRegistered()
     {
-        // AddWarpWorker calls AddWarp internally, which is where the validation lives.
+        // AddWarpServer calls AddWarp internally, which is where the validation lives.
         // Confirm the error surfaces via the worker entry point too — multi-host solutions
-        // are likely to call AddWarpWorker before AddDbContext if the registration order
+        // are likely to call AddWarpServer before AddDbContext if the registration order
         // is wrong in their composition root.
         var services = new ServiceCollection();
 
-        var ex = Should.Throw<InvalidOperationException>(() => services.AddWarpWorker<TestContext>());
+        var ex = Should.Throw<InvalidOperationException>(() => services.AddWarpServer<TestContext>());
         ex.Message.ShouldContain("AddDbContext");
         ex.Message.ShouldContain("TestContext");
     }

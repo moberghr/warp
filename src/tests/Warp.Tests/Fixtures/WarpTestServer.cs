@@ -72,7 +72,7 @@ public class WarpTestServer : IAsyncDisposable
     {
         get
         {
-            var config = _host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WarpWorkerConfiguration>>().Value;
+            var config = _host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WarpServerConfiguration>>().Value;
             return config.ServerId;
         }
     }
@@ -80,60 +80,50 @@ public class WarpTestServer : IAsyncDisposable
     public PauseStateHolder PauseState => _host.Services.GetRequiredService<PauseStateHolder>();
 
     /// <summary>
-    /// Synchronously runs the Heartbeat task once — refreshing <see cref="PauseStateHolder"/>
-    /// from the DB. Use after a Pause/Resume DB write when the test config has disabled the
-    /// auto Heartbeat (HealthCheckInterval = null), so that pause propagation is deterministic
-    /// rather than dependent on the periodic heartbeat tick.
+    /// Synchronously runs a single registered <see cref="Warp.Worker.Services.IServerTask"/> of
+    /// type <typeparamref name="TTask"/> once, resolving it in its own scope and calling
+    /// <c>ExecuteAsync</c> directly. This sidesteps the <see cref="ServerTaskHost{TContext}"/>
+    /// auto-loop and its distributed-lock guard, so it is only safe when that task's auto-loop is
+    /// disabled (or otherwise not running concurrently). Use it to drive a task tick
+    /// deterministically instead of waiting on a wall-clock interval.
     /// </summary>
-    public async Task<string?> RunHeartbeatOnceAsync(CancellationToken ct = default)
+    public async Task<string?> RunServerTaskOnceAsync<TTask>(CancellationToken ct = default)
+        where TTask : Warp.Worker.Services.IServerTask
     {
-        // Resolve the Heartbeat task in its own scope and call ExecuteAsync directly. This
-        // sidesteps the ServerTaskHost auto-loop (which doesn't register tasks whose
-        // DefaultInterval is null) so tests that disable HealthCheckInterval can still drive
-        // a heartbeat tick deterministically. Heartbeat takes no distributed lock, so running
-        // it without the host's lock guard is safe.
         await using var scope = _host.Services.CreateAsyncScope();
-        var heartbeat = scope.ServiceProvider
+        var task = scope.ServiceProvider
             .GetServices<Warp.Worker.Services.IServerTask>()
-            .OfType<Warp.Worker.Services.Heartbeat<TestContext>>()
+            .OfType<TTask>()
             .Single();
-        return await heartbeat.ExecuteAsync(ct);
+        return await task.ExecuteAsync(ct);
     }
 
     /// <summary>
-    /// Synchronously runs the Orchestrator task once — finalizes parents whose children have
-    /// all reached terminal state, activates continuations, fails children of deleted parents.
-    /// Use after a state change that should trigger orchestration (e.g. a job reaching Failed)
-    /// when the test config has disabled the auto Orchestrator (<c>OrchestrationInterval = null</c>),
-    /// so that "did/didn't activate the continuation" is decided by an explicit tick rather than
-    /// a wall-clock <c>Task.Delay</c>. Bypasses the <see cref="ServerTaskHost{TContext}"/>
-    /// distributed-lock guard — only safe when no auto-orchestrator is running concurrently.
+    /// Runs the Heartbeat task once — refreshing <see cref="PauseStateHolder"/> from the DB. Use
+    /// after a Pause/Resume DB write when the test config has disabled the auto Heartbeat
+    /// (HealthCheckInterval = null), so pause propagation is deterministic. Heartbeat takes no
+    /// distributed lock, so running it without the host's lock guard is safe.
     /// </summary>
-    public async Task<string?> RunOrchestratorOnceAsync(CancellationToken ct = default)
-    {
-        await using var scope = _host.Services.CreateAsyncScope();
-        var orchestrator = scope.ServiceProvider
-            .GetServices<Warp.Worker.Services.IServerTask>()
-            .OfType<Warp.Worker.Services.Orchestrator<TestContext>>()
-            .Single();
-        return await orchestrator.ExecuteAsync(ct);
-    }
+    public Task<string?> RunHeartbeatOnceAsync(CancellationToken ct = default)
+        => RunServerTaskOnceAsync<Warp.Worker.Services.Heartbeat<TestContext>>(ct);
 
     /// <summary>
-    /// Synchronously runs the MessageRouter task once — discovers handlers for any
-    /// <c>Kind=Message</c> rows in <see cref="State.Enqueued"/> and creates child handler jobs.
-    /// Use when the test config has disabled the auto MessageRouter so message routing is
-    /// driven by explicit ticks. Bypasses the host lock guard — only safe with the auto loop off.
+    /// Runs the Orchestrator task once — finalizes parents whose children have all reached
+    /// terminal state, activates continuations, fails children of deleted parents. Use after a
+    /// state change that should trigger orchestration when the auto Orchestrator is disabled
+    /// (<c>OrchestrationInterval = null</c>). Bypasses the distributed-lock guard — only safe when
+    /// no auto-orchestrator is running concurrently.
     /// </summary>
-    public async Task<string?> RunMessageRouterOnceAsync(CancellationToken ct = default)
-    {
-        await using var scope = _host.Services.CreateAsyncScope();
-        var router = scope.ServiceProvider
-            .GetServices<Warp.Worker.Services.IServerTask>()
-            .OfType<Warp.Worker.Services.MessageRouter<TestContext>>()
-            .Single();
-        return await router.ExecuteAsync(ct);
-    }
+    public Task<string?> RunOrchestratorOnceAsync(CancellationToken ct = default)
+        => RunServerTaskOnceAsync<Warp.Worker.Services.Orchestrator<TestContext>>(ct);
+
+    /// <summary>
+    /// Runs the MessageRouter task once — discovers handlers for any <c>Kind=Message</c> rows in
+    /// <see cref="State.Enqueued"/> and creates child handler jobs. Use when the auto MessageRouter
+    /// is disabled. Bypasses the host lock guard — only safe with the auto loop off.
+    /// </summary>
+    public Task<string?> RunMessageRouterOnceAsync(CancellationToken ct = default)
+        => RunServerTaskOnceAsync<Warp.Worker.Services.MessageRouter<TestContext>>(ct);
 
     /// <summary>
     /// Polls until the PauseStateHolder reflects the expected paused/resumed state for a group.
@@ -160,14 +150,14 @@ public class WarpTestServer : IAsyncDisposable
         return StartAsync(fixture, configure: null);
     }
 
-    public static Task<WarpTestServer> StartAsync(IDatabaseFixture fixture, Action<WarpWorkerBuilder<TestContext>>? configure)
+    public static Task<WarpTestServer> StartAsync(IDatabaseFixture fixture, Action<WarpServerBuilder<TestContext>>? configure)
     {
         return StartAsync(fixture, configure, configureServices: null);
     }
 
     public static async Task<WarpTestServer> StartAsync(
         IDatabaseFixture fixture,
-        Action<WarpWorkerBuilder<TestContext>>? configure,
+        Action<WarpServerBuilder<TestContext>>? configure,
         Action<IServiceCollection>? configureServices)
     {
         TestLifecycleTrace.Record("WarpTestServer.StartAsync starting");
@@ -241,7 +231,7 @@ public class WarpTestServer : IAsyncDisposable
                 services.AddSingleton<TestData.Handlers.MultiHandlerCounter>();
                 services.AddSingleton<TestData.Handlers.MetadataCapture>();
 
-                services.AddWarpWorker<TestContext>(config =>
+                services.AddWarpServer<TestContext>(config =>
                 {
                     if (isPostgres)
                     {
@@ -309,7 +299,7 @@ public class WarpTestServer : IAsyncDisposable
             .Build();
         TestLifecycleTrace.Record("Host.Build returned");
 
-        var serverId = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WarpWorkerConfiguration>>().Value.ServerId;
+        var serverId = host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WarpServerConfiguration>>().Value.ServerId;
 
         // SQL Server only: warm the per-test connection pool with a single sequential Open
         // before IHost.StartAsync fans out the worker + server-task fleet. Without this, the
@@ -364,7 +354,7 @@ public class WarpTestServer : IAsyncDisposable
     public static Task<WarpTestServer> StartWithFakeTime(
         IDatabaseFixture fixture,
         FakeTimeProvider time,
-        Action<WarpWorkerBuilder<TestContext>>? configure = null,
+        Action<WarpServerBuilder<TestContext>>? configure = null,
         Action<IServiceCollection>? configureServices = null)
     {
         return StartAsync(

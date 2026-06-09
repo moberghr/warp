@@ -4,12 +4,12 @@ using Warp.Worker;
 namespace Warp.Tests.Worker;
 
 [Trait("Category", "NoDb")]
-public class WarpWorkerConfigurationTests
+public class WarpServerConfigurationTests
 {
     [TimedFact]
     public void GetEffectiveWorkerGroups_PropagatesBackoffProperties()
     {
-        var config = new WarpWorkerConfiguration
+        var config = new WarpServerConfiguration
         {
             PollingInterval = TimeSpan.FromSeconds(2),
             MaxPollingInterval = TimeSpan.FromSeconds(45),
