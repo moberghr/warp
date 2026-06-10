@@ -11,7 +11,7 @@ The canonical example: an order placement spans hours. `OrderPlaced` arrives, th
 ## Setup
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddSagas();
@@ -156,7 +156,7 @@ public class OrderWorkflow(IPublisher publisher) :
 }
 ```
 
-`ScheduledJobActivation` (the server task that flips `Scheduled` → `Enqueued` when `ScheduleTime` elapses) drives the activation. The cadence is `WarpWorkerConfiguration.ScheduledActivationInterval` (default 5s) — that's the worst-case latency between the timeout's nominal fire time and the message actually being routed.
+`ScheduledJobActivation` (the server task that flips `Scheduled` → `Enqueued` when `ScheduleTime` elapses) drives the activation. The cadence is `WarpServerConfiguration.ScheduledActivationInterval` (default 5s) — that's the worst-case latency between the timeout's nominal fire time and the message actually being routed.
 
 ### Timeout-after-completion is silent
 

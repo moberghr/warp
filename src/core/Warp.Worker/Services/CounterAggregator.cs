@@ -13,11 +13,11 @@ public sealed class CounterAggregator<TContext> : IServerTask
     where TContext : DbContext
 {
     private readonly TContext _context;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
 
     public CounterAggregator(
         TContext context,
-        IOptions<WarpWorkerConfiguration> configuration)
+        IOptions<WarpServerConfiguration> configuration)
     {
         _context = context;
         _configuration = configuration.Value;

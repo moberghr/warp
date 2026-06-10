@@ -58,18 +58,18 @@ You only add the provider package for your database; Warp.Core no longer has a h
 > **Pin one coherent version across every Warp package.** The packages have inter-dependencies (e.g. `Warp.Http` requires a matching `Warp.Core`), so floating different floors per package can resolve to an incompatible mix. Set the same explicit version on all of them:
 >
 > ```xml
-> <PackageReference Include="Moberg.Warp.Core" Version="1.0.0" />
-> <PackageReference Include="Moberg.Warp.Worker" Version="1.0.0" />
-> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="1.0.0" />
-> <PackageReference Include="Moberg.Warp.UI" Version="1.0.0" />
-> <PackageReference Include="Moberg.Warp.Http" Version="1.0.0" />
+> <PackageReference Include="Moberg.Warp.Core" Version="2.0.0" />
+> <PackageReference Include="Moberg.Warp.Worker" Version="2.0.0" />
+> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="2.0.0" />
+> <PackageReference Include="Moberg.Warp.UI" Version="2.0.0" />
+> <PackageReference Include="Moberg.Warp.Http" Version="2.0.0" />
 > ```
 
 > **Package IDs are `Moberg.Warp.*`; namespaces are `Warp.*`.** Install `Moberg.Warp.Core`, but write `using Warp.Core;`. The public surface is also split across a few namespaces — here's where the common types live:
 >
 > | You want… | Types / methods | `using` |
 > |---|---|---|
-> | Register Warp / worker | `AddWarp`, `AddWarpWorker`, `AddBackgroundService`, `IPublisher`, `IBatchPublisher`, `IRecurringJobPublisher` | `Warp.Core` |
+> | Register Warp / server | `AddWarp`, `AddWarpServer`, `AddBackgroundService`, `IPublisher`, `IBatchPublisher`, `IRecurringJobPublisher` | `Warp.Core` |
 > | Define & handle work | `IJob`, `IMessage`, `IRequest<T>`, `IStreamRequest<T>`, `IJobHandler<>`, `IMessageHandler<>`, `IRequestHandler<,>`, `IStreamRequestHandler<,>`, `IPipelineBehavior<,>`, `IJobContext`, `Unit`, `IMediator` | `Warp.Core.Handlers` |
 > | Addon builder methods | `AddRetry` / `AddConcurrency` / `AddTimeout` / `AddRateLimit` / `AddSagas` | `Warp.Core.Retry` / `.Concurrency` / `.Timeout` / `.RateLimit` / `.Sagas` |
 > | Dashboard | `UseWarpUI` | `Warp.UI.UIMiddleware` |
@@ -78,7 +78,7 @@ You only add the provider package for your database; Warp.Core no longer has a h
 
 ### 2. Register Services
 
-Register your DbContext as usual — Warp hooks into it automatically when you call `AddWarp` or `AddWarpWorker`. Opt into a provider from the lambda:
+Register your DbContext as usual — Warp hooks into it automatically when you call `AddWarp` or `AddWarpServer`. Opt into a provider from the lambda:
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -87,10 +87,10 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
 
-// Register Warp worker (includes AddWarp internally).
+// Register a Warp server — runs the job worker by default (includes AddWarp internally).
 // opt.UsePostgreSql() comes from Moberg.Warp.Provider.PostgreSql and registers the row-lock SQL,
 // distributed lock provider, exception classifier, and the push notification factory.
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
 
@@ -118,7 +118,7 @@ app.UseWarpUI();
 app.Run();
 ```
 
-If you only need to publish jobs (no worker), use `AddWarp` instead:
+If you only need to publish jobs or serve the dashboard (no executing server), use `AddWarp` instead:
 
 ```csharp
 builder.Services.AddWarp<AppDbContext>(opt =>
@@ -127,10 +127,21 @@ builder.Services.AddWarp<AppDbContext>(opt =>
 });
 ```
 
+For a **service-only** server — runs `WarpBackgroundService` instances but processes no jobs — call `opt.DisableWorker()`:
+
+```csharp
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.DisableWorker();                 // no job worker; background services + server infra only
+    opt.AddBackgroundService<EmailPump>();
+});
+```
+
 To bind configuration from `appsettings.json`, use `BindConfiguration` inside the lambda — provider opt-in must still be an explicit call since it's a DI registration, not a config field:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.BindConfiguration(builder.Configuration.GetSection("Warp"));
     opt.UsePostgreSql();
@@ -140,7 +151,7 @@ builder.Services.AddWarpWorker<AppDbContext>(opt =>
 For fine-grained control, use worker groups to assign different queues and polling intervals:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UseSqlServer();
 
@@ -362,7 +373,7 @@ options.Authorization = new LocalRequestsOnlyAuthorizationFilter();
 ### 10. Configuration
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpServer<AppDbContext>(options =>
 {
     // Worker
     options.WorkerCount = 10;
@@ -400,7 +411,7 @@ builder.Services.AddWarpWorker<AppDbContext>(options =>
 Replaces polling wake-up with push notifications — PostgreSQL `LISTEN`/`NOTIFY` or SQL Server Service Broker. The dispatcher, `MessageRouter`, and `Orchestrator` wake instantly on relevant events instead of waiting for their next poll. Opt-in; default behavior (polling) is unchanged if you don't call `opt.UseDatabasePush()`.
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();         // or opt.UseSqlServer()
 

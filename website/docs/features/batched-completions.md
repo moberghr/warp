@@ -11,7 +11,7 @@ When running in dispatcher mode (`UseDispatcher = true`), each worker buffers jo
 Batched completions are automatic when dispatcher mode is enabled. Tune the batch size and flush interval if the defaults don't fit your workload:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(config =>
+builder.Services.AddWarpServer<AppDbContext>(config =>
 {
     config.UseDispatcher = true;
     config.CompletionBatchSize = 50;                         // default: 50

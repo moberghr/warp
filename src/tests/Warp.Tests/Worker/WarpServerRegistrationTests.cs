@@ -106,6 +106,108 @@ public abstract class WarpServerRegistrationTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task StartAsync_ZeroWorkerCount_WritesServerButNoWorkerOrGroupRows()
+    {
+        // Arrange — an explicit zero-worker group (the per-group skip), exercised directly on
+        // WarpServerRegistration. (A service-only server reaches this via RunWorker = false, not
+        // WorkerCount = 0; AddWarpServer rejects RunWorker = true with zero workers.)
+        var serverId = Guid.NewGuid();
+        var (registration, state) = CreateRegistration(serverId, c => c.WorkerCount = 0);
+
+        // Act
+        await registration.StartAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Assert — the Server row exists (FK target for background-service rows) but no
+        // WorkerGroup/Worker rows and no group registrations.
+        var readCtx = _fixture.CreateContext();
+        var server = await readCtx.Set<Server>().FirstOrDefaultAsync(x => x.Id == serverId, Xunit.TestContext.Current.CancellationToken);
+        server.ShouldNotBeNull();
+        server.ServiceCount.ShouldBe(0);
+
+        var groups = await readCtx.Set<Warp.Core.Data.Entities.WorkerGroup>()
+            .Where(x => x.ServerId == serverId)
+            .CountAsync(Xunit.TestContext.Current.CancellationToken);
+        groups.ShouldBe(0);
+
+        var workers = await readCtx.Set<Warp.Core.Data.Entities.Worker>()
+            .Where(x => x.ServerId == serverId)
+            .CountAsync(Xunit.TestContext.Current.CancellationToken);
+        workers.ShouldBe(0);
+
+        state.Groups.Count.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task StartAsync_MixedGroups_SkipsZeroGroup_KeepsExplicitGroup()
+    {
+        // Arrange — zero-worker implicit default group plus one explicit group with workers.
+        // The skip must apply only to the zero-count group.
+        var serverId = Guid.NewGuid();
+        var (registration, state) = CreateRegistration(serverId, c =>
+        {
+            c.WorkerCount = 0;
+            c.AddWorkerGroup(g => g.WorkerCount = 3);
+        });
+
+        // Act
+        await registration.StartAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Assert — only the explicit (3-worker) group materialises.
+        var readCtx = _fixture.CreateContext();
+        var groups = await readCtx.Set<Warp.Core.Data.Entities.WorkerGroup>()
+            .Where(x => x.ServerId == serverId)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        groups.Count.ShouldBe(1);
+        groups[0].WorkerCount.ShouldBe(3);
+
+        var workers = await readCtx.Set<Warp.Core.Data.Entities.Worker>()
+            .Where(x => x.ServerId == serverId)
+            .CountAsync(Xunit.TestContext.Current.CancellationToken);
+        workers.ShouldBe(3);
+
+        state.Groups.Count.ShouldBe(1);
+        state.Groups[0].WorkerIds.Count.ShouldBe(3);
+
+        var server = await readCtx.Set<Server>().FirstOrDefaultAsync(x => x.Id == serverId, Xunit.TestContext.Current.CancellationToken);
+        server.ShouldNotBeNull();
+        server.ServiceCount.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task StartAsync_RunWorkerFalse_NoGroupsEvenWithWorkerCountSet()
+    {
+        // Arrange — RunWorker = false must suppress all worker groups/rows regardless of a
+        // non-zero WorkerCount (the guard is independent of the per-group zero-skip).
+        var serverId = Guid.NewGuid();
+        var (registration, state) = CreateRegistration(serverId, c =>
+        {
+            c.WorkerCount = 5;
+            c.RunWorker = false;
+        });
+
+        // Act
+        await registration.StartAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Assert
+        var readCtx = _fixture.CreateContext();
+        var server = await readCtx.Set<Server>().FirstOrDefaultAsync(x => x.Id == serverId, Xunit.TestContext.Current.CancellationToken);
+        server.ShouldNotBeNull();
+        server.ServiceCount.ShouldBe(0);
+
+        var groups = await readCtx.Set<Warp.Core.Data.Entities.WorkerGroup>()
+            .Where(x => x.ServerId == serverId)
+            .CountAsync(Xunit.TestContext.Current.CancellationToken);
+        groups.ShouldBe(0);
+
+        var workers = await readCtx.Set<Warp.Core.Data.Entities.Worker>()
+            .Where(x => x.ServerId == serverId)
+            .CountAsync(Xunit.TestContext.Current.CancellationToken);
+        workers.ShouldBe(0);
+
+        state.Groups.Count.ShouldBe(0);
+    }
+
+    [TimedFact]
     public async Task StopAsync_NoServerRow_GracefulNoOp()
     {
         // Arrange — registration that never ran StartAsync
@@ -121,13 +223,17 @@ public abstract class WarpServerRegistrationTestsBase : IAsyncLifetime
         server.ShouldBeNull();
     }
 
-    private (WarpServerRegistration<TestContext> Registration, ServerRegistrationState State) CreateRegistration(Guid serverId)
+    private (WarpServerRegistration<TestContext> Registration, ServerRegistrationState State) CreateRegistration(
+        Guid serverId,
+        Action<WarpServerConfiguration>? configure = null)
     {
-        var config = Options.Create(new WarpWorkerConfiguration
+        var configuration = new WarpServerConfiguration
         {
             ServerId = serverId,
             WorkerCount = 2,
-        });
+        };
+        configure?.Invoke(configuration);
+        var config = Options.Create(configuration);
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();

@@ -15,7 +15,7 @@ namespace Warp.Tests.Worker;
 /// <summary>
 /// Verifies that <see cref="WarpDispatcherHost{TContext}"/> and
 /// <see cref="WarpSingleWorkerHost{TContext}"/> respect the
-/// <see cref="WarpWorkerConfiguration.UseDispatcher"/> flag — each no-ops when its mode is
+/// <see cref="WarpServerConfiguration.UseDispatcher"/> flag — each no-ops when its mode is
 /// not selected, and starts + stops cleanly when it is. The full end-to-end behavior of workers
 /// actually fetching and processing jobs is covered by the integration tests; these unit tests
 /// just pin the mode-branching contract so a future refactor can't silently break it.
@@ -120,7 +120,7 @@ public abstract class WorkerHostModeTestsBase : IAsyncLifetime
 
     private WarpDispatcherHost<TestContext> CreateDispatcherHost(bool useDispatcher, ServerRegistrationState state)
     {
-        var config = Options.Create(new WarpWorkerConfiguration
+        var config = Options.Create(new WarpServerConfiguration
         {
             UseDispatcher = useDispatcher,
             WorkerCount = 1,
@@ -149,7 +149,7 @@ public abstract class WorkerHostModeTestsBase : IAsyncLifetime
 
     private WarpSingleWorkerHost<TestContext> CreateSingleWorkerHost(bool useDispatcher, ServerRegistrationState state)
     {
-        var config = Options.Create(new WarpWorkerConfiguration
+        var config = Options.Create(new WarpServerConfiguration
         {
             UseDispatcher = useDispatcher,
             WorkerCount = 1,

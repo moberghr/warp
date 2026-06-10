@@ -27,7 +27,7 @@ public sealed class Heartbeat<TContext> : IServerTask
     private readonly TimeProvider _time;
     private readonly PauseStateHolder _pauseStateHolder;
     private readonly ProcessCpuTracker _cpuTracker;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly HeartbeatLeaseTracker _leaseTracker;
@@ -37,7 +37,7 @@ public sealed class Heartbeat<TContext> : IServerTask
         TimeProvider time,
         PauseStateHolder pauseStateHolder,
         ProcessCpuTracker cpuTracker,
-        IOptions<WarpWorkerConfiguration> configuration,
+        IOptions<WarpServerConfiguration> configuration,
         IWarpSqlQueries<TContext> sqlQueries,
         ServerTaskSignals<TContext> signals,
         HeartbeatLeaseTracker leaseTracker)

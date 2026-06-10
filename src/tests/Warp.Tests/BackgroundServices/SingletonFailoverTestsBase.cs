@@ -32,7 +32,7 @@ public abstract class SingletonFailoverTestsBase : IntegrationTestBase
         // CountingBarrierSignal: each acquisition releases Entry once; each holder blocks on CanFinish.
         var barrier = new CountingBarrierSignal();
 
-        void Configure(WarpWorkerBuilder<TestContext> cfg)
+        void Configure(WarpServerBuilder<TestContext> cfg)
         {
             cfg.AddBackgroundService<CountingBarrierService>();
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);
@@ -81,7 +81,7 @@ public abstract class SingletonFailoverTestsBase : IntegrationTestBase
     {
         var barrier = new CountingBarrierSignal();
 
-        void Configure(WarpWorkerBuilder<TestContext> cfg)
+        void Configure(WarpServerBuilder<TestContext> cfg)
         {
             cfg.AddBackgroundService<CountingBarrierService>();
             cfg.BackgroundServiceAcquirePollInterval = TimeSpan.FromMilliseconds(200);

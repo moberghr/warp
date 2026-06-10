@@ -22,7 +22,7 @@ public enum RegistrationOutcome
 /// <summary>
 /// Manages <c>BackgroundServiceInstance</c> and <c>BackgroundServiceDefinition</c> rows for
 /// services running on this server. All methods are scoped to the calling server's
-/// <c>ServerId</c>, resolved via <c>WarpWorkerConfiguration</c>.
+/// <c>ServerId</c>, resolved via <c>WarpServerConfiguration</c>.
 /// </summary>
 public interface IBackgroundServiceStateService
 {

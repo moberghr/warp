@@ -21,7 +21,7 @@ public class UseDatabasePushIntervalDefaultsTests
 
         new ServiceCollection()
             .AddDbContext<TestContext>(o => o.UseNpgsql("Host=x;Database=x;Username=x;Password=x"))
-            .AddWarpWorker<TestContext>(opt =>
+            .AddWarpServer<TestContext>(opt =>
             {
                 opt.UsePostgreSql();
                 opt.MessageRoutingInterval.ShouldBe(TimeSpan.FromSeconds(1), "precondition: class default is 1s");
@@ -39,7 +39,7 @@ public class UseDatabasePushIntervalDefaultsTests
 
         new ServiceCollection()
             .AddDbContext<TestContext>(o => o.UseNpgsql("Host=x;Database=x;Username=x;Password=x"))
-            .AddWarpWorker<TestContext>(opt =>
+            .AddWarpServer<TestContext>(opt =>
             {
                 opt.UsePostgreSql();
                 opt.OrchestrationInterval.ShouldBe(TimeSpan.FromSeconds(10), "precondition: class default is 10s");
@@ -61,7 +61,7 @@ public class UseDatabasePushIntervalDefaultsTests
 
         new ServiceCollection()
             .AddDbContext<TestContext>(o => o.UseNpgsql("Host=x;Database=x;Username=x;Password=x"))
-            .AddWarpWorker<TestContext>(opt =>
+            .AddWarpServer<TestContext>(opt =>
             {
                 opt.UsePostgreSql();
                 opt.MessageRoutingInterval = TimeSpan.FromSeconds(5);
@@ -79,7 +79,7 @@ public class UseDatabasePushIntervalDefaultsTests
 
         new ServiceCollection()
             .AddDbContext<TestContext>(o => o.UseNpgsql("Host=x;Database=x;Username=x;Password=x"))
-            .AddWarpWorker<TestContext>(opt =>
+            .AddWarpServer<TestContext>(opt =>
             {
                 opt.UsePostgreSql();
                 opt.OrchestrationInterval = TimeSpan.FromSeconds(20);
@@ -97,7 +97,7 @@ public class UseDatabasePushIntervalDefaultsTests
 
         new ServiceCollection()
             .AddDbContext<TestContext>(o => o.UseNpgsql("Host=x;Database=x;Username=x;Password=x"))
-            .AddWarpWorker<TestContext>(opt =>
+            .AddWarpServer<TestContext>(opt =>
             {
                 opt.UsePostgreSql();
                 opt.MaxPollingInterval.ShouldBe(TimeSpan.FromSeconds(30), "precondition: class default is 30s");
@@ -115,7 +115,7 @@ public class UseDatabasePushIntervalDefaultsTests
 
         new ServiceCollection()
             .AddDbContext<TestContext>(o => o.UseNpgsql("Host=x;Database=x;Username=x;Password=x"))
-            .AddWarpWorker<TestContext>(opt =>
+            .AddWarpServer<TestContext>(opt =>
             {
                 opt.UsePostgreSql();
                 opt.MaxPollingInterval = TimeSpan.FromSeconds(45);
@@ -127,23 +127,23 @@ public class UseDatabasePushIntervalDefaultsTests
     }
 
     [Fact]
-    public void WarpWorkerConfiguration_DefaultCounterAggregationInterval_IsOneMinute()
+    public void WarpServerConfiguration_DefaultCounterAggregationInterval_IsOneMinute()
     {
         // E: the class default was 5s, bumped to 60s because counter aggregation isn't
         // latency-critical and the dashboard reads tolerate 1-minute freshness.
-        new WarpWorkerConfiguration().CounterAggregationInterval
+        new WarpServerConfiguration().CounterAggregationInterval
             .ShouldBe(TimeSpan.FromMinutes(1));
     }
 
     [Fact]
-    public void WarpWorkerConfiguration_DefaultServerTaskBatchSize_IsOneThousand()
+    public void WarpServerConfiguration_DefaultServerTaskBatchSize_IsOneThousand()
     {
         // Pins the bounded-batching ceiling — a silent change to the default would either
         // hurt throughput (too small) or hold the orchestration lock too long (too large).
         // Raised from 100 → 1000 in fix/task-cadence: combined with batched commits inside
         // MessageRouter the per-iteration cost is bounded by one SaveChanges round-trip,
         // and 1000 is the right balance between drain rate and multi-server fairness.
-        new WarpWorkerConfiguration().ServerTaskBatchSize.ShouldBe(1000);
+        new WarpServerConfiguration().ServerTaskBatchSize.ShouldBe(1000);
     }
 
     [Fact]
@@ -157,7 +157,7 @@ public class UseDatabasePushIntervalDefaultsTests
 
         new ServiceCollection()
             .AddDbContext<TestContext>(o => o.UseNpgsql("Host=x;Database=x;Username=x;Password=x"))
-            .AddWarpWorker<TestContext>(opt =>
+            .AddWarpServer<TestContext>(opt =>
             {
                 opt.UsePostgreSql();
                 opt.UseDatabasePush();

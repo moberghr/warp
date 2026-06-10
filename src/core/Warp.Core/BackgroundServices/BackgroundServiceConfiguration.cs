@@ -7,9 +7,9 @@ public static class BackgroundServiceConfiguration
 {
     /// <summary>
     /// Registers a <see cref="WarpBackgroundService"/> subclass with the Warp host.
-    /// Call once per service type inside the <c>AddWarpWorker</c> lambda:
+    /// Call once per service type inside the <c>AddWarpServer</c> lambda:
     /// <code>
-    /// services.AddWarpWorker&lt;AppDbContext&gt;(opt =>
+    /// services.AddWarpServer&lt;AppDbContext&gt;(opt =>
     /// {
     ///     opt.UsePostgreSql();
     ///     opt.AddBackgroundService&lt;KafkaDrainService&gt;();

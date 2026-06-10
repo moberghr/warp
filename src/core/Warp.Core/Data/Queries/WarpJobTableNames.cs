@@ -119,7 +119,7 @@ public sealed class WarpJobTableNames
     /// <summary>
     /// Lease TTL in seconds to use when renewing <c>BackgroundServiceLease</c> rows during
     /// the heartbeat round-trip. Defaults to 30 (the spec default). Set by the provider
-    /// factory from <c>WarpWorkerConfiguration.BackgroundServiceLeaseTtl</c>.
+    /// factory from <c>WarpServerConfiguration.BackgroundServiceLeaseTtl</c>.
     /// </summary>
     public int LeaseTtlSeconds { get; init; } = 30;
 

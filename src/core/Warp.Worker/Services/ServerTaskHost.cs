@@ -31,7 +31,7 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
         IWarpLockProvider lockProvider,
         TimeProvider time,
         ILoggerFactory loggerFactory,
-        IOptions<WarpWorkerConfiguration> configuration,
+        IOptions<WarpServerConfiguration> configuration,
         ServerTaskSignals<TContext> signals)
     {
         var hostLogger = loggerFactory.CreateLogger<ServerTaskHost<TContext>>();

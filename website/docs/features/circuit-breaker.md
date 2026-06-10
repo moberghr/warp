@@ -8,10 +8,10 @@ Stops hammering a failing downstream when a handler's failure rate crosses a thr
 
 ## Setup
 
-Circuit Breaker is an opt-in addon. Register it inside the `AddWarpWorker` lambda:
+Circuit Breaker is an opt-in addon. Register it inside the `AddWarpServer` lambda:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddCircuitBreaker(o =>

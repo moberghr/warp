@@ -14,7 +14,7 @@ namespace Warp.Provider.SqlServer;
 /// <summary>
 /// Registers the SQL Server-specific provider services (row-lock SQL, exception classifier)
 /// for Warp. Call <c>opt.UseSqlServer()</c> inside the <c>AddWarp</c> or
-/// <c>AddWarpWorker</c> lambda to opt in.
+/// <c>AddWarpServer</c> lambda to opt in.
 /// </summary>
 public static class SqlServerServiceConfiguration
 {
@@ -28,7 +28,7 @@ public static class SqlServerServiceConfiguration
 
             // Propagate the configured lease TTL so the heartbeat SQL renewal window matches
             // what SingletonServiceStrategy uses when it first acquires the lease.
-            var workerConfig = sp.GetService<IOptions<WarpWorkerConfiguration>>();
+            var workerConfig = sp.GetService<IOptions<WarpServerConfiguration>>();
             var leaseTtl = workerConfig?.Value.BackgroundServiceLeaseTtl ?? TimeSpan.FromSeconds(30);
             var names = WarpJobTableNames.FromModel(context.Model, (int)leaseTtl.TotalSeconds);
 

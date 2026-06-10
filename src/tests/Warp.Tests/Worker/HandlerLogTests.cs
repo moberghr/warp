@@ -63,14 +63,14 @@ public abstract class HandlerLogTestsBase : IAsyncLifetime
         services.AddScoped<Warp.Core.Handlers.JobContext>();
         services.AddScoped<Warp.Core.Handlers.IJobContext>(x => x.GetRequiredService<Warp.Core.Handlers.JobContext>());
 
-        var workerConfig = new OptionsWrapper<WarpWorkerConfiguration>(new WarpWorkerConfiguration
+        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
         {
             WorkerCount = 1,
             ServerId = ServerId,
             Queues = DefaultQueues,
             EnableHandlerLogging = enableHandlerLogging,
         });
-        services.AddSingleton<IOptions<WarpWorkerConfiguration>>(workerConfig);
+        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
         services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
 
         var provider = services.BuildServiceProvider();

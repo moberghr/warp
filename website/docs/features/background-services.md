@@ -33,7 +33,7 @@ public sealed class KafkaDrainService : WarpBackgroundService
 Register via the worker builder:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddBackgroundService<KafkaDrainService>();
@@ -73,9 +73,32 @@ public sealed class KafkaDrainService : WarpBackgroundService
 `AddBackgroundService<T>()` registers `T` as a singleton and aliases it for host discovery. The four persistence tables (`Definition`/`Instance`/`Lease`/`Log`) ship with every Warp install (added by `AddWarp<TContext>`), so the only thing you do when adopting Background Services is register your concrete service classes. The first time you upgrade you'll need an EF Core migration to materialise the four tables; after that, schema changes only when Warp itself ships entity changes:
 
 ```bash
-dotnet ef migrations add AddWarpBackgroundServices
+dotnet ef migrations add AddWarpBackgroundServiceTables
 dotnet ef database update
 ```
+
+## Service-only deployment
+
+A Warp **server** runs the job worker by default — but the worker is just one component. To run a process that hosts background services (and the server infrastructure) but does **not** process jobs, call `opt.DisableWorker()`:
+
+```csharp
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();                  // or UseSqlServer() — a provider is still required
+    opt.DisableWorker();                  // service-only: no job worker
+    opt.AddBackgroundService<KafkaDrainService>();
+});
+```
+
+The two executing-server shapes:
+
+| Registration | Publishes / dashboard | Runs background services | Processes jobs |
+|---|---|---|---|
+| `AddWarp<TContext>` | ✅ | ❌ | ❌ |
+| `AddWarpServer<TContext>` + `opt.DisableWorker()` | ✅ | ✅ | ❌ |
+| `AddWarpServer<TContext>` (default) | ✅ | ✅ | ✅ |
+
+A service-only server still registers itself and runs the supporting server tasks — `Heartbeat` (renews the singleton lease), `ServerCleanup` (releases leases held by departed servers), and `ExpirationCleanup` (background-service log retention + orphaned-definition GC) — so `Singleton` coordination and cleanup work exactly as under the full worker. It does **not** register the job worker hosts or the job-only server tasks (Orchestrator, MessageRouter, ScheduledJobActivation, RecurringJobScheduler, StaleJobRecovery, CounterAggregator), so it takes no job-routing locks and creates no `Worker`/`WorkerGroup` rows. A provider (`UsePostgreSql`/`UseSqlServer`) is still required — the server tasks take distributed locks.
 
 ## Scope
 

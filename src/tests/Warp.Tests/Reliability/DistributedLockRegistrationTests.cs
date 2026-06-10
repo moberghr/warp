@@ -17,11 +17,11 @@ namespace Warp.Tests.Reliability;
 public class DistributedLockRegistrationTests
 {
     [TimedFact]
-    public void AddWarpWorker_PostgreSql_RegistersPostgresLockProvider()
+    public void AddWarpServer_PostgreSql_RegistersPostgresLockProvider()
     {
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseNpgsql("Host=localhost;Database=test;Username=user;Password=secret"));
-        services.AddWarpWorker<TestContext>(opt => opt.UsePostgreSql());
+        services.AddWarpServer<TestContext>(opt => opt.UsePostgreSql());
 
         using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         var provider = sp.GetRequiredService<IWarpLockProvider>();
@@ -30,11 +30,11 @@ public class DistributedLockRegistrationTests
     }
 
     [TimedFact]
-    public void AddWarpWorker_SqlServer_RegistersSqlServerLockProvider()
+    public void AddWarpServer_SqlServer_RegistersSqlServerLockProvider()
     {
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseSqlServer("Server=localhost;Database=test;User Id=sa;Password=secret;TrustServerCertificate=True"));
-        services.AddWarpWorker<TestContext>(opt => opt.UseSqlServer());
+        services.AddWarpServer<TestContext>(opt => opt.UseSqlServer());
 
         using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         var provider = sp.GetRequiredService<IWarpLockProvider>();
@@ -52,11 +52,11 @@ public class DistributedLockRegistrationTests
     /// The provider factory must succeed without ever resolving a DbContext.
     /// </summary>
     [TimedFact]
-    public void AddWarpWorker_PostgreSql_ResolvesFromOptionsExtension_NotFromContext()
+    public void AddWarpServer_PostgreSql_ResolvesFromOptionsExtension_NotFromContext()
     {
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseNpgsql("Host=localhost;Database=test;Username=user;Password=secret"));
-        services.AddWarpWorker<TestContext>(opt => opt.UsePostgreSql());
+        services.AddWarpServer<TestContext>(opt => opt.UsePostgreSql());
 
         // Poison: any attempt to resolve TestContext will throw
         services.AddScoped<TestContext>(_ => throw new InvalidOperationException("DbContext should not be resolved for connection string"));
@@ -71,11 +71,11 @@ public class DistributedLockRegistrationTests
     /// Same as above but for SQL Server.
     /// </summary>
     [TimedFact]
-    public void AddWarpWorker_SqlServer_ResolvesFromOptionsExtension_NotFromContext()
+    public void AddWarpServer_SqlServer_ResolvesFromOptionsExtension_NotFromContext()
     {
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseSqlServer("Server=localhost;Database=test;User Id=sa;Password=secret;TrustServerCertificate=True"));
-        services.AddWarpWorker<TestContext>(opt => opt.UseSqlServer());
+        services.AddWarpServer<TestContext>(opt => opt.UseSqlServer());
 
         // Poison: any attempt to resolve TestContext will throw
         services.AddScoped<TestContext>(_ => throw new InvalidOperationException("DbContext should not be resolved for connection string"));
@@ -87,12 +87,12 @@ public class DistributedLockRegistrationTests
     }
 
     [TimedFact]
-    public void AddWarpWorker_OptionsExtensionPreservesPassword_AfterWarpWrapsOptions()
+    public void AddWarpServer_OptionsExtensionPreservesPassword_AfterWarpWrapsOptions()
     {
         const string connectionString = "Host=localhost;Database=test;Username=user;Password=secret123";
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseNpgsql(connectionString));
-        services.AddWarpWorker<TestContext>(opt => opt.UsePostgreSql());
+        services.AddWarpServer<TestContext>(opt => opt.UsePostgreSql());
 
         using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         using var scope = sp.CreateScope();

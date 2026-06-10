@@ -26,7 +26,7 @@ public static class ServiceConfiguration
     /// Registers Warp's publish-side services against the user's <typeparamref name="TContext"/>:
     /// <c>IPublisher</c>, <c>IMediator</c>, <c>IRecurringJobPublisher</c>, the query services, and
     /// the EF Core model customizer / row-lock interceptors. Use this for processes that only
-    /// publish or serve the dashboard; call <c>AddWarpWorker</c> instead (it calls this internally)
+    /// publish or serve the dashboard; call <c>AddWarpServer</c> instead (it calls this internally)
     /// for processes that also execute jobs. <typeparamref name="TContext"/> must already be
     /// registered via <c>AddDbContext</c> (scoped). Opt into a provider — <c>opt.UsePostgreSql()</c>
     /// or <c>opt.UseSqlServer()</c> — and any addons from the <paramref name="configure"/> lambda.
@@ -47,7 +47,7 @@ public static class ServiceConfiguration
         // value so downstream consumers (JobCommandService, WarpModelCustomizer, etc.) see
         // exactly what the caller set, and so addon-contributed EntityConfigurators survive.
         // TryAdd: if the caller has already registered IOptions<WarpConfiguration> (e.g. via
-        // AddWarpWorker, which inherits WarpConfiguration), keep theirs.
+        // AddWarpServer, which inherits WarpConfiguration), keep theirs.
         services.TryAddSingleton<IOptions<WarpConfiguration>>(Options.Create<WarpConfiguration>(builder));
 
         return CreateWarpServices<TContext>(services);
@@ -91,18 +91,18 @@ public static class ServiceConfiguration
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
 
-        // Background-services dashboard read service. Registered in AddWarp (not AddWarpWorker)
-        // so dashboard-only / publisher-only processes that call AddWarp without AddWarpWorker
+        // Background-services dashboard read service. Registered in AddWarp (not AddWarpServer)
+        // so dashboard-only / publisher-only processes that call AddWarp without AddWarpServer
         // can still serve the /api/services endpoints. Only depends on TContext.
         services.TryAddScoped<IBackgroundServiceQueryService, BackgroundServiceQueryService<TContext>>();
 
-        // Default no-op transport. opt.UseDatabasePush() (inside the AddWarp/AddWarpWorker lambda) replaces this with a
+        // Default no-op transport. opt.UseDatabasePush() (inside the AddWarp/AddWarpServer lambda) replaces this with a
         // provider-specific implementation (Postgres LISTEN/NOTIFY or SQL Server Service Broker).
         services.TryAddSingleton<IWarpNotificationTransport, NullNotificationTransport>();
 
-        // In-process signal bus. Registered here (not in AddWarpWorker) so Core-side publishers
+        // In-process signal bus. Registered here (not in AddWarpServer) so Core-side publishers
         // — IPublisher, IBatchPublisher, IJobCommandService, IRecurringJobService, SagaStore —
-        // can inject it from publish-only processes that never call AddWarpWorker. Worker-side
+        // can inject it from publish-only processes that never call AddWarpServer. Worker-side
         // server-task loops and the dashboard broadcaster subscribe to its channels at host
         // construction; with no subscribers the SignalXxx calls are cheap no-ops.
         services.TryAddSingleton<ServerTaskSignals<TContext>>();

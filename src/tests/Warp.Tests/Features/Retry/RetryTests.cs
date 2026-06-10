@@ -86,13 +86,13 @@ public abstract class RetryTestsBase : IAsyncLifetime
             o.JitterFactor = jitterFactor;
         });
 
-        var workerConfig = new OptionsWrapper<WarpWorkerConfiguration>(new WarpWorkerConfiguration
+        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
         {
             WorkerCount = 1,
             ServerId = ServerId,
             Queues = DefaultQueues,
         });
-        services.AddSingleton<IOptions<WarpWorkerConfiguration>>(workerConfig);
+        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
         services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
         services.TryAddSingleton(TimeProvider.System);
 

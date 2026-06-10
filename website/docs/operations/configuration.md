@@ -37,10 +37,10 @@ This produces tables like `warp.job`, `warp.job_log`, `warp.server`, etc.
 
 ## Retry Configuration
 
-Configure retry behavior via `opt.AddRetry()` inside the `AddWarpWorker` lambda:
+Configure retry behavior via `opt.AddRetry()` inside the `AddWarpServer` lambda:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.AddRetry(options =>
     {
@@ -61,10 +61,10 @@ Per-job override via `[Retry]` attribute on handler or job class, or per-enqueue
 
 ## Concurrency Configuration
 
-Enable concurrency control (Mutex + Semaphore) via `opt.AddConcurrency()` inside the `AddWarpWorker` lambda:
+Enable concurrency control (Mutex + Semaphore) via `opt.AddConcurrency()` inside the `AddWarpServer` lambda:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.AddConcurrency();
 });
@@ -74,10 +74,10 @@ No options — just register and use `.WithMutex("key")` / `[Mutex("key")]` for 
 
 ## Circuit Breaker Configuration
 
-Enable the circuit breaker via `opt.AddCircuitBreaker()` inside the `AddWarpWorker` lambda:
+Enable the circuit breaker via `opt.AddCircuitBreaker()` inside the `AddWarpServer` lambda:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.AddCircuitBreaker(options =>
     {
@@ -98,10 +98,10 @@ Per-handler overrides on `[CircuitBreaker]` use `Group`, `Threshold`, `DurationS
 
 ## NoRestart Configuration
 
-Enable the stale-recovery opt-out via `opt.AddNoRestart()` inside the `AddWarpWorker` lambda:
+Enable the stale-recovery opt-out via `opt.AddNoRestart()` inside the `AddWarpServer` lambda:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.AddNoRestart();
 });
@@ -109,16 +109,18 @@ builder.Services.AddWarpWorker<AppDbContext>(opt =>
 
 No options. Register it to make `[NoRestart]` / `[Restart]` attributes take effect at publish time. `.WithRestart(bool)` works without the addon. See [NoRestart](/docs/features/no-restart) for details.
 
-The fleet-wide default is controlled by `WarpWorkerConfiguration.RestartStaleJobsByDefault` (default `true`). Flip to `false` to fail stale jobs on crash unless they explicitly opt in.
+The fleet-wide default is controlled by `WarpServerConfiguration.RestartStaleJobsByDefault` (default `true`). Flip to `false` to fail stale jobs on crash unless they explicitly opt in.
 
-## Worker Configuration (`WarpWorkerConfiguration`)
+## Server Configuration (`WarpServerConfiguration`)
 
-Extends `WarpConfiguration`. Used by the worker side (`AddWarpWorker<TContext>`):
+Extends `WarpConfiguration`. Used by a Warp server (`AddWarpServer<TContext>`):
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpServer<AppDbContext>(options =>
 {
-    // Worker
+    // Worker — runs by default. Call options.DisableWorker() (or set RunWorker = false) for a
+    // service-only server that runs background services but processes no jobs.
+    options.RunWorker = true;
     options.WorkerCount = 10;
     options.PollingInterval = TimeSpan.FromSeconds(1);    // floor
     options.MaxPollingInterval = TimeSpan.FromSeconds(30); // ceiling for exponential backoff
@@ -163,6 +165,7 @@ builder.Services.AddWarpWorker<AppDbContext>(options =>
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `RunWorker` | `bool` | `true` | Whether this server runs the job worker. Call `DisableWorker()` (which sets this to `false`) for a service-only server: background services + server infrastructure, no worker hosts, no job-only server tasks, no `Worker`/`WorkerGroup` rows. **Do not** set `WorkerCount = 0` while leaving the worker enabled — `AddWarpServer` throws at registration for that contradiction (it would orchestrate jobs but never execute them). Use `DisableWorker()` instead. |
 | `WorkerCount` | `int` | `min(CPU * 5, 20)` | Number of concurrent worker threads |
 | `PollingInterval` | `TimeSpan` | `1 second` | Delay between polls when no jobs are available. Also serves as the floor for exponential backoff. |
 | `MaxPollingInterval` | `TimeSpan` | `30 seconds` | Upper bound on the polling delay during idle periods. The delay grows from `PollingInterval` by `PollingIntervalFactor` on each empty poll, clamped to this value, and resets instantly when a job is processed. |
@@ -216,7 +219,7 @@ Use dispatcher mode when you have many workers (20+) and want to reduce database
 By default, all workers share the same queues and polling interval. Use worker groups for fine-grained control:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpServer<AppDbContext>(options =>
 {
     // Top-level settings become the first worker group
     options.WorkerCount = 5;

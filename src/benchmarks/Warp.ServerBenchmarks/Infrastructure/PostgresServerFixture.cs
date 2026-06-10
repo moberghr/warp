@@ -48,7 +48,7 @@ public class PostgresServerFixture : IAsyncDisposable
                         .UseSnakeCaseNamingConvention();
                 });
 
-                services.AddWarpWorker<TestContext>(config =>
+                services.AddWarpServer<TestContext>(config =>
                 {
                     config.WorkerCount = workerCount;
                     config.Queues = ["default"];
@@ -90,7 +90,7 @@ public class PostgresServerFixture : IAsyncDisposable
                         .UseSnakeCaseNamingConvention();
                 });
 
-                services.AddWarpWorker<TestContext>(config =>
+                services.AddWarpServer<TestContext>(config =>
                 {
                     config.WorkerCount = 1;
                     config.Queues = ["default"];

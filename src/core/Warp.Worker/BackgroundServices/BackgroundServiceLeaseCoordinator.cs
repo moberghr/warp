@@ -20,7 +20,7 @@ public sealed class BackgroundServiceLeaseCoordinator<TContext> : IBackgroundSer
     public BackgroundServiceLeaseCoordinator(
         TContext context,
         TimeProvider time,
-        IOptions<WarpWorkerConfiguration> options,
+        IOptions<WarpServerConfiguration> options,
         IWarpSqlQueries<TContext> sqlQueries)
     {
         _context = context;

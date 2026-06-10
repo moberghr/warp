@@ -9,20 +9,20 @@ namespace Warp.Worker.Services;
 /// <summary>
 /// Deletes expired jobs + logs, trims old hourly stats, deletes server logs past their
 /// per-task retention, and caps RecurringJobLog history. Also handles count-based
-/// cleanup when <see cref="WarpWorkerConfiguration.MaxExpirableJobCount"/> is set.
+/// cleanup when <see cref="WarpServerConfiguration.MaxExpirableJobCount"/> is set.
 /// </summary>
 public sealed class ExpirationCleanup<TContext> : IServerTask
     where TContext : DbContext
 {
     private readonly TContext _context;
     private readonly TimeProvider _time;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
     private readonly IEnumerable<WarpBackgroundService> _backgroundServices;
 
     public ExpirationCleanup(
         TContext context,
         TimeProvider time,
-        IOptions<WarpWorkerConfiguration> configuration,
+        IOptions<WarpServerConfiguration> configuration,
         IEnumerable<WarpBackgroundService>? backgroundServices = null)
     {
         _context = context;
@@ -224,7 +224,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         var now = _time.GetUtcNow().UtcDateTime;
 
         // Build per-service retention overrides keyed by Name. When a service supplies
-        // an override, it takes precedence over the global WarpWorkerConfiguration value.
+        // an override, it takes precedence over the global WarpServerConfiguration value.
         var perServiceCount = new Dictionary<string, int>(StringComparer.Ordinal);
         var perServiceAge = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
 

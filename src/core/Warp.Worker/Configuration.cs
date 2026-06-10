@@ -30,7 +30,7 @@ public class WorkerGroupConfiguration
     public double PollingIntervalFactor { get; set; } = 2.0;
 }
 
-public class WarpWorkerConfiguration : WarpConfiguration
+public class WarpServerConfiguration : WarpConfiguration
 {
     private static readonly int DefaultWorkerCount = Math.Min(Environment.ProcessorCount * 5, 20);
 
@@ -38,6 +38,16 @@ public class WarpWorkerConfiguration : WarpConfiguration
     /// How many worker instances should be created. Applies to the implicit default worker group.
     /// </summary>
     public int WorkerCount { get; set; } = DefaultWorkerCount;
+
+    /// <summary>
+    /// Whether this server runs the job worker (fetch/execute loop + job-orchestration server
+    /// tasks). Default <c>true</c> — a server processes jobs. Set to <c>false</c> (or call
+    /// <see cref="DisableWorker"/>) for a service-only server that runs only
+    /// <see cref="Core.BackgroundServices.WarpBackgroundService"/> instances and the server
+    /// infrastructure (heartbeat, cleanup). When <c>false</c>, no worker hosts or job-only server
+    /// tasks are registered and no <c>Worker</c>/<c>WorkerGroup</c> rows are created.
+    /// </summary>
+    public bool RunWorker { get; set; } = true;
 
     /// <summary>
     /// Each time the worker polls for a job, it will wait for this interval before polling again.
@@ -276,6 +286,19 @@ public class WarpWorkerConfiguration : WarpConfiguration
 
         groups.AddRange(ExplicitWorkerGroups);
         return groups;
+    }
+
+    /// <summary>
+    /// Turns this into a service-only server: the job worker does not run. Sets
+    /// <see cref="RunWorker"/> to <c>false</c>, which is the single source of truth — no worker
+    /// hosts, no job-only server tasks, and no <c>Worker</c>/<c>WorkerGroup</c> rows are created
+    /// (<see cref="WorkerCount"/> is ignored while <see cref="RunWorker"/> is <c>false</c>). The
+    /// server still registers itself and runs <c>Heartbeat</c>/<c>ServerCleanup</c>/
+    /// <c>ExpirationCleanup</c> and any registered <see cref="Core.BackgroundServices.WarpBackgroundService"/>.
+    /// </summary>
+    public void DisableWorker()
+    {
+        RunWorker = false;
     }
 
     /// <summary>

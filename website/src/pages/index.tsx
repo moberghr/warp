@@ -43,7 +43,7 @@ const HERO_SETUP = `<span class="k-dim">// Register with your existing DbContext
     opt.<span class="k-green">UsePostgreSql</span>();
 });
 
-<span class="k-blue">builder</span>.Services.<span class="k-green">AddWarpWorker</span>&lt;AppDbContext&gt;(opt =&gt; {
+<span class="k-blue">builder</span>.Services.<span class="k-green">AddWarpServer</span>&lt;AppDbContext&gt;(opt =&gt; {
     opt.<span class="k-green">UsePostgreSql</span>();
     opt.WorkerCount = <span class="k-yellow">10</span>;
     opt.<span class="k-green">AddRetry</span>();
