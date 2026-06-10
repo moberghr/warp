@@ -379,3 +379,4 @@ tasks/todo.md
 .mtk/
 .claude/settings.local.json
 .DS_Store
+.claude.local.md

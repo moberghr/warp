@@ -30,7 +30,7 @@
 
 - **Active stack:** dotnet (`net10.0` + `netstandard2.0` for source generators)
 - **Build:** `dotnet build src/Warp.slnx`
-- **Test (all):** `dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj` (~1m 30s, 1,024 tests)
+- **Test (all):** `dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj` (~1m 30s, ~1,200 tests)
 - **Test (no DB):** `... -- --filter-trait "Category=NoDb"` (~3s)
 - **Test (PG):** `... -- --filter-trait "Category=PostgreSql"` (~1m 10s)
 - **Test (SQL Server):** `... -- --filter-trait "Category=SqlServer"` (~1m 20s)
@@ -44,12 +44,12 @@ For framework-specific guidance, see `.claude/skills/tech-stack-dotnet/SKILL.md`
 ## Project Profile
 
 - **Framework:** .NET 10 (with netstandard2.0 source generators)
-- **Solution:** `src/Warp.slnx` — 18 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
+- **Solution:** `src/Warp.slnx` — 17 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
 - **Data layer:** EF Core 10 (Postgres via Npgsql, SQL Server via Microsoft.EntityFrameworkCore.SqlServer); EFCore.NamingConventions for snake_case
 - **Distributed locking:** Medallion `DistributedLock.Postgres` + `DistributedLock.SqlServer` behind `IWarpLockProvider`
-- **Patterns:** Custom mediator (Warp's own, source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (Retry, Timeout, Concurrency, RateLimit, CircuitBreaker, NoRestart, DatabasePush, DashboardPush)
+- **Patterns:** Custom mediator (Warp's own, source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (Retry, Timeout, Concurrency, RateLimit, CircuitBreaker, NoRestart, Sagas, DatabasePush, DashboardPush); `WarpBackgroundService` is a first-class base feature (not an addon)
 - **Test stack:** xUnit v3 (`xunit.v3.mtp-v2`), Shouldly, Moq, Respawn, Testcontainers (Postgres + MSSQL), `Microsoft.AspNetCore.TestHost` for dashboard auth
-- **Frontend:** Vite + React 18 + TypeScript, Tailwind + shadcn/ui, Zustand, Axios
+- **Frontend:** Vite + React 19 + TypeScript, Tailwind + shadcn/ui, Zustand, TanStack Query (React Query) + TanStack Table, Axios
 - **Analyzers (enforced as errors):** StyleCop, Roslynator, SonarAnalyzer, Meziantou (`TreatWarningsAsErrors=true` in `src/Directory.Build.props`)
 
 ---
@@ -92,6 +92,6 @@ Reference docs (read on-demand by skills and review agents):
 - **Tests on both DBs:** every new behavior asserts on both Postgres and SQL Server via `[GenerateDatabaseTests]` source generator.
 - **Build must be analyzer-clean** — `TreatWarningsAsErrors=true` is non-negotiable.
 
-<!-- mtk-setup: v7.5.0
+<!-- mtk-setup: v7.10.2
      coding-guidelines: moberghr/coding-guidelines@4043387ca2c70ed0cd76e005861f5c471908c3bb
-     generated: 2026-05-12T00:00:00Z -->
+     generated: 2026-06-03T00:00:00Z -->

@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useMemo } from 'react';
 import {
   Chart,
   LineController,
@@ -22,12 +22,33 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
 
   // The store buffer holds up to an hour of samples; the panel claims
   // "last 60 seconds", so window the header stats to the newest sample.
-  const lastTs = realtimeData.length > 0 ? realtimeData[realtimeData.length - 1].ts : 0;
-  const cutoff = lastTs - 60;
-  const vals = realtimeData.filter((p) => p.ts >= cutoff).map((p) => p.succeeded + p.failed);
-  const current = vals.length > 0 ? Math.round(vals[vals.length - 1]) : 0;
-  const max = vals.length > 0 ? Math.round(Math.max(...vals)) : 0;
-  const avg = vals.length >= 5 ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+  // Single memoized pass — the buffer ticks 5×/s and can hold 18k points.
+  const { current, max, avg } = useMemo(() => {
+    const lastTs = realtimeData.length > 0 ? realtimeData[realtimeData.length - 1].ts : 0;
+    const cutoff = lastTs - 60;
+    let c = 0;
+    let m = 0;
+    let sum = 0;
+    let n = 0;
+    for (const p of realtimeData) {
+      if (p.ts < cutoff) {
+        continue;
+      }
+      const v = p.succeeded + p.failed;
+      c = v;
+      if (v > m) {
+        m = v;
+      }
+      sum += v;
+      n++;
+    }
+
+    return {
+      current: Math.round(c),
+      max: Math.round(m),
+      avg: n >= 5 ? Math.round(sum / n) : null,
+    };
+  }, [realtimeData]);
 
   useEffect(() => {
     if (!canvasRef.current) return;

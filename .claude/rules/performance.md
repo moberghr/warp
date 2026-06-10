@@ -2,7 +2,7 @@
 
 - **§6.1** The worker fetch/execute hot path is sacred. **NEVER add logic** to `WarpWorkerService` (single-worker mode) or `WarpDispatcher` / `WarpDispatcherWorker` (dispatcher mode) beyond fetch, execute, signal. New orchestration belongs in an `IServerTask` implementation (§2.3).
 - **§6.2** Statistics use Counter rows (write-optimised) aggregated into Statistic rows by `CounterAggregator`. **Never** update `Statistic` rows directly from hot paths — write to `Counter` and let the aggregator collapse them.
-- **§6.3** Signal-driven wake-up for background tasks. `ServerTaskSignals<TContext>.SignalJobFinalized` wakes `Orchestrator`; `SignalMessageEnqueued` wakes `MessageRouter`. **Don't reduce poll intervals** as a performance hack — register a signal instead.
+- **§6.3** Signal-driven wake-up. `ServerTaskSignals<TContext>` has three channels (`ServerTaskSignal`, numbered from 1): `SignalJobFinalized` wakes `Orchestrator`; `SignalMessageEnqueued` wakes `MessageRouter`; `SignalJobEnqueued` shortcuts every local `WarpWorker`'s backoff so a same-server `Enqueued` `Kind=Job` row is picked up without waiting for the poll interval or a DB round-trip (§2.9). **Don't reduce poll intervals** as a performance hack — register/fire a signal instead.
 - **§6.4** Select only the columns you need. Use `.Select()` projections for read paths — never load full entities for read-only display.
 - **§6.5** Avoid initializing collections inside loops.
 - **§6.6** No premature optimization. Measure before optimizing. The `src/benchmarks/` projects (`Warp.Benchmarks`, `Warp.PerfTest`, `Warp.ServerBenchmarks`) exist for this — use them.

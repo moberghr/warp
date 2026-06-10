@@ -72,7 +72,8 @@ export function startRealtimeFeed() {
     useDashboardStore.getState().sampleRate();
   }, SAMPLE_INTERVAL_MS);
 
-  applyMode(useRealtimeStore.getState().status);
+  const currentStatus = useRealtimeStore.getState().status;
+  applyMode(currentStatus);
   statusUnsub = useRealtimeStore.subscribe((state, prevState) => {
     if (state.status === prevState.status) {
       return;
