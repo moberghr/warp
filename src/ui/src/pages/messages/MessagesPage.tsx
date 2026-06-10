@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Panel } from '@/components/v2/Panel';
 import { StateBadge } from '@/components/StateBadge';
@@ -7,16 +7,15 @@ import { shortType, shortId } from '@/utils/format';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { usePageParam } from '@/hooks/usePageParam';
 import { usePageStore } from '@/stores/page';
 import { useMessagesList } from '@/api/hooks/useMessages';
 import { GroupStateRail } from '@/pages/jobs/GroupStateRail';
 
 export default function MessagesPage() {
   const { state } = useParams<{ state?: string }>();
-  const [page, setPage] = useState(0);
+  const [page, setPage] = usePageParam();
   const [pageSize, setPageSize] = usePersistedPageSize();
-
-  useEffect(() => { setPage(0); }, [state]);
 
   const query = useMessagesList(state, page, pageSize);
 
@@ -84,7 +83,7 @@ export default function MessagesPage() {
         </div>
       </Panel>
 
-      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} />
+      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} totalCount={data.totalCount} />
       </>
       )}
       </div>

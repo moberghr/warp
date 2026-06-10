@@ -80,7 +80,6 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [remember, setRemember] = useState(true);
   const [usernameFocused, setUsernameFocused] = useState(false);
   const [passwordFocused, setPasswordFocused] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -292,35 +291,6 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
                 </button>
               </div>
             </div>
-
-            <label
-              onClick={() => setRemember((r) => !r)}
-              className="inline-flex cursor-pointer items-center gap-2.5 pt-1 pb-2 text-[13px] text-text-dim"
-            >
-              <span
-                className="inline-flex h-4 w-4 items-center justify-center rounded-[4px] border-[1.5px] transition"
-                style={{
-                  borderColor: remember ? 'var(--brand)' : 'var(--border-hi)',
-                  background: remember ? 'var(--brand)' : 'transparent',
-                }}
-              >
-                {remember && (
-                  <svg
-                    viewBox="0 0 12 12"
-                    width="10"
-                    height="10"
-                    fill="none"
-                    stroke="#fff"
-                    strokeWidth={2.4}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M2 6.5 L5 9 L10 3" />
-                  </svg>
-                )}
-              </span>
-              Keep me signed in
-            </label>
 
             <button
               type="submit"

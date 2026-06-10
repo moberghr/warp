@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { Panel } from '@/components/v2/Panel';
@@ -6,74 +6,50 @@ import { Pagination } from '@/components/Pagination';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
-import { useRefreshKey } from '@/hooks/useRefreshKey';
-import { useRealtimeRefetch } from '@/hooks/useRealtimeRefetch';
+import { usePageParam } from '@/hooks/usePageParam';
 import { usePageStore } from '@/stores/page';
-import type { SagaListItem, SagaStats, PagedList } from '@/types';
-import * as api from '@/api';
+import { useSagasList, useSagaTypes, useSagaStats } from '@/api/hooks/useSagas';
 
 export default function SagasListPage() {
-  const [data, setData] = useState<PagedList<SagaListItem> | null>(null);
-  const [types, setTypes] = useState<string[]>([]);
-  const [stats, setStats] = useState<SagaStats | null>(null);
   const [typeFilter, setTypeFilter] = useState<string>('');
   const [keyFilter, setKeyFilter] = useState<string>('');
-  const [error, setError] = useState<string | null>(null);
-  const [unavailable, setUnavailable] = useState(false);
-  const [page, setPage] = useState(0);
+  const [page, setPage] = usePageParam();
   const [pageSize, setPageSize] = usePersistedPageSize();
-  const refreshKey = useRefreshKey();
+
+  const listQuery = useSagasList(page, pageSize, typeFilter || undefined, keyFilter || undefined);
+  const typesQuery = useSagaTypes();
+  const statsQuery = useSagaStats();
 
   useEffect(() => {
-    usePageStore.getState().set({ title: 'Sagas' });
+    usePageStore.getState().set({
+      title: 'Sagas',
+      subtitle: 'Long-running message-driven workflows',
+    });
     return () => usePageStore.getState().reset();
   }, []);
 
-  const fetchAll = useCallback(async () => {
-    try {
-      const [list, typeList, statsData] = await Promise.all([
-        api.listSagas(page, pageSize, typeFilter || undefined, keyFilter || undefined),
-        api.getSagaTypes(),
-        api.getSagaStats(),
-      ]);
-      setData(list);
-      setTypes(typeList);
-      setStats(statsData);
-      setError(null);
-      setUnavailable(false);
-    } catch (e) {
-      if (axios.isAxiosError(e) && e.response?.status === 404) {
-        setUnavailable(true);
-        setError(null);
-        return;
-      }
-      setError('Unable to load sagas');
-    }
-  }, [page, pageSize, typeFilter, keyFilter]);
-
-  useEffect(() => {
-    fetchAll();
-  }, [refreshKey, fetchAll]);
-
-  // Live updates: saga lifecycle is driven by message arrivals (proxy commits inside
-  // SaveChanges, which emits MessageEnqueued for routed children and JobFinalized when
-  // those jobs settle). Either event indicates a saga may have changed.
-  useRealtimeRefetch(['JobFinalized', 'MessageEnqueued'], fetchAll);
+  const unavailable =
+    axios.isAxiosError(listQuery.error) && listQuery.error.response?.status === 404;
 
   if (unavailable) {
     return (
       <div className="flex flex-col gap-3 py-5">
         <Panel>
           <div className="py-8 text-center text-[13px] text-text-mute">
-            Sagas addon is not registered. Call <code className="font-mono text-xs text-text-default">opt.AddSagas()</code> in your Warp configuration to enable.
+            Sagas addon is not registered. Call <code className="font-mono text-xs text-foreground">opt.AddSagas()</code> in your Warp configuration to enable.
           </div>
         </Panel>
       </div>
     );
   }
 
-  if (error) return <ErrorState message={error} />;
+  if (listQuery.error) return <ErrorState message="Unable to load sagas" />;
+
+  const data = listQuery.data;
   if (!data) return <LoadingState />;
+
+  const types = typesQuery.data ?? [];
+  const stats = statsQuery.data ?? null;
 
   return (
     <div className="flex flex-col gap-3 py-5">
@@ -82,13 +58,13 @@ export default function SagasListPage() {
           <Panel>
             <div className="px-4 py-3">
               <div className="text-[12px] text-text-mute">Live sagas</div>
-              <div className="font-display text-[22px] font-semibold tracking-tight tabular-nums">{stats.liveSagas}</div>
+              <div className="font-display text-[22px] font-semibold tracking-tight tabular-nums">{stats.liveSagas.toLocaleString()}</div>
             </div>
           </Panel>
           <Panel>
             <div className="px-4 py-3">
               <div className="text-[12px] text-text-mute">Started today</div>
-              <div className="font-display text-[22px] font-semibold tracking-tight tabular-nums">{stats.startedToday}</div>
+              <div className="font-display text-[22px] font-semibold tracking-tight tabular-nums">{stats.startedToday.toLocaleString()}</div>
             </div>
           </Panel>
           <Panel>
@@ -103,6 +79,7 @@ export default function SagasListPage() {
       <div className="flex gap-2">
         <select
           className="border rounded-md px-2 py-1 text-sm bg-background"
+          aria-label="Filter by saga type"
           value={typeFilter}
           onChange={(e) => { setTypeFilter(e.target.value); setPage(0); }}
         >
@@ -113,6 +90,7 @@ export default function SagasListPage() {
           type="text"
           className="border rounded-md px-2 py-1 text-sm bg-background flex-1 max-w-xs"
           placeholder="Search correlation key…"
+          aria-label="Search correlation key"
           value={keyFilter}
           onChange={(e) => { setKeyFilter(e.target.value); setPage(0); }}
         />
@@ -161,6 +139,7 @@ export default function SagasListPage() {
         pageCount={Math.ceil(data.totalCount / pageSize)}
         onPageChange={setPage}
         onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
+        totalCount={data.totalCount}
       />
     </div>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Panel } from '@/components/v2/Panel';
 import { Button } from '@/components/ui/button';
@@ -6,6 +6,7 @@ import { Pagination } from '@/components/Pagination';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { usePageParam } from '@/hooks/usePageParam';
 import { usePageStore } from '@/stores/page';
 import {
   useRecurringList,
@@ -34,7 +35,7 @@ function describeCron(expr: string): string | null {
 }
 
 export default function RecurringPage() {
-  const [page, setPage] = useState(0);
+  const [page, setPage] = usePageParam();
   const [pageSize, setPageSize] = usePersistedPageSize();
   const query = useRecurringList(page, pageSize);
 
@@ -68,8 +69,8 @@ export default function RecurringPage() {
                 <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Cron</th>
                 <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Type</th>
                 <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Status</th>
-                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold" title={`Times shown in ${TZ_SHORT}`}>Next Execution</th>
-                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Last Execution</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold" title={`Times shown in ${TZ_SHORT}`}>Next execution</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Last execution</th>
                 <th className="warp-eyebrow text-right px-3.5 py-2.5 text-text-mute font-semibold">Actions</th>
               </tr>
             </thead>
@@ -95,9 +96,9 @@ export default function RecurringPage() {
                     <td className="px-3.5 py-2 text-[12.5px]">{rj.type.split(',')[0].split('.').pop()}</td>
                     <td className="px-3.5 py-2 text-[12.5px]">
                       {rj.disabledAt ? (
-                        <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">Disabled</span>
+                        <span className="inline-flex items-center rounded-full bg-warp-amber-soft px-2 py-0.5 text-xs font-medium text-warp-amber">Disabled</span>
                       ) : (
-                        <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400">Enabled</span>
+                        <span className="inline-flex items-center rounded-full bg-warp-green-soft px-2 py-0.5 text-xs font-medium text-warp-green">Enabled</span>
                       )}
                     </td>
                     <td className="px-3.5 py-2 text-[12.5px]">
@@ -140,7 +141,7 @@ export default function RecurringPage() {
                           const ok = await confirm({
                             title: 'Delete recurring job?',
                             description: `Remove "${rj.name}"? Future runs will not be scheduled and history will be removed permanently. Existing in-flight jobs are unaffected. This cannot be undone.`,
-                            confirmLabel: 'Remove',
+                            confirmLabel: 'Delete',
                             destructive: true,
                           });
                           if (ok) {
@@ -148,7 +149,7 @@ export default function RecurringPage() {
                           }
                         }}
                       >
-                        Remove
+                        Delete
                       </Button>
                     </td>
                   </tr>
@@ -159,7 +160,7 @@ export default function RecurringPage() {
         </div>
       </Panel>
 
-      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} />
+      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} totalCount={data.totalCount} />
       {confirmDialog}
     </div>
   );

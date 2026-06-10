@@ -6,7 +6,7 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { Badge } from '@/components/ui/badge';
 import { usePageStore } from '@/stores/page';
-import { shortId, shortType } from '@/utils/format';
+import { shortId, shortType, formatDuration } from '@/utils/format';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
 import { useWorkerDetail, useWorkerLogs } from '@/api/hooks/useServers';
 
@@ -138,7 +138,7 @@ export default function WorkerDetailPage() {
                       {log.message}
                     </td>
                     <td className="px-3.5 py-2 text-[12.5px] text-text-mute">
-                      {log.durationMs != null ? `${log.durationMs.toFixed(0)}ms` : '-'}
+                      {log.durationMs != null ? formatDuration(log.durationMs) : '—'}
                     </td>
                     <td className="px-3.5 py-2 text-[12.5px]">
                       <RelativeTime date={log.timestamp} />
@@ -151,7 +151,7 @@ export default function WorkerDetailPage() {
         </div>
       </Panel>
 
-      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} />
+      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} totalCount={data.totalCount} />
     </div>
   );
 }

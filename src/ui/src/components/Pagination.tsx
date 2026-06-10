@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { PAGE_SIZES } from '@/hooks/usePersistedPageSize';
 
 interface PaginationProps {
   page: number;
@@ -6,6 +6,10 @@ interface PaginationProps {
   onPageChange: (page: number) => void;
   pageSize?: number;
   onPageSizeChange?: (size: number) => void;
+  /** When provided (with pageSize), the footer shows "Showing x–y of N". */
+  totalCount?: number;
+  /** Container spacing override — in-panel usages pass their own padding. */
+  className?: string;
 }
 
 export function Pagination({
@@ -14,65 +18,60 @@ export function Pagination({
   onPageChange,
   pageSize,
   onPageSizeChange,
+  totalCount,
+  className = 'mt-3',
 }: PaginationProps) {
   if (pageCount <= 0 && !onPageSizeChange) return null;
 
-  const canPrev = page > 0;
-  const canNext = page < pageCount - 1;
+  const hasRange = totalCount != null && pageSize != null;
+  const showingFrom = hasRange ? (totalCount === 0 ? 0 : page * pageSize + 1) : 0;
+  const showingTo = hasRange ? Math.min(totalCount, (page + 1) * pageSize) : 0;
 
   return (
-    <div className="flex items-center justify-between gap-3 px-3.5 py-3 border-t border-hair">
-      <span className="mono text-[11.5px] text-text-mute tabular-nums">
-        {pageCount > 0 ? (
-          <>
-            Page <span className="text-text-dim font-semibold">{page + 1}</span> of{' '}
-            <span className="text-text-dim font-semibold">{pageCount}</span>
-          </>
+    <div className={`flex items-center justify-between text-[12px] text-text-mute gap-3 flex-wrap ${className}`}>
+      <span className="mono">
+        {hasRange ? (
+          <>Showing {showingFrom}&ndash;{showingTo} of {totalCount.toLocaleString()}</>
         ) : (
-          <span>&nbsp;</span>
+          <>&nbsp;</>
         )}
       </span>
-
-      <div className="flex items-center gap-2">
-        {pageCount > 0 && (
-          <>
-            <button
-              type="button"
-              onClick={() => onPageChange(page - 1)}
-              disabled={!canPrev}
-              aria-label="Previous page"
-              className="soft-btn soft-btn-ghost soft-btn-xs"
-              style={{ padding: '5px 9px' }}
+      <div className="flex items-center gap-3">
+        {pageSize != null && onPageSizeChange && (
+          <label className="flex items-center gap-1.5 text-[11.5px]">
+            <span>Per page</span>
+            <select
+              value={pageSize}
+              onChange={(e) => onPageSizeChange(Number(e.target.value))}
+              className="px-1.5 py-0.5 text-[11.5px] rounded-md border border-border bg-panel text-foreground"
             >
-              <ChevronLeft className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => onPageChange(page + 1)}
-              disabled={!canNext}
-              aria-label="Next page"
-              className="soft-btn soft-btn-ghost soft-btn-xs"
-              style={{ padding: '5px 9px' }}
-            >
-              <ChevronRight className="h-3.5 w-3.5" />
-            </button>
-          </>
+              {PAGE_SIZES.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </label>
         )}
-
-        {onPageSizeChange && (
-          <select
-            value={pageSize}
-            onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            className="mono text-[11.5px] rounded-md border bg-white py-1 pl-2 pr-7 text-text-dim hover:bg-paper"
-            style={{ borderColor: 'var(--border-hi)' }}
+        <span className="mono">
+          Page {pageCount === 0 ? 0 : page + 1} of {pageCount}
+        </span>
+        <div className="flex gap-1.5">
+          <button
+            type="button"
+            onClick={() => onPageChange(page - 1)}
+            disabled={page === 0}
+            className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-text-dim hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {[10, 20, 50, 100].map((size) => (
-              <option key={size} value={size}>
-                {size} / page
-              </option>
-            ))}
-          </select>
-        )}
+            &lsaquo; Prev
+          </button>
+          <button
+            type="button"
+            onClick={() => onPageChange(page + 1)}
+            disabled={page >= pageCount - 1}
+            className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-foreground hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            Next &rsaquo;
+          </button>
+        </div>
       </div>
     </div>
   );

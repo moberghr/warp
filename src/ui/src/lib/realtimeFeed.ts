@@ -48,6 +48,11 @@ function applyMode(status: RealtimeStatus) {
 
   if (pollerId === null) {
     pollerId = setInterval(() => {
+      // Skip network work while the tab is hidden — the sampler's stale-reset
+      // repairs the chart buffer when the tab becomes visible again.
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
       void useDashboardStore.getState().fetchStats();
     }, POLL_INTERVAL_MS);
   }
@@ -59,6 +64,11 @@ export function startRealtimeFeed() {
   }
 
   samplerId = setInterval(() => {
+    // No sampling while hidden; the store's >2s stale-reset rebuilds the
+    // buffer cleanly when the tab becomes visible again.
+    if (document.visibilityState === 'hidden') {
+      return;
+    }
     useDashboardStore.getState().sampleRate();
   }, SAMPLE_INTERVAL_MS);
 

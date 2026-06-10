@@ -222,8 +222,8 @@
     --popover:         #111114;
     --popover-foreground: #fafafa;
 
-    --primary:            #22c55e;
-    --primary-foreground: #0a0a0b;
+    --primary:            #6366F1;
+    --primary-foreground: #ffffff;
     --secondary:          #16161a;
     --secondary-foreground: #fafafa;
     --muted:              #16161a;
@@ -235,7 +235,7 @@
     --border:    #23232a;
     --border-hi: #2e2e36;
     --input:     #23232a;
-    --ring:      #22c55e;
+    --ring:      #6366F1;
 
     --warp-green:       #22c55e;
     --warp-green-soft:  rgba(34,197,94,0.18);
@@ -1168,7 +1168,7 @@
     color: #ffffff;
     box-shadow: var(--soft-btn-shadow);
   }
-  .soft-btn.soft-btn-primary:hover:not(:disabled) { background: #9F4A1B; }
+  .soft-btn.soft-btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--brand) 85%, black); }
   .soft-btn.soft-btn-dark {
     background: var(--foreground);
     color: var(--background);

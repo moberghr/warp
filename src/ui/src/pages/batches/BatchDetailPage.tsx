@@ -66,6 +66,17 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
   const { confirm, dialog: confirmDialog } = useConfirm();
   const [jobCounts, setJobCounts] = useState<Record<string, number>>({});
 
+  const askRequeue = async () => {
+    const ok = await confirm({
+      title: 'Requeue batch?',
+      description: `Requeue batch ${job.id.slice(0, 8)}? It will be re-executed immediately.`,
+      confirmLabel: 'Requeue',
+    });
+    if (ok) {
+      requeue.mutate(job.id);
+    }
+  };
+
   const askDelete = async () => {
     const ok = await confirm({
       title: 'Delete batch?',
@@ -129,11 +140,11 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => requeue.mutate(job.id)}
+              onClick={askRequeue}
               disabled={requeue.isPending}
               className="soft-btn soft-btn-ghost"
             >
-              <RotateCw size={14} /> Retry
+              <RotateCw size={14} /> Requeue
             </button>
             <button
               type="button"

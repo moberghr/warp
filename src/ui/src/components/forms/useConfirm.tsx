@@ -21,6 +21,8 @@ export function useConfirm() {
   const resolverRef = useRef<((ok: boolean) => void) | null>(null);
 
   const confirm = useCallback((opts: ConfirmOptions) => {
+    // Settle any still-pending confirm so its caller doesn't hang forever.
+    resolverRef.current?.(false);
     setState({ ...opts, open: true });
 
     return new Promise<boolean>((resolve) => {

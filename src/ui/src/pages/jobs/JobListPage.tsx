@@ -35,7 +35,9 @@ import { JobsStateRail } from './JobsStateRail';
 import { JobTypeBar } from './JobTypeBar';
 import { BulkActionBar } from './BulkActionBar';
 import { useConfirm } from '@/components/forms/useConfirm';
-import { usePersistedPageSize, PAGE_SIZES } from '@/hooks/usePersistedPageSize';
+import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { usePageParam } from '@/hooks/usePageParam';
+import { Pagination } from '@/components/Pagination';
 
 const SUBTEXT: Record<string, string> = {
   enqueued: 'Awaiting a worker pickup.',
@@ -57,19 +59,9 @@ export default function JobListPage() {
   const isFailed = resolvedState === 'failed';
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const page = Number(searchParams.get('page') ?? '0') || 0;
+  const [page, setPage] = usePageParam();
   const activeType = searchParams.get('type');
   const [pageSize, setPageSize] = usePersistedPageSize();
-
-  const setPage = (next: number) => {
-    const params = new URLSearchParams(searchParams);
-    if (next === 0) {
-      params.delete('page');
-    } else {
-      params.set('page', String(next));
-    }
-    setSearchParams(params, { replace: true });
-  };
 
   const setActiveType = (type: string | null) => {
     const params = new URLSearchParams(searchParams);
@@ -359,8 +351,6 @@ export default function JobListPage() {
   const stateLabel = resolvedState;
   const tone = getStateTone(resolvedState);
   const total = data?.totalCount ?? 0;
-  const showingFrom = total === 0 ? 0 : page * pageSize + 1;
-  const showingTo = Math.min((page + 1) * pageSize, total);
   const pageCount = data?.pageCount ?? 0;
 
   return (
@@ -376,7 +366,7 @@ export default function JobListPage() {
       <>
         <header className="mb-4">
           <h1 className="font-display text-[22px] font-semibold tracking-tight">
-            {capitalize(stateLabel)} jobs
+            {capitalize(stateLabel)} Jobs
             <span
               className={`ml-2.5 inline-flex items-center rounded-md px-2 py-0.5 text-[13px] font-medium align-middle ${tone.bg} ${tone.text}`}
             >
@@ -454,49 +444,14 @@ export default function JobListPage() {
           </div>
         </Panel>
 
-        <div className="flex items-center justify-between mt-3 text-[12px] text-text-mute gap-3 flex-wrap">
-          <span className="mono">
-            Showing {showingFrom}–{showingTo} of {total.toLocaleString()}
-          </span>
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-1.5 text-[11.5px]">
-              <span>Per page</span>
-              <select
-                value={pageSize}
-                onChange={(e) => {
-                  setPageSize(Number(e.target.value));
-                  setPage(0);
-                }}
-                className="px-1.5 py-0.5 text-[11.5px] rounded-md border border-border bg-panel text-foreground"
-              >
-                {PAGE_SIZES.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </label>
-            <span className="mono">
-              Page {pageCount === 0 ? 0 : page + 1} of {pageCount}
-            </span>
-            <div className="flex gap-1.5">
-              <button
-                type="button"
-                onClick={() => setPage(page - 1)}
-                disabled={page === 0}
-                className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-text-dim hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                ‹ Prev
-              </button>
-              <button
-                type="button"
-                onClick={() => setPage(page + 1)}
-                disabled={page >= pageCount - 1}
-                className="px-2.5 py-1 text-[11.5px] rounded-md border border-border bg-panel text-foreground hover:bg-panel-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                Next ›
-              </button>
-            </div>
-          </div>
-        </div>
+        <Pagination
+          page={page}
+          pageCount={pageCount}
+          onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
+          totalCount={total}
+        />
       </>
       )}
       </div>

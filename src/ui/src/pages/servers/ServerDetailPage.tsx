@@ -8,7 +8,7 @@ import { Pagination } from '@/components/Pagination';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePageStore } from '@/stores/page';
-import { shortId, formatBytes, serverStatusDotColor, isServerStale } from '@/utils/format';
+import { shortId, formatBytes, formatDuration, serverStatusDotColor, isServerStale } from '@/utils/format';
 import { ChevronDown, ChevronRight, RefreshCw, Pause, Play } from 'lucide-react';
 import type { WorkerModel, ServerTaskSummary } from '@/types';
 import {
@@ -36,6 +36,9 @@ export default function ServerDetailPage() {
 
   const pause = usePauseServer();
   const resume = useResumeServer();
+  const pauseMutate = pause.mutate;
+  const resumeMutate = resume.mutate;
+  const togglePending = pause.isPending || resume.isPending;
 
   const server = serverQuery.data;
 
@@ -52,9 +55,9 @@ export default function ServerDetailPage() {
     const handleTogglePause = () => {
       if (!id) return;
       if (server.pausedAt) {
-        resume.mutate(id);
+        resumeMutate(id);
       } else {
-        pause.mutate(id);
+        pauseMutate(id);
       }
     };
 
@@ -65,14 +68,14 @@ export default function ServerDetailPage() {
         <div className="flex items-center gap-2">
           {server.pausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300">Paused</Badge>}
           {isServerStale(server.lastHeartbeatTime) && <Badge variant="outline" className="text-red-600 border-red-300">Inactive</Badge>}
-          <button onClick={refetchAll} className="p-2 rounded-md hover:bg-panel-2 text-text-mute" title="Refresh">
+          <button type="button" onClick={refetchAll} className="p-2 rounded-md hover:bg-panel-2 text-text-mute" title="Refresh" aria-label="Refresh">
             <RefreshCw className="h-4 w-4" />
           </button>
           <Button
             variant="outline"
             size="sm"
             onClick={handleTogglePause}
-            disabled={pause.isPending || resume.isPending}
+            disabled={togglePending}
             title={server.pausedAt ? 'Resume server (takes effect on next heartbeat, ~3s)' : 'Pause server (takes effect on next heartbeat, ~3s)'}
           >
             {server.pausedAt ? <><Play className="h-4 w-4 mr-1" /> Resume</> : <><Pause className="h-4 w-4 mr-1" /> Pause</>}
@@ -80,7 +83,7 @@ export default function ServerDetailPage() {
         </div>
       ),
     });
-  }, [server, id, pause, resume, qc]);
+  }, [server, id, pauseMutate, resumeMutate, togglePending, qc]);
 
   useEffect(() => {
     return () => usePageStore.getState().reset();
@@ -188,8 +191,7 @@ function WorkerGroupSection({ queues, pollingMs, workers, activeCount, groupId, 
   const pauseGroup = usePauseWorkerGroup();
   const resumeGroup = useResumeWorkerGroup();
 
-  const handleToggleGroupPause = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleToggleGroupPause = () => {
     if (!groupId) return;
     if (groupPausedAt) {
       resumeGroup.mutate(groupId);
@@ -200,43 +202,49 @@ function WorkerGroupSection({ queues, pollingMs, workers, activeCount, groupId, 
 
   return (
     <Panel className="overflow-hidden">
-      <button
-        className="w-full text-left px-4 py-3 hover:bg-panel-2/60 transition-colors"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div className="flex items-center gap-3">
-          {expanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-          <span className={`inline-block w-2 h-2 rounded-full ${groupPausedAt ? 'bg-amber-500' : 'bg-green-500'}`} />
-          <span className="font-medium text-sm">{workers.length} workers</span>
-          {groupPausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">Paused</Badge>}
-          {activeCount > 0 && (
-            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
-              {activeCount} active
-            </span>
-          )}
-          <span className="text-xs text-text-mute">·</span>
-          <span className="text-xs text-text-mute">Polling: {pollingMs >= 1000 ? `${(pollingMs / 1000).toFixed(pollingMs % 1000 === 0 ? 0 : 1)}s` : `${pollingMs}ms`}</span>
-          <span className="ml-auto">
-            {groupId && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleToggleGroupPause}
-                disabled={pauseGroup.isPending || resumeGroup.isPending}
-                title={groupPausedAt ? 'Resume group (takes effect on next heartbeat, ~3s)' : 'Pause group (takes effect on next heartbeat, ~3s)'}
-                aria-label={groupPausedAt ? 'Resume worker group' : 'Pause worker group'}
-                className="h-7 px-2"
-              >
-                {groupPausedAt ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
-              </Button>
+      {/* The pause/resume control sits outside the expander button — nesting
+          interactive elements is invalid HTML and breaks keyboard access. */}
+      <div className="relative">
+        <button
+          type="button"
+          className="w-full text-left px-4 py-3 pr-14 hover:bg-panel-2/60 transition-colors"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+        >
+          <div className="flex items-center gap-3">
+            {expanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+            <span className={`inline-block w-2 h-2 rounded-full ${groupPausedAt ? 'bg-amber-500' : 'bg-green-500'}`} />
+            <span className="font-medium text-sm">{workers.length} workers</span>
+            {groupPausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">Paused</Badge>}
+            {activeCount > 0 && (
+              <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
+                {activeCount} active
+              </span>
             )}
+            <span className="text-xs text-text-mute">·</span>
+            <span className="text-xs text-text-mute">Polling: {pollingMs >= 1000 ? `${(pollingMs / 1000).toFixed(pollingMs % 1000 === 0 ? 0 : 1)}s` : `${pollingMs}ms`}</span>
+          </div>
+          <div className="ml-7 mt-1 text-xs text-text-mute">
+            Queues: <span className="font-mono">{queues}</span>
+            {groupPausedAt && <span className="ml-3">· Paused since <RelativeTime date={groupPausedAt} /></span>}
+          </div>
+        </button>
+        {groupId && (
+          <span className="absolute right-4 top-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleToggleGroupPause}
+              disabled={pauseGroup.isPending || resumeGroup.isPending}
+              title={groupPausedAt ? 'Resume group (takes effect on next heartbeat, ~3s)' : 'Pause group (takes effect on next heartbeat, ~3s)'}
+              aria-label={groupPausedAt ? 'Resume worker group' : 'Pause worker group'}
+              className="h-7 px-2"
+            >
+              {groupPausedAt ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+            </Button>
           </span>
-        </div>
-        <div className="ml-7 mt-1 text-xs text-text-mute">
-          Queues: <span className="font-mono">{queues}</span>
-          {groupPausedAt && <span className="ml-3">· Paused since <RelativeTime date={groupPausedAt} /></span>}
-        </div>
-      </button>
+        )}
+      </div>
 
       {expanded && (
         <div className="overflow-x-auto border-t border-border">
@@ -301,7 +309,7 @@ function TaskSection({ serverId, task }: { serverId: string; task: ServerTaskSum
           ) : (
             <span className="text-yellow-600 dark:text-yellow-400 font-medium">Disabled</span>
           )}
-          {task.lastDurationMs != null && <span>took {task.lastDurationMs.toFixed(0)}ms</span>}
+          {task.lastDurationMs != null && <span>took {formatDuration(task.lastDurationMs)}</span>}
           {task.lastRun && <span>ran <RelativeTime date={task.lastRun} /></span>}
         </div>
       </button>
@@ -332,7 +340,7 @@ function TaskSection({ serverId, task }: { serverId: string; task: ServerTaskSum
                           </span>
                         </td>
                         <td className="px-3.5 py-2 text-[12.5px] text-text-mute max-w-[300px] truncate">{log.message ?? '-'}</td>
-                        <td className="px-3.5 py-2 text-[12.5px] text-text-mute">{log.durationMs != null ? `${log.durationMs.toFixed(0)}ms` : '-'}</td>
+                        <td className="px-3.5 py-2 text-[12.5px] text-text-mute">{log.durationMs != null ? formatDuration(log.durationMs) : '—'}</td>
                         <td className="px-3.5 py-2 text-[12.5px]"><RelativeTime date={log.timestamp} /></td>
                       </tr>
                     ))}
@@ -340,7 +348,7 @@ function TaskSection({ serverId, task }: { serverId: string; task: ServerTaskSum
                 </table>
               </div>
               {logs.pageCount > 1 && (
-                <Pagination page={page} pageCount={logs.pageCount} onPageChange={setPage} />
+                <Pagination page={page} pageCount={logs.pageCount} onPageChange={setPage} className="px-3.5 py-2.5 mt-0 border-t border-border" />
               )}
             </>
           ) : (

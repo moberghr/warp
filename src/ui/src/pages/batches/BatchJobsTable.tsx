@@ -6,6 +6,7 @@ import { V2Tabs, type V2TabKind, type V2Tab } from '@/components/v2/V2Tabs';
 import { shortId, shortType } from '@/utils/format';
 import { State } from '@/types';
 import type { JobModel, PagedList } from '@/types';
+import { queryKeys } from '@/lib/queryClient';
 import * as api from '@/api';
 
 const PAGE_SIZE = 20;
@@ -103,9 +104,12 @@ export function BatchJobsTable({ parentId, parentKind = 'batch', onCountsUpdate 
 
   const fetchCounts = parentKind === 'message' ? api.getMessageJobCounts : api.getBatchJobCounts;
   const fetchJobs = parentKind === 'message' ? api.getMessageJobs : api.getBatchJobs;
+  const countsKey = parentKind === 'message'
+    ? queryKeys.messageJobCounts(parentId)
+    : queryKeys.batchJobCounts(parentId);
 
   const countsQuery = useQuery({
-    queryKey: [parentKind, parentId, 'jobs', 'counts'],
+    queryKey: countsKey,
     queryFn: () => fetchCounts(parentId),
   });
 
@@ -126,7 +130,9 @@ export function BatchJobsTable({ parentId, parentKind = 'batch', onCountsUpdate 
   }, [countsQuery.data, onCountsUpdate]);
 
   const jobsQuery = useQuery<PagedList<JobModel>>({
-    queryKey: [parentKind, parentId, 'jobs', active, page],
+    queryKey: parentKind === 'message'
+      ? queryKeys.messageJobs(parentId, page, PAGE_SIZE, active ?? undefined)
+      : queryKeys.batchJobs(parentId, page, PAGE_SIZE, active ?? undefined),
     queryFn: () => fetchJobs(parentId, page, PAGE_SIZE, active ?? undefined),
     enabled: active !== null,
     placeholderData: keepPreviousData,
@@ -200,7 +206,7 @@ export function BatchJobsTable({ parentId, parentKind = 'batch', onCountsUpdate 
         <tbody>
           {isEmpty && (
             <tr>
-              <td colSpan={6} style={{ textAlign: 'center', padding: '32px 14px', color: 'var(--text-mute)' }}>
+              <td colSpan={5} style={{ textAlign: 'center', padding: '32px 14px', color: 'var(--text-mute)' }}>
                 No jobs in this state.
               </td>
             </tr>

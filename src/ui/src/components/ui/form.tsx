@@ -130,5 +130,6 @@ export {
   FormControl,
   FormDescription,
   FormMessage,
+  // eslint-disable-next-line react-refresh/only-export-components -- shadcn form ships the hook with its components
   useFormField,
 };

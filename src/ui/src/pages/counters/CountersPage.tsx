@@ -15,6 +15,12 @@ const builtInColors: Record<string, string> = {
   'stats:requeued': '#B45309',
 };
 
+// Server hour buckets are UTC hour boundaries; build keys the same way
+// (local hour starts only coincide with UTC ones for whole-hour offsets).
+function latestUtcHourStart(): number {
+  return Math.floor(Date.now() / 3600000) * 3600000;
+}
+
 // Deterministic color from key for addon-defined metrics. Same key → same color across reloads.
 function colorFor(key: string): string {
   if (builtInColors[key]) {
@@ -54,10 +60,10 @@ export default function CountersPage() {
   return (
     <div className="flex flex-col gap-3 py-5">
       <p className="text-[12.5px] text-text-mute">
-        Built-in: <code className="font-mono text-text-default">stats:succeeded</code>,{' '}
-        <code className="font-mono text-text-default">stats:failed</code>,{' '}
-        <code className="font-mono text-text-default">stats:deleted</code>,{' '}
-        <code className="font-mono text-text-default">stats:requeued</code>. Addons can write their own keys here.
+        Built-in: <code className="font-mono text-foreground">stats:succeeded</code>,{' '}
+        <code className="font-mono text-foreground">stats:failed</code>,{' '}
+        <code className="font-mono text-foreground">stats:deleted</code>,{' '}
+        <code className="font-mono text-foreground">stats:requeued</code>. Addons can write their own keys here.
       </p>
 
       <Panel>
@@ -71,6 +77,7 @@ export default function CountersPage() {
               ].map(({ label, hours }) => (
                 <button
                   key={label}
+                  type="button"
                   onClick={() => setHistoryHours(hours)}
                   className={`px-2 py-0.5 text-[11px] font-medium rounded-md transition-colors ${
                     historyHours === hours
@@ -129,13 +136,12 @@ function HistoryChart({ points, hours }: { points: CounterHistoryPoint[] | null;
       return null;
     }
 
-    const now = new Date();
-    now.setMinutes(0, 0, 0);
+    const latestHour = latestUtcHourStart();
 
     const labels: string[] = [];
     const hourTimes: number[] = [];
     for (let i = hours - 1; i >= 0; i--) {
-      const t = now.getTime() - i * 3600000;
+      const t = latestHour - i * 3600000;
       hourTimes.push(t);
       const d = new Date(t);
       labels.push(

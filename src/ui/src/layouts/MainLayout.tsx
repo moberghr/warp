@@ -1,5 +1,4 @@
 import { Suspense, useEffect, useState } from 'react';
-import axios from 'axios';
 import { Outlet, useLocation } from 'react-router-dom';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useRealtimeStore } from '@/stores/realtime';
@@ -43,19 +42,6 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   // momentary failure doesn't hide all addon nav and push for the rest of the session.
   useEffect(() => {
     let cancelled = false;
-    api
-      .listConcurrencyLimits()
-      .then(() => {
-        if (!cancelled) setConcurrencyAvailable(true);
-      })
-      .catch((e: unknown) => {
-        if (cancelled) return;
-        if (axios.isAxiosError(e) && e.response?.status === 404) {
-          setConcurrencyAvailable(false);
-        } else {
-          setConcurrencyAvailable(false);
-        }
-      });
 
     const fetchAddons = async () => {
       try {

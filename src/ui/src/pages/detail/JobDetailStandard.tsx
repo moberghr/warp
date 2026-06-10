@@ -1,7 +1,7 @@
 import { Fragment, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Copy, RotateCw, Trash2, ExternalLink, X } from 'lucide-react';
-import { shortType, shortId, stateName, formatDateTime, detailPath } from '@/utils/format';
+import { shortType, shortId, stateName, formatDateTime, formatDuration, detailPath } from '@/utils/format';
 import { State } from '@/types';
 import type { UnifiedJobDetailModel, JobLogModel, ContinuationInfo } from '@/types';
 import { useDeleteJob, useRequeueJob } from '@/api/hooks/useJobs';
@@ -69,17 +69,6 @@ function eventStateBgVar(eventType: string): string {
   if (cls === 'completed')  return 'var(--state-completed-bg)';
   if (cls === 'failed')     return 'var(--state-failed-bg)';
   return 'var(--state-deleted-bg)';
-}
-
-function formatDuration(ms: number | null | undefined): string | null {
-  if (ms == null) return null;
-  if (ms < 1) return '<1ms';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  const mins = Math.floor(ms / 60000);
-  const secs = ((ms % 60000) / 1000).toFixed(0);
-
-  return `${mins}m ${secs}s`;
 }
 
 function getDuration(logs: JobLogModel[], idx: number): string | null {
@@ -178,7 +167,7 @@ function TitleStrip({ job, onRequeue, onDelete, isRequeuing, isDeleting }: Title
           marginBottom: 14,
         }}
       >
-        <Link to={`/jobs/${stateLabel.toLowerCase()}`} className="hover:text-foreground">
+        <Link to={`${kind === 'Message' ? '/messages' : '/jobs'}/${stateLabel.toLowerCase()}`} className="hover:text-foreground">
           {kind === 'Job' ? 'Jobs' : `${kind}s`}
         </Link>
         <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>

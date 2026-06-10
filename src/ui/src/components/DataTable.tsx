@@ -22,7 +22,7 @@ import { cn } from '@/lib/utils';
 // outer cell element.
 declare module '@tanstack/react-table' {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  interface ColumnMeta<TData extends unknown, TValue> {
+  interface ColumnMeta<TData, TValue> {
     headerClassName?: string;
     cellClassName?: string;
   }
@@ -32,6 +32,7 @@ export interface DataTablePagination {
   page: number;
   pageSize: number;
   pageCount: number;
+  totalCount?: number;
   onPageChange: (page: number) => void;
   onPageSizeChange?: (size: number) => void;
 }
@@ -148,6 +149,8 @@ export function DataTable<TData>({
           onPageChange={pagination.onPageChange}
           pageSize={pagination.pageSize}
           onPageSizeChange={pagination.onPageSizeChange}
+          totalCount={pagination.totalCount}
+          className="px-3.5 py-2.5 mt-0 border-t border-border"
         />
       )}
     </div>

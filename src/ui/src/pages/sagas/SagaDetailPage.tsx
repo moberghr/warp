@@ -1,56 +1,39 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
+import { useQueryClient } from '@tanstack/react-query';
 import { Panel, PanelHeader } from '@/components/v2/Panel';
 import { Button } from '@/components/ui/button';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
-import { useRefreshKey } from '@/hooks/useRefreshKey';
-import { useRealtimeRefetch } from '@/hooks/useRealtimeRefetch';
 import { usePageStore } from '@/stores/page';
-import type { SagaDetail, SagaActivityResponse } from '@/types';
+import { useSagaDetail, useSagaActivity } from '@/api/hooks/useSagas';
+import { queryScopes } from '@/lib/queryClient';
 import * as api from '@/api';
 
 export default function SagaDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [saga, setSaga] = useState<SagaDetail | null>(null);
-  const [activity, setActivity] = useState<SagaActivityResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [gone, setGone] = useState(false);
+  const qc = useQueryClient();
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmInput, setConfirmInput] = useState('');
   const [forcing, setForcing] = useState(false);
-  const refreshKey = useRefreshKey();
+  const [forceError, setForceError] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
-    if (!id) return;
-    try {
-      const [s, a] = await Promise.all([api.getSagaById(id), api.getSagaActivity(id)]);
-      setSaga(s);
-      setActivity(a);
-      setError(null);
-      setGone(false);
-    } catch (e) {
-      // A 404 mid-view means another operator force-completed the saga or it completed
-      // naturally during the polling window. Show a friendly message, not a generic error.
-      if (axios.isAxiosError(e) && e.response?.status === 404) {
-        setGone(true);
-        setError(null);
-        return;
-      }
-      setError('Unable to load saga');
-    }
-  }, [id]);
+  // Live updates arrive through the central realtime invalidation (the 'sagas'
+  // scope is invalidated on JobFinalized / MessageEnqueued bursts).
+  const detailQuery = useSagaDetail(id);
+  const activityQuery = useSagaActivity(id);
 
-  useEffect(() => {
-    fetchData();
-  }, [refreshKey, fetchData]);
+  const saga = detailQuery.data ?? null;
+  const activity = activityQuery.data ?? null;
 
-  // Live updates via the SignalR push bus: every routed message arrival or job
-  // finalization is a candidate event for the saga's state moving. 30s safety net
-  // catches anything the push channel misses (and matches other detail pages).
-  useRealtimeRefetch(['JobFinalized', 'MessageEnqueued'], fetchData);
+  // A 404 mid-view means another operator force-completed the saga or it completed
+  // naturally during the polling window. Show a friendly message, not a generic error.
+  const gone =
+    axios.isAxiosError(detailQuery.error) && detailQuery.error.response?.status === 404;
+  const error = forceError
+    ?? ((detailQuery.error && !gone) || activityQuery.error ? 'Unable to load saga' : null);
 
   useEffect(() => {
     if (!saga) {
@@ -61,7 +44,7 @@ export default function SagaDetailPage() {
       title: shortName(saga.type),
       subtitle: saga.correlationKey,
       right: (
-        <Button variant="destructive" size="sm" onClick={() => setShowConfirm(true)}>
+        <Button variant="destructive" size="sm" aria-haspopup="dialog" onClick={() => setShowConfirm(true)}>
           Force complete
         </Button>
       ),
@@ -77,9 +60,10 @@ export default function SagaDetailPage() {
     setForcing(true);
     try {
       await api.forceCompleteSaga(saga.id);
+      void qc.invalidateQueries({ queryKey: queryScopes.sagas });
       navigate('/sagas');
     } catch {
-      setError('Unable to force-complete saga');
+      setForceError('Unable to force-complete saga');
       setForcing(false);
     }
   };
@@ -158,7 +142,7 @@ export default function SagaDetailPage() {
                 <div key={entry.jobId} className="border-l-2 border-border pl-3 py-1">
                   <div className="flex items-baseline gap-2 text-[13px]">
                     <RelativeTime date={entry.createTime} />
-                    <Link to={`/detail/${entry.jobId}`} className="font-medium text-primary hover:underline">
+                    <Link to={`/jobs/detail/${entry.jobId}`} className="font-medium text-primary hover:underline">
                       {entry.messageType}
                     </Link>
                     <StateBadge state={entry.jobState} />
@@ -248,7 +232,7 @@ function StateBadge({ state }: { state: string }) {
   const cls =
     state === 'Completed' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' :
     state === 'Failed' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' :
-    state === 'Processing' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400' :
+    state === 'Processing' ? 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400' :
     'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400';
   return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>{state}</span>;
 }

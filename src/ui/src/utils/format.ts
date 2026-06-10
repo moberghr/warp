@@ -75,6 +75,17 @@ export function detailPath(id: string, kind?: number | null): string {
   return `/detail/${id}`;
 }
 
+export function formatDuration(ms: number | null | undefined): string | null {
+  if (ms == null) return null;
+  if (ms < 1) return '<1ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60000);
+  const secs = ((ms % 60000) / 1000).toFixed(0);
+
+  return `${mins}m ${secs}s`;
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;

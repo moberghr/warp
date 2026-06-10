@@ -134,11 +134,11 @@ export default function RecurringDetailPage() {
           <span className="text-text-mute italic">{describeCron(detail.cron)}</span>
         )}
         {detail.disabledAt ? (
-          <span className="inline-flex items-center rounded-full bg-orange-100 px-2.5 py-0.5 text-xs font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
+          <span className="inline-flex items-center rounded-full bg-warp-amber-soft px-2.5 py-0.5 text-xs font-medium text-warp-amber">
             Disabled <RelativeTime date={detail.disabledAt} />
           </span>
         ) : (
-          <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400">Enabled</span>
+          <span className="inline-flex items-center rounded-full bg-warp-green-soft px-2.5 py-0.5 text-xs font-medium text-warp-green">Enabled</span>
         )}
       </div>
 
@@ -201,7 +201,7 @@ export default function RecurringDetailPage() {
                         <tr key={entry.jobId ?? `log-${idx}`} className="border-b border-border last:border-b-0 hover:bg-panel-2/60">
                           <td className="px-3.5 py-2 font-mono text-[12.5px]">
                             {entry.jobExists && entry.jobId ? (
-                              <Link to={`/detail/${entry.jobId}`} className="text-primary hover:underline">{shortId(entry.jobId)}</Link>
+                              <Link to={`/jobs/detail/${entry.jobId}`} className="text-primary hover:underline">{shortId(entry.jobId)}</Link>
                             ) : entry.jobId ? (
                               <span className="text-text-mute">{shortId(entry.jobId)}</span>
                             ) : (
@@ -210,7 +210,7 @@ export default function RecurringDetailPage() {
                           </td>
                           <td className="px-3.5 py-2 text-[12.5px]">
                             {entry.skipped ? (
-                              <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">Skipped</span>
+                              <span className="inline-flex items-center rounded-full bg-warp-amber-soft px-2 py-0.5 text-xs font-medium text-warp-amber">Skipped</span>
                             ) : entry.jobExists && entry.currentState != null ? (
                               <StateBadge state={entry.currentState} />
                             ) : (
@@ -229,6 +229,8 @@ export default function RecurringDetailPage() {
                   onPageChange={setPage}
                   pageSize={pageSize}
                   onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
+                  totalCount={jobs.totalCount}
+                  className="px-3.5 py-2.5 mt-0 border-t border-border"
                 />
               </>
             ) : (

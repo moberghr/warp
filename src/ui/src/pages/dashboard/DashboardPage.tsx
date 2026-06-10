@@ -23,15 +23,18 @@ import type { StatsHistoryPoint } from '@/types';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, ChartTooltip, Legend);
 
+const HourMs = 3_600_000;
+
 function padHistory(data: StatsHistoryPoint[], hours: number) {
-  const now = new Date();
-  now.setMinutes(0, 0, 0);
+  // Server hour buckets are UTC hour boundaries; build keys the same way
+  // (local hour starts only coincide with UTC ones for whole-hour offsets).
+  const latestHour = Math.floor(Date.now() / HourMs) * HourMs;
   const dataMap = new Map(data.map((d) => [new Date(d.hour).getTime(), d]));
 
   if (hours <= 24) {
     const result = [];
     for (let i = hours - 1; i >= 0; i--) {
-      const hourDate = new Date(now.getTime() - i * 3600000);
+      const hourDate = new Date(latestHour - i * HourMs);
       const point = dataMap.get(hourDate.getTime());
       result.push({
         label: hourDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
@@ -42,25 +45,28 @@ function padHistory(data: StatsHistoryPoint[], hours: number) {
     return result;
   }
 
+  const dayTotals = new Map<number, { succeeded: number; failed: number }>();
+  for (const point of data) {
+    const day = new Date(point.hour);
+    day.setHours(0, 0, 0, 0);
+    const totals = dayTotals.get(day.getTime()) ?? { succeeded: 0, failed: 0 };
+    totals.succeeded += point.succeeded;
+    totals.failed += point.failed;
+    dayTotals.set(day.getTime(), totals);
+  }
+
   const days = Math.ceil(hours / 24);
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
   const result = [];
   for (let d = days - 1; d >= 0; d--) {
-    const dayStart = new Date(now.getTime() - d * 86400000);
-    dayStart.setHours(0, 0, 0, 0);
-    let succeeded = 0;
-    let failed = 0;
-    for (let h = 0; h < 24; h++) {
-      const hourKey = new Date(dayStart.getTime() + h * 3600000).getTime();
-      const point = dataMap.get(hourKey);
-      if (point) {
-        succeeded += point.succeeded;
-        failed += point.failed;
-      }
-    }
+    const dayStart = new Date(todayStart);
+    dayStart.setDate(todayStart.getDate() - d);
+    const totals = dayTotals.get(dayStart.getTime());
     result.push({
       label: `${dayStart.toLocaleDateString([], { weekday: 'short' })} ${String(dayStart.getDate()).padStart(2, '0')}.${String(dayStart.getMonth() + 1).padStart(2, '0')}`,
-      succeeded,
-      failed,
+      succeeded: totals?.succeeded ?? 0,
+      failed: totals?.failed ?? 0,
     });
   }
   return result;
@@ -75,12 +81,23 @@ export default function DashboardPage() {
   const [historyHours, setHistoryHours] = useState(24);
 
   useEffect(() => {
-    getStatsHistory(historyHours).then(setHistory).catch(() => {});
-    const id = setInterval(() => {
-      getStatsHistory(historyHours).then(setHistory).catch(() => {});
-    }, 60000);
+    let cancelled = false;
+    const fetchHistory = () => {
+      getStatsHistory(historyHours)
+        .then((data) => {
+          if (!cancelled) {
+            setHistory(data);
+          }
+        })
+        .catch(() => {});
+    };
+    fetchHistory();
+    const id = setInterval(fetchHistory, 60000);
 
-    return () => clearInterval(id);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [historyHours]);
 
   useEffect(() => {
@@ -186,12 +203,12 @@ export default function DashboardPage() {
         />
       </div>
 
-      <div className="rounded-xl border border-warp-border bg-warp-surface p-4">
+      <div className="rounded-xl border border-border bg-panel p-4">
         <div className="mb-2 text-[13px] font-medium text-foreground">Realtime — last 60 seconds</div>
         <RealtimeChart />
       </div>
 
-      <div className="rounded-xl border border-warp-border bg-warp-surface p-4">
+      <div className="rounded-xl border border-border bg-panel p-4">
         <div className="mb-2 flex items-center justify-between">
           <div className="text-[13px] font-medium text-foreground">History</div>
           <div className="flex gap-1">
@@ -202,10 +219,7 @@ export default function DashboardPage() {
               <button
                 key={label}
                 type="button"
-                onClick={() => {
-                  setHistoryHours(hours);
-                  getStatsHistory(hours).then(setHistory).catch(() => {});
-                }}
+                onClick={() => setHistoryHours(hours)}
                 className={`rounded-md px-2 py-0.5 text-xs transition-colors ${
                   historyHours === hours
                     ? 'bg-primary text-primary-foreground'
@@ -235,6 +249,11 @@ function HistoryChart({ data }: { data: { label: string; succeeded: number; fail
     const isDark = document.documentElement.classList.contains('dark');
     const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)';
     const textColor = isDark ? '#888' : '#666';
+    const css = getComputedStyle(document.documentElement);
+    const okColor = css.getPropertyValue('--state-completed').trim() || '#22c55e';
+    const okBg = css.getPropertyValue('--state-completed-bg').trim() || 'rgba(34, 197, 94, 0.15)';
+    const failColor = css.getPropertyValue('--state-failed').trim() || '#ef4444';
+    const failBg = css.getPropertyValue('--state-failed-bg').trim() || 'rgba(239, 68, 68, 0.15)';
 
     chartRef.current = new Chart(canvasRef.current, {
       type: 'line',
@@ -244,8 +263,8 @@ function HistoryChart({ data }: { data: { label: string; succeeded: number; fail
           {
             label: 'Succeeded',
             data: [],
-            borderColor: '#22c55e',
-            backgroundColor: 'rgba(34, 197, 94, 0.15)',
+            borderColor: okColor,
+            backgroundColor: okBg,
             borderWidth: 2,
             fill: true,
             pointRadius: 0,
@@ -255,8 +274,8 @@ function HistoryChart({ data }: { data: { label: string; succeeded: number; fail
           {
             label: 'Failed',
             data: [],
-            borderColor: '#ef4444',
-            backgroundColor: 'rgba(239, 68, 68, 0.15)',
+            borderColor: failColor,
+            backgroundColor: failBg,
             borderWidth: 2,
             fill: true,
             pointRadius: 0,

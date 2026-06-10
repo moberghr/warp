@@ -49,6 +49,8 @@ export function useRealtimeInvalidation() {
         queryScopes.dashboard,
         queryScopes.messages,
         queryScopes.batches,
+        queryScopes.recurring,
+        queryScopes.sagas,
       ]);
     };
 
@@ -57,6 +59,7 @@ export function useRealtimeInvalidation() {
         queryScopes.messages,
         queryScopes.jobs,
         queryScopes.dashboard,
+        queryScopes.sagas,
       ]);
     };
 

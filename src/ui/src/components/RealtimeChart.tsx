@@ -20,7 +20,11 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
   const rafId = useRef(0);
   const realtimeData = useDashboardStore((s) => s.realtimeData);
 
-  const vals = realtimeData.map((p) => p.succeeded + p.failed);
+  // The store buffer holds up to an hour of samples; the panel claims
+  // "last 60 seconds", so window the header stats to the newest sample.
+  const lastTs = realtimeData.length > 0 ? realtimeData[realtimeData.length - 1].ts : 0;
+  const cutoff = lastTs - 60;
+  const vals = realtimeData.filter((p) => p.ts >= cutoff).map((p) => p.succeeded + p.failed);
   const current = vals.length > 0 ? Math.round(vals[vals.length - 1]) : 0;
   const max = vals.length > 0 ? Math.round(Math.max(...vals)) : 0;
   const avg = vals.length >= 5 ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
@@ -31,6 +35,11 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
     const isDark = document.documentElement.classList.contains('dark');
     const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)';
     const textColor = isDark ? '#888' : '#666';
+    const css = getComputedStyle(document.documentElement);
+    const okColor = css.getPropertyValue('--state-completed').trim() || '#22c55e';
+    const okBg = css.getPropertyValue('--state-completed-bg').trim() || 'rgba(34, 197, 94, 0.15)';
+    const failColor = css.getPropertyValue('--state-failed').trim() || '#ef4444';
+    const failBg = css.getPropertyValue('--state-failed-bg').trim() || 'rgba(239, 68, 68, 0.15)';
     const now = Date.now();
 
     const storeData = useDashboardStore.getState().realtimeData;
@@ -45,8 +54,8 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
         datasets: [
           {
             label: 'Succeeded/s',
-            borderColor: '#4338CA',
-            backgroundColor: 'rgba(67, 56, 202, 0.15)',
+            borderColor: okColor,
+            backgroundColor: okBg,
             borderWidth: 2,
             fill: true,
             pointRadius: 0,
@@ -55,8 +64,8 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
           },
           {
             label: 'Failed/s',
-            borderColor: '#ef4444',
-            backgroundColor: 'rgba(239, 68, 68, 0.15)',
+            borderColor: failColor,
+            backgroundColor: failBg,
             borderWidth: 2,
             fill: true,
             pointRadius: 0,
@@ -90,13 +99,17 @@ export function RealtimeChart({ height = 200 }: { height?: number }) {
     });
 
     // Scroll at 30fps — enough for smooth appearance, less CPU than 60fps
-    const scroll = () => {
+    let lastFrame = 0;
+    const scroll = (frameTime: number) => {
       if (!chartRef.current) return;
-      const t = Date.now();
-      const xScale = chartRef.current.options.scales!.x!;
-      xScale.min = t - 62000;
-      xScale.max = t - 2000;
-      chartRef.current.update('none');
+      if (frameTime - lastFrame >= 33) {
+        lastFrame = frameTime;
+        const t = Date.now();
+        const xScale = chartRef.current.options.scales!.x!;
+        xScale.min = t - 62000;
+        xScale.max = t - 2000;
+        chartRef.current.update('none');
+      }
       rafId.current = requestAnimationFrame(scroll);
     };
     rafId.current = requestAnimationFrame(scroll);

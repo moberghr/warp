@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Panel } from '@/components/v2/Panel';
 import { StateBadge } from '@/components/StateBadge';
@@ -7,18 +7,15 @@ import { shortId } from '@/utils/format';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { usePageParam } from '@/hooks/usePageParam';
 import { usePageStore } from '@/stores/page';
 import { useBatchesList } from '@/api/hooks/useBatches';
 import { GroupStateRail } from '@/pages/jobs/GroupStateRail';
 
 export default function BatchesPage() {
   const { state } = useParams<{ state?: string }>();
-  const [page, setPage] = useState(0);
+  const [page, setPage] = usePageParam();
   const [pageSize, setPageSize] = usePersistedPageSize();
-
-  useEffect(() => {
-    setPage(0);
-  }, [state]);
 
   const query = useBatchesList(state, page, pageSize);
 
@@ -98,7 +95,7 @@ export default function BatchesPage() {
         </div>
       </Panel>
 
-      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(s) => { setPageSize(s); setPage(0); }} />
+      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(s) => { setPageSize(s); setPage(0); }} totalCount={data.totalCount} />
       </>
       )}
       </div>

@@ -1,8 +1,9 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { ColumnDef } from '@tanstack/react-table';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { DataTable } from '@/components/DataTable';
+import { usePageStore } from '@/stores/page';
 import { useBackgroundServices } from '@/api/hooks/useBackgroundServices';
 import { ServiceScope } from '@/types/backgroundServices';
 import type { BackgroundServiceListItem } from '@/types/backgroundServices';
@@ -10,6 +11,14 @@ import type { BackgroundServiceListItem } from '@/types/backgroundServices';
 export default function BackgroundServicesList() {
   const navigate = useNavigate();
   const { data: items, isLoading, isError } = useBackgroundServices();
+
+  useEffect(() => {
+    usePageStore.getState().set({
+      title: 'Background Services',
+      subtitle: 'Long-running hosted services supervised by Warp',
+    });
+    return () => usePageStore.getState().reset();
+  }, []);
 
   const columns = useMemo<ColumnDef<BackgroundServiceListItem>[]>(
     () => [
@@ -21,7 +30,7 @@ export default function BackgroundServicesList() {
             {row.original.name}
             {row.original.configurationMismatchCount > 0 && (
               <span
-                className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
+                className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-warp-amber-soft text-warp-amber"
                 title={`${row.original.configurationMismatchCount} instance(s) have a configuration mismatch`}
               >
                 Mismatch
@@ -45,7 +54,7 @@ export default function BackgroundServicesList() {
         header: 'Restarts',
         cell: ({ row }) =>
           row.original.totalRestartCount > 0 ? (
-            <span className="tabular-nums text-amber-600 dark:text-amber-400">
+            <span className="tabular-nums text-warp-amber">
               {row.original.totalRestartCount}
             </span>
           ) : (
@@ -54,10 +63,10 @@ export default function BackgroundServicesList() {
       },
       {
         accessorKey: 'lastErrorType',
-        header: 'Last Error',
+        header: 'Last error',
         cell: ({ row }) =>
           row.original.lastErrorType ? (
-            <span className="text-red-600 dark:text-red-400 font-mono text-xs">
+            <span className="text-warp-red font-mono text-xs">
               {shortTypeName(row.original.lastErrorType)}
             </span>
           ) : (
@@ -72,9 +81,7 @@ export default function BackgroundServicesList() {
   if (isLoading || !items) return <LoadingState />;
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-4">Background Services</h1>
-
+    <div className="py-5">
       <DataTable
         columns={columns}
         data={items}
@@ -90,8 +97,8 @@ function ScopeBadge({ scope }: { scope: number }) {
   const label = scope === ServiceScope.Singleton ? 'Singleton' : 'Per Server';
   const cls =
     scope === ServiceScope.Singleton
-      ? 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400'
-      : 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400';
+      ? 'bg-warp-purple-soft text-warp-purple'
+      : 'bg-warp-blue-soft text-warp-blue';
 
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
@@ -123,12 +130,12 @@ function StatusSummary({ item }: { item: BackgroundServiceListItem }) {
     <span className="flex items-center gap-1.5 flex-wrap">
       <span className="text-sm">{parts.join(', ')}</span>
       {hasFault && (
-        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-warp-red-soft text-warp-red">
           {item.faultedCount} faulted
         </span>
       )}
       {item.configurationMismatchCount > 0 && (
-        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
+        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-warp-amber-soft text-warp-amber">
           {item.configurationMismatchCount} mismatch
         </span>
       )}

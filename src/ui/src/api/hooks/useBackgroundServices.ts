@@ -17,3 +17,12 @@ export function useBackgroundServiceDetail(name: string | undefined) {
     refetchInterval: 2_000,
   });
 }
+
+export function useBackgroundServiceLease(name: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ['background-services', name ?? '', 'lease'] as const,
+    queryFn: () => api.getBackgroundServiceLease(name!),
+    enabled: !!name && enabled,
+    refetchInterval: 2_000,
+  });
+}
