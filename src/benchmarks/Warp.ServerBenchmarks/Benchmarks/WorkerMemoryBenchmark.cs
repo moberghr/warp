@@ -45,7 +45,7 @@ public class WorkerMemoryBenchmark
             Guid.NewGuid(),
             services.GetRequiredService<IServiceScopeFactory>(),
             services.GetRequiredService<ILogger<WarpWorkerService<TestContext>>>(),
-            services.GetRequiredService<IOptions<WarpWorkerConfiguration>>(),
+            services.GetRequiredService<IOptions<WarpServerConfiguration>>(),
             new WorkerGroupConfiguration { Queues = ["default"], WorkerCount = 1 },
             services.GetRequiredService<TimeProvider>(),
             services.GetRequiredService<IWarpSqlQueries<TestContext>>(),
@@ -56,7 +56,7 @@ public class WorkerMemoryBenchmark
         await using var scope = services.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
         var now = DateTime.UtcNow;
-        var config = services.GetRequiredService<IOptions<WarpWorkerConfiguration>>().Value;
+        var config = services.GetRequiredService<IOptions<WarpServerConfiguration>>().Value;
         ctx.Set<Server>().Add(new Server
         {
             Id = config.ServerId,

@@ -32,7 +32,7 @@ public class WarpDispatcher<TContext> : BackgroundService
     public WarpDispatcher(
         IServiceScopeFactory scopeFactory,
         ILogger<WarpDispatcher<TContext>> logger,
-        IOptions<WarpWorkerConfiguration> configuration,
+        IOptions<WarpServerConfiguration> configuration,
         WorkerGroupConfiguration groupConfiguration,
         TimeProvider timeProvider,
         PauseStateHolder pauseStateHolder,

@@ -1,0 +1,1 @@
+import{Hn as e,In as t,zn as n}from"./index-j09aW4CR.js";var r=e(n(),1);function i(){let[e,n]=t();return[Number(e.get(`page`)??`0`)||0,(0,r.useCallback)(e=>{n(t=>{let n=new URLSearchParams(t);return e<=0?n.delete(`page`):n.set(`page`,String(e)),n},{replace:!0})},[n])]}export{i as t};

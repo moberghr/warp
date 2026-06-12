@@ -12,7 +12,7 @@ Opt-in addon — register with `opt.AddTimeout()` on the builder.
 
 ```csharp
 // Registration
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddRetry();        // optional — register BEFORE AddTimeout for Fail mode to retry

@@ -4,7 +4,7 @@ namespace Warp.Worker;
 /// In-process singleton that carries the DB-generated WorkerGroup IDs and assigned worker IDs
 /// from <see cref="WarpServerRegistration{TContext}"/> to the worker host services. All three
 /// are <c>IHostedService</c> implementations running in the same process; startup order is
-/// guaranteed by DI registration order in <c>AddWarpWorker</c>.
+/// guaranteed by DI registration order in <c>AddWarpServer</c>.
 /// <para>
 /// <see cref="Set"/> is expected to be called exactly once per process. A second call is a
 /// bug — most likely a partial host recycle where the state singleton survived but the

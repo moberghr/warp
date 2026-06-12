@@ -19,7 +19,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
     {
     }
 
-    private static void ConfigureBatchedServer(WarpWorkerBuilder<TestContext> config)
+    private static void ConfigureBatchedServer(WarpServerBuilder<TestContext> config)
     {
         config.UseDispatcher = true;
         config.WorkerCount = 5;

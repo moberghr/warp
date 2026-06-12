@@ -33,7 +33,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 ### 2. Register Warp
 
-Handlers (`IJobHandler<>`, `IMessageHandler<>`, `IRequestHandler<,>`) and pipeline behaviors (`IPipelineBehavior<,>`) are discovered by Warp's source generator at compile time — there are no `AddJobHandlers(asm)` / `AddPipelineBehaviors(asm)` extension methods. The source generator emits a `[ModuleInitializer]` per assembly that registers all discovered handlers into a public registry, which `AddWarp` / `AddWarpWorker` replays onto your `IServiceCollection`. Define a handler class, build, and it's wired.
+Handlers (`IJobHandler<>`, `IMessageHandler<>`, `IRequestHandler<,>`) and pipeline behaviors (`IPipelineBehavior<,>`) are discovered by Warp's source generator at compile time — there are no `AddJobHandlers(asm)` / `AddPipelineBehaviors(asm)` extension methods. The source generator emits a `[ModuleInitializer]` per assembly that registers all discovered handlers into a public registry, which `AddWarp` / `AddWarpServer` replays onto your `IServiceCollection`. Define a handler class, build, and it's wired.
 
 For publisher-only apps (create jobs but don't process them):
 
@@ -44,7 +44,7 @@ builder.Services.AddWarp<AppDbContext>(opt => opt.UsePostgreSql());
 For worker apps (create AND process jobs):
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();   // required — provider opt-in
     opt.WorkerCount = 10;
@@ -53,7 +53,7 @@ builder.Services.AddWarpWorker<AppDbContext>(opt =>
 });
 ```
 
-`AddWarpWorker` includes `AddWarp` internally — don't call both. `opt.UsePostgreSql()` (or `opt.UseSqlServer()`) **must** be called inside the lambda so the provider package's row-locking and DB-push wiring takes effect.
+`AddWarpServer` includes `AddWarp` internally — don't call both. `opt.UsePostgreSql()` (or `opt.UseSqlServer()`) **must** be called inside the lambda so the provider package's row-locking and DB-push wiring takes effect.
 
 > **Multi-project solutions.** The source generator scans handlers transitively across project references and registers them all into the host. If a host references an assembly whose handlers it doesn't want in its DI graph (e.g., an API host that pulls in worker-only handlers via a Domain → Worker → Domain chain), opt that assembly out: `opt.ExcludeHandlersFromAssembly(typeof(WorkerOnlyMarker).Assembly)`. See the Multi-Project Source Generation page for the full picture.
 
@@ -97,7 +97,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
 
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();   // provider opt-in (required)
     opt.WorkerCount = 5;
@@ -236,7 +236,7 @@ public class GenerateReportHandler : IJobHandler<GenerateReport> { ... }
 Or configure global defaults via the builder lambda:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddRetry(o => { o.MaxRetries = 3; o.Delays = [15, 60, 300]; o.JitterFactor = 0.2; });
@@ -313,7 +313,7 @@ If a worker picks up a job whose mutex is already held by another processing job
 
 ### NoRestart (stale-recovery opt-out)
 
-Opt-in addon: `opt.AddNoRestart()` on the `AddWarp`/`AddWarpWorker` builder. Lets specific job types stay `Failed` on worker crash instead of being auto-requeued by `StaleJobRecovery`.
+Opt-in addon: `opt.AddNoRestart()` on the `AddWarp`/`AddWarpServer` builder. Lets specific job types stay `Failed` on worker crash instead of being auto-requeued by `StaleJobRecovery`.
 
 ```csharp
 [NoRestart]
@@ -324,10 +324,10 @@ Override chain (first non-null wins): per-publish `.WithRestart(bool)` > `[NoRes
 
 ### Circuit Breaker
 
-Opt-in addon: `opt.AddCircuitBreaker(o => ...)` on the `AddWarp`/`AddWarpWorker` builder. The `CircuitBreakerState` entity is part of Warp's base schema (registered unconditionally), so no separate migration is required when you turn the addon on. Opens after `Threshold` consecutive failures, stays open for `Duration`, then transitions to **HalfOpen** where an atomic CAS guarantees exactly one worker probes while others reschedule.
+Opt-in addon: `opt.AddCircuitBreaker(o => ...)` on the `AddWarp`/`AddWarpServer` builder. The `CircuitBreakerState` entity is part of Warp's base schema (registered unconditionally), so no separate migration is required when you turn the addon on. Opens after `Threshold` consecutive failures, stays open for `Duration`, then transitions to **HalfOpen** where an atomic CAS guarantees exactly one worker probes while others reschedule.
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddCircuitBreaker(o =>
@@ -774,10 +774,10 @@ builder.Services.AddWarp<AppDbContext>(options =>
 });
 ```
 
-### Worker Configuration (AddWarpWorker)
+### Worker Configuration (AddWarpServer)
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpServer<AppDbContext>(options =>
 {
     // Worker
     options.WorkerCount = 10;                                  // Concurrent workers (default: min(CPU*5, 20))
@@ -832,7 +832,7 @@ builder.Services.AddWarpWorker<AppDbContext>(options =>
 Split workers into groups with independent queues and polling intervals:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpServer<AppDbContext>(options =>
 {
     // Top-level settings become the first worker group
     options.WorkerCount = 5;
@@ -1116,7 +1116,7 @@ Endpoint metadata is populated automatically: `.Accepts<TRequest>("application/j
 
 ## DI Services Available
 
-After calling `AddWarp<TContext>()` or `AddWarpWorker<TContext>()`, these services are available via dependency injection:
+After calling `AddWarp<TContext>()` or `AddWarpServer<TContext>()`, these services are available via dependency injection:
 
 | Service | Purpose |
 |---------|---------|
@@ -1308,8 +1308,8 @@ IServiceCollection.AddWarp<TContext>();
 IServiceCollection.AddWarp<TContext>(Action<WarpBuilder<TContext>> configure);
 
 // Worker registration (includes AddWarp internally)
-IServiceCollection.AddWarpWorker<TContext>();
-IServiceCollection.AddWarpWorker<TContext>(Action<WarpWorkerBuilder<TContext>> configure);
+IServiceCollection.AddWarpServer<TContext>();
+IServiceCollection.AddWarpServer<TContext>(Action<WarpServerBuilder<TContext>> configure);
 
 // Addon opt-ins on the builder lambda parameter (IWarpBuilder<TContext>)
 opt.UsePostgreSql() / opt.UseSqlServer();    // required provider opt-in
@@ -1441,7 +1441,7 @@ Worker app (background service):
 ```csharp
 // Only processes jobs
 builder.Services.AddDbContext<AppDbContext>(o => o.UseNpgsql(connStr));
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.WorkerCount = 20;
@@ -1449,7 +1449,7 @@ builder.Services.AddWarpWorker<AppDbContext>(opt =>
 });
 ```
 
-Both apps share the same database. The worker polls for and executes jobs created by the publisher. Handlers are picked up by the source generator in whichever project defines them and replayed into the host's DI graph by `AddWarp` / `AddWarpWorker` — no `AddJobHandlers(asm)` calls.
+Both apps share the same database. The worker polls for and executes jobs created by the publisher. Handlers are picked up by the source generator in whichever project defines them and replayed into the host's DI graph by `AddWarp` / `AddWarpServer` — no `AddJobHandlers(asm)` calls.
 
 ---
 
@@ -1459,7 +1459,7 @@ Both apps share the same database. The worker polls for and executes jobs create
 2. **Call SaveChangesAsync()** after publishing — jobs are not committed until you save
 3. **Failed jobs never auto-delete** — they persist until manually handled
 4. **Queue order is alphabetical** — use prefixes like "a-", "b-", "c-" for priority
-5. **AddWarpWorker includes AddWarp** — don't call both
+5. **AddWarpServer includes AddWarp** — don't call both
 6. **UseWarpUI after auth middleware** — so HttpContext.User is populated
 7. **TimeProvider is injectable** — use it for testability, Warp registers TimeProvider.System by default
 8. **Handler ILogger output is captured** — logs are flushed every ~1s and appear in the dashboard in real time

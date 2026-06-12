@@ -33,10 +33,10 @@ public static class WarpBuilderExtensions
 
     /// <summary>
     /// Binds a configuration section onto the builder's config fields (inherited from
-    /// <see cref="WarpConfiguration"/> / <c>WarpWorkerConfiguration</c>). Intended for the
+    /// <see cref="WarpConfiguration"/> / <c>WarpServerConfiguration</c>). Intended for the
     /// appsettings.json pattern:
     /// <code>
-    /// services.AddWarpWorker&lt;AppDbContext&gt;(opt =>
+    /// services.AddWarpServer&lt;AppDbContext&gt;(opt =>
     /// {
     ///     opt.BindConfiguration(builder.Configuration.GetSection("Warp"));
     ///     opt.UsePostgreSql();

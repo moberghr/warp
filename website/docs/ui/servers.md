@@ -9,7 +9,7 @@ Live server and worker status. Shows custom server name, worker count, start tim
 Configure a custom server name:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(options =>
+builder.Services.AddWarpServer<AppDbContext>(options =>
 {
     options.ServerName = "my-api-server";
 });

@@ -13,7 +13,7 @@ Use `[Semaphore]` when you want to **cap** N concurrent jobs per key. Use `[Mute
 Same addon as Mutex — `opt.AddConcurrency()` registers both:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddConcurrency();

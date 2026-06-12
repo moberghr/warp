@@ -9,7 +9,7 @@ Replaces polling wake-up with push notifications — PostgreSQL `LISTEN`/`NOTIFY
 ## Setup
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();         // or opt.UseSqlServer()
 

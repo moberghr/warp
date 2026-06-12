@@ -9,7 +9,7 @@ public static class SagaServiceConfiguration
 {
     /// <summary>
     /// Contributes the <see cref="Data.Entities.SagaState"/> entity to the user's DbContext and
-    /// registers the saga infrastructure services. Call once per <c>AddWarp</c>/<c>AddWarpWorker</c>
+    /// registers the saga infrastructure services. Call once per <c>AddWarp</c>/<c>AddWarpServer</c>
     /// lambda. Individual saga handlers are registered separately via
     /// <see cref="AddSagaHandler{THandler}"/>.
     /// </summary>

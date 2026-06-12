@@ -13,7 +13,7 @@ public interface IBackgroundServiceStatusObserver
 
 /// <summary>
 /// Production default implementation of <see cref="IBackgroundServiceStatusObserver"/>. No-op
-/// singleton registered by <c>AddWarpWorker</c>. Tests replace it with a custom observer via DI.
+/// singleton registered by <c>AddWarpServer</c>. Tests replace it with a custom observer via DI.
 /// External consumers that want to explicitly pass a no-op instance can reference this type
 /// directly without relying on Warp internals.
 /// </summary>

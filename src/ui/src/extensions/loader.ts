@@ -22,7 +22,10 @@ export async function loadExtensions(): Promise<ExtensionManifest[]> {
     return [];
   }
 
-  if (manifests.length === 0) {
+  // Guard against a 200 with the wrong body (e.g. an SPA-fallback index.html when
+  // the endpoint is misrouted) — treat anything that isn't a manifest array as "none"
+  // rather than letting a non-array crash the nav (extensions.flatMap downstream).
+  if (!Array.isArray(manifests) || manifests.length === 0) {
     return [];
   }
 

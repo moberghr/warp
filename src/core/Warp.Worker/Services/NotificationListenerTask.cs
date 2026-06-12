@@ -11,14 +11,14 @@ namespace Warp.Worker.Services;
 /// Hosted service that consumes <see cref="IWarpNotificationTransport.ListenAsync"/> and
 /// signals the in-process background tasks (dispatcher, MessageRouter, Orchestrator)
 /// on each notification. Only registered when the user opts in via
-/// <c>opt.UseDatabasePush() (inside the AddWarp/AddWarpWorker lambda)</c>.
+/// <c>opt.UseDatabasePush() (inside the AddWarp/AddWarpServer lambda)</c>.
 /// </summary>
 public class NotificationListenerTask<TContext> : BackgroundService
     where TContext : DbContext
 {
     private readonly IWarpNotificationTransport _transport;
     private readonly WarpDatabasePushConfiguration _options;
-    private readonly WarpWorkerConfiguration _workerConfiguration;
+    private readonly WarpServerConfiguration _workerConfiguration;
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly DispatcherRegistry _dispatcherRegistry;
     private readonly ILogger<NotificationListenerTask<TContext>> _logger;
@@ -26,7 +26,7 @@ public class NotificationListenerTask<TContext> : BackgroundService
     public NotificationListenerTask(
         IWarpNotificationTransport transport,
         WarpDatabasePushConfiguration options,
-        IOptions<WarpWorkerConfiguration> workerConfiguration,
+        IOptions<WarpServerConfiguration> workerConfiguration,
         ServerTaskSignals<TContext> signals,
         DispatcherRegistry dispatcherRegistry,
         ILogger<NotificationListenerTask<TContext>> logger)
@@ -51,7 +51,7 @@ public class NotificationListenerTask<TContext> : BackgroundService
         {
             _logger.LogWarning(
                 "Warp DB push is enabled but UseDispatcher=false; worker fetch will keep polling. " +
-                "Enable UseDispatcher on WarpWorkerConfiguration to get the full benefit.");
+                "Enable UseDispatcher on WarpServerConfiguration to get the full benefit.");
         }
 
         var delay = _options.ReconnectInitialDelay;

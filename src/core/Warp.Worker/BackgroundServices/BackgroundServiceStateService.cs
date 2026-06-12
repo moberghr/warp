@@ -23,7 +23,7 @@ public sealed class BackgroundServiceStateService<TContext> : IBackgroundService
     public BackgroundServiceStateService(
         TContext context,
         TimeProvider time,
-        IOptions<WarpWorkerConfiguration> options,
+        IOptions<WarpServerConfiguration> options,
         IWarpSqlQueries<TContext> sqlQueries)
     {
         _context = context;

@@ -8,10 +8,10 @@ When a worker crashes mid-job, Warp's `StaleJobRecovery` normally requeues the j
 
 ## Setup
 
-NoRestart is an opt-in addon. Register it alongside `AddWarp` / `AddWarpWorker`:
+NoRestart is an opt-in addon. Register it alongside `AddWarp` / `AddWarpServer`:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>();
+builder.Services.AddWarpServer<AppDbContext>();
 builder.Services.AddWarpNoRestart();
 ```
 
@@ -61,10 +61,10 @@ await publisher.Enqueue(
 
 ### Global default
 
-Set `RestartStaleJobsByDefault` on `WarpWorkerConfiguration` to flip the fleet-wide default:
+Set `RestartStaleJobsByDefault` on `WarpServerConfiguration` to flip the fleet-wide default:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(config =>
+builder.Services.AddWarpServer<AppDbContext>(config =>
 {
     config.RestartStaleJobsByDefault = false; // jobs fail on crash unless they opt in
 });
@@ -76,7 +76,7 @@ When `StaleJobRecovery` evaluates a stale job, it resolves `CanBeRestarted` in t
 
 1. Per-publish metadata set via `.WithRestart()`
 2. `[NoRestart]` / `[Restart]` attribute on the job class (written at publish time by `NoRestartPublishBehavior`)
-3. `RestartStaleJobsByDefault` on `WarpWorkerConfiguration` (default `true`)
+3. `RestartStaleJobsByDefault` on `WarpServerConfiguration` (default `true`)
 
 ## How It Works
 

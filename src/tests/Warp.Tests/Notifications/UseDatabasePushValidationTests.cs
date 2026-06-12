@@ -22,7 +22,7 @@ public class UseDatabasePushValidationTests
 
         var ex = Should.Throw<InvalidOperationException>(() =>
         {
-            services.AddWarpWorker<TestContext>(opt =>
+            services.AddWarpServer<TestContext>(opt =>
             {
                 // Deliberately no UsePostgreSql / UseSqlServer.
                 opt.UseDatabasePush();
@@ -38,7 +38,7 @@ public class UseDatabasePushValidationTests
         var services = new ServiceCollection();
         services.AddDbContext<TestContext>(o => o.UseNpgsql("Host=x;Database=x;Username=x;Password=x"));
 
-        services.AddWarpWorker<TestContext>(opt =>
+        services.AddWarpServer<TestContext>(opt =>
         {
             opt.UsePostgreSql();
             opt.UseDatabasePush();
@@ -59,7 +59,7 @@ public class UseDatabasePushValidationTests
 
         var ex = Should.Throw<InvalidOperationException>(() =>
         {
-            services.AddWarpWorker<TestContext>(opt =>
+            services.AddWarpServer<TestContext>(opt =>
             {
                 opt.UseDatabasePush();  // out of order
                 opt.UsePostgreSql();

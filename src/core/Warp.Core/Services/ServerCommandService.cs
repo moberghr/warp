@@ -7,7 +7,7 @@ namespace Warp.Core.Services;
 /// Server-level admin commands. <c>PauseServer</c> / <c>PauseWorkerGroup</c> only stamp
 /// <c>PausedAt</c> on the DB row; pause does not propagate instantly. Each server's
 /// <c>Heartbeat</c> task reads the new value on its next tick (cadence
-/// <c>WarpWorkerConfiguration.HealthCheckInterval</c>, default 3s) and refreshes its
+/// <c>WarpServerConfiguration.HealthCheckInterval</c>, default 3s) and refreshes its
 /// in-memory <c>PauseStateHolder</c>; only then will workers on that server stop
 /// claiming new jobs. An iteration that already passed its pause check before the
 /// holder flipped will still complete its in-flight claim. Treat pause as "no new

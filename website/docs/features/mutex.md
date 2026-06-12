@@ -24,10 +24,10 @@ If you need strict FIFO per key, this primitive isn't the right one — that req
 
 ## Setup
 
-Concurrency control is an opt-in addon. Register it inside the `AddWarpWorker` lambda:
+Concurrency control is an opt-in addon. Register it inside the `AddWarpServer` lambda:
 
 ```csharp
-builder.Services.AddWarpWorker<AppDbContext>(opt =>
+builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
     opt.AddConcurrency();

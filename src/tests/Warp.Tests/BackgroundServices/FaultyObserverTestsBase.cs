@@ -25,7 +25,7 @@ public abstract class FaultyObserverTestsBase : IntegrationTestBase
         var barrier = new BackgroundServiceBarrierSignal();
 
         // Register a throwing observer. Because TryAddSingleton is used for the null default,
-        // this AddSingleton (registered after AddWarpWorker) takes precedence via last-wins DI.
+        // this AddSingleton (registered after AddWarpServer) takes precedence via last-wins DI.
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
             configure: cfg => cfg.AddBackgroundService<BarrierPinnedService>(),

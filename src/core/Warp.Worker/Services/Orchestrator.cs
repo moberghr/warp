@@ -19,12 +19,12 @@ public sealed class Orchestrator<TContext> : IServerTask
 {
     private readonly TContext _context;
     private readonly TimeProvider _time;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
 
     public Orchestrator(
         TContext context,
         TimeProvider time,
-        IOptions<WarpWorkerConfiguration> configuration)
+        IOptions<WarpServerConfiguration> configuration)
     {
         _context = context;
         _time = time;

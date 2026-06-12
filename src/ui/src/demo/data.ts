@@ -202,21 +202,18 @@ function makeProgress(
 // Dashboard statistics (incrementing counters for realtime chart)
 // ============================================================
 
-let statusCallCount = 0;
-
+// Every field is fixed so the demo reads as a stable point-in-time snapshot. The
+// realtime chart is pre-seeded with a static 60s window and the live feed is disabled
+// in demo (see startRealtimeFeed / isDemoMode), so totalSucceeded/totalFailed never need
+// to advance — keeping them constant stops the chart's Current/Avg/Peak from drifting.
 export function getDashboardStats(): DashboardStatistics {
-  statusCallCount++;
-  const base = 15692;
-  const added = statusCallCount * Math.round(15 + seeded(statusCallCount) * 8);
-  const addedFailed = Math.floor(statusCallCount / 7);
-
   return {
-    total: 15847 + added + addedFailed,
+    total: 15847,
     pending: 23,
     scheduled: 12,
     created: 23,
-    completed: base + added,
-    failed: 47 + addedFailed,
+    completed: 15692,
+    failed: 47,
     processing: 8,
     servers: 2,
     awaiting: 3,
@@ -236,10 +233,10 @@ export function getDashboardStats(): DashboardStatistics {
     messagesFailed: 5,
     messagesDeleted: 0,
     messages: 156,
-    totalSucceeded: base + added,
-    totalFailed: 47 + addedFailed,
+    totalSucceeded: 15692,
+    totalFailed: 47,
     totalDeleted: 62,
-    totalCreated: 15847 + added + addedFailed,
+    totalCreated: 15847,
     batches: 34,
     databaseConnection: 'PostgreSQL',
   };
@@ -330,8 +327,14 @@ export const demoRateLimits: RateLimitInfo[] = [
 
 export function generateRealtimeHistory(): RealtimePoint[] {
   const nowSec = Math.floor(NOW / 1000);
-  return Array.from({ length: 60 }, (_, i) => ({
-    ts: nowSec - (59 - i),
+  // The chart's frozen-clock window spans [now-62s, now-2s] (RealtimeChart). With the
+  // demo clock pinned, no live points scroll in to fill it, so the seed must cover the
+  // whole window itself. Generate 66 points ending at `now` (oldest = now-65s) so the
+  // line reaches past both edges — otherwise a 60-point [now-59s, now] seed leaves a
+  // ~3s gap on the left of the window.
+  const points = 66;
+  return Array.from({ length: points }, (_, i) => ({
+    ts: nowSec - (points - 1 - i),
     succeeded: Math.round(15 + seeded(i) * 10 + Math.sin(i * 0.4) * 3),
     failed: seeded(i + 200) > 0.85 ? Math.round(1 + seeded(i + 300) * 2) : 0,
   }));

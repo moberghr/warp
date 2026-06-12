@@ -1,5 +1,6 @@
 import { useDashboardStore } from '@/stores/dashboard';
 import { useRealtimeStore, type RealtimeStatus } from '@/stores/realtime';
+import { isDemoMode } from '@/lib/demoMode';
 
 /**
  * Realtime data feed for the dashboard's per-second chart.
@@ -60,6 +61,15 @@ function applyMode(status: RealtimeStatus) {
 
 export function startRealtimeFeed() {
   if (samplerId !== null) {
+    return;
+  }
+
+  // Demo mode pins Date.now() and pre-seeds realtimeData with a fixed 60s window
+  // (see setupDemo / generateRealtimeHistory), so the chart renders a stable
+  // snapshot. Running the 1 Hz poll + sampler would keep mutating realtimeData —
+  // Current/Avg/Peak would drift while the frozen clock keeps the line static,
+  // a visibly inconsistent half-alive chart. Skip the live feed entirely in demo.
+  if (isDemoMode()) {
     return;
   }
 

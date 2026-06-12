@@ -2,18 +2,14 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { isDemoMode, freezeClock } from '@/lib/demoMode'
 
 async function boot() {
-  const isDemoMode = new URLSearchParams(window.location.search).has('demo')
-    || import.meta.env.VITE_DEMO === 'true'
-
-  if (isDemoMode) {
-    // Pin the clock so demo data + "X minutes ago" labels are deterministic.
-    // Must run BEFORE the demo module loads — `data.ts` reads `Date.now()`
-    // at the top level into a `const NOW`, so a later override wouldn't
-    // reach that seed.
-    const FROZEN_NOW = Date.UTC(2026, 4, 25, 11, 0, 0)
-    Date.now = () => FROZEN_NOW
+  if (isDemoMode()) {
+    // Pin the clock so demo data, "X minutes ago" labels, and hour-bucketed charts
+    // are deterministic. Must run BEFORE the demo module loads — data.ts seeds
+    // timestamps at import time, so a later override wouldn't reach those seeds.
+    freezeClock()
 
     const { setupDemo } = await import('@/demo')
     setupDemo()

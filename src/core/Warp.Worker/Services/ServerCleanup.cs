@@ -7,7 +7,7 @@ namespace Warp.Worker.Services;
 
 /// <summary>
 /// Removes Server rows (and their Worker / WorkerGroup children) whose last heartbeat is
-/// older than <see cref="WarpWorkerConfiguration.HealthCheckTimeout"/>. This is the
+/// older than <see cref="WarpServerConfiguration.HealthCheckTimeout"/>. This is the
 /// ungraceful-shutdown cleanup path — <see cref="WarpServerRegistration{TContext}.StopAsync"/>
 /// handles the graceful case.
 /// </summary>
@@ -17,13 +17,13 @@ public sealed class ServerCleanup<TContext> : IServerTask
     private readonly TContext _context;
     private readonly TimeProvider _time;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
 
     public ServerCleanup(
         TContext context,
         TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
-        IOptions<WarpWorkerConfiguration> configuration)
+        IOptions<WarpServerConfiguration> configuration)
     {
         _context = context;
         _time = time;

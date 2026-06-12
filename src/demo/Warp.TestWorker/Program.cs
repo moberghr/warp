@@ -12,7 +12,7 @@ var host = Host.CreateDefaultBuilder(args)
     .ConfigureServices((context, services) =>
     {
         services.AddServices(context.Configuration);
-        services.AddWarpWorker<TestContext>(options =>
+        services.AddWarpServer<TestContext>(options =>
         {
             options.UsePostgreSql();
             options.WorkerCount = 10;

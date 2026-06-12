@@ -34,7 +34,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly ChannelReader<Job> _jobReader;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<WarpDispatcherWorker<TContext>> _logger;
-    private readonly WarpWorkerConfiguration _configuration;
+    private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
     private readonly CompletionBatch<TContext> _batch;
     private readonly IWarpNotificationTransport _notificationTransport;
@@ -45,7 +45,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         ChannelReader<Job> jobReader,
         IServiceScopeFactory scopeFactory,
         ILogger<WarpDispatcherWorker<TContext>> logger,
-        IOptions<WarpWorkerConfiguration> configuration,
+        IOptions<WarpServerConfiguration> configuration,
         TimeProvider timeProvider,
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals,

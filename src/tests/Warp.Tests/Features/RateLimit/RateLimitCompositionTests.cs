@@ -254,13 +254,13 @@ public abstract class RateLimitCompositionTestsBase : IAsyncLifetime
         builder.AddConcurrency();
         builder.AddRateLimit();
 
-        var workerConfig = new OptionsWrapper<WarpWorkerConfiguration>(new WarpWorkerConfiguration
+        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
         {
             WorkerCount = 1,
             ServerId = ServerId,
             Queues = DefaultQueues,
         });
-        services.AddSingleton<IOptions<WarpWorkerConfiguration>>(workerConfig);
+        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
         services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
 
         var provider = services.BuildServiceProvider();

@@ -66,7 +66,7 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddSingleton<IWarpUIExtension, RetryUIExtension>();
-builder.Services.AddWarpWorker<TestContext>(options =>
+builder.Services.AddWarpServer<TestContext>(options =>
 {
     options.UsePostgreSql();
 

@@ -7,7 +7,7 @@ namespace Warp.Core.Notifications;
 /// signals the appropriate background tasks on each event.
 /// <para>
 /// The default registration is <see cref="NullNotificationTransport"/> (no-op); users opt
-/// into DB-push by calling <c>opt.UseDatabasePush() (inside the AddWarp/AddWarpWorker lambda)</c>.
+/// into DB-push by calling <c>opt.UseDatabasePush() (inside the AddWarp/AddWarpServer lambda)</c>.
 /// </para>
 /// </summary>
 public interface IWarpNotificationTransport

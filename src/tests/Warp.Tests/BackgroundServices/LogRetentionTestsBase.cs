@@ -32,7 +32,7 @@ public abstract class LogRetentionTestsBase : IAsyncLifetime
         TimeProvider? time = null,
         IEnumerable<WarpBackgroundService>? backgroundServices = null)
     {
-        var config = new WarpWorkerConfiguration
+        var config = new WarpServerConfiguration
         {
             BackgroundServiceLogRetentionCount = retentionCount,
             BackgroundServiceLogRetentionAge = retentionAge ?? TimeSpan.FromDays(7),

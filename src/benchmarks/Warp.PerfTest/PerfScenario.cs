@@ -64,7 +64,7 @@ public sealed class PerfScenario : IAsyncDisposable
                     options.AddInterceptors(_interceptor);
                 });
 
-                services.AddWarpWorker<TestContext>(config =>
+                services.AddWarpServer<TestContext>(config =>
                 {
                     config.UsePostgreSql();
                     config.WorkerCount = 5;
