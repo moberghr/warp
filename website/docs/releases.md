@@ -4,6 +4,26 @@ sidebar_position: 6
 
 # Releases
 
+## 2.0.1
+
+*2026-06-12*
+
+Security maintenance release. No API changes, no schema changes — drop-in upgrade from 2.0.0. Clears all open Dependabot alerts across the bundled dashboard and the docs-site tooling.
+
+### Dashboard dependency fixes (`Moberg.Warp.UI`)
+
+The dashboard bundle shipped in `Moberg.Warp.UI` is rebuilt against patched front-end dependencies:
+
+- **react-router 7.13.2 → 7.17.0** — clears four advisories: an unauthenticated RCE via vendored turbo-stream deserialization (`GHSA-49rj-9fvp-4h2h`, high), two denial-of-service vectors (unbounded `__manifest` path expansion `GHSA-8x6r-g9mw-2r78` and reflected single-fetch input `GHSA-rxv8-25v2-qmq8`, both high), and a protocol-relative open redirect (`GHSA-2j2x-hqr9-3h42`, medium).
+- **hono → 4.12.25** (transitive) — clears four medium advisories: JWT middleware accepting any auth scheme, IPv6 deny-rule bypass, `app.mount()` prefix-stripping on percent-encoded paths, and `Set-Cookie` injection via unsanitized cookie attributes.
+
+### Build tooling (docs site only — not shipped)
+
+Repo-only dependency bumps in the Docusaurus docs site, with no effect on any published package:
+
+- **shell-quote → 1.8.4** — `quote()` not escaping newlines in object `.op` values (`GHSA-w7jw-789q-3m8p`, critical).
+- **joi → 18.2.1** (forced via `overrides`) — uncaught `RangeError` on deeply nested input through recursive `link()` schemas (`GHSA-q7cg-457f-vx79`, medium).
+
 ## 2.0.0
 
 *2026-06-09*
