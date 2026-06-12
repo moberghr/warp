@@ -1,6 +1,5 @@
 import api from './client';
-import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
-import type { ExtensionManifest } from '@/extensions/types';
+import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo, WarpInfo } from '@/types';
 
 // Dashboard
 export const getStatus = () => api.get<DashboardStatistics>('/status').then(r => r.data);
@@ -8,6 +7,9 @@ export const getStatus = () => api.get<DashboardStatistics>('/status').then(r =>
 // Addon discovery — one call replaces three speculative hide-on-404 probes from MainLayout.
 // Always 200; per-addon booleans reflect server-side DI registration.
 export const getAddons = () => api.get<WarpAddonsInfo>('/addons').then(r => r.data);
+
+// One-shot deployment metadata for the statusbar (version, provider, host, db, schema).
+export const getInfo = () => api.get<WarpInfo>('/info').then(r => r.data);
 
 // Jobs by state
 export const getEnqueuedJobs = (page = 0, pageSize = 20) =>
@@ -191,13 +193,12 @@ export const getSagaActivity = (id: string) =>
 export const forceCompleteSaga = (id: string) =>
   api.delete(`/sagas/${encodeURIComponent(id)}`).then(() => undefined);
 
-// Extensions
-export const getExtensions = () =>
-  api.get<ExtensionManifest[]>('/extensions').then(r => r.data);
-
 // Auth — cookie-free probe so the SPA can render the login page without firing a 401 first.
 export const getAuthStatus = () =>
   api.get<AuthStatus>('/auth/status').then(r => r.data);
+
+export const logout = () =>
+  api.post('/auth/logout').then(() => undefined);
 
 // Background services
 export {

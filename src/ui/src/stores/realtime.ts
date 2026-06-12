@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { HubConnection, HubConnectionBuilder, HubConnectionState, LogLevel } from '@microsoft/signalr';
+import type { HubConnection } from '@microsoft/signalr';
 import { getHubUrl, type RealtimeEvent } from '@/api/realtime';
 import { emit } from '@/lib/realtimeBus';
 import { useDashboardStore } from '@/stores/dashboard';
@@ -61,6 +61,10 @@ export const useRealtimeStore = create<RealtimeStore>((set, get) => ({
     bootInflight = (async () => {
       set({ status: 'connecting' });
 
+      // Lazy-load SignalR so deployments without push (UseDatabasePush off, or
+      // pushEnabled=false from /api/addons) never ship the ~70 KB transport.
+      const { HubConnectionBuilder, LogLevel } = await import('@microsoft/signalr');
+
       const connection = new HubConnectionBuilder()
         .withUrl(getHubUrl(), { withCredentials: true })
         .withAutomaticReconnect()
@@ -106,8 +110,11 @@ export const useRealtimeStore = create<RealtimeStore>((set, get) => ({
   },
   disconnect: async () => {
     const { connection } = get();
-    if (connection && connection.state !== HubConnectionState.Disconnected) {
-      await connection.stop();
+    if (connection) {
+      const { HubConnectionState } = await import('@microsoft/signalr');
+      if (connection.state !== HubConnectionState.Disconnected) {
+        await connection.stop();
+      }
     }
     set({ status: 'idle', connection: null });
   },

@@ -20,7 +20,10 @@ import { isDemoMode } from '@/lib/demoMode';
  * the same whether they stayed on the dashboard or navigated away and back.
  */
 
-const SAMPLE_INTERVAL_MS = 1000;
+// Sole sampler for `useDashboardStore.realtimeData`. ThroughputChart used to
+// run a duplicate 5Hz sampler locally; that was removed so the store sees one
+// caller and React only re-renders chart consumers on a single cadence.
+const SAMPLE_INTERVAL_MS = 200; // 5Hz
 const POLL_INTERVAL_MS = 1000;
 
 let samplerId: ReturnType<typeof setInterval> | null = null;
@@ -46,6 +49,11 @@ function applyMode(status: RealtimeStatus) {
 
   if (pollerId === null) {
     pollerId = setInterval(() => {
+      // Skip network work while the tab is hidden — the sampler's stale-reset
+      // repairs the chart buffer when the tab becomes visible again.
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
       void useDashboardStore.getState().fetchStats();
     }, POLL_INTERVAL_MS);
   }
@@ -66,10 +74,16 @@ export function startRealtimeFeed() {
   }
 
   samplerId = setInterval(() => {
+    // No sampling while hidden; the store's >2s stale-reset rebuilds the
+    // buffer cleanly when the tab becomes visible again.
+    if (document.visibilityState === 'hidden') {
+      return;
+    }
     useDashboardStore.getState().sampleRate();
   }, SAMPLE_INTERVAL_MS);
 
-  applyMode(useRealtimeStore.getState().status);
+  const currentStatus = useRealtimeStore.getState().status;
+  applyMode(currentStatus);
   statusUnsub = useRealtimeStore.subscribe((state, prevState) => {
     if (state.status === prevState.status) {
       return;

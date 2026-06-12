@@ -1,221 +1,245 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Panel, PanelHeader } from '@/components/v2/Panel';
 import { Button } from '@/components/ui/button';
-import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { StateBadge } from '@/components/StateBadge';
 import { Pagination } from '@/components/Pagination';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { usePageStore } from '@/stores/page';
 import { shortType, formatDateTime, shortId } from '@/utils/format';
-import type { RecurringJobDetailModel, RecurringJobHistoryModel, PagedList } from '@/types';
-import * as api from '@/api';
+import {
+  useRecurringDetail,
+  useRecurringJobs,
+  useEnableRecurringJob,
+  useDisableRecurringJob,
+  useTriggerRecurringJob,
+  useDeleteRecurringJob,
+} from '@/api/hooks/useRecurring';
+import { useConfirm } from '@/components/forms/useConfirm';
+import cronstrue from 'cronstrue';
+
+const TZ_SHORT = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return 'UTC';
+  }
+})();
+
+function describeCron(expr: string): string | null {
+  try {
+    return cronstrue.toString(expr, { use24HourTimeFormat: true });
+  } catch {
+    return null;
+  }
+}
 
 export default function RecurringDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [detail, setDetail] = useState<RecurringJobDetailModel | null>(null);
-  const [jobs, setJobs] = useState<PagedList<RecurringJobHistoryModel> | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const numericId = id !== undefined ? Number(id) : undefined;
+
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = usePersistedPageSize();
-  const [pending, setPending] = useState<'trigger' | 'delete' | 'disable' | null>(null);
+
+  const detailQuery = useRecurringDetail(numericId);
+  const jobsQuery = useRecurringJobs(numericId, page, pageSize);
+
+  const enableJob = useEnableRecurringJob();
+  const disableJob = useDisableRecurringJob();
+  const triggerJob = useTriggerRecurringJob();
+  const deleteJob = useDeleteRecurringJob();
+  const { confirm, dialog: confirmDialog } = useConfirm();
+
+  const detail = detailQuery.data;
 
   useEffect(() => {
-    if (id) {
-      api.getRecurringJobById(Number(id)).then(setDetail).catch(() => setError('Unable to load recurring job'));
+    if (!detail) {
+      usePageStore.getState().set({ title: 'Recurring job', subtitle: undefined });
+      return;
     }
-  }, [id]);
 
-  const fetchJobs = useCallback(async () => {
-    if (id) {
-      try {
-        const result = await api.getRecurringJobJobs(Number(id), page, pageSize);
-        setJobs(result);
-      } catch {
-        // Jobs loading failure is non-critical
+    const handleToggleEnabled = async () => {
+      if (detail.disabledAt) {
+        enableJob.mutate(detail.id);
+
+        return;
       }
-    }
-  }, [id, page, pageSize]);
+      const ok = await confirm({
+        title: 'Disable recurring job?',
+        description: `Future runs of "${detail.name}" will be paused until you re-enable it. Disabling a job that drives critical work (reconciliation, billing, etc.) can stall downstream processes — make sure this is intended.`,
+        confirmLabel: 'Disable',
+        destructive: true,
+      });
+      if (ok) {
+        disableJob.mutate(detail.id);
+      }
+    };
 
-  useEffect(() => { fetchJobs(); }, [fetchJobs]);
+    const handleTrigger = async () => {
+      const ok = await confirm({
+        title: 'Trigger recurring job now?',
+        description: `A job will be enqueued immediately, on top of the normal cron schedule. Use this for manual reruns — not for backfills.`,
+        confirmLabel: 'Trigger',
+      });
+      if (ok) {
+        triggerJob.mutate(detail.id);
+      }
+    };
 
-  if (error) return <ErrorState message={error} />;
+    const handleDelete = async () => {
+      const ok = await confirm({
+        title: 'Delete recurring job?',
+        description: `Remove "${detail.name}"? Future runs will not be scheduled and history will be removed permanently. Existing in-flight jobs are unaffected. This cannot be undone.`,
+        confirmLabel: 'Delete',
+        destructive: true,
+      });
+      if (!ok) {
+        return;
+      }
+      deleteJob.mutate(detail.id, { onSuccess: () => navigate('/recurring') });
+    };
+
+    usePageStore.getState().set({
+      title: detail.name,
+      subtitle: detail.cron,
+      right: (
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleToggleEnabled}>
+            {detail.disabledAt ? 'Enable' : 'Disable'}
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleTrigger}>Trigger</Button>
+          <Button variant="destructive" size="sm" onClick={handleDelete}>Delete</Button>
+        </div>
+      ),
+    });
+  }, [detail, enableJob, disableJob, triggerJob, deleteJob, navigate, confirm]);
+
+  useEffect(() => {
+    return () => usePageStore.getState().reset();
+  }, []);
+
+  if (detailQuery.error) return <ErrorState message={(detailQuery.error as Error).message} />;
   if (!detail) return <LoadingState />;
 
-  // Enable is reversible and harmless — apply immediately. Disable on a production
-  // recurring job (billing sweep, reconciliation, etc.) is potentially an outage, so it
-  // goes through the confirm dialog like the other destructive actions.
-  const handleEnable = async () => {
-    await api.enableRecurringJob(detail.id);
-    const updated = await api.getRecurringJobById(detail.id);
-    setDetail(updated);
-  };
-
-  const handleDisable = async () => {
-    await api.disableRecurringJob(detail.id);
-    const updated = await api.getRecurringJobById(detail.id);
-    setDetail(updated);
-  };
-
-  const handleTrigger = async () => {
-    await api.triggerRecurringJob(detail.id);
-    const updated = await api.getRecurringJobById(detail.id);
-    setDetail(updated);
-    fetchJobs();
-  };
-
-  const handleDelete = async () => {
-    await api.deleteRecurringJob(detail.id);
-    navigate('/recurring');
-  };
+  const jobs = jobsQuery.data ?? null;
 
   return (
-    <div>
-      {/* Header */}
-      <div className="flex items-center gap-4 mb-6">
-        <h1 className="text-2xl font-bold">{detail.name}</h1>
-        <span className="font-mono text-sm bg-muted px-2 py-1 rounded">{detail.cron}</span>
+    <div className="flex flex-col gap-3 py-5">
+      <div className="flex flex-wrap items-center gap-3 text-[12.5px]">
+        <span className="font-mono bg-panel-2 border border-border px-2 py-0.5 rounded">{detail.cron}</span>
+        {describeCron(detail.cron) && (
+          <span className="text-text-mute italic">{describeCron(detail.cron)}</span>
+        )}
         {detail.disabledAt ? (
-          <span className="inline-flex items-center rounded-full bg-orange-100 px-2.5 py-0.5 text-xs font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
+          <span className="inline-flex items-center rounded-full bg-warp-amber-soft px-2.5 py-0.5 text-xs font-medium text-warp-amber">
             Disabled <RelativeTime date={detail.disabledAt} />
           </span>
         ) : (
-          <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400">Enabled</span>
+          <span className="inline-flex items-center rounded-full bg-warp-green-soft px-2.5 py-0.5 text-xs font-medium text-warp-green">Enabled</span>
         )}
-        <div className="flex-1" />
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={detail.disabledAt ? handleEnable : () => setPending('disable')}
-        >
-          {detail.disabledAt ? 'Enable' : 'Disable'}
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => setPending('trigger')}>Trigger</Button>
-        <Button variant="destructive" size="sm" onClick={() => setPending('delete')}>Delete</Button>
       </div>
 
-      <ConfirmDialog
-        open={pending !== null}
-        onOpenChange={(open) => !open && setPending(null)}
-        title={
-          pending === 'delete' ? `Remove recurring job "${detail.name}"?`
-            : pending === 'trigger' ? `Trigger "${detail.name}" now?`
-              : pending === 'disable' ? `Disable recurring job "${detail.name}"?`
-                : ''
-        }
-        description={
-          pending === 'delete'
-            ? 'The recurring job definition and its history will be removed permanently. Any future scheduled runs will not fire. This cannot be undone.'
-            : pending === 'trigger'
-              ? 'A job will be enqueued immediately, on top of the normal cron schedule.'
-              : pending === 'disable'
-                ? 'No new runs will fire until the job is re-enabled. In-flight jobs from earlier runs continue to completion. Disable a job that drives critical work (reconciliation, billing, etc.) only with the same care as deleting it.'
-                : null
-        }
-        confirmLabel={pending === 'delete' ? 'Remove' : pending === 'disable' ? 'Disable' : 'Trigger'}
-        variant={pending === 'delete' || pending === 'disable' ? 'destructive' : 'default'}
-        onConfirm={() => {
-          if (pending === 'trigger') handleTrigger();
-          else if (pending === 'delete') handleDelete();
-          else if (pending === 'disable') handleDisable();
-          setPending(null);
-        }}
-      />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <div className="flex flex-col gap-3">
+          <Panel>
+            <PanelHeader eyebrow="Details" />
+            <div className="px-4 py-3">
+              <dl className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-2 text-[13px]">
+                <dt className="warp-eyebrow text-text-mute">Type</dt>
+                <dd>{shortType(detail.type)}</dd>
+                <dt className="warp-eyebrow text-text-mute">Created</dt>
+                <dd className="font-mono">{formatDateTime(detail.createdAt)}</dd>
+                {detail.updatedAt && (
+                  <>
+                    <dt className="warp-eyebrow text-text-mute">Updated</dt>
+                    <dd className="font-mono">{formatDateTime(detail.updatedAt)}</dd>
+                  </>
+                )}
+                <dt className="warp-eyebrow text-text-mute" title={`Times shown in ${TZ_SHORT}`}>
+                  Next execution
+                </dt>
+                <dd>{detail.nextExecution ? <RelativeTime date={detail.nextExecution} /> : 'N/A'}</dd>
+                <dt className="warp-eyebrow text-text-mute" title={`Times shown in ${TZ_SHORT}`}>
+                  Last execution
+                </dt>
+                <dd>{detail.lastExecution ? <RelativeTime date={detail.lastExecution} /> : 'Never'}</dd>
+                <dt className="warp-eyebrow text-text-mute">ID</dt>
+                <dd className="font-mono text-xs">{detail.id}</dd>
+              </dl>
+            </div>
+          </Panel>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Left column */}
-        <div className="space-y-4">
-          {/* Details */}
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Details</CardTitle></CardHeader>
-            <CardContent className="space-y-2 text-sm">
-              <div><span className="text-muted-foreground">Type:</span> {shortType(detail.type)}</div>
-              <div><span className="text-muted-foreground">Created:</span> {formatDateTime(detail.createdAt)}</div>
-              {detail.updatedAt && <div><span className="text-muted-foreground">Updated:</span> {formatDateTime(detail.updatedAt)}</div>}
-              <div>
-                <span className="text-muted-foreground">Next Execution:</span>{' '}
-                {detail.nextExecution ? <RelativeTime date={detail.nextExecution} /> : 'N/A'}
-              </div>
-              <div>
-                <span className="text-muted-foreground">Last Execution:</span>{' '}
-                {detail.lastExecution ? <RelativeTime date={detail.lastExecution} /> : 'Never'}
-              </div>
-              <div><span className="text-muted-foreground">ID:</span> <span className="font-mono text-xs">{detail.id}</span></div>
-            </CardContent>
-          </Card>
-
-          {/* Payload */}
           {detail.message && (
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Payload</CardTitle></CardHeader>
-              <CardContent>
-                <pre className="text-xs bg-muted p-3 rounded-md overflow-auto max-h-40">{detail.message}</pre>
-              </CardContent>
-            </Card>
+            <Panel>
+              <PanelHeader eyebrow="Payload" />
+              <pre className="mono m-0 max-h-60 overflow-auto bg-[color:var(--panel-2)] px-4 py-3 text-[11.5px] leading-[1.7] text-text-dim">
+                {detail.message}
+              </pre>
+            </Panel>
           )}
         </div>
 
-        {/* Right column: Execution History */}
-        <div className="space-y-4">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">Execution History</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {jobs && jobs.items.length > 0 ? (
-                <>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Job</TableHead>
-                        <TableHead>State</TableHead>
-                        <TableHead>Executed</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
+        <div className="flex flex-col gap-3">
+          <Panel className="overflow-hidden">
+            <PanelHeader eyebrow="Execution history" action={<span className="text-[10.5px] text-text-mute">Retains last 100 runs</span>} />
+            {jobs && jobs.items.length > 0 ? (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse">
+                    <thead>
+                      <tr className="bg-panel-2 border-b border-border">
+                        <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Job</th>
+                        <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">State</th>
+                        <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Executed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
                       {jobs.items.map((entry, idx) => (
-                        <TableRow key={entry.jobId ?? `log-${idx}`}>
-                          <TableCell className="font-mono text-xs">
+                        <tr key={entry.jobId ?? `log-${idx}`} className="border-b border-border last:border-b-0 hover:bg-panel-2/60">
+                          <td className="px-3.5 py-2 font-mono text-[12.5px]">
                             {entry.jobExists && entry.jobId ? (
-                              <Link to={`/detail/${entry.jobId}`} className="text-primary hover:underline">{shortId(entry.jobId)}</Link>
+                              <Link to={`/jobs/detail/${entry.jobId}`} className="text-primary hover:underline">{shortId(entry.jobId)}</Link>
                             ) : entry.jobId ? (
-                              <span className="text-muted-foreground">{shortId(entry.jobId)}</span>
+                              <span className="text-text-mute">{shortId(entry.jobId)}</span>
                             ) : (
-                              <span className="text-muted-foreground">-</span>
+                              <span className="text-text-mute">-</span>
                             )}
-                          </TableCell>
-                          <TableCell>
+                          </td>
+                          <td className="px-3.5 py-2 text-[12.5px]">
                             {entry.skipped ? (
-                              <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">Skipped</span>
+                              <span className="inline-flex items-center rounded-full bg-warp-amber-soft px-2 py-0.5 text-xs font-medium text-warp-amber">Skipped</span>
                             ) : entry.jobExists && entry.currentState != null ? (
                               <StateBadge state={entry.currentState} />
                             ) : (
-                              <span className="text-xs text-muted-foreground">Cleaned up</span>
+                              <span className="text-xs text-text-mute">Cleaned up</span>
                             )}
-                          </TableCell>
-                          <TableCell className="text-sm"><RelativeTime date={entry.createdAt} /></TableCell>
-                        </TableRow>
+                          </td>
+                          <td className="px-3.5 py-2 text-[12.5px]"><RelativeTime date={entry.createdAt} /></td>
+                        </tr>
                       ))}
-                    </TableBody>
-                  </Table>
-                  <Pagination
-                    page={page}
-                    pageCount={jobs.pageCount}
-                    onPageChange={setPage}
-                    pageSize={pageSize}
-                    onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
-                  />
-                </>
-              ) : (
-                <p className="text-muted-foreground text-sm py-4 text-center">No executions yet</p>
-              )}
-            </CardContent>
-          </Card>
+                    </tbody>
+                  </table>
+                </div>
+                <Pagination
+                  page={page}
+                  pageCount={jobs.pageCount}
+                  onPageChange={setPage}
+                  pageSize={pageSize}
+                  onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
+                  totalCount={jobs.totalCount}
+                  className="px-3.5 py-2.5 mt-0 border-t border-border"
+                />
+              </>
+            ) : (
+              <div className="py-10 text-center text-[13px] text-text-mute">No executions yet</div>
+            )}
+          </Panel>
         </div>
       </div>
+      {confirmDialog}
     </div>
   );
 }

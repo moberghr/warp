@@ -187,6 +187,14 @@ public class Publisher<TContext> : IPublisher
         WarpTelemetry.JobsEnqueued.Add(1, new KeyValuePair<string, object?>("queue", msg.Queue), new KeyValuePair<string, object?>("kind", "message"));
 
         await _context.Set<Job>().AddAsync(msg);
+        await _context.Set<JobLog>().AddAsync(new JobLog
+        {
+            JobId = msg.Id,
+            EventType = "Created",
+            Level = "Information",
+            Timestamp = now,
+            Message = $"Message created in queue \"{msg.Queue}\"",
+        });
 
         return msg.Id;
     }

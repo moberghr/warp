@@ -1,11 +1,8 @@
-import { lazy, Suspense, useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
-import { Toaster } from 'sonner';
-import { queryClient } from '@/lib/queryClient';
-import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { ErrorBoundary } from 'react-error-boundary';
 import MainLayout from '@/layouts/MainLayout';
-import ExtensionPage from '@/extensions/ExtensionPage';
 
 // Route pages are code-split: each becomes its own chunk loaded on navigation,
 // so the initial bundle no longer carries every page (notably the trace graph's
@@ -29,15 +26,20 @@ const BackgroundServiceDetail = lazy(() => import('@/pages/BackgroundServices/De
 const WorkerDetailPage = lazy(() => import('@/pages/workers/WorkerDetailPage'));
 const TracePage = lazy(() => import('@/pages/trace/TracePage'));
 const DetailPage = lazy(() => import('@/pages/detail/DetailPage'));
+const SettingsPage = lazy(() => import('@/pages/settings/SettingsPage'));
 const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
+const ExtensionPage = lazy(() => import('@/extensions/ExtensionPage'));
 import { setOnUnauthorized } from '@/api/client';
 import { loadExtensions } from '@/extensions/loader';
 import { extensionRuntime } from '@/extensions/runtime';
 import { getAuthStatus } from '@/api';
 import { config } from '@/config';
+import { queryClient } from '@/lib/queryClient';
+import { Toaster } from '@/components/ui/sonner';
+import { RootErrorFallback } from '@/components/RootErrorFallback';
 import type { ExtensionManifest } from '@/extensions/types';
 
-function App() {
+function AppRoutes() {
   const [needsLogin, setNeedsLogin] = useState(false);
   const [extensions, setExtensions] = useState<ExtensionManifest[]>([]);
   const [extensionsLoaded, setExtensionsLoaded] = useState(false);
@@ -82,27 +84,40 @@ function App() {
 
   const handleLogin = useCallback(() => {
     setNeedsLogin(false);
-    // Now authenticated — load extensions. MainLayout's mount-effect re-runs getAddons()
-    // and drives both nav-visibility and connectIfEnabled, so we don't duplicate the
-    // request here.
+    // The URL is still /login (the bare-LoginPage render path doesn't go
+    // through BrowserRouter), so when the router mounts it has no matching
+    // route and renders blank. Rewrite to the base path before unmounting
+    // LoginPage so the dashboard route catches.
+    const target = (config.basePath || '/').replace(/\/+$/, '') + '/';
+    if (window.location.pathname !== target) {
+      window.history.replaceState(null, '', target);
+    }
+    // Now authenticated — load extensions. MainLayout's mount-effect re-runs
+    // getAddons() and drives connectIfEnabled, so we don't duplicate it here.
     initExtensions();
   }, [initExtensions]);
 
   const extensionPages = extensionsLoaded ? extensionRuntime.getPages() : [];
 
-  const body = () => {
-    if (!authProbeDone) {
-      return null;
-    }
-    if (needsLogin) {
-      return <LoginPage onLogin={handleLogin} />;
-    }
-    if (!extensionsLoaded) {
-      return null;
-    }
+  if (!authProbeDone) {
+    return null;
+  }
 
+  if (needsLogin) {
     return (
-      <BrowserRouter basename={config.basePath}>
+      <Suspense fallback={null}>
+        <LoginPage onLogin={handleLogin} />
+      </Suspense>
+    );
+  }
+
+  if (!extensionsLoaded) {
+    return null;
+  }
+
+  return (
+    <BrowserRouter basename={config.basePath}>
+      <Suspense fallback={null}>
         <Routes>
           <Route element={<MainLayout extensions={extensions} />}>
             <Route index element={<DashboardPage />} />
@@ -111,8 +126,10 @@ function App() {
             <Route path="/jobs/:state" element={<JobListPage />} />
             <Route path="/messages/detail/:id" element={<DetailPage />} />
             <Route path="/messages/:state" element={<MessagesPage />} />
+            <Route path="/messages" element={<MessagesPage />} />
             <Route path="/batches/detail/:id" element={<DetailPage />} />
             <Route path="/batches/:state" element={<BatchesPage />} />
+            <Route path="/batches" element={<BatchesPage />} />
             <Route path="/recurring/:id" element={<RecurringDetailPage />} />
             <Route path="/recurring" element={<RecurringPage />} />
             <Route path="/trace/:traceId/:highlightId?" element={<TracePage />} />
@@ -126,6 +143,7 @@ function App() {
             <Route path="/sagas" element={<SagasListPage />} />
             <Route path="/services/:name" element={<BackgroundServiceDetail />} />
             <Route path="/services" element={<BackgroundServicesList />} />
+            <Route path="/settings" element={<SettingsPage />} />
 
             {/* Extension pages */}
             {extensionPages.map((page) => (
@@ -137,15 +155,17 @@ function App() {
             ))}
           </Route>
         </Routes>
-      </BrowserRouter>
-    );
-  };
+      </Suspense>
+    </BrowserRouter>
+  );
+}
 
+function App() {
   return (
-    <ErrorBoundary>
+    <ErrorBoundary FallbackComponent={RootErrorFallback}>
       <QueryClientProvider client={queryClient}>
-        <Suspense fallback={null}>{body()}</Suspense>
-        <Toaster position="bottom-right" richColors closeButton />
+        <AppRoutes />
+        <Toaster />
       </QueryClientProvider>
     </ErrorBoundary>
   );

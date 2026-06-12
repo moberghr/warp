@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import * as api from '@/api';
 import { queryKeys } from '@/lib/queryClient';
 
@@ -6,6 +6,7 @@ export function useMessagesList(state: string | undefined, page: number, pageSiz
   return useQuery({
     queryKey: queryKeys.messages(state, page, pageSize),
     queryFn: () => api.getMessages(page, pageSize, state),
+    placeholderData: keepPreviousData,
   });
 }
 

@@ -4,7 +4,8 @@ export default defineConfig({
   testDir: './e2e',
   timeout: 30000,
   expect: { timeout: 10000 },
-  fullyParallel: false,
+  fullyParallel: true,
+  workers: process.env.CI ? 2 : undefined,
   use: {
     baseURL: 'http://localhost:5179',
     // 1920×1080. Bigger than the prior 1280×800 because the section sidebars

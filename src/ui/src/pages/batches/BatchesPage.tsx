@@ -1,109 +1,104 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { ColumnDef } from '@tanstack/react-table';
+import { Panel } from '@/components/v2/Panel';
 import { StateBadge } from '@/components/StateBadge';
+import { Pagination } from '@/components/Pagination';
 import { shortId } from '@/utils/format';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
-import { DataTable } from '@/components/DataTable';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { usePageParam } from '@/hooks/usePageParam';
+import { usePageStore } from '@/stores/page';
 import { useBatchesList } from '@/api/hooks/useBatches';
-import type { JobGroupModel } from '@/types';
+import { GroupStateRail } from '@/pages/jobs/GroupStateRail';
 
 export default function BatchesPage() {
   const { state } = useParams<{ state?: string }>();
-  const [page, setPage] = useState(0);
+  const [page, setPage] = usePageParam();
   const [pageSize, setPageSize] = usePersistedPageSize();
 
+  const query = useBatchesList(state, page, pageSize);
+
   useEffect(() => {
-    setPage(0);
+    const title = state ? `${state.charAt(0).toUpperCase() + state.slice(1)} Batches` : 'Batches';
+    usePageStore.getState().set({
+      title,
+      subtitle: 'Groups of child jobs tracked as a single unit',
+    });
+    return () => usePageStore.getState().reset();
   }, [state]);
 
-  const { data, isLoading, isError } = useBatchesList(state, page, pageSize);
-
-  const columns = useMemo<ColumnDef<JobGroupModel>[]>(
-    () => [
-      {
-        accessorKey: 'id',
-        header: 'ID',
-        cell: ({ row }) => (
-          <Link to={`/detail/${row.original.id}`} className="font-mono text-xs text-primary hover:underline">
-            {shortId(row.original.id)}
-          </Link>
-        ),
-        meta: { headerClassName: 'w-[100px]' },
-      },
-      {
-        id: 'progress',
-        header: 'Progress',
-        cell: ({ row }) => {
-          const batch = row.original;
-          const done = batch.completedJobs + batch.failedJobs;
-          const pct = batch.totalJobs > 0 ? Math.round((done / batch.totalJobs) * 100) : 0;
-          const greenPct = batch.totalJobs > 0 ? (batch.completedJobs / batch.totalJobs) * 100 : 0;
-          const redPct = batch.totalJobs > 0 ? (batch.failedJobs / batch.totalJobs) * 100 : 0;
-
-          return (
-            <div className="flex items-center gap-2">
-              <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden flex">
-                {greenPct > 0 && <div className="h-full bg-green-500 transition-all" style={{ width: `${greenPct}%` }} />}
-                {redPct > 0 && <div className="h-full bg-red-500 transition-all" style={{ width: `${redPct}%` }} />}
-              </div>
-              <span className="text-xs text-muted-foreground w-28 text-right shrink-0">
-                {done}/{batch.totalJobs} ({pct}%)
-              </span>
-            </div>
-          );
-        },
-      },
-      {
-        accessorKey: 'currentState',
-        header: 'State',
-        cell: ({ row }) => <StateBadge state={row.original.currentState} />,
-        meta: { headerClassName: 'w-[100px] text-right', cellClassName: 'text-right' },
-      },
-      {
-        accessorKey: 'createTime',
-        header: 'Created',
-        cell: ({ row }) => (
-          <span className="text-sm text-muted-foreground">
-            <RelativeTime date={row.original.createTime} />
-          </span>
-        ),
-        meta: { headerClassName: 'w-[120px] text-right', cellClassName: 'text-sm text-muted-foreground text-right' },
-      },
-    ],
-    [],
-  );
-
-  if (isError) return <ErrorState message="Unable to load batches" />;
-  if (isLoading || !data) return <LoadingState />;
+  const data = query.data;
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-bold">
-          {state ? `${state.charAt(0).toUpperCase() + state.slice(1)} Batches` : 'Batches'}
-        </h1>
-        <span className="text-sm text-muted-foreground">{data.totalCount} total</span>
-      </div>
+    <div className="flex flex-col lg:flex-row">
+      <GroupStateRail kind="batches" active={state} />
+      <div className="flex-1 p-5 min-w-0 flex flex-col gap-3">
+      {query.error ? (
+        <ErrorState message={(query.error as Error).message} />
+      ) : !data ? (
+        <LoadingState />
+      ) : (
+      <>
+      <Panel className="overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse">
+            <thead>
+              <tr className="bg-panel-2 border-b border-border">
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold w-[100px]">ID</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Progress</th>
+                <th className="warp-eyebrow text-right px-3.5 py-2.5 text-text-mute font-semibold w-[100px]">State</th>
+                <th className="warp-eyebrow text-right px-3.5 py-2.5 text-text-mute font-semibold w-[120px]">Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-3.5 py-8 text-center text-[12.5px] text-text-mute">
+                    No batches found
+                  </td>
+                </tr>
+              ) : (
+                data.items.map((batch) => {
+                  const done = batch.completedJobs + batch.failedJobs;
+                  const pct = batch.totalJobs > 0 ? Math.round((done / batch.totalJobs) * 100) : 0;
+                  const greenPct = batch.totalJobs > 0 ? (batch.completedJobs / batch.totalJobs) * 100 : 0;
+                  const redPct = batch.totalJobs > 0 ? (batch.failedJobs / batch.totalJobs) * 100 : 0;
+                  return (
+                    <tr key={batch.id} className="border-b border-border last:border-b-0 hover:bg-panel-2/60">
+                      <td className="px-3.5 py-2 font-mono text-[12.5px]">
+                        <Link to={`/batches/detail/${batch.id}`} className="text-primary hover:underline">
+                          {shortId(batch.id)}
+                        </Link>
+                      </td>
+                      <td className="px-3.5 py-2 text-[12.5px]">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden flex">
+                            {greenPct > 0 && <div className="h-full bg-green-500 transition-all" style={{ width: `${greenPct}%` }} />}
+                            {redPct > 0 && <div className="h-full bg-red-500 transition-all" style={{ width: `${redPct}%` }} />}
+                          </div>
+                          <span className="text-[11.5px] text-text-mute w-28 text-right shrink-0">
+                            {done}/{batch.totalJobs} ({pct}%)
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-3.5 py-2 text-right text-[12.5px]"><StateBadge state={batch.currentState} /></td>
+                      <td className="px-3.5 py-2 text-right text-[12.5px] text-text-mute">
+                        <RelativeTime date={batch.createTime} />
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
 
-      <DataTable
-        columns={columns}
-        data={data.items}
-        emptyMessage="No batches found"
-        getRowId={(row) => row.id}
-        pagination={{
-          page,
-          pageSize,
-          pageCount: data.pageCount,
-          onPageChange: setPage,
-          onPageSizeChange: (size) => {
-            setPageSize(size);
-            setPage(0);
-          },
-        }}
-      />
+      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(s) => { setPageSize(s); setPage(0); }} totalCount={data.totalCount} />
+      </>
+      )}
+      </div>
     </div>
   );
 }

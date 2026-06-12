@@ -28,13 +28,18 @@ export interface DashboardStatistics {
   deleted: number;
   batchesProcessing: number;
   batchesAwaiting: number;
+  batchesScheduled: number;
+  batchesEnqueued: number;
   batchesDeleted: number;
   batchesCompleted: number;
   batchesFailed: number;
+  messagesAwaiting: number;
+  messagesScheduled: number;
   messagesEnqueued: number;
   messagesProcessing: number;
   messagesCompleted: number;
   messagesFailed: number;
+  messagesDeleted: number;
   messages: number;
   totalSucceeded: number;
   totalFailed: number;
@@ -328,6 +333,15 @@ export interface WarpAddonsInfo {
   rateLimits: boolean;
   push: boolean;
   sagas: boolean;
+  services: boolean;
+}
+
+export interface WarpInfo {
+  version: string | null;
+  provider: string | null;
+  host: string | null;
+  database: string | null;
+  schema: string | null;
 }
 
 export type {

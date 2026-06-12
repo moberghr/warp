@@ -9,6 +9,7 @@ import api from '@/api/client';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Panel, PanelHeader, Eyebrow } from '@/components/v2/Panel';
 
 declare global {
   interface Window {
@@ -20,6 +21,7 @@ export interface WarpSDK {
   React: typeof React;
   ReactDOM: typeof ReactDOM;
   api: typeof api;
+  /** @deprecated V1 component surface. Use `window.Warp.v2.components` instead. Will be removed in a future major release. */
   components: {
     Card: typeof Card;
     CardContent: typeof CardContent;
@@ -29,6 +31,16 @@ export interface WarpSDK {
     CardFooter: typeof CardFooter;
     Button: typeof Button;
     Badge: typeof Badge;
+  };
+  /** V2 design system surface. Stable. Prefer this over `components`. */
+  v2: {
+    components: {
+      Panel: typeof Panel;
+      PanelHeader: typeof PanelHeader;
+      Eyebrow: typeof Eyebrow;
+      Button: typeof Button;
+      Badge: typeof Badge;
+    };
   };
 }
 
@@ -46,6 +58,15 @@ export function initSDK(): void {
       CardFooter,
       Button,
       Badge,
+    },
+    v2: {
+      components: {
+        Panel,
+        PanelHeader,
+        Eyebrow,
+        Button,
+        Badge,
+      },
     },
   };
 }

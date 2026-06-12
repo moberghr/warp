@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Reflection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
@@ -10,6 +12,8 @@ namespace Warp.Core.Services;
 public interface IDashboardStatsService
 {
     Task<DashboardStatistics> GetWarpStatus();
+
+    WarpInfo GetWarpInfo();
 
     Task<List<StatsHistoryPoint>> GetStatsHistory(int hours = 24);
 
@@ -37,11 +41,66 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 {
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
+    private readonly WarpConfiguration _configuration;
 
-    public DashboardStatsService(TContext context, TimeProvider timeProvider)
+    public DashboardStatsService(TContext context, TimeProvider timeProvider, IOptions<WarpConfiguration>? configuration = null)
     {
         _context = context;
         _timeProvider = timeProvider;
+        _configuration = configuration?.Value ?? new WarpConfiguration();
+    }
+
+    public WarpInfo GetWarpInfo()
+    {
+        var version = typeof(WarpConfiguration).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(WarpConfiguration).Assembly.GetName().Version?.ToString();
+
+        // Strip Git metadata appended by SourceLink (e.g. "1.2.3+abc123") so the
+        // statusbar shows the package version, not the build hash.
+        if (version is not null)
+        {
+            var plus = version.IndexOf('+', StringComparison.Ordinal);
+            if (plus > 0)
+            {
+                version = version[..plus];
+            }
+        }
+
+        var parts = ParseConnectionParts(_context.Database.GetConnectionString());
+        var isPostgres = parts.ContainsKey("Host");
+
+        return new WarpInfo
+        {
+            Version = version,
+            Provider = isPostgres ? "PostgreSQL" : "SQL Server",
+            Host = parts.GetValueOrDefault("Host") ?? parts.GetValueOrDefault("Server") ?? parts.GetValueOrDefault("Data Source"),
+            Database = parts.GetValueOrDefault("Database") ?? parts.GetValueOrDefault("Initial Catalog"),
+            Schema = _configuration.Schema,
+        };
+    }
+
+    private static Dictionary<string, string> ParseConnectionParts(string? connectionString)
+    {
+        var parts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(connectionString))
+        {
+            return parts;
+        }
+
+        foreach (var raw in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = raw.Trim();
+            var eq = trimmed.IndexOf('=', StringComparison.Ordinal);
+            if (eq <= 0)
+            {
+                continue;
+            }
+
+            parts[trimmed[..eq].Trim()] = trimmed[(eq + 1)..].Trim();
+        }
+
+        return parts;
     }
 
     public async Task<DashboardStatistics> GetWarpStatus()
@@ -81,6 +140,8 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 
         var batchesProcessing = batchStateCounts.Where(x => x.State == State.Processing).Sum(x => x.Count);
         var batchesAwaiting = batchStateCounts.Where(x => x.State == State.Awaiting).Sum(x => x.Count);
+        var batchesScheduled = batchStateCounts.Where(x => x.State == State.Scheduled).Sum(x => x.Count);
+        var batchesEnqueued = batchStateCounts.Where(x => x.State == State.Enqueued).Sum(x => x.Count);
 
         // Per-state message counts
         var messageStateCounts = await _context.Set<Job>()
@@ -89,10 +150,13 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(g => new { State = g.Key, Count = g.Count() })
             .ToListAsync();
 
+        var messagesAwaiting = messageStateCounts.Where(x => x.State == State.Awaiting).Sum(x => x.Count);
+        var messagesScheduled = messageStateCounts.Where(x => x.State == State.Scheduled).Sum(x => x.Count);
         var messagesEnqueued = messageStateCounts.Where(x => x.State == State.Enqueued).Sum(x => x.Count);
         var messagesProcessing = messageStateCounts.Where(x => x.State == State.Processing).Sum(x => x.Count);
         var messagesCompleted = messageStateCounts.Where(x => x.State == State.Completed).Sum(x => x.Count);
         var messagesFailed = messageStateCounts.Where(x => x.State == State.Failed).Sum(x => x.Count);
+        var messagesDeleted = messageStateCounts.Where(x => x.State == State.Deleted).Sum(x => x.Count);
 
         var totalSucceeded = await GetCombinedStatValue("stats:succeeded");
         var totalFailed = await GetCombinedStatValue("stats:failed");
@@ -116,10 +180,15 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             BatchesFailed = batchesFailed,
             BatchesAwaiting = batchesAwaiting,
             BatchesDeleted = batchesDeleted,
+            BatchesScheduled = batchesScheduled,
+            BatchesEnqueued = batchesEnqueued,
+            MessagesAwaiting = messagesAwaiting,
+            MessagesScheduled = messagesScheduled,
             MessagesEnqueued = messagesEnqueued,
             MessagesProcessing = messagesProcessing,
             MessagesCompleted = messagesCompleted,
             MessagesFailed = messagesFailed,
+            MessagesDeleted = messagesDeleted,
             TotalSucceeded = totalSucceeded,
             TotalFailed = totalFailed,
             TotalDeleted = totalDeleted,
@@ -154,7 +223,9 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(x => new { x.CurrentWorkerId, x.Id, x.Type })
             .ToListAsync();
 
-        var jobByWorker = processingJobs.ToDictionary(j => j.CurrentWorkerId!.Value);
+        var jobByWorker = processingJobs
+            .GroupBy(j => j.CurrentWorkerId!.Value)
+            .ToDictionary(g => g.Key, g => g.First());
 
         var workersByServer = workers
             .GroupBy(w => w.ServerId)
@@ -213,7 +284,9 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(x => new { x.CurrentWorkerId, x.Id, x.Type })
             .ToListAsync();
 
-        var jobByWorker = processingJobs.ToDictionary(j => j.CurrentWorkerId!.Value);
+        var jobByWorker = processingJobs
+            .GroupBy(j => j.CurrentWorkerId!.Value)
+            .ToDictionary(g => g.Key, g => g.First());
 
         return new ServerModel
         {

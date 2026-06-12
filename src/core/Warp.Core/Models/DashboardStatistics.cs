@@ -42,7 +42,15 @@ public class DashboardStatistics
 
     public int BatchesAwaiting { get; set; }
 
+    public int BatchesScheduled { get; set; }
+
+    public int BatchesEnqueued { get; set; }
+
     public int BatchesDeleted { get; set; }
+
+    public int MessagesAwaiting { get; set; }
+
+    public int MessagesScheduled { get; set; }
 
     public int MessagesEnqueued { get; set; }
 
@@ -51,6 +59,8 @@ public class DashboardStatistics
     public int MessagesCompleted { get; set; }
 
     public int MessagesFailed { get; set; }
+
+    public int MessagesDeleted { get; set; }
 
     public string? DatabaseConnection { get; set; }
 }

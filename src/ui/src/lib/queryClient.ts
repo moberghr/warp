@@ -74,6 +74,7 @@ export const queryScopes = {
   servers: ['servers'] as const,
   workers: ['workers'] as const,
   counters: ['counters'] as const,
+  sagas: ['sagas'] as const,
   detail: ['detail'] as const,
   dashboard: ['dashboard'] as const,
   stats: ['stats'] as const,

@@ -1,5 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { Panel } from '@/components/v2/Panel';
+import { usePageStore } from '@/stores/page';
 import {
   ReactFlow,
   Controls,
@@ -20,7 +22,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import { Briefcase, Mail, Layers } from 'lucide-react';
 import type { State } from '@/types';
 import type { TraceJobModel } from '@/types';
-import * as api from '@/api';
+import { useTrace } from '@/api/hooks/useTrace';
 
 const NODE_WIDTH = 220;
 const NODE_HEIGHT = 72;
@@ -28,9 +30,9 @@ const GROUP_PADDING = 30;
 const CHILD_GAP = 16;
 
 function kindIcon(kind: number) {
-  if (kind === 3) return <Layers className="h-4 w-4 text-muted-foreground" />;
-  if (kind === 2) return <Mail className="h-4 w-4 text-muted-foreground" />;
-  return <Briefcase className="h-4 w-4 text-muted-foreground" />;
+  if (kind === 3) return <Layers className="h-4 w-4 text-text-mute" />;
+  if (kind === 2) return <Mail className="h-4 w-4 text-text-mute" />;
+  return <Briefcase className="h-4 w-4 text-text-mute" />;
 }
 
 function kindLabel(kind: number) {
@@ -53,20 +55,20 @@ function TraceNode({ data }: NodeProps) {
   const highlighted = job.highlighted;
   return (
     <div
-      className={`border rounded-lg px-3 py-2 shadow-sm cursor-pointer hover:border-primary transition-colors ${highlighted ? 'ring-2 ring-primary border-primary bg-primary/10' : 'bg-card'}`}
+      className={`border border-border rounded-lg px-3 py-2 shadow-sm cursor-pointer hover:border-primary transition-colors ${highlighted ? 'ring-2 ring-primary border-primary bg-primary/10' : 'bg-panel'}`}
       style={{ width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
       onClick={() => navigate(`/detail/${job.id}`)}
     >
       <Handle type="target" position={Position.Left} className="!bg-transparent !border-0 !w-0 !h-0" />
       <div className="flex items-center gap-2 mb-1">
         {kindIcon(job.kind)}
-        <span className="text-xs text-muted-foreground">{kindLabel(job.kind)}</span>
-        <span className="text-xs font-mono text-muted-foreground ml-auto">{shortId(job.id)}</span>
+        <span className="text-xs text-text-mute">{kindLabel(job.kind)}</span>
+        <span className="text-xs font-mono text-text-mute ml-auto">{shortId(job.id)}</span>
       </div>
       <div className="text-sm font-medium truncate">{shortType(job.type)}</div>
       <div className="flex items-center gap-2 mt-1">
         <StateBadge state={job.currentState} />
-        {job.handlerType && <span className="text-xs text-muted-foreground truncate">{shortType(job.handlerType)}</span>}
+        {job.handlerType && <span className="text-xs text-text-mute truncate">{shortType(job.handlerType)}</span>}
       </div>
       <Handle type="source" position={Position.Right} className="!bg-transparent !border-0 !w-0 !h-0" />
     </div>
@@ -78,12 +80,12 @@ function GroupNode({ data }: NodeProps) {
   const d = data as unknown as { label: string; id: string; kind: number; state: State; highlighted?: boolean };
   return (
     <div
-      className={`border-2 border-dashed border-muted-foreground/30 rounded-xl ${d.highlighted ? 'border-primary bg-primary/5' : ''}`}
+      className={`border-2 border-dashed border-border rounded-xl ${d.highlighted ? 'border-primary bg-primary/5' : ''}`}
       style={{ width: '100%', height: '100%', position: 'relative' }}
     >
       <Handle type="target" position={Position.Left} className="!bg-transparent !border-0 !w-0 !h-0" />
       <span
-        className="absolute -top-3 left-3 bg-card px-2 text-xs font-medium cursor-pointer text-primary hover:underline whitespace-nowrap flex items-center gap-1"
+        className="absolute -top-3 left-3 bg-panel px-2 text-xs font-medium cursor-pointer text-primary hover:underline whitespace-nowrap flex items-center gap-1"
         onClick={() => navigate(`/detail/${d.id}`)}
       >
         {kindIcon(d.kind)} {d.label} <StateBadge state={d.state} />
@@ -298,23 +300,25 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
 
 export default function TracePage() {
   const { traceId: rawTraceId, highlightId } = useParams<{ traceId: string; highlightId?: string }>();
-  const [jobs, setJobs] = useState<TraceJobModel[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
 
   // Normalize: accept both "4bf92f3577b34da6a3ce929d0e0e4736" and "4bf92f35-77b3-4da6-a3ce-929d0e0e4736"
-  const traceId = rawTraceId && /^[0-9a-f]{32}$/i.test(rawTraceId)
-    ? `${rawTraceId.slice(0,8)}-${rawTraceId.slice(8,12)}-${rawTraceId.slice(12,16)}-${rawTraceId.slice(16,20)}-${rawTraceId.slice(20)}`
-    : rawTraceId;
+  const isHex32 = !!rawTraceId && /^[0-9a-f]{32}$/i.test(rawTraceId);
+  const isDashed = !!rawTraceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawTraceId);
+  const isValidTraceId = isHex32 || isDashed;
+  const traceId = isHex32
+    ? `${rawTraceId!.slice(0,8)}-${rawTraceId!.slice(8,12)}-${rawTraceId!.slice(12,16)}-${rawTraceId!.slice(16,20)}-${rawTraceId!.slice(20)}`
+    : isDashed
+      ? rawTraceId
+      : undefined;
 
   // Display without dashes (W3C format)
   const traceIdDisplay = traceId?.replace(/-/g, '') ?? '';
 
-  useEffect(() => {
-    if (traceId) {
-      api.getTraceTree(traceId).then(setJobs).catch(() => setError('Unable to load trace'));
-    }
-  }, [traceId]);
+  const query = useTrace(traceId);
+  const jobs: TraceJobModel[] | null = query.data ?? null;
+  const error = query.error;
 
   const { nodes, edges } = useMemo(() => {
     if (!jobs || jobs.length === 0) return { nodes: [], edges: [] };
@@ -363,16 +367,77 @@ export default function TracePage() {
     };
   }, [nodes, edges, hoveredEdge]);
 
-  if (error) return <ErrorState message={error} />;
+  useEffect(() => {
+    usePageStore.getState().set({
+      title: 'Trace',
+      subtitle: traceIdDisplay ? `${traceIdDisplay} · ${jobs?.length ?? 0} jobs` : undefined,
+    });
+  }, [traceIdDisplay, jobs?.length]);
+
+  useEffect(() => {
+    return () => usePageStore.getState().reset();
+  }, []);
+
+  if (!isValidTraceId) {
+    return (
+      <div className="flex flex-col gap-3 py-5">
+        <Panel>
+          <div className="py-10 px-6 text-center space-y-3">
+            <div className="text-[15px] font-semibold">Invalid trace ID</div>
+            <div className="text-[13px] text-text-mute">
+              Expected a 32-character hex W3C trace ID (with or without dashes).
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/jobs/enqueued')}
+              className="mt-2 inline-flex items-center gap-1 rounded-md border border-border bg-card px-3 py-1.5 text-[12.5px] font-medium hover:bg-panel-2"
+            >
+              ← Back to Jobs
+            </button>
+          </div>
+        </Panel>
+      </div>
+    );
+  }
+  if (error) return <ErrorState message={(error as Error).message} />;
   if (!jobs) return <LoadingState />;
 
-  return (
-    <div>
-      <div className="flex items-center gap-4 mb-4">
-        <h1 className="text-2xl font-bold">Trace <span className="font-mono text-lg">{traceIdDisplay}</span></h1>
-        <span className="text-sm text-muted-foreground">{jobs.length} jobs</span>
+  if (jobs.length === 0) {
+    return (
+      <div className="flex flex-col gap-3 py-5">
+        <Panel>
+          <div className="py-10 px-6 text-center space-y-3">
+            <div className="text-[15px] font-semibold">Trace not found</div>
+            <div className="text-[13px] text-text-mute">
+              No jobs were recorded for trace <code className="font-mono">{traceIdDisplay}</code>.
+              The trace may have expired or the IDs may not match.
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate('/jobs/enqueued')}
+              className="mt-2 inline-flex items-center gap-1 rounded-md border border-border bg-card px-3 py-1.5 text-[12.5px] font-medium hover:bg-panel-2"
+            >
+              ← Back to Jobs
+            </button>
+          </div>
+        </Panel>
       </div>
-      <div className="rounded-md border bg-card" style={{ height: 'calc(100vh - 12rem)' }}>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3 py-5">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => navigate(-1)}
+          className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[11.5px] font-medium hover:bg-panel-2"
+          aria-label="Go back"
+        >
+          ←&nbsp;Back
+        </button>
+      </div>
+      <Panel style={{ height: 'calc(100vh - 12rem)' }} className="overflow-hidden">
         <ReactFlow
           nodes={styledNodes}
           edges={styledEdges}
@@ -389,16 +454,16 @@ export default function TracePage() {
           onPaneClick={() => setHoveredEdge(null)}
           proOptions={{ hideAttribution: true }}
         >
-          <Controls className="!bg-card !border !border-border !shadow-sm [&>button]:!bg-card [&>button]:!border-border [&>button]:!fill-foreground [&>button:hover]:!bg-accent" />
+          <Controls className="!bg-panel-2 !border !border-border !shadow-sm [&>button]:!bg-panel-2 [&>button]:!border-border [&>button]:!fill-foreground [&>button:hover]:!bg-panel-2/60" />
           <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
-          <div className="absolute top-3 right-3 bg-card border rounded-lg px-4 py-3 text-xs space-y-2 shadow-sm z-10">
-            <div className="font-medium text-sm mb-2">Legend</div>
+          <div className="absolute top-3 right-3 bg-panel-2 border border-border rounded-lg px-4 py-3 text-xs space-y-2 shadow-sm z-10">
+            <div className="warp-eyebrow text-text-mute mb-2">Legend</div>
             <div className="flex items-center gap-2">
-              <Briefcase className="h-3.5 w-3.5 text-muted-foreground" />
+              <Briefcase className="h-3.5 w-3.5 text-text-mute" />
               <span>Job</span>
-              <Mail className="h-3.5 w-3.5 text-muted-foreground ml-3" />
+              <Mail className="h-3.5 w-3.5 text-text-mute ml-3" />
               <span>Message</span>
-              <Layers className="h-3.5 w-3.5 text-muted-foreground ml-3" />
+              <Layers className="h-3.5 w-3.5 text-text-mute ml-3" />
               <span>Batch</span>
             </div>
             <div className="flex items-center gap-2">
@@ -406,16 +471,16 @@ export default function TracePage() {
               <span>Continuation</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-8 h-0 border-t border-dashed border-muted-foreground" />
+              <div className="w-8 h-0 border-t border-dashed border-text-mute" />
               <span>Spawned by</span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="w-8 h-4 border-2 border-dashed border-muted-foreground/30 rounded" />
+              <div className="w-8 h-4 border-2 border-dashed border-border rounded" />
               <span>Batch or Message</span>
             </div>
           </div>
         </ReactFlow>
-      </div>
+      </Panel>
     </div>
   );
 }

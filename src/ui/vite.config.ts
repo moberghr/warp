@@ -1,8 +1,23 @@
+/// <reference types="vitest" />
 import { defineConfig, type Plugin, type PluginOption } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 import fs from 'fs'
+import { execSync } from 'child_process'
+
+function gitInfo() {
+  const safe = (cmd: string, fallback = '') => {
+    try { return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() }
+    catch { return fallback }
+  }
+  // Tag (with `v` prefix stripped) or short sha as fallback.
+  const raw = safe('git describe --tags --abbrev=0', '') || safe('git rev-parse --short HEAD', 'dev')
+  const version = raw.replace(/^v/, '')
+  const commit = safe('git rev-parse --short HEAD', 'dev')
+  const buildDate = safe('git log -1 --format=%cd --date=short', new Date().toISOString().slice(0, 10))
+  return { version, commit, buildDate }
+}
 
 /**
  * In demo mode, serves UI extension JS files from their source location
@@ -43,6 +58,13 @@ function serveExtensions(): Plugin {
 
 export default defineConfig(async ({ mode }) => {
   const isDemo = mode === 'demo'
+  const git = gitInfo()
+  // Vite exposes any process.env var prefixed with VITE_ on import.meta.env
+  // at build/dev time. This is the supported escape hatch when define-based
+  // substitution misbehaves with JSX/TSX (Vite v8 + plugin-react).
+  process.env.VITE_APP_VERSION = git.version
+  process.env.VITE_APP_COMMIT = git.commit
+  process.env.VITE_APP_BUILD_DATE = git.buildDate
 
   // Bundle analysis is opt-in: `ANALYZE=1 npm run build` emits bundle-stats.html.
   // Loaded via dynamic import so normal/CI builds never touch the devDependency.
@@ -66,11 +88,22 @@ export default defineConfig(async ({ mode }) => {
       outDir: '../core/Warp.UI/dist',
       emptyOutDir: true,
     },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      setupFiles: ['./src/test/setup.ts'],
+      include: ['src/**/*.{test,spec}.{ts,tsx}'],
+      css: false,
+    },
     server: isDemo
-      ? {}
+      ? { allowedHosts: ['.trycloudflare.com'] }
       : {
+          allowedHosts: ['.trycloudflare.com'],
           proxy: {
-            '/warp': 'http://localhost:5104',
+            '/warp/api': {
+              target: 'http://localhost:5104',
+              ws: true,
+            },
           },
         },
   }

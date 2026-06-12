@@ -11,7 +11,7 @@
 
   <!-- Source Link for library packages so consumers can step into Warp source while debugging. -->
   <ItemGroup Condition="'$(PackageId)' != ''">
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.300" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>

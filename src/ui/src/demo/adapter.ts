@@ -18,6 +18,11 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const params: Record<string, unknown> = config.params ?? {};
     const method = (config.method ?? 'get').toLowerCase();
 
+    // Auth status: authenticated unless ?login mode is still active.
+    if (url.includes('/auth/status')) {
+      return resolve({ authenticated: !loginActive }, config);
+    }
+
     // Login mode: reject with 401 until POST /auth/login succeeds
     if (loginActive) {
       if (method === 'post' && url.includes('/auth/login')) {
@@ -528,6 +533,16 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // Job relations (siblings, children, trace)
   if (/^\/jobs\/[^/]+\/(siblings|children|trace)$/.test(url)) {
     return data.paginate(data.completedJobs.slice(0, 5), page, pageSize);
+  }
+
+  if (url.endsWith('/info')) {
+    return {
+      version: '1.0.0-demo',
+      provider: 'PostgreSql',
+      host: 'demo-host',
+      database: 'warp_demo',
+      schema: 'warp',
+    };
   }
 
   // Fallback

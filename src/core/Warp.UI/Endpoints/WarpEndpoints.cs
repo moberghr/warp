@@ -37,6 +37,8 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("status", async ([FromServices] IDashboardStatsService statsService) => await statsService.GetWarpStatus());
 
+        apiGroup.MapGet("info", ([FromServices] IDashboardStatsService statsService) => Results.Ok(statsService.GetWarpInfo()));
+
         apiGroup.MapGet("jobs/enqueued", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetJobsList(request, State.Enqueued));
 
         apiGroup.MapGet("jobs/completed", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetJobsList(request, State.Completed));
@@ -138,13 +140,15 @@ public static class WarpEndpoints
             [FromServices] IConcurrencyLimitManager? concurrency,
             [FromServices] IRateLimitManager? rateLimits,
             [FromServices] IDashboardPushMarker? push,
-            [FromServices] ISagaQueryService? sagas) =>
+            [FromServices] ISagaQueryService? sagas,
+            [FromServices] IBackgroundServiceQueryService? services) =>
             Results.Ok(new WarpAddonsInfo
             {
                 Concurrency = concurrency is not null,
                 Push = push is not null,
                 RateLimits = rateLimits is not null,
                 Sagas = sagas is not null,
+                Services = services is not null,
             }));
 
         apiGroup.MapGet("concurrency", async ([FromServices] IConcurrencyLimitManager? mgr, CancellationToken ct) =>

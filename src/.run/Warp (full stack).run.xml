@@ -1,0 +1,7 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Warp (full stack)" type="CompoundRunConfigurationType">
+    <toRun name="Warp.TestApp" type="LaunchSettings" />
+    <toRun name="UI dev server" type="js.build_tools.npm" />
+    <method v="2" />
+  </configuration>
+</component>

@@ -11,4 +11,6 @@ public sealed class WarpAddonsInfo
     public bool RateLimits { get; init; }
 
     public bool Sagas { get; init; }
+
+    public bool Services { get; init; }
 }

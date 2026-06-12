@@ -113,6 +113,20 @@ public sealed class Orchestrator<TContext> : IServerTask
             }
 
             parent.ExpireAt = now.Add(jobExpirationTimeout);
+
+            var kindLabel = parent.Kind == JobKind.Batch ? "Batch" : "Message";
+            var message = parent.CurrentState == State.Completed
+                ? $"{kindLabel} completed — all children finished"
+                : $"{kindLabel} failed — one or more children failed";
+
+            _context.Set<JobLog>().Add(new JobLog
+            {
+                JobId = parent.Id,
+                EventType = parent.CurrentState == State.Completed ? "Completed" : "Failed",
+                Level = "Information",
+                Timestamp = now,
+                Message = message,
+            });
         }
 
         await _context.SaveChangesAsync(ct);

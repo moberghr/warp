@@ -1,152 +1,180 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import type { ColumnDef } from '@tanstack/react-table';
-import { Button } from '@/components/ui/button';
+import { useParams, useSearchParams, Link } from 'react-router-dom';
+import {
+  flexRender,
+  getCoreRowModel,
+  getSortedRowModel,
+  useReactTable,
+  type ColumnDef,
+  type SortingState,
+  type RowSelectionState,
+} from '@tanstack/react-table';
+import { toast } from 'sonner';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Panel } from '@/components/v2/Panel';
 import { StateBadge } from '@/components/StateBadge';
-import { shortType, shortId } from '@/utils/format';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
-import { DataTable } from '@/components/DataTable';
-import { ConfirmDialog } from '@/components/ConfirmDialog';
-import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { shortType, shortId, formatDateTime } from '@/utils/format';
+import { getStateTone } from '@/lib/styles';
+import { usePageStore } from '@/stores/page';
 import {
   useJobsList,
   useFailedJobsByType,
   useFailedJobTypes,
-  useRequeueJob,
-  useDeleteJob,
   useBulkRequeueJobs,
   useBulkDeleteJobs,
   useRequeueFailedJobsByType,
   useDeleteFailedJobsByType,
+  useRequeueJob,
+  useDeleteJob,
 } from '@/api/hooks/useJobs';
 import type { JobModel } from '@/types';
+import { State } from '@/types';
+import { JobsStateRail } from './JobsStateRail';
+import { JobTypeBar } from './JobTypeBar';
+import { BulkActionBar } from './BulkActionBar';
+import { useConfirm } from '@/components/forms/useConfirm';
+import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { usePageParam } from '@/hooks/usePageParam';
+import { Pagination } from '@/components/Pagination';
 
-type PendingAction =
-  | { kind: 'requeue-one'; id: string }
-  | { kind: 'delete-one'; id: string }
-  | { kind: 'requeue-bulk'; ids: string[] }
-  | { kind: 'delete-bulk'; ids: string[] }
-  | { kind: 'requeue-by-type'; type: string }
-  | { kind: 'delete-by-type'; type: string };
+const SUBTEXT: Record<string, string> = {
+  enqueued: 'Awaiting a worker pickup.',
+  scheduled: 'Future-dated runs.',
+  processing: 'Currently executing.',
+  completed: 'Recent successful runs.',
+  failed: 'Retries exhausted. Filter by type to bulk requeue or delete.',
+  awaiting: 'Awaiting parent / dependency.',
+  deleted: 'Soft-deleted; recoverable until cleanup.',
+};
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 export default function JobListPage() {
   const { state } = useParams<{ state: string }>();
-  const activeState = state ?? 'enqueued';
-  const isFailed = activeState === 'failed';
+  const resolvedState = state ?? 'enqueued';
+  const isFailed = resolvedState === 'failed';
 
-  const [page, setPage] = useState(0);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [page, setPage] = usePageParam();
+  const activeType = searchParams.get('type');
   const [pageSize, setPageSize] = usePersistedPageSize();
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [selectedType, setSelectedType] = useState<string | null>(null);
 
+  const setActiveType = (type: string | null) => {
+    const params = new URLSearchParams(searchParams);
+    if (type) {
+      params.set('type', type);
+    } else {
+      params.delete('type');
+    }
+    params.delete('page');
+    setSearchParams(params, { replace: true });
+  };
+
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'createTime', desc: true }]);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+
+  // Reset selection when navigating between state/type/page.
   useEffect(() => {
-    setPage(0);
-    setSelectedIds(new Set());
-    setSelectedType(null);
-  }, [state]);
+    setRowSelection({});
+  }, [resolvedState, activeType, page]);
 
-  const listQuery = useJobsList(activeState, page, pageSize);
-  const typedQuery = useFailedJobsByType(selectedType ?? '', page, pageSize, isFailed && !!selectedType);
-  const typeCounts = useFailedJobTypes(isFailed);
+  const jobsQuery = useJobsList(resolvedState, page, pageSize);
+  const filteredQuery = useFailedJobsByType(
+    activeType ?? '',
+    page,
+    pageSize,
+    isFailed && !!activeType,
+  );
+  const typeCountsQuery = useFailedJobTypes(isFailed);
 
-  const requeue = useRequeueJob();
-  const remove = useDeleteJob();
+  const activeQuery = isFailed && activeType ? filteredQuery : jobsQuery;
+  const data = activeQuery.data;
+  const error = activeQuery.error;
+  const typeCounts = typeCountsQuery.data ?? [];
+
+  const requeueJob = useRequeueJob();
+  const deleteJob = useDeleteJob();
   const bulkRequeue = useBulkRequeueJobs();
   const bulkDelete = useBulkDeleteJobs();
   const requeueByType = useRequeueFailedJobsByType();
   const deleteByType = useDeleteFailedJobsByType();
 
-  const [pending, setPending] = useState<PendingAction | null>(null);
+  // Drive the topbar via the page store. Re-set on state navigation so the
+  // title doesn't get cleared by PageHeader's path-change handler.
+  useEffect(() => {
+    usePageStore.getState().set({
+      title: `${capitalize(resolvedState)} Jobs`,
+      subtitle: 'Background work items dispatched to workers',
+    });
+  }, [resolvedState]);
+  useEffect(() => () => usePageStore.getState().reset(), []);
 
-  const runPending = () => {
-    if (!pending) return;
-    switch (pending.kind) {
-      case 'requeue-one':
-        requeue.mutate(pending.id);
-        break;
-      case 'delete-one':
-        remove.mutate(pending.id);
-        break;
-      case 'requeue-bulk':
-        bulkRequeue.mutate(pending.ids, { onSuccess: () => setSelectedIds(new Set()) });
-        break;
-      case 'delete-bulk':
-        bulkDelete.mutate(pending.ids, { onSuccess: () => setSelectedIds(new Set()) });
-        break;
-      case 'requeue-by-type':
-        requeueByType.mutate(pending.type);
-        break;
-      case 'delete-by-type':
-        deleteByType.mutate(pending.type);
-        break;
+  const rows = useMemo<JobModel[]>(() => data?.items ?? [], [data]);
+
+  const isScheduledView = resolvedState === 'scheduled';
+
+  const askRequeueOne = async (job: JobModel) => {
+    const ok = await confirm({
+      title: 'Requeue job?',
+      description: `The job will be re-enqueued and picked up by a worker on the next poll.`,
+      confirmLabel: 'Requeue',
+    });
+    if (ok) {
+      requeueJob.mutate(job.id);
     }
-    setPending(null);
   };
-
-  const active = isFailed && selectedType ? typedQuery : listQuery;
-  const data = active.data;
 
   const columns = useMemo<ColumnDef<JobModel>[]>(
     () => [
       {
         id: 'select',
-        header: () => {
-          const allSelected =
-            (data?.items.length ?? 0) > 0 && (data?.items.every((j) => selectedIds.has(j.id)) ?? false);
-
-          return (
-            <input
-              type="checkbox"
-              checked={allSelected}
-              onChange={(e) => {
-                if (e.target.checked) {
-                  setSelectedIds(new Set(data?.items.map((j) => j.id) ?? []));
-                } else {
-                  setSelectedIds(new Set());
-                }
-              }}
-              className="rounded"
-            />
-          );
-        },
-        cell: ({ row }) => (
-          <input
-            type="checkbox"
-            checked={selectedIds.has(row.original.id)}
-            onChange={(e) => {
-              const next = new Set(selectedIds);
-              if (e.target.checked) {
-                next.add(row.original.id);
-              } else {
-                next.delete(row.original.id);
-              }
-              setSelectedIds(next);
-            }}
-            className="rounded"
-            onClick={(e) => e.stopPropagation()}
+        header: ({ table }) => (
+          <Checkbox
+            checked={table.getIsAllRowsSelected()}
+            indeterminate={table.getIsSomeRowsSelected()}
+            onChange={table.getToggleAllRowsSelectedHandler()}
+            aria-label="Select all"
           />
         ),
-        meta: { headerClassName: 'w-[40px]' },
+        cell: ({ row }) => (
+          <Checkbox
+            checked={row.getIsSelected()}
+            onChange={row.getToggleSelectedHandler()}
+            aria-label="Select row"
+          />
+        ),
+        enableSorting: false,
+        size: 36,
       },
       {
         accessorKey: 'id',
         header: 'ID',
+        enableSorting: false,
         cell: ({ row }) => (
-          <Link to={`/detail/${row.original.id}`} className="font-mono text-xs text-primary hover:underline">
+          <Link
+            to={`/jobs/detail/${row.original.id}`}
+            className="mono text-[12px] text-foreground hover:text-warp-blue transition-colors"
+          >
             {shortId(row.original.id)}
           </Link>
         ),
-        meta: { headerClassName: 'w-[100px]' },
       },
       {
         accessorKey: 'type',
-        header: 'Type',
+        header: 'Type · Handler',
+        enableSorting: false,
         cell: ({ row }) => (
           <div>
-            <div>{shortType(row.original.type)}</div>
+            <div className="text-[13px] font-medium text-foreground">{shortType(row.original.type)}</div>
             {row.original.handlerType && (
-              <div className="text-xs text-muted-foreground">{shortType(row.original.handlerType)}</div>
+              <div className="mono text-[10.5px] text-text-mute mt-0.5">
+                {shortType(row.original.handlerType)}
+              </div>
             )}
           </div>
         ),
@@ -154,27 +182,32 @@ export default function JobListPage() {
       {
         accessorKey: 'currentState',
         header: 'State',
+        enableSorting: false,
         cell: ({ row }) => (
-          <StateBadge state={row.original.currentState} cancellationMode={row.original.cancellationMode} />
+          <StateBadge
+            state={row.original.currentState}
+            cancellationMode={row.original.cancellationMode}
+          />
         ),
       },
       {
         accessorKey: 'createTime',
         header: 'Created',
         cell: ({ row }) => (
-          <span className="text-sm text-muted-foreground">
+          <span className="text-[12px] text-text-dim mono">
             <RelativeTime date={row.original.createTime} />
           </span>
         ),
       },
-      ...(activeState === 'scheduled'
+      ...(isScheduledView
         ? [
             {
-              id: 'scheduled',
+              accessorKey: 'scheduleTime',
               header: 'Scheduled',
-              cell: ({ row }) => (
-                <span className="text-sm text-muted-foreground">
-                  <RelativeTime date={row.original.scheduleTime ?? row.original.createTime} />
+              enableSorting: false,
+              cell: ({ row }: { row: { original: JobModel } }) => (
+                <span className="text-[12px] text-text-dim mono">
+                  {row.original.scheduleTime ? formatDateTime(row.original.scheduleTime) : '—'}
                 </span>
               ),
             } as ColumnDef<JobModel>,
@@ -182,187 +215,246 @@ export default function JobListPage() {
         : []),
       {
         id: 'actions',
-        header: 'Actions',
-        cell: ({ row }) => (
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setPending({ kind: 'requeue-one', id: row.original.id })}
-            >
-              Requeue
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-destructive"
-              onClick={() => setPending({ kind: 'delete-one', id: row.original.id })}
-            >
-              Delete
-            </Button>
-          </>
-        ),
-        meta: { headerClassName: 'text-right', cellClassName: 'text-right' },
+        header: '',
+        enableSorting: false,
+        cell: ({ row }) => {
+          const rowState = row.original.currentState;
+          const isFailedRow = rowState === State.Failed;
+          const isProcessingRow = rowState === State.Processing;
+          const isCompletedRow = rowState === State.Completed;
+          const showRequeue = !isProcessingRow && !isCompletedRow;
+
+          return (
+            <div className="flex justify-end gap-2">
+              {showRequeue && (
+                <button
+                  type="button"
+                  onClick={() => void askRequeueOne(row.original)}
+                  className="px-2.5 py-1 text-[11.5px] font-medium rounded-md border border-border bg-panel-2 text-foreground hover:bg-panel transition-colors"
+                >
+                  {isFailedRow ? 'Retry' : 'Requeue'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: 'Delete job?',
+                    description: `Delete ${shortId(row.original.id)} (${shortType(row.original.type)})? This cannot be undone.`,
+                    confirmLabel: 'Delete',
+                    destructive: true,
+                  });
+                  if (ok) {
+                    deleteJob.mutate(row.original.id);
+                  }
+                }}
+                className="px-2.5 py-1 text-[11.5px] font-medium rounded-md border border-warp-red text-warp-red hover:bg-warp-red-soft transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          );
+        },
       },
     ],
-    [data, selectedIds, activeState],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [requeueJob, deleteJob, confirm, isScheduledView],
   );
 
-  if (active.isError) return <ErrorState message="Unable to load jobs" />;
-  if (active.isLoading || !data) return <LoadingState />;
+  const table = useReactTable({
+    data: rows,
+    columns,
+    state: { sorting, rowSelection },
+    onSortingChange: setSorting,
+    onRowSelectionChange: setRowSelection,
+    getRowId: (row) => row.id,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    enableRowSelection: true,
+  });
 
-  const title = activeState.charAt(0).toUpperCase() + activeState.slice(1);
-  const handlePageSizeChange = (size: number) => {
-    setPageSize(size);
-    setPage(0);
-    setSelectedIds(new Set());
+  const selectedIds = Object.keys(rowSelection).filter((id) => rowSelection[id]);
+
+  const handleBulkRequeue = async () => {
+    const ok = await confirm({
+      title: `Requeue ${selectedIds.length} jobs?`,
+      description: 'Selected jobs will be re-enqueued and picked up by workers on the next poll.',
+      confirmLabel: `Requeue ${selectedIds.length}`,
+    });
+    if (!ok) {
+      return;
+    }
+    bulkRequeue.mutate(selectedIds, {
+      onSuccess: () => setRowSelection({}),
+    });
   };
 
+  const handleBulkDelete = async () => {
+    const ok = await confirm({
+      title: `Delete ${selectedIds.length} jobs?`,
+      description: 'This cannot be undone.',
+      confirmLabel: `Delete ${selectedIds.length}`,
+      destructive: true,
+    });
+    if (!ok) {
+      return;
+    }
+
+    bulkDelete.mutate(selectedIds, {
+      onSuccess: () => setRowSelection({}),
+    });
+  };
+
+  const handleRequeueAllType = async () => {
+    if (!activeType) {
+      return;
+    }
+    const ok = await confirm({
+      title: `Requeue all ${shortType(activeType)}?`,
+      description: `Every failed job of type ${shortType(activeType)} will be re-enqueued.`,
+      confirmLabel: 'Requeue all',
+    });
+    if (!ok) {
+      return;
+    }
+
+    requeueByType.mutate(activeType, {
+      onSuccess: () => {
+        setRowSelection({});
+        toast.success(`Requeued all ${shortType(activeType)}`);
+      },
+    });
+  };
+
+  const handleDeleteAllType = async () => {
+    if (!activeType) {
+      return;
+    }
+    const ok = await confirm({
+      title: `Delete all ${shortType(activeType)}?`,
+      description: `Every failed job of type ${shortType(activeType)} will be removed permanently. This cannot be undone.`,
+      confirmLabel: 'Delete all',
+      destructive: true,
+    });
+    if (!ok) {
+      return;
+    }
+
+    deleteByType.mutate(activeType, {
+      onSuccess: () => {
+        setRowSelection({});
+        toast.success(`Deleted all ${shortType(activeType)}`);
+      },
+    });
+  };
+
+  const stateLabel = resolvedState;
+  const tone = getStateTone(resolvedState);
+  const total = data?.totalCount ?? 0;
+  const pageCount = data?.pageCount ?? 0;
+
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-bold">{title} Jobs</h1>
-        <span className="text-sm text-muted-foreground">{data.totalCount} total</span>
-      </div>
-
-      {/* Failed type filter bar */}
-      {isFailed && (typeCounts.data?.length ?? 0) > 0 && (
-        <div className="flex flex-wrap items-center gap-2 mb-3">
-          <Button
-            variant={selectedType === null ? 'default' : 'outline'}
-            size="sm"
-            onClick={() => {
-              setSelectedType(null);
-              setPage(0);
-              setSelectedIds(new Set());
-            }}
-          >
-            All
-          </Button>
-          {typeCounts.data?.map((tc) => (
-            <Button
-              key={tc.type}
-              variant={selectedType === tc.type ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => {
-                setSelectedType(tc.type);
-                setPage(0);
-                setSelectedIds(new Set());
-              }}
+    <div className="flex flex-col lg:flex-row">
+      {confirmDialog}
+      <JobsStateRail active={resolvedState} />
+      <div className="flex-1 p-5 min-w-0">
+      {error ? (
+        <ErrorState message={(error as Error).message} />
+      ) : !data ? (
+        <LoadingState />
+      ) : (
+      <>
+        <header className="mb-4">
+          <h1 className="font-display text-[22px] font-semibold tracking-tight">
+            {capitalize(stateLabel)} Jobs
+            <span
+              className={`ml-2.5 inline-flex items-center rounded-md px-2 py-0.5 text-[13px] font-medium align-middle ${tone.bg} ${tone.text}`}
             >
-              {shortType(tc.type)} ({tc.count})
-            </Button>
-          ))}
-        </div>
+              {total.toLocaleString()}
+            </span>
+          </h1>
+          <p className="text-[12.5px] text-text-mute mt-1">{SUBTEXT[resolvedState] ?? ''}</p>
+        </header>
+
+        <BulkActionBar
+          count={selectedIds.length}
+          total={total}
+          activeType={activeType ? shortType(activeType) : null}
+          stateLabel={stateLabel}
+          onRequeue={handleBulkRequeue}
+          onDelete={handleBulkDelete}
+          onRequeueAllType={isFailed && activeType ? handleRequeueAllType : undefined}
+          onDeleteAllType={isFailed && activeType ? handleDeleteAllType : undefined}
+        />
+
+        {isFailed && typeCounts.length > 0 && (
+          <JobTypeBar types={typeCounts} activeType={activeType} onPick={setActiveType} />
+        )}
+
+        <Panel className="overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead>
+                {table.getHeaderGroups().map((hg) => (
+                  <tr key={hg.id} className="bg-panel-2 border-b border-border">
+                    {hg.headers.map((header) => (
+                      <th
+                        key={header.id}
+                        className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold"
+                        style={{ width: header.column.columnDef.size ? header.column.columnDef.size : undefined }}
+                      >
+                        {header.isPlaceholder
+                          ? null
+                          : flexRender(header.column.columnDef.header, header.getContext())}
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
+              <tbody>
+                {table.getRowModel().rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={columns.length} className="text-center text-text-mute py-10 text-[13px]">
+                      No jobs found.
+                    </td>
+                  </tr>
+                ) : (
+                  table.getRowModel().rows.map((row) => {
+                    const isSelected = row.getIsSelected();
+                    const selectedBg = isFailed ? 'bg-warp-red-soft' : 'bg-warp-blue-soft';
+
+                    return (
+                      <tr
+                        key={row.id}
+                        className={`border-b border-border last:border-b-0 transition-colors ${
+                          isSelected ? selectedBg : 'hover:bg-panel-2'
+                        }`}
+                      >
+                        {row.getVisibleCells().map((cell) => (
+                          <td key={cell.id} className="px-3.5 py-3 align-middle">
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+
+        <Pagination
+          page={page}
+          pageCount={pageCount}
+          onPageChange={setPage}
+          pageSize={pageSize}
+          onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
+          totalCount={total}
+        />
+      </>
       )}
-
-      {/* Bulk actions for type filter */}
-      {isFailed && selectedType && (
-        <div className="flex items-center gap-3 mb-3 p-3 bg-muted rounded-md">
-          <span className="text-sm font-medium">Filtered: {shortType(selectedType)}</span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setPending({ kind: 'requeue-by-type', type: selectedType })}
-          >
-            Requeue All
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-destructive"
-            onClick={() => setPending({ kind: 'delete-by-type', type: selectedType })}
-          >
-            Delete All
-          </Button>
-        </div>
-      )}
-
-      {selectedIds.size > 0 && (
-        <div className="flex items-center gap-3 mb-3 p-3 bg-muted rounded-md">
-          <span className="text-sm font-medium">{selectedIds.size} selected</span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setPending({ kind: 'requeue-bulk', ids: Array.from(selectedIds) })}
-          >
-            Requeue
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-destructive"
-            onClick={() => setPending({ kind: 'delete-bulk', ids: Array.from(selectedIds) })}
-          >
-            Delete
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
-            Clear
-          </Button>
-        </div>
-      )}
-
-      <DataTable
-        columns={columns}
-        data={data.items}
-        emptyMessage="No jobs found"
-        getRowId={(row) => row.id}
-        pagination={{
-          page,
-          pageSize,
-          pageCount: data.pageCount,
-          onPageChange: setPage,
-          onPageSizeChange: handlePageSizeChange,
-        }}
-      />
-
-      <ConfirmDialog
-        open={pending !== null}
-        onOpenChange={(open) => !open && setPending(null)}
-        title={pending ? pendingTitle(pending) : ''}
-        description={pending ? pendingDescription(pending) : null}
-        confirmLabel={pending ? pendingConfirmLabel(pending) : 'Confirm'}
-        variant={pending && pending.kind.startsWith('delete') ? 'destructive' : 'default'}
-        onConfirm={runPending}
-      />
+      </div>
     </div>
   );
-}
-
-function pendingTitle(p: PendingAction): string {
-  switch (p.kind) {
-    case 'requeue-one':
-      return 'Requeue job?';
-    case 'delete-one':
-      return 'Delete job?';
-    case 'requeue-bulk':
-      return `Requeue ${p.ids.length} job${p.ids.length === 1 ? '' : 's'}?`;
-    case 'delete-bulk':
-      return `Delete ${p.ids.length} job${p.ids.length === 1 ? '' : 's'}?`;
-    case 'requeue-by-type':
-      return `Requeue all failed ${shortType(p.type)} jobs?`;
-    case 'delete-by-type':
-      return `Delete all failed ${shortType(p.type)} jobs?`;
-  }
-}
-
-function pendingDescription(p: PendingAction): string {
-  switch (p.kind) {
-    case 'requeue-one':
-      return 'The job will be re-enqueued and picked up by a worker on the next poll.';
-    case 'delete-one':
-      return 'The job will be removed permanently. This cannot be undone.';
-    case 'requeue-bulk':
-      return `All ${p.ids.length} selected job${p.ids.length === 1 ? '' : 's'} will be re-enqueued.`;
-    case 'delete-bulk':
-      return `${p.ids.length} selected job${p.ids.length === 1 ? '' : 's'} will be removed permanently. This cannot be undone.`;
-    case 'requeue-by-type':
-      return 'All failed jobs of this type will be re-enqueued. Depending on the type, this may be a large number of jobs.';
-    case 'delete-by-type':
-      return 'All failed jobs of this type will be removed permanently. This cannot be undone.';
-  }
-}
-
-function pendingConfirmLabel(p: PendingAction): string {
-  return p.kind.startsWith('delete') ? 'Delete' : 'Requeue';
 }

@@ -32,29 +32,17 @@ public class JobGroupQueryService<TContext> : IJobGroupQueryService
         var query = _context.Set<Job>()
             .Where(x => x.Kind == kind);
 
-        if (kind == JobKind.Batch)
+        query = state switch
         {
-            query = state switch
-            {
-                "processing" => query.Where(x => x.CurrentState == State.Processing),
-                "awaiting" => query.Where(x => x.CurrentState == State.Awaiting),
-                "completed" => query.Where(x => x.CurrentState == State.Completed),
-                "failed" => query.Where(x => x.CurrentState == State.Failed),
-                "deleted" => query.Where(x => x.CurrentState == State.Deleted),
-                _ => query,
-            };
-        }
-        else
-        {
-            query = state switch
-            {
-                "enqueued" => query.Where(x => x.CurrentState == State.Enqueued),
-                "processing" => query.Where(x => x.CurrentState == State.Processing),
-                "completed" => query.Where(x => x.CurrentState == State.Completed),
-                "failed" => query.Where(x => x.CurrentState == State.Failed),
-                _ => query,
-            };
-        }
+            "awaiting" => query.Where(x => x.CurrentState == State.Awaiting),
+            "scheduled" => query.Where(x => x.CurrentState == State.Scheduled),
+            "enqueued" => query.Where(x => x.CurrentState == State.Enqueued),
+            "processing" => query.Where(x => x.CurrentState == State.Processing),
+            "completed" => query.Where(x => x.CurrentState == State.Completed),
+            "failed" => query.Where(x => x.CurrentState == State.Failed),
+            "deleted" => query.Where(x => x.CurrentState == State.Deleted),
+            _ => query,
+        };
 
         return await query
             .OrderByDescending(x => x.CreateTime)
@@ -149,10 +137,12 @@ public class JobGroupQueryService<TContext> : IJobGroupQueryService
         query = state switch
         {
             "awaiting" => query.Where(x => x.CurrentState == State.Awaiting),
+            "scheduled" => query.Where(x => x.CurrentState == State.Scheduled),
             "enqueued" => query.Where(x => x.CurrentState == State.Enqueued),
             "processing" => query.Where(x => x.CurrentState == State.Processing),
             "completed" => query.Where(x => x.CurrentState == State.Completed),
             "failed" => query.Where(x => x.CurrentState == State.Failed),
+            "deleted" => query.Where(x => x.CurrentState == State.Deleted),
             _ => query,
         };
 

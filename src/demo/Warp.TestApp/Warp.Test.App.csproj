@@ -8,6 +8,19 @@
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
   </PropertyGroup>
 
+  <!--
+    macOS Sequoia tags files created inside Claude-Code's worktree dirs with
+    com.apple.provenance, and AppleSystemPolicy then SIGKILLs ad-hoc-signed
+    .NET apphosts launched from those locations (Rider reports exit 137 /
+    "exited before any CLR were loaded"). Skip apphost generation on local
+    macOS Debug builds — Rider launches via `dotnet *.dll` instead, which
+    is properly signed and not policy-rejected. Release & non-mac builds
+    keep the apphost.
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' AND '$([MSBuild]::IsOSPlatform(`OSX`))' == 'true'">
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
   <ItemGroup>
     <Compile Remove="wwwroot\**" />
     <Content Remove="wwwroot\**" />
@@ -16,8 +29,19 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.21.0" />
-    <PackageReference Include="Swashbuckle.AspNetCore" Version="7.3.1" />
+    <!--
+      Copy appsettings to the output dir so the dll is launchable from any cwd
+      (Rider debugger, Docker, raw `dotnet path/to.dll`). Without this, the
+      content root defaults to cwd and the ConnectionString comes back null,
+      crashing on first DB call before any logs are emitted.
+    -->
+    <Content Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Update="appsettings.Development.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.23.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.7" />
   </ItemGroup>
 
   <ItemGroup>

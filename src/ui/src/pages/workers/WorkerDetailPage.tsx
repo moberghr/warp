@@ -1,15 +1,14 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Panel, PanelHeader } from '@/components/v2/Panel';
 import { Pagination } from '@/components/Pagination';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { Badge } from '@/components/ui/badge';
-import { shortId, shortType } from '@/utils/format';
+import { usePageStore } from '@/stores/page';
+import { shortId, shortType, formatDuration } from '@/utils/format';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
-import type { WorkerDetailModel, WorkerJobLogModel, PagedList } from '@/types';
-import * as api from '@/api';
+import { useWorkerDetail, useWorkerLogs } from '@/api/hooks/useServers';
 
 const eventColors: Record<string, string> = {
   Processing: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
@@ -28,141 +27,131 @@ const levelColors: Record<string, string> = {
 
 export default function WorkerDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const [worker, setWorker] = useState<WorkerDetailModel | null>(null);
-  const [data, setData] = useState<PagedList<WorkerJobLogModel> | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = usePersistedPageSize();
 
+  const workerQuery = useWorkerDetail(id);
+  const logsQuery = useWorkerLogs(id, page, pageSize);
+
+  const worker = workerQuery.data ?? null;
+
   useEffect(() => {
-    if (!id) return;
-    api.getWorkerById(id).then(setWorker).catch(() => {});
-  }, [id]);
+    usePageStore.getState().set({
+      title: `Worker ${shortId(id ?? '')}`,
+      subtitle: worker?.currentJobId ? 'Processing' : 'Idle',
+      right: (
+        <div className="flex items-center gap-2">
+          {worker?.serverPausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300">Server Paused</Badge>}
+          {worker?.workerGroupPausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300">Group Paused</Badge>}
+        </div>
+      ),
+    });
+  }, [id, worker]);
 
-  const fetchData = useCallback(async () => {
-    if (!id) return;
-    try {
-      const result = await api.getWorkerJobLogs(id, page, pageSize);
-      setData(result);
-      setError(null);
-    } catch {
-      setError('Unable to load worker logs');
-    }
-  }, [id, page, pageSize]);
+  useEffect(() => {
+    return () => usePageStore.getState().reset();
+  }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  if (logsQuery.error) return <ErrorState message={(logsQuery.error as Error).message} />;
+  if (!logsQuery.data) return <LoadingState />;
 
-  if (error) return <ErrorState message={error} />;
-  if (!data) return <LoadingState />;
+  const data = logsQuery.data;
 
   return (
-    <div>
-      <div className="flex items-center gap-3 mb-6">
+    <div className="flex flex-col gap-3 py-5">
+      <div className="flex items-center gap-2 text-[12.5px] text-text-mute">
         <span className={`inline-block w-3 h-3 rounded-full ${worker?.currentJobId ? 'bg-purple-500' : 'bg-green-500'}`} />
-        <h1 className="text-2xl font-bold">Worker {shortId(id!)}</h1>
-        {worker?.currentJobId ? (
-          <span className="text-sm text-purple-700 dark:text-purple-400 font-medium">Processing</span>
-        ) : (
-          <span className="text-sm text-muted-foreground">Idle</span>
-        )}
-        {worker?.serverPausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300">Server Paused</Badge>}
-        {worker?.workerGroupPausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300">Group Paused</Badge>}
+        {worker?.currentJobId ? 'Processing' : 'Idle'}
       </div>
 
       {worker && (
-        <Card className="mb-6">
-          <CardHeader className="pb-2"><CardTitle className="text-sm">Details</CardTitle></CardHeader>
-          <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-sm">
-            <div>
-              <span className="text-muted-foreground">Server:</span>{' '}
-              <Link to={`/servers/${worker.serverId}`} className="text-primary hover:underline">{worker.serverName}</Link>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Started:</span>{' '}
-              <RelativeTime date={worker.startedTime} />
-            </div>
-            <div>
-              <span className="text-muted-foreground">Heartbeat:</span>{' '}
-              {worker.lastHeartbeatTime ? <RelativeTime date={worker.lastHeartbeatTime} /> : 'N/A'}
-            </div>
-            <div>
-              <span className="text-muted-foreground">Current Job:</span>{' '}
-              {worker.currentJobId ? (
-                <>
-                  <Link to={`/detail/${worker.currentJobId}`} className="text-primary hover:underline font-mono text-xs">
-                    {shortId(worker.currentJobId)}
-                  </Link>
-                  {worker.currentJobType && (
-                    <span className="text-muted-foreground ml-2">({shortType(worker.currentJobType)})</span>
-                  )}
-                </>
-              ) : (
-                <span className="text-muted-foreground">None</span>
-              )}
-            </div>
-            <div className="md:col-span-2">
-              <span className="text-muted-foreground">ID:</span>{' '}
-              <span className="font-mono text-xs">{id}</span>
-            </div>
-          </CardContent>
-        </Card>
+        <Panel>
+          <PanelHeader eyebrow="Details" />
+          <div className="px-4 py-3">
+            <dl className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-2 text-[13px]">
+              <dt className="warp-eyebrow text-text-mute">Server</dt>
+              <dd>
+                <Link to={`/servers/${worker.serverId}`} className="text-primary hover:underline">{worker.serverName}</Link>
+              </dd>
+              <dt className="warp-eyebrow text-text-mute">Started</dt>
+              <dd><RelativeTime date={worker.startedTime} /></dd>
+              <dt className="warp-eyebrow text-text-mute">Heartbeat</dt>
+              <dd>{worker.lastHeartbeatTime ? <RelativeTime date={worker.lastHeartbeatTime} /> : 'N/A'}</dd>
+              <dt className="warp-eyebrow text-text-mute">Current job</dt>
+              <dd>
+                {worker.currentJobId ? (
+                  <>
+                    <Link to={`/jobs/detail/${worker.currentJobId}`} className="text-primary hover:underline font-mono text-xs">
+                      {shortId(worker.currentJobId)}
+                    </Link>
+                    {worker.currentJobType && (
+                      <span className="text-text-mute ml-2">({shortType(worker.currentJobType)})</span>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-text-mute">None</span>
+                )}
+              </dd>
+              <dt className="warp-eyebrow text-text-mute">ID</dt>
+              <dd className="font-mono text-xs">{id}</dd>
+            </dl>
+          </div>
+        </Panel>
       )}
 
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold">Job Activity</h2>
-        <span className="text-sm text-muted-foreground">{data.totalCount} log entries</span>
-      </div>
+      <Panel className="overflow-hidden">
+        <PanelHeader eyebrow="Job activity" action={<span className="text-[11px] text-text-mute">{data.totalCount} log entries</span>} />
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse">
+            <thead>
+              <tr className="bg-panel-2 border-b border-border">
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Event</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Job</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Type</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Message</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Duration</th>
+                <th className="warp-eyebrow text-left px-3.5 py-2.5 text-text-mute font-semibold">Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="text-center text-text-mute py-8 text-[13px]">
+                    No log entries found for this worker
+                  </td>
+                </tr>
+              ) : (
+                data.items.map((log) => (
+                  <tr key={log.id} className="border-b border-border last:border-b-0 hover:bg-panel-2/60">
+                    <td className="px-3.5 py-2 text-[12.5px]">
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${eventColors[log.eventType] ?? 'text-text-mute'}`}>
+                        {log.eventType}
+                      </span>
+                    </td>
+                    <td className="px-3.5 py-2 font-mono text-[12.5px]">
+                      <Link to={`/jobs/detail/${log.jobId}`} className="text-primary hover:underline">
+                        {shortId(log.jobId)}
+                      </Link>
+                    </td>
+                    <td className="px-3.5 py-2 text-[12.5px]">{log.jobType ? shortType(log.jobType) : '-'}</td>
+                    <td className={`px-3.5 py-2 text-[12.5px] max-w-[300px] truncate ${levelColors[log.level] ?? 'text-text-mute'}`}>
+                      {log.message}
+                    </td>
+                    <td className="px-3.5 py-2 text-[12.5px] text-text-mute">
+                      {log.durationMs != null ? formatDuration(log.durationMs) : '—'}
+                    </td>
+                    <td className="px-3.5 py-2 text-[12.5px]">
+                      <RelativeTime date={log.timestamp} />
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
 
-      <div className="rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Event</TableHead>
-              <TableHead>Job</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Message</TableHead>
-              <TableHead>Duration</TableHead>
-              <TableHead>Time</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {data.items.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
-                  No log entries found for this worker
-                </TableCell>
-              </TableRow>
-            ) : (
-              data.items.map((log) => (
-                <TableRow key={log.id}>
-                  <TableCell>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${eventColors[log.eventType] ?? 'text-muted-foreground'}`}>
-                      {log.eventType}
-                    </span>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    <Link to={`/detail/${log.jobId}`} className="text-primary hover:underline">
-                      {shortId(log.jobId)}
-                    </Link>
-                  </TableCell>
-                  <TableCell className="text-sm">{log.jobType ? shortType(log.jobType) : '-'}</TableCell>
-                  <TableCell className={`text-sm max-w-[300px] truncate ${levelColors[log.level] ?? 'text-muted-foreground'}`}>
-                    {log.message}
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {log.durationMs != null ? `${log.durationMs.toFixed(0)}ms` : '-'}
-                  </TableCell>
-                  <TableCell className="text-sm">
-                    <RelativeTime date={log.timestamp} />
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </div>
-
-      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} />
+      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} totalCount={data.totalCount} />
     </div>
   );
 }
