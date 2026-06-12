@@ -1,5 +1,4 @@
 import { useCallback, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { Copy, RotateCw, Trash2 } from 'lucide-react';
 import { ProgressCard } from '@/components/v2/ProgressCard';
 import { LifecycleCard, type LifecycleEvent } from '@/components/v2/LifecycleCard';
@@ -119,45 +118,9 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
 
   return (
     <div className="flex flex-col gap-[18px]">
-      <div style={{ padding: '20px 0 18px', borderBottom: '1px solid var(--hair)' }}>
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div
-            className="mono"
-            style={{
-              fontSize: 11.5,
-              color: 'var(--text-mute)',
-              letterSpacing: 0.4,
-            }}
-          >
-            <Link to="/batches" className="hover:text-foreground">
-              Batches
-            </Link>
-            <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>
-            <span>{stateLabel}</span>
-            <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>
-            <span style={{ color: 'var(--foreground)' }}>{job.id.slice(0, 8)}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={askRequeue}
-              disabled={requeue.isPending}
-              className="soft-btn soft-btn-ghost"
-            >
-              <RotateCw size={14} /> Requeue
-            </button>
-            <button
-              type="button"
-              onClick={askDelete}
-              disabled={deleteJob.isPending}
-              className="soft-btn soft-btn-danger"
-            >
-              <Trash2 size={14} /> Delete
-            </button>
-          </div>
-        </div>
-
-        <div className="mt-4 flex items-center gap-3.5 flex-wrap">
+      <div style={{ padding: '16px 0 16px', borderBottom: '1px solid var(--hair)' }}>
+        <div className="flex items-end justify-between gap-6 flex-wrap">
+          <div className="flex items-center gap-3.5 flex-wrap">
           <span
             className="font-semibold text-foreground"
             style={{ fontSize: 32, letterSpacing: '-0.6px', lineHeight: 1 }}
@@ -183,6 +146,25 @@ export function BatchDetailPage({ job, systemEvents }: BatchDetailPageProps) {
               <span className="text-text-dim font-medium">{shortType(job.handlerType)}</span>
             </span>
           )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={askRequeue}
+              disabled={requeue.isPending}
+              className="soft-btn soft-btn-ghost"
+            >
+              <RotateCw size={14} /> Requeue
+            </button>
+            <button
+              type="button"
+              onClick={askDelete}
+              disabled={deleteJob.isPending}
+              className="soft-btn soft-btn-danger"
+            >
+              <Trash2 size={14} /> Delete
+            </button>
+          </div>
         </div>
 
         <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-7 sm:gap-y-2 min-w-0">

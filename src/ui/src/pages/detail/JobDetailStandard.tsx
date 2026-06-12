@@ -154,34 +154,12 @@ function TitleStrip({ job, onRequeue, onDelete, isRequeuing, isDeleting }: Title
   const currentAttempt = job.retriedTimes + 1;
   const hasRetryPolicy = job.maxRetries > 0;
   const attemptsLabel = `${currentAttempt} / ${totalAttempts}`;
-  const crumbState = stateLabel;
 
   return (
-    <div style={{ padding: '20px 0 18px', borderBottom: '1px solid var(--hair)' }}>
-      <div
-        className="mono"
-        style={{
-          fontSize: 11.5,
-          color: 'var(--text-mute)',
-          letterSpacing: 0.4,
-          marginBottom: 14,
-        }}
-      >
-        <Link to={`${kind === 'Message' ? '/messages' : '/jobs'}/${stateLabel.toLowerCase()}`} className="hover:text-foreground">
-          {kind === 'Job' ? 'Jobs' : `${kind}s`}
-        </Link>
-        <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>
-        <span>{crumbState}</span>
-        <span style={{ margin: '0 7px', opacity: 0.5 }}>/</span>
-        <span style={{ color: 'var(--foreground)' }}>{job.id.slice(0, 8)}</span>
-      </div>
-
+    <div style={{ padding: '16px 0 16px', borderBottom: '1px solid var(--hair)' }}>
       <div className="flex items-end justify-between gap-6 flex-wrap">
         <div className="min-w-0">
-          <span className="soft-eyebrow" style={{ color: 'var(--brand)' }}>
-            {kind} detail
-          </span>
-          <div className="mt-2 flex items-center gap-3.5 flex-wrap">
+          <div className="flex items-center gap-3.5 flex-wrap">
             <span
               className="font-semibold text-foreground"
               style={{ fontSize: 32, letterSpacing: '-0.6px', lineHeight: 1 }}
