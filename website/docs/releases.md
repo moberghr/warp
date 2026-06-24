@@ -4,6 +4,26 @@ sidebar_position: 6
 
 # Releases
 
+## 2.0.2
+
+*2026-06-24*
+
+Security maintenance release. No API changes, no schema changes — drop-in upgrade from 2.0.1. Clears all open Dependabot alerts across the bundled dashboard and the docs-site tooling.
+
+### Dashboard dependency fixes (`Moberg.Warp.UI`)
+
+The dashboard bundle shipped in `Moberg.Warp.UI` is rebuilt against patched front-end dependencies:
+
+- **ws 7.5.10 → 7.5.11** (transitive via `@microsoft/signalr`) — memory exhaustion DoS from tiny fragments and data chunks (`GHSA-96hv-2xvq-fx4p`, high).
+- **form-data 4.0.5 → 4.0.6** (transitive via `axios`) — CRLF injection via unescaped multipart field names and filenames (`GHSA-hmw2-7cc7-3qxx`, high).
+
+### Build tooling (not shipped)
+
+Repo-only dependency bumps with no effect on any published package:
+
+- **vite 8.0.9 → 8.1.0** (dashboard build) — clears a `server.fs.deny` bypass on Windows alternate paths (`GHSA-fx2h-pf6j-xcff`, high) and an NTLMv2 hash disclosure via the bundled `launch-editor`'s UNC path handling (`GHSA-v6wh-96g9-6wx3`, medium).
+- **ws 7.5.10 → 7.5.11** and **launch-editor 2.13.2 → 2.14.1** (docs site, transitive via webpack) — the same ws memory-exhaustion DoS (`GHSA-96hv-2xvq-fx4p`, high) and `launch-editor` NTLMv2 hash disclosure (`GHSA-v6wh-96g9-6wx3`, medium).
+
 ## 2.0.1
 
 *2026-06-12*

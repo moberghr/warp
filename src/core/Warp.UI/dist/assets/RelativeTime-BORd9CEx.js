@@ -1,1 +1,0 @@
-import{z as e}from"./card-T9E9aBt_.js";import{i as t,r as n}from"./format-CAe6keGr.js";var r=e();function i({date:e}){return(0,r.jsxs)(`span`,{children:[n(e),` `,(0,r.jsxs)(`span`,{className:`text-muted-foreground`,children:[`(`,t(e),`)`]})]})}export{i as t};
