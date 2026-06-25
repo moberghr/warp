@@ -173,7 +173,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     }
 
     public async Task<List<Job>> ClaimEnqueuedJobsAsync(
-        TContext context,
+        DbContext context,
         string[] queues,
         Guid workerId,
         DateTime now,
@@ -186,7 +186,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             .ToListAsync(ct);
     }
 
-    public async Task<List<Job>> ClaimEnqueuedMessagesAsync(TContext context, int limit, CancellationToken ct)
+    public async Task<List<Job>> ClaimEnqueuedMessagesAsync(DbContext context, int limit, CancellationToken ct)
     {
         return await context.Set<Job>()
             .FromSqlRaw(_claimEnqueuedMessagesSql, limit)
@@ -194,7 +194,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     }
 
     public async Task<List<Job>> LockStaleProcessingJobsAsync(
-        TContext context,
+        DbContext context,
         DateTime cutoff,
         CancellationToken ct)
     {
@@ -203,14 +203,14 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             .ToListAsync(ct);
     }
 
-    public async Task<Job?> LockJobByIdWaitAsync(TContext context, Guid jobId, CancellationToken ct)
+    public async Task<Job?> LockJobByIdWaitAsync(DbContext context, Guid jobId, CancellationToken ct)
     {
         return await context.Set<Job>()
             .FromSqlRaw(_lockJobByIdWaitSql, jobId)
             .FirstOrDefaultAsync(ct);
     }
 
-    public async Task<List<Server>> LockAllServersAsync(TContext context, CancellationToken ct)
+    public async Task<List<Server>> LockAllServersAsync(DbContext context, CancellationToken ct)
     {
         return await context.Set<Server>()
             .FromSqlRaw(_lockAllServersSql)
@@ -218,7 +218,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     }
 
     public async Task<HeartbeatResult?> HeartbeatAsync(
-        TContext context,
+        DbContext context,
         Guid serverId,
         DateTime now,
         long? memoryBytes,
@@ -308,7 +308,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     }
 
     public async Task<List<(Guid Id, string Queue, DateTime ScheduleTime)>> ActivateScheduledJobsAsync(
-        TContext context,
+        DbContext context,
         DateTime now,
         CancellationToken ct)
     {
@@ -355,9 +355,9 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     }
 
     public async Task<(bool LockHeld, T? Result)> RunUnderTransactionLockAsync<T>(
-        TContext context,
+        DbContext context,
         string lockKey,
-        Func<TContext, CancellationToken, Task<T>> work,
+        Func<DbContext, CancellationToken, Task<T>> work,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(work);
@@ -449,7 +449,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     }
 
     public async Task<BackgroundServiceLease?> LockLeaseByServiceNameAsync(
-        TContext context,
+        DbContext context,
         string serviceName,
         CancellationToken ct)
     {
@@ -459,7 +459,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     }
 
     public async Task<BackgroundServiceDefinition?> LockDefinitionByServiceNameAsync(
-        TContext context,
+        DbContext context,
         string serviceName,
         CancellationToken ct)
     {
