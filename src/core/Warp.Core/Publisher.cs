@@ -101,6 +101,8 @@ public class Publisher<TContext> : IPublisher
 
     public Publisher(TContext context, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
+        WarpModelGuard.EnsureWarpModelApplied(context);
+
         _context = context;
         _timeProvider = timeProvider;
         _serviceProvider = serviceProvider;

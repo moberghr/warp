@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Core;
+using Warp.Core.Testing;
 using Warp.Http;
 using Warp.Tests.TestData;
 
@@ -22,10 +23,10 @@ public sealed class SubmitJobPatternTests
     [TimedFact]
     public async Task RequestWrapper_EnqueuesJobAndReturnsId()
     {
-        var fakePublisher = new FakePublisher();
+        var publisher = new InMemoryPublisher();
 
         await using var app = await WarpHttpTestApp.StartAsync(
-            configureServices: s => s.AddSingleton<IPublisher>(fakePublisher),
+            configureServices: s => s.AddSingleton<IPublisher>(publisher),
             configureApp: a => a.MapWarpHttp());
 
         var resp = await app.Client.PostAsJsonAsync("/api/queue-work", new { Tag = "background-task" });
@@ -34,8 +35,9 @@ public sealed class SubmitJobPatternTests
         var jobId = await resp.Content.ReadFromJsonAsync<Guid>();
         jobId.ShouldNotBe(Guid.Empty);
 
-        fakePublisher.EnqueuedJobs.ShouldHaveSingleItem();
-        var enqueued = fakePublisher.EnqueuedJobs[0].ShouldBeOfType<EmptyJob>();
+        var published = publisher.Published.ShouldHaveSingleItem();
+        published.Kind.ShouldBe(PublishedJobKind.Job);
+        var enqueued = published.Payload.ShouldBeOfType<EmptyJob>();
         enqueued.Tag.ShouldBe("background-task");
     }
 }

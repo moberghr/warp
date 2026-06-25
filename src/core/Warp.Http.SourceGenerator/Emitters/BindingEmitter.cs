@@ -85,7 +85,11 @@ internal static class BindingEmitter
         }
 
         // Whole-body default: body verb, no attributes anywhere — Minimal API binds TRequest from body.
-        if (isBodyVerb && !sawAnyAttribute)
+        // A zero-member request (empty record / all-route-query-header command) has nothing to read
+        // from the body; classifying it WholeBody emits a required [FromBody] param, so a bodyless
+        // POST/PUT/PATCH 400s before the handler runs. Fall through to AsParameters instead — the same
+        // shape an empty GET already binds successfully.
+        if (isBodyVerb && !sawAnyAttribute && targets.Count > 0)
         {
             return new BindingPlan(BindingShape.WholeBody, targets, usesPrimaryCtor);
         }

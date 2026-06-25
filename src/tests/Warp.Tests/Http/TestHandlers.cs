@@ -500,3 +500,13 @@ public sealed class EmptyJobHandler : IJobHandler<EmptyJob>
 {
     public Task HandleAsync(EmptyJob message, CancellationToken cancellationToken) => Task.CompletedTask;
 }
+
+// Zero-member command on a body verb (e.g. /api/auth/logout). Must bind from an empty/absent
+// body — classifying it WholeBody would emit a required [FromBody] param and 400 a bodyless POST.
+public sealed record LogoutCommand : IRequest<string>;
+
+[WarpHttpPost("/api/auth/logout")]
+public sealed class LogoutHandler : IRequestHandler<LogoutCommand, string>
+{
+    public Task<string> HandleAsync(LogoutCommand request, CancellationToken cancellationToken) => Task.FromResult("logged-out");
+}
