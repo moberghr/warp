@@ -4,25 +4,55 @@ sidebar_position: 6
 
 # Releases
 
-## 2.0.2
+## 2.1.0
 
-*2026-06-24*
+*2026-06-25*
 
-Security maintenance release. No API changes, no schema changes — drop-in upgrade from 2.0.1. Clears all open Dependabot alerts across the bundled dashboard and the docs-site tooling.
+Additive minor release — no breaking changes, no schema changes, drop-in from 2.0.x. Smooths over several EF-integration and testability pain points: an explicit way to contribute Warp's model, a fail-fast check when it's missing, an in-memory publisher for tests, and an HTTP binding fix for bodyless commands. Also rolls up the dependency/security fixes that were staged after 2.0.1.
 
-### Dashboard dependency fixes (`Moberg.Warp.UI`)
+### `ApplyWarpModel` — explicit, design-time-friendly model registration
 
-The dashboard bundle shipped in `Moberg.Warp.UI` is rebuilt against patched front-end dependencies:
+`AddWarp` still wires Warp's EF model onto your `DbContext` automatically, but that wiring lives on `DbContextOptions` — so a separate migrator or design-time host that builds the context differently can end up with a model that doesn't match your runtime, producing empty or drifting migrations. You can now declare Warp's model in your context's own `OnModelCreating`:
 
-- **ws 7.5.10 → 7.5.11** (transitive via `@microsoft/signalr`) — memory exhaustion DoS from tiny fragments and data chunks (`GHSA-96hv-2xvq-fx4p`, high).
-- **form-data 4.0.5 → 4.0.6** (transitive via `axios`) — CRLF injection via unescaped multipart field names and filenames (`GHSA-hmw2-7cc7-3qxx`, high).
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    base.OnModelCreating(modelBuilder);
+    modelBuilder.ApplyWarpModel(schema: "warp"); // null = database default schema
+}
+```
 
-### Build tooling (not shipped)
+When the model is declared this way, every host — your API, your workers, a standalone migrator, `dotnet ef` — sees an identical model with no `DbContextOptions` divergence. `ApplyWarpModel` is idempotent, so it composes safely with the implicit `AddWarp` wiring (whichever runs first wins; the other is a no-op). This is now the recommended pattern for dedicated migration / Aspire-style hosts. See [EF Core Integration](./operations/ef-core-integration.md).
 
-Repo-only dependency bumps with no effect on any published package:
+### Fail-fast when the Warp model is missing
 
-- **vite 8.0.9 → 8.1.0** (dashboard build) — clears a `server.fs.deny` bypass on Windows alternate paths (`GHSA-fx2h-pf6j-xcff`, high) and an NTLMv2 hash disclosure via the bundled `launch-editor`'s UNC path handling (`GHSA-v6wh-96g9-6wx3`, medium).
-- **ws 7.5.10 → 7.5.11** and **launch-editor 2.13.2 → 2.14.1** (docs site, transitive via webpack) — the same ws memory-exhaustion DoS (`GHSA-96hv-2xvq-fx4p`, high) and `launch-editor` NTLMv2 hash disclosure (`GHSA-v6wh-96g9-6wx3`, medium).
+Publishing against a context that never received Warp's model used to fail deep inside EF Core with the cryptic `Cannot create a DbSet for 'Job'`. Warp now validates the model **at host startup** (a hosted service that runs before any worker, server task, or request) and throws a clear, actionable error naming both fixes — call `AddWarp<TContext>` or `ApplyWarpModel`. A matching guard on the `Publisher` / `BatchPublisher` constructors backstops non-hosted (raw `ServiceProvider`) usage.
+
+### `InMemoryPublisher` — test publish-side code without a database
+
+Handlers and application code that call `IPublisher` (or `IBatchPublisher`) are now unit-testable without standing up the Warp store. `InMemoryPublisher` (in `Warp.Core.Testing`) records every publish in memory:
+
+```csharp
+using Warp.Core.Testing;
+
+var publisher = new InMemoryPublisher();
+services.AddSingleton<IPublisher>(publisher);
+
+// … exercise the handler …
+
+var published = publisher.Published.ShouldHaveSingleItem();
+published.Payload.ShouldBeOfType<SendEmailJob>();
+```
+
+It implements both `IPublisher` and `IBatchPublisher`; recorded calls land in `Published` and `Batches`, and `SaveChangesCount` tracks `SaveChangesAsync`. No `Job` DbSet, no migrations, no container required.
+
+### Bodyless `POST` / `PUT` / `PATCH` commands now bind (`Moberg.Warp.Http`)
+
+A handler whose request type has no body members — an empty record or a command bound entirely from route/query/header values (e.g. `POST /api/auth/logout`) — was classified as whole-body and bound the request as a required `[FromBody]`, so a request with no body returned **400** before the handler ran. Zero-member requests now bind via `[AsParameters]` (the same shape empty `GET` requests already use) and a bodyless request succeeds.
+
+### Dependency & security maintenance
+
+Rolls up the dependency bumps merged after 2.0.1, clearing all open Dependabot alerts across the bundled dashboard (`Moberg.Warp.UI`) and the repo's build/docs tooling (notably `ws`, `form-data`, `react-router`, `hono`, `vite`, `launch-editor`, `shell-quote`, `joi`).
 
 ## 2.0.1
 

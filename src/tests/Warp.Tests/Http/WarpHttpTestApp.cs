@@ -40,7 +40,7 @@ public sealed class WarpHttpTestApp : IAsyncDisposable
 
         // Default IPublisher for tests that don't override it — needed because the test
         // assembly's source-gen registers QueueWorkHandler (which depends on IPublisher).
-        builder.Services.AddSingleton<Warp.Core.IPublisher>(new FakePublisher());
+        builder.Services.AddSingleton<Warp.Core.IPublisher>(new Warp.Core.Testing.InMemoryPublisher());
 
         // Defaults for concurrency-isolation handlers. The mediator constructor eagerly
         // resolves every IRequestHandler<,> in the assembly, so these must be registered

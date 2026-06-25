@@ -197,6 +197,34 @@ public sealed class ModelBindingTests
     }
 
     [TimedFact]
+    public async Task EmptyRecordPostCommand_BindsWithoutBody()
+    {
+        await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
+
+        // A zero-member command on a body verb (e.g. logout) must not require a request body.
+        // Regression: it was classified WholeBody and emitted a required [FromBody], so a bodyless
+        // POST returned 400 before the handler ran.
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/auth/logout");
+        var resp = await app.Client.SendAsync(req);
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<string>();
+        body.ShouldBe("logged-out");
+    }
+
+    [TimedFact]
+    public async Task EmptyRecordPostCommand_BindsWithExplicitEmptyJsonBody()
+    {
+        await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
+
+        // The AsParameters shape also tolerates a present (but empty) JSON body — clients that
+        // always send Content-Type: application/json with {} must keep working.
+        var resp = await app.Client.PostAsJsonAsync("/api/auth/logout", new { });
+
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [TimedFact]
     public async Task InitOnlyProperties_BindFromQueryViaAsParameters()
     {
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());

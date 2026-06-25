@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.BackgroundServices;
@@ -106,6 +107,12 @@ public static class ServiceConfiguration
         // server-task loops and the dashboard broadcaster subscribe to its channels at host
         // construction; with no subscribers the SignalXxx calls are cheap no-ops.
         services.TryAddSingleton<ServerTaskSignals<TContext>>();
+
+        // Fail-fast model validation at host startup (plain IHostedService → awaited to completion
+        // before the app starts). AddHostedService dedups via TryAddEnumerable, so the second AddWarp
+        // call from AddWarpServer's AddServerHostCore doesn't double-register. The Publisher /
+        // BatchPublisher constructor guard backstops non-hosted (raw ServiceProvider) usage.
+        services.AddHostedService<WarpModelValidationService<TContext>>();
 
         // IWarpSqlQueries<TContext> is registered by the provider package (Warp.PostgreSql /
         // Warp.SqlServer) via their UsePostgreSql / UseSqlServer builder extensions.
