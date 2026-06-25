@@ -116,6 +116,23 @@ public static class ServiceConfiguration
         // also called AddWarp separately for their own addon opt-ins.
         services.AddWarp<TContext>();
 
+        // The Warp server context: a runtime-only mirror of the Warp model used for all autonomous
+        // server-internal DB work (worker fetch/complete, server tasks, background-service host), with
+        // its own logger so server polling doesn't pollute the user's command logs. The connection is
+        // supplied by the provider (UsePostgreSql/UseSqlServer) from TContext's options; the model
+        // (names + ExcludeFromMigrations) is built in WarpServerContext.OnModelCreating.
+        services.AddDbContext<WarpServerContext<TContext>>((sp, options) =>
+        {
+            var configurator = sp.GetService<IWarpServerContextConfigurator>()
+                ?? throw new InvalidOperationException(
+                    "AddWarpServer requires a Warp provider — call opt.UsePostgreSql() or "
+                    + "opt.UseSqlServer() so the server context can open against the same database "
+                    + "as your DbContext.");
+
+            configurator.Configure(options, sp);
+            options.AddWarpInterceptors();
+        });
+
         // Trace-correlation scope tracking applies to every server process (worker or
         // service-only) so background-service and server-task logs carry TraceId/SpanId/ParentId.
         // The job-handler log provider (JobLoggerProvider) is worker-only and added separately.

@@ -3,11 +3,11 @@ using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace Warp.Core;
 
-// PROTOTYPE (spec 2026-06-25-warp-server-context). Mirrors the physical table/schema/column names
-// that the user's TContext resolved (post-naming-convention) onto the server context's model, so the
-// server context maps to the identical tables without replaying the convention. Reads the same
-// resolved metadata WarpJobTableNames uses for raw provider SQL. Pins names explicitly + excludes
-// the tables from the server context's migrations (TContext stays the schema owner).
+// Mirrors the physical table/schema/column names that the user's TContext resolved
+// (post-naming-convention) onto the server context's model, so the server context maps to the
+// identical tables without replaying the convention. Reads the same resolved metadata
+// WarpJobTableNames uses for raw provider SQL. Pins names explicitly + excludes the tables from the
+// server context's migrations (TContext stays the schema owner).
 internal static class WarpServerModel
 {
     public static void MirrorNames(ModelBuilder modelBuilder, IModel sourceModel)

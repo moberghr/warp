@@ -52,10 +52,14 @@ public static class PostgreSqlServiceConfiguration
                 ? new PostgresSemaphoreProvider(dataSource)
                 : new PostgresSemaphoreProvider(ResolveConnectionString<TContext>(sp)));
 
+        // Points the Warp server context at the same database as TContext (data source if the user
+        // registered one, else the connection string), inheriting auth/SSL settings.
+        builder.Services.TryAddSingleton<IWarpServerContextConfigurator>(new PostgresServerContextConfigurator<TContext>());
+
         return builder;
     }
 
-    private static string ResolveConnectionString<TContext>(IServiceProvider sp)
+    internal static string ResolveConnectionString<TContext>(IServiceProvider sp)
         where TContext : DbContext
     {
         using var scope = sp.CreateScope();
@@ -78,7 +82,7 @@ public static class PostgreSqlServiceConfiguration
     // or SSL settings attached to the data source — surface that data source so our lock,
     // semaphore, and notification connections inherit the same auth/encryption configuration
     // instead of being opened from a raw connection string that may be missing them.
-    private static NpgsqlDataSource? ResolveDataSource<TContext>(IServiceProvider sp)
+    internal static NpgsqlDataSource? ResolveDataSource<TContext>(IServiceProvider sp)
         where TContext : DbContext
     {
         // AddDbContext registers DbContextOptions<TContext> as Scoped (only AddDbContextPool
@@ -95,5 +99,22 @@ public static class PostgreSqlServiceConfiguration
             .OfType<NpgsqlOptionsExtension>()
             .FirstOrDefault()?.DataSource as NpgsqlDataSource;
 #pragma warning restore EF1001
+    }
+}
+
+internal sealed class PostgresServerContextConfigurator<TContext> : IWarpServerContextConfigurator
+    where TContext : DbContext
+{
+    public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
+    {
+        var dataSource = PostgreSqlServiceConfiguration.ResolveDataSource<TContext>(applicationServices);
+        if (dataSource is not null)
+        {
+            optionsBuilder.UseNpgsql(dataSource);
+
+            return;
+        }
+
+        optionsBuilder.UseNpgsql(PostgreSqlServiceConfiguration.ResolveConnectionString<TContext>(applicationServices));
     }
 }
