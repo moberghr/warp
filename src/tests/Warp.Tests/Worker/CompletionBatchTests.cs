@@ -7,6 +7,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Worker;
 
 namespace Warp.Tests.Worker;
@@ -27,7 +28,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
+        services.AddTestServerContext<TestContext>();
         var provider = services.BuildServiceProvider();
         return provider.GetRequiredService<IServiceScopeFactory>();
     }

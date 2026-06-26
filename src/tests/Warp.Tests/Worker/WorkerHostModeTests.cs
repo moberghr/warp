@@ -184,7 +184,7 @@ public abstract class WorkerHostModeTestsBase : IAsyncLifetime
     {
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
+        services.AddTestServerContext<TestContext>();
         return services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
     }
 

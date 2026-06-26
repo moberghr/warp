@@ -74,12 +74,12 @@ public class ServerCleanupLockContentionTests : IAsyncLifetime, IClassFixture<Po
             RestartCount = 0,
         });
 
-        var insert = async () => await insertCtx.SaveChangesAsync(TestCancellation);
+        async Task<int> Insert() => await insertCtx.SaveChangesAsync(TestCancellation);
 
         // FOR NO KEY UPDATE (pre-fix): the insert's FOR KEY SHARE is compatible with the held
         // lock, so it proceeds immediately and nothing is thrown — this assertion fails.
         // FOR UPDATE (post-fix): the insert blocks on the held lock and trips lock_timeout.
-        var ex = await Should.ThrowAsync<Exception>(insert);
+        var ex = await Should.ThrowAsync<Exception>((Func<Task<int>>)Insert);
 
         // The insert must have been blocked by the held cleanup lock and tripped lock_timeout
         // (55P03). Assert on the exception chain rather than a specific wrapper type — EF surfaces

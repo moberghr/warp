@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 
 namespace Warp.Worker;
@@ -46,7 +47,7 @@ public class WarpServerRegistration<TContext> : IHostedService
         var totalWorkerCount = workerGroups.Sum(g => g.WorkerCount);
 
         using var scope = _serviceScopeFactory.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
         var server = new Server
@@ -126,7 +127,7 @@ public class WarpServerRegistration<TContext> : IHostedService
         var ct = cleanupCts.Token;
 
         using var scope = _serviceScopeFactory.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
         var server = await context.Set<Server>().FindAsync([_configuration.ServerId], ct);
         if (server == null)

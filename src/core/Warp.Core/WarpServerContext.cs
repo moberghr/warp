@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace Warp.Core;
 
@@ -10,18 +11,18 @@ namespace Warp.Core;
 // naming convention on TContext is honoured without replaying it. Excluded from migrations: TContext
 // remains the schema owner.
 //
-// Bootstrap: TContext's IModel is resolved at this context's model-build time via the injected
-// application IServiceProvider. TContext's model is independent (no cycle) and cached after first
+// Bootstrap: TContext's IModel is resolved at this context's model-build time via a scope from the
+// injected IServiceScopeFactory. TContext's model is independent (no cycle) and cached after first
 // build; OnModelCreating runs once per (cached) model.
 internal sealed class WarpServerContext<TContext> : DbContext, IWarpServerContext
     where TContext : DbContext
 {
-    private readonly IServiceProvider _applicationServices;
+    private readonly IServiceScopeFactory _scopeFactory;
 
-    public WarpServerContext(DbContextOptions<WarpServerContext<TContext>> options, IServiceProvider applicationServices)
+    public WarpServerContext(DbContextOptions<WarpServerContext<TContext>> options, IServiceScopeFactory scopeFactory)
         : base(options)
     {
-        _applicationServices = applicationServices;
+        _scopeFactory = scopeFactory;
     }
 
     public DbContext Context => this;
@@ -30,10 +31,24 @@ internal sealed class WarpServerContext<TContext> : DbContext, IWarpServerContex
     {
         base.OnModelCreating(modelBuilder);
 
-        modelBuilder.ApplyWarpModel();
+        using var scope = _scopeFactory.CreateScope();
+        var serviceProvider = scope.ServiceProvider;
 
-        using var scope = _applicationServices.CreateScope();
-        var sourceModel = scope.ServiceProvider.GetRequiredService<TContext>().Model;
+        // Mirror TContext's full model build (ApplyWarpModel + external EntityConfigurators, under the
+        // configured schema) so the server context maps every entity TContext does — then pin the
+        // resolved physical names so a naming convention on TContext is honoured without replay.
+        var config = serviceProvider.GetService<IOptions<WarpConfiguration>>()?.Value;
+        var schema = config != null ? config.Schema : "warp";
+        modelBuilder.ApplyWarpModel(schema);
+        if (config != null)
+        {
+            foreach (var configurator in config.EntityConfigurators)
+            {
+                configurator(modelBuilder, schema);
+            }
+        }
+
+        var sourceModel = serviceProvider.GetRequiredService<TContext>().Model;
         WarpServerModel.MirrorNames(modelBuilder, sourceModel);
     }
 }

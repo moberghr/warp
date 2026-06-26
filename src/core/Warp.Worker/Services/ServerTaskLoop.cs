@@ -284,7 +284,12 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
             var task = scope.ServiceProvider
                 .GetServices<IServerTask>()
                 .First(x => x.GetType() == _taskType);
-            var ctx = scope.ServiceProvider.GetRequiredService<TContext>();
+
+            // The xact-lock must be held on the SAME context the task writes through (the scoped
+            // server context — same instance the task resolved), so the task's SaveChanges joins the
+            // lock transaction and commits atomically with it. Resolving TContext here would open the
+            // lock on a different connection than the task's writes, defeating the atomicity.
+            var ctx = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
             var sqlQueries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
 
             var outcome = await sqlQueries.RunUnderTransactionLockAsync<string?>(

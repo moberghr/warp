@@ -59,7 +59,7 @@ public abstract class JobLogTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
+        services.AddTestServerContext<TestContext>();
         services.AddSingleton<CounterService>();
         services.AddSingleton<MultiHandlerCounter>();
         services.AddScoped<Warp.Core.Handlers.JobContext>();

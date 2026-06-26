@@ -14,6 +14,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.RateLimit;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 
@@ -240,7 +241,7 @@ public abstract class RateLimitCompositionTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
+        services.AddTestServerContext<TestContext>();
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
         services.AddSingleton<IWarpSemaphoreProvider>(semaphoreProvider);

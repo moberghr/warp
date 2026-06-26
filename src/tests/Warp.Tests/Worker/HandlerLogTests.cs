@@ -13,6 +13,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Logging;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 
@@ -58,7 +59,7 @@ public abstract class HandlerLogTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging(builder => builder.AddProvider(new JobLoggerProvider()));
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
+        services.AddTestServerContext<TestContext>();
         services.AddSingleton<CounterService>();
         services.AddSingleton<MultiHandlerCounter>();
         services.AddScoped<Warp.Core.Handlers.JobContext>();
