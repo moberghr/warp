@@ -29,6 +29,18 @@
 		<PackageReference Include="xunit.v3.mtp-v2" Version="3.2.2" />
 	</ItemGroup>
 
+	<!-- GHSA-2m69-gcr7-jv3q: the native SQLite bundled by SQLitePCLRaw.lib.e_sqlite3 (pulled in
+	     transitively by Microsoft.EntityFrameworkCore.Sqlite) has no patched release — every version
+	     <= 2.1.11 is flagged and 2.1.11 is the latest published. SQLite is used here only by the
+	     in-memory SqliteFixture (DataSource=:memory:) to run a curated subset of tests fast under
+	     Stryker; this is a non-shipping test exe with no untrusted SQL input, so the engine CVE is
+	     not reachable. Scoped to this project (the only one referencing SQLite) and keyed to the
+	     advisory URL so any future, different advisory still fails the build. Revisit when a patched
+	     SQLitePCLRaw ships. -->
+	<ItemGroup>
+		<NuGetAuditSuppress Include="https://github.com/advisories/GHSA-2m69-gcr7-jv3q" />
+	</ItemGroup>
+
 	<ItemGroup>
 		<Using Include="Xunit" />
 		<Using Include="Warp.Tests.TestData" />
