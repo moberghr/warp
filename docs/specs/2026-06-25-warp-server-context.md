@@ -66,6 +66,12 @@ Server reads/writes of `Job` rows (router, orchestrator, activation, fetch) go t
 5. **Test harness.** `TestContext` and the `[GenerateDatabaseTests]` source-gen build contexts directly. Decide how fixtures construct the server context (and whether tests run it against the same physical tables).
 6. **Versioning.** No public consumer API changes (users still call `AddWarp` / `AddWarpServer` unchanged; the server context is Warp-internal), so this *could* be a minor — but the internal blast radius argues for **3.0**.
 
+## Outcome (implemented 3.0)
+
+Shipped via `IWarpServerContext` (abstraction; components extract `DbContext Context` once) over an internal `WarpServerContext<TContext>`. Server tasks + background-service host moved to it; quiet logging via `ConfigureWarnings` demoting `CommandExecuted` to `Debug` (opt-out: `EnableServerCommandLogging`). Validated: NoDb 572 / PostgreSQL 760 / SQL Server 754.
+
+**Deviation from plan — the worker stays on `TContext`.** Batch 4 (moving the worker's fetch/execute context to the server context) was reverted: a held server-context connection across job execution caused a ~5s graceful-cancellation latency regression (contention with `DeleteJob`'s `FOR UPDATE` row lock), reliably reproduced but not fully root-caused. Per §0.2 (worker hot path is sacred) and "don't ship refactors you can't explain", the worker/dispatcher were kept on `TContext`. Consequence: worker-fetch SQL still logs; `UseDatabasePush()` remains the lever for worker-poll noise. The constant server-wide polling (heartbeat, server tasks, background services) — the dominant idle noise — is silenced.
+
 ## Non-goals
 
 - Changing the publish-path outbox or the handler context.
