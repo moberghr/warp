@@ -30,7 +30,7 @@ public abstract class BackgroundServiceStateServiceTestsBase : IAsyncLifetime
         var ctx = _fixture.CreateContext();
         var options = Options.Create(new WarpServerConfiguration { ServerId = MyServerId });
 
-        return new BackgroundServiceStateService<TestContext>(ctx, TimeProvider.System, options, TestTasks.QueriesFor(ctx));
+        return new BackgroundServiceStateService<TestContext>(new TestServerContext(ctx), TimeProvider.System, options, TestTasks.QueriesFor(ctx));
     }
 
     [TimedFact]

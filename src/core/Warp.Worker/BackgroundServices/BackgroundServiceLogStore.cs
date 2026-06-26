@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Warp.Core;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
 
@@ -11,11 +12,11 @@ namespace Warp.Worker.BackgroundServices;
 public sealed class BackgroundServiceLogStore<TContext> : IBackgroundServiceLogStore
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
 
-    public BackgroundServiceLogStore(TContext context)
+    public BackgroundServiceLogStore(IWarpServerContext serverContext)
     {
-        _context = context;
+        _context = serverContext.Context;
     }
 
     /// <inheritdoc/>

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
@@ -15,18 +16,18 @@ public sealed class BackgroundServiceStateService<TContext> : IBackgroundService
 {
     private const int MaxErrorLength = 4096;
 
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly Guid _serverId;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
 
     public BackgroundServiceStateService(
-        TContext context,
+        IWarpServerContext serverContext,
         TimeProvider time,
         IOptions<WarpServerConfiguration> options,
         IWarpSqlQueries<TContext> sqlQueries)
     {
-        _context = context;
+        _context = serverContext.Context;
         _time = time;
         _serverId = options.Value.ServerId;
         _sqlQueries = sqlQueries;
