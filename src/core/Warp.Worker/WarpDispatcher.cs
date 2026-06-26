@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
@@ -138,7 +139,7 @@ public class WarpDispatcher<TContext> : BackgroundService
         }
 
         using var scope = _scopeFactory.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var sqlQueries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
@@ -209,7 +210,7 @@ public class WarpDispatcher<TContext> : BackgroundService
         {
             var undeliveredIds = jobs.Skip(delivered).Select(j => j.Id).ToArray();
             using var cleanupScope = _scopeFactory.CreateScope();
-            var cleanupContext = cleanupScope.ServiceProvider.GetRequiredService<TContext>();
+            var cleanupContext = cleanupScope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
             await cleanupContext.Set<Job>()
                 .Where(x => undeliveredIds.Contains(x.Id))
