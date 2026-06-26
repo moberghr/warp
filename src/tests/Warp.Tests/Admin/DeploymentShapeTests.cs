@@ -52,6 +52,21 @@ public class DeploymentShapeTests
         services.AddDbContext<TestContext>(o => o.UseInMemoryDatabase($"shape-{Guid.NewGuid():N}"));
         services.AddSingleton(Mock.Of<IWarpSqlQueries<TestContext>>());
         services.AddSingleton(Mock.Of<IWarpLockProvider>());
+
+        // Provider packages register IWarpServerContextConfigurator in production (UsePostgreSql /
+        // UseSqlServer). For a NoDb shape test, point the server context at InMemory so AddWarpServer's
+        // WarpServerContext registration can build.
+        services.AddSingleton<IWarpServerContextConfigurator>(new InMemoryServerContextConfigurator());
+    }
+
+    private sealed class InMemoryServerContextConfigurator : IWarpServerContextConfigurator
+    {
+        private readonly string _database = $"shape-server-{Guid.NewGuid():N}";
+
+        public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
+        {
+            optionsBuilder.UseInMemoryDatabase(_database);
+        }
     }
 
     // Pins the dashboard-only / publisher-only path: AddWarp<TContext> alone must build a

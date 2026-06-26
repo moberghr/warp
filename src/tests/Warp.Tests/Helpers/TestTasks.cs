@@ -86,7 +86,7 @@ public static class TestTasks
         where TContext : DbContext
     {
         return new MessageRouter<TContext>(
-            context,
+            new TestServerContext(context),
             timeProvider,
             scopeFactory,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),
@@ -103,7 +103,7 @@ public static class TestTasks
         where TContext : DbContext
     {
         return new StaleJobRecovery<TContext>(
-            context,
+            new TestServerContext(context),
             timeProvider,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),
             Options.Create(new WarpServerConfiguration
@@ -117,7 +117,7 @@ public static class TestTasks
         where TContext : DbContext
     {
         return new CounterAggregator<TContext>(
-            context,
+            new TestServerContext(context),
             Options.Create(new WarpServerConfiguration()));
     }
 
@@ -128,7 +128,7 @@ public static class TestTasks
         where TContext : DbContext
     {
         return new ScheduledJobActivation<TContext>(
-            context,
+            new TestServerContext(context),
             timeProvider,
             transport ?? NullTransport,
             Options.Create(new WarpServerConfiguration()),
@@ -154,7 +154,7 @@ public static class TestTasks
         }
 
         return new Orchestrator<TContext>(
-            context,
+            new TestServerContext(context),
             timeProvider,
             Options.Create(configuration));
     }
@@ -165,7 +165,7 @@ public static class TestTasks
         where TContext : DbContext
     {
         return new RecurringJobScheduler<TContext>(
-            context,
+            new TestServerContext(context),
             timeProvider,
             Options.Create(new WarpServerConfiguration()));
     }
@@ -177,7 +177,7 @@ public static class TestTasks
         where TContext : DbContext
     {
         return new ExpirationCleanup<TContext>(
-            context,
+            new TestServerContext(context),
             timeProvider,
             Options.Create(new WarpServerConfiguration { ExpirationBatchSize = batchSize }));
     }
@@ -189,7 +189,7 @@ public static class TestTasks
         where TContext : DbContext
     {
         return new ServerCleanup<TContext>(
-            context,
+            new TestServerContext(context),
             timeProvider,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),
             Options.Create(new WarpServerConfiguration { HealthCheckTimeout = healthCheckTimeout }));

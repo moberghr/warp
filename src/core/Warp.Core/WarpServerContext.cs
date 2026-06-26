@@ -13,7 +13,7 @@ namespace Warp.Core;
 // Bootstrap: TContext's IModel is resolved at this context's model-build time via the injected
 // application IServiceProvider. TContext's model is independent (no cycle) and cached after first
 // build; OnModelCreating runs once per (cached) model.
-internal sealed class WarpServerContext<TContext> : DbContext
+internal sealed class WarpServerContext<TContext> : DbContext, IWarpServerContext
     where TContext : DbContext
 {
     private readonly IServiceProvider _applicationServices;
@@ -23,6 +23,8 @@ internal sealed class WarpServerContext<TContext> : DbContext
     {
         _applicationServices = applicationServices;
     }
+
+    public DbContext Context => this;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

@@ -133,6 +133,10 @@ public static class ServiceConfiguration
             options.AddWarpInterceptors();
         });
 
+        // Server-internal components depend on IWarpServerContext (not the concrete generic type),
+        // resolving the scoped WarpServerContext<TContext>.
+        services.AddScoped<IWarpServerContext>(sp => sp.GetRequiredService<WarpServerContext<TContext>>());
+
         // Trace-correlation scope tracking applies to every server process (worker or
         // service-only) so background-service and server-task logs carry TraceId/SpanId/ParentId.
         // The job-handler log provider (JobLoggerProvider) is worker-only and added separately.

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Events;
@@ -23,7 +24,7 @@ namespace Warp.Worker.Services;
 public sealed class Heartbeat<TContext> : IServerTask
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly PauseStateHolder _pauseStateHolder;
     private readonly ProcessCpuTracker _cpuTracker;
@@ -33,7 +34,7 @@ public sealed class Heartbeat<TContext> : IServerTask
     private readonly HeartbeatLeaseTracker _leaseTracker;
 
     public Heartbeat(
-        TContext context,
+        IWarpServerContext serverContext,
         TimeProvider time,
         PauseStateHolder pauseStateHolder,
         ProcessCpuTracker cpuTracker,
@@ -42,7 +43,7 @@ public sealed class Heartbeat<TContext> : IServerTask
         ServerTaskSignals<TContext> signals,
         HeartbeatLeaseTracker leaseTracker)
     {
-        _context = context;
+        _context = serverContext.Context;
         _time = time;
         _pauseStateHolder = pauseStateHolder;
         _cpuTracker = cpuTracker;

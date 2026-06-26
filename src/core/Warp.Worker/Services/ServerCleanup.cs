@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 
@@ -14,18 +15,18 @@ namespace Warp.Worker.Services;
 public sealed class ServerCleanup<TContext> : IServerTask
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly WarpServerConfiguration _configuration;
 
     public ServerCleanup(
-        TContext context,
+        IWarpServerContext serverContext,
         TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
         IOptions<WarpServerConfiguration> configuration)
     {
-        _context = context;
+        _context = serverContext.Context;
         _time = time;
         _sqlQueries = sqlQueries;
         _configuration = configuration.Value;

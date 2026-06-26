@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 
 namespace Warp.Worker.Services;
@@ -12,14 +13,14 @@ namespace Warp.Worker.Services;
 public sealed class CounterAggregator<TContext> : IServerTask
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly WarpServerConfiguration _configuration;
 
     public CounterAggregator(
-        TContext context,
+        IWarpServerContext serverContext,
         IOptions<WarpServerConfiguration> configuration)
     {
-        _context = context;
+        _context = serverContext.Context;
         _configuration = configuration.Value;
     }
 

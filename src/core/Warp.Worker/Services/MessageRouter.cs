@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
@@ -21,7 +22,7 @@ namespace Warp.Worker.Services;
 public sealed class MessageRouter<TContext> : IServerTask
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
@@ -30,7 +31,7 @@ public sealed class MessageRouter<TContext> : IServerTask
     private readonly WarpServerConfiguration _configuration;
 
     public MessageRouter(
-        TContext context,
+        IWarpServerContext serverContext,
         TimeProvider time,
         IServiceScopeFactory scopeFactory,
         IWarpSqlQueries<TContext> sqlQueries,
@@ -38,7 +39,7 @@ public sealed class MessageRouter<TContext> : IServerTask
         ServerTaskSignals<TContext> signals,
         IOptions<WarpServerConfiguration> configuration)
     {
-        _context = context;
+        _context = serverContext.Context;
         _time = time;
         _scopeFactory = scopeFactory;
         _sqlQueries = sqlQueries;

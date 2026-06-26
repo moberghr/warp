@@ -39,7 +39,7 @@ public abstract class LogRetentionTestsBase : IAsyncLifetime
         };
 
         return new ExpirationCleanup<TestContext>(
-            _fixture.CreateContext(),
+            new Warp.Tests.Helpers.TestServerContext(_fixture.CreateContext()),
             time ?? TimeProvider.System,
             Options.Create(config),
             backgroundServices);
