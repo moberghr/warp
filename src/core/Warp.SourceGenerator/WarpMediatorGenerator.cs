@@ -118,7 +118,7 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
                 {
                     if (isJob && jobHandlerMap.TryGetValue(candidateFullName, out var jobHandlerSymbol))
                     {
-                        var methodName = "Execute_" + candidate.Name;
+                        var methodName = "Execute_" + GetUniqueIdentifierFragment(candidateFullName);
                         jobTypes.Add(new JobTypeInfo(
                             candidateFullName,
                             [GetFullyQualifiedName(jobHandlerSymbol)],
@@ -127,7 +127,7 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
                     }
                     else if (isMessage && messageHandlerMap.TryGetValue(candidateFullName, out var messageHandlers))
                     {
-                        var methodName = "Execute_" + candidate.Name;
+                        var methodName = "Execute_" + GetUniqueIdentifierFragment(candidateFullName);
                         var handlerNames = new List<string>(messageHandlers.Count);
                         foreach (var h in messageHandlers)
                         {
@@ -157,7 +157,7 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
                     var handlerKey = candidateFullName + "|" + responseFullName;
                     if (allHandlerMap.TryGetValue(handlerKey, out var reqHandlerSymbol))
                     {
-                        var wrapperFieldName = "_wrapper_" + candidate.Name;
+                        var wrapperFieldName = "_wrapper_" + GetUniqueIdentifierFragment(candidateFullName);
                         requestTypes.Add(new RequestTypeInfo(
                             candidateFullName,
                             responseFullName,
@@ -193,7 +193,7 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
                     var streamHandlerKey = candidateFullName + "|" + streamResponseFullName;
                     if (streamHandlerMap.TryGetValue(streamHandlerKey, out var streamHandlerSymbol))
                     {
-                        var wrapperFieldName = "_streamWrapper_" + candidate.Name;
+                        var wrapperFieldName = "_streamWrapper_" + GetUniqueIdentifierFragment(candidateFullName);
                         streamRequestTypes.Add(new StreamRequestTypeInfo(
                             candidateFullName,
                             streamResponseFullName,
@@ -204,6 +204,30 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
                 }
             }
         }
+
+        // Handler-driven discovery (cross-assembly fix).
+        //
+        // The message-driven pass above only sees types declared in *this* compilation that
+        // implement IRequest (the message/request/job/stream contracts). When the contract lives
+        // in a referenced assembly (shared-contract layouts: Contracts.dll defines FooMessage,
+        // Worker.dll defines FooHandler : IMessageHandler<FooMessage>), the contract is never a
+        // local candidate, the handler implements IMessageHandler<> (not IRequest), and nothing is
+        // emitted — the worker then fails the job with "No handlers registered".
+        //
+        // Fix: also iterate the *handlers* this assembly declares, keyed by their message/request
+        // generic argument regardless of where that argument is declared. This feeds the same
+        // collections the emitter consumes, so both the DI registration and the dispatch map pick
+        // the handler up.
+        AddHandlerDrivenRegistrations(
+            candidates,
+            compilation,
+            iJobHandlerSymbol,
+            iMessageHandlerSymbol,
+            iRequestHandlerSymbol,
+            iStreamRequestHandlerSymbol,
+            requestTypes,
+            streamRequestTypes,
+            jobTypes);
 
         // Collect pipeline behavior registrations — multiple behaviors per type are allowed (pipeline chain).
         // Scan only types declared in the *current* compilation (not referenced assemblies) so each
@@ -282,6 +306,154 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
             pipelineBehaviorRegistrations,
             streamPipelineBehaviorRegistrations);
         context.AddSource("WarpMediator.g.cs", source);
+    }
+
+    /// <summary>
+    /// Registers the handlers <paramref name="compilation"/> declares locally, keyed by the
+    /// message/request type read off the handler's generic argument — even when that type lives in
+    /// a referenced assembly. Only types the message-driven pass missed are added; the both-local
+    /// case is already covered there, so it is skipped here to avoid double emission.
+    /// </summary>
+    /// <remarks>
+    /// Only locally-declared handlers are registered: each assembly emits its own
+    /// <c>[ModuleInitializer]</c>, so registering a referenced assembly's handler here would
+    /// double-register it (an IMessageHandler&lt;T&gt; firing twice for the same message).
+    /// </remarks>
+    private static void AddHandlerDrivenRegistrations(
+        ImmutableArray<INamedTypeSymbol?> candidates,
+        Compilation compilation,
+        INamedTypeSymbol? iJobHandlerSymbol,
+        INamedTypeSymbol? iMessageHandlerSymbol,
+        INamedTypeSymbol? iRequestHandlerSymbol,
+        INamedTypeSymbol? iStreamRequestHandlerSymbol,
+        List<RequestTypeInfo> requestTypes,
+        List<StreamRequestTypeInfo> streamRequestTypes,
+        List<JobTypeInfo> jobTypes)
+    {
+        var requestPresent = new HashSet<string>(requestTypes.Select(x => x.RequestFullName), StringComparer.Ordinal);
+        var streamPresent = new HashSet<string>(streamRequestTypes.Select(x => x.RequestFullName), StringComparer.Ordinal);
+        var jobPresent = new HashSet<string>(jobTypes.Select(x => x.JobFullName), StringComparer.Ordinal);
+
+        // Referenced-message handlers are grouped so all of an assembly's local handlers for the
+        // same message land in a single JobTypeInfo (IMessage pub/sub allows multiple handlers).
+        var messageGroups = new Dictionary<string, (INamedTypeSymbol MessageType, List<string> Handlers)>(StringComparer.Ordinal);
+
+        foreach (var candidate in candidates)
+        {
+            if (candidate is null || candidate.IsAbstract || candidate.TypeKind == TypeKind.Interface)
+            {
+                continue;
+            }
+
+            if (!SymbolEqualityComparer.Default.Equals(candidate.ContainingAssembly, compilation.Assembly))
+            {
+                continue;
+            }
+
+            var handlerFullName = GetFullyQualifiedName(candidate);
+
+            foreach (var iface in candidate.AllInterfaces)
+            {
+                var def = iface.OriginalDefinition;
+
+                if (iJobHandlerSymbol is not null && def.Equals(iJobHandlerSymbol, SymbolEqualityComparer.Default))
+                {
+                    if (iface.TypeArguments[0] is not INamedTypeSymbol jobType)
+                    {
+                        continue;
+                    }
+
+                    var jobFullName = GetFullyQualifiedName(jobType);
+                    if (jobPresent.Add(jobFullName))
+                    {
+                        jobTypes.Add(new JobTypeInfo(
+                            jobFullName,
+                            [handlerFullName],
+                            "Execute_" + GetUniqueIdentifierFragment(jobFullName),
+                            isMessage: false));
+                    }
+
+                    continue;
+                }
+
+                if (iMessageHandlerSymbol is not null && def.Equals(iMessageHandlerSymbol, SymbolEqualityComparer.Default))
+                {
+                    if (iface.TypeArguments[0] is not INamedTypeSymbol messageType)
+                    {
+                        continue;
+                    }
+
+                    var messageFullName = GetFullyQualifiedName(messageType);
+
+                    // A locally-declared message was already handled (with all of its — necessarily
+                    // local — handlers) by the message-driven pass. Only referenced messages reach here.
+                    if (jobPresent.Contains(messageFullName))
+                    {
+                        continue;
+                    }
+
+                    if (!messageGroups.TryGetValue(messageFullName, out var group))
+                    {
+                        group = (messageType, []);
+                        messageGroups[messageFullName] = group;
+                    }
+
+                    group.Handlers.Add(handlerFullName);
+                    continue;
+                }
+
+                if (iStreamRequestHandlerSymbol is not null && def.Equals(iStreamRequestHandlerSymbol, SymbolEqualityComparer.Default))
+                {
+                    if (iface.TypeArguments[0] is not INamedTypeSymbol streamRequestType)
+                    {
+                        continue;
+                    }
+
+                    var streamRequestFullName = GetFullyQualifiedName(streamRequestType);
+                    if (streamPresent.Add(streamRequestFullName))
+                    {
+                        streamRequestTypes.Add(new StreamRequestTypeInfo(
+                            streamRequestFullName,
+                            GetFullyQualifiedName(iface.TypeArguments[1]),
+                            handlerFullName,
+                            "_streamWrapper_" + GetUniqueIdentifierFragment(streamRequestFullName),
+                            streamRequestType.DeclaredAccessibility));
+                    }
+
+                    continue;
+                }
+
+                if (iRequestHandlerSymbol is not null && def.Equals(iRequestHandlerSymbol, SymbolEqualityComparer.Default))
+                {
+                    if (iface.TypeArguments[0] is not INamedTypeSymbol requestType)
+                    {
+                        continue;
+                    }
+
+                    var requestFullName = GetFullyQualifiedName(requestType);
+                    if (requestPresent.Add(requestFullName))
+                    {
+                        requestTypes.Add(new RequestTypeInfo(
+                            requestFullName,
+                            GetFullyQualifiedName(iface.TypeArguments[1]),
+                            handlerFullName,
+                            "_wrapper_" + GetUniqueIdentifierFragment(requestFullName),
+                            requestType.DeclaredAccessibility));
+                    }
+
+                    continue;
+                }
+            }
+        }
+
+        foreach (var entry in messageGroups)
+        {
+            jobTypes.Add(new JobTypeInfo(
+                entry.Key,
+                entry.Value.Handlers,
+                "Execute_" + GetUniqueIdentifierFragment(entry.Key),
+                isMessage: true));
+        }
     }
 
     /// <summary>
@@ -473,6 +645,32 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
     private static string GetFullyQualifiedName(ISymbol symbol)
     {
         return symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+    }
+
+    /// <summary>
+    /// Derives a collision-free identifier fragment from a fully-qualified type name, for use in
+    /// generated member names (<c>_wrapper_X</c> wrapper fields, <c>Execute_X</c> dispatch methods).
+    /// Deriving these from the simple <c>Type.Name</c> collides when two request/job types share a
+    /// name across namespaces or assemblies — the dedup keys use the fully-qualified name, so both
+    /// are emitted and produce duplicate members (CS0102 / CS0111). Two distinct fully-qualified
+    /// names always yield distinct fragments here.
+    /// </summary>
+    private static string GetUniqueIdentifierFragment(string fullyQualifiedName)
+    {
+        var trimmed = fullyQualifiedName.StartsWith("global::", StringComparison.Ordinal)
+            ? fullyQualifiedName.Substring("global::".Length)
+            : fullyQualifiedName;
+
+        var chars = trimmed.ToCharArray();
+        for (var i = 0; i < chars.Length; i++)
+        {
+            if (!char.IsLetterOrDigit(chars[i]))
+            {
+                chars[i] = '_';
+            }
+        }
+
+        return new string(chars);
     }
 
     private static string GenerateSource(

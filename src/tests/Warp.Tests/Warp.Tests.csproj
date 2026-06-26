@@ -55,16 +55,18 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<ProjectReference Include="..\Warp.Tests.Contracts\Warp.Tests.Contracts.csproj" />
 		<ProjectReference Include="..\..\core\Warp.Core\Warp.Core.csproj" />
 		<ProjectReference Include="..\..\core\Warp.Http\Warp.Http.csproj" />
 		<ProjectReference Include="..\..\core\providers\Warp.Provider.PostgreSql\Warp.Provider.PostgreSql.csproj" />
 		<ProjectReference Include="..\..\core\providers\Warp.Provider.SqlServer\Warp.Provider.SqlServer.csproj" />
 		<ProjectReference Include="..\..\core\Warp.Worker\Warp.Worker.csproj" />
 		<ProjectReference Include="..\..\core\Warp.UI\Warp.UI.csproj" />
-		<ProjectReference Include="..\..\core\Warp.SourceGenerator\Warp.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-		<!-- Single reference: OutputItemType=Analyzer makes it run as a source generator at compile
-		     time; default ReferenceOutputAssembly=true keeps the assembly bindable so the test
-		     project can instantiate WarpHttpGenerator directly via Roslyn (see GeneratorTestHarness). -->
+		<ProjectReference Include="..\..\core\Warp.SourceGenerator\Warp.SourceGenerator.csproj" OutputItemType="Analyzer" />
+		<!-- OutputItemType=Analyzer runs these as source generators at compile time; the default
+		     ReferenceOutputAssembly=true keeps each assembly bindable so the test project can
+		     instantiate WarpHttpGenerator / WarpMediatorGenerator directly via Roslyn (see
+		     GeneratorTestHarness and MediatorGeneratorTestHarness). -->
 		<ProjectReference Include="..\..\core\Warp.Http.SourceGenerator\Warp.Http.SourceGenerator.csproj" OutputItemType="Analyzer" />
 		<ProjectReference Include="..\Warp.Tests.SourceGenerator\Warp.Tests.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 	</ItemGroup>
