@@ -1,43 +1,33 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace Warp.Core;
 
-// Mirrors the physical table/schema/column names that the user's TContext resolved
-// (post-naming-convention) onto the server context's model, so the server context maps to the
-// identical tables without replaying the convention. Reads the same resolved metadata
-// WarpJobTableNames uses for raw provider SQL. Pins names explicitly + excludes the tables from the
-// server context's migrations (TContext stays the schema owner).
+// Applies the resolved physical names (from IWarpServerModelNames) onto the server context's model
+// so it maps to the same tables as TContext without replaying any naming convention, and excludes
+// the tables from the server context's migrations (TContext stays the schema owner).
 internal static class WarpServerModel
 {
-    public static void MirrorNames(ModelBuilder modelBuilder, IModel sourceModel)
+    public static void MirrorNames(ModelBuilder modelBuilder, IWarpServerModelNames names)
     {
         foreach (var serverEntity in modelBuilder.Model.GetEntityTypes().ToList())
         {
-            var sourceEntity = sourceModel.FindEntityType(serverEntity.ClrType);
-            if (sourceEntity is null)
-            {
-                continue;
-            }
-
-            var tableName = sourceEntity.GetTableName();
-            var sourceStore = StoreObjectIdentifier.Create(sourceEntity, StoreObjectType.Table);
-            if (tableName is null || sourceStore is null)
+            var entityNames = names.GetNames(serverEntity.ClrType);
+            if (entityNames is null)
             {
                 continue;
             }
 
             var entityBuilder = modelBuilder.Entity(serverEntity.ClrType);
-            entityBuilder.ToTable(tableName, sourceEntity.GetSchema(), x => x.ExcludeFromMigrations());
+            entityBuilder.ToTable(entityNames.Table, entityNames.Schema, x => x.ExcludeFromMigrations());
 
             var columns = serverEntity.GetProperties()
                 .Select(x =>
                     new
                     {
                         x.Name,
-                        Column = sourceEntity.FindProperty(x.Name)?.GetColumnName(sourceStore.Value),
+                        Column = entityNames.Columns.GetValueOrDefault(x.Name),
                     })
-                .Where(x => !string.IsNullOrEmpty(x.Column));
+                .Where(x => x.Column is not null);
 
             foreach (var column in columns)
             {

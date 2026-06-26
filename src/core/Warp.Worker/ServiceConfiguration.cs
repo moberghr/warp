@@ -122,6 +122,11 @@ public static class ServiceConfiguration
         // its own logger so server polling doesn't pollute the user's command logs. The connection is
         // supplied by the provider (UsePostgreSql/UseSqlServer) from TContext's options; the model
         // (names + ExcludeFromMigrations) is built in WarpServerContext.OnModelCreating.
+        // Resolved physical names for the server context's model. Default impl reads TContext's model
+        // once (the single place TContext is touched); the server context consumes the abstraction.
+        services.TryAddSingleton<IWarpServerModelNames>(sp =>
+            new WarpServerModelNames<TContext>(sp.GetRequiredService<IServiceScopeFactory>()));
+
         services.AddDbContext<WarpServerContext<TContext>>((sp, options) =>
         {
             var configurator = sp.GetService<IWarpServerContextConfigurator>()

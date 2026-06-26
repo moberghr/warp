@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Entities;
@@ -88,6 +89,9 @@ public sealed class WarpServerContextPrototypeTests
             .UseSnakeCaseNamingConvention());
         services.AddDbContext<WarpServerContext<SnakeContext>>(x => x
             .UseNpgsql(DummyConnection));
+        services.AddSingleton<IOptions<WarpConfiguration>>(Options.Create(new WarpConfiguration()));
+        services.AddSingleton<IWarpServerModelNames>(sp =>
+            new WarpServerModelNames<SnakeContext>(sp.GetRequiredService<IServiceScopeFactory>()));
 
         return services.BuildServiceProvider();
     }
