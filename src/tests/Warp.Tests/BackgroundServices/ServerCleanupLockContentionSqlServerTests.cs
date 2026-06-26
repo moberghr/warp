@@ -62,12 +62,12 @@ public class ServerCleanupLockContentionSqlServerTests : IAsyncLifetime, IClassF
             RestartCount = 0,
         });
 
-        var insert = async () => await insertCtx.SaveChangesAsync(TestCancellation);
+        async Task<int> Insert() => await insertCtx.SaveChangesAsync(TestCancellation);
 
         // A held cleanup lock that blocks the insert trips SQL Server error 1222. If the lock is
         // too weak (compatible with the insert's FK-check lock), the insert proceeds and nothing
         // is thrown — failing this assertion, exactly as the orphaning race would in production.
-        var ex = await Should.ThrowAsync<Exception>(insert);
+        var ex = await Should.ThrowAsync<Exception>((Func<Task<int>>)Insert);
         ex.ToString().ShouldContain("1222");
 
         await insertTx.RollbackAsync(TestCancellation);

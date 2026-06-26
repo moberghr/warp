@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Worker;
 
 namespace Warp.Tests.Worker;
@@ -236,6 +237,7 @@ public abstract class WarpServerRegistrationTestsBase : IAsyncLifetime
         var config = Options.Create(configuration);
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddTestServerContext<TestContext>();
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
         var state = new ServerRegistrationState();
         var pauseStateHolder = new PauseStateHolder();

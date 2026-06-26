@@ -32,7 +32,7 @@ public abstract class BackgroundServiceLeaseCoordinatorTestsBase : IAsyncLifetim
         var ctx = _fixture.CreateContext();
         var options = Options.Create(new WarpServerConfiguration { ServerId = MyServerId });
 
-        return new BackgroundServiceLeaseCoordinator<TestContext>(ctx, TimeProvider.System, options, TestTasks.QueriesFor(ctx));
+        return new BackgroundServiceLeaseCoordinator<TestContext>(new TestServerContext(ctx), TimeProvider.System, options, TestTasks.QueriesFor(ctx));
     }
 
     private async Task SeedDefinitionAsync(string serviceName)

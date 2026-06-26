@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -14,18 +15,18 @@ namespace Warp.Worker.Services;
 public sealed class ExpirationCleanup<TContext> : IServerTask
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly WarpServerConfiguration _configuration;
     private readonly IEnumerable<WarpBackgroundService> _backgroundServices;
 
     public ExpirationCleanup(
-        TContext context,
+        IWarpServerContext serverContext,
         TimeProvider time,
         IOptions<WarpServerConfiguration> configuration,
         IEnumerable<WarpBackgroundService>? backgroundServices = null)
     {
-        _context = context;
+        _context = serverContext.Context;
         _time = time;
         _configuration = configuration.Value;
         _backgroundServices = backgroundServices ?? [];

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -115,6 +116,41 @@ public static class ServiceConfiguration
         // Core setup is idempotent (TryAdd-based) so calling it here is safe even if the user
         // also called AddWarp separately for their own addon opt-ins.
         services.AddWarp<TContext>();
+
+        // The Warp server context: a runtime-only mirror of the Warp model used for all autonomous
+        // server-internal DB work (worker fetch/complete, server tasks, background-service host), with
+        // its own logger so server polling doesn't pollute the user's command logs. The connection is
+        // supplied by the provider (UsePostgreSql/UseSqlServer) from TContext's options; the model
+        // (names + ExcludeFromMigrations) is built in WarpServerContext.OnModelCreating.
+        // Resolved physical names for the server context's model. Default impl reads TContext's model
+        // once (the single place TContext is touched); the server context consumes the abstraction.
+        services.TryAddSingleton<IWarpServerModelNames>(sp =>
+            new WarpServerModelNames<TContext>(sp.GetRequiredService<IServiceScopeFactory>()));
+
+        services.AddDbContext<WarpServerContext<TContext>>((sp, options) =>
+        {
+            var configurator = sp.GetService<IWarpServerContextConfigurator>()
+                ?? throw new InvalidOperationException(
+                    "AddWarpServer requires a Warp provider — call opt.UsePostgreSql() or "
+                    + "opt.UseSqlServer() so the server context can open against the same database "
+                    + "as your DbContext.");
+
+            configurator.Configure(options, sp);
+            options.AddWarpInterceptors();
+
+            // Keep the autonomous server loops' SQL out of the application's command logs: demote the
+            // server context's command-executed event to Debug (app stays at Information). The user's
+            // own DbContext is unaffected. Opt back in with opt.EnableServerCommandLogging = true.
+            var serverConfig = sp.GetService<IOptions<WarpServerConfiguration>>()?.Value;
+            if (serverConfig is null || !serverConfig.EnableServerCommandLogging)
+            {
+                options.ConfigureWarnings(w => w.Log((RelationalEventId.CommandExecuted, LogLevel.Debug)));
+            }
+        });
+
+        // Server-internal components depend on IWarpServerContext (not the concrete generic type),
+        // resolving the scoped WarpServerContext<TContext>.
+        services.AddScoped<IWarpServerContext>(sp => sp.GetRequiredService<WarpServerContext<TContext>>());
 
         // Trace-correlation scope tracking applies to every server process (worker or
         // service-only) so background-service and server-task logs carry TraceId/SpanId/ParentId.

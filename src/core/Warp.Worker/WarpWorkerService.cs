@@ -55,7 +55,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
         // Worker scope — owns Warp state (Job, JobLog, Counter). Isolated from handler's DbContext.
         using var workerScope = _serviceScopeFactory.CreateScope();
-        var workerContext = workerScope.ServiceProvider.GetRequiredService<TContext>();
+        var workerContext = workerScope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
@@ -457,7 +457,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 }
 
                 using var scope = _serviceScopeFactory.CreateScope();
-                var context = scope.ServiceProvider.GetRequiredService<TContext>();
+                var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
                 if (doCancellationCheck)
                 {
@@ -528,7 +528,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     /// Finalizes job state: clears worker fields, adds counters and log entry.
     /// State must be set on the job before calling this method.
     /// </summary>
-    private void FinalizeJobState(TContext context, Job job, Exception? error, double? durationMs, JobOutcome? outcome = null)
+    private void FinalizeJobState(DbContext context, Job job, Exception? error, double? durationMs, JobOutcome? outcome = null)
     {
         var state = job.CurrentState;
         job.CancellationMode = CancellationMode.None;
@@ -565,7 +565,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
     }
 
-    private static async Task SaveJobLogs(TContext context, JobLogCollector collector)
+    private static async Task SaveJobLogs(DbContext context, JobLogCollector collector)
     {
         var entries = collector.Drain();
         if (entries.Count == 0)
@@ -576,7 +576,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         await context.Set<JobLog>().AddRangeAsync(entries);
     }
 
-    private static async Task SaveProgressRows(TContext context, JobProgressCollector collector)
+    private static async Task SaveProgressRows(DbContext context, JobProgressCollector collector)
     {
         var entries = collector.Drain();
         if (entries.Count == 0)
@@ -587,7 +587,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         await context.Set<JobLog>().AddRangeAsync(entries);
     }
 
-    private static void AddCounters(TContext context, string totalKey, string hourlyKey)
+    private static void AddCounters(DbContext context, string totalKey, string hourlyKey)
     {
         context.Set<Counter>().Add(new Counter { Key = totalKey, Value = 1 });
         context.Set<Counter>().Add(new Counter { Key = hourlyKey, Value = 1 });

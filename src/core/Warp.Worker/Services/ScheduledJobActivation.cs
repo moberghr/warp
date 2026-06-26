@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
@@ -17,7 +18,7 @@ namespace Warp.Worker.Services;
 public sealed class ScheduledJobActivation<TContext> : IServerTask
     where TContext : DbContext
 {
-    private readonly TContext _context;
+    private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly IWarpNotificationTransport _transport;
     private readonly WarpServerConfiguration _configuration;
@@ -25,14 +26,14 @@ public sealed class ScheduledJobActivation<TContext> : IServerTask
     private readonly ServerTaskSignals<TContext> _signals;
 
     public ScheduledJobActivation(
-        TContext context,
+        IWarpServerContext serverContext,
         TimeProvider time,
         IWarpNotificationTransport transport,
         IOptions<WarpServerConfiguration> configuration,
         IWarpSqlQueries<TContext> sqlQueries,
         ServerTaskSignals<TContext> signals)
     {
-        _context = context;
+        _context = serverContext.Context;
         _time = time;
         _transport = transport;
         _configuration = configuration.Value;

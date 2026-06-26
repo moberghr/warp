@@ -61,6 +61,7 @@ public abstract class RetentionEdgeCaseTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddTestServerContext<TestContext>();
         services.AddSingleton<CounterService>();
         services.AddSingleton<MultiHandlerCounter>();
         services.AddScoped<Warp.Core.Handlers.JobContext>();

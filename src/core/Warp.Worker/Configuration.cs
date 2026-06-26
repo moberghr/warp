@@ -50,6 +50,15 @@ public class WarpServerConfiguration : WarpConfiguration
     public bool RunWorker { get; set; } = true;
 
     /// <summary>
+    /// When <c>false</c> (the default), the Warp server context demotes EF Core's command-executed
+    /// log to <c>Debug</c>, so the autonomous server loops (worker fetch, heartbeat, server tasks)
+    /// don't flood the application's command logs at <c>Information</c>. Your own
+    /// <c>DbContext</c>'s command logging is unaffected. Set to <c>true</c> to log the server
+    /// context's commands at the normal level (e.g. when debugging Warp's own SQL).
+    /// </summary>
+    public bool EnableServerCommandLogging { get; set; }
+
+    /// <summary>
     /// Each time the worker polls for a job, it will wait for this interval before polling again.
     /// Applies to the implicit default worker group. Also serves as the floor for exponential
     /// backoff when consecutive polls return no work.

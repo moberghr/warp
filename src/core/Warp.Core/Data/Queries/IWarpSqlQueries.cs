@@ -27,7 +27,7 @@ public interface IWarpSqlQueries<TContext>
     /// rows without contention. Returns the post-update row as a tracked entity.
     /// </summary>
     Task<List<Job>> ClaimEnqueuedJobsAsync(
-        TContext context,
+        DbContext context,
         string[] queues,
         Guid workerId,
         DateTime now,
@@ -44,7 +44,7 @@ public interface IWarpSqlQueries<TContext>
     /// (no-handler → Failed) commit together in a single <c>SaveChanges</c> at the end of the
     /// caller's batch.
     /// </summary>
-    Task<List<Job>> ClaimEnqueuedMessagesAsync(TContext context, int limit, CancellationToken ct);
+    Task<List<Job>> ClaimEnqueuedMessagesAsync(DbContext context, int limit, CancellationToken ct);
 
     /// <summary>
     /// Locks <c>Kind=Job</c> rows in <c>State=Processing</c> whose <c>LastKeepAlive</c> is older
@@ -52,7 +52,7 @@ public interface IWarpSqlQueries<TContext>
     /// the caller to transition to Enqueued / Failed / Deleted per its recovery policy.
     /// </summary>
     Task<List<Job>> LockStaleProcessingJobsAsync(
-        TContext context,
+        DbContext context,
         DateTime cutoff,
         CancellationToken ct);
 
@@ -61,7 +61,7 @@ public interface IWarpSqlQueries<TContext>
     /// commands (DeleteJob, RequeueJob) that must find the row and serialize against the worker's
     /// brief keep-alive UPDATEs; SKIP LOCKED would race those updates and falsely report "not found".
     /// </summary>
-    Task<Job?> LockJobByIdWaitAsync(TContext context, Guid jobId, CancellationToken ct);
+    Task<Job?> LockJobByIdWaitAsync(DbContext context, Guid jobId, CancellationToken ct);
 
     /// <summary>
     /// Locks every <see cref="Server"/> row with a blocking lock (WAIT — no SKIP LOCKED).
@@ -69,7 +69,7 @@ public interface IWarpSqlQueries<TContext>
     /// The blocking lock serializes against <c>Heartbeat</c>'s per-row update so we can't
     /// delete a server that just sent a fresh heartbeat.
     /// </summary>
-    Task<List<Server>> LockAllServersAsync(TContext context, CancellationToken ct);
+    Task<List<Server>> LockAllServersAsync(DbContext context, CancellationToken ct);
 
     /// <summary>
     /// Atomic heartbeat: updates <c>last_heartbeat_time</c> / memory / CPU on the server row
@@ -84,7 +84,7 @@ public interface IWarpSqlQueries<TContext>
     /// </para>
     /// </summary>
     Task<HeartbeatResult?> HeartbeatAsync(
-        TContext context,
+        DbContext context,
         Guid serverId,
         DateTime now,
         long? memoryBytes,
@@ -101,7 +101,7 @@ public interface IWarpSqlQueries<TContext>
     /// per-row trail of the Scheduled→Enqueued transition.
     /// </summary>
     Task<List<(Guid Id, string Queue, DateTime ScheduleTime)>> ActivateScheduledJobsAsync(
-        TContext context,
+        DbContext context,
         DateTime now,
         CancellationToken ct);
 
@@ -116,7 +116,7 @@ public interface IWarpSqlQueries<TContext>
     /// </para>
     /// </summary>
     Task<BackgroundServiceLease?> LockLeaseByServiceNameAsync(
-        TContext context,
+        DbContext context,
         string serviceName,
         CancellationToken ct);
 
@@ -131,7 +131,7 @@ public interface IWarpSqlQueries<TContext>
     /// </para>
     /// </summary>
     Task<BackgroundServiceDefinition?> LockDefinitionByServiceNameAsync(
-        TContext context,
+        DbContext context,
         string serviceName,
         CancellationToken ct);
 
@@ -154,8 +154,8 @@ public interface IWarpSqlQueries<TContext>
     /// </para>
     /// </summary>
     Task<(bool LockHeld, T? Result)> RunUnderTransactionLockAsync<T>(
-        TContext context,
+        DbContext context,
         string lockKey,
-        Func<TContext, CancellationToken, Task<T>> work,
+        Func<DbContext, CancellationToken, Task<T>> work,
         CancellationToken ct);
 }

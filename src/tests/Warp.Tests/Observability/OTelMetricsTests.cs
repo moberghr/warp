@@ -62,6 +62,7 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging(builder => builder.AddProvider(new JobLoggerProvider()));
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddTestServerContext<TestContext>();
         services.AddSingleton<CounterService>();
         services.AddSingleton<MultiHandlerCounter>();
         services.AddSingleton<ActivityCapture>();

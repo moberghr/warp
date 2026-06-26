@@ -156,7 +156,7 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
         try
         {
             using var scope = _scopes.CreateScope();
-            var ctx = scope.ServiceProvider.GetRequiredService<TContext>();
+            var ctx = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
             await ctx.Set<Warp.Core.Data.Entities.BackgroundServiceLease>()
                 .Where(x => x.HolderServerId == serverId)

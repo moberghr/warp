@@ -260,6 +260,11 @@ public abstract class ServerTaskLoopRoutingTestsBase : IAsyncLifetime
                     return _queries;
                 }
 
+                if (serviceType == typeof(Warp.Core.IWarpServerContext))
+                {
+                    return new TestServerContext(_context);
+                }
+
                 if (serviceType == typeof(IEnumerable<IServerTask>))
                 {
                     return new IServerTask[] { _stub };

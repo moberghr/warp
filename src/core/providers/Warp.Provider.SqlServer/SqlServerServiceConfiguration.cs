@@ -44,10 +44,13 @@ public static class SqlServerServiceConfiguration
         builder.Services.TryAddSingleton<IWarpSemaphoreProvider>(sp =>
             new SqlServerSemaphoreProvider(ResolveConnectionString<TContext>(sp)));
 
+        // Points the Warp server context at the same database as TContext.
+        builder.Services.TryAddSingleton<IWarpServerContextConfigurator>(new SqlServerServerContextConfigurator<TContext>());
+
         return builder;
     }
 
-    private static string ResolveConnectionString<TContext>(IServiceProvider sp)
+    internal static string ResolveConnectionString<TContext>(IServiceProvider sp)
         where TContext : DbContext
     {
         using var scope = sp.CreateScope();
@@ -63,5 +66,14 @@ public static class SqlServerServiceConfiguration
         }
 
         return connectionString;
+    }
+}
+
+internal sealed class SqlServerServerContextConfigurator<TContext> : IWarpServerContextConfigurator
+    where TContext : DbContext
+{
+    public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
+    {
+        optionsBuilder.UseSqlServer(SqlServerServiceConfiguration.ResolveConnectionString<TContext>(applicationServices));
     }
 }

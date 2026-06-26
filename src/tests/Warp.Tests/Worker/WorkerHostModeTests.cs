@@ -184,6 +184,7 @@ public abstract class WorkerHostModeTestsBase : IAsyncLifetime
     {
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddTestServerContext<TestContext>();
         return services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
     }
 
