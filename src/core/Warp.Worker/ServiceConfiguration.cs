@@ -127,6 +127,13 @@ public static class ServiceConfiguration
         services.TryAddSingleton<IWarpServerModelNames>(sp =>
             new WarpServerModelNames<TContext>(sp.GetRequiredService<IServiceScopeFactory>()));
 
+        // Snapshot the non-generic DbContextOptions forwarders present before we register the server
+        // context, so we can identify (by reference) the one AddDbContext is about to append and remove
+        // exactly that — see the rationale below.
+        var forwardersBefore = services
+            .Where(x => x.ServiceType == typeof(DbContextOptions))
+            .ToList();
+
         services.AddDbContext<WarpServerContext<TContext>>((sp, options) =>
         {
             var configurator = sp.GetService<IWarpServerContextConfigurator>()
@@ -147,6 +154,23 @@ public static class ServiceConfiguration
                 options.ConfigureWarnings(w => w.Log((RelationalEventId.CommandExecuted, LogLevel.Debug)));
             }
         });
+
+        // AddDbContext also appends a non-generic DbContextOptions forwarder (plain Add, not TryAdd)
+        // carrying WarpServerContext<TContext> as its ContextType. That enumeration —
+        // GetServices<DbContextOptions>().Select(o => o.ContextType) — is the only vector EF's
+        // design-time tooling uses to discover this context (it's internal, open-generic, and outside
+        // the user's startup assembly, so the IDesignTimeDbContextFactory and assembly scans miss it).
+        // Left in, `dotnet ef` counts the runtime-only server context and demands --context. Warp only
+        // ever resolves DbContextOptions<WarpServerContext<TContext>>, so dropping the forwarder we just
+        // added leaves runtime untouched; the user's own AddDbContext keeps its separate forwarder
+        // (→ TContext), the correct design-time target. No property identifies a forwarder by its target
+        // context (the factory closure is opaque), so we remove it by identity: the one descriptor
+        // AddDbContext appended that wasn't present before.
+        var addedForwarder = services
+            .Where(x => x.ServiceType == typeof(DbContextOptions))
+            .Except(forwardersBefore)
+            .Single();
+        services.Remove(addedForwarder);
 
         // Server-internal components depend on IWarpServerContext (not the concrete generic type),
         // resolving the scoped WarpServerContext<TContext>.

@@ -4,6 +4,12 @@ sidebar_position: 6
 
 # Releases
 
+## Unreleased
+
+### `dotnet ef` no longer sees the Warp server context
+
+The internal **Warp server context** introduced in 3.0 is now hidden from EF Core's design-time tooling. Because `AddWarpServer` registers `WarpServerContext<TContext>` in DI, `dotnet ef` discovered it alongside your own `DbContext` and failed every command with *"More than one DbContext was found"* unless you passed `--context YourDbContext`. The server context is a runtime-only implementation detail you can never migrate, so the tooling should never have offered it as a target. `AddWarpServer` now strips the design-time discovery hook (the non-generic `DbContextOptions` forwarder EF enumerates), so `dotnet ef` resolves cleanly to your context with no `--context` flag. Runtime resolution of the server context is unchanged.
+
 ## 3.0.0
 
 *2026-06-26*

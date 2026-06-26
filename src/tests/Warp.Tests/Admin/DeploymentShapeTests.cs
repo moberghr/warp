@@ -298,6 +298,42 @@ public class DeploymentShapeTests
         Should.NotThrow(() => ok.AddWarpServer<TestContext>(opt => opt.DisableWorker()));
     }
 
+    // Pins the design-time-discovery contract: AddWarpServer registers the runtime-only
+    // WarpServerContext<TContext>, but EF's `dotnet ef` tooling must NOT see it (else it errors
+    // "More than one DbContext was found" and demands --context). The only discovery vector that
+    // can reach the server context is the non-generic DbContextOptions enumeration
+    // (GetServices<DbContextOptions>().Select(o => o.ContextType)) — it's internal, open-generic, and
+    // outside the user's startup assembly, so the other two vectors miss it. AddWarpServer strips the
+    // forwarder it adds; this guards that strip. If a refactor reintroduces a second forwarder (or
+    // switches back to a plain AddDbContext without the Remove), the enumeration surfaces the server
+    // context and this fails before a broken `dotnet ef` ships.
+    [TimedFact]
+    public void ServerShape_AddWarpServer_HidesServerContextFromEfDiscovery()
+    {
+        var services = new ServiceCollection();
+        RegisterMinimalDependencies(services);
+        services.AddWarpServer<TestContext>();
+
+        var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = sp.CreateScope();
+
+        // This is exactly what DbContextOperations.FindContextTypes() enumerates from DI.
+        var discovered = scope.ServiceProvider
+            .GetServices<DbContextOptions>()
+            .Select(x => x.ContextType)
+            .ToList();
+
+        discovered.ShouldContain(typeof(TestContext));
+        discovered.ShouldNotContain(
+            typeof(WarpServerContext<TestContext>),
+            "the runtime-only server context must stay invisible to `dotnet ef` discovery.");
+
+        // Sanity: hiding it from discovery must NOT break runtime resolution — the context still
+        // resolves via its generic options and IWarpServerContext.
+        scope.ServiceProvider.GetRequiredService<WarpServerContext<TestContext>>().ShouldNotBeNull();
+        scope.ServiceProvider.GetRequiredService<IWarpServerContext>().ShouldNotBeNull();
+    }
+
     private static bool HasHostedService<T>(IServiceCollection services)
         where T : IHostedService
         => services.Any(d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(T));
