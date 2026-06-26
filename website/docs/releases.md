@@ -12,11 +12,11 @@ Isolates Warp's autonomous server-internal database work onto a dedicated, inter
 
 ### Quiet server logging
 
-Warp's constant background polling — `Heartbeat`, `Orchestrator`, `MessageRouter`, `ScheduledJobActivation`, `RecurringJobScheduler`, `StaleJobRecovery`, `CounterAggregator`, the cleanups, and the background-service host — now runs on an internal server context whose EF Core command logging is demoted to `Debug`. At a default `Information` level, **that SQL no longer appears in your logs, and your own `DbContext`'s command logging is unaffected.** Zero configuration; opt back in with `opt.EnableServerCommandLogging = true`.
+All of Warp's server-internal database work — the **job worker** (fetch/execute/complete), `Heartbeat`, `Orchestrator`, `MessageRouter`, `ScheduledJobActivation`, `RecurringJobScheduler`, `StaleJobRecovery`, `CounterAggregator`, the cleanups, and the background-service host — now runs on an internal server context whose EF Core command logging is demoted to `Debug`. At a default `Information` level, **that SQL no longer appears in your logs, and your own `DbContext`'s command logging is unaffected.** Zero configuration; opt back in with `opt.EnableServerCommandLogging = true`.
 
 The server context is a runtime-only mirror of the Warp model: it maps to the same physical tables as your `DbContext` (column/table names pulled from your model, so naming conventions are honoured) and is excluded from migrations — your context remains the schema owner. It exists only under `AddWarpServer`, with its connection supplied by the provider (`UsePostgreSql` / `UseSqlServer`).
 
-**Scope:** the job worker's fetch/execute path intentionally stays on your `DbContext` (it holds its context across job execution and coordinates with graceful-cancellation row locks). Use `UseDatabasePush()` to cut worker polling at the source. See [EF Core Integration → Server-internal logging](./operations/ef-core-integration.md#server-internal-logging--the-warp-server-context).
+The only DB work left on your `DbContext` is the **outbox** (the publisher staging job rows in your transaction) and your **handler's own code** — exactly what you'd want logged. See [EF Core Integration → Server-internal logging](./operations/ef-core-integration.md#server-internal-logging--the-warp-server-context).
 
 ## 2.1.0
 

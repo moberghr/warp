@@ -33,13 +33,11 @@ public class WarpTestServer : IAsyncDisposable
 {
     private readonly IHost _host;
     private readonly IDatabaseFixture _fixture;
-    private readonly JobLogObserver _jobLogObserver;
 
-    private WarpTestServer(IHost host, IDatabaseFixture fixture, JobLogObserver jobLogObserver)
+    private WarpTestServer(IHost host, IDatabaseFixture fixture)
     {
         _host = host;
         _fixture = fixture;
-        _jobLogObserver = jobLogObserver;
     }
 
     public IPublisher CreatePublisher()
@@ -180,11 +178,6 @@ public class WarpTestServer : IAsyncDisposable
             ? baseConnectionString
             : $"{baseConnectionString};Application Name=warp-test-{Guid.NewGuid():N}";
 
-        // One observer per test-server instance — captures every JobLog insertion the
-        // worker pool commits, so WaitForJobLog can complete deterministically the moment
-        // SaveChanges returns rather than polling at a 200 ms cadence.
-        var jobLogObserver = new JobLogObserver();
-
         TestLifecycleTrace.Record("Host.Build starting");
         var host = Host.CreateDefaultBuilder()
             .ConfigureLogging(logging =>
@@ -222,8 +215,6 @@ public class WarpTestServer : IAsyncDisposable
                     {
                         options.UseSqlServer(connectionString, sql => sql.CommandTimeout(5));
                     }
-
-                    options.AddInterceptors(jobLogObserver);
                 });
 
                 services.AddTransient(typeof(IPublishPipelineBehavior<>), typeof(TestData.Handlers.TestMetadataPublishBehavior<>));
@@ -329,7 +320,7 @@ public class WarpTestServer : IAsyncDisposable
 
         TestLifecycleTrace.Record($"WarpTestServer.StartAsync returned (server={serverId})");
 
-        return new WarpTestServer(host, fixture, jobLogObserver);
+        return new WarpTestServer(host, fixture);
     }
 
     /// <summary>
@@ -408,36 +399,32 @@ public class WarpTestServer : IAsyncDisposable
 
     public async Task WaitForJobLog(Guid jobId, string eventType, TimeSpan? timeout = null)
     {
-        // Deterministic wait via JobLogObserver: subscribe BEFORE the existence check so
-        // a SaveChanges that lands between the two completes our TCS, eliminating the
-        // race window the previous 200 ms-poll implementation had.
+        // Poll the committed JobLog row (mirrors WaitForJobState). Robust regardless of which
+        // context wrote it: the worker and server tasks write JobLog via the Warp server context,
+        // which a TContext-scoped interceptor would not observe. The row is committed once written,
+        // so polling is deterministic — found within one interval.
         var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(5);
-
-        using var subscription = _jobLogObserver.Subscribe(jobId, eventType);
-
-        // Already there? Worker may have committed the row before the test got here.
-        var alreadyLogged = await CreateContext().Set<JobLog>()
-            .AnyAsync(
-                x => x.JobId == jobId && x.EventType == eventType,
-                Xunit.TestContext.Current.CancellationToken);
-
-        if (alreadyLogged)
+        var deadline = DateTime.UtcNow + effectiveTimeout;
+        while (DateTime.UtcNow < deadline)
         {
-            return;
+            var logged = await CreateContext().Set<JobLog>()
+                .AnyAsync(
+                    x => x.JobId == jobId && x.EventType == eventType,
+                    Xunit.TestContext.Current.CancellationToken);
+
+            if (logged)
+            {
+                return;
+            }
+
+            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
         }
 
-        try
-        {
-            await subscription.Task.WaitAsync(effectiveTimeout, Xunit.TestContext.Current.CancellationToken);
-        }
-        catch (TimeoutException)
-        {
-            var logs = await GetJobLogs(jobId);
-            var eventTypes = string.Join(", ", logs.Select(l => l.EventType));
+        var logs = await GetJobLogs(jobId);
+        var eventTypes = string.Join(", ", logs.Select(l => l.EventType));
 
-            throw new TimeoutException(
-                $"Job {jobId} did not get log event '{eventType}' within {effectiveTimeout}. Events: {eventTypes}");
-        }
+        throw new TimeoutException(
+            $"Job {jobId} did not get log event '{eventType}' within {effectiveTimeout}. Events: {eventTypes}");
     }
 
     /// <summary>

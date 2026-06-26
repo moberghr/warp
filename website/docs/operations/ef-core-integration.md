@@ -166,9 +166,11 @@ publisher.SaveChangesCount.ShouldBe(1);
 
 ## Server-internal logging — the Warp server context
 
-Warp's autonomous server loops — the `Heartbeat`, `Orchestrator`, `MessageRouter`, `ScheduledJobActivation`, `RecurringJobScheduler`, `StaleJobRecovery`, `CounterAggregator`, the cleanups, and the background-service host — poll the database continuously. If those queries ran on your `DbContext`, EF Core's command logging would flood your application's logs (under `Microsoft.EntityFrameworkCore.Database.Command`) with Warp's polling SQL, indistinguishable from your own queries.
+Warp's server-internal work — the **job worker** (fetch/execute/complete), the `Heartbeat`, `Orchestrator`, `MessageRouter`, `ScheduledJobActivation`, `RecurringJobScheduler`, `StaleJobRecovery`, `CounterAggregator`, the cleanups, and the background-service host — polls the database continuously. If those queries ran on your `DbContext`, EF Core's command logging would flood your application's logs (under `Microsoft.EntityFrameworkCore.Database.Command`) with Warp's polling SQL, indistinguishable from your own queries.
 
-To prevent that, `AddWarpServer` runs all of that work on a dedicated **Warp server context** — a runtime-only mirror of the Warp model that maps to the exact same tables as your `DbContext` (names pulled from your context's model, so a naming convention like `UseSnakeCaseNamingConvention()` is honoured), but carries its **own quiet logger**: it demotes the command-executed event to `Debug`. So at a default `Information` log level, **Warp's autonomous server SQL no longer appears in your logs, and your own `DbContext`'s command logging is completely unaffected.** No configuration required.
+To prevent that, `AddWarpServer` runs **all** of that work — worker fetch/execute included — on a dedicated **Warp server context**: a runtime-only mirror of the Warp model that maps to the exact same tables as your `DbContext` (names pulled from your context's model, so a naming convention like `UseSnakeCaseNamingConvention()` is honoured), but carries its **own quiet logger**: it demotes the command-executed event to `Debug`. So at a default `Information` log level, **Warp's server SQL no longer appears in your logs, and your own `DbContext`'s command logging is completely unaffected.** No configuration required.
+
+The only DB work left on your `DbContext` is the **outbox** (the publisher staging job rows inside your transaction) and your **handler's own code** (plus any addon pipeline state it commits) — i.e. exactly the queries you'd *want* logged.
 
 The server context is internal infrastructure; you never register or reference it. It's a no-op for `AddWarp`-only (dashboard / publisher-only) processes — it exists only where `AddWarpServer` runs, and a provider (`opt.UsePostgreSql()` / `opt.UseSqlServer()`) supplies its connection from your context's options.
 
@@ -181,8 +183,6 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
     opt.EnableServerCommandLogging = true; // server SQL logs at the normal level
 });
 ```
-
-> **Scope:** the **job worker's** fetch/execute path stays on your `DbContext` (it holds its context across job execution and must coordinate with graceful-cancellation row locks). So worker-fetch SQL still logs normally — enable `UseDatabasePush()` to cut worker polling at the source, or filter the worker's categories. The constant, server-wide background polling (heartbeat, server tasks, background services) is what the server context silences.
 
 ## Connection string vs `NpgsqlDataSource`
 
