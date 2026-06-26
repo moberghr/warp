@@ -731,6 +731,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
         services.AddSingleton<IWarpSemaphoreProvider>(lockProvider);
@@ -773,6 +774,7 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
         services.AddSingleton<IWarpSemaphoreProvider>(new FakeSemaphoreProvider());

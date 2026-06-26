@@ -441,7 +441,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private async Task MarkWorkerOwnership(Job job, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+        var context = scope.ServiceProvider.GetRequiredService<TContext>();
         var handlerTypeToSet = job.HandlerType;
         await context.Set<Job>()
             .Where(x => x.Id == job.Id)
@@ -524,7 +524,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 }
 
                 using var s = _scopeFactory.CreateScope();
-                var ctx = s.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+                var ctx = s.ServiceProvider.GetRequiredService<TContext>();
 
                 if (doCancellationCheck)
                 {

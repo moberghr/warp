@@ -585,6 +585,7 @@ public abstract class CircuitBreakerTestsBase : IAsyncLifetime
     {
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
 
         return services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
     }
@@ -599,6 +600,7 @@ public abstract class CircuitBreakerTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
         services.TryAddSingleton(TimeProvider.System);

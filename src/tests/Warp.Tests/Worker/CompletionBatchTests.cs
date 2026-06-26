@@ -27,6 +27,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
         var provider = services.BuildServiceProvider();
         return provider.GetRequiredService<IServiceScopeFactory>();
     }

@@ -77,6 +77,7 @@ public abstract class ActivityTraceTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging(builder => builder.AddProvider(new JobLoggerProvider()));
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
         services.AddSingleton<CounterService>();
         services.AddSingleton<MultiHandlerCounter>();
         services.AddSingleton(capture);

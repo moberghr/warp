@@ -55,7 +55,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
         // Worker scope — owns Warp state (Job, JobLog, Counter). Isolated from handler's DbContext.
         using var workerScope = _serviceScopeFactory.CreateScope();
-        var workerContext = workerScope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+        var workerContext = workerScope.ServiceProvider.GetRequiredService<TContext>();
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
@@ -457,7 +457,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 }
 
                 using var scope = _serviceScopeFactory.CreateScope();
-                var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+                var context = scope.ServiceProvider.GetRequiredService<TContext>();
 
                 if (doCancellationCheck)
                 {

@@ -716,6 +716,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
         services.AddSingleton<IWarpLockProvider>(new FakeLockProvider());
@@ -734,6 +735,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         services.AddWarpMediator();
         services.AddLogging();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
         services.AddSingleton<IWarpLockProvider>(lockProvider);

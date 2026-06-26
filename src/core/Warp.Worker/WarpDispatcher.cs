@@ -139,7 +139,7 @@ public class WarpDispatcher<TContext> : BackgroundService
         }
 
         using var scope = _scopeFactory.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+        var context = scope.ServiceProvider.GetRequiredService<TContext>();
         var sqlQueries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
@@ -210,7 +210,7 @@ public class WarpDispatcher<TContext> : BackgroundService
         {
             var undeliveredIds = jobs.Skip(delivered).Select(j => j.Id).ToArray();
             using var cleanupScope = _scopeFactory.CreateScope();
-            var cleanupContext = cleanupScope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+            var cleanupContext = cleanupScope.ServiceProvider.GetRequiredService<TContext>();
 
             await cleanupContext.Set<Job>()
                 .Where(x => undeliveredIds.Contains(x.Id))

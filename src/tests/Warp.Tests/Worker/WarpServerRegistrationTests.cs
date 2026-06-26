@@ -236,6 +236,7 @@ public abstract class WarpServerRegistrationTestsBase : IAsyncLifetime
         var config = Options.Create(configuration);
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<Warp.Core.IWarpServerContext>(x => new Warp.Tests.Helpers.TestServerContext(x.GetRequiredService<TestContext>()));
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
         var state = new ServerRegistrationState();
         var pauseStateHolder = new PauseStateHolder();
