@@ -9,9 +9,6 @@ on:
 
 env:
   DOTNET_VERSION: '10.0'
-  # Opt into Node.js 24 for JS-based actions (setup-dotnet, setup-node, checkout).
-  # Node 20 is deprecated on GitHub Actions runners from 2026-06-02.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   test:
@@ -29,15 +26,15 @@ jobs:
             filter: --filter-trait "Category=NoDb"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Setup Node.js (for Warp.UI npm build)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -65,7 +62,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ matrix.database }}
           path: test-results/*.trx
