@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -131,6 +132,15 @@ public static class ServiceConfiguration
 
             configurator.Configure(options, sp);
             options.AddWarpInterceptors();
+
+            // Keep the autonomous server loops' SQL out of the application's command logs: demote the
+            // server context's command-executed event to Debug (app stays at Information). The user's
+            // own DbContext is unaffected. Opt back in with opt.EnableServerCommandLogging = true.
+            var serverConfig = sp.GetService<IOptions<WarpServerConfiguration>>()?.Value;
+            if (serverConfig is null || !serverConfig.EnableServerCommandLogging)
+            {
+                options.ConfigureWarnings(w => w.Log((RelationalEventId.CommandExecuted, LogLevel.Debug)));
+            }
         });
 
         // Server-internal components depend on IWarpServerContext (not the concrete generic type),
