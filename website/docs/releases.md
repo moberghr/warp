@@ -18,6 +18,14 @@ The server context is a runtime-only mirror of the Warp model: it maps to the sa
 
 The only DB work left on your `DbContext` is the **outbox** (the publisher staging job rows in your transaction) and your **handler's own code** — exactly what you'd want logged. See [EF Core Integration → Server-internal logging](./operations/ef-core-integration.md#server-internal-logging--the-warp-server-context).
 
+### Cross-assembly handler discovery (source generator)
+
+The mediator source generator now registers a handler whose message/request **contract lives in a referenced assembly** — the shared-contract layout where contracts sit in one project (e.g. `Contracts.dll`) and handlers in another (a separate worker or API). Discovery used to be driven only by message/request types *declared in the compilation being built*, so a handler such as `FooHandler : IMessageHandler<FooMessage>` whose `FooMessage` came from a referenced assembly was never DI-registered or routed, and the worker failed the job with `No handlers registered for message type FooMessage`. It only worked when the message and its handler lived in the same assembly.
+
+Discovery is now **handler-driven**: each assembly registers the handlers it declares, keyed by the message/request type read off the handler interface — regardless of where that type is declared. Only locally-declared handlers are registered (each assembly emits its own registration), so co-located handlers still register exactly once and a referenced assembly's handlers are not re-registered by a consumer. Applies symmetrically to `IJobHandler`, `IMessageHandler`, `IRequestHandler`, and `IStreamRequestHandler`.
+
+Generated mediator member names (wrapper fields, dispatch methods) are now derived from the fully-qualified type name, so two request/job types that share a simple name across different namespaces or assemblies no longer produce colliding members.
+
 ## 2.1.0
 
 *2026-06-25*

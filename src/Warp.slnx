@@ -23,6 +23,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Warp.Tests/Warp.Tests.csproj" />
+    <Project Path="tests/Warp.Tests.Contracts/Warp.Tests.Contracts.csproj" />
     <Project Path="tests/Warp.Tests.Mutation/Warp.Tests.Mutation.csproj" />
     <Project Path="tests/Warp.Tests.SourceGenerator/Warp.Tests.SourceGenerator.csproj" />
   </Folder>

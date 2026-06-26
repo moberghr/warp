@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+
+	<!--
+		Deliberately a pure-contracts assembly: it references Warp.Core for the IMessage/IJob
+		marker interfaces but NOT the source generator. It mirrors the "Contracts.dll" leg of the
+		shared-contract layout (see WarpMediatorGenerator's handler-driven discovery) — the message
+		type lives here while its handler lives in the referencing Warp.Tests assembly.
+	-->
+	<ItemGroup>
+		<ProjectReference Include="..\..\core\Warp.Core\Warp.Core.csproj" />
+	</ItemGroup>
+
+</Project>
