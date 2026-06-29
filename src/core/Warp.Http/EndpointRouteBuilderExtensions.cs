@@ -60,7 +60,15 @@ public static class EndpointRouteBuilderExtensions
             builder.WithTags(firstSegment);
         }
 
-        if (IsBodyVerb(descriptor.Method))
+        if (descriptor.RequiresFormBinding)
+        {
+            // Form binding reads multipart/form-data, not JSON. Antiforgery validation would
+            // reject programmatic / non-browser uploads (no token) — suppress it on these
+            // endpoints, matching how a hand-written MapPost with IFormFile is configured.
+            builder.Accepts(descriptor.RequestType, "multipart/form-data");
+            builder.DisableAntiforgery();
+        }
+        else if (IsBodyVerb(descriptor.Method))
         {
             builder.Accepts(descriptor.RequestType, "application/json");
         }
@@ -68,6 +76,12 @@ public static class EndpointRouteBuilderExtensions
         if (descriptor.ResponseType == typeof(Unit))
         {
             builder.Produces(StatusCodes.Status204NoContent);
+        }
+        else if (typeof(IResult).IsAssignableFrom(descriptor.ResponseType))
+        {
+            // The handler returns an IResult and owns the response (status, content type, body),
+            // so a fixed "200 application/json" Produces would be misleading in OpenAPI. The
+            // concrete shape is only known at runtime — leave it undeclared.
         }
         else
         {

@@ -43,4 +43,12 @@ public sealed class HttpEndpointDescriptor
     /// before invoking the dispatch trampoline that calls <c>IMediator</c>.
     /// </summary>
     public required Delegate HandlerDelegate { get; init; }
+
+    /// <summary>
+    /// True when the request binds from a multipart form (an <c>IFormFile</c> member or a
+    /// <c>[FromForm]</c> field). <see cref="EndpointRouteBuilderExtensions.MapWarpHttp"/> uses
+    /// this to disable antiforgery on the endpoint and to declare the
+    /// <c>multipart/form-data</c> content type instead of <c>application/json</c>.
+    /// </summary>
+    public bool RequiresFormBinding { get; init; }
 }

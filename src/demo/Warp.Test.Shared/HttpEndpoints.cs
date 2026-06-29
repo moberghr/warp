@@ -101,3 +101,39 @@ public sealed class WebhookEchoHandler : IRequestHandler<WebhookEcho, WebhookEch
     public Task<WebhookEchoResponse> HandleAsync(WebhookEcho request, CancellationToken cancellationToken)
         => Task.FromResult(new WebhookEchoResponse(request.Payload, DateTime.UtcNow));
 }
+
+// 7. File upload — multipart/form-data with an IFormFile member. Reads the uploaded file and
+// echoes its contents back as JSON. Verify with:
+//   curl -F "File=@notes.txt" http://localhost:5000/http/file-echo
+public sealed record FileEcho(IFormFile File) : IRequest<FileEchoResponse>;
+
+public sealed record FileEchoResponse(string FileName, long Length, string Content);
+
+[WarpHttpPost("/http/file-echo")]
+public sealed class FileEchoHandler : IRequestHandler<FileEcho, FileEchoResponse>
+{
+    public async Task<FileEchoResponse> HandleAsync(FileEcho request, CancellationToken cancellationToken)
+    {
+        using var reader = new StreamReader(request.File.OpenReadStream());
+        var content = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+
+        return new FileEchoResponse(request.File.FileName, request.File.Length, content);
+    }
+}
+
+// 8. Text → file. Send JSON { "Text": "..." } and get the text back as a downloadable file.
+// The IResult return owns the response (content type + attachment), bypassing the JSON envelope.
+//   curl -X POST -H "Content-Type: application/json" -d "{\"Text\":\"hello\"}" \
+//        http://localhost:5000/http/text-to-file -OJ
+public sealed record TextToFile(string Text) : IRequest<IResult>;
+
+[WarpHttpPost("/http/text-to-file")]
+public sealed class TextToFileHandler : IRequestHandler<TextToFile, IResult>
+{
+    public Task<IResult> HandleAsync(TextToFile request, CancellationToken cancellationToken)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(request.Text ?? string.Empty);
+
+        return Task.FromResult(Results.File(bytes, "text/plain", "echo.txt"));
+    }
+}

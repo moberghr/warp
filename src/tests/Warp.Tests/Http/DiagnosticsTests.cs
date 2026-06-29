@@ -531,6 +531,67 @@ public sealed class DiagnosticsTests
     }
 
     [TimedFact]
+    public void WHTTP006_FiresWhenFormFileMixedWithFromBody()
+    {
+        // A multipart form (IFormFile) and a JSON [FromBody] both read the request body —
+        // Minimal API reads it once, so the combination is rejected.
+        const string source = """
+            using Warp.Core.Handlers;
+            using Warp.Http;
+            using Microsoft.AspNetCore.Http;
+            using Microsoft.AspNetCore.Mvc;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace TestSamples;
+
+            public sealed record UploadWithBody(IFormFile File, [FromBody] Meta Meta) : IRequest<string>;
+
+            public sealed record Meta(string Caption);
+
+            [WarpHttpPost("/api/upload-with-body")]
+            public sealed class UploadWithBodyHandler : IRequestHandler<UploadWithBody, string>
+            {
+                public Task<string> HandleAsync(UploadWithBody request, CancellationToken ct) => Task.FromResult(request.File.FileName);
+            }
+            """;
+
+        var result = GeneratorTestHarness.Run(source);
+
+        result.Diagnostics.ShouldContain(d => d.Id == "WHTTP006" && d.GetMessage().Contains("UploadWithBodyHandler"));
+        result.Diagnostics.ShouldNotContain(d => d.Id == "CS8785");
+    }
+
+    [TimedFact]
+    public void WHTTP006_DoesNotFireForFormFileWithRouteAndFormFields()
+    {
+        // IFormFile + [FromRoute] + [FromForm] is the supported multipart shape — no body conflict.
+        const string source = """
+            using Warp.Core.Handlers;
+            using Warp.Http;
+            using Microsoft.AspNetCore.Http;
+            using Microsoft.AspNetCore.Mvc;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace TestSamples;
+
+            public sealed record UploadDoc([FromRoute] int Id, IFormFile File, [FromForm] string Title) : IRequest<string>;
+
+            [WarpHttpPost("/api/folders/{id}/docs")]
+            public sealed class UploadDocHandler : IRequestHandler<UploadDoc, string>
+            {
+                public Task<string> HandleAsync(UploadDoc request, CancellationToken ct) => Task.FromResult(request.Title);
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.Run(source).Diagnostics;
+
+        diagnostics.ShouldNotContain(d => d.Id == "WHTTP006");
+        diagnostics.ShouldNotContain(d => d.Id == "WHTTP004");
+    }
+
+    [TimedFact]
     public void WHTTP005_DoesNotFireForStringQueryParameter()
     {
         // Reference-typed query params are already optional under ASP.NET binding — only

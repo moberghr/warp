@@ -40,6 +40,14 @@ internal static class Diagnostics
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    public static readonly DiagnosticDescriptor FormAndBodyConflict = new(
+        id: "WHTTP006",
+        title: "Request cannot bind from both a multipart form and a JSON body",
+        messageFormat: "Handler '{0}' has a request that binds from both a multipart form (IFormFile / [FromForm]) and a JSON [FromBody] parameter. Minimal API reads the request body once — a single endpoint cannot do both. Move the JSON fields onto [FromForm] form fields, or split into separate endpoints.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor InternalGeneratorError = new(
         id: "WHTTP999",
         title: "Warp.Http source generator encountered an internal error",

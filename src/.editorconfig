@@ -516,7 +516,7 @@ dotnet_diagnostic.S112.severity = none
 # S1133/CS0612/CS0618: Deprecated Testcontainers constructors — no alternative
 dotnet_diagnostic.S1133.severity = none
 
-[**/Warp.Test.Shared/**/*.cs]
+[**/Warp.Test.Shared/**.cs]
 # SA1401: Public fields needed for Interlocked.Increment in test counters
 dotnet_diagnostic.SA1401.severity = none
 # S112: General exceptions — intentional in test throw handlers

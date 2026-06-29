@@ -58,6 +58,11 @@ internal static class RegistryEmitter
         sb.Append("                ResponseType = typeof(").Append(responseFqn).AppendLine("),");
         sb.Append("                Kind = ").Append(kind).AppendLine(",");
         sb.Append("                HandlerDelegate = WarpHttpDelegate_").Append(index).AppendLine(".Handler,");
+        if (ep.RequiresFormBinding)
+        {
+            sb.AppendLine("                RequiresFormBinding = true,");
+        }
+
         sb.AppendLine("            });");
         sb.AppendLine();
     }

@@ -501,6 +501,89 @@ public sealed class EmptyJobHandler : IJobHandler<EmptyJob>
     public Task HandleAsync(EmptyJob message, CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
+// === File upload → read → echo, and text → file download. Mirrors the demo endpoints in ===
+// === Warp.Test.Shared/HttpEndpoints.cs. Exercised by FileEndpointTests. ===
+
+// Upload a file, read its contents, echo them back as JSON. Covers IFormFile binding.
+public sealed record FileEcho(IFormFile File) : IRequest<FileEchoResponse>;
+
+public sealed record FileEchoResponse(string FileName, long Length, string Content);
+
+[WarpHttpPost("/api/file-echo")]
+public sealed class FileEchoHandler : IRequestHandler<FileEcho, FileEchoResponse>
+{
+    public async Task<FileEchoResponse> HandleAsync(FileEcho request, CancellationToken cancellationToken)
+    {
+        using var reader = new StreamReader(request.File.OpenReadStream());
+        var content = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+
+        return new FileEchoResponse(request.File.FileName, request.File.Length, content);
+    }
+}
+
+// Upload file + scalar [FromForm] field — covers form-field binding alongside the file.
+public sealed record FileEchoTagged(IFormFile File, [FromForm] string Tag) : IRequest<FileEchoTaggedResponse>;
+
+public sealed record FileEchoTaggedResponse(string Tag, string FileName, long Length);
+
+[WarpHttpPost("/api/file-echo-tagged")]
+public sealed class FileEchoTaggedHandler : IRequestHandler<FileEchoTagged, FileEchoTaggedResponse>
+{
+    public Task<FileEchoTaggedResponse> HandleAsync(FileEchoTagged request, CancellationToken cancellationToken)
+        => Task.FromResult(new FileEchoTaggedResponse(request.Tag, request.File.FileName, request.File.Length));
+}
+
+// Send text, get it back as a downloadable text/plain file. Covers the IResult File response.
+public sealed record TextToFile(string Text) : IRequest<IResult>;
+
+[WarpHttpPost("/api/text-to-file")]
+public sealed class TextToFileHandler : IRequestHandler<TextToFile, IResult>
+{
+    public Task<IResult> HandleAsync(TextToFile request, CancellationToken cancellationToken)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(request.Text ?? string.Empty);
+
+        return Task.FromResult(Results.File(bytes, "text/plain", "echo.txt"));
+    }
+}
+
+// IResult carries any status code — 404 for an unknown name, 200 text otherwise. Covers the
+// non-200 / bodyless-status IResult path (distinct from a successful file download).
+public sealed record MaybeFile([FromRoute] string Name) : IRequest<IResult>;
+
+[WarpHttpGet("/api/maybe-file/{name}")]
+public sealed class MaybeFileHandler : IRequestHandler<MaybeFile, IResult>
+{
+    public Task<IResult> HandleAsync(MaybeFile request, CancellationToken cancellationToken)
+        => Task.FromResult(string.Equals(request.Name, "missing", StringComparison.Ordinal)
+            ? Results.NotFound()
+            : Results.Text("found:" + request.Name));
+}
+
+// Route + form in one request — the Mixed shape combining [FromRoute] with an IFormFile.
+public sealed record UploadToFolder([FromRoute] int FolderId, IFormFile File) : IRequest<FolderUploadResponse>;
+
+public sealed record FolderUploadResponse(int FolderId, string FileName, long Length);
+
+[WarpHttpPost("/api/folders/{folderId}/files")]
+public sealed class UploadToFolderHandler : IRequestHandler<UploadToFolder, FolderUploadResponse>
+{
+    public Task<FolderUploadResponse> HandleAsync(UploadToFolder request, CancellationToken cancellationToken)
+        => Task.FromResult(new FolderUploadResponse(request.FolderId, request.File.FileName, request.File.Length));
+}
+
+// Multiple files via IFormFileCollection — the whole-collection form binding path.
+public sealed record UploadMany(IFormFileCollection Files) : IRequest<UploadManyResponse>;
+
+public sealed record UploadManyResponse(int Count, string[] Names);
+
+[WarpHttpPost("/api/file-multi")]
+public sealed class UploadManyHandler : IRequestHandler<UploadMany, UploadManyResponse>
+{
+    public Task<UploadManyResponse> HandleAsync(UploadMany request, CancellationToken cancellationToken)
+        => Task.FromResult(new UploadManyResponse(request.Files.Count, [.. request.Files.Select(x => x.FileName)]));
+}
+
 // Zero-member command on a body verb (e.g. /api/auth/logout). Must bind from an empty/absent
 // body — classifying it WholeBody would emit a required [FromBody] param and 400 a bodyless POST.
 public sealed record LogoutCommand : IRequest<string>;
