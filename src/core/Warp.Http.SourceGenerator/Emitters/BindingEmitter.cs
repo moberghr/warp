@@ -15,6 +15,10 @@ internal static class BindingEmitter
     private const string FromQueryAttributeMetadataName = "Microsoft.AspNetCore.Mvc.FromQueryAttribute";
     private const string FromHeaderAttributeMetadataName = "Microsoft.AspNetCore.Mvc.FromHeaderAttribute";
     private const string FromBodyAttributeMetadataName = "Microsoft.AspNetCore.Mvc.FromBodyAttribute";
+    private const string FromFormAttributeMetadataName = "Microsoft.AspNetCore.Mvc.FromFormAttribute";
+    private const string FormFileMetadataName = "Microsoft.AspNetCore.Http.IFormFile";
+    private const string FormFileCollectionMetadataName = "Microsoft.AspNetCore.Http.IFormFileCollection";
+    private const string FormCollectionMetadataName = "Microsoft.AspNetCore.Http.IFormCollection";
 
     public static BindingPlan Build(Compilation compilation, INamedTypeSymbol requestType, string method)
     {
@@ -22,10 +26,23 @@ internal static class BindingEmitter
         var fromQuery = compilation.GetTypeByMetadataName(FromQueryAttributeMetadataName);
         var fromHeader = compilation.GetTypeByMetadataName(FromHeaderAttributeMetadataName);
         var fromBody = compilation.GetTypeByMetadataName(FromBodyAttributeMetadataName);
+        var fromForm = compilation.GetTypeByMetadataName(FromFormAttributeMetadataName);
+
+        var formFile = compilation.GetTypeByMetadataName(FormFileMetadataName);
+        var formFileCollection = compilation.GetTypeByMetadataName(FormFileCollectionMetadataName);
+        var formCollection = compilation.GetTypeByMetadataName(FormCollectionMetadataName);
 
         var isBodyVerb = IsBodyVerb(method);
 
         var (usesPrimaryCtor, members) = EnumerateMembers(requestType);
+
+        // First pass: decide whether this is a multipart-form request. It is whenever any member
+        // is a form type (IFormFile / IFormFileCollection / IFormCollection) or carries [FromForm].
+        // In a form request, unattributed scalar members bind from form fields rather than the JSON
+        // body — the two are mutually exclusive in Minimal API (WHTTP006 guards the conflict).
+        var isFormRequest = members.Any(m =>
+            IsFormType(m.Type, formFile, formFileCollection, formCollection)
+            || HasFromForm(m.AttributedSymbol, fromForm));
 
         // Resolve a binding source for every member; if any are unattributed and the verb is
         // a body verb, treat them as body-default. Then categorize the plan shape.
@@ -35,7 +52,7 @@ internal static class BindingEmitter
 
         foreach (var (memberName, memberType, ctorIndex, propertyName, attributedSymbol) in members)
         {
-            var attr = ResolveAttribute(attributedSymbol, fromRoute, fromQuery, fromHeader, fromBody);
+            var attr = ResolveAttribute(attributedSymbol, fromRoute, fromQuery, fromHeader, fromBody, fromForm);
             if (attr is not null)
             {
                 sawAnyAttribute = true;
@@ -57,13 +74,25 @@ internal static class BindingEmitter
                     source = BindingSource.Header;
                     key = attr.Value.name ?? memberName;
                     break;
+                case BindingSource.Form:
+                    source = BindingSource.Form;
+                    key = attr.Value.name ?? memberName;
+                    break;
                 case BindingSource.Body:
                     source = BindingSource.Body;
                     key = memberName;
                     sawBody = true;
                     break;
                 default:
-                    source = isBodyVerb ? BindingSource.Body : BindingSource.Query;
+                    if (IsFormType(memberType, formFile, formFileCollection, formCollection) || isFormRequest)
+                    {
+                        source = BindingSource.Form;
+                    }
+                    else
+                    {
+                        source = isBodyVerb ? BindingSource.Body : BindingSource.Query;
+                    }
+
                     key = memberName;
                     if (source == BindingSource.Body)
                     {
@@ -73,6 +102,9 @@ internal static class BindingEmitter
                     break;
             }
 
+            var isWholeFormCollection = source == BindingSource.Form
+                && IsFormType(memberType, formFile: null, formFileCollection, formCollection);
+
             targets.Add(new BindingTarget(
                 memberName,
                 memberType,
@@ -81,7 +113,16 @@ internal static class BindingEmitter
                 ctorIndex,
                 propertyName,
                 HasClrDefault(attributedSymbol),
-                attributedSymbol.Locations.FirstOrDefault()));
+                attributedSymbol.Locations.FirstOrDefault(),
+                isWholeFormCollection));
+        }
+
+        // Form request: an uploaded file / form fields (plus optional route/query/header). [AsParameters]
+        // can't carry IFormFile or [FromForm], so the generator emits explicit lambda parameters per
+        // source and constructs TRequest — the same Mixed machinery the body+route case uses.
+        if (isFormRequest)
+        {
+            return new BindingPlan(BindingShape.Mixed, targets, usesPrimaryCtor);
         }
 
         // Whole-body default: body verb, no attributes anywhere — Minimal API binds TRequest from body.
@@ -105,6 +146,39 @@ internal static class BindingEmitter
         // Mixed: body + route/query/header. [AsParameters] doesn't support [FromBody] members,
         // so the generator emits explicit lambda parameters per source and constructs TRequest.
         return new BindingPlan(BindingShape.Mixed, targets, usesPrimaryCtor);
+    }
+
+    private static bool IsFormType(
+        ITypeSymbol type,
+        INamedTypeSymbol? formFile,
+        INamedTypeSymbol? formFileCollection,
+        INamedTypeSymbol? formCollection)
+    {
+        foreach (var candidate in new[] { formFile, formFileCollection, formCollection })
+        {
+            if (candidate is null)
+            {
+                continue;
+            }
+
+            if (SymbolEqualityComparer.Default.Equals(type, candidate)
+                || type.AllInterfaces.Any(i => SymbolEqualityComparer.Default.Equals(i, candidate)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasFromForm(ISymbol member, INamedTypeSymbol? fromForm)
+    {
+        if (fromForm is null)
+        {
+            return false;
+        }
+
+        return member.GetAttributes().Any(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, fromForm));
     }
 
     private static (bool UsesPrimaryCtor, IReadOnlyList<MemberInfo> Members) EnumerateMembers(INamedTypeSymbol requestType)
@@ -154,7 +228,8 @@ internal static class BindingEmitter
         INamedTypeSymbol? fromRoute,
         INamedTypeSymbol? fromQuery,
         INamedTypeSymbol? fromHeader,
-        INamedTypeSymbol? fromBody)
+        INamedTypeSymbol? fromBody,
+        INamedTypeSymbol? fromForm)
     {
         foreach (var attr in member.GetAttributes())
         {
@@ -176,6 +251,11 @@ internal static class BindingEmitter
             if (fromHeader is not null && SymbolEqualityComparer.Default.Equals(attr.AttributeClass, fromHeader))
             {
                 return (BindingSource.Header, ReadName(attr));
+            }
+
+            if (fromForm is not null && SymbolEqualityComparer.Default.Equals(attr.AttributeClass, fromForm))
+            {
+                return (BindingSource.Form, ReadName(attr));
             }
 
             if (fromBody is not null && SymbolEqualityComparer.Default.Equals(attr.AttributeClass, fromBody))

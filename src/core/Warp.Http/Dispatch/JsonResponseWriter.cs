@@ -18,6 +18,15 @@ public static class JsonResponseWriter
     /// <summary>Writes <paramref name="value"/> as JSON with status 200.</summary>
     public static async Task WriteAsync<TResponse>(HttpContext context, TResponse value, CancellationToken cancellationToken)
     {
+        // A handler that returns an IResult (Results.Stream / File / NotFound / Ok, etc.) owns
+        // the entire response — binary payloads, custom content types, and bodyless status codes
+        // don't fit the JSON envelope. Let the result write itself and skip JSON serialization.
+        if (value is IResult result)
+        {
+            await result.ExecuteAsync(context).ConfigureAwait(false);
+            return;
+        }
+
         if (typeof(TResponse) == typeof(Unit))
         {
             context.Response.StatusCode = StatusCodes.Status204NoContent;

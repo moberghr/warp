@@ -58,11 +58,11 @@ You only add the provider package for your database; Warp.Core no longer has a h
 > **Pin one coherent version across every Warp package.** The packages have inter-dependencies (e.g. `Warp.Http` requires a matching `Warp.Core`), so floating different floors per package can resolve to an incompatible mix. Set the same explicit version on all of them:
 >
 > ```xml
-> <PackageReference Include="Moberg.Warp.Core" Version="2.0.0" />
-> <PackageReference Include="Moberg.Warp.Worker" Version="2.0.0" />
-> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="2.0.0" />
-> <PackageReference Include="Moberg.Warp.UI" Version="2.0.0" />
-> <PackageReference Include="Moberg.Warp.Http" Version="2.0.0" />
+> <PackageReference Include="Moberg.Warp.Core" Version="3.1.0" />
+> <PackageReference Include="Moberg.Warp.Worker" Version="3.1.0" />
+> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="3.1.0" />
+> <PackageReference Include="Moberg.Warp.UI" Version="3.1.0" />
+> <PackageReference Include="Moberg.Warp.Http" Version="3.1.0" />
 > ```
 
 > **Package IDs are `Moberg.Warp.*`; namespaces are `Warp.*`.** Install `Moberg.Warp.Core`, but write `using Warp.Core;`. The public surface is also split across a few namespaces — here's where the common types live:

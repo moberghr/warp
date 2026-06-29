@@ -104,6 +104,12 @@ internal static class DelegateEmitter
                 BindingSource.Route => $"[global::Microsoft.AspNetCore.Mvc.FromRoute(Name = \"{Escape(target.SourceKey)}\")]",
                 BindingSource.Query => $"[global::Microsoft.AspNetCore.Mvc.FromQuery(Name = \"{Escape(target.SourceKey)}\")]",
                 BindingSource.Header => $"[global::Microsoft.AspNetCore.Mvc.FromHeader(Name = \"{Escape(target.SourceKey)}\")]",
+
+                // IFormFileCollection / IFormCollection bind the whole collection by type — ASP.NET
+                // throws if a [FromForm(Name=...)] is applied. Emit a bare [FromForm] for those.
+                BindingSource.Form => target.IsWholeFormCollection
+                    ? "[global::Microsoft.AspNetCore.Mvc.FromForm]"
+                    : $"[global::Microsoft.AspNetCore.Mvc.FromForm(Name = \"{Escape(target.SourceKey)}\")]",
                 _ => string.Empty,
             };
 

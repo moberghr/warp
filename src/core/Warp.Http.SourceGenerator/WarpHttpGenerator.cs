@@ -178,6 +178,14 @@ public sealed class WarpHttpGenerator : IIncrementalGenerator
                 continue;
             }
 
+            // A multipart-form request and a JSON [FromBody] parameter both consume the request
+            // body — Minimal API reads it once, so the two can't coexist on one endpoint.
+            if (plan.HasFormTargets && plan.HasBodyTargets)
+            {
+                ReportFormAndBodyConflict(context, candidate);
+                continue;
+            }
+
             ReportRequiredScalarDefaults(context, plan);
 
             var model = new HttpEndpointModel(
@@ -188,7 +196,8 @@ public sealed class WarpHttpGenerator : IIncrementalGenerator
                 method: method,
                 route: route,
                 group: group,
-                name: name);
+                name: name,
+                requiresFormBinding: plan.HasFormTargets);
 
             endpoints.Add((model, plan));
         }
@@ -338,6 +347,15 @@ public sealed class WarpHttpGenerator : IIncrementalGenerator
         var location = type.Locations.FirstOrDefault() ?? Location.None;
         context.ReportDiagnostic(Diagnostic.Create(
             Diagnostics.MultipleBodyTargets,
+            location,
+            type.ToDisplayString()));
+    }
+
+    private static void ReportFormAndBodyConflict(SourceProductionContext context, INamedTypeSymbol type)
+    {
+        var location = type.Locations.FirstOrDefault() ?? Location.None;
+        context.ReportDiagnostic(Diagnostic.Create(
+            Diagnostics.FormAndBodyConflict,
             location,
             type.ToDisplayString()));
     }

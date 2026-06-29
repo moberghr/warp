@@ -18,7 +18,8 @@ internal sealed class HttpEndpointModel
         string method,
         string route,
         string? group,
-        string? name)
+        string? name,
+        bool requiresFormBinding)
     {
         HandlerType = handlerType;
         RequestType = requestType;
@@ -28,6 +29,7 @@ internal sealed class HttpEndpointModel
         Route = route;
         Group = group;
         Name = name;
+        RequiresFormBinding = requiresFormBinding;
     }
 
     public INamedTypeSymbol HandlerType { get; }
@@ -45,6 +47,10 @@ internal sealed class HttpEndpointModel
     public string? Group { get; }
 
     public string? Name { get; }
+
+    /// <summary>True when the request binds from a multipart form (IFormFile / [FromForm]).
+    /// Drives antiforgery suppression and the OpenAPI content type on the mapped endpoint.</summary>
+    public bool RequiresFormBinding { get; }
 }
 
 internal enum HttpHandlerKind

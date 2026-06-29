@@ -6,6 +6,47 @@ sidebar_position: 6
 
 ## Unreleased
 
+_Nothing yet._
+
+## 3.1.0
+
+*2026-06-29*
+
+Additive minor release — no breaking changes, no schema changes, drop-in from 3.0.x. Headlined by native binary I/O in `Warp.Http`: file uploads and file/stream responses now flow through ordinary `[WarpHttp*]` handlers instead of forcing you to hand-write a Minimal API endpoint. Also folds in the `dotnet ef` design-time fix for the 3.0 server context.
+
+### Binary HTTP — file uploads and file/stream responses
+
+`Warp.Http` endpoints used to be JSON-only: requests bound from route/query/header/JSON-body, and every response was JSON-serialized. Binary payloads — uploading a file, streaming a download, returning a bodyless `404` — didn't fit the envelope, so you had to drop to a hand-written `MapPost`/`MapGet`. Both directions are now first-class on a `[WarpHttp*]` handler.
+
+**Responses — return `IResult`.** A handler whose response type is `Microsoft.AspNetCore.Http.IResult` owns the full HTTP response; the JSON writer detects it and skips serialization. Use the built-in `Results.Stream` / `Results.File` / `Results.Bytes` / `Results.NotFound` / `Results.Ok`:
+
+```csharp
+public sealed record GetAvatar([FromRoute] long Id) : IRequest<IResult>;
+
+[WarpHttpGet("/api/users/{id}/avatar")]
+public sealed class GetAvatarHandler(IBlobStore blobs) : IRequestHandler<GetAvatar, IResult>
+{
+    public async Task<IResult> HandleAsync(GetAvatar request, CancellationToken ct)
+    {
+        var blob = await blobs.GetAsync(request.Id, ct);
+
+        return blob is null ? Results.NotFound() : Results.Stream(blob.Content, blob.ContentType);
+    }
+}
+```
+
+**Requests — bind from a multipart form.** Request members typed `IFormFile`, `IFormFileCollection`, or `IFormCollection` (or carrying `[FromForm]`) bind from `multipart/form-data` alongside any `[FromRoute]`/`[FromQuery]` members. The generated endpoint advertises `multipart/form-data` and disables antiforgery, matching a hand-written `MapPost` with an `IFormFile` parameter:
+
+```csharp
+public sealed record UploadDoc([FromRoute] long FolderId, IFormFile File, [FromForm] string Title)
+    : IRequest<IResult>;
+
+[WarpHttpPost("/api/folders/{folderId}/docs")]
+public sealed class UploadDocHandler : IRequestHandler<UploadDoc, IResult> { /* … */ }
+```
+
+A request cannot bind both a multipart form and a JSON `[FromBody]` parameter — Minimal API reads the body once, so the combination is now a compile-time error, **WHTTP006**.
+
 ### `dotnet ef` no longer sees the Warp server context
 
 The internal **Warp server context** introduced in 3.0 is now hidden from EF Core's design-time tooling. Because `AddWarpServer` registers `WarpServerContext<TContext>` in DI, `dotnet ef` discovered it alongside your own `DbContext` and failed every command with *"More than one DbContext was found"* unless you passed `--context YourDbContext`. The server context is a runtime-only implementation detail you can never migrate, so the tooling should never have offered it as a target. `AddWarpServer` now strips the design-time discovery hook (the non-generic `DbContextOptions` forwarder EF enumerates), so `dotnet ef` resolves cleanly to your context with no `--context` flag. Runtime resolution of the server context is unchanged.
