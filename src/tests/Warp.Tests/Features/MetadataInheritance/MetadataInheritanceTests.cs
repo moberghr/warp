@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Helper;
+using Warp.Core.Retry;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
 
@@ -124,6 +126,33 @@ public abstract class MetadataInheritanceTestsBase : IntegrationTestBase
         // Inheriting RetriedTimes=1 silently robs the child of part of its own retry budget.
         child.CurrentState.ShouldBe(State.Completed);
         ShouldNotHaveMetadataKey(child, "RetriedTimes");
+    }
+
+    [TimedFact]
+    public async Task ParentWithCustomRetryPolicy_SpawnsPlainChild_ChildResolvesItsOwnRetryPolicy()
+    {
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+
+        // The parent is given a non-default retry policy at publish. Unlike the other addons,
+        // MaxRetries/RetryDelays are inherited on every child already — but the leak is masked
+        // whenever the parent uses the global default (the inherited value equals what the child
+        // would resolve on its own). A custom parent policy makes the leak observable.
+        var parentId = await publisher.Enqueue(new SpawnChildJobRequest(), new JobParameters().WithRetry(maxRetries: 5, delays: [7]));
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForCompletion();
+
+        var (parent, child) = await LoadParentAndChild(parentId);
+
+        parent.CurrentState.ShouldBe(State.Completed);
+        child.CurrentState.ShouldBe(State.Completed);
+
+        // The child declared no retry policy, so it must resolve the global default
+        // (MaxRetries=1, RetryDelays=[1]) — not inherit the parent's WithRetry(5, [7]).
+        var childMetadata = JsonSerializer.Deserialize<Dictionary<string, object>>(child.Metadata!)!;
+        ((JsonElement)childMetadata["MaxRetries"]).GetInt32().ShouldBe(1);
+        ((JsonElement)childMetadata["RetryDelays"]).EnumerateArray().Select(x => x.GetInt32()).ShouldBe([1]);
     }
 
     private async Task<(Job Parent, Job Child)> LoadParentAndChild(Guid parentId)

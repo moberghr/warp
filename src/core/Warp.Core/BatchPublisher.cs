@@ -202,6 +202,12 @@ public class BatchPublisher<TContext> : IBatchPublisher
             {
                 foreach (var kvp in inherited)
                 {
+                    // Addon operational policy / live state is per-handler, never inherited.
+                    if (MetadataInheritance.NonInheritableKeys.Contains(kvp.Key))
+                    {
+                        continue;
+                    }
+
                     metadata[kvp.Key] = kvp.Value;
                 }
             }
