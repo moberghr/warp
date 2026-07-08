@@ -127,13 +127,13 @@ public abstract class MetadataPropagationIntegrationTestsBase : IntegrationTestB
     }
 
     [TimedFact]
-    public async Task GivenChildJobSpawnedByHandler_WhenCompleted_ThenChildInheritsParentMetadata()
+    public async Task GivenChildJobSpawnedByHandler_WhenCompleted_ThenChildDoesNotInheritParentMetadata()
     {
         await using var server = await WarpTestServer.StartAsync(Fixture);
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new SpawnChildJobRequest(), new JobParameters
         {
-            Metadata = new Dictionary<string, object> { ["ParentKey"] = "inherited" },
+            Metadata = new Dictionary<string, object> { ["ParentKey"] = "not-inherited" },
         });
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
@@ -145,13 +145,14 @@ public abstract class MetadataPropagationIntegrationTestsBase : IntegrationTestB
             .Where(x => x.Kind == JobKind.Job)
             .ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
+        // The SpawnedByJobId link still connects child to parent for trace correlation.
         children.Count.ShouldBeGreaterThan(0);
 
         foreach (var child in children)
         {
+            // Metadata is not inherited — the parent's key must not leak onto the child.
             var metadata = MetadataSerializer.Deserialize(child.Metadata);
-            metadata.ShouldContainKey("ParentKey");
-            metadata["ParentKey"].ShouldBe("inherited");
+            metadata?.ShouldNotContainKey("ParentKey");
         }
     }
 }

@@ -381,4 +381,34 @@ public abstract class RecurringJobTestsBase : IAsyncLifetime
         var jobCountAfter = await _fixture.CreateContext().Set<Job>().CountAsync(Xunit.TestContext.Current.CancellationToken);
         jobCountAfter.ShouldBeGreaterThan(jobCountBefore);
     }
+
+    [TimedFact]
+    public async Task RecurringJobScheduler_CreatesJobWithTraceId()
+    {
+        var ctx = _fixture.CreateContext();
+        var pastTime = DateTime.UtcNow.AddMinutes(-5);
+        var recurringJob = new RecurringJob
+        {
+            Name = "scheduler-trace-test",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new UnitRequest()),
+            Cron = "* * * * *",
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            NextExecution = pastTime,
+        };
+        ctx.Set<RecurringJob>().Add(recurringJob);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var schedCtx = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+
+        var job = await _fixture.CreateContext().Set<Job>()
+            .Where(x => x.CurrentState == State.Enqueued)
+            .FirstAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // A recurring firing bypasses Publisher, so it must root its own trace — otherwise the
+        // fired job (and its whole tree) lands in the DB with a null trace_id.
+        job.TraceId.ShouldNotBeNull();
+        job.TraceId.ShouldBe(job.Id);
+    }
 }
