@@ -438,8 +438,6 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
             CreateTime = DateTime.UtcNow,
             ScheduleTime = DateTime.UtcNow,
             Queue = queue,
-            MaxRetries = 3,
-            RetriedTimes = 0,
         });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 

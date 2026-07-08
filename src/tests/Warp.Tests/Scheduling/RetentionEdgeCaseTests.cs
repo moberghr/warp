@@ -119,7 +119,6 @@ public abstract class RetentionEdgeCaseTestsBase : IAsyncLifetime
             CreateTime = DateTime.UtcNow,
             ScheduleTime = DateTime.UtcNow,
             Queue = "default",
-            MaxRetries = 2,
         });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
