@@ -36,10 +36,6 @@ public sealed class WarpJobTableNames
 
     public required string CurrentState { get; init; }
 
-    public required string RetriedTimes { get; init; }
-
-    public required string MaxRetries { get; init; }
-
     public required string Queue { get; init; }
 
     public required string ParentJobId { get; init; }
@@ -209,8 +205,6 @@ public sealed class WarpJobTableNames
             CreateTime = Col(nameof(Job.CreateTime)),
             ScheduleTime = Col(nameof(Job.ScheduleTime)),
             CurrentState = Col(nameof(Job.CurrentState)),
-            RetriedTimes = Col(nameof(Job.RetriedTimes)),
-            MaxRetries = Col(nameof(Job.MaxRetries)),
             Queue = Col(nameof(Job.Queue)),
             ParentJobId = Col(nameof(Job.ParentJobId)),
             CurrentWorkerId = Col(nameof(Job.CurrentWorkerId)),

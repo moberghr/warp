@@ -18,10 +18,6 @@ public class Job
 
     public State CurrentState { get; set; }
 
-    public int RetriedTimes { get; set; }
-
-    public int MaxRetries { get; set; }
-
     public string Queue { get; set; } = "default";
 
     public Guid? ParentJobId { get; set; }

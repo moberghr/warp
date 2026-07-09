@@ -213,7 +213,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             {
                 JobId = job.Id,
                 TraceId = job.TraceId ?? job.Id,
-                MetadataJson = job.Metadata,
             };
 
             // Handler scope — isolated DbContext for handler + pipeline behaviors.

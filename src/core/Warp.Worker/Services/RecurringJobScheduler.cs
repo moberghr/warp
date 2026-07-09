@@ -97,6 +97,10 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
                 state: State.Enqueued,
                 now: now);
 
+            // This path bypasses Publisher, so root the trace here: each firing is its own
+            // unit of work and gets a fresh trace (mirrors Publisher's root fallback).
+            newJob.TraceId = newJob.Id;
+
             _context.Set<Job>().Add(newJob);
             _context.Set<JobLog>().Add(new JobLog
             {

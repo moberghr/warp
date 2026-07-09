@@ -326,21 +326,9 @@ public class Publisher<TContext> : IPublisher
     {
         var metadata = new Dictionary<string, object>();
 
-        // Seed with inherited metadata from parent execution context
-        var executionContext = JobExecutionContext.Current;
-        if (executionContext?.MetadataJson != null)
-        {
-            var inherited = JsonSerializer.Deserialize<Dictionary<string, object>>(executionContext.MetadataJson);
-            if (inherited != null)
-            {
-                foreach (var kvp in inherited)
-                {
-                    metadata[kvp.Key] = kvp.Value;
-                }
-            }
-        }
-
-        // Seed with ad-hoc metadata (overrides inherited)
+        // Metadata is not inherited from the parent job. User metadata is set per publish
+        // (JobParameters) or via IPublishPipelineBehavior; addon policy is resolved per handler.
+        // Trace correlation threads separately through the Job's TraceId / SpawnedByJobId columns.
         if (seed != null)
         {
             foreach (var kvp in seed)

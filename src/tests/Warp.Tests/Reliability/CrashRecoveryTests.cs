@@ -4,6 +4,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Handlers;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Worker.Services;
@@ -133,8 +134,7 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
             ScheduleTime = DateTime.UtcNow,
             Queue = "default",
             LastKeepAlive = DateTime.UtcNow.AddMinutes(-10),
-            RetriedTimes = 2,
-            MaxRetries = 5,
+            Metadata = """{"RetriedTimes":2}""",
         });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
@@ -147,7 +147,10 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
         var readCtx = _fixture.CreateContext();
         var job = await readCtx.Set<Job>().FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
         job.CurrentState.ShouldBe(State.Enqueued);
-        job.RetriedTimes.ShouldBe(2); // Unchanged
+
+        // Stale recovery must not count as a retry — the retry counter (in metadata) is untouched.
+        var metadata = MetadataSerializer.Deserialize(job.Metadata)!;
+        Convert.ToInt32(metadata["RetriedTimes"]).ShouldBe(2);
     }
 
     [TimedFact]

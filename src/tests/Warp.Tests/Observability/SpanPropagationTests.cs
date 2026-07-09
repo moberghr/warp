@@ -276,7 +276,6 @@ public abstract class SpanPropagationTestsBase : IAsyncLifetime
         {
             JobId = Guid.NewGuid(),
             TraceId = parentTraceId,
-            MetadataJson = null,
         };
 
         try

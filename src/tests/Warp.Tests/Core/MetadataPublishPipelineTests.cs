@@ -216,16 +216,17 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
         }
     }
 
-    // --- Metadata inheritance from execution context ---
+    // --- Metadata is NOT inherited from the execution context; only trace threads ---
     [TimedFact]
-    public async Task Enqueue_InsideExecutionContext_InheritsParentMetadata()
+    public async Task Enqueue_InsideExecutionContext_DoesNotInheritMetadata()
     {
-        // Simulate a handler publishing a child job
+        // Simulate a handler publishing a child job.
+        var parentJobId = Guid.NewGuid();
+        var parentTraceId = Guid.NewGuid();
         JobExecutionContext.Current = new JobExecutionInfo
         {
-            JobId = Guid.NewGuid(),
-            TraceId = Guid.NewGuid(),
-            MetadataJson = """{"inherited":"from-parent"}""",
+            JobId = parentJobId,
+            TraceId = parentTraceId,
         };
 
         try
@@ -237,9 +238,11 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
             await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
             var job = await _fixture.CreateContext().Set<Job>().FindAsync([id], Xunit.TestContext.Current.CancellationToken);
-            job!.Metadata.ShouldNotBeNull();
-            var metadata = MetadataSerializer.Deserialize(job.Metadata)!;
-            metadata["inherited"].ShouldBe("from-parent");
+            job!.Metadata.ShouldBeNull();
+
+            // Trace correlation still threads through the dedicated columns.
+            job.TraceId.ShouldBe(parentTraceId);
+            job.SpawnedByJobId.ShouldBe(parentJobId);
         }
         finally
         {
@@ -338,15 +341,14 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
         executionLog.ShouldBe(["outer:before", "inner:before", "inner:after", "outer:after"]);
     }
 
-    // --- Edge case: ad-hoc metadata overrides inherited metadata on key conflict ---
+    // --- Ad-hoc metadata still applies inside an execution context, and is the ONLY metadata ---
     [TimedFact]
-    public async Task Enqueue_AdHocOverridesInherited_OnKeyConflict()
+    public async Task Enqueue_InsideExecutionContext_AdHocMetadataIsTheOnlyMetadata()
     {
         JobExecutionContext.Current = new JobExecutionInfo
         {
             JobId = Guid.NewGuid(),
             TraceId = Guid.NewGuid(),
-            MetadataJson = """{"shared":"inherited-value","inherited-only":"stays"}""",
         };
 
         try
@@ -356,15 +358,15 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
 
             var id = await publisher.Enqueue(new UnitRequest(), new JobParameters
             {
-                Metadata = new Dictionary<string, object> { ["shared"] = "ad-hoc-value" },
+                Metadata = new Dictionary<string, object> { ["ad-hoc"] = "value" },
             });
             await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
             var job = await _fixture.CreateContext().Set<Job>().FindAsync([id], Xunit.TestContext.Current.CancellationToken);
             job!.Metadata.ShouldNotBeNull();
             var metadata = MetadataSerializer.Deserialize(job.Metadata)!;
-            metadata["shared"].ShouldBe("ad-hoc-value", "Ad-hoc should override inherited");
-            metadata["inherited-only"].ShouldBe("stays", "Non-conflicting inherited key should survive");
+            metadata.Count.ShouldBe(1, "nothing is inherited from the parent, only the ad-hoc key");
+            metadata["ad-hoc"].ShouldBe("value");
         }
         finally
         {

@@ -141,7 +141,6 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             {
                 JobId = job.Id,
                 TraceId = job.TraceId ?? job.Id,
-                MetadataJson = job.Metadata,
             };
 
             // Handler scope — isolated DbContext for handler + pipeline behaviors.
