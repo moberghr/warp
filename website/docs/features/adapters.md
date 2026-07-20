@@ -214,9 +214,10 @@ Keep group values and tags tokenised too — they render in the dashboard. Hash 
 
 `RecordCalls = All` writes one row per call, which is meaningful volume on a hot adapter. Mitigations, in order of reach:
 
-1. Recording is **batched** through a bounded channel and drained by the flusher — never a per-call synchronous write.
-2. Rows carry an `ExpireAt` from `CallLogRetention` (per-adapter) or the global `AdapterCallLogRetention` (default 7 days); `ExpirationCleanup` prunes them.
-3. For genuinely hot adapters, set `RecordCalls = CallRecording.FailuresOnly` — counters and telemetry are unaffected, so you keep the rates and lose only the per-success rows.
+1. Recording is **batched** through a bounded channel and drained by the flusher — never a per-call synchronous write. Channel size is `WarpConfiguration.CallLogBufferCapacity` (default 10,000, shared with inbound endpoint observability); drain batch size is `CallLogFlushBatchSize` (default 500).
+2. Rows are pruned by `ExpirationCleanup` on **both** an age and a count cap, whichever trims first: `CallLogRetention` (per-adapter) / global `AdapterCallLogRetention` (default 7 days) stamps `ExpireAt`; `CallLogRetentionCount` (per-adapter) / global `AdapterCallLogRetentionCount` (default null = disabled) keeps at most N rows per adapter, deleting the oldest — the "keep last N" knob for a hot adapter that fills its age window in minutes.
+3. **`SampleRate`** (0.0–1.0, default 1.0) keeps a row for that fraction of **successful** calls; failures are always kept. The Sentry-style knob for a hot adapter where representative payloads suffice — the aggregate counts, error rate, and latency percentiles still record every call, so only raw success rows thin out.
+4. For genuinely hot adapters, set `RecordCalls = CallRecording.FailuresOnly` — counters and telemetry are unaffected, so you keep the rates and lose only the per-success rows.
 
 Recording is **lossy by design.** If the channel is full, the record is dropped, `warp.adapter.records_dropped` increments, and the caller returns without delay or error. Call logs are diagnostics, not an audit trail — the same stance as `JobLog`. If you need a guaranteed attempt record, that is what the (future) webhooks feature's own delivery table is for; it reads attempts from here via `CorrelationId`.
 
@@ -303,9 +304,9 @@ Emitted **unconditionally** in the scope (null-listener pattern — zero cost wi
   - `warp.adapter.records_dropped` (counter — channel-full drops)
   - `warp.adapter.config_conflicts` (counter — shared-policy mismatches)
 
-Latency percentiles live in the OTel histogram deliberately; the dashboard shows counts, error rate, and average (count-based counters can't produce percentiles).
+The OTel histogram carries exact per-call latency for external backends. The dashboard shows counts, error rate, average, and **p90/p95/p99** — the percentiles come from a fixed-bucket latency histogram folded into the same `Counter`→`Statistic` aggregates (the reported value is the upper edge of the bucket the rank falls in), so they are exact-over-all-calls and survive log-row cleanup without an OTel backend.
 
-Statistics are written as `Counter` rows (per adapter/operation/outcome and per group/outcome, successes included) that `CounterAggregator` collapses into `Statistic` rows — never a direct `Statistic` write from the call path.
+Statistics are written as `Counter` rows (per adapter/operation/outcome and per group/outcome, successes included, plus per-outcome duration-sum and latency-bucket counters) that `CounterAggregator` collapses into `Statistic` rows — never a direct `Statistic` write from the call path. Because average latency and the percentiles are read from these aggregates rather than the raw `AdapterCallLog` rows, they stay correct after retention prunes the rows.
 
 ## Dashboard
 
@@ -313,17 +314,17 @@ An **Adapters** nav item (gated on the `adapters` flag from `GET {prefix}/api/ad
 
 **Adapters list** — one row per registered adapter: name, a **health pill** derived from the recent error rate, calls, error %, average latency, a neutral **trend sparkline** over the recent window, and last-seen time. An adapter whose local shared rate-limit policy conflicts with the persisted cluster policy carries a **policy-conflict badge** (the persisted policy is what's being enforced — see [cluster-shared rate limiting](#cluster-shared-rate-limiting)).
 
-**Adapter detail** — metric tiles (total calls, error rate, average latency) over:
+**Adapter detail** — metric tiles (total calls, error rate, average latency, p90/p95/p99) over:
 
 - a **per-operation table** — calls, error rate, and average latency per operation, so a single red operation across all groups (a caller-side bug) is visible at a glance;
 - a **Groups table** — the same stats per group value, with the adapter's `GroupLabel` (`"Endpoint"`, `"Shop"`, …) as the column header. Error rates have real denominators because successes are counted per group too. Shown only when the adapter's data carries groups; a single red group across all operations points at the counterparty;
 - a **recent-calls list** — timestamp, operation, group, outcome, status code, duration, attempts — opening a **call-detail drawer** with the captured request/response panes (post-redaction, post-truncation — exactly what was stored, never the live secret), the exception type/message on failures, tags, correlation id, trace id, and machine name.
 
-Latency figures are averages by design — percentiles come from the OTel histogram (see [Not in v1](#not-in-v1)).
+Latency is reported as both the average and p90/p95/p99, all from the surviving aggregates (the OTel histogram remains available for exact, backend-side analysis).
 
 `IAdapterQueryService` is registered by `AddWarp` itself — so dashboard-only, publisher-only, and `AddWarp`-only processes resolve it and serve the endpoints without running a server or calling `AddAdapters()`:
 
-- `GET {prefix}/api/adapters` — registered adapters with total calls, error count, error rate, average latency.
+- `GET {prefix}/api/adapters` — registered adapters with total calls, error count, error rate, average latency, and p90/p95/p99.
 - `GET {prefix}/api/adapters/{name}` — per-operation and per-group stat tables (error rates include successes), a recent-calls list, and the shared-policy conflict flag.
 - `GET {prefix}/api/adapters/{name}/calls/{id}` — one call's captured, already-redacted request/response payloads.
 - `GET {prefix}/api/addons` reports `adapters: true` iff `AddAdapters()` was called; the dashboard **Adapters** nav item is gated on that flag (hidden otherwise).
@@ -338,6 +339,5 @@ Deferred by design (some with their own specs):
 - **`SOAPAction`-header operation-name fallback** — `WithWarpOperation` covers it today.
 - **Minimal GraphQL client generator** (`Warp.Adapters.GraphQL`) — designed fast-follow; hand-written clients over the named adapter client are the v1 path.
 - **Replay of failed calls** — records only; replay needs explicit idempotency opt-in.
-- **Dashboard latency percentiles** — use the OTel histogram.
 
 **Shipped since this list was written:** durable webhook *delivery* — originally the first entry here — is now its own feature, [`Warp.Adapters.Webhooks`](./webhooks.md), built exactly as designed: deliveries in their own `WebhookDelivery` table, attempts read from `AdapterCallLog` via `CorrelationId`.

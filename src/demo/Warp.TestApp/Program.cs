@@ -171,9 +171,14 @@ builder.Services.AddWarpServer<TestContext>(options =>
     // shows a real browser/curl/other split without a high-cardinality dimension.
     options.AddEndpointObservability(o =>
     {
+        // Demo: capture everything so the dashboard call drawer shows full request/response headers + bodies.
+        // A real app keeps these at OnFailure (§1.2). SampleRate stays 1.0 here so every call shows up.
         o.CaptureRequestBodies = CaptureMode.Always;
-        o.CaptureResponseBodies = CaptureMode.OnFailure;
-        o.CaptureHeaders = CaptureMode.OnFailure;
+        o.CaptureResponseBodies = CaptureMode.Always;
+        o.CaptureHeaders = CaptureMode.Always;
+
+        // Group by user-agent family so the per-caller table shows a real browser/curl/other split without
+        // a high-cardinality dimension.
         o.GroupSelector = ctx =>
         {
             var ua = ctx.Request.Headers.UserAgent.ToString();
@@ -188,6 +193,19 @@ builder.Services.AddWarpServer<TestContext>(options =>
             }
 
             return string.IsNullOrEmpty(ua) ? null : "other";
+        };
+
+        // Custom enrichment — attach free-form tags (shown in the call drawer). A real app would put a user
+        // id / tenant here; the demo reads an optional X-Client-Id header and always records the scheme.
+        o.Enrich = (ctx, tags) =>
+        {
+            var clientId = ctx.Request.Headers["X-Client-Id"].ToString();
+            if (!string.IsNullOrEmpty(clientId))
+            {
+                tags["clientId"] = clientId;
+            }
+
+            tags["scheme"] = ctx.Request.Scheme;
         };
     });
 });
