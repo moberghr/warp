@@ -23,10 +23,13 @@ public static class WarpAdapterCall
 {
     private static readonly AsyncLocal<string?> _operation = new();
     private static readonly AsyncLocal<string?> _group = new();
+    private static readonly AsyncLocal<bool> _forceCapture = new();
 
     internal static string? CurrentOperation => _operation.Value;
 
     internal static string? CurrentGroup => _group.Value;
+
+    internal static bool CurrentForceCapture => _forceCapture.Value;
 
     /// <summary>
     /// Pushes an ambient operation name for the current async context. Dispose to restore the previous
@@ -54,6 +57,21 @@ public static class WarpAdapterCall
         _group.Value = group;
 
         return new Popper(() => _group.Value = previous);
+    }
+
+    /// <summary>
+    /// Forces full-fidelity capture (request + response bodies and headers, even on success and even if the
+    /// capture tier is <c>None</c>/<c>OnFailure</c>) and always writes the call-log row for every outbound
+    /// call made on the current async context — bypassing the adapter's <c>SampleRate</c> and
+    /// <c>RecordCalls</c>. Dispose to restore the previous value (scopes nest). ORs with the per-request
+    /// <see cref="HttpRequestMessageExtensions.WithWarpForceCapture"/> option. PII-owned (§1.2).
+    /// </summary>
+    public static IDisposable ForceCapture()
+    {
+        var previous = _forceCapture.Value;
+        _forceCapture.Value = true;
+
+        return new Popper(() => _forceCapture.Value = previous);
     }
 
     private sealed class Popper : IDisposable

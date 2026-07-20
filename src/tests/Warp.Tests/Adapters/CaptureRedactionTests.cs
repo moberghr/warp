@@ -488,6 +488,60 @@ public class CaptureRedactionTests
         recorder.Records.ShouldHaveSingleItem().GroupName.ShouldBe("opt-group");
     }
 
+    [TimedFact]
+    public async Task ForceCapture_RequestOption_SampleRateZero_WritesRowAndCapturesBodies()
+    {
+        // Force-capture via the request option overrides SampleRate=0 (row is written, SuppressLog false) and
+        // captures full-fidelity bodies even though every capture tier is None.
+        var httpOptions = new WarpAdapterHttpOptions();
+        httpOptions.Recording.SampleRate = 0.0;
+        var (adapters, recorder, _) = AdapterTestHarness.CreateAdapters(httpOptions.Recording);
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "https://api.vendor.com/submit")
+        {
+            Content = new StringContent("req-payload"),
+        };
+        request.WithWarpForceCapture();
+
+        await SendWith(adapters, httpOptions, request, Ok("resp-payload"));
+
+        var record = recorder.Records.ShouldHaveSingleItem();
+        record.SuppressLog.ShouldBeFalse();
+        record.RequestBody.ShouldBe("req-payload");
+        record.ResponseBody.ShouldBe("resp-payload");
+    }
+
+    [TimedFact]
+    public async Task ForceCapture_AmbientScope_CapturesBodiesEvenWhenTierNone()
+    {
+        // The ambient WarpAdapterCall.ForceCapture() scope forces capture for calls made inside it, even
+        // with all tiers None.
+        var (adapters, recorder) = Harness();
+        var options = new WarpAdapterHttpOptions();
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "https://api.vendor.com/submit")
+        {
+            Content = new StringContent("ambient-req"),
+        };
+
+        using (WarpAdapterCall.ForceCapture())
+        {
+            await SendWith(adapters, options, request, Ok("ambient-resp"));
+        }
+
+        var record = recorder.Records.ShouldHaveSingleItem();
+        record.SuppressLog.ShouldBeFalse();
+        record.RequestBody.ShouldBe("ambient-req");
+        record.ResponseBody.ShouldBe("ambient-resp");
+    }
+
+    private static async Task SendWith(WarpAdapters adapters, WarpAdapterHttpOptions options, HttpRequestMessage request, HttpResponseMessage response)
+    {
+        var handler = new WarpAdapterHandler("vendor", options, adapters, Resolver()) { InnerHandler = new StubHandler(response) };
+        using var invoker = new HttpMessageInvoker(handler);
+        using var result = await invoker.SendAsync(request, Xunit.TestContext.Current.CancellationToken);
+    }
+
     private static (WarpAdapters Adapters, CapturingRecorder Recorder) Harness()
     {
         var (adapters, recorder, _) = AdapterTestHarness.CreateAdapters();

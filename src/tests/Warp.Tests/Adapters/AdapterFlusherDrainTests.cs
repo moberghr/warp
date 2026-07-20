@@ -58,6 +58,34 @@ public class AdapterFlusherDrainTests
         flushed.Count.ShouldBe(3);
     }
 
+    [TimedFact]
+    public async Task DrainRemaining_SmallBatchSize_SplitsIntoMultipleBatches()
+    {
+        // The configurable flush batch size bounds how many records fold into one SaveChanges: batchSize=1
+        // drains three buffered records as three single-record batches (all records still land).
+        var channel = Channel.CreateBounded<AdapterCallRecord>(16);
+        channel.Writer.TryWrite(MakeRecord()).ShouldBeTrue();
+        channel.Writer.TryWrite(MakeRecord()).ShouldBeTrue();
+        channel.Writer.TryWrite(MakeRecord()).ShouldBeTrue();
+        channel.Writer.Complete();
+
+        var batchSizes = new List<int>();
+
+        await AdapterCallFlusher<Warp.Tests.TestContext>.DrainRemainingAsync(
+            channel.Reader,
+            (batch, _) =>
+            {
+                batchSizes.Add(batch.Count);
+
+                return Task.CompletedTask;
+            },
+            budget: TimeSpan.FromSeconds(5),
+            batchSize: 1);
+
+        batchSizes.Count.ShouldBe(3);
+        batchSizes.ShouldAllBe(x => x == 1);
+    }
+
     private static AdapterCallRecord MakeRecord()
         => new()
         {

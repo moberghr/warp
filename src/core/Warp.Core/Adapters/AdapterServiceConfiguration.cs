@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace Warp.Core.Adapters;
 
@@ -26,7 +27,8 @@ public static class AdapterServiceConfiguration
         // calls. TryAdd throughout so a second AddAdapters() is a no-op. The DB-backed recorder owns
         // the channel; IAdapterCallRecorder resolves to the same instance.
         builder.Services.TryAddSingleton<AdapterRegistry>();
-        builder.Services.TryAddSingleton<DbAdapterCallRecorder>();
+        builder.Services.TryAddSingleton(x => new DbAdapterCallRecorder(
+            x.GetRequiredService<IOptions<WarpConfiguration>>().Value.CallLogBufferCapacity));
         builder.Services.TryAddSingleton<IAdapterCallRecorder>(x => x.GetRequiredService<DbAdapterCallRecorder>());
         builder.Services.TryAddSingleton<IWarpAdapters, WarpAdapters>();
 

@@ -10,6 +10,7 @@ public static class HttpRequestMessageExtensions
     internal static readonly HttpRequestOptionsKey<string> OperationKey = new("warp.adapter.operation");
     internal static readonly HttpRequestOptionsKey<string> GroupKey = new("warp.adapter.group");
     internal static readonly HttpRequestOptionsKey<string> CorrelationKey = new("warp.adapter.correlation");
+    internal static readonly HttpRequestOptionsKey<bool> ForceCaptureKey = new("warp.adapter.force_capture");
 
     /// <summary>
     /// Names the operation for this request (<c>GetOrders</c>, <c>payment.capture</c>). Wins over the
@@ -53,6 +54,25 @@ public static class HttpRequestMessageExtensions
 
         return request;
     }
+
+    /// <summary>
+    /// Forces full-fidelity capture (request + response bodies and headers, even on success and even if the
+    /// capture tier is <c>None</c>/<c>OnFailure</c>) for this request and always writes its call-log row,
+    /// bypassing the adapter's <c>SampleRate</c> and <c>RecordCalls</c>. ORs with the ambient
+    /// <see cref="WarpAdapterCall.ForceCapture"/> scope. It is PII-owned (§1.2): forcing capture stores
+    /// payloads (headers still pass the redaction denylist).
+    /// </summary>
+    public static HttpRequestMessage WithWarpForceCapture(this HttpRequestMessage request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        request.Options.Set(ForceCaptureKey, true);
+
+        return request;
+    }
+
+    internal static bool GetWarpForceCapture(this HttpRequestMessage request)
+        => request.Options.TryGetValue(ForceCaptureKey, out var value) && value;
 
     internal static string? GetWarpOperation(this HttpRequestMessage request)
         => request.Options.TryGetValue(OperationKey, out var value) ? value : null;

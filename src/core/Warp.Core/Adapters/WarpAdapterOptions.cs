@@ -16,6 +16,16 @@ public sealed class WarpAdapterOptions
     /// </summary>
     public CallRecording RecordCalls { get; set; } = CallRecording.All;
 
+    /// <summary>
+    /// Fraction of <b>successful</b> call-log <b>rows</b> to keep (0.0–1.0). Applies to the raw row only:
+    /// failures are always kept, and the <c>Counter</c>/<c>Statistic</c> aggregates (counts, error rate,
+    /// latency percentiles) always record every call regardless of this value. <c>1.0</c> (default) keeps
+    /// all rows; <c>0.0</c> keeps none (equivalent to <see cref="CallRecording.FailuresOnly"/> for
+    /// successes); <c>0.1</c> keeps ~10% of successful rows. A per-call force-capture override
+    /// (request option or ambient scope) writes the row regardless of the sample.
+    /// </summary>
+    public double SampleRate { get; set; } = 1.0;
+
     /// <summary>Capture tier for request bodies. Independent of <see cref="CaptureResponseBodies"/>.</summary>
     public CaptureMode CaptureRequestBodies { get; set; } = CaptureMode.None;
 

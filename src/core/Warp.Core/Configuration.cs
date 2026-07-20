@@ -144,6 +144,21 @@ public class WarpConfiguration
     public int? EndpointCallLogRetentionCount { get; set; }
 
     /// <summary>
+    /// Bounded in-memory buffer capacity for the outbound adapter and inbound endpoint call-log recorders
+    /// (each owns its own channel of this size). Records are enqueued non-blocking; once the buffer is full
+    /// further records are dropped (counted, never blocking or failing a call — recording is lossy by
+    /// design). Raise for bursty, high-volume observability; lower to cap memory. Default 10,000.
+    /// </summary>
+    public int CallLogBufferCapacity { get; set; } = 10_000;
+
+    /// <summary>
+    /// Max call-log records the adapter/endpoint flushers fold into a single DI scope + <c>SaveChanges</c>
+    /// batch when draining their buffer. Larger batches amortise the round-trip; smaller batches bound the
+    /// work per transaction. Does not affect the shutdown-drain budget. Default 500.
+    /// </summary>
+    public int CallLogFlushBatchSize { get; set; } = 500;
+
+    /// <summary>
     /// How far past its <c>NextAttemptAt</c> a <c>Pending</c> <c>WebhookDelivery</c> must be before the
     /// stuck-delivery sweep (part of <c>StaleJobRecovery</c>) re-enqueues an executor job for it. A row
     /// only reaches this state when the executor's outcome commit faulted after the attempt claim — the

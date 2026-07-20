@@ -20,6 +20,26 @@ public sealed class WarpEndpointObservabilityOptions
     /// <summary>Whether a row is written per call. <c>All</c> (default) writes every call; <c>FailuresOnly</c> is the volume knob for chatty endpoints (counters still record all calls).</summary>
     public CallRecording RecordCalls { get; set; } = CallRecording.All;
 
+    /// <summary>
+    /// Fraction of <b>successful</b> request rows to keep (0.0–1.0). Applies to the raw call-log row only:
+    /// failures (status &gt;= 500 or an exception) are always kept, and the <c>Counter</c>/<c>Statistic</c>
+    /// aggregates (counts, error rate, latency percentiles) always record every request regardless of this
+    /// value. <c>1.0</c> (default) keeps all rows; <c>0.0</c> keeps none (equivalent to
+    /// <see cref="CallRecording.FailuresOnly"/> for successes); <c>0.1</c> keeps ~10%. A request matched by
+    /// <see cref="ForceCapture"/> writes the row regardless of the sample.
+    /// </summary>
+    public double SampleRate { get; set; } = 1.0;
+
+    /// <summary>
+    /// Per-request predicate evaluated at request START (before body buffering) — when it returns
+    /// <c>true</c>, the request is captured at full fidelity (bodies and headers, even on success and even
+    /// if the capture tier is <c>None</c>/<c>OnFailure</c>) and its call-log row is always written,
+    /// bypassing <see cref="SampleRate"/> and <see cref="RecordCalls"/>. Null (default) forces nothing. Use
+    /// for targeted diagnostics (a debug header, a specific caller). It is PII-owned (§1.2): forcing capture
+    /// stores request/response bodies + headers (still redacted per <see cref="RedactedHeaders"/>).
+    /// </summary>
+    public Func<HttpContext, bool>? ForceCapture { get; set; }
+
     /// <summary>Capture tier for the request body (None / OnFailure / Always). Default OnFailure.</summary>
     public CaptureMode CaptureRequestBodies { get; set; } = CaptureMode.OnFailure;
 

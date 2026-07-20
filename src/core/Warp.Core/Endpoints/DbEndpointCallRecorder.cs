@@ -22,7 +22,11 @@ public sealed class DbEndpointCallRecorder : IEndpointCallRecorder
     {
     }
 
-    internal DbEndpointCallRecorder(int capacity)
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DbEndpointCallRecorder"/> class with an explicit
+    /// bounded-channel capacity (from <c>WarpConfiguration.CallLogBufferCapacity</c>).
+    /// </summary>
+    public DbEndpointCallRecorder(int capacity)
     {
         // SingleReader: only the flusher drains. FullMode.DropWrite would silently discard and report
         // success; we want TryWrite to return false on a full channel so the caller can count the drop.

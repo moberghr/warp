@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Endpoints;
 
@@ -25,7 +26,8 @@ public static class EndpointObservabilityServiceConfiguration
 
         // Singleton bounded-channel recorder (persists across scopes); IEndpointCallRecorder resolves to the
         // same instance and doubles as the addons-flag marker (only this method registers it).
-        builder.Services.TryAddSingleton<DbEndpointCallRecorder>();
+        builder.Services.TryAddSingleton(x => new DbEndpointCallRecorder(
+            x.GetRequiredService<IOptions<WarpConfiguration>>().Value.CallLogBufferCapacity));
         builder.Services.TryAddSingleton<IEndpointCallRecorder>(x => x.GetRequiredService<DbEndpointCallRecorder>());
 
         // The flusher drains the channel onto the user's TContext (§0.5). AddEndpointObservability is

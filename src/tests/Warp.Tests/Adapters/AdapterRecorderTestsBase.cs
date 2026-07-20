@@ -93,6 +93,74 @@ public abstract class AdapterRecorderTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Succeed_SampleRateZero_PersistsNoRow()
+    {
+        var options = new WarpAdapterOptions { SampleRate = 0.0 };
+        var (adapters, recorder, registry) = CreateStack(options);
+
+        adapters.BeginCall("vendor", "GetOrders").Succeed();
+
+        await FlushAsync(recorder, registry);
+
+        var count = await _fixture.CreateContext().Set<AdapterCallLog>().CountAsync(Xunit.TestContext.Current.CancellationToken);
+        count.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task Fail_SampleRateZero_PersistsRow()
+    {
+        // Sampling never drops failures — the row is the point of a failure.
+        var options = new WarpAdapterOptions { SampleRate = 0.0 };
+        var (adapters, recorder, registry) = CreateStack(options);
+
+        adapters.BeginCall("vendor", "GetOrders").Fail(new InvalidOperationException("boom"));
+
+        await FlushAsync(recorder, registry);
+
+        var row = await SingleRowAsync();
+        row.Outcome.ShouldBe(AdapterCallOutcome.Failed);
+    }
+
+    [TimedFact]
+    public async Task Succeed_SampleRateZero_MultipleCalls_CountersStayExact_NoRows()
+    {
+        // The volume knob suppresses ROWS only: N successes at SampleRate=0 write no log rows but the
+        // success COUNT and duration-SUM counters still reflect every call (aggregates stay 100% exact).
+        var options = new WarpAdapterOptions { SampleRate = 0.0 };
+        var (adapters, recorder, registry) = CreateStack(options);
+
+        adapters.BeginCall("vendor", "GetOrders").Succeed();
+        adapters.BeginCall("vendor", "GetOrders").Succeed();
+        adapters.BeginCall("vendor", "GetOrders").Succeed();
+
+        await FlushAsync(recorder, registry);
+
+        var logCount = await _fixture.CreateContext().Set<AdapterCallLog>().CountAsync(Xunit.TestContext.Current.CancellationToken);
+        logCount.ShouldBe(0);
+
+        var successCounter = await _fixture.CreateContext().Set<Counter>()
+            .Where(x => x.Key == AdapterCounterKeys.Total("vendor", "success"))
+            .SumAsync(x => (long)x.Value, Xunit.TestContext.Current.CancellationToken);
+        successCounter.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task Succeed_ForceCapture_SampleRateZero_PersistsRow()
+    {
+        var options = new WarpAdapterOptions { SampleRate = 0.0 };
+        var (adapters, recorder, registry) = CreateStack(options);
+
+        var scope = adapters.BeginCall("vendor", "GetOrders");
+        scope.SetForceCapture(true);
+        scope.Succeed();
+
+        await FlushAsync(recorder, registry);
+
+        var row = await SingleRowAsync();
+        row.Outcome.ShouldBe(AdapterCallOutcome.Success);
+    }
+
+    [TimedFact]
     public async Task Persist_TagsCorrelationAndGroup_RecordedOnRow()
     {
         var (adapters, recorder, registry) = CreateStack();

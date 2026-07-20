@@ -65,6 +65,12 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
 
         using var scope = _adapters.BeginCall(_adapterName, operation, group);
 
+        // Force-capture (request option OR ambient scope): writes the log row regardless of SampleRate /
+        // RecordCalls and captures full-fidelity payloads even on success / with a None tier. Set on the
+        // scope before completion so its SuppressLog decision honours it.
+        var forceCapture = request.GetWarpForceCapture() || WarpAdapterCall.CurrentForceCapture;
+        scope.SetForceCapture(forceCapture);
+
         var correlation = request.GetWarpCorrelation();
         if (correlation is not null)
         {
@@ -75,24 +81,24 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         string? requestBody = null;
         try
         {
-            // Buffer the request body up front (only when a request-body tier is active): the transport
-            // consumes the content, so it cannot be read after the send. Buffering lives INSIDE the
-            // outcome-owning try — a cancellation here must record Failed, not unwind past the scope
-            // and let Dispose() default the never-sent call to Success.
-            requestBody = await BufferRequestBodyAsync(request, cancellationToken);
+            // Buffer the request body up front (only when a request-body tier is active or capture is
+            // forced): the transport consumes the content, so it cannot be read after the send. Buffering
+            // lives INSIDE the outcome-owning try — a cancellation here must record Failed, not unwind past
+            // the scope and let Dispose() default the never-sent call to Success.
+            requestBody = await BufferRequestBodyAsync(request, forceCapture, cancellationToken);
 
             response = await base.SendAsync(request, cancellationToken);
         }
         catch (Exception ex)
         {
-            await CaptureAsync(scope, request, response: null, requestBody, isFailure: true, cancellationToken);
+            await CaptureAsync(scope, request, response: null, requestBody, isFailure: true, forceCapture, cancellationToken);
             scope.Fail(ex);
 
             throw;
         }
 
         var isFailure = !response.IsSuccessStatusCode;
-        await CaptureAsync(scope, request, response, requestBody, isFailure, cancellationToken);
+        await CaptureAsync(scope, request, response, requestBody, isFailure, forceCapture, cancellationToken);
         CompleteOutcome(scope, response, isFailure);
 
         return response;
@@ -115,7 +121,7 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         scope.Succeed();
     }
 
-    internal static bool ShouldCapture(CaptureMode mode, bool isFailure) => mode switch
+    internal static bool ShouldCapture(CaptureMode mode, bool isFailure, bool forceCapture) => forceCapture || mode switch
     {
         CaptureMode.Always => true,
         CaptureMode.OnFailure => isFailure,
@@ -177,9 +183,10 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         HttpResponseMessage? response,
         string? requestBody,
         bool isFailure,
+        bool forceCapture,
         CancellationToken cancellationToken)
     {
-        if (!AnyCaptureEnabled)
+        if (!AnyCaptureEnabled && !forceCapture)
         {
             return;
         }
@@ -191,7 +198,7 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
             scope.SetStatusCode((int)response.StatusCode);
         }
 
-        if (ShouldCapture(_recording.CaptureHeaders, isFailure))
+        if (ShouldCapture(_recording.CaptureHeaders, isFailure, forceCapture))
         {
             scope.SetRequestHeaders(RedactHeaders(AllHeaders(request.Headers, request.Content?.Headers), _recording.RedactedHeaders, _recording.MaxCapturedHeaderSize));
 
@@ -201,12 +208,12 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
             }
         }
 
-        if (requestBody is not null && ShouldCapture(_recording.CaptureRequestBodies, isFailure))
+        if (requestBody is not null && ShouldCapture(_recording.CaptureRequestBodies, isFailure, forceCapture))
         {
             scope.SetRequestBody(TruncateToBytes(requestBody, _recording.MaxCapturedBodySize));
         }
 
-        if (response?.Content is not null && ShouldCapture(_recording.CaptureResponseBodies, isFailure))
+        if (response?.Content is not null && ShouldCapture(_recording.CaptureResponseBodies, isFailure, forceCapture))
         {
             // Capture must be NON-DESTRUCTIVE: a live response body is a forward-only, single-pass stream, so
             // raw-reading it here would consume it and the caller (and HttpClient's default content buffering)
@@ -238,9 +245,9 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         || _recording.CaptureRequestBodies != CaptureMode.None
         || _recording.CaptureResponseBodies != CaptureMode.None;
 
-    private async Task<string?> BufferRequestBodyAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    private async Task<string?> BufferRequestBodyAsync(HttpRequestMessage request, bool forceCapture, CancellationToken cancellationToken)
     {
-        if (_recording.CaptureRequestBodies == CaptureMode.None || request.Content is null)
+        if ((_recording.CaptureRequestBodies == CaptureMode.None && !forceCapture) || request.Content is null)
         {
             return null;
         }

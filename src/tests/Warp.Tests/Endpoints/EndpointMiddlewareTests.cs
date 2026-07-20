@@ -96,6 +96,99 @@ public class EndpointMiddlewareTests
         }
     }
 
+    [TimedFact]
+    public async Task SampleRateZero_Success_SuppressesLogRow()
+    {
+        var (app, client, recorder) = await CreateHost(o => o.SampleRate = 0.0);
+
+        try
+        {
+            var response = await client.PostAsync("/probe", new StringContent("x"), Xunit.TestContext.Current.CancellationToken);
+
+            response.IsSuccessStatusCode.ShouldBeTrue();
+
+            // Counters are still written by the flusher; the row is suppressed. The record is handed over
+            // flagged SuppressLog (the recorder captures every record regardless of the flag).
+            recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeTrue();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task SampleRateZero_ServerError_NotSuppressed()
+    {
+        var (app, client, recorder) = await CreateHost(o => o.SampleRate = 0.0);
+
+        try
+        {
+            var response = await client.GetAsync("/boom", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(500);
+            recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeFalse();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task SampleRateOne_Success_NotSuppressed()
+    {
+        // The keep-all default writes every successful row — no behaviour change for existing hosts.
+        var (app, client, recorder) = await CreateHost();
+
+        try
+        {
+            var response = await client.PostAsync("/probe", new StringContent("x"), Xunit.TestContext.Current.CancellationToken);
+
+            response.IsSuccessStatusCode.ShouldBeTrue();
+            recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeFalse();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task ForceCapture_SampleRateZero_Success_WritesRowAndCapturesBodyEvenWhenTierNone()
+    {
+        // ForceCapture returns true → the row is written despite SampleRate=0, and the request body + headers
+        // are captured even though every capture tier is None.
+        var (app, client, recorder) = await CreateHost(o =>
+        {
+            o.SampleRate = 0.0;
+            o.CaptureRequestBodies = CaptureMode.None;
+            o.CaptureResponseBodies = CaptureMode.None;
+            o.CaptureHeaders = CaptureMode.None;
+            o.ForceCapture = _ => true;
+        });
+
+        try
+        {
+            var response = await client.PostAsync("/probe", new StringContent("forced-body"), Xunit.TestContext.Current.CancellationToken);
+
+            response.IsSuccessStatusCode.ShouldBeTrue();
+
+            var record = recorder.Records.ShouldHaveSingleItem();
+            record.SuppressLog.ShouldBeFalse();
+            record.RequestBody.ShouldBe("forced-body");
+            record.RequestHeaders.ShouldNotBeNull();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
     private static async Task<(WebApplication App, HttpClient Client, CapturingRecorder Recorder)> CreateHost(
         Action<WarpEndpointObservabilityOptions>? configure = null)
     {

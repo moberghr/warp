@@ -112,6 +112,70 @@ public class AdapterScopeTests
     }
 
     [TimedFact]
+    public void SampleRateZero_Success_FlaggedSuppressLog()
+    {
+        // SampleRate 0 keeps no successful ROWS (same effect as FailuresOnly for successes): the record is
+        // still handed over (counters/telemetry unaffected) but flagged SuppressLog.
+        var options = new WarpAdapterOptions { SampleRate = 0.0 };
+        var (adapters, recorder, _) = AdapterTestHarness.CreateAdapters(options);
+
+        adapters.BeginCall("vendor", "GetOrders").Succeed();
+
+        recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeTrue();
+    }
+
+    [TimedFact]
+    public void SampleRateZero_Failure_NotSuppressed()
+    {
+        // Failures are always kept regardless of the sample rate — the row is the point of a failure.
+        var options = new WarpAdapterOptions { SampleRate = 0.0 };
+        var (adapters, recorder, _) = AdapterTestHarness.CreateAdapters(options);
+
+        adapters.BeginCall("vendor", "GetOrders").Fail(new InvalidOperationException("boom"));
+
+        recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public void SampleRateOne_Success_NotSuppressed()
+    {
+        // The keep-all default writes every successful row — no behaviour change for existing callers.
+        var (adapters, recorder, _) = AdapterTestHarness.CreateAdapters();
+
+        adapters.BeginCall("vendor", "GetOrders").Succeed();
+
+        recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public void ForceCapture_SampleRateZero_Success_NotSuppressed()
+    {
+        // A forced successful call writes its row even when the sample rate would have dropped it.
+        var options = new WarpAdapterOptions { SampleRate = 0.0 };
+        var (adapters, recorder, _) = AdapterTestHarness.CreateAdapters(options);
+
+        var scope = adapters.BeginCall("vendor", "GetOrders");
+        scope.SetForceCapture(true);
+        scope.Succeed();
+
+        recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public void ForceCapture_FailuresOnly_Success_NotSuppressed()
+    {
+        // Force-capture also overrides RecordCalls = FailuresOnly for the row-write decision.
+        var options = new WarpAdapterOptions { RecordCalls = CallRecording.FailuresOnly };
+        var (adapters, recorder, _) = AdapterTestHarness.CreateAdapters(options);
+
+        var scope = adapters.BeginCall("vendor", "GetOrders");
+        scope.SetForceCapture(true);
+        scope.Succeed();
+
+        recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeFalse();
+    }
+
+    [TimedFact]
     public void Dispose_WithoutExplicitOutcome_RecordsSuccess()
     {
         var (adapters, recorder, _) = AdapterTestHarness.CreateAdapters();

@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 
 namespace Warp.Core.Endpoints;
@@ -24,15 +25,18 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
 {
     private readonly DbEndpointCallRecorder _recorder;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly WarpConfiguration _configuration;
     private readonly ILogger<EndpointCallFlusher<TContext>> _logger;
 
     public EndpointCallFlusher(
         DbEndpointCallRecorder recorder,
         IServiceScopeFactory scopeFactory,
+        IOptions<WarpConfiguration> configuration,
         ILogger<EndpointCallFlusher<TContext>> logger)
     {
         _recorder = recorder;
         _scopeFactory = scopeFactory;
+        _configuration = configuration.Value;
         _logger = logger;
     }
 
@@ -54,8 +58,9 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
                 break;
             }
 
+            var batchSize = _configuration.CallLogFlushBatchSize;
             var batch = new List<EndpointCallRecord>();
-            while (batch.Count < EndpointFlush.BatchSize && reader.TryRead(out var record))
+            while (batch.Count < batchSize && reader.TryRead(out var record))
             {
                 batch.Add(record);
             }
@@ -87,7 +92,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
     }
 
     private Task DrainRemainingAsync()
-        => DrainRemainingAsync(_recorder.Reader, FlushBatchAsync, EndpointFlush.ShutdownDrainBudget);
+        => DrainRemainingAsync(_recorder.Reader, FlushBatchAsync, EndpointFlush.ShutdownDrainBudget, _configuration.CallLogFlushBatchSize);
 
     // Extracted + internal so tests can prove the drain budget bounds a HANGING persist (a slow or
     // unreachable database at shutdown) without a real database. The budget token is independent of the
@@ -97,14 +102,15 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
     internal static async Task DrainRemainingAsync(
         ChannelReader<EndpointCallRecord> reader,
         Func<List<EndpointCallRecord>, CancellationToken, Task> flush,
-        TimeSpan budget)
+        TimeSpan budget,
+        int batchSize = EndpointFlush.BatchSize)
     {
         using var cts = new CancellationTokenSource(budget);
 
         while (!cts.IsCancellationRequested)
         {
             var batch = new List<EndpointCallRecord>();
-            while (batch.Count < EndpointFlush.BatchSize && reader.TryRead(out var record))
+            while (batch.Count < batchSize && reader.TryRead(out var record))
             {
                 batch.Add(record);
             }

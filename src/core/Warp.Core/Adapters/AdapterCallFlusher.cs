@@ -65,8 +65,9 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
                 break;
             }
 
+            var batchSize = _configuration.CallLogFlushBatchSize;
             var batch = new List<AdapterCallRecord>();
-            while (batch.Count < AdapterFlush.BatchSize && reader.TryRead(out var record))
+            while (batch.Count < batchSize && reader.TryRead(out var record))
             {
                 batch.Add(record);
             }
@@ -101,7 +102,7 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
     }
 
     private Task DrainRemainingAsync()
-        => DrainRemainingAsync(_recorder.Reader, FlushBatchAsync, AdapterFlush.ShutdownDrainBudget);
+        => DrainRemainingAsync(_recorder.Reader, FlushBatchAsync, AdapterFlush.ShutdownDrainBudget, _configuration.CallLogFlushBatchSize);
 
     // Extracted + internal so tests can prove the drain budget bounds a HANGING persist (a slow or
     // unreachable database at shutdown) without a real database. The budget token is independent of the
@@ -111,14 +112,15 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
     internal static async Task DrainRemainingAsync(
         ChannelReader<AdapterCallRecord> reader,
         Func<List<AdapterCallRecord>, CancellationToken, Task> flush,
-        TimeSpan budget)
+        TimeSpan budget,
+        int batchSize = AdapterFlush.BatchSize)
     {
         using var cts = new CancellationTokenSource(budget);
 
         while (!cts.IsCancellationRequested)
         {
             var batch = new List<AdapterCallRecord>();
-            while (batch.Count < AdapterFlush.BatchSize && reader.TryRead(out var record))
+            while (batch.Count < batchSize && reader.TryRead(out var record))
             {
                 batch.Add(record);
             }

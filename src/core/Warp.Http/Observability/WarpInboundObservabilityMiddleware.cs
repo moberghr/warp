@@ -51,7 +51,12 @@ internal sealed class WarpInboundObservabilityMiddleware
             return;
         }
 
-        if (_options.CaptureRequestBodies != CaptureMode.None)
+        // Force-capture is evaluated at request START (before body buffering) so a forced request buffers its
+        // request/response bodies even when the tier is None/OnFailure. It also always writes the row,
+        // bypassing SampleRate / RecordCalls (folded in RecordAsync).
+        var forceCapture = _options.ForceCapture?.Invoke(context) ?? false;
+
+        if (_options.CaptureRequestBodies != CaptureMode.None || forceCapture)
         {
             // Buffer the body before model binding consumes it, so it can be re-read after the handler runs.
             context.Request.EnableBuffering();
@@ -59,7 +64,7 @@ internal sealed class WarpInboundObservabilityMiddleware
 
         var originalBody = context.Response.Body;
         CaptureBodyStream? capture = null;
-        if (_options.CaptureResponseBodies != CaptureMode.None)
+        if (_options.CaptureResponseBodies != CaptureMode.None || forceCapture)
         {
             capture = new CaptureBodyStream(originalBody, _options.MaxCapturedBodySize);
             context.Response.Body = capture;
@@ -87,7 +92,7 @@ internal sealed class WarpInboundObservabilityMiddleware
                 context.Response.Body = originalBody;
             }
 
-            await RecordAsync(context, identity, start, capture, exceptionType, exceptionMessage);
+            await RecordAsync(context, identity, start, capture, forceCapture, exceptionType, exceptionMessage);
         }
     }
 
@@ -96,6 +101,7 @@ internal sealed class WarpInboundObservabilityMiddleware
         WarpEndpointIdentity identity,
         long start,
         CaptureBodyStream? capture,
+        bool forceCapture,
         string? exceptionType,
         string? exceptionMessage)
     {
@@ -107,9 +113,22 @@ internal sealed class WarpInboundObservabilityMiddleware
             var failed = exceptionType is not null || statusCode >= 500;
             var outcome = failed ? AdapterCallOutcome.Failed : AdapterCallOutcome.Success;
 
-            var captureBodies = _options.CaptureResponseBodies == CaptureMode.Always || (failed && _options.CaptureResponseBodies == CaptureMode.OnFailure);
-            var captureReq = _options.CaptureRequestBodies == CaptureMode.Always || (failed && _options.CaptureRequestBodies == CaptureMode.OnFailure);
-            var captureHeaders = _options.CaptureHeaders == CaptureMode.Always || (failed && _options.CaptureHeaders == CaptureMode.OnFailure);
+            // Capture tiers: full fidelity iff Always, OnFailure-and-failed, or forced. A forced request
+            // captures bodies + headers even on success and even if the tier is None/OnFailure.
+            var captureBodies = forceCapture || _options.CaptureResponseBodies == CaptureMode.Always || (failed && _options.CaptureResponseBodies == CaptureMode.OnFailure);
+            var captureReq = forceCapture || _options.CaptureRequestBodies == CaptureMode.Always || (failed && _options.CaptureRequestBodies == CaptureMode.OnFailure);
+            var captureHeaders = forceCapture || _options.CaptureHeaders == CaptureMode.Always || (failed && _options.CaptureHeaders == CaptureMode.OnFailure);
+
+            // A row is written for any failure, any forced request, and successes kept by both the record
+            // mode and the sample rate; counters are ALWAYS written (never gated by sampling or suppression),
+            // keeping the aggregates 100% exact.
+#pragma warning disable CA5394 // Sampling is a volume knob, not a security decision — non-crypto RNG is fine.
+            var sampledIn = _options.SampleRate >= 1.0 || Random.Shared.NextDouble() < _options.SampleRate;
+#pragma warning restore CA5394
+
+            var suppressLog = !failed
+                && !forceCapture
+                && (_options.RecordCalls == CallRecording.FailuresOnly || !sampledIn);
 
             var record = new EndpointCallRecord
             {
@@ -134,7 +153,7 @@ internal sealed class WarpInboundObservabilityMiddleware
                 TraceId = ResolveTraceId(),
                 TagsJson = ResolveTags(context),
                 ExpireAt = now.Add(_retention),
-                SuppressLog = _options.RecordCalls == CallRecording.FailuresOnly && !failed,
+                SuppressLog = suppressLog,
             };
 
             _recorder.Record(record);

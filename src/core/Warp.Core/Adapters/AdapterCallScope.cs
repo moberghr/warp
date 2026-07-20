@@ -56,6 +56,7 @@ public sealed class AdapterCallScope : IDisposable
     private string? _responseHeaders;
     private string? _requestBody;
     private string? _responseBody;
+    private bool _forceCapture;
     private int _completed;
 
     internal AdapterCallScope(
@@ -178,6 +179,14 @@ public sealed class AdapterCallScope : IDisposable
         _responseBody = responseBody;
     }
 
+    /// <summary>
+    /// Forces this call's log row to be written and its capture tiers to full fidelity regardless of the
+    /// adapter's <c>SampleRate</c> / <c>RecordCalls</c> — the transport binding sets it from the per-call
+    /// force-capture request option or ambient scope. Must be set before completion. Counters/telemetry are
+    /// unaffected (they always record).
+    /// </summary>
+    public void SetForceCapture(bool forceCapture) => _forceCapture = forceCapture;
+
     public void Dispose() => Complete(AdapterCallOutcome.Success, null);
 
     private void Complete(AdapterCallOutcome outcome, Exception? exception)
@@ -271,10 +280,20 @@ public sealed class AdapterCallScope : IDisposable
 
     private void RecordCall(AdapterCallOutcome outcome, Exception? exception, double duration)
     {
-        // FailuresOnly suppresses the call-log ROW only — counters, the LastSeenAt/definition upsert, and
+        // Volume controls suppress the call-log ROW only — counters, the LastSeenAt/definition upsert, and
         // telemetry are unaffected (successes are always counted so ErrorRate has a real denominator). Always
-        // hand the record over; the flusher honours SuppressLog by skipping the AdapterCallLog row.
-        var suppressLog = _options.RecordCalls == CallRecording.FailuresOnly && outcome == AdapterCallOutcome.Success;
+        // hand the record over; the flusher honours SuppressLog by skipping the AdapterCallLog row. A row is
+        // written for any failure, any forced call, and successes kept by both FailuresOnly-vs-All and the
+        // sample rate; it is suppressed only for a non-forced success that either mode dropped.
+        var failure = outcome != AdapterCallOutcome.Success;
+
+#pragma warning disable CA5394 // Sampling is a volume knob, not a security decision — non-crypto RNG is fine.
+        var sampledIn = _options.SampleRate >= 1.0 || Random.Shared.NextDouble() < _options.SampleRate;
+#pragma warning restore CA5394
+
+        var suppressLog = !failure
+            && !_forceCapture
+            && (_options.RecordCalls == CallRecording.FailuresOnly || !sampledIn);
 
         var record = new AdapterCallRecord
         {

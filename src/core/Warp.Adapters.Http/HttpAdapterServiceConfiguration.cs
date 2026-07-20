@@ -120,6 +120,11 @@ public static class HttpAdapterServiceConfiguration
             ? $"{limit.Limit}/{limit.PerSeconds}s ({limit.Overflow})"
             : "none";
 
-        return $"record={recording.RecordCalls}; capture req-body={recording.CaptureRequestBodies}, resp-body={recording.CaptureResponseBodies}, headers={recording.CaptureHeaders}; resilience={resilience}; shared-limit={sharedLimit}";
+        // Only surface the sample rate when it deviates from the keep-all default, so existing summaries stay stable.
+        var sample = recording.SampleRate < 1.0
+            ? $"; sample={recording.SampleRate.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)}"
+            : string.Empty;
+
+        return $"record={recording.RecordCalls}; capture req-body={recording.CaptureRequestBodies}, resp-body={recording.CaptureResponseBodies}, headers={recording.CaptureHeaders}; resilience={resilience}; shared-limit={sharedLimit}{sample}";
     }
 }
