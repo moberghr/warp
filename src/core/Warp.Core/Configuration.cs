@@ -83,6 +83,15 @@ public class WarpConfiguration
     public TimeSpan AdapterCallLogRetention { get; set; } = TimeSpan.FromDays(7);
 
     /// <summary>
+    /// Global default <b>count</b> cap for <c>AdapterCallLog</c> rows — keep at most this many rows per
+    /// adapter, deleting the oldest beyond the cap (by <c>Timestamp</c>). Complements the age cap
+    /// (<see cref="AdapterCallLogRetention"/>): a row is removed once it exceeds <b>either</b> limit,
+    /// so a hot adapter is bounded by row count between age sweeps. <c>null</c> (default) disables the
+    /// count cap. Per-adapter override via <c>WarpAdapterOptions.CallLogRetentionCount</c> takes precedence.
+    /// </summary>
+    public int? AdapterCallLogRetentionCount { get; set; }
+
+    /// <summary>
     /// Grace window before an orphaned <c>AdapterDefinition</c> row is deleted by
     /// <c>ExpirationCleanup</c>. A definition is considered orphaned when its <c>LastSeenAt</c> is
     /// older than this value (adapters run in non-server processes, so there is no live-instance
@@ -108,6 +117,15 @@ public class WarpConfiguration
     /// <c>CallLogRetention</c> so a delivery and its attempt rows expire together.
     /// </summary>
     public TimeSpan WebhookDeliveryRetention { get; set; } = TimeSpan.FromDays(30);
+
+    /// <summary>
+    /// Global <b>count</b> cap for settled (<c>Delivered</c>/<c>Exhausted</c>) <c>WebhookDelivery</c> rows —
+    /// keep at most this many, deleting the oldest beyond the cap (by <c>CreatedAt</c>). Complements the age
+    /// cap (<see cref="WebhookDeliveryRetention"/>): a settled row is removed once it exceeds <b>either</b>
+    /// limit. <c>Pending</c> deliveries are never count-trimmed (they still own live work). <c>null</c>
+    /// (default) disables the count cap.
+    /// </summary>
+    public int? WebhookDeliveryRetentionCount { get; set; }
 
     /// <summary>
     /// How far past its <c>NextAttemptAt</c> a <c>Pending</c> <c>WebhookDelivery</c> must be before the

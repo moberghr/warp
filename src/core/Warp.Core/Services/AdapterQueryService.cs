@@ -19,18 +19,11 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
     // reachable via retention windows / OTel, not this list.
     private const int RecentCallsLimit = 100;
 
-    // The list page's per-adapter average latency is computed over the last 24h only. Without a window
-    // the GroupBy full-scans AdapterCallLog on every list load; the (AdapterName, Timestamp) index serves
-    // this bound cheaply, and a rolling day is a representative "current latency" for the dashboard.
-    private const int LatencyWindowHours = 24;
-
     private readonly TContext _context;
-    private readonly TimeProvider _timeProvider;
 
-    public AdapterQueryService(TContext context, TimeProvider timeProvider)
+    public AdapterQueryService(TContext context)
     {
         _context = context;
-        _timeProvider = timeProvider;
     }
 
     public async Task<IReadOnlyList<AdapterListItemModel>> GetAdapters(CancellationToken ct = default)
@@ -55,14 +48,12 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
         }
 
         var stats = await LoadStatsAsync(ct);
-        var latency = await LoadAdapterLatencyAsync(ct);
 
         var result = new List<AdapterListItemModel>(definitions.Count);
 
         foreach (var definition in definitions)
         {
             var totals = stats.Totals.GetValueOrDefault(definition.Name);
-            var avg = latency.GetValueOrDefault(definition.Name);
 
             result.Add(new AdapterListItemModel
             {
@@ -73,7 +64,7 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
                 TotalCalls = totals?.Total ?? 0,
                 ErrorCount = totals?.Errors ?? 0,
                 ErrorRate = Rate(totals),
-                AvgDurationMs = avg,
+                AvgDurationMs = totals?.AvgDurationMs ?? 0,
                 HasPolicyConflict = definition.HasPolicyConflict,
             });
         }
@@ -107,35 +98,9 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
 
         var totals = stats.Totals.GetValueOrDefault(name);
 
-        var operationLatency = await _context.Set<AdapterCallLog>()
-            .AsNoTracking()
-            .Where(x => x.AdapterName == name)
-            .GroupBy(x => x.Operation)
-            .Select(g =>
-                new
-                {
-                    Operation = g.Key,
-                    Avg = g.Average(x => x.DurationMs),
-                })
-            .ToListAsync(ct);
-
-        var operationLatencyByKey = operationLatency.ToDictionary(x => x.Operation, x => x.Avg, StringComparer.Ordinal);
-
-        var groupLatency = await _context.Set<AdapterCallLog>()
-            .AsNoTracking()
-            .Where(x => x.AdapterName == name)
-            .Where(x => x.GroupName != null)
-            .GroupBy(x => x.GroupName!)
-            .Select(g =>
-                new
-                {
-                    Group = g.Key,
-                    Avg = g.Average(x => x.DurationMs),
-                })
-            .ToListAsync(ct);
-
-        var groupLatencyByKey = groupLatency.ToDictionary(x => x.Group, x => x.Avg, StringComparer.Ordinal);
-
+        // Average latency comes from the duration-sum ÷ count aggregates (survives AdapterCallLog deletion),
+        // not the raw rows. Last-failure timestamps and the recent-calls list below still read raw rows —
+        // they degrade gracefully to null/empty once logs are swept.
         var groupFailures = await _context.Set<AdapterCallLog>()
             .AsNoTracking()
             .Where(x => x.AdapterName == name)
@@ -184,7 +149,7 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
                     Calls = x.Value.Total,
                     Errors = x.Value.Errors,
                     ErrorRate = Rate(x.Value),
-                    AvgDurationMs = operationLatencyByKey.GetValueOrDefault(x.Key.Value),
+                    AvgDurationMs = x.Value.AvgDurationMs,
                 })
             .ToList();
 
@@ -198,15 +163,10 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
                     Calls = x.Value.Total,
                     Errors = x.Value.Errors,
                     ErrorRate = Rate(x.Value),
-                    AvgDurationMs = groupLatencyByKey.GetValueOrDefault(x.Key.Value),
+                    AvgDurationMs = x.Value.AvgDurationMs,
                     LastFailureAt = groupFailureByKey.TryGetValue(x.Key.Value, out var last) ? last : null,
                 })
             .ToList();
-
-        var adapterAvg = await _context.Set<AdapterCallLog>()
-            .AsNoTracking()
-            .Where(x => x.AdapterName == name)
-            .AverageAsync(x => (double?)x.DurationMs, ct) ?? 0;
 
         return new AdapterDetailModel
         {
@@ -219,7 +179,7 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
             TotalCalls = totals?.Total ?? 0,
             ErrorCount = totals?.Errors ?? 0,
             ErrorRate = Rate(totals),
-            AvgDurationMs = adapterAvg,
+            AvgDurationMs = totals?.AvgDurationMs ?? 0,
             Operations = operations,
             Groups = groups,
             RecentCalls = recentCalls,
@@ -259,25 +219,6 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
             .FirstOrDefaultAsync(ct);
     }
 
-    private async Task<Dictionary<string, double>> LoadAdapterLatencyAsync(CancellationToken ct)
-    {
-        var since = _timeProvider.GetUtcNow().UtcDateTime.AddHours(-LatencyWindowHours);
-
-        var rows = await _context.Set<AdapterCallLog>()
-            .AsNoTracking()
-            .Where(x => x.Timestamp >= since)
-            .GroupBy(x => x.AdapterName)
-            .Select(g =>
-                new
-                {
-                    Name = g.Key,
-                    Avg = g.Average(x => x.DurationMs),
-                })
-            .ToListAsync(ct);
-
-        return rows.ToDictionary(x => x.Name, x => x.Avg, StringComparer.Ordinal);
-    }
-
     // Loads every adapter-namespaced Statistic + pending Counter row once, merges them (aggregated
     // Statistic value + un-collapsed Counter rows for the same key), and folds each into its
     // adapter / operation / group outcome bucket. The prefix is a constant, so there is no
@@ -305,7 +246,7 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
                 new
                 {
                     Key = g.Key,
-                    Value = (long)g.Sum(c => c.Value),
+                    Value = g.Sum(c => (long)c.Value),
                 })
             .ToListAsync(ct);
 
@@ -381,8 +322,21 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
 
         public long Errors { get; private set; }
 
+        public long DurationSum { get; private set; }
+
+        public double AvgDurationMs => Total == 0 ? 0 : (double)DurationSum / Total;
+
         public void Add(string outcome, long count)
         {
+            // The duration-sum token rides the same keys as the outcome counts but is NOT a call — fold it
+            // into DurationSum, never the Total denominator.
+            if (string.Equals(outcome, AdapterCounterKeys.DurationToken, StringComparison.Ordinal))
+            {
+                DurationSum += count;
+
+                return;
+            }
+
             Total += count;
 
             if (IsError(outcome))

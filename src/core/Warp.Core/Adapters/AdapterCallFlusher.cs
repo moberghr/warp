@@ -298,11 +298,20 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
         context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Total(record.AdapterName, outcome), Value = 1 });
         context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Operation(record.AdapterName, record.Operation, outcome), Value = 1 });
 
+        // Duration-SUM counters (ms) mirror the count counters so average latency (sum ÷ count) is
+        // aggregate-backed and survives AdapterCallLog deletion. One dur counter per dimension per call
+        // (not per outcome) — the denominator is the summed outcome counts above. Counter.Value is int; a
+        // single call's ms comfortably fits.
+        var durationMs = (int)Math.Round(record.DurationMs, MidpointRounding.AwayFromZero);
+        context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Total(record.AdapterName, AdapterCounterKeys.DurationToken), Value = durationMs });
+        context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Operation(record.AdapterName, record.Operation, AdapterCounterKeys.DurationToken), Value = durationMs });
+
         // Per-group counters (successes included) give real per-group error rates (SC15). Only written
         // when the call carried a group — group-less calls behave exactly as before.
         if (record.GroupName is not null)
         {
             context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Group(record.AdapterName, record.GroupName, outcome), Value = 1 });
+            context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Group(record.AdapterName, record.GroupName, AdapterCounterKeys.DurationToken), Value = durationMs });
         }
     }
 
@@ -332,6 +341,10 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
             var configSummary = registry.ResolveConfigSummary(name);
             var groupLabel = registry.ResolveGroupLabel(name);
 
+            // Persist the per-adapter count cap so ExpirationCleanup (which runs on a server that may not
+            // have registered this adapter) can enforce it without the in-memory registry.
+            var retentionCount = registry.Resolve(name).CallLogRetentionCount;
+
             if (byName.TryGetValue(name, out var definition))
             {
                 // Lazy refresh: only touch the row once LastSeenAt is stale, so a hot adapter does not
@@ -354,6 +367,11 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
                     definition.GroupLabel = groupLabel;
                 }
 
+                if (retentionCount is not null && definition.CallLogRetentionCount != retentionCount)
+                {
+                    definition.CallLogRetentionCount = retentionCount;
+                }
+
                 continue;
             }
 
@@ -364,6 +382,7 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
                 LastSeenAt = now,
                 ConfigSummary = configSummary,
                 GroupLabel = groupLabel,
+                CallLogRetentionCount = retentionCount,
             });
         }
     }
@@ -423,6 +442,12 @@ internal static class AdapterFlush
 internal static class AdapterCounterKeys
 {
     public const string Prefix = "adapter";
+
+    // Reserved trailing token for the per-dimension duration SUM (ms). Rides the same key layout + Counter→
+    // Statistic aggregation as the per-outcome COUNT tokens, so average latency (sum ÷ count) survives
+    // AdapterCallLog deletion — the count denominator is already aggregate-backed. Never an AdapterCallOutcome
+    // token, so OutcomeCounts folds it into DurationSum, not the call Total.
+    public const string DurationToken = "dur";
 
     public static string Total(string adapter, string outcome) => $"{Prefix}:{adapter}:{outcome}";
 

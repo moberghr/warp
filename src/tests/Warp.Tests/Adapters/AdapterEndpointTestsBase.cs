@@ -93,6 +93,7 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
         seed.Set<AdapterDefinition>().Add(Definition("vendor"));
         AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "success"), 2);
         AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "failed"), 1);
+        AddDurationCounter(seed, AdapterCounterKeys.Total("vendor", AdapterCounterKeys.DurationToken), 60);
         seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10));
         seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 20));
         seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Failed, durationMs: 30));
@@ -214,19 +215,22 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task GetAdapters_LatencyWindow_ExcludesRowsOlderThanWindow()
+    public async Task GetAdapters_Latency_FromAggregates_SurvivesLogDeletion()
     {
-        // The list page's average latency is bounded to a 24h rolling window (F7). A stale call outside the
-        // window must not drag the average — only the recent call counts.
+        // Item 2: average latency is derived from the duration-sum ÷ count aggregates, not raw AdapterCallLog
+        // rows — so it persists after logs are swept, exactly like counts and error rate. No call-log rows
+        // are seeded here (simulating deleted logs); the aggregate alone must still yield the average.
         var seed = _fixture.CreateContext();
         seed.Set<AdapterDefinition>().Add(Definition("vendor"));
-        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10, timestamp: DateTime.UtcNow));
-        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 9000, timestamp: DateTime.UtcNow.AddHours(-30)));
+        AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "success"), 3);
+        AddDurationCounter(seed, AdapterCounterKeys.Total("vendor", AdapterCounterKeys.DurationToken), 30);
         await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var list = await CreateService().GetAdapters(Xunit.TestContext.Current.CancellationToken);
 
-        list.ShouldHaveSingleItem().AvgDurationMs.ShouldBe(10);
+        var item = list.ShouldHaveSingleItem();
+        item.TotalCalls.ShouldBe(3);
+        item.AvgDurationMs.ShouldBe(10);
     }
 
     [TimedFact]
@@ -269,6 +273,7 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
         seed.Set<AdapterDefinition>().Add(Definition("vendor"));
         AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "success"), 2);
         AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "failed"), 1);
+        AddDurationCounter(seed, AdapterCounterKeys.Total("vendor", AdapterCounterKeys.DurationToken), 60);
         seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10));
         seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Failed, durationMs: 30));
         await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -388,7 +393,7 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
         // Back the always-registered query service with the fixture database so the real route templates,
         // binding, and JSON serialization in WarpEndpoints are exercised end-to-end (not the service alone).
         var fixture = _fixture;
-        builder.Services.AddScoped<IAdapterQueryService>(_ => new AdapterQueryService<TestContext>(fixture.CreateContext(), TimeProvider.System));
+        builder.Services.AddScoped<IAdapterQueryService>(_ => new AdapterQueryService<TestContext>(fixture.CreateContext()));
 
         var app = builder.Build();
         app.MapWarpApiEndpoints(new WarpUIOptions(), []);
@@ -454,5 +459,13 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
         }
     }
 
-    private AdapterQueryService<TestContext> CreateService() => new(_fixture.CreateContext(), TimeProvider.System);
+    // The duration-sum counter in milliseconds that backs average latency for Item 2. One row carrying the
+    // summed milliseconds, which the query divides by the outcome-count total (all from aggregates) so that
+    // average latency survives call-log deletion.
+    private static void AddDurationCounter(TestContext context, string key, int totalMs)
+    {
+        context.Set<Counter>().Add(new Counter { Key = key, Value = totalMs });
+    }
+
+    private AdapterQueryService<TestContext> CreateService() => new(_fixture.CreateContext());
 }

@@ -137,12 +137,90 @@ public abstract class AdapterCleanupTestsBase : IAsyncLifetime
         (await CallLogExistsAsync("alive")).ShouldBeTrue();
     }
 
-    private ExpirationCleanup<TestContext> CreateCleanup(TimeSpan? orphanGrace = null, int? batchSize = null)
+    [TimedFact]
+    public async Task CleanupByCount_PerAdapterOverride_KeepsNewestN()
+    {
+        await InsertDefinitionAsync("hot", DateTime.UtcNow, retentionCount: 2);
+        for (var i = 0; i < 5; i++)
+        {
+            await InsertCallLogAsync("hot", expireAt: null, timestamp: DateTime.UtcNow.AddMinutes(-10 + i));
+        }
+
+        var deleted = await CreateCleanup().CleanupAdapterCallLogsByCountAsync(Ct);
+
+        deleted.ShouldBe(3);
+        (await CallLogCountAsync("hot")).ShouldBe(2);
+    }
+
+    [TimedFact]
+    public async Task CleanupByCount_GlobalCap_AppliedWhenNoOverride()
+    {
+        await InsertDefinitionAsync("warm", DateTime.UtcNow);
+        for (var i = 0; i < 5; i++)
+        {
+            await InsertCallLogAsync("warm", expireAt: null, timestamp: DateTime.UtcNow.AddMinutes(-10 + i));
+        }
+
+        var deleted = await CreateCleanup(callLogRetentionCount: 3).CleanupAdapterCallLogsByCountAsync(Ct);
+
+        deleted.ShouldBe(2);
+        (await CallLogCountAsync("warm")).ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task CleanupByCount_PerAdapterOverride_BeatsGlobal()
+    {
+        await InsertDefinitionAsync("special", DateTime.UtcNow, retentionCount: 1);
+        for (var i = 0; i < 4; i++)
+        {
+            await InsertCallLogAsync("special", expireAt: null, timestamp: DateTime.UtcNow.AddMinutes(-10 + i));
+        }
+
+        await CreateCleanup(callLogRetentionCount: 10).CleanupAdapterCallLogsByCountAsync(Ct);
+
+        (await CallLogCountAsync("special")).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task CleanupByCount_NoCapConfigured_KeepsAll()
+    {
+        await InsertDefinitionAsync("unbounded", DateTime.UtcNow);
+        for (var i = 0; i < 4; i++)
+        {
+            await InsertCallLogAsync("unbounded", expireAt: null);
+        }
+
+        var deleted = await CreateCleanup().CleanupAdapterCallLogsByCountAsync(Ct);
+
+        deleted.ShouldBe(0);
+        (await CallLogCountAsync("unbounded")).ShouldBe(4);
+    }
+
+    [TimedFact]
+    public async Task CleanupByCount_DeletesOldestByTimestamp_KeepsNewest()
+    {
+        await InsertDefinitionAsync("ordered", DateTime.UtcNow, retentionCount: 1);
+        await InsertCallLogAsync("ordered", expireAt: null, timestamp: DateTime.UtcNow.AddMinutes(-5), operation: "old");
+        await InsertCallLogAsync("ordered", expireAt: null, timestamp: DateTime.UtcNow.AddMinutes(-1), operation: "new");
+
+        await CreateCleanup().CleanupAdapterCallLogsByCountAsync(Ct);
+
+        var remaining = await _fixture.CreateContext().Set<AdapterCallLog>()
+            .Where(x => x.AdapterName == "ordered")
+            .Select(x => x.Operation)
+            .ToListAsync(Ct);
+        remaining.ShouldHaveSingleItem().ShouldBe("new");
+    }
+
+    private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
+
+    private ExpirationCleanup<TestContext> CreateCleanup(TimeSpan? orphanGrace = null, int? batchSize = null, int? callLogRetentionCount = null)
     {
         var configuration = new WarpServerConfiguration
         {
             AdapterDefinitionOrphanGrace = orphanGrace ?? TimeSpan.FromMinutes(2),
             ExpirationBatchSize = batchSize ?? new WarpServerConfiguration().ExpirationBatchSize,
+            AdapterCallLogRetentionCount = callLogRetentionCount,
         };
 
         return new ExpirationCleanup<TestContext>(
@@ -151,14 +229,14 @@ public abstract class AdapterCleanupTestsBase : IAsyncLifetime
             Options.Create(configuration));
     }
 
-    private async Task InsertCallLogAsync(string adapterName, DateTime? expireAt)
+    private async Task InsertCallLogAsync(string adapterName, DateTime? expireAt, DateTime? timestamp = null, string operation = "GetOrders")
     {
         var ctx = _fixture.CreateContext();
         ctx.Set<AdapterCallLog>().Add(new AdapterCallLog
         {
             AdapterName = adapterName,
-            Operation = "GetOrders",
-            Timestamp = DateTime.UtcNow,
+            Operation = operation,
+            Timestamp = timestamp ?? DateTime.UtcNow,
             DurationMs = 5,
             Attempts = 1,
             Outcome = AdapterCallOutcome.Success,
@@ -169,7 +247,7 @@ public abstract class AdapterCleanupTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
     }
 
-    private async Task InsertDefinitionAsync(string name, DateTime lastSeenAt)
+    private async Task InsertDefinitionAsync(string name, DateTime lastSeenAt, int? retentionCount = null)
     {
         var ctx = _fixture.CreateContext();
         ctx.Set<AdapterDefinition>().Add(new AdapterDefinition
@@ -177,9 +255,16 @@ public abstract class AdapterCleanupTestsBase : IAsyncLifetime
             Name = name,
             FirstSeenAt = lastSeenAt,
             LastSeenAt = lastSeenAt,
+            CallLogRetentionCount = retentionCount,
         });
 
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+    }
+
+    private async Task<int> CallLogCountAsync(string adapterName)
+    {
+        return await _fixture.CreateContext().Set<AdapterCallLog>()
+            .CountAsync(x => x.AdapterName == adapterName, Xunit.TestContext.Current.CancellationToken);
     }
 
     private async Task<bool> CallLogExistsAsync(string adapterName)

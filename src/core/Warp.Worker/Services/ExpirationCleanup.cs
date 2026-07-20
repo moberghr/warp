@@ -50,8 +50,10 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupBackgroundServiceLogsAsync(ct);
         await CleanupOrphanedBackgroundServiceDefinitionsAsync(ct);
         await CleanupExpiredAdapterCallLogsAsync(ct);
+        await CleanupAdapterCallLogsByCountAsync(ct);
         await CleanupOrphanedAdapterDefinitionsAsync(ct);
         await CleanupExpiredWebhookDeliveriesAsync(ct);
+        await CleanupWebhookDeliveriesByCountAsync(ct);
 
         var total = timeExpired + countCleaned;
         if (total == 0)
@@ -377,6 +379,66 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         return total;
     }
 
+    // Count cap for AdapterCallLog: keep at most N rows per adapter (per-adapter override persisted on
+    // AdapterDefinition.CallLogRetentionCount, else the global AdapterCallLogRetentionCount), deleting the
+    // oldest by Timestamp beyond the cap. Complements the age sweep — a hot adapter is bounded by row count
+    // between age ticks. Iterates definitions (every adapter that writes logs has one), so cleanup needs no
+    // access to the in-memory registry. Per-adapter batched delete, capped by MaxSweepBatchesPerTick.
+    internal async Task<int> CleanupAdapterCallLogsByCountAsync(CancellationToken ct)
+    {
+        var globalCap = _configuration.AdapterCallLogRetentionCount;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var total = 0;
+
+        var definitions = await _context.Set<AdapterDefinition>()
+            .Select(x => new { x.Name, x.CallLogRetentionCount })
+            .ToListAsync(ct);
+
+        foreach (var definition in definitions)
+        {
+            var cap = definition.CallLogRetentionCount ?? globalCap;
+            if (cap is null)
+            {
+                continue;
+            }
+
+            var name = definition.Name;
+            var batches = 0;
+
+            while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+            {
+                batches++;
+                var count = await _context.Set<AdapterCallLog>()
+                    .Where(x => x.AdapterName == name)
+                    .CountAsync(ct);
+
+                if (count <= cap.Value)
+                {
+                    break;
+                }
+
+                var toDelete = Math.Min(count - cap.Value, batchSize);
+                var ids = await _context.Set<AdapterCallLog>()
+                    .Where(x => x.AdapterName == name)
+                    .OrderBy(x => x.Timestamp)
+                    .Select(x => x.Id)
+                    .Take(toDelete)
+                    .ToListAsync(ct);
+
+                if (ids.Count == 0)
+                {
+                    break;
+                }
+
+                total += await _context.Set<AdapterCallLog>()
+                    .Where(x => ids.Contains(x.Id))
+                    .ExecuteDeleteAsync(ct);
+            }
+        }
+
+        return total;
+    }
+
     // Deletes AdapterDefinition rows whose LastSeenAt is older than the orphan grace. Adapters run in
     // non-server processes, so there is no live-instance signal (unlike background services) — staleness
     // alone drives removal. The flusher lazily refreshes LastSeenAt while an adapter is in use, so a
@@ -432,6 +494,55 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             {
                 break;
             }
+        }
+
+        return total;
+    }
+
+    // Count cap for WebhookDelivery: keep at most N settled (non-Pending) rows globally
+    // (WebhookDeliveryRetentionCount), deleting the oldest by CreatedAt beyond the cap. Complements the age
+    // sweep. Pending deliveries are never count-trimmed — they still own live scheduled work. Batched,
+    // capped by MaxSweepBatchesPerTick.
+    internal async Task<int> CleanupWebhookDeliveriesByCountAsync(CancellationToken ct)
+    {
+        var cap = _configuration.WebhookDeliveryRetentionCount;
+        if (cap is null)
+        {
+            return 0;
+        }
+
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var count = await _context.Set<WebhookDelivery>()
+                .Where(x => x.Status != WebhookDeliveryStatus.Pending)
+                .CountAsync(ct);
+
+            if (count <= cap.Value)
+            {
+                break;
+            }
+
+            var toDelete = Math.Min(count - cap.Value, batchSize);
+            var ids = await _context.Set<WebhookDelivery>()
+                .Where(x => x.Status != WebhookDeliveryStatus.Pending)
+                .OrderBy(x => x.CreatedAt)
+                .Select(x => x.Id)
+                .Take(toDelete)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<WebhookDelivery>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
         }
 
         return total;

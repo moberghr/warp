@@ -26,6 +26,14 @@ public class AdapterDefinition
     public string? ConfigSummary { get; set; }
 
     /// <summary>
+    /// Effective per-adapter call-log <b>count</b> cap, persisted from the registered
+    /// <c>WarpAdapterOptions.CallLogRetentionCount</c> so <c>ExpirationCleanup</c> (which runs on a server
+    /// that may not have registered this adapter) can enforce it without the in-memory registry. Null falls
+    /// back to <c>WarpConfiguration.AdapterCallLogRetentionCount</c>.
+    /// </summary>
+    public int? CallLogRetentionCount { get; set; }
+
+    /// <summary>
     /// Dashboard display label for the group dimension (e.g. "Endpoint", "Shop"), persisted from the
     /// registered <c>WarpAdapterOptions.GroupLabel</c> so dashboard-only processes (which never touch the
     /// in-memory registry) can render it. Null falls back to "Group".

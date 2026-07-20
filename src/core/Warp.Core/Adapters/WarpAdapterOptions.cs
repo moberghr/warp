@@ -35,6 +35,13 @@ public sealed class WarpAdapterOptions
     public TimeSpan? CallLogRetention { get; set; }
 
     /// <summary>
+    /// Per-adapter override of the global <c>WarpConfiguration.AdapterCallLogRetentionCount</c> (keep at most
+    /// this many call-log rows for this adapter, deleting the oldest beyond the cap); null uses the global
+    /// value. Applied on top of the age cap — a row is removed once it exceeds either limit.
+    /// </summary>
+    public int? CallLogRetentionCount { get; set; }
+
+    /// <summary>
     /// Case-insensitive header denylist whose values are stored as <c>***</c> when headers are
     /// captured. Fully user-owned (§1.2): prepopulated with the common credential-bearing headers,
     /// but callers may <c>Add</c>/<c>Remove</c>/<c>Clear</c> freely.

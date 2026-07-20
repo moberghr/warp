@@ -36,6 +36,18 @@ public abstract class AdapterCounterTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Persist_WritesDurationSumCounters_ForLatencyAggregate()
+    {
+        // Item 2 write side: the flusher emits a duration-SUM counter (the "dur" token) per adapter +
+        // operation (+ group when present) so average latency is aggregate-backed. Value is the rounded ms.
+        await PersistAsync(Record("vendor", "GetOrders", AdapterCallOutcome.Success, group: "shop-1", durationMs: 42.4));
+
+        (await CounterValueAsync(AdapterCounterKeys.Total("vendor", AdapterCounterKeys.DurationToken))).ShouldBe(42);
+        (await CounterValueAsync(AdapterCounterKeys.Operation("vendor", "GetOrders", AdapterCounterKeys.DurationToken))).ShouldBe(42);
+        (await CounterValueAsync(AdapterCounterKeys.Group("vendor", "shop-1", AdapterCounterKeys.DurationToken))).ShouldBe(42);
+    }
+
+    [TimedFact]
     public async Task Persist_PerGroupCounter_IncludesSuccessOutcome()
     {
         await PersistAsync(Record("vendor", "Deliver", AdapterCallOutcome.Success, group: "shop-1"));
@@ -97,14 +109,14 @@ public abstract class AdapterCounterTestsBase : IAsyncLifetime
         definition.GroupLabel.ShouldBe("Endpoint");
     }
 
-    private static AdapterCallRecord Record(string adapter, string operation, AdapterCallOutcome outcome, string? group = null)
+    private static AdapterCallRecord Record(string adapter, string operation, AdapterCallOutcome outcome, string? group = null, double durationMs = 5)
         => new()
         {
             AdapterName = adapter,
             Operation = operation,
             GroupName = group,
             Timestamp = DateTime.UtcNow,
-            DurationMs = 5,
+            DurationMs = durationMs,
             Attempts = 1,
             Outcome = outcome,
             MachineName = "test-host",

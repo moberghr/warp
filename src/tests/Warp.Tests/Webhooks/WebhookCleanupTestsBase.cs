@@ -98,16 +98,61 @@ public abstract class WebhookCleanupTestsBase : IAsyncLifetime
         (await _fixture.CreateContext().Set<WebhookDelivery>().CountAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBe(1);
     }
 
-    private ExpirationCleanup<TestContext> CreateCleanup(int? batchSize = null)
+    [TimedFact]
+    public async Task CleanupByCount_KeepsNewestSettled_DeletesOldest()
+    {
+        for (var i = 0; i < 5; i++)
+        {
+            await InsertDeliveryAsync(expireAt: null, createdAt: DateTime.UtcNow.AddMinutes(-10 + i));
+        }
+
+        var deleted = await CreateCleanup(retentionCount: 2).CleanupWebhookDeliveriesByCountAsync(Ct);
+
+        deleted.ShouldBe(3);
+        (await _fixture.CreateContext().Set<WebhookDelivery>().CountAsync(Ct)).ShouldBe(2);
+    }
+
+    [TimedFact]
+    public async Task CleanupByCount_PendingNeverCountTrimmed()
+    {
+        // Pending rows still own live scheduled work — the count sweep only trims settled deliveries.
+        var pending = await InsertDeliveryAsync(expireAt: null, status: WebhookDeliveryStatus.Pending);
+        await InsertDeliveryAsync(expireAt: null, status: WebhookDeliveryStatus.Delivered);
+        await InsertDeliveryAsync(expireAt: null, status: WebhookDeliveryStatus.Delivered);
+
+        await CreateCleanup(retentionCount: 1).CleanupWebhookDeliveriesByCountAsync(Ct);
+
+        (await DeliveryExistsAsync(pending)).ShouldBeTrue();
+        (await _fixture.CreateContext().Set<WebhookDelivery>().CountAsync(Ct)).ShouldBe(2);
+    }
+
+    [TimedFact]
+    public async Task CleanupByCount_NoCapConfigured_KeepsAll()
+    {
+        for (var i = 0; i < 3; i++)
+        {
+            await InsertDeliveryAsync(expireAt: null);
+        }
+
+        var deleted = await CreateCleanup().CleanupWebhookDeliveriesByCountAsync(Ct);
+
+        deleted.ShouldBe(0);
+        (await _fixture.CreateContext().Set<WebhookDelivery>().CountAsync(Ct)).ShouldBe(3);
+    }
+
+    private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
+
+    private ExpirationCleanup<TestContext> CreateCleanup(int? batchSize = null, int? retentionCount = null)
         => new(
             new TestServerContext(_fixture.CreateContext()),
             TimeProvider.System,
             Options.Create(new WarpServerConfiguration
             {
                 ExpirationBatchSize = batchSize ?? new WarpServerConfiguration().ExpirationBatchSize,
+                WebhookDeliveryRetentionCount = retentionCount,
             }));
 
-    private async Task<Guid> InsertDeliveryAsync(DateTime? expireAt, WebhookDeliveryStatus status = WebhookDeliveryStatus.Delivered)
+    private async Task<Guid> InsertDeliveryAsync(DateTime? expireAt, WebhookDeliveryStatus status = WebhookDeliveryStatus.Delivered, DateTime? createdAt = null)
     {
         var ctx = _fixture.CreateContext();
         var delivery = new WebhookDelivery
@@ -120,7 +165,7 @@ public abstract class WebhookCleanupTestsBase : IAsyncLifetime
             SigningMode = WebhookSigning.None,
             RetrySchedule = [],
             Status = status,
-            CreatedAt = DateTime.UtcNow,
+            CreatedAt = createdAt ?? DateTime.UtcNow,
             ExpireAt = expireAt,
         };
 
