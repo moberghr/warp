@@ -231,14 +231,26 @@ public abstract class WebhookCommandServiceTestsBase : IntegrationTestBase
 
     private Task<WarpTestServer> StartServerAsync()
     {
-        // Worker polls only "default"; the redelivered job lands on "warp:webhooks" and is never consumed,
-        // so it stays Enqueued for the assertion.
         return WarpTestServer.StartAsync(
             Fixture,
             configure: cfg =>
             {
-                cfg.Queues = ["default"];
                 cfg.AddWebhooks();
+
+                // AddWebhooks appends "warp:webhooks" to the worker's queue list, so set the poll list
+                // AFTER it: the worker then polls only "default" and the redelivered executor job lands on
+                // "warp:webhooks" and is never consumed, staying Enqueued for the assertion. (Setting Queues
+                // before AddWebhooks left "warp:webhooks" in the list, so under load the worker picked up and
+                // re-ran the job — flipping AttemptCount off 0 and the webhooks-queue job count off 1.)
+                cfg.Queues = ["default"];
+
+                // These tests hand-seed delivery rows (Redeliver_SettledDelivery_RefreshesExpireAt seeds one
+                // already past ExpireAt) and assert exact row/job state. Disable the maintenance tasks that
+                // would otherwise delete or advance them: ExpirationCleanup (60s default — fires during a
+                // full-suite CI run and swept the past-expiry seed row, so Redeliver returned NotFound) and
+                // StaleJobRecovery (the webhook stuck-delivery sweep).
+                cfg.ExpirationCleanupInterval = null;
+                cfg.StaleJobRecoveryInterval = null;
             });
     }
 
