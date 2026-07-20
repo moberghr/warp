@@ -128,6 +128,22 @@ public class WarpConfiguration
     public int? WebhookDeliveryRetentionCount { get; set; }
 
     /// <summary>
+    /// Global default retention for <c>EndpointCallLog</c> rows (inbound endpoint observability). The
+    /// inbound middleware stamps each row's <c>ExpireAt</c> at <c>Timestamp + retention</c>;
+    /// <c>ExpirationCleanup</c> deletes rows past <c>ExpireAt</c>. Same lossy, bounded stance as
+    /// <c>AdapterCallLog</c> — diagnostics, not an audit trail.
+    /// </summary>
+    public TimeSpan EndpointCallLogRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// Global <b>count</b> cap for <c>EndpointCallLog</c> rows — keep at most this many rows per endpoint
+    /// (method + route template), deleting the oldest beyond the cap. Complements the age cap
+    /// (<see cref="EndpointCallLogRetention"/>): a row is removed once it exceeds <b>either</b> limit.
+    /// <c>null</c> (default) disables the count cap.
+    /// </summary>
+    public int? EndpointCallLogRetentionCount { get; set; }
+
+    /// <summary>
     /// How far past its <c>NextAttemptAt</c> a <c>Pending</c> <c>WebhookDelivery</c> must be before the
     /// stuck-delivery sweep (part of <c>StaleJobRecovery</c>) re-enqueues an executor job for it. A row
     /// only reaches this state when the executor's outcome commit faulted after the attempt claim — the

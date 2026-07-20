@@ -329,6 +329,7 @@ export interface WarpAddonsInfo {
   push: boolean;
   sagas: boolean;
   adapters: boolean;
+  endpoints: boolean;
   webhooks: boolean;
 }
 

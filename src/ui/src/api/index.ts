@@ -2,6 +2,7 @@ import axios from 'axios';
 import api from './client';
 import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
 import type { AdapterListItem, AdapterDetail, AdapterCallDetail } from '@/types/adapters';
+import type { EndpointListItem, EndpointDetail, EndpointCallDetail } from '@/types/endpoints';
 import type {
   WebhookDeliveryListItem,
   WebhookDeliveryDetail,
@@ -209,6 +210,18 @@ export const getAdapterDetail = (name: string) =>
 
 export const getAdapterCall = (name: string, id: string) =>
   api.get<AdapterCallDetail>(`/adapters/${encodeURIComponent(name)}/calls/${encodeURIComponent(id)}`).then(r => r.data);
+
+// Endpoints — inbound HTTP request observability, the mirror of adapters. Nav gated on
+// addons.endpoints; the query endpoints themselves are always registered (dashboard-only
+// processes resolve them).
+export const getEndpoints = () =>
+  api.get<EndpointListItem[]>('/endpoints').then(r => r.data);
+
+export const getEndpointDetail = (id: string) =>
+  api.get<EndpointDetail>(`/endpoints/${encodeURIComponent(id)}`).then(r => r.data);
+
+export const getEndpointCall = (id: string, callId: string) =>
+  api.get<EndpointCallDetail>(`/endpoints/${encodeURIComponent(id)}/calls/${encodeURIComponent(callId)}`).then(r => r.data);
 
 // Webhooks — durable outbound delivery. Nav gated on addons.webhooks (IWebhookRedeliveryEnqueuer
 // presence); the query endpoints themselves are always registered (dashboard-only processes resolve

@@ -14,5 +14,7 @@ public sealed class WarpAddonsInfo
 
     public bool Adapters { get; init; }
 
+    public bool Endpoints { get; init; }
+
     public bool Webhooks { get; init; }
 }

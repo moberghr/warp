@@ -5,6 +5,7 @@ using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Concurrency;
+using Warp.Core.Endpoints;
 using Warp.Core.Enums;
 using Warp.Core.Models;
 using Warp.Core.RateLimit;
@@ -142,6 +143,7 @@ public static class WarpEndpoints
             [FromServices] IDashboardPushMarker? push,
             [FromServices] ISagaQueryService? sagas,
             [FromServices] IWarpAdapters? adapters,
+            [FromServices] IEndpointCallRecorder? endpoints,
             [FromServices] IWebhookRedeliveryEnqueuer? webhooks) =>
             Results.Ok(new WarpAddonsInfo
             {
@@ -153,6 +155,11 @@ public static class WarpEndpoints
                 // IWarpAdapters is registered only by AddAdapters(); IAdapterQueryService (always
                 // registered by AddWarp for dashboard-only processes) can't gate the flag.
                 Adapters = adapters is not null,
+
+                // IEndpointCallRecorder is registered only by AddEndpointObservability(); IEndpointQueryService
+                // (always registered by AddWarp for dashboard-only processes) can't gate the flag. The
+                // endpoints nav shows only where inbound requests are actually being recorded.
+                Endpoints = endpoints is not null,
 
                 // IWebhookRedeliveryEnqueuer is registered only by AddWebhooks(); IWebhookQueryService /
                 // IWebhookCommandService (always registered by AddWarp for dashboard-only processes) can't
@@ -494,6 +501,36 @@ public static class WarpEndpoints
             }
 
             var detail = await svc.GetCallDetail(name, id, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        // Endpoints — inbound endpoint observability. IEndpointQueryService is always registered by AddWarp
+        // (dashboard-only processes resolve it); the sidebar nav is gated on the addons flag
+        // (IEndpointCallRecorder presence), not on a 404. The {id} is the URL-safe encoded route identity.
+        apiGroup.MapGet("endpoints", async ([FromServices] IEndpointQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetEndpoints(ct)));
+
+        apiGroup.MapGet("endpoints/{id}", async ([FromServices] IEndpointQueryService svc, string id, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                return Results.BadRequest();
+            }
+
+            var detail = await svc.GetEndpointDetail(id, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        apiGroup.MapGet("endpoints/{id}/calls/{callId}", async ([FromServices] IEndpointQueryService svc, string id, Guid callId, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                return Results.BadRequest();
+            }
+
+            var detail = await svc.GetCallDetail(id, callId, ct);
 
             return detail is null ? Results.NotFound() : Results.Ok(detail);
         });

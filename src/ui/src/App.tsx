@@ -28,6 +28,8 @@ const BackgroundServicesList = lazy(() => import('@/pages/BackgroundServices/Lis
 const BackgroundServiceDetail = lazy(() => import('@/pages/BackgroundServices/Detail'));
 const AdaptersPage = lazy(() => import('@/pages/adapters/AdaptersPage'));
 const AdapterDetailPage = lazy(() => import('@/pages/adapters/AdapterDetailPage'));
+const EndpointsPage = lazy(() => import('@/pages/endpoints/EndpointsPage'));
+const EndpointDetailPage = lazy(() => import('@/pages/endpoints/EndpointDetailPage'));
 const WebhooksPage = lazy(() => import('@/pages/webhooks/WebhooksPage'));
 const WebhookDetailPage = lazy(() => import('@/pages/webhooks/WebhookDetailPage'));
 const WorkerDetailPage = lazy(() => import('@/pages/workers/WorkerDetailPage'));
@@ -132,6 +134,8 @@ function App() {
             <Route path="/services" element={<BackgroundServicesList />} />
             <Route path="/adapters/:name" element={<AdapterDetailPage />} />
             <Route path="/adapters" element={<AdaptersPage />} />
+            <Route path="/endpoints/:id" element={<EndpointDetailPage />} />
+            <Route path="/endpoints" element={<EndpointsPage />} />
             <Route path="/webhooks/:id" element={<WebhookDetailPage />} />
             <Route path="/webhooks" element={<WebhooksPage />} />
 

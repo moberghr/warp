@@ -17,6 +17,7 @@ using Warp.Core.Retry;
 using Warp.Core.Sagas;
 using Warp.Demo.ServiceDefaults;
 using Warp.Http;
+using Warp.Http.Observability;
 using Warp.Provider.PostgreSql;
 using Warp.Test.Shared;
 using Warp.Test.Shared.Entities;
@@ -163,6 +164,32 @@ builder.Services.AddWarpServer<TestContext>(options =>
 
     // === Durable outbound webhooks — order.paid / order.shipped delivered to subscribers, tracked to done ===
     options.AddWebhooks(w => w.OnDeliveryExhausted<OrderWebhookExhaustedHandler>());
+
+    // === Inbound endpoint observability — who calls OUR Warp HTTP endpoints (the inbound mirror of adapters) ===
+    // Records IP / user-agent / user + duration + status per request to MapWarpHttp endpoints. Request bodies
+    // always captured (demo), response bodies on failure. Group by user-agent family so the per-caller table
+    // shows a real browser/curl/other split without a high-cardinality dimension.
+    options.AddEndpointObservability(o =>
+    {
+        o.CaptureRequestBodies = CaptureMode.Always;
+        o.CaptureResponseBodies = CaptureMode.OnFailure;
+        o.CaptureHeaders = CaptureMode.OnFailure;
+        o.GroupSelector = ctx =>
+        {
+            var ua = ctx.Request.Headers.UserAgent.ToString();
+            if (ua.Contains("curl", StringComparison.OrdinalIgnoreCase))
+            {
+                return "curl";
+            }
+
+            if (ua.Contains("Mozilla", StringComparison.OrdinalIgnoreCase))
+            {
+                return "browser";
+            }
+
+            return string.IsNullOrEmpty(ua) ? null : "other";
+        };
+    });
 });
 builder.Services.AddSagaHandler<OrderSagaWorkflow>();
 
@@ -176,6 +203,11 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+
+// Explicit routing so the inbound observability middleware (below) sees the matched endpoint + its
+// WarpEndpointIdentity — it no-ops for anything that isn't a MapWarpHttp endpoint (dashboard, controllers).
+app.UseRouting();
+app.UseWarpHttpObservability();
 
 app.UseCors();
 app.UseAuthentication();

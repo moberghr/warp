@@ -19,6 +19,7 @@ import {
   GitBranch,
   Activity,
   Cable,
+  ArrowDownToLine,
   Webhook,
   Menu,
   X,
@@ -46,6 +47,7 @@ const concurrencyNavItem = { to: '/concurrency', label: 'Concurrency', icon: Key
 const rateLimitsNavItem = { to: '/ratelimits', label: 'Rate Limits', icon: Timer };
 const sagasNavItem = { to: '/sagas', label: 'Sagas', icon: GitBranch };
 const adaptersNavItem = { to: '/adapters', label: 'Adapters', icon: Cable };
+const endpointsNavItem = { to: '/endpoints', label: 'Endpoints', icon: ArrowDownToLine };
 const webhooksNavItem = { to: '/webhooks', label: 'Webhooks', icon: Webhook };
 const servicesNavItem = { to: '/services', label: 'Services', icon: Activity };
 
@@ -74,6 +76,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   const [rateLimitsAvailable, setRateLimitsAvailable] = useState(false);
   const [sagasAvailable, setSagasAvailable] = useState(false);
   const [adaptersAvailable, setAdaptersAvailable] = useState(false);
+  const [endpointsAvailable, setEndpointsAvailable] = useState(false);
   const [webhooksAvailable, setWebhooksAvailable] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -128,6 +131,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         setRateLimitsAvailable(addons.rateLimits);
         setSagasAvailable(addons.sagas);
         setAdaptersAvailable(addons.adapters);
+        setEndpointsAvailable(addons.endpoints);
         setWebhooksAvailable(addons.webhooks);
         void useRealtimeStore.getState().connectIfEnabled(addons.push);
       })
@@ -137,6 +141,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         setRateLimitsAvailable(false);
         setSagasAvailable(false);
         setAdaptersAvailable(false);
+        setEndpointsAvailable(false);
         setWebhooksAvailable(false);
         void useRealtimeStore.getState().connectIfEnabled(false);
       });
@@ -156,6 +161,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
     ...(rateLimitsAvailable ? [rateLimitsNavItem] : []),
     ...(sagasAvailable ? [sagasNavItem] : []),
     ...(adaptersAvailable ? [adaptersNavItem] : []),
+    ...(endpointsAvailable ? [endpointsNavItem] : []),
     ...(webhooksAvailable ? [webhooksNavItem] : []),
     servicesNavItem,
     ...extensions.flatMap((ext) =>

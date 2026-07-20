@@ -54,6 +54,8 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupOrphanedAdapterDefinitionsAsync(ct);
         await CleanupExpiredWebhookDeliveriesAsync(ct);
         await CleanupWebhookDeliveriesByCountAsync(ct);
+        await CleanupExpiredEndpointCallLogsAsync(ct);
+        await CleanupEndpointCallLogsByCountAsync(ct);
 
         var total = timeExpired + countCleaned;
         if (total == 0)
@@ -373,6 +375,104 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             if (ids.Count < batchSize)
             {
                 break;
+            }
+        }
+
+        return total;
+    }
+
+    // Deletes EndpointCallLog rows past their stamped ExpireAt (inbound endpoint observability). Same
+    // batched, MaxSweepBatchesPerTick-capped shape as the adapter call-log sweep.
+    internal async Task<int> CleanupExpiredEndpointCallLogsAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var ids = await _context.Set<EndpointCallLog>()
+                .Where(x => x.ExpireAt != null)
+                .Where(x => x.ExpireAt < now)
+                .Select(x => x.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<EndpointCallLog>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+
+            if (ids.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // Global count cap for EndpointCallLog: keep at most N rows per endpoint (method + route template),
+    // deleting the oldest by Timestamp beyond the cap. Distinct endpoints come from the log itself (there
+    // is no endpoint-definition table — the inbound feature discovers endpoints from traffic).
+    internal async Task<int> CleanupEndpointCallLogsByCountAsync(CancellationToken ct)
+    {
+        var cap = _configuration.EndpointCallLogRetentionCount;
+        if (cap is null)
+        {
+            return 0;
+        }
+
+        var batchSize = _configuration.ExpirationBatchSize;
+        var total = 0;
+
+        var endpoints = await _context.Set<EndpointCallLog>()
+            .Select(x => new { x.Method, x.RouteTemplate })
+            .Distinct()
+            .ToListAsync(ct);
+
+        foreach (var endpoint in endpoints)
+        {
+            var method = endpoint.Method;
+            var route = endpoint.RouteTemplate;
+            var batches = 0;
+
+            while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+            {
+                batches++;
+                var count = await _context.Set<EndpointCallLog>()
+                    .Where(x => x.Method == method)
+                    .Where(x => x.RouteTemplate == route)
+                    .CountAsync(ct);
+
+                if (count <= cap.Value)
+                {
+                    break;
+                }
+
+                var toDelete = Math.Min(count - cap.Value, batchSize);
+                var ids = await _context.Set<EndpointCallLog>()
+                    .Where(x => x.Method == method)
+                    .Where(x => x.RouteTemplate == route)
+                    .OrderBy(x => x.Timestamp)
+                    .Select(x => x.Id)
+                    .Take(toDelete)
+                    .ToListAsync(ct);
+
+                if (ids.Count == 0)
+                {
+                    break;
+                }
+
+                total += await _context.Set<EndpointCallLog>()
+                    .Where(x => ids.Contains(x.Id))
+                    .ExecuteDeleteAsync(ct);
             }
         }
 

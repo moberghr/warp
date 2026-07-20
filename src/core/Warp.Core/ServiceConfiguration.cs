@@ -105,6 +105,12 @@ public static class ServiceConfiguration
         // in the schema (§2.11); AddAdapters() gates recording services + the addons flag only.
         services.TryAddScoped<IAdapterQueryService, AdapterQueryService<TContext>>();
 
+        // Inbound endpoint observability dashboard read service. Registered in AddWarp (not
+        // AddEndpointObservability) so dashboard-only / publisher-only processes can serve /api/endpoints
+        // without running the middleware. The EndpointCallLog table is always in the schema (§2.11), so
+        // AddEndpointObservability() gates only the recorder/flusher/middleware plus the addons flag.
+        services.TryAddScoped<IEndpointQueryService, EndpointQueryService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
@@ -259,6 +265,7 @@ public static class ServiceConfiguration
         AddAdapterDefinitionEntity(modelBuilder, schema);
         AddAdapterCallLogEntity(modelBuilder, schema);
         AddWebhookDeliveryEntity(modelBuilder, schema);
+        AddEndpointCallLogEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -766,6 +773,43 @@ public static class ServiceConfiguration
 
         // Domain-record lookup by correlation id (e.g. webhook delivery attempts).
         log.HasIndex(p => new { p.AdapterName, p.CorrelationId });
+
+        // ExpirationCleanup range scan on expiry.
+        log.HasIndex(p => p.ExpireAt);
+
+        log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddEndpointCallLogEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var log = modelBuilder.Entity<EndpointCallLog>();
+
+        log.Property(p => p.Id);
+        log.HasKey(p => p.Id);
+
+        log.Property(p => p.Method).HasMaxLength(16).IsRequired();
+        log.Property(p => p.RouteTemplate).HasMaxLength(1024).IsRequired();
+        log.Property(p => p.Operation).HasMaxLength(200).IsRequired();
+        log.Property(p => p.GroupName).HasMaxLength(200);
+        log.Property(p => p.Timestamp);
+        log.Property(p => p.DurationMs);
+        log.Property(p => p.Outcome).HasConversion<int>();
+        log.Property(p => p.StatusCode);
+        log.Property(p => p.RemoteIp).HasMaxLength(64);
+        log.Property(p => p.UserAgent).HasMaxLength(1024);
+        log.Property(p => p.User).HasMaxLength(256);
+        log.Property(p => p.ExceptionType).HasMaxLength(512);
+        log.Property(p => p.ExceptionMessage).HasMaxLength(4096);
+        log.Property(p => p.RequestHeaders);
+        log.Property(p => p.ResponseHeaders);
+        log.Property(p => p.RequestBody);
+        log.Property(p => p.ResponseBody);
+        log.Property(p => p.MachineName).HasMaxLength(256).IsRequired();
+        log.Property(p => p.TraceId).HasMaxLength(64);
+        log.Property(p => p.ExpireAt);
+
+        // Per-endpoint recent-calls listing (identity = method + route template).
+        log.HasIndex(p => new { p.Method, p.RouteTemplate, p.Timestamp });
 
         // ExpirationCleanup range scan on expiry.
         log.HasIndex(p => p.ExpireAt);
