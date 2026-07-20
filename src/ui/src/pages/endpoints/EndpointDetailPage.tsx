@@ -7,6 +7,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
+import { StateBadge } from '@/components/StateBadge';
+import type { State } from '@/types';
+import type { EndpointRelatedJob } from '@/types/endpoints';
 import * as api from '@/api';
 import { HealthPill, adapterHealth, OutcomeBadge, formatPercent, formatMs } from '../adapters/shared';
 
@@ -97,6 +100,9 @@ export default function EndpointDetailPage() {
         />
         <StatTile label="Avg latency" value={formatMs(detail.avgDurationMs)} />
       </div>
+
+      {/* Latency percentiles from the durable histogram — shown once there is request data */}
+      <LatencyLine detail={detail} />
 
       {/* Callers (groups) — only when calls carry a group; click a row to filter recent calls */}
       {hasGroups && (
@@ -210,6 +216,25 @@ export default function EndpointDetailPage() {
       {selectedCallId && (
         <CallDrawer id={id} callId={selectedCallId} onClose={() => setSelectedCallId(null)} />
       )}
+    </div>
+  );
+}
+
+// Compact latency line under the stat tiles: avg + p90/p95/p99 from the durable histogram. Hidden when
+// there is no data (all zero) so an endpoint with no traffic doesn't show a row of dashes.
+function LatencyLine({
+  detail,
+}: {
+  detail: { avgDurationMs: number; p90DurationMs: number; p95DurationMs: number; p99DurationMs: number };
+}) {
+  if (detail.avgDurationMs <= 0 && detail.p99DurationMs <= 0) {
+    return null;
+  }
+
+  return (
+    <div className="mb-4 -mt-1 text-sm text-muted-foreground">
+      Latency: avg {formatMs(detail.avgDurationMs)} · p90 {formatMs(detail.p90DurationMs)} · p95{' '}
+      {formatMs(detail.p95DurationMs)} · p99 {formatMs(detail.p99DurationMs)}
     </div>
   );
 }
@@ -355,6 +380,10 @@ function CallDrawer({ id, callId, onClose }: { id: string; callId: string; onClo
               headers={call.responseHeaders}
               body={call.responseBody}
             />
+
+            <TagsSection tagsJson={call.tagsJson} />
+
+            <RelatedJobsSection jobs={call.relatedJobs} traceId={call.traceId} />
           </div>
         )}
       </div>
@@ -390,6 +419,77 @@ function PayloadPane({
       )}
     </Pane>
   );
+}
+
+// Custom enrichment tags come from the recorder as a JSON object of string→string. Render defensively —
+// a null/empty or malformed payload skips the whole section rather than crashing.
+function TagsSection({ tagsJson }: { tagsJson: string | null }) {
+  const tags = useMemo(() => parseTags(tagsJson), [tagsJson]);
+  if (tags.length === 0) {
+    return null;
+  }
+
+  return (
+    <Pane title="Tags">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+        {tags.map(([key, value]) => (
+          <div key={key} className="flex gap-2">
+            <span className="text-muted-foreground min-w-24 font-mono text-xs">{key}</span>
+            <span className="font-mono text-xs break-words">{value}</span>
+          </div>
+        ))}
+      </div>
+    </Pane>
+  );
+}
+
+// Jobs enqueued during this request (same trace id) — the request→jobs drill-down. Skipped entirely when
+// no jobs were spawned; a "View full trace" link is shown when the request carried a trace id.
+function RelatedJobsSection({ jobs, traceId }: { jobs: EndpointRelatedJob[]; traceId: string | null }) {
+  if (jobs.length === 0) {
+    return null;
+  }
+
+  return (
+    <Pane title="Related jobs">
+      <div className="space-y-1.5">
+        {jobs.map((job) => (
+          <div key={job.id} className="flex items-center gap-2 text-sm">
+            <Link to={`/detail/${job.id}`} className="font-mono text-xs text-primary hover:underline truncate max-w-56">
+              {job.type ?? job.id}
+            </Link>
+            <StateBadge state={job.state as State} />
+            <span className="font-mono text-xs text-muted-foreground">{job.queue}</span>
+          </div>
+        ))}
+      </div>
+      {traceId && (
+        <div className="mt-2">
+          <Link to={`/trace/${traceId}`} className="text-xs text-primary hover:underline">
+            View full trace →
+          </Link>
+        </div>
+      )}
+    </Pane>
+  );
+}
+
+// Redacted, truncated tags as a JSON object of string→string. A malformed or non-object payload yields
+// no pairs rather than a crash.
+function parseTags(tagsJson: string | null): [string, string][] {
+  if (!tagsJson) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(tagsJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return [];
+    }
+
+    return Object.entries(parsed as Record<string, unknown>).map(([key, value]) => [key, String(value)]);
+  } catch {
+    return [];
+  }
 }
 
 function Pane({ title, children }: { title: string; children: React.ReactNode }) {

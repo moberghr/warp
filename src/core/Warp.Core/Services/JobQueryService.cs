@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
+using Warp.Core.Endpoints;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Models;
@@ -233,6 +234,38 @@ public class JobQueryService<TContext> : IJobQueryService
                 Value = x.Value,
             })
             .ToListAsync();
+
+        // Origin: the inbound HTTP request that started this trace (reverse of the endpoint's
+        // request→jobs drill-down — jobs enqueued during a request share its trace id). Only when
+        // tracing was active (TraceId set); the earliest request row on the trace is the originator.
+        if (job.TraceId is { } traceId)
+        {
+            var origin = await _context.Set<EndpointCallLog>()
+                .AsNoTracking()
+                .Where(x => x.TraceId == traceId)
+                .OrderBy(x => x.Timestamp)
+                .Select(x =>
+                    new
+                    {
+                        x.Id,
+                        x.Method,
+                        x.RouteTemplate,
+                        x.User,
+                    })
+                .FirstOrDefaultAsync();
+
+            if (origin != null)
+            {
+                job.Origin = new JobOriginModel
+                {
+                    Method = origin.Method,
+                    RouteTemplate = origin.RouteTemplate,
+                    User = origin.User,
+                    CallId = origin.Id,
+                    EndpointId = EndpointRouteId.Encode($"{origin.Method} {origin.RouteTemplate}"),
+                };
+            }
+        }
 
         // Parent job details
         var parentJobId = await _context.Set<Job>()

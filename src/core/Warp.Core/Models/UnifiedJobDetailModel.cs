@@ -50,6 +50,9 @@ public class UnifiedJobDetailModel
 
     public List<ContinuationInfo> SpawnedJobs { get; set; } = [];
 
+    // Origin: the inbound HTTP request that started this trace (reverse drill-down)
+    public JobOriginModel? Origin { get; set; }
+
     // Metadata
     [JsonIgnore]
     public string? MetadataJson { get; set; }
@@ -62,4 +65,21 @@ public class UnifiedJobDetailModel
 
     // History
     public List<JobLogModel> Logs { get; set; } = [];
+}
+
+/// <summary>
+/// The inbound HTTP request that originated a job, matched via shared trace id
+/// (the reverse of the request→jobs drill-down on the endpoint detail page).
+/// </summary>
+public sealed class JobOriginModel
+{
+    public string Method { get; set; } = string.Empty;
+
+    public string RouteTemplate { get; set; } = string.Empty;
+
+    public string? User { get; set; }
+
+    public Guid CallId { get; set; }
+
+    public string EndpointId { get; set; } = string.Empty;
 }

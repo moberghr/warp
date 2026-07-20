@@ -56,6 +56,12 @@ export interface EndpointDetail {
   errorCount: number;
   errorRate: number;
   avgDurationMs: number;
+  /** 90th-percentile latency (ms) from the durable histogram; 0 when no data. */
+  p90DurationMs: number;
+  /** 95th-percentile latency (ms) from the durable histogram; 0 when no data. */
+  p95DurationMs: number;
+  /** 99th-percentile latency (ms) from the durable histogram; 0 when no data. */
+  p99DurationMs: number;
   groups: EndpointGroupStat[];
   recentCalls: EndpointCallSummary[];
 }
@@ -81,5 +87,19 @@ export interface EndpointCallDetail {
   requestBody: string | null;
   responseBody: string | null;
   machineName: string;
+  /** W3C trace id (a GUID); links this request to the jobs it spawned. */
   traceId: string | null;
+  /** Custom enrichment tags as a JSON string→string map. */
+  tagsJson: string | null;
+  /** Jobs enqueued during this request (same trace id) — the request→jobs drill-down. */
+  relatedJobs: EndpointRelatedJob[];
+}
+
+/** A job spawned during a request (shares the request's trace id), shown on the call detail. */
+export interface EndpointRelatedJob {
+  id: string;
+  type: string | null;
+  /** Numeric job state (matches the shared State enum). */
+  state: number;
+  queue: string;
 }

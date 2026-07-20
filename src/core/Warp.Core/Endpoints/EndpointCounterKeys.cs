@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
@@ -25,9 +26,25 @@ internal static partial class EndpointCounterKeys
     // not the call Total.
     public const string DurationToken = "dur";
 
+    // Dimension marker for the latency histogram buckets. A pct key is Total-only and has the fixed shape
+    // endpoint:{route}:pct:{upperMs} — parts.Length == 4 with this marker — so TryParse (which only knows
+    // Total at length 3 and grp at length >= 5) never folds it into the count/error StatSet.
+    public const string PctMarker = "pct";
+
+    // Ascending latency-bucket upper bounds (ms); the trailing int.MaxValue is the "> 10000 ms" catch-all
+    // overflow bucket. A single call increments the ONE bucket whose bound is the smallest >= its rounded
+    // ms (see BucketFor); the read side walks these cumulatively to derive p90/p95/p99.
+    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, int.MaxValue];
+
     public static string Total(string route, string outcome) => $"{Prefix}:{route}:{outcome}";
 
     public static string Group(string route, string group, string outcome) => $"{Prefix}:{route}:grp:{group}:{outcome}";
+
+    public static string Pct(string route, int upperMs) => $"{Prefix}:{route}:{PctMarker}:{upperMs.ToString(CultureInfo.InvariantCulture)}";
+
+    // The smallest bucket upper bound that is >= the rounded duration. Buckets is ascending and its last
+    // entry is int.MaxValue, so First always matches (the final entry is the "> 10000 ms" catch-all).
+    public static int BucketFor(int durationMs) => Buckets.First(bound => durationMs <= bound);
 
     public static string OutcomeToken(AdapterCallOutcome outcome) => outcome switch
     {
@@ -81,6 +98,14 @@ internal static partial class EndpointCounterKeys
         }
 
         var marker = parts[2];
+
+        // Latency histogram buckets (endpoint:{route}:pct:{upperMs}) are NOT count/error rows — they are
+        // read separately via TryParsePct. Reject them here so they never pollute the count/error StatSet.
+        if (string.Equals(marker, PctMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         var group = string.Join(':', parts[3..^1]);
         var outcome = parts[^1];
 
@@ -92,6 +117,39 @@ internal static partial class EndpointCounterKeys
         }
 
         return false;
+    }
+
+    // Parses a latency-histogram bucket key (endpoint:{route}:pct:{upperMs}). Returns false for every
+    // other key shape — the disjoint counterpart to TryParse, which rejects pct keys.
+    public static bool TryParsePct(string key, out string route, out int upperMs)
+    {
+        route = string.Empty;
+        upperMs = 0;
+
+        var parts = key.Split(':');
+        if (parts.Length != 4)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], Prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[2], PctMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out upperMs))
+        {
+            return false;
+        }
+
+        route = parts[1];
+
+        return true;
     }
 
     [GeneratedRegex(@"\{(?<name>[^{}:]+):[^{}]*\}", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | RegexOptions.NonBacktracking)]

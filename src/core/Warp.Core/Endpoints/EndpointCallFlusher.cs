@@ -260,6 +260,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
                     ResponseBody = record.ResponseBody,
                     MachineName = record.MachineName,
                     TraceId = record.TraceId,
+                    TagsJson = record.TagsJson,
                     ExpireAt = record.ExpireAt,
                 });
             }
@@ -287,6 +288,11 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
         // ms comfortably fits.
         var durationMs = (int)Math.Round(record.DurationMs, MidpointRounding.AwayFromZero);
         context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.Total(route, EndpointCounterKeys.DurationToken), Value = durationMs });
+
+        // Latency histogram: increment the ONE Total-dimension bucket whose upper bound is the smallest >=
+        // the rounded ms (the read side walks these cumulatively for p90/p95/p99). Total dimension only —
+        // not bucketed per-group — to bound counter volume.
+        context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.Pct(route, EndpointCounterKeys.BucketFor(durationMs)), Value = 1 });
 
         // Per-group counters (successes included) give real per-group error rates. Only written when the
         // request carried a group — group-less requests behave exactly as before.

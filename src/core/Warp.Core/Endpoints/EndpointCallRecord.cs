@@ -66,7 +66,9 @@ public sealed record EndpointCallRecord
 
     public required string MachineName { get; init; }
 
-    public string? TraceId { get; init; }
+    public Guid? TraceId { get; init; }
+
+    public string? TagsJson { get; init; }
 
     /// <summary>
     /// Retention deadline stamped by the caller/middleware; the flusher just persists it onto the

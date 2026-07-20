@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.EntityFrameworkCore;
@@ -306,6 +307,11 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
         context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Total(record.AdapterName, AdapterCounterKeys.DurationToken), Value = durationMs });
         context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Operation(record.AdapterName, record.Operation, AdapterCounterKeys.DurationToken), Value = durationMs });
 
+        // Latency histogram: increment the ONE Total-dimension bucket whose upper bound is the smallest >=
+        // the rounded ms (the read side walks these cumulatively for p90/p95/p99). Total dimension only —
+        // not bucketed per-operation/per-group — to bound counter volume.
+        context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Pct(record.AdapterName, AdapterCounterKeys.BucketFor(durationMs)), Value = 1 });
+
         // Per-group counters (successes included) give real per-group error rates (SC15). Only written
         // when the call carried a group — group-less calls behave exactly as before.
         if (record.GroupName is not null)
@@ -449,11 +455,27 @@ internal static class AdapterCounterKeys
     // token, so OutcomeCounts folds it into DurationSum, not the call Total.
     public const string DurationToken = "dur";
 
+    // Dimension marker for the latency histogram buckets. A pct key is Total-only and has the fixed shape
+    // adapter:{adapter}:pct:{upperMs} — parts.Length == 4 with this marker — so TryParse (which only knows
+    // Total at length 3 and op/grp at length >= 5) never folds it into the count/error StatSet.
+    public const string PctMarker = "pct";
+
+    // Ascending latency-bucket upper bounds (ms); the trailing int.MaxValue is the "> 10000 ms" catch-all
+    // overflow bucket. A single call increments the ONE bucket whose bound is the smallest >= its rounded
+    // ms (see BucketFor); the read side walks these cumulatively to derive p90/p95/p99.
+    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, int.MaxValue];
+
     public static string Total(string adapter, string outcome) => $"{Prefix}:{adapter}:{outcome}";
 
     public static string Operation(string adapter, string operation, string outcome) => $"{Prefix}:{adapter}:op:{operation}:{outcome}";
 
     public static string Group(string adapter, string group, string outcome) => $"{Prefix}:{adapter}:grp:{group}:{outcome}";
+
+    public static string Pct(string adapter, int upperMs) => $"{Prefix}:{adapter}:{PctMarker}:{upperMs.ToString(CultureInfo.InvariantCulture)}";
+
+    // The smallest bucket upper bound that is >= the rounded duration. Buckets is ascending and its last
+    // entry is int.MaxValue, so First always matches (the final entry is the "> 10000 ms" catch-all).
+    public static int BucketFor(int durationMs) => Buckets.First(bound => durationMs <= bound);
 
     // Inverse of the builders above — kept in the SAME type so the key format and its parser can never
     // drift apart (drift silently zeroes the dashboard, which drops unparseable keys). Layout:
@@ -487,6 +509,14 @@ internal static class AdapterCounterKeys
         }
 
         var marker = parts[2];
+
+        // Latency histogram buckets (adapter:{name}:pct:{upperMs}) are NOT count/error rows — they are
+        // read separately via TryParsePct. Reject them here so they never pollute the count/error StatSet.
+        if (string.Equals(marker, PctMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         var value = string.Join(':', parts[3..^1]);
         var outcome = parts[^1];
 
@@ -505,6 +535,39 @@ internal static class AdapterCounterKeys
         }
 
         return false;
+    }
+
+    // Parses a latency-histogram bucket key (adapter:{name}:pct:{upperMs}). Returns false for every other
+    // key shape — the disjoint counterpart to TryParse, which rejects pct keys.
+    public static bool TryParsePct(string key, out string adapter, out int upperMs)
+    {
+        adapter = string.Empty;
+        upperMs = 0;
+
+        var parts = key.Split(':');
+        if (parts.Length != 4)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], Prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[2], PctMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out upperMs))
+        {
+            return false;
+        }
+
+        adapter = parts[1];
+
+        return true;
     }
 
     public static string OutcomeToken(AdapterCallOutcome outcome) => outcome switch

@@ -73,6 +73,12 @@ export interface AdapterDetail {
   errorCount: number;
   errorRate: number;
   avgDurationMs: number;
+  /** 90th-percentile latency (ms) from the durable histogram; 0 when no data. */
+  p90DurationMs: number;
+  /** 95th-percentile latency (ms) from the durable histogram; 0 when no data. */
+  p95DurationMs: number;
+  /** 99th-percentile latency (ms) from the durable histogram; 0 when no data. */
+  p99DurationMs: number;
   operations: AdapterOperationStat[];
   groups: AdapterGroupStat[];
   recentCalls: AdapterCallSummary[];

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
 using Warp.Core;
@@ -130,7 +131,8 @@ internal sealed class WarpInboundObservabilityMiddleware
                 RequestBody = captureReq ? await ReadRequestBodyAsync(context) : null,
                 ResponseBody = captureBodies ? DecodeCaptured(capture) : null,
                 MachineName = Environment.MachineName,
-                TraceId = Activity.Current?.TraceId.ToString() ?? context.TraceIdentifier,
+                TraceId = ResolveTraceId(),
+                TagsJson = ResolveTags(context),
                 ExpireAt = now.Add(_retention),
                 SuppressLog = _options.RecordCalls == CallRecording.FailuresOnly && !failed,
             };
@@ -207,4 +209,34 @@ internal sealed class WarpInboundObservabilityMiddleware
     }
 
     private static string? NullIfEmpty(string? value) => string.IsNullOrEmpty(value) ? null : value;
+
+    // Store the trace id as a Guid built the SAME way jobs build theirs (new Guid over the 32-hex trace id),
+    // so jobs spawned during this request join directly on Job.TraceId. Null when no Activity is flowing.
+    private static Guid? ResolveTraceId()
+    {
+        var activity = Activity.Current;
+
+        return activity is null ? null : new Guid(activity.TraceId.ToHexString());
+    }
+
+    private string? ResolveTags(HttpContext context)
+    {
+        if (_options.Enrich is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var tags = new Dictionary<string, string>(StringComparer.Ordinal);
+            _options.Enrich(context, tags);
+
+            return tags.Count == 0 ? null : JsonSerializer.Serialize(tags);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A throwing enricher costs its tags, not the whole record (recording never fails a request).
+            return null;
+        }
+    }
 }

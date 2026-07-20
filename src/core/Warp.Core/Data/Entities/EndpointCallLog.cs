@@ -52,7 +52,15 @@ public class EndpointCallLog
 
     public string MachineName { get; set; } = string.Empty;
 
-    public string? TraceId { get; set; }
+    /// <summary>
+    /// W3C trace id of the request, stored as a <see cref="Guid"/> in the SAME form jobs use
+    /// (<c>new Guid(Activity.TraceId.ToHexString())</c>) so jobs spawned during the request join directly
+    /// on <c>Job.TraceId</c> — the request→jobs drill-down. Null when no <c>Activity</c> was flowing.
+    /// </summary>
+    public Guid? TraceId { get; set; }
+
+    /// <summary>Custom per-request enrichment (user id, tenant, correlation id, …) as a JSON string→string map, set by the options enricher.</summary>
+    public string? TagsJson { get; set; }
 
     public DateTime? ExpireAt { get; set; }
 }

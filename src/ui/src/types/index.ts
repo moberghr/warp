@@ -124,8 +124,17 @@ export interface UnifiedJobDetailModel {
   spawnedByJob: ContinuationInfo | null;
   continuations: ContinuationInfo[];
   spawnedJobs: ContinuationInfo[];
+  origin: JobOriginModel | null;
   metadata: Record<string, string> | null;
   logs: JobLogModel[];
+}
+
+export interface JobOriginModel {
+  method: string;
+  routeTemplate: string;
+  user: string | null;
+  callId: string;
+  endpointId: string;
 }
 
 export interface TraceJobModel {

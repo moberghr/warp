@@ -49,6 +49,15 @@ public sealed class WarpEndpointObservabilityOptions
     public Func<HttpContext, string?>? GroupSelector { get; set; }
 
     /// <summary>
+    /// Custom per-request enrichment. Called once per observed request to add free-form key/value tags
+    /// (user id, tenant, correlation id, …) stored on the call-log row and shown in the dashboard call
+    /// drawer. Unlike <see cref="GroupSelector"/>, tags are NOT a metrics dimension (no cardinality limit),
+    /// so high-cardinality values are fine. It is PII-owned (§1.2) — do not put secrets here. Throwing is
+    /// swallowed (recording never fails a request).
+    /// </summary>
+    public Action<HttpContext, IDictionary<string, string>>? Enrich { get; set; }
+
+    /// <summary>
     /// Case-insensitive header denylist whose values are stored as <c>***</c> when headers are captured.
     /// Fully user-owned (§1.2): prepopulated with the common credential-bearing headers; callers may
     /// <c>Add</c>/<c>Remove</c>/<c>Clear</c> freely.

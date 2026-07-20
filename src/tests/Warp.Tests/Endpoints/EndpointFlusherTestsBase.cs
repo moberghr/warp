@@ -52,6 +52,18 @@ public abstract class EndpointFlusherTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Persist_WritesLatencyHistogramBucket()
+    {
+        // 42ms rounds into the 50ms bucket (the smallest bound >= 42); no other bucket is touched.
+        await PersistAsync(Record("GET", "/orders", AdapterCallOutcome.Success, durationMs: 42.4));
+
+        var route = EndpointCounterKeys.NormalizeRoute("GET", "/orders");
+
+        (await CounterValueAsync(EndpointCounterKeys.Pct(route, 50))).ShouldBe(1);
+        (await CounterValueAsync(EndpointCounterKeys.Pct(route, 25))).ShouldBe(0);
+    }
+
+    [TimedFact]
     public async Task Persist_FailedOutcome_WritesFailedCounter()
     {
         await PersistAsync(Record("GET", "/orders", AdapterCallOutcome.Failed));

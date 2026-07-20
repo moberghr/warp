@@ -2,6 +2,7 @@ using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
+using Warp.Core.Entities;
 using Warp.Core.Enums;
 
 namespace Warp.Core.Services;
@@ -18,6 +19,8 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
     where TContext : DbContext
 {
     private const int RecentCallsLimit = 100;
+
+    private const int RelatedJobsLimit = 100;
 
     private readonly TContext _context;
 
@@ -67,6 +70,8 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
 
         var method = SplitMethod(route);
         var template = SplitTemplate(route);
+
+        var (p90, p95, p99) = Percentiles(stats.DurationBuckets.GetValueOrDefault(route));
 
         var groupFailures = await _context.Set<EndpointCallLog>()
             .AsNoTracking()
@@ -133,6 +138,9 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
             ErrorCount = totals.Errors,
             ErrorRate = Rate(totals),
             AvgDurationMs = totals.AvgDurationMs,
+            P90DurationMs = p90,
+            P95DurationMs = p95,
+            P99DurationMs = p99,
             Groups = groups,
             RecentCalls = recentCalls,
         };
@@ -149,7 +157,7 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         var method = SplitMethod(route);
         var template = SplitTemplate(route);
 
-        return await _context.Set<EndpointCallLog>()
+        var detail = await _context.Set<EndpointCallLog>()
             .AsNoTracking()
             .Where(x => x.Method == method)
             .Where(x => x.RouteTemplate == template)
@@ -177,8 +185,36 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
                     ResponseBody = x.ResponseBody,
                     MachineName = x.MachineName,
                     TraceId = x.TraceId,
+                    TagsJson = x.TagsJson,
                 })
             .FirstOrDefaultAsync(ct);
+
+        if (detail is null)
+        {
+            return null;
+        }
+
+        // Request→jobs drill-down: jobs enqueued during this request share its trace id (§ the ambient
+        // Activity propagates into Publisher). Only when tracing was active (TraceId set).
+        if (detail.TraceId is { } traceId)
+        {
+            detail.RelatedJobs = await _context.Set<Job>()
+                .AsNoTracking()
+                .Where(x => x.TraceId == traceId)
+                .OrderBy(x => x.ScheduleTime)
+                .Take(RelatedJobsLimit)
+                .Select(x =>
+                    new EndpointRelatedJobModel
+                    {
+                        Id = x.Id,
+                        Type = x.Type,
+                        State = x.CurrentState,
+                        Queue = x.Queue,
+                    })
+                .ToListAsync(ct);
+        }
+
+        return detail;
     }
 
     // URL-safe base64 of the "{METHOD} {template}" route so the detail route id survives a path segment
@@ -266,6 +302,21 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
 
         foreach (var row in merged)
         {
+            // Latency-histogram bucket rows ride the same "endpoint:" prefix but are not count/error rows —
+            // accumulate them into the per-route bucket map for the percentile walk, never the StatSet.
+            if (EndpointCounterKeys.TryParsePct(row.Key, out var pctRoute, out var upperMs))
+            {
+                if (!set.DurationBuckets.TryGetValue(pctRoute, out var buckets))
+                {
+                    buckets = [];
+                    set.DurationBuckets[pctRoute] = buckets;
+                }
+
+                buckets[upperMs] = buckets.GetValueOrDefault(upperMs) + row.Value;
+
+                continue;
+            }
+
             if (!EndpointCounterKeys.TryParse(row.Key, out var parsed))
             {
                 continue;
@@ -308,11 +359,56 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
 
     private readonly record struct GroupKey(string Route, string Group);
 
+    // Walks the ascending latency buckets cumulatively: the percentile for quantile q over N samples is the
+    // upper bound of the smallest bucket whose cumulative count reaches ceil(q*N). The overflow bucket
+    // (int.MaxValue, "> 10000 ms") reports the last real bound (10000) as a displayable floor. Returns 0
+    // when there is no bucket data.
+    private static (double P90, double P95, double P99) Percentiles(Dictionary<int, long>? buckets)
+    {
+        if (buckets is null || buckets.Count == 0)
+        {
+            return (0, 0, 0);
+        }
+
+        var total = buckets.Values.Sum();
+        if (total == 0)
+        {
+            return (0, 0, 0);
+        }
+
+        return (
+            Quantile(buckets, total, 0.90),
+            Quantile(buckets, total, 0.95),
+            Quantile(buckets, total, 0.99));
+    }
+
+    private static double Quantile(Dictionary<int, long> buckets, long total, double q)
+    {
+        var threshold = (long)Math.Ceiling(q * total);
+        long cumulative = 0;
+
+        foreach (var bound in EndpointCounterKeys.Buckets)
+        {
+            cumulative += buckets.GetValueOrDefault(bound);
+
+            if (cumulative >= threshold)
+            {
+                // Overflow bucket → report the last real bound (10000) rather than int.MaxValue.
+                return bound == int.MaxValue ? EndpointCounterKeys.Buckets[^2] : bound;
+            }
+        }
+
+        return EndpointCounterKeys.Buckets[^2];
+    }
+
     private sealed class StatSet
     {
         public Dictionary<string, OutcomeCounts> Totals { get; } = new(StringComparer.Ordinal);
 
         public Dictionary<GroupKey, OutcomeCounts> Groups { get; } = [];
+
+        // Per-route latency histogram: route identity → (bucket upper bound → count).
+        public Dictionary<string, Dictionary<int, long>> DurationBuckets { get; } = new(StringComparer.Ordinal);
     }
 
     private sealed class OutcomeCounts

@@ -107,6 +107,9 @@ export default function AdapterDetailPage() {
         <StatTile label="Avg latency" value={formatMs(detail.avgDurationMs)} />
       </div>
 
+      {/* Latency percentiles from the durable histogram — shown once there is call data */}
+      <LatencyLine detail={detail} />
+
       {/* Policy — parsed from the config summary into labeled badges */}
       <PolicyCard configSummary={detail.configSummary} hasConflict={detail.hasPolicyConflict} firstSeenAt={detail.firstSeenAt} />
 
@@ -269,6 +272,25 @@ export default function AdapterDetailPage() {
       {selectedCallId && (
         <CallDrawer name={name} callId={selectedCallId} onClose={() => setSelectedCallId(null)} />
       )}
+    </div>
+  );
+}
+
+// Compact latency line under the stat tiles: avg + p90/p95/p99 from the durable histogram. Hidden when
+// there is no data (all zero) so a freshly-registered adapter doesn't show a row of dashes.
+function LatencyLine({
+  detail,
+}: {
+  detail: { avgDurationMs: number; p90DurationMs: number; p95DurationMs: number; p99DurationMs: number };
+}) {
+  if (detail.avgDurationMs <= 0 && detail.p99DurationMs <= 0) {
+    return null;
+  }
+
+  return (
+    <div className="mb-4 -mt-1 text-sm text-muted-foreground">
+      Latency: avg {formatMs(detail.avgDurationMs)} · p90 {formatMs(detail.p90DurationMs)} · p95{' '}
+      {formatMs(detail.p95DurationMs)} · p99 {formatMs(detail.p99DurationMs)}
     </div>
   );
 }

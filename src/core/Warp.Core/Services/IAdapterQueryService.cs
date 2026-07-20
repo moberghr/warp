@@ -79,6 +79,15 @@ public sealed class AdapterDetailModel
 
     public double AvgDurationMs { get; set; }
 
+    /// <summary>90th-percentile call latency (ms), derived from the durable latency histogram; 0 when no data.</summary>
+    public double P90DurationMs { get; set; }
+
+    /// <summary>95th-percentile call latency (ms), derived from the durable latency histogram; 0 when no data.</summary>
+    public double P95DurationMs { get; set; }
+
+    /// <summary>99th-percentile call latency (ms), derived from the durable latency histogram; 0 when no data.</summary>
+    public double P99DurationMs { get; set; }
+
     public List<AdapterOperationStatModel> Operations { get; set; } = [];
 
     public List<AdapterGroupStatModel> Groups { get; set; } = [];

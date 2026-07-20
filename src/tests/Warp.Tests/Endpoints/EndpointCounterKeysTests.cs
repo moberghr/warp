@@ -79,4 +79,38 @@ public class EndpointCounterKeysTests
     {
         EndpointCounterKeys.TryParse("adapter:vendor:success", out _).ShouldBeFalse();
     }
+
+    [TimedFact]
+    public void Pct_BuildsHistogramKey_And_TryParseIgnoresIt()
+    {
+        var route = EndpointCounterKeys.NormalizeRoute("get", "/orders/{id:int}");
+        var key = EndpointCounterKeys.Pct(route, 50);
+
+        key.ShouldBe("endpoint:GET /orders/{id}:pct:50");
+
+        // A pct key is a latency-histogram row, NOT a count/error row — TryParse must reject it so the
+        // histogram counters never pollute the count/error StatSet.
+        EndpointCounterKeys.TryParse(key, out _).ShouldBeFalse();
+
+        // TryParsePct is the disjoint parser that DOES accept it, round-tripping the route + bucket bound.
+        EndpointCounterKeys.TryParsePct(key, out var parsedRoute, out var upperMs).ShouldBeTrue();
+        parsedRoute.ShouldBe("GET /orders/{id}");
+        upperMs.ShouldBe(50);
+    }
+
+    [TimedFact]
+    public void BucketFor_ReturnsSmallestBoundAtOrAboveDuration()
+    {
+        EndpointCounterKeys.BucketFor(42).ShouldBe(50);
+        EndpointCounterKeys.BucketFor(50).ShouldBe(50);
+        EndpointCounterKeys.BucketFor(0).ShouldBe(5);
+        EndpointCounterKeys.BucketFor(20_000).ShouldBe(int.MaxValue);
+    }
+
+    [TimedFact]
+    public void TryParsePct_NonPctKey_ReturnsFalse()
+    {
+        EndpointCounterKeys.TryParsePct(EndpointCounterKeys.Total("GET /orders", "success"), out _, out _).ShouldBeFalse();
+        EndpointCounterKeys.TryParsePct("adapter:vendor:pct:50", out _, out _).ShouldBeFalse();
+    }
 }

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
+using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
@@ -110,11 +111,24 @@ public abstract class EndpointQueryTestsBase : IAsyncLifetime
         call.ResponseBody = "response-body";
         call.ExceptionType = typeof(InvalidOperationException).FullName;
         call.ExceptionMessage = "boom";
-        call.TraceId = "trace-123";
+        var traceId = Guid.NewGuid();
+        call.TraceId = traceId;
+        call.TagsJson = "{\"userId\":\"bob\"}";
 
         var seed = _fixture.CreateContext();
         AddOutcomeCounters(seed, EndpointCounterKeys.Total(Route, "failed"), 1);
         seed.Set<EndpointCallLog>().Add(call);
+
+        // A job spawned during the request shares its trace id — the request→jobs drill-down.
+        seed.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Type = "SendEmail",
+            Queue = "default",
+            CurrentState = State.Completed,
+            TraceId = traceId,
+            ScheduleTime = DateTime.UtcNow,
+        });
         await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var id = (await CreateService().GetEndpoints(Xunit.TestContext.Current.CancellationToken)).Single().Id;
@@ -131,7 +145,12 @@ public abstract class EndpointQueryTestsBase : IAsyncLifetime
         detail.ExceptionMessage.ShouldBe("boom");
         detail.RemoteIp.ShouldBe("10.0.0.9");
         detail.User.ShouldBe("bob");
-        detail.TraceId.ShouldBe("trace-123");
+        detail.TraceId.ShouldBe(traceId);
+        detail.TagsJson.ShouldBe("{\"userId\":\"bob\"}");
+
+        var relatedJob = detail.RelatedJobs.ShouldHaveSingleItem();
+        relatedJob.Type.ShouldBe("SendEmail");
+        relatedJob.State.ShouldBe(State.Completed);
     }
 
     [TimedFact]
@@ -163,6 +182,30 @@ public abstract class EndpointQueryTestsBase : IAsyncLifetime
         var item = list.ShouldHaveSingleItem();
         item.TotalCalls.ShouldBe(3);
         item.AvgDurationMs.ShouldBe(10);
+    }
+
+    [TimedFact]
+    public async Task GetEndpointDetail_Percentiles_ComputedFromHistogramBuckets()
+    {
+        // 100 samples across the latency histogram: 90 ≤50ms, 5 ≤100ms, 4 ≤500ms, 1 ≤10000ms. Walking
+        // cumulative bucket counts: p90 (ceil .9*100=90) lands in the 50ms bucket, p95 (95) in 100ms, p99
+        // (99) in 500ms.
+        var seed = _fixture.CreateContext();
+        AddOutcomeCounters(seed, EndpointCounterKeys.Total(Route, "success"), 100);
+        AddBucketCounter(seed, EndpointCounterKeys.Pct(Route, 50), 90);
+        AddBucketCounter(seed, EndpointCounterKeys.Pct(Route, 100), 5);
+        AddBucketCounter(seed, EndpointCounterKeys.Pct(Route, 500), 4);
+        AddBucketCounter(seed, EndpointCounterKeys.Pct(Route, 10000), 1);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var id = (await CreateService().GetEndpoints(Xunit.TestContext.Current.CancellationToken)).Single().Id;
+
+        var detail = await CreateService().GetEndpointDetail(id, Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.P90DurationMs.ShouldBe(50);
+        detail.P95DurationMs.ShouldBe(100);
+        detail.P99DurationMs.ShouldBe(500);
     }
 
     private static EndpointCallLog CallLog(
@@ -200,6 +243,13 @@ public abstract class EndpointQueryTestsBase : IAsyncLifetime
     private static void AddDurationCounter(TestContext context, string key, int totalMs)
     {
         context.Set<Counter>().Add(new Counter { Key = key, Value = totalMs });
+    }
+
+    // A latency-histogram bucket counter: the summed call count that fell into one bucket bound. The query
+    // walks these cumulatively (over the ascending bucket bounds) to derive p90/p95/p99.
+    private static void AddBucketCounter(TestContext context, string key, int count)
+    {
+        context.Set<Counter>().Add(new Counter { Key = key, Value = count });
     }
 
     private EndpointQueryService<TestContext> CreateService() => new(_fixture.CreateContext());

@@ -48,6 +48,17 @@ public abstract class AdapterCounterTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Persist_WritesLatencyHistogramBucket()
+    {
+        // 42ms rounds into the 50ms bucket (the smallest bound >= 42); no other bucket is touched. The
+        // histogram is Total-dimension only (not per-operation/per-group) to bound counter volume.
+        await PersistAsync(Record("vendor", "GetOrders", AdapterCallOutcome.Success, group: "shop-1", durationMs: 42.4));
+
+        (await CounterValueAsync(AdapterCounterKeys.Pct("vendor", 50))).ShouldBe(1);
+        (await CounterValueAsync(AdapterCounterKeys.Pct("vendor", 25))).ShouldBe(0);
+    }
+
+    [TimedFact]
     public async Task Persist_PerGroupCounter_IncludesSuccessOutcome()
     {
         await PersistAsync(Record("vendor", "Deliver", AdapterCallOutcome.Success, group: "shop-1"));

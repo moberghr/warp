@@ -98,6 +98,8 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
 
         var totals = stats.Totals.GetValueOrDefault(name);
 
+        var (p90, p95, p99) = Percentiles(stats.DurationBuckets.GetValueOrDefault(name));
+
         // Average latency comes from the duration-sum ÷ count aggregates (survives AdapterCallLog deletion),
         // not the raw rows. Last-failure timestamps and the recent-calls list below still read raw rows —
         // they degrade gracefully to null/empty once logs are swept.
@@ -180,6 +182,9 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
             ErrorCount = totals?.Errors ?? 0,
             ErrorRate = Rate(totals),
             AvgDurationMs = totals?.AvgDurationMs ?? 0,
+            P90DurationMs = p90,
+            P95DurationMs = p95,
+            P99DurationMs = p99,
             Operations = operations,
             Groups = groups,
             RecentCalls = recentCalls,
@@ -264,6 +269,21 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
 
         foreach (var row in merged)
         {
+            // Latency-histogram bucket rows ride the same "adapter:" prefix but are not count/error rows —
+            // accumulate them into the per-adapter bucket map for the percentile walk, never the StatSet.
+            if (AdapterCounterKeys.TryParsePct(row.Key, out var pctAdapter, out var upperMs))
+            {
+                if (!set.DurationBuckets.TryGetValue(pctAdapter, out var buckets))
+                {
+                    buckets = [];
+                    set.DurationBuckets[pctAdapter] = buckets;
+                }
+
+                buckets[upperMs] = buckets.GetValueOrDefault(upperMs) + row.Value;
+
+                continue;
+            }
+
             if (!AdapterCounterKeys.TryParse(row.Key, out var parsed))
             {
                 continue;
@@ -307,6 +327,48 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
 
     private readonly record struct DimensionKey(string Adapter, string Value);
 
+    // Walks the ascending latency buckets cumulatively: the percentile for quantile q over N samples is the
+    // upper bound of the smallest bucket whose cumulative count reaches ceil(q*N). The overflow bucket
+    // (int.MaxValue, "> 10000 ms") reports the last real bound (10000) as a displayable floor. Returns 0
+    // when there is no bucket data.
+    private static (double P90, double P95, double P99) Percentiles(Dictionary<int, long>? buckets)
+    {
+        if (buckets is null || buckets.Count == 0)
+        {
+            return (0, 0, 0);
+        }
+
+        var total = buckets.Values.Sum();
+        if (total == 0)
+        {
+            return (0, 0, 0);
+        }
+
+        return (
+            Quantile(buckets, total, 0.90),
+            Quantile(buckets, total, 0.95),
+            Quantile(buckets, total, 0.99));
+    }
+
+    private static double Quantile(Dictionary<int, long> buckets, long total, double q)
+    {
+        var threshold = (long)Math.Ceiling(q * total);
+        long cumulative = 0;
+
+        foreach (var bound in AdapterCounterKeys.Buckets)
+        {
+            cumulative += buckets.GetValueOrDefault(bound);
+
+            if (cumulative >= threshold)
+            {
+                // Overflow bucket → report the last real bound (10000) rather than int.MaxValue.
+                return bound == int.MaxValue ? AdapterCounterKeys.Buckets[^2] : bound;
+            }
+        }
+
+        return AdapterCounterKeys.Buckets[^2];
+    }
+
     private sealed class StatSet
     {
         public Dictionary<string, OutcomeCounts> Totals { get; } = new(StringComparer.Ordinal);
@@ -314,6 +376,9 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
         public Dictionary<DimensionKey, OutcomeCounts> Operations { get; } = [];
 
         public Dictionary<DimensionKey, OutcomeCounts> Groups { get; } = [];
+
+        // Per-adapter latency histogram: adapter name → (bucket upper bound → count).
+        public Dictionary<string, Dictionary<int, long>> DurationBuckets { get; } = new(StringComparer.Ordinal);
     }
 
     private sealed class OutcomeCounts

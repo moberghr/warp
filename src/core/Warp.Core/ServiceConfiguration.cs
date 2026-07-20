@@ -805,11 +805,15 @@ public static class ServiceConfiguration
         log.Property(p => p.RequestBody);
         log.Property(p => p.ResponseBody);
         log.Property(p => p.MachineName).HasMaxLength(256).IsRequired();
-        log.Property(p => p.TraceId).HasMaxLength(64);
+        log.Property(p => p.TraceId);
+        log.Property(p => p.TagsJson);
         log.Property(p => p.ExpireAt);
 
         // Per-endpoint recent-calls listing (identity = method + route template).
         log.HasIndex(p => new { p.Method, p.RouteTemplate, p.Timestamp });
+
+        // Request→jobs drill-down joins jobs on the shared trace id.
+        log.HasIndex(p => p.TraceId);
 
         // ExpirationCleanup range scan on expiry.
         log.HasIndex(p => p.ExpireAt);

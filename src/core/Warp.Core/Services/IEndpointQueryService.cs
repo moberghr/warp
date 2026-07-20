@@ -99,6 +99,15 @@ public sealed class EndpointDetailModel
 
     public double AvgDurationMs { get; set; }
 
+    /// <summary>90th-percentile request latency (ms), derived from the durable latency histogram; 0 when no data.</summary>
+    public double P90DurationMs { get; set; }
+
+    /// <summary>95th-percentile request latency (ms), derived from the durable latency histogram; 0 when no data.</summary>
+    public double P95DurationMs { get; set; }
+
+    /// <summary>99th-percentile request latency (ms), derived from the durable latency histogram; 0 when no data.</summary>
+    public double P99DurationMs { get; set; }
+
     public IReadOnlyList<EndpointGroupStatModel> Groups { get; set; } = [];
 
     public IReadOnlyList<EndpointCallSummaryModel> RecentCalls { get; set; } = [];
@@ -145,5 +154,24 @@ public sealed class EndpointCallDetailModel
 
     public string MachineName { get; set; } = string.Empty;
 
-    public string? TraceId { get; set; }
+    /// <summary>W3C trace id (matches <c>Job.TraceId</c>); links this request to the jobs it spawned.</summary>
+    public Guid? TraceId { get; set; }
+
+    /// <summary>Custom enrichment tags (user id, tenant, …) as a JSON string→string map.</summary>
+    public string? TagsJson { get; set; }
+
+    /// <summary>Jobs enqueued during this request (same trace id) — the request→jobs drill-down.</summary>
+    public IReadOnlyList<EndpointRelatedJobModel> RelatedJobs { get; set; } = [];
+}
+
+/// <summary>A job spawned during a request (shares the request's trace id), shown on the call detail.</summary>
+public sealed class EndpointRelatedJobModel
+{
+    public Guid Id { get; set; }
+
+    public string? Type { get; set; }
+
+    public State State { get; set; }
+
+    public string Queue { get; set; } = string.Empty;
 }

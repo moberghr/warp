@@ -179,6 +179,28 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetAdapterDetail_Percentiles_ComputedFromHistogramBuckets()
+    {
+        // 100 samples across the latency histogram: 90 ≤50ms, 5 ≤100ms, 4 ≤500ms, 1 ≤10000ms. Walking
+        // cumulative bucket counts: p90 (ceil .9*100=90) lands in the 50ms bucket, p95 (95) in 100ms, p99
+        // (99) in 500ms.
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor"));
+        AddBucketCounter(seed, AdapterCounterKeys.Pct("vendor", 50), 90);
+        AddBucketCounter(seed, AdapterCounterKeys.Pct("vendor", 100), 5);
+        AddBucketCounter(seed, AdapterCounterKeys.Pct("vendor", 500), 4);
+        AddBucketCounter(seed, AdapterCounterKeys.Pct("vendor", 10000), 1);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var detail = await CreateService().GetAdapterDetail("vendor", Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.P90DurationMs.ShouldBe(50);
+        detail.P95DurationMs.ShouldBe(100);
+        detail.P99DurationMs.ShouldBe(500);
+    }
+
+    [TimedFact]
     public async Task GetAdapterDetail_UnknownName_ReturnsNull()
     {
         var detail = await CreateService().GetAdapterDetail("missing", Xunit.TestContext.Current.CancellationToken);
@@ -465,6 +487,13 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
     private static void AddDurationCounter(TestContext context, string key, int totalMs)
     {
         context.Set<Counter>().Add(new Counter { Key = key, Value = totalMs });
+    }
+
+    // A latency-histogram bucket counter: the summed call count that fell into one bucket bound. The query
+    // walks these cumulatively (over the ascending bucket bounds) to derive p90/p95/p99.
+    private static void AddBucketCounter(TestContext context, string key, int count)
+    {
+        context.Set<Counter>().Add(new Counter { Key = key, Value = count });
     }
 
     private AdapterQueryService<TestContext> CreateService() => new(_fixture.CreateContext());
