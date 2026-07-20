@@ -1,0 +1,344 @@
+{
+  "slug": "warp-webhooks",
+  "date": "2026-07-10",
+  "title": "Warp.Adapters.Webhooks \u2014 durable outbound webhook delivery (host owns subscriptions, Warp owns delivery)",
+  "scope_classification": "new-feature",
+  "security_impact": "pii-exposure + secrets-change",
+  "baseline_area": "adapters",
+  "depends_on": [
+    "2026-07-09-warp-adapters"
+  ],
+  "public_contracts": [
+    "Warp.Adapters.Webhooks.WebhookServiceConfiguration.AddWebhooks(this IWarpBuilder, Action<WarpWebhookOptions>?)",
+    "Warp.Adapters.Webhooks.IWebhookDispatcher.SendAsync(WebhookSend, CancellationToken) : Task<Guid>",
+    "Warp.Adapters.Webhooks.WebhookSend (Url/Headers/EventType/EventId/Payload/Group/Reference/RetrySchedule: IReadOnlyList<TimeSpan>/SuccessCodes/Signing/Secret \u2014 per-send, self-contained)",
+    "Warp.Adapters.Webhooks.IWebhookSigner + StandardWebhooksSigner (webhook-id/webhook-timestamp/webhook-signature, HMAC-SHA256 over {id}.{timestamp}.{payload})",
+    "Warp.Adapters.Webhooks.IWebhookDeliveryExhaustedHandler",
+    "Warp.Core.Webhooks.IWebhookQueryService / IWebhookCommandService.Redeliver(Guid)",
+    "Warp.Core.Data.Enums.WebhookDeliveryStatus { Pending = 1, Delivered = 2, Exhausted = 3 }",
+    "Warp.Core.Data.Enums.WebhookSigning { None = 1, StandardWebhooks = 2, Custom = 3 }",
+    "Entity: warp.WebhookDelivery (always in schema; attempts = AdapterCallLog via CorrelationId \u2014 no attempt table)",
+    "GET {prefix}/api/webhooks | GET {prefix}/api/webhooks/{id} | POST {prefix}/api/webhooks/{id}/redeliver",
+    "WarpAddonsInfo.Webhooks flag; WarpConfiguration.WebhookDeliveryRetention (default 30d)",
+    "Telemetry: warp.webhooks.deliveries, warp.webhooks.attempts, warp.webhooks.redeliveries"
+  ],
+  "change_manifest": [
+    "src/core/Warp.Core/Webhooks/IWebhookQueryService.cs",
+    "src/core/Warp.Core/Webhooks/WebhookQueryService.cs",
+    "src/core/Warp.Core/Webhooks/IWebhookCommandService.cs",
+    "src/core/Warp.Core/Webhooks/WebhookCommandService.cs",
+    "src/core/Warp.Core/Data/Entities/WebhookDelivery.cs",
+    "src/core/Warp.Core/Data/Enums/WebhookDeliveryStatus.cs",
+    "src/core/Warp.Core/Data/Enums/WebhookSigning.cs",
+    "src/core/Warp.Core/Data/Converters/RetryScheduleConverter.cs",
+    "src/core/Warp.Core/ServiceConfiguration.cs",
+    "src/core/Warp.Core/WarpModelCustomizer.cs",
+    "src/core/Warp.Core/Configuration.cs",
+    "src/core/Warp.Core/Logging/WarpTelemetry.cs",
+    "src/core/Warp.Adapters.Webhooks/Warp.Adapters.Webhooks.csproj",
+    "src/core/Warp.Adapters.Webhooks/WebhookServiceConfiguration.cs",
+    "src/core/Warp.Adapters.Webhooks/IWebhookDispatcher.cs",
+    "src/core/Warp.Adapters.Webhooks/WebhookSend.cs",
+    "src/core/Warp.Adapters.Webhooks/WebhookDispatcher.cs",
+    "src/core/Warp.Adapters.Webhooks/ExecuteWebhookDelivery.cs",
+    "src/core/Warp.Adapters.Webhooks/IWebhookSigner.cs",
+    "src/core/Warp.Adapters.Webhooks/StandardWebhooksSigner.cs",
+    "src/core/Warp.Adapters.Webhooks/IWebhookDeliveryExhaustedHandler.cs",
+    "src/Warp.slnx",
+    "src/core/Warp.Worker/Services/ExpirationCleanup.cs",
+    "src/core/Warp.UI/Endpoints/WarpEndpoints.cs",
+    "src/core/Warp.UI/Endpoints/WarpAddonsInfo.cs",
+    "src/ui/src/pages/webhooks/WebhooksPage.tsx",
+    "src/ui/src/pages/webhooks/WebhookDetailPage.tsx",
+    "src/ui/src/layouts/MainLayout.tsx",
+    "src/ui/src/App.tsx",
+    "src/ui/src/api/index.ts",
+    "src/ui/src/types/webhooks.ts",
+    "src/ui/src/demo/data/webhooks.ts",
+    "src/tests/Warp.Tests/Webhooks/WebhookSigningTests.cs",
+    "src/tests/Warp.Tests/Webhooks/RetryScheduleConverterTestsBase.cs",
+    "src/tests/Warp.Tests/Webhooks/WebhookDeliveryPersistenceTestsBase.cs",
+    "src/tests/Warp.Tests/Webhooks/WebhookExecutionTestsBase.cs",
+    "src/tests/Warp.Tests/Webhooks/WebhookCommandServiceTestsBase.cs",
+    "src/tests/Warp.Tests/Webhooks/WebhookEndpointTestsBase.cs",
+    "src/tests/Warp.Tests/Webhooks/WebhookCleanupTestsBase.cs",
+    "website/docs/features/webhooks.md",
+    ".claude/rules/project-specific.md",
+    "CLAUDE.md",
+    "docs/specs/2026-07-09-warp-adapters.md"
+  ],
+  "success_criteria": [
+    {
+      "id": "WSC1",
+      "description": "SendAsync persists self-contained delivery; RetrySchedule converter roundtrips empty/single/multi-hour on both providers",
+      "verification": "WebhookDeliveryPersistenceTestsBase + RetryScheduleConverterTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "generated tests pass"
+    },
+    {
+      "id": "WSC2",
+      "description": "Success \u21d2 Delivered; AdapterCallLog attempt row with CorrelationId=deliveryId, operation=eventType, group; executor job completes (no failed jobs)",
+      "verification": "WebhookExecutionTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "WSC3",
+      "description": "Failure with retries left \u21d2 Pending, AttemptCount++, NextAttemptAt=schedule[N-1], Scheduled executor job with matching ScheduleTime",
+      "verification": "WebhookExecutionTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "WSC4",
+      "description": "Exhaustion \u21d2 Exhausted + exhausted-handler invoked once; [] schedule = single attempt",
+      "verification": "WebhookExecutionTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "WSC5",
+      "description": "SuccessCodes honored (default any 2xx; explicit [200] fails a 202)",
+      "verification": "WebhookExecutionTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "WSC6",
+      "description": "StandardWebhooks signing matches published test vector; None adds nothing; Custom uses registered signer",
+      "verification": "WebhookSigningTests",
+      "evidence_channel": "test-run",
+      "observable": "NoDb tests pass"
+    },
+    {
+      "id": "WSC7",
+      "description": "Redeliver resets Delivered/Exhausted to Pending + immediate attempt; Pending redeliver rejected",
+      "verification": "WebhookCommandServiceTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "WSC8",
+      "description": "Query service filters (status/eventType/reference/group/date); endpoints + addons flag",
+      "verification": "WebhookEndpointTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "WSC9",
+      "description": "ExpirationCleanup deletes expired deliveries",
+      "verification": "WebhookCleanupTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "WSC10",
+      "description": "Solution builds analyzer-clean with new project",
+      "verification": "dotnet build src/Warp.slnx",
+      "evidence_channel": "build-output",
+      "observable": "exit 0, zero warnings"
+    },
+    {
+      "id": "WSC11",
+      "description": "Frontend builds with Webhooks pages + demo fixtures",
+      "verification": "npm run build in src/ui",
+      "evidence_channel": "build-output",
+      "observable": "exit 0"
+    }
+  ],
+  "test_manifest": [
+    {
+      "path": "src/tests/Warp.Tests/Webhooks/WebhookSigningTests.cs",
+      "covers": [
+        "WSC6"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Webhooks/RetryScheduleConverterTestsBase.cs",
+      "covers": [
+        "WSC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Webhooks/WebhookDeliveryPersistenceTestsBase.cs",
+      "covers": [
+        "WSC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Webhooks/WebhookExecutionTestsBase.cs",
+      "covers": [
+        "WSC2",
+        "WSC3",
+        "WSC4",
+        "WSC5"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Webhooks/WebhookCommandServiceTestsBase.cs",
+      "covers": [
+        "WSC7"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Webhooks/WebhookEndpointTestsBase.cs",
+      "covers": [
+        "WSC8"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Webhooks/WebhookCleanupTestsBase.cs",
+      "covers": [
+        "WSC9"
+      ]
+    }
+  ],
+  "out_of_scope": [
+    "Subscription/registration modeling and fan-out (host-owned by design)",
+    "Automatic endpoint disabling (host decides via IWebhookDeliveryExhaustedHandler)",
+    "Per-endpoint keyed rate limiting of deliveries (extension of adapters shared limiter \u2014 deferred)",
+    "FIFO/ordering guarantees across deliveries",
+    "Payload transformations",
+    "Receiving-side webhooks",
+    "Migration tooling for legacy hand-rolled delivery tables",
+    "Any change to the worker fetch/execute hot path"
+  ],
+  "open_decisions": [],
+  "assumptions": [
+    "[ASSUMED] Standard Webhooks published test vectors suffice to verify signer correctness; validate in batch 3",
+    "[VERIFIED:docs/specs/2026-07-09-warp-adapters.md] adapters v1 provides CorrelationId, groups, RecordCalls, per-adapter CallLogRetention"
+  ],
+  "risks": [
+    "Secrets at rest on delivery rows \u2014 accepted for self-containment; redacted on all read surfaces; Signing=None escape hatch documented",
+    "Attempt and delivery rows expire independently (no FK cascade); default retention alignment mitigates",
+    "Retry timing precision = delay + up to ~5s activation + worker pickup; documented",
+    "Adoption prerequisite: a Warp server (worker) must run somewhere; Hangfire coexistence documented",
+    "trap: see Rejected alternatives in the .md spec"
+  ],
+  "plan": {
+    "batches": [
+      {
+        "title": "Entity + converter + Core services",
+        "files": [
+          "src/core/Warp.Core/Webhooks/*",
+          "src/core/Warp.Core/Data/Entities/WebhookDelivery.cs",
+          "src/core/Warp.Core/Data/Enums/Webhook*.cs",
+          "src/core/Warp.Core/Data/Converters/RetryScheduleConverter.cs",
+          "src/core/Warp.Core/WarpModelCustomizer.cs",
+          "src/core/Warp.Core/ServiceConfiguration.cs",
+          "src/core/Warp.Core/Configuration.cs"
+        ],
+        "acceptance": "Converter roundtrip (empty/single/multi-hour) + persistence tests green on PG + SQL Server; build analyzer-clean."
+      },
+      {
+        "title": "Dispatcher + executor",
+        "files": [
+          "src/core/Warp.Adapters.Webhooks/*",
+          "src/Warp.slnx",
+          "src/core/Warp.Core/Logging/WarpTelemetry.cs"
+        ],
+        "acceptance": "Execution tests green: success/failure/exhaust/empty-schedule/success-codes; executor jobs never fail; attempts land in AdapterCallLog with CorrelationId."
+      },
+      {
+        "title": "Signing",
+        "files": [
+          "src/core/Warp.Adapters.Webhooks/StandardWebhooksSigner.cs",
+          "src/core/Warp.Adapters.Webhooks/IWebhookSigner.cs"
+        ],
+        "acceptance": "Signing tests green against Standard Webhooks test vectors; Custom-without-registration fails at AddWebhooks time."
+      },
+      {
+        "title": "Redelivery + endpoints + addons flag",
+        "files": [
+          "src/core/Warp.Core/Webhooks/WebhookCommandService.cs",
+          "src/core/Warp.UI/Endpoints/*",
+          "src/core/Warp.Worker/Services/ExpirationCleanup.cs"
+        ],
+        "acceptance": "Command/endpoint/cleanup tests green; Pending-redeliver rejected."
+      },
+      {
+        "title": "Frontend",
+        "files": [
+          "src/ui/src/pages/webhooks/*",
+          "src/ui/src/layouts/MainLayout.tsx",
+          "src/ui/src/App.tsx",
+          "src/ui/src/api/index.ts",
+          "src/ui/src/types/webhooks.ts",
+          "src/ui/src/demo/*"
+        ],
+        "acceptance": "npm run build exit 0; nav hidden when addons.webhooks=false; demo renders list + detail with attempt timeline + redeliver."
+      },
+      {
+        "title": "Docs + rules",
+        "files": [
+          "website/docs/features/webhooks.md",
+          ".claude/rules/project-specific.md",
+          "CLAUDE.md",
+          "docs/specs/2026-07-09-warp-adapters.md"
+        ],
+        "acceptance": "Feature doc covers boundary table, migration path, Hangfire coexistence, cadence precision; full suite green."
+      }
+    ]
+  },
+  "implement": {
+    "run_id": "wf_efdaf269-61b",
+    "completed_batches": [
+      {
+        "batch_id": "W1",
+        "status": "completed",
+        "files": 12,
+        "tests": "Webhooks namespace 16/16 (PG+SQL), converter roundtrip empty/single/multi-hour"
+      },
+      {
+        "batch_id": "W2",
+        "status": "completed",
+        "files": 11,
+        "tests": "Webhooks 28/28; executor always-completes verified, no failed job rows"
+      },
+      {
+        "batch_id": "W3",
+        "status": "completed",
+        "files": 5,
+        "tests": "NoDb 673/673; Standard Webhooks published vector recomputed"
+      },
+      {
+        "batch_id": "W4",
+        "status": "completed",
+        "files": 10,
+        "tests": "Webhooks 72/72 (TestServer route tests incl. 404s)"
+      },
+      {
+        "batch_id": "W5",
+        "status": "completed",
+        "files": 9,
+        "tests": "npm run build exit 0; demo routes wired"
+      },
+      {
+        "batch_id": "W6",
+        "status": "completed",
+        "files": 4,
+        "tests": "FULL SUITE 2343/2343 (2m12s)"
+      }
+    ],
+    "manifest_amendments": [
+      "src/tests/Warp.Tests/Warp.Tests.csproj (addon project ref, W2)",
+      "src/ui/src/types/index.ts (addons flag type, W5 - plan-listed, manifest omission)",
+      "IWebhookRedeliveryEnqueuer seam: Core interface + addon impl (W4 - required for immediate redeliver enqueue without Core referencing the job type)"
+    ],
+    "contract_amendments": [
+      "GET {prefix}/api/webhooks/summary (W4 - required by spec dashboard tiles; list is capped so totals cannot be client-derived)",
+      "WarpWebhookOptions.UseCustomSigner<T>() (W3 - required for fail-at-registration Custom validation)",
+      "WebhookDeliveryStatus/WebhookSigning in Warp.Core.Enums namespace (codebase convention, mirrors adapters amendment)"
+    ],
+    "drift_check": {
+      "verdict": "PASS-with-amendments",
+      "notes": [
+        "all extras in-manifest files or spec-body-mandated contract additions",
+        "out_of_scope respected: no subscriptions modeling, no auto-disable, no FIFO, worker hot path untouched",
+        "clamp delivered at W2 SendAsync choke point per W1 deferral",
+        "executor always-completes verified in tests"
+      ]
+    },
+    "behavioral_diff": "New Warp.Adapters.Webhooks addon: IWebhookDispatcher.SendAsync persists a self-contained WebhookDelivery (per-send retry schedule as seconds-array, headers, payload, signing mode+secret, success codes, group, host Reference) and enqueues an always-completing executor job on warp:webhooks; attempts POST through an auto-registered warp-webhooks adapter (rows correlated by delivery id), retries ride Scheduled jobs (no timers/scans), exhaustion invokes the host callback once, redelivery resets settled deliveries with an immediate job. Standard Webhooks header signing (webhook-id=EventId stable across retries), None for legacy body-signing hosts, Custom via registered signer validated at AddWebhooks. Dashboard gains gated Webhooks nav, deliveries list+detail with attempt timeline and Redeliver, summary endpoint, demo mode. One new always-in-schema table."
+  }
+}

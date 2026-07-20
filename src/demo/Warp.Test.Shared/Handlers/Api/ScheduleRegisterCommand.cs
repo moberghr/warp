@@ -5,25 +5,25 @@ using Warp.Test.Shared.Entities;
 
 namespace Warp.Core.Handlers;
 
-public class ScheduleRegisterRequest : IJob
+public class ScheduleCustomerSignupRequest : IJob
 {
     public string? Email { get; set; }
 
     public DateTime ScheduleTime { get; set; }
 }
 
-public class ScheduleRegisterCommand : IJobHandler<ScheduleRegisterRequest>
+public class ScheduleCustomerSignupCommand : IJobHandler<ScheduleCustomerSignupRequest>
 {
     private readonly TestContext _context;
     private readonly IPublisher _publisher;
 
-    public ScheduleRegisterCommand(TestContext context, IPublisher publisher)
+    public ScheduleCustomerSignupCommand(TestContext context, IPublisher publisher)
     {
         _context = context;
         _publisher = publisher;
     }
 
-    public async Task HandleAsync(ScheduleRegisterRequest message, CancellationToken cancellationToken)
+    public async Task HandleAsync(ScheduleCustomerSignupRequest message, CancellationToken cancellationToken)
     {
         var registration = new Registration
         {
@@ -45,7 +45,7 @@ public class ScheduleRegisterCommand : IJobHandler<ScheduleRegisterRequest>
 
         await _context.SaveChangesAsync(cancellationToken);
 
-        var sendEmailRequest = new SendEmailRequest
+        var sendEmailRequest = new OrderConfirmationRequest
         {
             EmailLogId = emailLog.Id,
         };

@@ -11,4 +11,8 @@ public sealed class WarpAddonsInfo
     public bool RateLimits { get; init; }
 
     public bool Sagas { get; init; }
+
+    public bool Adapters { get; init; }
+
+    public bool Webhooks { get; init; }
 }

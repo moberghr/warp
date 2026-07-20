@@ -1,0 +1,288 @@
+// Deterministic demo-mode fixtures for the Webhooks pages. All timestamps are anchored to the pinned
+// demo clock (FROZEN_NOW) so relative-time labels render identically across screenshot runs. Typed
+// against the real DTOs so shape drift breaks the build, not the demo. The axios mock router in
+// `demo/adapter.ts` serves these; production reads the real REST endpoints via `@/api`.
+import { FROZEN_NOW } from '@/lib/demoMode';
+import { AdapterCallOutcome } from '@/types/adapters';
+import { WebhookDeliveryStatus, WebhookSigning } from '@/types/webhooks';
+import type {
+  WebhookDeliveryListItem,
+  WebhookDeliveryDetail,
+  WebhookDeliverySummary,
+} from '@/types/webhooks';
+
+function ago(minutes: number): string {
+  return new Date(FROZEN_NOW - minutes * 60_000).toISOString();
+}
+
+function ahead(minutes: number): string {
+  return new Date(FROZEN_NOW + minutes * 60_000).toISOString();
+}
+
+const DELIVERED_ID = 'aaaaaaaa-0000-0000-0000-000000000001';
+const PENDING_ID = 'aaaaaaaa-0000-0000-0000-000000000002';
+const EXHAUSTED_ID = 'aaaaaaaa-0000-0000-0000-000000000003';
+const DELIVERED2_ID = 'aaaaaaaa-0000-0000-0000-000000000004';
+const PENDING2_ID = 'aaaaaaaa-0000-0000-0000-000000000005';
+
+export const demoWebhooks: WebhookDeliveryListItem[] = [
+  {
+    id: PENDING_ID,
+    eventType: 'invoice.payment_failed',
+    eventId: 'evt_8c21f0',
+    url: 'https://hooks.globex.example/inbound',
+    groupName: 'https://hooks.globex.example/inbound',
+    reference: 'sub_4471',
+    status: WebhookDeliveryStatus.Pending,
+    signingMode: WebhookSigning.StandardWebhooks,
+    attemptCount: 2,
+    nextAttemptAt: ahead(48),
+    createdAt: ago(64),
+  },
+  {
+    id: DELIVERED_ID,
+    eventType: 'order.completed',
+    eventId: 'evt_1a9b3d',
+    url: 'https://hooks.acme.example/orders',
+    groupName: 'https://hooks.acme.example/orders',
+    reference: 'sub_1120',
+    status: WebhookDeliveryStatus.Delivered,
+    signingMode: WebhookSigning.StandardWebhooks,
+    attemptCount: 1,
+    nextAttemptAt: null,
+    createdAt: ago(6),
+  },
+  {
+    id: EXHAUSTED_ID,
+    eventType: 'shipment.delivered',
+    eventId: 'evt_77de10',
+    url: 'https://hooks.initech.example/ship',
+    groupName: 'https://hooks.initech.example/ship',
+    reference: 'sub_9930',
+    status: WebhookDeliveryStatus.Exhausted,
+    signingMode: WebhookSigning.None,
+    attemptCount: 5,
+    nextAttemptAt: null,
+    createdAt: ago(60 * 20),
+  },
+  {
+    id: DELIVERED2_ID,
+    eventType: 'customer.created',
+    eventId: 'evt_02ffa4',
+    url: 'https://hooks.acme.example/customers',
+    groupName: 'https://hooks.acme.example/customers',
+    reference: null,
+    status: WebhookDeliveryStatus.Delivered,
+    signingMode: WebhookSigning.Custom,
+    attemptCount: 2,
+    nextAttemptAt: null,
+    createdAt: ago(180),
+  },
+  {
+    id: PENDING2_ID,
+    eventType: 'invoice.finalized',
+    eventId: 'evt_5b0c9e',
+    url: 'https://hooks.umbrella.example/billing',
+    groupName: 'https://hooks.umbrella.example/billing',
+    reference: 'sub_2087',
+    status: WebhookDeliveryStatus.Pending,
+    signingMode: WebhookSigning.StandardWebhooks,
+    attemptCount: 0,
+    nextAttemptAt: ahead(1),
+    createdAt: ago(1),
+  },
+];
+
+export const demoWebhookSummary: WebhookDeliverySummary = {
+  total: 4812,
+  pending: 37,
+  delivered: 4689,
+  exhausted: 86,
+};
+
+export const demoWebhookDetails: Record<string, WebhookDeliveryDetail> = {
+  [DELIVERED_ID]: {
+    id: DELIVERED_ID,
+    eventType: 'order.completed',
+    eventId: 'evt_1a9b3d',
+    url: 'https://hooks.acme.example/orders',
+    headersJson: '{"Content-Type":"application/json","Authorization":"***"}',
+    groupName: 'https://hooks.acme.example/orders',
+    reference: 'sub_1120',
+    payloadJson: '{"id":"order_8842","total":42.5,"currency":"usd","items":3}',
+    signingMode: WebhookSigning.StandardWebhooks,
+    hasSecret: true,
+    retryScheduleSeconds: [60, 600, 3600, 21600],
+    successCodesJson: null,
+    status: WebhookDeliveryStatus.Delivered,
+    attemptCount: 1,
+    nextAttemptAt: null,
+    createdAt: ago(6),
+    expireAt: ahead(60 * 24 * 30),
+    attempts: [
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000001',
+        timestamp: ago(6),
+        durationMs: 128.4,
+        outcome: AdapterCallOutcome.Success,
+        statusCode: 200,
+        exceptionType: null,
+      },
+    ],
+  },
+  [PENDING_ID]: {
+    id: PENDING_ID,
+    eventType: 'invoice.payment_failed',
+    eventId: 'evt_8c21f0',
+    url: 'https://hooks.globex.example/inbound',
+    headersJson: '{"Content-Type":"application/json","X-Api-Key":"***"}',
+    groupName: 'https://hooks.globex.example/inbound',
+    reference: 'sub_4471',
+    payloadJson: '{"id":"in_5521","amount_due":1999,"attempt":2}',
+    signingMode: WebhookSigning.StandardWebhooks,
+    hasSecret: true,
+    retryScheduleSeconds: [60, 600, 3600, 21600],
+    successCodesJson: '[200,202]',
+    status: WebhookDeliveryStatus.Pending,
+    attemptCount: 2,
+    nextAttemptAt: ahead(48),
+    createdAt: ago(64),
+    expireAt: ahead(60 * 24 * 30),
+    attempts: [
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000011',
+        timestamp: ago(64),
+        durationMs: 512.9,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 503,
+        exceptionType: null,
+      },
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000012',
+        timestamp: ago(54),
+        durationMs: 30001.0,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: null,
+        exceptionType: 'System.Threading.Tasks.TaskCanceledException',
+      },
+    ],
+  },
+  [EXHAUSTED_ID]: {
+    id: EXHAUSTED_ID,
+    eventType: 'shipment.delivered',
+    eventId: 'evt_77de10',
+    url: 'https://hooks.initech.example/ship',
+    headersJson: null,
+    groupName: 'https://hooks.initech.example/ship',
+    reference: 'sub_9930',
+    payloadJson: '{"id":"ship_9930","status":"delivered"}',
+    signingMode: WebhookSigning.None,
+    hasSecret: false,
+    retryScheduleSeconds: [60, 600, 3600, 21600],
+    successCodesJson: '[200]',
+    status: WebhookDeliveryStatus.Exhausted,
+    attemptCount: 5,
+    nextAttemptAt: null,
+    createdAt: ago(60 * 20),
+    expireAt: ahead(60 * 24 * 10),
+    attempts: [
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000021',
+        timestamp: ago(60 * 20),
+        durationMs: 220.1,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 500,
+        exceptionType: null,
+      },
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000022',
+        timestamp: ago(60 * 19),
+        durationMs: 198.7,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 500,
+        exceptionType: null,
+      },
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000023',
+        timestamp: ago(60 * 18),
+        durationMs: 205.3,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 502,
+        exceptionType: null,
+      },
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000024',
+        timestamp: ago(60 * 14),
+        durationMs: 210.9,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 502,
+        exceptionType: null,
+      },
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000025',
+        timestamp: ago(60 * 8),
+        durationMs: 231.0,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 503,
+        exceptionType: null,
+      },
+    ],
+  },
+  [DELIVERED2_ID]: {
+    id: DELIVERED2_ID,
+    eventType: 'customer.created',
+    eventId: 'evt_02ffa4',
+    url: 'https://hooks.acme.example/customers',
+    headersJson: '{"Content-Type":"application/json"}',
+    groupName: 'https://hooks.acme.example/customers',
+    reference: null,
+    payloadJson: '{"id":"cus_7781","email":"[redacted]"}',
+    signingMode: WebhookSigning.Custom,
+    hasSecret: true,
+    retryScheduleSeconds: [30, 300],
+    successCodesJson: null,
+    status: WebhookDeliveryStatus.Delivered,
+    attemptCount: 2,
+    nextAttemptAt: null,
+    createdAt: ago(180),
+    expireAt: ahead(60 * 24 * 30),
+    attempts: [
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000031',
+        timestamp: ago(180),
+        durationMs: 640.2,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 429,
+        exceptionType: null,
+      },
+      {
+        callId: 'bbbbbbbb-0000-0000-0000-000000000032',
+        timestamp: ago(175),
+        durationMs: 142.6,
+        outcome: AdapterCallOutcome.Success,
+        statusCode: 200,
+        exceptionType: null,
+      },
+    ],
+  },
+  [PENDING2_ID]: {
+    id: PENDING2_ID,
+    eventType: 'invoice.finalized',
+    eventId: 'evt_5b0c9e',
+    url: 'https://hooks.umbrella.example/billing',
+    headersJson: '{"Content-Type":"application/json","Authorization":"***"}',
+    groupName: 'https://hooks.umbrella.example/billing',
+    reference: 'sub_2087',
+    payloadJson: '{"id":"in_2087","total":11800,"currency":"eur"}',
+    signingMode: WebhookSigning.StandardWebhooks,
+    hasSecret: true,
+    retryScheduleSeconds: [],
+    successCodesJson: null,
+    status: WebhookDeliveryStatus.Pending,
+    attemptCount: 0,
+    nextAttemptAt: ahead(1),
+    createdAt: ago(1),
+    expireAt: ahead(60 * 24 * 30),
+    attempts: [],
+  },
+};

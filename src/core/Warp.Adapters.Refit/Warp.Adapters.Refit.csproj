@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<PackageId>Moberg.Warp.Adapters.Refit</PackageId>
+		<Description>Refit registration sugar for Warp outbound adapters: one-call AddAdapter&lt;TApi&gt; wires an observed, named Refit client onto the Warp.Adapters.Http pipeline and names each operation after the interface method (from Refit's RestMethodInfo). The only Warp package that references Refit.</Description>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Refit" Version="11.0.1" />
+		<PackageReference Include="Refit.HttpClientFactory" Version="11.0.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Warp.Adapters.Http\Warp.Adapters.Http.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="Warp.Tests" />
+	</ItemGroup>
+
+</Project>

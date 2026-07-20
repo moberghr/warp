@@ -60,7 +60,7 @@ public sealed class QueueEmailHandler : IRequestHandler<QueueEmailRequest, Guid>
 
     public async Task<Guid> HandleAsync(QueueEmailRequest request, CancellationToken cancellationToken)
     {
-        var jobId = await _publisher.Enqueue(new SendEmailRequest { EmailLogId = request.EmailLogId }).ConfigureAwait(false);
+        var jobId = await _publisher.Enqueue(new OrderConfirmationRequest { EmailLogId = request.EmailLogId }).ConfigureAwait(false);
         await _publisher.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return jobId;
     }

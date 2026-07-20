@@ -104,13 +104,15 @@ public static class TestTasks
     {
         return new StaleJobRecovery<TContext>(
             new TestServerContext(context),
+            context,
             timeProvider,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),
             Options.Create(new WarpServerConfiguration
             {
                 InvisibilityTimeout = invisibilityTimeout,
                 RestartStaleJobsByDefault = restartByDefault,
-            }));
+            }),
+            webhookEnqueuers: []);
     }
 
     public static CounterAggregator<TContext> CreateCounterAggregator<TContext>(TContext context)

@@ -1,5 +1,13 @@
+import axios from 'axios';
 import api from './client';
 import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
+import type { AdapterListItem, AdapterDetail, AdapterCallDetail } from '@/types/adapters';
+import type {
+  WebhookDeliveryListItem,
+  WebhookDeliveryDetail,
+  WebhookDeliverySummary,
+  WebhookDeliveryFilter,
+} from '@/types/webhooks';
 import type { ExtensionManifest } from '@/extensions/types';
 
 // Dashboard
@@ -190,6 +198,68 @@ export const getSagaActivity = (id: string) =>
 
 export const forceCompleteSaga = (id: string) =>
   api.delete(`/sagas/${encodeURIComponent(id)}`).then(() => undefined);
+
+// Adapters — outbound service-call observability. Nav gated on addons.adapters; the
+// endpoints themselves are always registered (dashboard-only processes resolve them).
+export const getAdapters = () =>
+  api.get<AdapterListItem[]>('/adapters').then(r => r.data);
+
+export const getAdapterDetail = (name: string) =>
+  api.get<AdapterDetail>(`/adapters/${encodeURIComponent(name)}`).then(r => r.data);
+
+export const getAdapterCall = (name: string, id: string) =>
+  api.get<AdapterCallDetail>(`/adapters/${encodeURIComponent(name)}/calls/${encodeURIComponent(id)}`).then(r => r.data);
+
+// Webhooks — durable outbound delivery. Nav gated on addons.webhooks (IWebhookRedeliveryEnqueuer
+// presence); the query endpoints themselves are always registered (dashboard-only processes resolve
+// them). The list returns a plain filtered array (server clamps the limit), not a paged envelope.
+export const getWebhooks = (filter: WebhookDeliveryFilter = {}) => {
+  const params: Record<string, string | number> = {};
+  if (filter.status !== undefined) params.status = filter.status;
+  if (filter.eventType) params.eventType = filter.eventType;
+  if (filter.reference) params.reference = filter.reference;
+  if (filter.group) params.group = filter.group;
+  if (filter.since) params.since = filter.since;
+  if (filter.until) params.until = filter.until;
+  if (filter.limit !== undefined) params.limit = filter.limit;
+
+  return api.get<WebhookDeliveryListItem[]>('/webhooks', { params }).then(r => r.data);
+};
+
+export const getWebhookSummary = () =>
+  api.get<WebhookDeliverySummary>('/webhooks/summary').then(r => r.data);
+
+export const getWebhookDetail = (id: string) =>
+  api.get<WebhookDeliveryDetail>(`/webhooks/${encodeURIComponent(id)}`).then(r => r.data);
+
+// Redeliver outcome, mapped from the endpoint's distinct HTTP statuses (WebhookRedeliveryResult):
+// 200 Enqueued, 404 NotFound, 409 Rejected (already in flight) / Unavailable (no worker in this
+// process). The two 409s share a status code and are told apart by the response message body, so the
+// caller can surface a distinct, accurate toast for each.
+export type RedeliverOutcome = 'enqueued' | 'not-found' | 'in-flight' | 'unavailable' | 'error';
+
+export const redeliverWebhook = async (id: string): Promise<RedeliverOutcome> => {
+  try {
+    await api.post(`/webhooks/${encodeURIComponent(id)}/redeliver`);
+
+    return 'enqueued';
+  } catch (error) {
+    if (!axios.isAxiosError(error) || !error.response) {
+      return 'error';
+    }
+    if (error.response.status === 404) {
+      return 'not-found';
+    }
+    if (error.response.status === 409) {
+      const message = String((error.response.data as { message?: string } | undefined)?.message ?? '');
+
+      // Only the Unavailable body mentions the process/worker; everything else at 409 is Rejected.
+      return message.toLowerCase().includes('unavailable') ? 'unavailable' : 'in-flight';
+    }
+
+    return 'error';
+  }
+};
 
 // Extensions
 export const getExtensions = () =>

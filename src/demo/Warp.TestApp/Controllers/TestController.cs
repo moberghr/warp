@@ -16,14 +16,14 @@ public class TestController : ControllerBase
     }
 
     [HttpPost("register")]
-    public async Task<IActionResult> Register(RegisterRequest request)
+    public async Task<IActionResult> Register(CustomerSignupRequest request)
     {
         await _publisher.Enqueue(request);
         return Ok();
     }
 
     [HttpPost("register-schedule")]
-    public async Task<IActionResult> ScheduleRegister(ScheduleRegisterRequest request)
+    public async Task<IActionResult> ScheduleRegister(ScheduleCustomerSignupRequest request)
     {
         await _publisher.Enqueue(request);
         return Ok();

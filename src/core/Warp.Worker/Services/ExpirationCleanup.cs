@@ -4,6 +4,7 @@ using Warp.Core;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
+using Warp.Core.Enums;
 
 namespace Warp.Worker.Services;
 
@@ -48,6 +49,9 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupRecurringJobLogsAsync(ct);
         await CleanupBackgroundServiceLogsAsync(ct);
         await CleanupOrphanedBackgroundServiceDefinitionsAsync(ct);
+        await CleanupExpiredAdapterCallLogsAsync(ct);
+        await CleanupOrphanedAdapterDefinitionsAsync(ct);
+        await CleanupExpiredWebhookDeliveriesAsync(ct);
 
         var total = timeExpired + countCleaned;
         if (total == 0)
@@ -322,6 +326,117 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     // doesn't matter: BackgroundServiceLog has a FK cascade from Instance (§8.18), not from
     // Definition, so log rows tied to a deleted Definition were already removed when their
     // Instance disappeared.
+    // Deletes AdapterCallLog rows past their stamped ExpireAt. Call logs are diagnostics, not an
+    // audit trail (§8.2 stance) — the flusher stamps ExpireAt from the per-adapter / global retention
+    // and this sweep drops anything expired. This is the highest-volume adapter table (a row per
+    // outbound call under RecordCalls = All), so the delete runs in ExpirationBatchSize id batches.
+    // Honest scope of the batching: the whole task tick shares one xact-lock transaction, so row locks
+    // accumulate across batches until commit — what batching buys is per-STATEMENT bounds, below SQL
+    // Server's ~5k lock-escalation threshold so the table never escalates to a table lock against the
+    // flusher's live INSERTs, not earlier lock release. Loops to exhaustion up to MaxSweepBatchesPerTick
+    // with any remainder draining next tick.
+    //
+    // The cap is a backstop: with a sane retention, fresh rows are stamped a future ExpireAt and never
+    // requalify against the snapshotted now, so the loop naturally terminates. A pathological zero or
+    // negative retention would let the flusher's live INSERTs requalify mid-loop — the cap converts that
+    // into bounded work per tick instead of an endless chase.
+    private const int MaxSweepBatchesPerTick = 100;
+
+    internal async Task<int> CleanupExpiredAdapterCallLogsAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var ids = await _context.Set<AdapterCallLog>()
+                .Where(x => x.ExpireAt != null)
+                .Where(x => x.ExpireAt < now)
+                .Select(x => x.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<AdapterCallLog>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+
+            if (ids.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // Deletes AdapterDefinition rows whose LastSeenAt is older than the orphan grace. Adapters run in
+    // non-server processes, so there is no live-instance signal (unlike background services) — staleness
+    // alone drives removal. The flusher lazily refreshes LastSeenAt while an adapter is in use, so a
+    // still-active adapter stays well within the grace window. One row per adapter NAME (not per call),
+    // so the single statement is bounded by registration cardinality — no id batching needed.
+    internal async Task CleanupOrphanedAdapterDefinitionsAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var threshold = now.Subtract(_configuration.AdapterDefinitionOrphanGrace);
+
+        await _context.Set<AdapterDefinition>()
+            .Where(x => x.LastSeenAt < threshold)
+            .ExecuteDeleteAsync(ct);
+    }
+
+    // Deletes settled WebhookDelivery rows past their stamped ExpireAt. Delivery rows are operational
+    // history, not an audit trail (§8.2 stance) — the dispatcher stamps ExpireAt from WebhookDeliveryRetention
+    // and this sweep drops anything expired. Pending deliveries are excluded: an in-flight delivery whose
+    // ExpireAt elapses mid-schedule (a long backoff can outrun retention) must never vanish underneath its
+    // own scheduled executor job — only Delivered/Exhausted rows are eligible. The WebhookDelivery table is
+    // always in the schema (§2.11), like AdapterCallLog, so no model guard is needed. Attempt rows
+    // (AdapterCallLog) expire independently on their own retention. A volume table (a row per send), so
+    // the delete runs in ExpirationBatchSize id batches like the call-log sweep — same honest scope:
+    // per-statement bounds (no lock escalation), not earlier lock release, capped by MaxSweepBatchesPerTick.
+    internal async Task<int> CleanupExpiredWebhookDeliveriesAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var ids = await _context.Set<WebhookDelivery>()
+                .Where(x => x.Status != WebhookDeliveryStatus.Pending)
+                .Where(x => x.ExpireAt != null)
+                .Where(x => x.ExpireAt < now)
+                .Select(x => x.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<WebhookDelivery>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+
+            if (ids.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
     internal async Task CleanupOrphanedBackgroundServiceDefinitionsAsync(CancellationToken ct)
     {
         var now = _time.GetUtcNow().UtcDateTime;

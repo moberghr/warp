@@ -3,16 +3,16 @@ using Warp.Core.Handlers;
 
 namespace Warp.Core.Handlers;
 
-public class SendEmailCommand : IJobHandler<SendEmailRequest>
+public class OrderConfirmationCommand : IJobHandler<OrderConfirmationRequest>
 {
     private readonly TestContext _context;
 
-    public SendEmailCommand(TestContext context)
+    public OrderConfirmationCommand(TestContext context)
     {
         _context = context;
     }
 
-    public async Task HandleAsync(SendEmailRequest message, CancellationToken cancellationToken)
+    public async Task HandleAsync(OrderConfirmationRequest message, CancellationToken cancellationToken)
     {
         var emailLog = await _context.EmailLogs
             .Where(x => x.Id == message.EmailLogId)
@@ -24,7 +24,7 @@ public class SendEmailCommand : IJobHandler<SendEmailRequest>
     }
 }
 
-public class SendEmailRequest : IJob
+public class OrderConfirmationRequest : IJob
 {
     public int EmailLogId { get; set; }
 }

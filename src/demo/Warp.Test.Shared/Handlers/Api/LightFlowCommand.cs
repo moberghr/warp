@@ -23,7 +23,7 @@ public class LightFlowHandler : IJobHandler<LightFlowRequest>
 
     public async Task HandleAsync(LightFlowRequest message, CancellationToken cancellationToken)
     {
-        var email = new SendEmailRequest { EmailLogId = 1 };
+        var email = new OrderConfirmationRequest { EmailLogId = 1 };
 
         // 3 spawned emails
         for (var i = 0; i < 3; i++)
@@ -32,7 +32,7 @@ public class LightFlowHandler : IJobHandler<LightFlowRequest>
         }
 
         // Batch of 4
-        var batch = Enumerable.Range(0, 4).Select(_ => new SendEmailRequest { EmailLogId = 1 }).ToList();
+        var batch = Enumerable.Range(0, 4).Select(_ => new OrderConfirmationRequest { EmailLogId = 1 }).ToList();
         await _batchPublisher.StartNew(batch);
 
         // Parent email with 2 continuations:

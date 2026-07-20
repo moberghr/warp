@@ -1,5 +1,8 @@
 import type { InternalAxiosRequestConfig, AxiosResponse } from 'axios';
 import * as data from './data';
+import { demoAdapters, demoAdapterDetails, demoAdapterCalls } from './data/adapters';
+import { demoWebhooks, demoWebhookDetails, demoWebhookSummary } from './data/webhooks';
+import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
 
@@ -53,6 +56,20 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const sagaResult = routeSagas(method, url, config);
     if (sagaResult !== undefined) {
       return sagaResult;
+    }
+
+    // Adapters: /addons reports adapters:true in demo mode (see routeGet), so the nav is visible
+    // and these routes serve the static fixtures for the screenshots.
+    const adapterResult = routeAdapters(method, url, config);
+    if (adapterResult !== undefined) {
+      return adapterResult;
+    }
+
+    // Webhooks: /addons reports webhooks:true in demo mode (see routeGet), so the nav is visible
+    // and these routes serve the static fixtures for the screenshots.
+    const webhookResult = routeWebhooks(method, url, config);
+    if (webhookResult !== undefined) {
+      return webhookResult;
     }
 
     // All POST/DELETE routes return success
@@ -135,6 +152,127 @@ function routeSagas(
   }
   if (method === 'delete' && detailMatch && !RESERVED.has(detailMatch[1])) {
     return resolve({}, config);
+  }
+
+  return undefined;
+}
+
+function routeAdapters(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (!url.startsWith('/adapters')) {
+    return undefined;
+  }
+
+  // GET /adapters — list
+  if (method === 'get' && (url === '/adapters' || url.startsWith('/adapters?'))) {
+    return resolve(demoAdapters, config);
+  }
+
+  // GET /adapters/{name}/calls/{id} — call detail (checked before the {name} detail route)
+  const callMatch = url.match(/^\/adapters\/([^/?]+)\/calls\/([^/?]+)$/);
+  if (method === 'get' && callMatch) {
+    const id = decodeURIComponent(callMatch[2]);
+    const call = demoAdapterCalls[id];
+    if (!call) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(call, config);
+  }
+
+  // GET /adapters/{name} — detail
+  const detailMatch = url.match(/^\/adapters\/([^/?]+)$/);
+  if (method === 'get' && detailMatch) {
+    const name = decodeURIComponent(detailMatch[1]);
+    const detail = demoAdapterDetails[name];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(detail, config);
+  }
+
+  return undefined;
+}
+
+function routeWebhooks(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (!url.startsWith('/webhooks')) {
+    return undefined;
+  }
+
+  const params: Record<string, unknown> = config.params ?? {};
+
+  // GET /webhooks/summary — tile counts (checked before the {id} detail route).
+  if (method === 'get' && url === '/webhooks/summary') {
+    return resolve(demoWebhookSummary, config);
+  }
+
+  // GET /webhooks — filtered list. Server does the real filtering; mirror status/event/reference
+  // here so the demo filters feel live.
+  if (method === 'get' && (url === '/webhooks' || url.startsWith('/webhooks?'))) {
+    const status = params.status !== undefined ? Number(params.status) : undefined;
+    const eventType = params.eventType ? String(params.eventType).toLowerCase() : undefined;
+    const reference = params.reference ? String(params.reference).toLowerCase() : undefined;
+    const filtered = demoWebhooks.filter((x) => {
+      if (status !== undefined && x.status !== (status as WebhookDeliveryStatus)) {
+        return false;
+      }
+      if (eventType && !x.eventType.toLowerCase().includes(eventType)) {
+        return false;
+      }
+      if (reference && !(x.reference ?? '').toLowerCase().includes(reference)) {
+        return false;
+      }
+
+      return true;
+    });
+
+    return resolve(filtered, config);
+  }
+
+  // POST /webhooks/{id}/redeliver — mirrors the real endpoint's status codes (checked before the {id}
+  // detail route). A settled delivery redelivers (200); a Pending one already owns a live executor job,
+  // so the server rejects it with 409 (Rejected). Unknown id is 404. Deterministic off the fixed fixture
+  // status. Unavailable (no worker) can't occur in the single-process demo, so it is not modelled.
+  const redeliverMatch = url.match(/^\/webhooks\/([^/?]+)\/redeliver$/);
+  if (method === 'post' && redeliverMatch) {
+    const id = decodeURIComponent(redeliverMatch[1]);
+    const detail = demoWebhookDetails[id];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+    if (detail.status === WebhookDeliveryStatus.Pending) {
+      return Promise.reject({
+        response: {
+          status: 409,
+          statusText: 'Conflict',
+          data: { message: 'Delivery is already pending — it already has a live executor job.' },
+          headers: {},
+          config,
+        },
+      });
+    }
+
+    return resolve({}, config);
+  }
+
+  // GET /webhooks/{id} — detail.
+  const detailMatch = url.match(/^\/webhooks\/([^/?]+)$/);
+  if (method === 'get' && detailMatch) {
+    const id = decodeURIComponent(detailMatch[1]);
+    const detail = demoWebhookDetails[id];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(detail, config);
   }
 
   return undefined;
@@ -373,7 +511,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true };
+    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, webhooks: true };
   }
 
   // Dashboard

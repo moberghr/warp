@@ -100,6 +100,41 @@ public static class WarpTelemetry
         unit: "{restart}",
         description: "Total WarpBackgroundService restart attempts (increments each time the supervisor enters the backoff-wait path after a fault). Tag: service_name.");
 
+    public static readonly Counter<long> AdapterCalls = Meter.CreateCounter<long>(
+        "warp.adapter.calls",
+        unit: "{call}",
+        description: "Total completed outbound adapter calls. Tags: adapter, operation, outcome (and group when IncludeGroupInMetrics).");
+
+    public static readonly Histogram<double> AdapterDuration = Meter.CreateHistogram<double>(
+        "warp.adapter.duration",
+        unit: "ms",
+        description: "Duration of a logical outbound adapter call (outermost handler timing). Tags: adapter, operation, outcome (and group when IncludeGroupInMetrics).");
+
+    public static readonly Counter<long> AdapterRecordsDropped = Meter.CreateCounter<long>(
+        "warp.adapter.records_dropped",
+        unit: "{record}",
+        description: "Total adapter call-log records dropped because the recording channel was full. Recording is lossy by design; user calls are never blocked. Tag: adapter.");
+
+    public static readonly Counter<long> AdapterConfigConflicts = Meter.CreateCounter<long>(
+        "warp.adapter.config_conflicts",
+        unit: "{conflict}",
+        description: "Total times a process's local shared-rate-limit policy differed from the persisted AdapterDefinition policy; the persisted policy is enforced. Tag: adapter.");
+
+    public static readonly Counter<long> WebhookDeliveries = Meter.CreateCounter<long>(
+        "warp.webhooks.deliveries",
+        unit: "{delivery}",
+        description: "Total webhook deliveries that reached a terminal outcome. Tag: outcome (delivered | exhausted).");
+
+    public static readonly Counter<long> WebhookAttempts = Meter.CreateCounter<long>(
+        "warp.webhooks.attempts",
+        unit: "{attempt}",
+        description: "Total webhook delivery attempts made by the executor. Tag: outcome (success | failed). The HTTP leg's spans/duration/error counters come from the adapter layer and are not duplicated here.");
+
+    public static readonly Counter<long> WebhookRedeliveries = Meter.CreateCounter<long>(
+        "warp.webhooks.redeliveries",
+        unit: "{redelivery}",
+        description: "Total manual redeliveries triggered on a settled (Delivered | Exhausted) delivery.");
+
     /// <summary>
     /// Starts the consumer activity for handler execution when an <see cref="ActivityListener"/>
     /// is attached to the Warp source. Returns null when no listener is registered — workers
@@ -228,6 +263,27 @@ public static class WarpTelemetry
     /// (one of: acquired, skipped, throttled, lock_contention) before disposing.
     /// </summary>
     public static Activity? StartRateLimitActivity() => ActivitySource.StartActivity("warp.rate_limit_check", ActivityKind.Internal);
+
+    /// <summary>
+    /// Starts a Client-kind span around a single outbound adapter call. Span name
+    /// <c>"{adapter}.{operation}"</c> (OTel client-span convention). Returns null when no
+    /// <see cref="ActivityListener"/> is attached — callers must use <c>?.</c> so non-OTel
+    /// deployments pay zero allocation overhead. Stamps warp.adapter.name / warp.adapter.operation;
+    /// the caller adds warp.adapter.group / warp.adapter.outcome / error.type before disposing.
+    /// </summary>
+    public static Activity? StartAdapterActivity(string adapter, string operation)
+    {
+        var activity = ActivitySource.StartActivity($"{adapter}.{operation}", ActivityKind.Client);
+        if (activity == null)
+        {
+            return null;
+        }
+
+        activity.SetTag(WarpTelemetryAttributes.WarpAdapterName, adapter);
+        activity.SetTag(WarpTelemetryAttributes.WarpAdapterOperation, operation);
+
+        return activity;
+    }
 
     /// <summary>
     /// Bound the length of a string used as an OTel span status description. Activity status

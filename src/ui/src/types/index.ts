@@ -328,6 +328,8 @@ export interface WarpAddonsInfo {
   rateLimits: boolean;
   push: boolean;
   sagas: boolean;
+  adapters: boolean;
+  webhooks: boolean;
 }
 
 export type {

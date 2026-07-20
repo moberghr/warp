@@ -158,4 +158,15 @@ public interface IWarpSqlQueries<TContext>
         string lockKey,
         Func<DbContext, CancellationToken, Task<T>> work,
         CancellationToken ct);
+
+    /// <summary>
+    /// Acquires a row-level write lock on the <see cref="RateLimitBucket"/> row for
+    /// <paramref name="key"/> within the caller's open transaction, returning it as a tracked entity
+    /// (or <c>null</c> when no row exists yet). Uses <c>FOR NO KEY UPDATE</c> (PG) /
+    /// <c>WITH (UPDLOCK, ROWLOCK)</c> (SQL Server) so concurrent adapter rate-limit lease acquisitions
+    /// serialise without a TOCTOU window between the SELECT and the caller's INSERT/UPDATE (§1.4). Used
+    /// by the shared adapter rate limiter's token-leasing check-and-increment. Caller must have started a
+    /// transaction before calling this method.
+    /// </summary>
+    Task<RateLimitBucket?> LockRateLimitBucketByKeyAsync(DbContext context, string key, CancellationToken ct);
 }

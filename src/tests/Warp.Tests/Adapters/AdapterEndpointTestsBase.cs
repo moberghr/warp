@@ -1,0 +1,458 @@
+using System.Net;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Moq;
+using Shouldly;
+using Warp.Core;
+using Warp.Core.Adapters;
+using Warp.Core.Data.Entities;
+using Warp.Core.Enums;
+using Warp.Core.Services;
+using Warp.Tests.Fixtures;
+using Warp.UI.Endpoints;
+using Warp.UI.UIMiddleware;
+
+namespace Warp.Tests.Adapters;
+
+/// <summary>
+/// Dashboard-backend coverage for the Adapters feature (SC7): the <see cref="IAdapterQueryService"/>
+/// payloads (list stats, detail operations/groups/recent-calls + policy-conflict flag, call detail with
+/// captured payloads) against a real database, plus the <c>GET /api/addons</c> <c>adapters</c> flag in
+/// both registration shapes (with and without <c>AddAdapters()</c>). Counts come from the merged
+/// <see cref="Statistic"/>/<see cref="Counter"/> rows and average latency from <see cref="AdapterCallLog"/>,
+/// so the seed writes both. Each test drives exactly one public method (§4.8).
+/// </summary>
+[GenerateDatabaseTests]
+public abstract class AdapterEndpointTestsBase : IAsyncLifetime
+{
+    private readonly IDatabaseFixture _fixture;
+
+    protected AdapterEndpointTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
+
+    public async ValueTask InitializeAsync() => await _fixture.ResetAsync();
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    [TimedFact]
+    public void AddAdapters_RegistersWarpAdaptersMarker()
+    {
+        // The addons flag is gated on IWarpAdapters presence — only AddAdapters() registers it.
+        var services = new ServiceCollection();
+
+        new WarpBuilder<TestContext>(services).AddAdapters();
+
+        services.Any(x => x.ServiceType == typeof(IWarpAdapters)).ShouldBeTrue();
+    }
+
+    [TimedFact]
+    public async Task GetAddons_AdaptersRegistered_FlagTrue()
+    {
+        var (app, client) = await CreateAddonsHost(registerAdapters: true);
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", Xunit.TestContext.Current.CancellationToken);
+
+            info.ShouldNotBeNull();
+            info.Adapters.ShouldBeTrue();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetAddons_AdaptersNotRegistered_FlagFalse()
+    {
+        var (app, client) = await CreateAddonsHost(registerAdapters: false);
+        try
+        {
+            var response = await client.GetAsync("/warp/api/addons", Xunit.TestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+            var info = await response.Content.ReadFromJsonAsync<WarpAddonsInfo>(Xunit.TestContext.Current.CancellationToken);
+            info.ShouldNotBeNull();
+            info.Adapters.ShouldBeFalse();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetAdapters_ReturnsDefinitionWithAggregatedStats()
+    {
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor"));
+        AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "success"), 2);
+        AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "failed"), 1);
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10));
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 20));
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Failed, durationMs: 30));
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var list = await CreateService().GetAdapters(Xunit.TestContext.Current.CancellationToken);
+
+        var item = list.ShouldHaveSingleItem();
+        item.Name.ShouldBe("vendor");
+        item.TotalCalls.ShouldBe(3);
+        item.ErrorCount.ShouldBe(1);
+        item.ErrorRate.ShouldBe(1d / 3d, 0.001);
+        item.AvgDurationMs.ShouldBe(20);
+        item.HasPolicyConflict.ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task GetAdapterDetail_ReturnsOperationsGroupsAndConflictFlag()
+    {
+        var failedAt = DateTime.UtcNow;
+
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor", hasPolicyConflict: true));
+        AddOutcomeCounters(seed, AdapterCounterKeys.Operation("vendor", "GetOrders", "success"), 2);
+        AddOutcomeCounters(seed, AdapterCounterKeys.Operation("vendor", "GetOrders", "failed"), 1);
+        AddOutcomeCounters(seed, AdapterCounterKeys.Group("vendor", "shop-eu", "success"), 1);
+        AddOutcomeCounters(seed, AdapterCounterKeys.Group("vendor", "shop-eu", "failed"), 1);
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10, group: "shop-eu", timestamp: failedAt.AddMinutes(-1)));
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Failed, durationMs: 20, group: "shop-eu", timestamp: failedAt));
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 30));
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var detail = await CreateService().GetAdapterDetail("vendor", Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.HasPolicyConflict.ShouldBeTrue();
+
+        var operation = detail.Operations.ShouldHaveSingleItem();
+        operation.Operation.ShouldBe("GetOrders");
+        operation.Calls.ShouldBe(3);
+        operation.Errors.ShouldBe(1);
+
+        var group = detail.Groups.ShouldHaveSingleItem();
+        group.Group.ShouldBe("shop-eu");
+        group.Calls.ShouldBe(2);
+        group.Errors.ShouldBe(1);
+        group.LastFailureAt.ShouldNotBeNull();
+        group.LastFailureAt.Value.ShouldBe(failedAt, TimeSpan.FromSeconds(1));
+
+        detail.RecentCalls.Count.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task GetAdapterDetail_RecentCallsIdenticalTimestamp_OrdersByIdDescendingAsStableTiebreaker()
+    {
+        // SMALL-5: OrderByDescending(Timestamp) alone leaves the recent-calls order non-deterministic when
+        // Timestamp ties (and, at the RecentCalls cap, which rows survive the Take arbitrary).
+        // ThenByDescending(Id) gives a total order — the returned list matches the deterministic ordering.
+        var timestamp = DateTime.UtcNow;
+
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor"));
+        for (var i = 0; i < 5; i++)
+        {
+            seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10, timestamp: timestamp));
+        }
+
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var detail = await CreateService().GetAdapterDetail("vendor", Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+
+        // The same total order the service applies (Timestamp desc, then Id desc).
+        var expected = await _fixture.CreateContext().Set<AdapterCallLog>()
+            .Where(x => x.AdapterName == "vendor")
+            .OrderByDescending(x => x.Timestamp)
+            .ThenByDescending(x => x.Id)
+            .Select(x => x.Id)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        detail.RecentCalls.Select(x => x.Id).ShouldBe(expected);
+    }
+
+    [TimedFact]
+    public async Task GetAdapterDetail_UnknownName_ReturnsNull()
+    {
+        var detail = await CreateService().GetAdapterDetail("missing", Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task GetAdapterDetail_ConfiguredGroupLabel_FlowsThroughFromDefinition()
+    {
+        var seed = _fixture.CreateContext();
+        var definition = Definition("vendor");
+        definition.GroupLabel = "Shop";
+        seed.Set<AdapterDefinition>().Add(definition);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var detail = await CreateService().GetAdapterDetail("vendor", Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.GroupLabel.ShouldBe("Shop");
+    }
+
+    [TimedFact]
+    public async Task GetAdapterDetail_NoGroupLabel_DefaultsToGroup()
+    {
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor"));
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var detail = await CreateService().GetAdapterDetail("vendor", Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.GroupLabel.ShouldBe("Group");
+    }
+
+    [TimedFact]
+    public async Task GetAdapters_LatencyWindow_ExcludesRowsOlderThanWindow()
+    {
+        // The list page's average latency is bounded to a 24h rolling window (F7). A stale call outside the
+        // window must not drag the average — only the recent call counts.
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor"));
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10, timestamp: DateTime.UtcNow));
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 9000, timestamp: DateTime.UtcNow.AddHours(-30)));
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var list = await CreateService().GetAdapters(Xunit.TestContext.Current.CancellationToken);
+
+        list.ShouldHaveSingleItem().AvgDurationMs.ShouldBe(10);
+    }
+
+    [TimedFact]
+    public async Task GetCallDetail_ReturnsCapturedPayloads()
+    {
+        var call = CallLog("vendor", "GetOrders", AdapterCallOutcome.Failed, durationMs: 12);
+        call.RequestBody = "request-body";
+        call.ResponseBody = "response-body";
+        call.RequestHeaders = "X-Api-Key: ***";
+        call.ExceptionType = typeof(InvalidOperationException).FullName;
+        call.ExceptionMessage = "boom";
+
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterCallLog>().Add(call);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var detail = await CreateService().GetCallDetail("vendor", call.Id, Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.Id.ShouldBe(call.Id);
+        detail.RequestBody.ShouldBe("request-body");
+        detail.ResponseBody.ShouldBe("response-body");
+        detail.RequestHeaders.ShouldBe("X-Api-Key: ***");
+        detail.ExceptionType.ShouldBe(typeof(InvalidOperationException).FullName);
+        detail.ExceptionMessage.ShouldBe("boom");
+    }
+
+    [TimedFact]
+    public async Task GetCallDetail_UnknownId_ReturnsNull()
+    {
+        var detail = await CreateService().GetCallDetail("vendor", Guid.NewGuid(), Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task GetAdaptersEndpoint_ReturnsAggregatedStatsJson()
+    {
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor"));
+        AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "success"), 2);
+        AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "failed"), 1);
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10));
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Failed, durationMs: 30));
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var (app, client) = await CreateEndpointHost();
+        try
+        {
+            var list = await client.GetFromJsonAsync<List<AdapterListItemModel>>("/warp/api/adapters", Xunit.TestContext.Current.CancellationToken);
+
+            var item = list.ShouldNotBeNull().ShouldHaveSingleItem();
+            item.Name.ShouldBe("vendor");
+            item.TotalCalls.ShouldBe(3);
+            item.ErrorCount.ShouldBe(1);
+            item.AvgDurationMs.ShouldBe(20);
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetAdapterDetailEndpoint_KnownName_ReturnsDetailJson()
+    {
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor", hasPolicyConflict: true));
+        AddOutcomeCounters(seed, AdapterCounterKeys.Operation("vendor", "GetOrders", "success"), 2);
+        seed.Set<AdapterCallLog>().Add(CallLog("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 15));
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var (app, client) = await CreateEndpointHost();
+        try
+        {
+            var detail = await client.GetFromJsonAsync<AdapterDetailModel>("/warp/api/adapters/vendor", Xunit.TestContext.Current.CancellationToken);
+
+            detail.ShouldNotBeNull();
+            detail.Name.ShouldBe("vendor");
+            detail.HasPolicyConflict.ShouldBeTrue();
+            detail.Operations.ShouldHaveSingleItem().Operation.ShouldBe("GetOrders");
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetAdapterDetailEndpoint_UnknownName_Returns404()
+    {
+        var (app, client) = await CreateEndpointHost();
+        try
+        {
+            var response = await client.GetAsync("/warp/api/adapters/missing", Xunit.TestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetCallDetailEndpoint_KnownId_ReturnsCapturedPayloadsJson()
+    {
+        var call = CallLog("vendor", "GetOrders", AdapterCallOutcome.Failed, durationMs: 12);
+        call.ResponseBody = "response-body";
+        call.ExceptionMessage = "boom";
+
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterCallLog>().Add(call);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var (app, client) = await CreateEndpointHost();
+        try
+        {
+            var detail = await client.GetFromJsonAsync<AdapterCallDetailModel>($"/warp/api/adapters/vendor/calls/{call.Id}", Xunit.TestContext.Current.CancellationToken);
+
+            detail.ShouldNotBeNull();
+            detail.Id.ShouldBe(call.Id);
+            detail.ResponseBody.ShouldBe("response-body");
+            detail.ExceptionMessage.ShouldBe("boom");
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetCallDetailEndpoint_UnknownId_Returns404()
+    {
+        var (app, client) = await CreateEndpointHost();
+        try
+        {
+            var response = await client.GetAsync($"/warp/api/adapters/vendor/calls/{Guid.NewGuid()}", Xunit.TestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    private async Task<(WebApplication App, HttpClient Client)> CreateEndpointHost()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.WebHost.UseDefaultServiceProvider(o => o.ValidateScopes = true);
+
+        // Back the always-registered query service with the fixture database so the real route templates,
+        // binding, and JSON serialization in WarpEndpoints are exercised end-to-end (not the service alone).
+        var fixture = _fixture;
+        builder.Services.AddScoped<IAdapterQueryService>(_ => new AdapterQueryService<TestContext>(fixture.CreateContext(), TimeProvider.System));
+
+        var app = builder.Build();
+        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+
+        await app.StartAsync(CancellationToken.None);
+
+        return (app, app.GetTestClient());
+    }
+
+    private static async Task<(WebApplication App, HttpClient Client)> CreateAddonsHost(bool registerAdapters)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.WebHost.UseDefaultServiceProvider(o => o.ValidateScopes = true);
+
+        if (registerAdapters)
+        {
+            builder.Services.AddSingleton(Mock.Of<IWarpAdapters>());
+        }
+
+        var app = builder.Build();
+        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+
+        await app.StartAsync(CancellationToken.None);
+
+        return (app, app.GetTestClient());
+    }
+
+    private static AdapterDefinition Definition(string name, bool hasPolicyConflict = false)
+        => new()
+        {
+            Name = name,
+            FirstSeenAt = DateTime.UtcNow.AddHours(-1),
+            LastSeenAt = DateTime.UtcNow,
+            ConfigSummary = "test",
+            HasPolicyConflict = hasPolicyConflict,
+        };
+
+    private static AdapterCallLog CallLog(
+        string adapter,
+        string operation,
+        AdapterCallOutcome outcome,
+        double durationMs,
+        string? group = null,
+        DateTime? timestamp = null)
+        => new()
+        {
+            AdapterName = adapter,
+            Operation = operation,
+            GroupName = group,
+            Timestamp = timestamp ?? DateTime.UtcNow,
+            DurationMs = durationMs,
+            Attempts = 1,
+            Outcome = outcome,
+            MachineName = "test-host",
+        };
+
+    private static void AddOutcomeCounters(TestContext context, string key, int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            context.Set<Counter>().Add(new Counter { Key = key, Value = 1 });
+        }
+    }
+
+    private AdapterQueryService<TestContext> CreateService() => new(_fixture.CreateContext(), TimeProvider.System);
+}
