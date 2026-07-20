@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import { AlertTriangle, X, ChevronLeft, ChevronRight } from 'lucide-react';
@@ -8,19 +8,19 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
-import { HealthPill, adapterHealth, OutcomeBadge, formatPercent, formatMs } from './shared';
+import { HealthPill, adapterHealth, OutcomeBadge, formatPercent, formatMs, parseTags } from './shared';
 
 const PAGE_SIZE = 15;
 
 export default function AdapterDetailPage() {
   const { name: rawName } = useParams<{ name: string }>();
   const name = rawName ? decodeURIComponent(rawName) : '';
+  const navigate = useNavigate();
 
   // Combined filter for the recent-calls list — driven by clicking an operation row or a group row.
   const [operationFilter, setOperationFilter] = useState<string | null>(null);
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
   const [page, setPage] = useState(0);
-  const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
 
   const detailQuery = useQuery({
     queryKey: ['adapters', 'detail', name] as const,
@@ -238,7 +238,7 @@ export default function AdapterDetailPage() {
                   <TableRow
                     key={call.id}
                     className="cursor-pointer"
-                    onClick={() => setSelectedCallId(call.id)}
+                    onClick={() => navigate(`/adapters/${encodeURIComponent(name)}/calls/${encodeURIComponent(call.id)}`)}
                   >
                     <TableCell className="text-sm text-muted-foreground">
                       <RelativeTime date={call.timestamp} />
@@ -268,10 +268,6 @@ export default function AdapterDetailPage() {
           />
         )}
       </Card>
-
-      {selectedCallId && (
-        <CallDrawer name={name} callId={selectedCallId} onClose={() => setSelectedCallId(null)} />
-      )}
     </div>
   );
 }
@@ -482,147 +478,4 @@ function Tags({ tagsJson }: { tagsJson: string | null }) {
       ))}
     </div>
   );
-}
-
-function CallDrawer({ name, callId, onClose }: { name: string; callId: string; onClose: () => void }) {
-  const query = useQuery({
-    queryKey: ['adapters', 'call', name, callId] as const,
-    queryFn: () => api.getAdapterCall(name, callId),
-  });
-
-  const call = query.data;
-
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/40" onClick={onClose}>
-      <div
-        className="h-full w-full max-w-2xl overflow-y-auto bg-card p-6 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between mb-4">
-          <h2 className="text-lg font-semibold">Call detail</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 rounded-md hover:bg-accent text-muted-foreground"
-            title="Close"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        {query.isError && <ErrorState message="Unable to load call detail" />}
-        {query.isLoading && <LoadingState />}
-
-        {call && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-sm">{call.operation}</span>
-              <OutcomeBadge outcome={call.outcome} />
-            </div>
-
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-              <Field label="Timestamp"><RelativeTime date={call.timestamp} /></Field>
-              <Field label="Duration">{formatMs(call.durationMs)}</Field>
-              <Field label="Attempts">{call.attempts}</Field>
-              <Field label="Status">{call.statusCode ?? '—'}</Field>
-              {call.groupName && <Field label="Group"><span className="font-mono text-xs">{call.groupName}</span></Field>}
-              <Field label="Machine"><span className="font-mono text-xs">{call.machineName}</span></Field>
-              {call.traceId && <Field label="Trace"><span className="font-mono text-xs">{call.traceId}</span></Field>}
-              {call.correlationId && <Field label="Correlation"><span className="font-mono text-xs">{call.correlationId}</span></Field>}
-            </div>
-
-            {call.exceptionType && (
-              <Pane title="Exception">
-                <div className="font-mono text-xs text-destructive">{call.exceptionType}</div>
-                {call.exceptionMessage && (
-                  <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-xs">{call.exceptionMessage}</pre>
-                )}
-              </Pane>
-            )}
-
-            <PayloadPane
-              title="Request"
-              summary={call.requestSummary}
-              headers={call.requestHeaders}
-              body={call.requestBody}
-            />
-            <PayloadPane
-              title="Response"
-              headers={call.responseHeaders}
-              body={call.responseBody}
-            />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function PayloadPane({
-  title,
-  summary,
-  headers,
-  body,
-}: {
-  title: string;
-  summary?: string | null;
-  headers: string | null;
-  body: string | null;
-}) {
-  const hasAny = !!summary || !!headers || !!body;
-
-  return (
-    <Pane title={title}>
-      {!hasAny && <div className="text-xs text-muted-foreground">Not captured.</div>}
-      {summary && <div className="font-mono text-xs mb-2 break-words">{summary}</div>}
-      {headers && (
-        <div className="mb-2">
-          <div className="text-xs text-muted-foreground mb-0.5">Headers</div>
-          <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 font-mono text-xs">{headers}</pre>
-        </div>
-      )}
-      {body && (
-        <div>
-          <div className="text-xs text-muted-foreground mb-0.5">Body</div>
-          <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 font-mono text-xs max-h-72 overflow-auto">{body}</pre>
-        </div>
-      )}
-    </Pane>
-  );
-}
-
-function Pane({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-md border p-3">
-      <div className="text-sm font-medium mb-2">{title}</div>
-      {children}
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex gap-2">
-      <span className="text-muted-foreground min-w-24">{label}</span>
-      <span>{children}</span>
-    </div>
-  );
-}
-
-// Redacted, truncated tags come from the recorder as a JSON object of string→string. Render
-// defensively — a malformed or non-object payload yields no chips rather than a crash.
-function parseTags(tagsJson: string | null): [string, string][] {
-  if (!tagsJson) {
-    return [];
-  }
-  try {
-    const parsed: unknown = JSON.parse(tagsJson);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return [];
-    }
-
-    return Object.entries(parsed as Record<string, unknown>).map(([key, value]) => [key, String(value)]);
-  } catch {
-    return [];
-  }
 }

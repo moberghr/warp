@@ -3,6 +3,7 @@
 // This is a leaf helper module (formatters + tiny presentational atoms), not an HMR
 // component boundary, so the fast-refresh single-export rule doesn't apply.
 /* eslint-disable react-refresh/only-export-components */
+import type { ReactNode } from 'react';
 import { AdapterCallOutcome } from '@/types/adapters';
 
 export function formatPercent(rate: number): string {
@@ -93,6 +94,79 @@ export function OutcomeBadge({ outcome }: { outcome: AdapterCallOutcome }) {
       {style.label}
     </span>
   );
+}
+
+// Bordered titled section used across the call-detail pages (metadata, exception, payload panes).
+export function Pane({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="rounded-md border p-3">
+      <div className="text-sm font-medium mb-2">{title}</div>
+      {children}
+    </div>
+  );
+}
+
+// Label/value row in a metadata grid.
+export function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      <span className="text-muted-foreground min-w-24">{label}</span>
+      <span>{children}</span>
+    </div>
+  );
+}
+
+// Request/response pane: an optional one-line summary, then the captured (already redacted +
+// truncated) headers and body. Shows "Not captured." when the tier stored nothing.
+export function PayloadPane({
+  title,
+  summary,
+  headers,
+  body,
+}: {
+  title: string;
+  summary?: string | null;
+  headers: string | null;
+  body: string | null;
+}) {
+  const hasAny = !!summary || !!headers || !!body;
+
+  return (
+    <Pane title={title}>
+      {!hasAny && <div className="text-xs text-muted-foreground">Not captured.</div>}
+      {summary && <div className="font-mono text-xs mb-2 break-words">{summary}</div>}
+      {headers && (
+        <div className="mb-2">
+          <div className="text-xs text-muted-foreground mb-0.5">Headers</div>
+          <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 font-mono text-xs">{headers}</pre>
+        </div>
+      )}
+      {body && (
+        <div>
+          <div className="text-xs text-muted-foreground mb-0.5">Body</div>
+          <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 font-mono text-xs max-h-72 overflow-auto">{body}</pre>
+        </div>
+      )}
+    </Pane>
+  );
+}
+
+// Redacted, truncated tags come from the recorder as a JSON object of string→string. Parse
+// defensively — a malformed or non-object payload yields no pairs rather than a crash.
+export function parseTags(tagsJson: string | null): [string, string][] {
+  if (!tagsJson) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(tagsJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return [];
+    }
+
+    return Object.entries(parsed as Record<string, unknown>).map(([key, value]) => [key, String(value)]);
+  } catch {
+    return [];
+  }
 }
 
 // Neutral, dependency-free trend sparkline. Renders nothing when there's no series (production
