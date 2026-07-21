@@ -23,6 +23,7 @@ import {
   Webhook,
   Menu,
   X,
+  ExternalLink,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useRealtimeInvalidation } from '@/hooks/useRealtimeInvalidation';
@@ -95,6 +96,12 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   // by the bridge still wakes other pages (jobs, counters, etc.) to refetch their
   // own scoped views.
   useEffect(() => { fetchStats(); }, [fetchStats]);
+
+  // Distinguish browser tabs across deployments (#241): append the host-configured instance name to
+  // the tab title so prod/staging/etc. tabs aren't all just "Warp".
+  useEffect(() => {
+    document.title = config.instanceName ? `Warp · ${config.instanceName}` : 'Warp';
+  }, []);
 
   // The realtime chart binds to `useDashboardStore.realtimeData` as a pure
   // renderer. The feed module owns the freshness source (SignalR push or 1 Hz
@@ -242,13 +249,28 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
       {/* Top navbar */}
       <header className="border-b bg-card">
         <div className="flex h-14 items-center px-4 md:px-6">
-          <Link to="/" className="text-lg font-bold mr-4 md:mr-8">Warp</Link>
+          <Link to="/" className="flex items-center gap-2 mr-4 md:mr-8">
+            {config.logoUrl
+              ? <img src={config.logoUrl} alt="" className="h-6 w-auto" />
+              : <span className="text-lg font-bold">Warp</span>}
+            {config.instanceName && (
+              <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary whitespace-nowrap">{config.instanceName}</span>
+            )}
+          </Link>
           {/* Desktop nav — collapses to a hamburger below md so the row never
               exceeds the viewport width on phones. */}
           <nav className="hidden md:flex gap-1">
             {navItems.map(renderNavItem)}
           </nav>
           <div className="flex-1" />
+          {config.portalUrl && (
+            <a
+              href={config.portalUrl}
+              className="hidden md:flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mr-3"
+            >
+              <ExternalLink className="h-4 w-4" />{config.portalLabel}
+            </a>
+          )}
           <RealtimeStatusIndicator status={realtimeStatus} />
           <button onClick={toggle} className="p-2 rounded-md hover:bg-accent text-muted-foreground">
             {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
