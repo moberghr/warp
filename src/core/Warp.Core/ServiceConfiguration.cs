@@ -859,6 +859,11 @@ public static class ServiceConfiguration
         // Deliveries-by-event-type listing, newest first.
         delivery.HasIndex(p => new { p.EventType, p.CreatedAt });
 
+        // ExpirationCleanup count-trim orders the settled set by CreatedAt globally (the composite
+        // (EventType, CreatedAt) index can't serve a cross-event-type sort). A dedicated CreatedAt index
+        // gives the sweep a pre-sorted scan — Pending rows are the residual predicate, not a sort key.
+        delivery.HasIndex(p => p.CreatedAt);
+
         // ExpirationCleanup range scan on expiry.
         delivery.HasIndex(p => p.ExpireAt);
 
