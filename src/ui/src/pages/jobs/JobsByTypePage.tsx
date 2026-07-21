@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { ColumnDef } from '@tanstack/react-table';
 import { StateBadge } from '@/components/StateBadge';
@@ -13,9 +13,16 @@ import type { JobModel } from '@/types';
 // #1: the destination for a clickable job type — every job of a given type across all states.
 export default function JobsByTypePage() {
   const { type: rawType } = useParams<{ type: string }>();
-  const type = rawType ? decodeURIComponent(rawType) : '';
+  const type = useMemo(() => {
+    if (!rawType) return '';
+    // A hand-crafted URL with a stray "%" throws in decodeURIComponent — fall back to the raw value.
+    try { return decodeURIComponent(rawType); } catch { return rawType; }
+  }, [rawType]);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = usePersistedPageSize();
+
+  // Reset paging when navigating between types (the route component instance is reused).
+  useEffect(() => { setPage(0); }, [type]);
 
   const { data, isLoading, isError } = useJobsByType(type, page, pageSize);
 

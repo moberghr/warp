@@ -51,7 +51,7 @@ public static class WarpEndpoints
         apiGroup.MapGet("jobs/failed/by-type", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string type) => await jobQueryService.GetFailedJobsByType(request, type));
 
         apiGroup.MapGet("jobs/by-type", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string type, [FromQuery] string? state) =>
-            await jobQueryService.GetJobsByType(request, type, Enum.TryParse<State>(state, ignoreCase: true, out var parsed) ? parsed : null));
+            await jobQueryService.GetJobsByType(request, type, Enum.TryParse<State>(state, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed) ? parsed : null));
 
         apiGroup.MapPost("jobs/failed/delete-by-type", async ([FromServices] IJobCommandService jobCommandService, [FromQuery] string type) => await jobCommandService.DeleteFailedJobsByType(type));
 

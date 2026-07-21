@@ -218,8 +218,12 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
   for (const job of jobs) {
     if (childrenInContainer.has(job.id)) continue; // positioned inside group, not by dagre
     const childCount = containers.get(job.id)?.length ?? 0;
-    const height = childCount > 0
-      ? childCount * NODE_HEIGHT + (childCount - 1) * CHILD_GAP + GROUP_PADDING * 2 + 30
+    // Reserve height for the CAPPED render (visible children + one "+N more" slot), not the full child
+    // count — otherwise dagre reserves thousands of rows for a large fan-out and blows the layout apart,
+    // defeating the collapse. Must match the manual group-box sizing below.
+    const renderedSlots = childCount > CHILD_RENDER_CAP ? CHILD_RENDER_CAP + 1 : childCount;
+    const height = renderedSlots > 0
+      ? renderedSlots * NODE_HEIGHT + (renderedSlots - 1) * CHILD_GAP + GROUP_PADDING * 2 + 30
       : NODE_HEIGHT;
     g.setNode(job.id, { width: NODE_WIDTH, height });
   }

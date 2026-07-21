@@ -151,6 +151,14 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
         // elapsed since the last accept (WindowStartUtc = last-refill instant, TimestampsJson = the
         // fractional token count at that instant). Rejections write nothing, mirroring Fixed/Sliding.
         var capacity = (double)count;
+
+        // Degenerate window (only reachable via a hand-constructed IRateLimitMetadata; all public entry
+        // points clamp perSeconds >= 1) — don't divide by zero / produce NaN schedule times; just allow.
+        if (window.TotalSeconds <= 0)
+        {
+            return new RateLimitEvaluation(true, default);
+        }
+
         var ratePerSecond = capacity / window.TotalSeconds;
 
         double available;
@@ -259,9 +267,19 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             return [];
         }
 
-        var ticks = JsonSerializer.Deserialize<long[]>(json) ?? [];
+        // Defensive: the bucket row is keyed by name only, so a key reused across styles (or a hand-edit)
+        // could leave a non-array payload here (e.g. a token-bucket scalar). Treat anything unparseable as
+        // an empty window rather than throwing out of the pipeline and failing the job.
+        try
+        {
+            var ticks = JsonSerializer.Deserialize<long[]>(json) ?? [];
 
-        return [.. ticks.Select(t => new DateTime(t, DateTimeKind.Utc))];
+            return [.. ticks.Select(t => new DateTime(t, DateTimeKind.Utc))];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     private static string SerializeTimestamps(List<DateTime> timestamps)
@@ -274,7 +292,23 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
     // Token bucket stores a single fractional token count in the same TimestampsJson column the sliding
     // window uses for its tick array — the two styles never share a bucket row, so the column is free.
     private static double ParseTokens(string? json)
-        => string.IsNullOrEmpty(json) ? 0 : JsonSerializer.Deserialize<double>(json);
+    {
+        if (string.IsNullOrEmpty(json))
+        {
+            return 0;
+        }
+
+        // Defensive: same shared-row concern as ParseTimestamps — a sliding-window tick array left on the
+        // row would not deserialize to a double. Treat an unparseable payload as an empty bucket.
+        try
+        {
+            return JsonSerializer.Deserialize<double>(json);
+        }
+        catch (JsonException)
+        {
+            return 0;
+        }
+    }
 
     private static string SerializeTokens(double tokens) => JsonSerializer.Serialize(tokens);
 

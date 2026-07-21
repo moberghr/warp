@@ -240,18 +240,26 @@ public static class ServiceConfiguration
             typeof(RateLimit.RateLimitAttribute),
         };
 
-        var handlerTypes = services
+        var handlers = services
             .Where(x => x.ServiceType.IsGenericType)
             .Where(x => handlerDefinitions.Contains(x.ServiceType.GetGenericTypeDefinition()))
-            .Select(x => x.ImplementationType)
-            .Where(x => x is not null)
+            .Where(x => x.ImplementationType is not null)
+            .Select(x => new { Handler = x.ImplementationType!, Request = x.ServiceType.GetGenericArguments()[0] })
             .Distinct();
 
-        foreach (var handler in handlerTypes)
+        foreach (var entry in handlers)
         {
+            // Self-handling job (e.g. `class Foo : IJob, IJobHandler<Foo>`): the impl type IS the request
+            // type, so an addon attribute on it is the correct request-axis placement, not a misplaced
+            // handler attribute. Don't reject it.
+            if (entry.Handler == entry.Request)
+            {
+                continue;
+            }
+
             foreach (var attribute in requestOnlyAttributes)
             {
-                if (handler!.GetCustomAttributes(attribute, inherit: false).Length == 0)
+                if (entry.Handler.GetCustomAttributes(attribute, inherit: false).Length == 0)
                 {
                     continue;
                 }
@@ -259,7 +267,7 @@ public static class ServiceConfiguration
                 var name = attribute.Name.Replace("Attribute", string.Empty, StringComparison.Ordinal);
 
                 throw new InvalidOperationException(
-                    $"[{name}] is declared on handler '{handler.Name}', where it is silently ignored: {name} is "
+                    $"[{name}] is declared on handler '{entry.Handler.Name}', where it is silently ignored: {name} is "
                     + "read only from the request/job type (stamped into metadata at publish, before the handler "
                     + "is known). Move the attribute to the request/job type. See issue #242.");
             }

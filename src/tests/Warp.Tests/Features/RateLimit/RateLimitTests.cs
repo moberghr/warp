@@ -471,10 +471,12 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task TokenBucket_Empty_WaitMode_ReschedulesToNextToken()
+    public async Task TokenBucket_Empty_WaitMode_ReschedulesToNextTokenRefillInstant()
     {
-        // Bucket empty, rate 1 token/sec (1/1s) → the next token refills ~1s out, so a Wait-mode start is
-        // rescheduled into the future (Scheduled) at the refill instant, not a window boundary.
+        // Bucket empty, capacity 1 / 60s → rate 1 token / 60s, so the next token refills ~60s out. A slow
+        // rate (vs 1/1s) keeps the bucket reliably empty for the test's duration — no flake from a token
+        // accruing mid-test — and lets us assert the reschedule lands at the refill INSTANT (~now + 60s),
+        // not merely "in the future" and not a fixed-window boundary.
         var now = DateTime.UtcNow;
         var seedCtx = _fixture.CreateContext();
         seedCtx.Set<RateLimitBucket>().Add(new RateLimitBucket
@@ -496,7 +498,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
             Queue = "default",
             Type = typeof(UnitRequest).AssemblyQualifiedName,
             Message = "{}",
-            Metadata = SerializeMetadata("rl-tb-empty-wait", 1, 1, RateLimitMode.Wait, RateLimitStyle.TokenBucket),
+            Metadata = SerializeMetadata("rl-tb-empty-wait", 1, 60, RateLimitMode.Wait, RateLimitStyle.TokenBucket),
         });
         await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
@@ -507,7 +509,52 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         var job = await readCtx.Set<Job>().FindAsync([jobId], Xunit.TestContext.Current.CancellationToken);
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Scheduled);
-        job.ScheduleTime.ShouldBeGreaterThan(now);
+
+        // ~60s to refill one token (small slack for the tokens accrued during test execution).
+        job.ScheduleTime.ShouldBeGreaterThan(now.AddSeconds(45));
+        job.ScheduleTime.ShouldBeLessThan(now.AddSeconds(75));
+    }
+
+    [TimedFact]
+    public async Task TokenBucket_BucketRowHoldsSlidingTickArray_DegradesGracefullyNotThrows()
+    {
+        // The bucket row is keyed by name only, so a key reused across styles (or a hand-edit) can leave a
+        // sliding-window tick ARRAY in TimestampsJson where the token bucket expects a scalar. Parsing must
+        // degrade to an empty bucket instead of throwing a JsonException out of the pipeline (which would
+        // fail the job on every attempt). With an empty bucket + no accrual, a Skip-mode start is Deleted —
+        // crucially NOT Failed with an exception.
+        var now = DateTime.UtcNow;
+        var seedCtx = _fixture.CreateContext();
+        seedCtx.Set<RateLimitBucket>().Add(new RateLimitBucket
+        {
+            Name = "rl-tb-crossstyle",
+            WindowStartUtc = now,
+            CurrentCount = 2,
+            TimestampsJson = JsonSerializer.Serialize(new[] { now.AddSeconds(-10).Ticks, now.AddSeconds(-5).Ticks }),
+            UpdatedAt = now,
+        });
+        var jobId = Guid.NewGuid();
+        seedCtx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = now,
+            ScheduleTime = now.AddMinutes(-1),
+            Queue = "default",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = "{}",
+            Metadata = SerializeMetadata("rl-tb-crossstyle", 4, 60, RateLimitMode.Skip, RateLimitStyle.TokenBucket),
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker();
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FindAsync([jobId], Xunit.TestContext.Current.CancellationToken);
+        job.ShouldNotBeNull();
+        job.CurrentState.ShouldBe(State.Deleted);
     }
 
     [TimedFact]

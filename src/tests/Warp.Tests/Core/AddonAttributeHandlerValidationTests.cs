@@ -44,6 +44,18 @@ public class AddonAttributeHandlerValidationTests
         Should.NotThrow(() => ServiceConfiguration.ValidateAddonAttributesOnHandlers(services));
     }
 
+    [TimedFact]
+    public void Validate_SelfHandlingJobWithAttribute_DoesNotThrow()
+    {
+        // A self-handling job (registered as IJobHandler<Self> → Self) carries the attribute on the request
+        // axis, which happens to be the same type as the handler. That is correct placement — the validator
+        // must NOT reject it (handler type == request type).
+        var services = new ServiceCollection();
+        services.AddTransient(typeof(IJobHandler<>).MakeGenericType(typeof(SelfHandlingWithMutex)), typeof(SelfHandlingWithMutex));
+
+        Should.NotThrow(() => ServiceConfiguration.ValidateAddonAttributesOnHandlers(services));
+    }
+
     private static void AssertRejected(Type offendingImpl, string expectedName)
     {
         var services = new ServiceCollection();
@@ -69,4 +81,10 @@ public class AddonAttributeHandlerValidationTests
 
     [RateLimit("addon-attr-test", count: 1, perSeconds: 60)]
     private sealed class RateLimitOnHandler;
+
+    // Registered as IJobHandler<SelfHandlingWithMutex> → itself: handler type == request type, so [Mutex]
+    // here is correct request-axis placement and must not be rejected. Implements IJob to satisfy the
+    // IJobHandler<in T> where-T:IJob constraint; private+nested keeps it off the source generator.
+    [Mutex("addon-attr-test")]
+    private sealed class SelfHandlingWithMutex : IJob;
 }
