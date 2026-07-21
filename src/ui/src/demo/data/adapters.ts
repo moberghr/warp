@@ -1,0 +1,327 @@
+// Deterministic demo-mode fixtures for the Adapters pages. All timestamps are anchored to the
+// pinned demo clock (FROZEN_NOW) so relative-time labels render identically across screenshot
+// runs. These are typed against the real DTOs so a shape drift breaks the build, not the demo.
+//
+// NOTE: the axios mock router lives in `demo/adapter.ts` (the transport adapter — unrelated to
+// this feature and intentionally not modified). These fixtures are exported for that router / any
+// demo harness to serve; production reads the real REST endpoints via `@/api`.
+import { FROZEN_NOW } from '@/lib/demoMode';
+import { AdapterCallOutcome } from '@/types/adapters';
+import type {
+  AdapterListItem,
+  AdapterDetail,
+  AdapterCallDetail,
+  AdapterHistoryPoint,
+} from '@/types/adapters';
+
+function ago(minutes: number): string {
+  return new Date(FROZEN_NOW - minutes * 60_000).toISOString();
+}
+
+// Start of the UTC hour `hours` before the pinned demo clock — the x value of a history point.
+function hourAgo(hours: number): string {
+  const d = new Date(FROZEN_NOW - hours * 3_600_000);
+  d.setUTCMinutes(0, 0, 0);
+
+  return d.toISOString();
+}
+
+// Deterministic 24-hour performance series (oldest first) for the demo chart — no randomness so it
+// renders identically across screenshot runs. Values wobble by index (a slow sine-like swell via modular
+// arithmetic) so the bars/line have realistic shape across the day.
+function demoHistory(baseCalls: number, errorFraction: number, baseLatencyMs: number): AdapterHistoryPoint[] {
+  const hours = 24;
+
+  return Array.from({ length: hours }, (_, i) => {
+    // A daytime swell: busier in the middle of the window, quieter at the edges.
+    const swell = 1 + Math.round((hours / 2 - Math.abs(hours / 2 - i)) * 0.6);
+    const calls = baseCalls + swell + ((i * 7) % 13);
+    const errors = Math.round(calls * errorFraction * (0.3 + ((i % 4) * 0.4)));
+    const avgDurationMs = baseLatencyMs + ((i * 13) % 55) + (i % 5) * 6;
+
+    return {
+      hour: hourAgo(hours - 1 - i),
+      calls,
+      errors,
+      errorRate: calls === 0 ? 0 : errors / calls,
+      avgDurationMs,
+    };
+  });
+}
+
+export const demoAdapters: AdapterListItem[] = [
+  {
+    name: 'stripe',
+    configSummary: 'rate-limit 100/60s · capture bodies OnFailure',
+    firstSeenAt: ago(60 * 24 * 9),
+    lastSeenAt: ago(1),
+    totalCalls: 48213,
+    errorCount: 121,
+    errorRate: 121 / 48213,
+    avgDurationMs: 142.7,
+    hasPolicyConflict: false,
+    trend: [12, 14, 11, 18, 22, 19, 25, 21, 28, 24, 30, 27],
+  },
+  {
+    name: 'shipping-webhooks',
+    configSummary: 'observe-only · groups=Endpoint',
+    firstSeenAt: ago(60 * 24 * 5),
+    lastSeenAt: ago(2),
+    totalCalls: 9042,
+    errorCount: 640,
+    errorRate: 640 / 9042,
+    avgDurationMs: 318.4,
+    hasPolicyConflict: false,
+    trend: [40, 35, 42, 30, 55, 48, 62, 58, 70, 44, 51, 60],
+  },
+  {
+    name: 'legacy-soap-tax',
+    configSummary: 'rate-limit 20/60s (FailFast)',
+    firstSeenAt: ago(60 * 24 * 2),
+    lastSeenAt: ago(6),
+    totalCalls: 1503,
+    errorCount: 402,
+    errorRate: 402 / 1503,
+    avgDurationMs: 884.1,
+    hasPolicyConflict: true,
+    trend: [8, 6, 9, 7, 12, 15, 11, 14, 9, 13, 10, 12],
+  },
+  {
+    name: 'geocoder',
+    configSummary: 'observe-only',
+    firstSeenAt: ago(60 * 24),
+    lastSeenAt: ago(90),
+    totalCalls: 0,
+    errorCount: 0,
+    errorRate: 0,
+    avgDurationMs: 0,
+    hasPolicyConflict: false,
+  },
+];
+
+export const demoAdapterDetails: Record<string, AdapterDetail> = {
+  stripe: {
+    name: 'stripe',
+    configSummary: 'rate-limit 100/60s · capture bodies OnFailure',
+    firstSeenAt: ago(60 * 24 * 9),
+    lastSeenAt: ago(1),
+    hasPolicyConflict: false,
+    groupLabel: 'Group',
+    totalCalls: 48213,
+    errorCount: 121,
+    errorRate: 121 / 48213,
+    avgDurationMs: 142.7,
+    p90DurationMs: 260,
+    p95DurationMs: 420,
+    p99DurationMs: 980,
+    operations: [
+      { operation: 'CreatePaymentIntent', calls: 20140, errors: 88, errorRate: 88 / 20140, avgDurationMs: 168.2 },
+      { operation: 'CapturePaymentIntent', calls: 15320, errors: 21, errorRate: 21 / 15320, avgDurationMs: 131.5 },
+      { operation: 'GetCustomer', calls: 12753, errors: 12, errorRate: 12 / 12753, avgDurationMs: 96.3 },
+    ],
+    groups: [],
+    recentCalls: [
+      {
+        id: '11111111-1111-1111-1111-111111111101',
+        operation: 'CreatePaymentIntent',
+        groupName: null,
+        timestamp: ago(1),
+        durationMs: 173.4,
+        attempts: 1,
+        outcome: AdapterCallOutcome.Success,
+        statusCode: 200,
+        correlationId: 'order_8842',
+        tagsJson: '{"tenant":"acme","currency":"usd"}',
+      },
+      {
+        id: '11111111-1111-1111-1111-111111111102',
+        operation: 'CapturePaymentIntent',
+        groupName: null,
+        timestamp: ago(4),
+        durationMs: 512.9,
+        attempts: 3,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 402,
+        correlationId: 'order_8830',
+        tagsJson: '{"tenant":"acme"}',
+      },
+      {
+        id: '11111111-1111-1111-1111-111111111103',
+        operation: 'GetCustomer',
+        groupName: null,
+        timestamp: ago(9),
+        durationMs: 88.1,
+        attempts: 1,
+        outcome: AdapterCallOutcome.Success,
+        statusCode: 200,
+        correlationId: null,
+        tagsJson: null,
+      },
+    ],
+    history: demoHistory(38, 0.03, 110),
+  },
+  'shipping-webhooks': {
+    name: 'shipping-webhooks',
+    configSummary: 'observe-only · groups=Endpoint',
+    firstSeenAt: ago(60 * 24 * 5),
+    lastSeenAt: ago(2),
+    hasPolicyConflict: false,
+    groupLabel: 'Endpoint',
+    totalCalls: 9042,
+    errorCount: 640,
+    errorRate: 640 / 9042,
+    avgDurationMs: 318.4,
+    p90DurationMs: 520,
+    p95DurationMs: 780,
+    p99DurationMs: 1600,
+    operations: [
+      { operation: 'shipment.created', calls: 4820, errors: 210, errorRate: 210 / 4820, avgDurationMs: 289.0 },
+      { operation: 'shipment.delivered', calls: 4222, errors: 430, errorRate: 430 / 4222, avgDurationMs: 351.7 },
+    ],
+    groups: [
+      {
+        group: 'https://hooks.acme.example/ship',
+        calls: 5100,
+        errors: 90,
+        errorRate: 90 / 5100,
+        avgDurationMs: 210.4,
+        lastFailureAt: ago(140),
+      },
+      {
+        group: 'https://hooks.globex.example/inbound',
+        calls: 3942,
+        errors: 550,
+        errorRate: 550 / 3942,
+        avgDurationMs: 452.9,
+        lastFailureAt: ago(3),
+      },
+    ],
+    recentCalls: [
+      {
+        id: '22222222-2222-2222-2222-222222222201',
+        operation: 'shipment.delivered',
+        groupName: 'https://hooks.globex.example/inbound',
+        timestamp: ago(3),
+        durationMs: 601.2,
+        attempts: 1,
+        outcome: AdapterCallOutcome.Failed,
+        statusCode: 503,
+        correlationId: 'delivery_5521',
+        tagsJson: '{"region":"eu-west"}',
+      },
+      {
+        id: '22222222-2222-2222-2222-222222222202',
+        operation: 'shipment.created',
+        groupName: 'https://hooks.acme.example/ship',
+        timestamp: ago(7),
+        durationMs: 188.5,
+        attempts: 1,
+        outcome: AdapterCallOutcome.Success,
+        statusCode: 202,
+        correlationId: 'delivery_5518',
+        tagsJson: null,
+      },
+    ],
+    history: demoHistory(22, 0.12, 240),
+  },
+  'legacy-soap-tax': {
+    name: 'legacy-soap-tax',
+    configSummary: 'rate-limit 20/60s (FailFast)',
+    firstSeenAt: ago(60 * 24 * 2),
+    lastSeenAt: ago(6),
+    hasPolicyConflict: true,
+    groupLabel: 'Group',
+    totalCalls: 1503,
+    errorCount: 402,
+    errorRate: 402 / 1503,
+    avgDurationMs: 884.1,
+    p90DurationMs: 1800,
+    p95DurationMs: 2500,
+    p99DurationMs: 5000,
+    operations: [
+      { operation: 'CalculateTax', calls: 1503, errors: 402, errorRate: 402 / 1503, avgDurationMs: 884.1 },
+    ],
+    groups: [],
+    recentCalls: [
+      {
+        id: '33333333-3333-3333-3333-333333333301',
+        operation: 'CalculateTax',
+        groupName: null,
+        timestamp: ago(6),
+        durationMs: 5.2,
+        attempts: 1,
+        outcome: AdapterCallOutcome.Throttled,
+        statusCode: null,
+        correlationId: null,
+        tagsJson: null,
+      },
+    ],
+    history: demoHistory(9, 0.28, 520),
+  },
+  geocoder: {
+    name: 'geocoder',
+    configSummary: 'observe-only',
+    firstSeenAt: ago(60 * 24),
+    lastSeenAt: ago(90),
+    hasPolicyConflict: false,
+    groupLabel: 'Group',
+    totalCalls: 0,
+    errorCount: 0,
+    errorRate: 0,
+    avgDurationMs: 0,
+    p90DurationMs: 0,
+    p95DurationMs: 0,
+    p99DurationMs: 0,
+    operations: [],
+    groups: [],
+    recentCalls: [],
+    history: [],
+  },
+};
+
+export const demoAdapterCalls: Record<string, AdapterCallDetail> = {
+  '11111111-1111-1111-1111-111111111102': {
+    id: '11111111-1111-1111-1111-111111111102',
+    adapterName: 'stripe',
+    operation: 'CapturePaymentIntent',
+    groupName: null,
+    timestamp: ago(4),
+    durationMs: 512.9,
+    attempts: 3,
+    outcome: AdapterCallOutcome.Failed,
+    statusCode: 402,
+    exceptionType: 'System.Net.Http.HttpRequestException',
+    exceptionMessage: 'Response status code does not indicate success: 402 (Payment Required).',
+    requestSummary: 'POST https://api.stripe.com/v1/payment_intents/{id}/capture',
+    requestHeaders: 'Authorization: ***\nIdempotency-Key: order_8830\nContent-Type: application/x-www-form-urlencoded',
+    responseHeaders: 'Content-Type: application/json\nRequest-Id: req_9f2a',
+    requestBody: 'amount_to_capture=4200',
+    responseBody: '{"error":{"code":"card_declined","message":"Your card was declined."}}',
+    machineName: 'checkout-worker-3',
+    traceId: '0af7651916cd43dd8448eb211c80319c',
+    tagsJson: '{"tenant":"acme"}',
+    correlationId: 'order_8830',
+  },
+  '22222222-2222-2222-2222-222222222201': {
+    id: '22222222-2222-2222-2222-222222222201',
+    adapterName: 'shipping-webhooks',
+    operation: 'shipment.delivered',
+    groupName: 'https://hooks.globex.example/inbound',
+    timestamp: ago(3),
+    durationMs: 601.2,
+    attempts: 1,
+    outcome: AdapterCallOutcome.Failed,
+    statusCode: 503,
+    exceptionType: null,
+    exceptionMessage: null,
+    requestSummary: 'POST https://hooks.globex.example/inbound',
+    requestHeaders: 'Content-Type: application/json\nX-Api-Key: ***',
+    responseHeaders: 'Retry-After: 30',
+    requestBody: '{"event":"shipment.delivered","id":"delivery_5521"}',
+    responseBody: 'Service Unavailable',
+    machineName: 'dispatch-2',
+    traceId: 'b7ad6b7169203331e1d6b9d8f6a1a2c3',
+    tagsJson: '{"region":"eu-west"}',
+    correlationId: 'delivery_5521',
+  },
+};

@@ -49,6 +49,14 @@ public static class EndpointRouteBuilderExtensions
 
     private static void ApplyMetadata(RouteHandlerBuilder builder, HttpEndpointDescriptor descriptor)
     {
+        // Stable identity for inbound observability: the middleware no-ops unless the matched endpoint
+        // carries this, so it only ever observes Warp-mapped endpoints (never the host's own controllers
+        // or the dashboard). Operation is the route name if set, else the handler type name.
+        builder.WithMetadata(new Observability.WarpEndpointIdentity(
+            descriptor.Method,
+            descriptor.Route,
+            string.IsNullOrEmpty(descriptor.Name) ? descriptor.HandlerType.Name : descriptor.Name!));
+
         if (!string.IsNullOrEmpty(descriptor.Name))
         {
             builder.WithName(descriptor.Name!);

@@ -1,6 +1,6 @@
 # Warp — Engineering Standards
 
-> Distributed job processing and message queue library for .NET 10. Provider-agnostic core + Postgres / SQL Server providers. Ships as `Warp.Core`, `Warp.Worker`, `Warp.UI`, `Warp.Http`, `Warp.Provider.PostgreSql`, `Warp.Provider.SqlServer`.
+> Distributed job processing and message queue library for .NET 10. Provider-agnostic core + Postgres / SQL Server providers. Ships as `Warp.Core`, `Warp.Worker`, `Warp.UI`, `Warp.Http` (inbound HTTP endpoints), `Warp.Adapters.Http` + `Warp.Adapters.Refit` (outbound service-call observability), `Warp.Adapters.Webhooks` (durable outbound webhook delivery), `Warp.Provider.PostgreSql`, `Warp.Provider.SqlServer`.
 >
 > Source of truth for AI agents: this file + `.claude/rules/`. Reference docs in `.claude/references/`.
 
@@ -44,10 +44,10 @@ For framework-specific guidance, see `.claude/skills/tech-stack-dotnet/SKILL.md`
 ## Project Profile
 
 - **Framework:** .NET 10 (with netstandard2.0 source generators)
-- **Solution:** `src/Warp.slnx` — 17 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
+- **Solution:** `src/Warp.slnx` — 19 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
 - **Data layer:** EF Core 10 (Postgres via Npgsql, SQL Server via Microsoft.EntityFrameworkCore.SqlServer); EFCore.NamingConventions for snake_case
 - **Distributed locking:** Medallion `DistributedLock.Postgres` + `DistributedLock.SqlServer` behind `IWarpLockProvider`
-- **Patterns:** Custom mediator (Warp's own, source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (Retry, Timeout, Concurrency, RateLimit, CircuitBreaker, NoRestart, Sagas, DatabasePush, DashboardPush); `WarpBackgroundService` is a first-class base feature (not an addon)
+- **Patterns:** Custom mediator (Warp's own, source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (Retry, Timeout, Concurrency, RateLimit, CircuitBreaker, NoRestart, Sagas, DatabasePush, DashboardPush, Adapters, Webhooks); `WarpBackgroundService` is a first-class base feature (not an addon)
 - **Test stack:** xUnit v3 (`xunit.v3.mtp-v2`), Shouldly, Moq, Respawn, Testcontainers (Postgres + MSSQL), `Microsoft.AspNetCore.TestHost` for dashboard auth
 - **Frontend:** Vite + React 19 + TypeScript, Tailwind + shadcn/ui, Zustand, TanStack Query (React Query) + TanStack Table, Axios
 - **Analyzers (enforced as errors):** StyleCop, Roslynator, SonarAnalyzer, Meziantou (`TreatWarningsAsErrors=true` in `src/Directory.Build.props`)

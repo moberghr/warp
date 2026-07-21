@@ -65,4 +65,17 @@ public static class WarpTelemetryAttributes
     public const string RetryMetadataRetriedTimesKey = "RetriedTimes";
 
     public const string RetryMetadataMaxRetriesKey = "MaxRetries";
+
+    // Span attribute keys for outbound adapter Client-kind spans.
+    public const string WarpAdapterName = "warp.adapter.name";
+    public const string WarpAdapterOperation = "warp.adapter.operation";
+    public const string WarpAdapterGroup = "warp.adapter.group";
+    public const string WarpAdapterOutcome = "warp.adapter.outcome";
+
+    // Meter tag keys for warp.adapter.* instruments. Bounded dimensions only (adapter/operation/
+    // outcome); group is excluded unless the adapter opts in via IncludeGroupInMetrics.
+    public const string AdapterMeterAdapter = "adapter";
+    public const string AdapterMeterOperation = "operation";
+    public const string AdapterMeterOutcome = "outcome";
+    public const string AdapterMeterGroup = "group";
 }

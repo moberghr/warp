@@ -3,20 +3,20 @@ using Warp.Test.Shared.Entities;
 
 namespace Warp.Core.Handlers;
 
-public class RegisterCommand : IJobHandler<RegisterRequest>
+public class CustomerSignupCommand : IJobHandler<CustomerSignupRequest>
 {
     private readonly TestContext _context;
     private readonly IPublisher _publisher;
     private readonly IBatchPublisher _batchPublisher;
 
-    public RegisterCommand(TestContext context, IPublisher publisher, IBatchPublisher batchPublisher)
+    public CustomerSignupCommand(TestContext context, IPublisher publisher, IBatchPublisher batchPublisher)
     {
         _context = context;
         _publisher = publisher;
         _batchPublisher = batchPublisher;
     }
 
-    public async Task HandleAsync(RegisterRequest message, CancellationToken cancellationToken)
+    public async Task HandleAsync(CustomerSignupRequest message, CancellationToken cancellationToken)
     {
         var registration = new Registration
         {
@@ -38,12 +38,12 @@ public class RegisterCommand : IJobHandler<RegisterRequest>
 
         await _context.SaveChangesAsync(cancellationToken);
 
-        var sendEmailRequest = new SendEmailRequest
+        var sendEmailRequest = new OrderConfirmationRequest
         {
             EmailLogId = emailLog.Id,
         };
 
-        var batch = new List<SendEmailRequest>();
+        var batch = new List<OrderConfirmationRequest>();
 
         for (var i = 0; i < 20; i++)
         {
@@ -66,7 +66,7 @@ public class RegisterCommand : IJobHandler<RegisterRequest>
     }
 }
 
-public class RegisterRequest : IJob
+public class CustomerSignupRequest : IJob
 {
     public string? Email { get; set; }
 }

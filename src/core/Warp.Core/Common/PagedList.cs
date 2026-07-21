@@ -4,17 +4,17 @@ namespace Warp.Core;
 
 public static class PagedListExtensions
 {
-    public static async Task<PagedList<T>> ToPagedListAsync<T>(this IQueryable<T> query, BaseListRequest request)
+    public static async Task<PagedList<T>> ToPagedListAsync<T>(this IQueryable<T> query, BaseListRequest request, CancellationToken ct = default)
         where T : class
     {
-        var totalCount = await query.CountAsync();
+        var totalCount = await query.CountAsync(ct);
 
         var pageCount = (int)Math.Ceiling(totalCount / (double)request.PageSize);
 
         var data = await query
             .Skip(request.Page * request.PageSize)
             .Take(request.PageSize)
-            .ToListAsync();
+            .ToListAsync(ct);
 
         return new PagedList<T>(totalCount, data, pageCount);
     }

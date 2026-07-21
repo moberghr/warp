@@ -1,0 +1,476 @@
+{
+  "slug": "warp-adapters",
+  "date": "2026-07-09",
+  "title": "Warp.Adapters \u2014 outbound service call observability + cluster-shared rate limiting",
+  "scope_classification": "new-feature",
+  "security_impact": "pii-exposure",
+  "baseline_area": "adapters",
+  "public_contracts": [
+    "Warp.Core.Adapters.IWarpAdapters.BeginCall(string adapter, string operation, string? group = null) : AdapterCallScope (SetGroup/SetCorrelation/SetTag on scope)",
+    "Warp.Core.Adapters.AdapterServiceConfiguration.AddAdapters(this IWarpBuilder)",
+    "Warp.Core.Adapters.WarpAdapterOptions (RecordCalls/CaptureRequestBodies/CaptureResponseBodies/CaptureHeaders/MaxCapturedBodySize/MaxCapturedHeaderSize/CallLogRetention/RedactedHeaders/EnrichCall/MaxDistinctOperations/MaxDistinctGroups/GroupLabel/IncludeGroupInMetrics; BaseUrl optional)",
+    "Warp.Core.Data.Enums.CallRecording { All = 1, FailuresOnly = 2 }",
+    "Warp.Core.Data.Enums.CaptureMode { None = 1, OnFailure = 2, Always = 3 }",
+    "Warp.Core.Data.Enums.AdapterCallOutcome { Success = 1, Failed = 2, Throttled = 3, CircuitOpen = 4 }",
+    "Warp.Core.Data.Enums.AdapterRateLimitOverflow { Wait = 1, FailFast = 2 }",
+    "Warp.Core.Services.IAdapterQueryService",
+    "Warp.Adapters.Http.HttpAdapterServiceConfiguration.AddAdapter(this IWarpBuilder, string name, Action<WarpAdapterHttpOptions>)",
+    "Warp.Adapters.Http.WarpAdapterHttpOptions.UseSharedRateLimit(int limit, int perSeconds, AdapterRateLimitOverflow overflow, TimeSpan? maxWait)",
+    "Warp.Adapters.Http.WarpAdapterCall.Operation(string) : IDisposable (ambient AsyncLocal)",
+    "Warp.Adapters.Http.HttpRequestMessageExtensions.WithWarpOperation / WithWarpGroup (this HttpRequestMessage, string)",
+    "Warp.Adapters.Http.WarpAdapterCall.Group(string) : IDisposable (ambient AsyncLocal)",
+    "Warp.Adapters.Refit.RefitAdapterServiceConfiguration.AddAdapter<TApi>(this IWarpBuilder, string name, Action<WarpAdapterHttpOptions>)",
+    "GET {prefix}/api/adapters | GET {prefix}/api/adapters/{name} | GET {prefix}/api/adapters/{name}/calls/{id}",
+    "WarpAddonsInfo.Adapters flag on GET {prefix}/api/addons",
+    "Entities: warp.AdapterDefinition (incl. SharedPolicyJson/SharedPolicyHash/HasPolicyConflict), warp.AdapterCallLog (incl. GroupName, CorrelationId; row per call by default; always in schema)",
+    "Telemetry: warp.adapter.calls, warp.adapter.duration, warp.adapter.records_dropped, warp.adapter.config_conflicts"
+  ],
+  "change_manifest": [
+    "src/core/Warp.Core/Adapters/IWarpAdapters.cs",
+    "src/core/Warp.Core/Adapters/AdapterCallScope.cs",
+    "src/core/Warp.Core/Adapters/WarpAdapterOptions.cs",
+    "src/core/Warp.Core/Adapters/AdapterServiceConfiguration.cs",
+    "src/core/Warp.Core/Adapters/IAdapterCallRecorder.cs",
+    "src/core/Warp.Core/Adapters/DbAdapterCallRecorder.cs",
+    "src/core/Warp.Core/Adapters/AdapterCallFlusher.cs",
+    "src/core/Warp.Core/Adapters/AdapterRateLimiter.cs",
+    "src/core/Warp.Core/Adapters/AdapterRateLimitedException.cs",
+    "src/core/Warp.Core/Data/Entities/AdapterDefinition.cs",
+    "src/core/Warp.Core/Data/Entities/AdapterCallLog.cs",
+    "src/core/Warp.Core/Data/Enums/CaptureMode.cs",
+    "src/core/Warp.Core/Data/Enums/AdapterCallOutcome.cs",
+    "src/core/Warp.Core/Data/Enums/AdapterRateLimitOverflow.cs",
+    "src/core/Warp.Core/ServiceConfiguration.cs",
+    "src/core/Warp.Core/WarpModelCustomizer.cs",
+    "src/core/Warp.Core/Configuration.cs",
+    "src/core/Warp.Core/Logging/WarpTelemetry.cs",
+    "src/core/Warp.Core/Logging/WarpTelemetryAttributes.cs",
+    "src/core/Warp.Core/Services/IAdapterQueryService.cs",
+    "src/core/Warp.Core/Services/AdapterQueryService.cs",
+    "src/core/Warp.Core/Data/Queries/IWarpSqlQueries.cs",
+    "src/core/providers/Warp.Provider.PostgreSql/PostgresWarpSqlQueries.cs",
+    "src/core/providers/Warp.Provider.SqlServer/SqlServerWarpSqlQueries.cs",
+    "src/core/Warp.Worker/Services/ExpirationCleanup.cs",
+    "src/core/Warp.Adapters.Http/Warp.Adapters.Http.csproj",
+    "src/core/Warp.Adapters.Http/HttpAdapterServiceConfiguration.cs",
+    "src/core/Warp.Adapters.Http/WarpAdapterHandler.cs",
+    "src/core/Warp.Adapters.Http/WarpAdapterRateLimitHandler.cs",
+    "src/core/Warp.Adapters.Http/WarpAdapterCall.cs",
+    "src/core/Warp.Adapters.Http/WarpAdapterHttpOptions.cs",
+    "src/core/Warp.Adapters.Http/OperationNameResolver.cs",
+    "src/core/Warp.Adapters.Http/HttpRequestMessageExtensions.cs",
+    "src/core/Warp.Adapters.Refit/Warp.Adapters.Refit.csproj",
+    "src/core/Warp.Adapters.Refit/RefitAdapterServiceConfiguration.cs",
+    "src/core/Warp.Adapters.Refit/RefitOperationNameReader.cs",
+    "src/Warp.slnx",
+    "src/core/Warp.UI/Endpoints/WarpEndpoints.cs",
+    "src/core/Warp.UI/Endpoints/WarpAddonsInfo.cs",
+    "src/ui/src/pages/adapters/AdaptersPage.tsx",
+    "src/ui/src/pages/adapters/AdapterDetailPage.tsx",
+    "src/ui/src/layouts/MainLayout.tsx",
+    "src/ui/src/App.tsx",
+    "src/ui/src/api/index.ts",
+    "src/ui/src/types/adapters.ts",
+    "src/ui/src/demo/data/adapters.ts",
+    "src/tests/Warp.Tests/Adapters/AdapterScopeTests.cs",
+    "src/tests/Warp.Tests/Adapters/OperationNameResolverTests.cs",
+    "src/tests/Warp.Tests/Adapters/AdapterGroupTests.cs",
+    "src/tests/Warp.Tests/Adapters/CaptureRedactionTests.cs",
+    "src/tests/Warp.Tests/Adapters/AdapterTelemetryTests.cs",
+    "src/tests/Warp.Tests/Adapters/RefitAdapterTests.cs",
+    "src/tests/Warp.Tests/Adapters/AdapterRecorderTestsBase.cs",
+    "src/tests/Warp.Tests/Adapters/AdapterCounterTestsBase.cs",
+    "src/tests/Warp.Tests/Adapters/AdapterRateLimitTestsBase.cs",
+    "src/tests/Warp.Tests/Adapters/AdapterCleanupTestsBase.cs",
+    "src/tests/Warp.Tests/Adapters/AdapterEndpointTestsBase.cs",
+    "website/docs/features/adapters.md",
+    ".claude/rules/project-specific.md",
+    ".claude/rules/architecture.md",
+    "CLAUDE.md"
+  ],
+  "success_criteria": [
+    {
+      "id": "SC1",
+      "description": "Manual scope failure persists AdapterCallLog with exception details; success persists a row under default RecordCalls=All and none under FailuresOnly",
+      "verification": "AdapterRecorderTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "generated _PostgreSql/_SqlServer tests pass"
+    },
+    {
+      "id": "SC2",
+      "description": "Operation name precedence: request option > ambient scope > URL heuristic",
+      "verification": "OperationNameResolverTests",
+      "evidence_channel": "test-run",
+      "observable": "NoDb tests pass"
+    },
+    {
+      "id": "SC3",
+      "description": "Capture tiers None/OnFailure/Always with truncation + user-owned redaction",
+      "verification": "CaptureRedactionTests + AdapterRecorderTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "SC4",
+      "description": "Calls write Counter rows aggregated by CounterAggregator into Statistics",
+      "verification": "AdapterCounterTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "SC5",
+      "description": "Shared rate limiter: no cluster over-admission (BarrierSignal N=2), Wait delays, FailFast throws",
+      "verification": "AdapterRateLimitTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "SC6",
+      "description": "ExpirationCleanup removes expired call logs and orphaned definitions",
+      "verification": "AdapterCleanupTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "SC7",
+      "description": "Adapter endpoints return definitions/stats/calls; addons flag reflects AddAdapters",
+      "verification": "AdapterEndpointTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "SC8",
+      "description": "Refit integration derives operation names from interface methods (stubbed handler)",
+      "verification": "RefitAdapterTests",
+      "evidence_channel": "test-run",
+      "observable": "NoDb tests pass"
+    },
+    {
+      "id": "SC9",
+      "description": "Solution builds analyzer-clean with two new projects",
+      "verification": "dotnet build src/Warp.slnx",
+      "evidence_channel": "build-output",
+      "observable": "exit 0, zero warnings"
+    },
+    {
+      "id": "SC10",
+      "description": "Client-kind span {adapter}.{operation} + warp.adapter.* meters emitted per call",
+      "verification": "AdapterTelemetryTests",
+      "evidence_channel": "test-run",
+      "observable": "NoDb tests pass"
+    },
+    {
+      "id": "SC11",
+      "description": "Frontend builds with Adapters pages + demo fixtures",
+      "verification": "npm run build in src/ui",
+      "evidence_channel": "build-output",
+      "observable": "exit 0"
+    },
+    {
+      "id": "SC12",
+      "description": "Cardinality guard: heuristic operation names beyond MaxDistinctOperations collapse to {other} with one warning; explicit names never collapsed",
+      "verification": "OperationNameResolverTests",
+      "evidence_channel": "test-run",
+      "observable": "NoDb tests pass"
+    },
+    {
+      "id": "SC13",
+      "description": "Shared-policy conflict: differing process enforces persisted policy, increments warp.adapter.config_conflicts, flags definition",
+      "verification": "AdapterRateLimitTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "SC14",
+      "description": "Adapter without BaseUrl routes absolute-URI requests through full pipeline unchanged",
+      "verification": "OperationNameResolverTests + CaptureRedactionTests",
+      "evidence_channel": "test-run",
+      "observable": "NoDb tests pass"
+    },
+    {
+      "id": "SC15",
+      "description": "Groups: group recorded on row + counter key (incl. successes \u2192 per-group error rates), span attribute yes, meter tag only with IncludeGroupInMetrics; group-less calls unchanged",
+      "verification": "AdapterGroupTests + AdapterCounterTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "SC16",
+      "description": "Group cardinality guard: values beyond MaxDistinctGroups collapse to {other} with one warning",
+      "verification": "AdapterGroupTests",
+      "evidence_channel": "test-run",
+      "observable": "NoDb tests pass"
+    }
+  ],
+  "test_manifest": [
+    {
+      "path": "src/tests/Warp.Tests/Adapters/AdapterScopeTests.cs",
+      "covers": [
+        "SC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/OperationNameResolverTests.cs",
+      "covers": [
+        "SC2",
+        "SC12",
+        "SC14"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/CaptureRedactionTests.cs",
+      "covers": [
+        "SC3",
+        "SC14"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/AdapterTelemetryTests.cs",
+      "covers": [
+        "SC10"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/RefitAdapterTests.cs",
+      "covers": [
+        "SC8"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/AdapterRecorderTestsBase.cs",
+      "covers": [
+        "SC1",
+        "SC3"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/AdapterGroupTests.cs",
+      "covers": [
+        "SC15",
+        "SC16"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/AdapterCounterTestsBase.cs",
+      "covers": [
+        "SC4",
+        "SC15"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/AdapterRateLimitTestsBase.cs",
+      "covers": [
+        "SC5",
+        "SC13"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/AdapterCleanupTestsBase.cs",
+      "covers": [
+        "SC6"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Adapters/AdapterEndpointTestsBase.cs",
+      "covers": [
+        "SC7"
+      ]
+    }
+  ],
+  "out_of_scope": [
+    "Webhook delivery \u2014 designed follow-up with its own spec: docs/specs/2026-07-10-warp-webhooks.md (depends on this spec's CorrelationId, groups, RecordCalls)",
+    "Shared (DB-backed) circuit breaker \u2014 fast-follow reusing CircuitBreakerState",
+    "SOAPAction-header fallback in the operation-name resolver (fast-follow; WithWarpOperation covers it)",
+    "GraphQL minimal client generator (Warp.Adapters.GraphQL) \u2014 designed fast-follow; not the rejected REST Refit-alike since no lightweight GraphQL equivalent exists",
+    "Replay of failed calls (requires explicit idempotency opt-in)",
+    "WCF/SOAP message-inspector, GraphQL operation-extraction, and gRPC interceptor binding packages",
+    "Custom source-generated REST client (Refit-alike)",
+    "Public pluggable call-log storage (IAdapterCallStore stays internal)",
+    "Dashboard latency percentiles (OTel histograms cover this)",
+    "Any change to the worker fetch/execute hot path"
+  ],
+  "open_decisions": [],
+  "assumptions": [
+    "[ASSUMED] Polly attempt count readable for AdapterCallLog.Attempts; fallback: record 1 per logical call, document",
+    "[ASSUMED] existing IWarpSqlQueries bucket-lock method reusable for lease acquisition; else add LockRateLimitBucketByKeyAsync to both providers",
+    "[ASSUMED] Counter naming supports free-form adapter keys; confirm CounterAggregator grouping in batch 2",
+    "[VERIFIED:src/core/Warp.Core/RateLimit/RateLimitStore.cs] RateLimitBucket store exists; adapter limiter uses its own scope, not handler-scope commit semantics"
+  ],
+  "risks": [
+    "RecordCalls=All default writes a row per call \u2014 volume on hot adapters; mitigations: batched flushing, retention, per-adapter FailuresOnly",
+    "Per-attempt latency invisible in Warp rows (one row per logical call); visible via resilience OTel telemetry",
+    "AsyncLocal ambient operation name does not flow across manually created threads; request-option is the reliable path",
+    "Package naming Warp.Adapters.Http (outbound) vs Warp.Http (inbound) needs explicit docs",
+    "trap: see Rejected alternatives section in the .md spec"
+  ],
+  "plan": {
+    "batches": [
+      {
+        "title": "Core scope API + entities + telemetry",
+        "files": [
+          "src/core/Warp.Core/Adapters/*",
+          "src/core/Warp.Core/Data/Entities/Adapter*",
+          "src/core/Warp.Core/Data/Enums/*",
+          "src/core/Warp.Core/WarpModelCustomizer.cs",
+          "src/core/Warp.Core/ServiceConfiguration.cs",
+          "src/core/Warp.Core/Logging/WarpTelemetry.cs"
+        ],
+        "acceptance": "Build clean; AdapterScopeTests + AdapterTelemetryTests (NoDb) green."
+      },
+      {
+        "title": "Recorder + flusher + counters + retention",
+        "files": [
+          "src/core/Warp.Core/Adapters/DbAdapterCallRecorder.cs",
+          "src/core/Warp.Core/Adapters/AdapterCallFlusher.cs",
+          "src/core/Warp.Core/Configuration.cs",
+          "src/core/Warp.Worker/Services/ExpirationCleanup.cs"
+        ],
+        "acceptance": "AdapterRecorderTestsBase, AdapterCounterTestsBase, AdapterCleanupTestsBase green on PG + SQL Server."
+      },
+      {
+        "title": "Warp.Adapters.Http package",
+        "files": [
+          "src/core/Warp.Adapters.Http/*",
+          "src/Warp.slnx"
+        ],
+        "acceptance": "OperationNameResolverTests + CaptureRedactionTests (NoDb, stub HttpMessageHandler) green; build analyzer-clean."
+      },
+      {
+        "title": "Shared rate limiter (token leasing)",
+        "files": [
+          "src/core/Warp.Core/Adapters/AdapterRateLimiter.cs",
+          "src/core/Warp.Adapters.Http/WarpAdapterRateLimitHandler.cs",
+          "src/core/Warp.Core/Data/Queries/IWarpSqlQueries.cs",
+          "src/core/providers/*"
+        ],
+        "acceptance": "AdapterRateLimitTestsBase green on PG + SQL Server; BarrierSignal N=2 over-admission test passes."
+      },
+      {
+        "title": "Warp.Adapters.Refit package",
+        "files": [
+          "src/core/Warp.Adapters.Refit/*",
+          "src/Warp.slnx"
+        ],
+        "acceptance": "RefitAdapterTests (NoDb) green."
+      },
+      {
+        "title": "Dashboard backend",
+        "files": [
+          "src/core/Warp.Core/Services/AdapterQueryService.cs",
+          "src/core/Warp.UI/Endpoints/*"
+        ],
+        "acceptance": "AdapterEndpointTestsBase green; addons flag correct in both registration shapes."
+      },
+      {
+        "title": "Frontend",
+        "files": [
+          "src/ui/src/pages/adapters/*",
+          "src/ui/src/layouts/MainLayout.tsx",
+          "src/ui/src/App.tsx",
+          "src/ui/src/api/index.ts",
+          "src/ui/src/types/adapters.ts",
+          "src/ui/src/demo/*"
+        ],
+        "acceptance": "npm run build exit 0; Adapters nav hidden when addons.adapters=false; demo mode renders both pages."
+      },
+      {
+        "title": "Docs + rules",
+        "files": [
+          "website/docs/features/adapters.md",
+          ".claude/rules/project-specific.md",
+          ".claude/rules/architecture.md",
+          "CLAUDE.md"
+        ],
+        "acceptance": "Feature doc covers inbound-vs-outbound naming, capture/PII stance, shared rate limiter; full test suite green."
+      }
+    ]
+  },
+  "implement": {
+    "run_id": "wf_cb06226b-1fc",
+    "completed_batches": [
+      {
+        "batch_id": "B1",
+        "status": "completed",
+        "files": 18,
+        "tests": "NoDb 616/616"
+      },
+      {
+        "batch_id": "B2",
+        "status": "completed",
+        "files": 8,
+        "tests": "Adapters namespace 56/56 (PG+SQL)"
+      },
+      {
+        "batch_id": "B3",
+        "status": "completed",
+        "files": 11,
+        "tests": "NoDb 637/637",
+        "open_gap": "capture routed to TagsJson, dedicated columns unpopulated - remediation queued"
+      },
+      {
+        "batch_id": "B4",
+        "status": "completed",
+        "files": 8,
+        "tests": "Adapters namespace 85/85 (PG+SQL)",
+        "note": "shared policy = first-writer-wins (spec said last-writer) - flagged for engineer"
+      },
+      {
+        "batch_id": "B5",
+        "status": "completed",
+        "files": 6,
+        "tests": "NoDb 642/642"
+      },
+      {
+        "batch_id": "B6",
+        "status": "completed",
+        "files": 6,
+        "tests": "Adapters namespace 106/106 (PG+SQL)"
+      },
+      {
+        "batch_id": "B7",
+        "status": "completed",
+        "files": 9,
+        "tests": "npm run build exit 0",
+        "open_gap": "demo fixtures not wired into mock router - remediation queued"
+      },
+      {
+        "batch_id": "B8",
+        "status": "completed",
+        "files": 4,
+        "tests": "FULL SUITE 2212/2212 + npm build"
+      },
+      {
+        "batch_id": "R1-remediation",
+        "status": "completed",
+        "files": 7,
+        "tests": "Adapters 110/110, NoDb 642/642",
+        "note": "capture columns wired end-to-end; demo routes added"
+      }
+    ],
+    "manifest_amendments": [
+      "src/tests/Warp.Tests/Warp.Tests.csproj (project refs for new packages, B3/B5)",
+      "src/ui/src/pages/adapters/shared.tsx (co-located UI helpers, B7)",
+      "src/ui/src/types/index.ts (addons flag type, B7)",
+      "src/core/Warp.Core/Data/Enums/CallRecording.cs (B1 - enum listed in contracts, omitted from manifest)",
+      "src/ui/src/demo/adapter.ts (R1 - demo route wiring, required by B7 acceptance)",
+      "src/core/Warp.UI/dist/* (regenerated build output from npm run build - not source)"
+    ],
+    "contract_amendments": [
+      "Warp.Core.Adapters.IAdapterRateLimiter (public - cross-package composition without InternalsVisibleTo, B4)",
+      "HttpRequestMessageExtensions.WithWarpCorrelation (request-option counterpart of SetCorrelation, B3)",
+      "AddAdapter<TApi>(..., RefitSettings? refitSettings = null) trailing optional param (B5)",
+      "AdapterCallScope.SetRequestSummary/SetStatusCode/SetRequestHeaders/SetResponseHeaders/SetRequestBody/SetResponseBody (R1 - capture surface, mirrors specced AdapterCallLog columns)"
+    ],
+    "drift_check": {
+      "verdict": "PASS-with-amendments",
+      "notes": [
+        "all extra files in-package/in-repo, auto-fixable class",
+        "all contract additions mandated by spec body, absent only from sidecar list",
+        "out_of_scope respected: no circuit breaker, no webhooks, worker hot path untouched",
+        "security_impact unchanged: pii-exposure, redaction defaults implemented",
+        "open design question: shared-policy first-writer-wins vs spec last-writer-wins (engineer decision pending)"
+      ]
+    },
+    "behavioral_diff": "New opt-in Adapters feature: IWarpAdapters.BeginCall scopes any outbound call (adapter/operation/group/correlation/tags) emitting unconditional OTel spans+meters; AddAdapters() adds lossy channel-based DB recording (AdapterCallLog row per call incl. redacted/truncated capture columns, Counter rows per adapter/operation/group incl. successes, AdapterDefinition registry) with ExpirationCleanup retention; Warp.Adapters.Http auto-scopes named HttpClients (fixed handler ordering, BaseUrl optional, naming precedence option>ambient>heuristic with cardinality guards) with optional Polly resilience and a DB-token-leased cluster-wide rate limiter (Wait/FailFast, shared-policy conflict detection); Warp.Adapters.Refit wraps Refit interfaces with per-method operation names; dashboard gains gated Adapters nav, fleet+detail pages, three REST endpoints, demo fixtures. Two tables added to schema unconditionally."
+  }
+}

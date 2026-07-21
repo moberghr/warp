@@ -7,32 +7,46 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.NoRestart;
+using Warp.Core.Webhooks;
 
 namespace Warp.Worker.Services;
 
 /// <summary>
-/// Finds jobs in <see cref="State.Processing"/> whose worker stopped refreshing
-/// <c>LastKeepAlive</c> past <see cref="WarpServerConfiguration.InvisibilityTimeout"/>
-/// and either requeues them, fails them, or honors a pending cancellation.
+/// Crash recovery for stalled in-flight work, in two sweeps. Jobs: finds rows in
+/// <see cref="State.Processing"/> whose worker stopped refreshing <c>LastKeepAlive</c> past
+/// <see cref="WarpServerConfiguration.InvisibilityTimeout"/> and either requeues them, fails them, or
+/// honors a pending cancellation. Webhook deliveries: finds <c>Pending</c> rows whose executor job was
+/// lost to a faulted outcome commit (<c>NextAttemptAt</c> more than
+/// <c>WarpConfiguration.WebhookStuckDeliveryGrace</c> past) and re-enqueues one atomically via the
+/// addon-registered <see cref="IWebhookRedeliveryEnqueuer"/> seam — a no-op in processes without
+/// <c>AddWebhooks()</c>.
 /// </summary>
 public sealed class StaleJobRecovery<TContext> : IServerTask
     where TContext : DbContext
 {
+    private const int StuckDeliveryBatchSize = 100;
+
     private readonly DbContext _context;
+    private readonly TContext _userContext;
     private readonly TimeProvider _time;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly WarpServerConfiguration _configuration;
+    private readonly IEnumerable<IWebhookRedeliveryEnqueuer> _webhookEnqueuers;
 
     public StaleJobRecovery(
         IWarpServerContext serverContext,
+        TContext userContext,
         TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
-        IOptions<WarpServerConfiguration> configuration)
+        IOptions<WarpServerConfiguration> configuration,
+        IEnumerable<IWebhookRedeliveryEnqueuer> webhookEnqueuers)
     {
         _context = serverContext.Context;
+        _userContext = userContext;
         _time = time;
         _sqlQueries = sqlQueries;
         _configuration = configuration.Value;
+        _webhookEnqueuers = webhookEnqueuers;
     }
 
     public string Name => "StaleJobRecovery";
@@ -46,12 +60,16 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
         var result = await RecoverStaleJobsAsync(ct);
-        if (result.Total == 0)
+        var stuckDeliveries = await RecoverStuckWebhookDeliveriesAsync(ct);
+
+        if (result.Total == 0 && stuckDeliveries == 0)
         {
             return null;
         }
 
-        return $"Recovered {result.Total} stale jobs ({result.Requeued} requeued, {result.Failed} failed, {result.Deleted} deleted)";
+        var message = $"Recovered {result.Total} stale jobs ({result.Requeued} requeued, {result.Failed} failed, {result.Deleted} deleted)";
+
+        return stuckDeliveries == 0 ? message : $"{message}; re-enqueued {stuckDeliveries} stuck webhook deliveries";
     }
 
     internal async Task<StaleJobRecoveryResult> RecoverStaleJobsAsync(CancellationToken ct)
@@ -139,6 +157,93 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         }
 
         return new StaleJobRecoveryResult(requeued, failed, deleted);
+    }
+
+    // A Pending WebhookDelivery whose NextAttemptAt is more than WebhookStuckDeliveryGrace past has lost
+    // its executor job: the executor's outcome commit faulted after the attempt claim, and the retry job
+    // was staged in that same failed transaction. Nothing scans NextAttemptAt by design (§8.20) and
+    // Redeliver rejects Pending rows, so this sweep is the only path back.
+    //
+    // The whole recovery runs on the USER context — unlike the stale-job work above — because the
+    // enqueuer's publisher stages the executor job on the same scoped TContext (outbox): the guarded
+    // NextAttemptAt bump and the job then commit in ONE explicit transaction, so the row is never bumped
+    // without its job nor the job created without the bump (mirrors WebhookCommandService.Redeliver). The
+    // server context's ambient xact-lock transaction is a different connection and is not involved.
+    internal async Task<int> RecoverStuckWebhookDeliveriesAsync(CancellationToken ct)
+    {
+        var enqueuer = _webhookEnqueuers.FirstOrDefault();
+        if (enqueuer is null)
+        {
+            return 0;
+        }
+
+        var now = _time.GetUtcNow().UtcDateTime;
+        var threshold = now - _configuration.WebhookStuckDeliveryGrace;
+
+        var stuck = await _userContext.Set<WebhookDelivery>()
+            .AsNoTracking()
+            .Where(x => x.Status == WebhookDeliveryStatus.Pending)
+            .Where(x => x.NextAttemptAt != null)
+            .Where(x => x.NextAttemptAt < threshold)
+            .OrderBy(x => x.NextAttemptAt)
+            .Take(StuckDeliveryBatchSize)
+            .Select(x =>
+                new
+                {
+                    x.Id,
+                    x.NextAttemptAt,
+                })
+            .ToListAsync(ct);
+
+        // Executor-job states that mean a stuck-looking delivery still has live work in flight.
+        State[] liveJobStates = [State.Enqueued, State.Scheduled, State.Awaiting, State.Processing];
+
+        var recovered = 0;
+        foreach (var row in stuck)
+        {
+            // A stuck row is one whose executor job was LOST. If a live job still exists — workers merely
+            // backlogged past the grace — enqueueing another would cost a duplicate (at-least-once) attempt.
+            // The payload-substring match is a heuristic (the serialized job carries the delivery id); the
+            // executor's attempt claim remains the correctness backstop should it ever miss.
+            var idText = row.Id.ToString();
+            var hasLiveJob = await _userContext.Set<Job>()
+                .Where(x => x.Queue == WebhookConstants.Queue)
+                .Where(x => liveJobStates.Contains(x.CurrentState))
+                .Where(x => x.Message != null)
+                .Where(x => x.Message!.Contains(idText))
+                .AnyAsync(ct);
+
+            if (hasLiveJob)
+            {
+                continue;
+            }
+
+            // Bump + enqueue commit atomically: the NextAttemptAt equality check makes the bump a claim
+            // (two sweeps never double-recover), and a rollback undoes both — no bumped-without-job or
+            // job-without-bump state can exist.
+            await using var tx = await _userContext.Database.BeginTransactionAsync(ct);
+
+            var claimed = await _userContext.Set<WebhookDelivery>()
+                .Where(x => x.Id == row.Id)
+                .Where(x => x.Status == WebhookDeliveryStatus.Pending)
+                .Where(x => x.NextAttemptAt == row.NextAttemptAt)
+                .ExecuteUpdateAsync(
+                    s => s.SetProperty(x => x.NextAttemptAt, now + _configuration.WebhookStuckDeliveryGrace),
+                    ct);
+
+            if (claimed != 1)
+            {
+                await tx.RollbackAsync(ct);
+
+                continue;
+            }
+
+            await enqueuer.EnqueueAsync(row.Id, ct);
+            await tx.CommitAsync(ct);
+            recovered++;
+        }
+
+        return recovered;
     }
 
     private static bool? ReadCanBeRestarted(string? metadataJson)

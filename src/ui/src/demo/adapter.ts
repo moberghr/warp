@@ -1,5 +1,8 @@
 import type { InternalAxiosRequestConfig, AxiosResponse } from 'axios';
 import * as data from './data';
+import { demoAdapters, demoAdapterDetails, demoAdapterCalls } from './data/adapters';
+import { demoWebhooks, demoWebhookDetails, demoWebhookSummary } from './data/webhooks';
+import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
 
@@ -53,6 +56,20 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const sagaResult = routeSagas(method, url, config);
     if (sagaResult !== undefined) {
       return sagaResult;
+    }
+
+    // Adapters: /addons reports adapters:true in demo mode (see routeGet), so the nav is visible
+    // and these routes serve the static fixtures for the screenshots.
+    const adapterResult = routeAdapters(method, url, config);
+    if (adapterResult !== undefined) {
+      return adapterResult;
+    }
+
+    // Webhooks: /addons reports webhooks:true in demo mode (see routeGet), so the nav is visible
+    // and these routes serve the static fixtures for the screenshots.
+    const webhookResult = routeWebhooks(method, url, config);
+    if (webhookResult !== undefined) {
+      return webhookResult;
     }
 
     // All POST/DELETE routes return success
@@ -135,6 +152,206 @@ function routeSagas(
   }
   if (method === 'delete' && detailMatch && !RESERVED.has(detailMatch[1])) {
     return resolve({}, config);
+  }
+
+  return undefined;
+}
+
+function routeAdapters(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (!url.startsWith('/adapters')) {
+    return undefined;
+  }
+
+  // GET /adapters — list
+  if (method === 'get' && (url === '/adapters' || url.startsWith('/adapters?'))) {
+    return resolve(demoAdapters, config);
+  }
+
+  // GET /adapters/history — global overview, aggregated across every demo adapter's per-hour history.
+  if (method === 'get' && url.startsWith('/adapters/history')) {
+    const map = new Map<string, { hour: string; calls: number; errors: number; durSum: number }>();
+    for (const detail of Object.values(demoAdapterDetails)) {
+      for (const p of detail.history) {
+        const g = map.get(p.hour) ?? { hour: p.hour, calls: 0, errors: 0, durSum: 0 };
+        g.calls += p.calls;
+        g.errors += p.errors;
+        g.durSum += p.avgDurationMs * p.calls;
+        map.set(p.hour, g);
+      }
+    }
+    const points = [...map.values()]
+      .sort((a, b) => (a.hour < b.hour ? -1 : 1))
+      .map((g) => ({
+        hour: g.hour,
+        calls: g.calls,
+        errors: g.errors,
+        errorRate: g.calls === 0 ? 0 : g.errors / g.calls,
+        avgDurationMs: g.calls === 0 ? 0 : g.durSum / g.calls,
+      }));
+
+    return resolve(points, config);
+  }
+
+  // GET /adapters/{name}/calls/{id} — call detail (checked before the {name} detail route)
+  const callMatch = url.match(/^\/adapters\/([^/?]+)\/calls\/([^/?]+)$/);
+  if (method === 'get' && callMatch) {
+    const id = decodeURIComponent(callMatch[2]);
+    const call = demoAdapterCalls[id];
+    if (!call) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(call, config);
+  }
+
+  // GET /adapters/{name} — detail
+  const detailMatch = url.match(/^\/adapters\/([^/?]+)$/);
+  if (method === 'get' && detailMatch) {
+    const name = decodeURIComponent(detailMatch[1]);
+    const detail = demoAdapterDetails[name];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(detail, config);
+  }
+
+  return undefined;
+}
+
+function routeWebhooks(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (!url.startsWith('/webhooks')) {
+    return undefined;
+  }
+
+  const params: Record<string, unknown> = config.params ?? {};
+
+  // GET /webhooks/summary — tile counts (checked before the {id} detail route).
+  if (method === 'get' && url === '/webhooks/summary') {
+    return resolve(demoWebhookSummary, config);
+  }
+
+  // GET /webhooks/groups?by=type|endpoint — grouped counts (checked before the list + {id} routes).
+  if (method === 'get' && url.startsWith('/webhooks/groups')) {
+    const by = String(params.by ?? 'type');
+    const keyOf = (x: (typeof demoWebhooks)[number]) => (by === 'endpoint' ? (x.groupName ?? x.url) : x.eventType);
+    const map = new Map<string, { key: string; total: number; pending: number; delivered: number; exhausted: number; lastActivityAt: string }>();
+    for (const x of demoWebhooks) {
+      const key = keyOf(x);
+      const g = map.get(key) ?? { key, total: 0, pending: 0, delivered: 0, exhausted: 0, lastActivityAt: x.createdAt };
+      g.total += 1;
+      if (x.status === WebhookDeliveryStatus.Pending) g.pending += 1;
+      if (x.status === WebhookDeliveryStatus.Delivered) g.delivered += 1;
+      if (x.status === WebhookDeliveryStatus.Exhausted) g.exhausted += 1;
+      if (x.createdAt > g.lastActivityAt) g.lastActivityAt = x.createdAt;
+      map.set(key, g);
+    }
+    const groups = [...map.values()].sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1));
+
+    return resolve(groups, config);
+  }
+
+  // GET /webhooks/history?eventType=&group= — hourly delivery stats by status (global or scoped).
+  if (method === 'get' && url.startsWith('/webhooks/history')) {
+    const eventType = params.eventType ? String(params.eventType) : undefined;
+    const group = params.group ? String(params.group) : undefined;
+    const scoped = demoWebhooks.filter((x) => {
+      if (eventType && x.eventType !== eventType) return false;
+      if (group && (x.groupName ?? x.url) !== group) return false;
+
+      return true;
+    });
+    const map = new Map<string, { hour: string; delivered: number; exhausted: number; pending: number; total: number }>();
+    for (const x of scoped) {
+      const hour = `${x.createdAt.slice(0, 13)}:00:00.000Z`;
+      const g = map.get(hour) ?? { hour, delivered: 0, exhausted: 0, pending: 0, total: 0 };
+      g.total += 1;
+      if (x.status === WebhookDeliveryStatus.Delivered) g.delivered += 1;
+      if (x.status === WebhookDeliveryStatus.Exhausted) g.exhausted += 1;
+      if (x.status === WebhookDeliveryStatus.Pending) g.pending += 1;
+      map.set(hour, g);
+    }
+    const points = [...map.values()].sort((a, b) => (a.hour < b.hour ? -1 : 1));
+
+    return resolve(points, config);
+  }
+
+  // GET /webhooks — filtered, paged list. Server does the real filtering; mirror
+  // status/event/endpoint/reference + paging here so the demo filters feel live.
+  if (method === 'get' && (url === '/webhooks' || url.startsWith('/webhooks?'))) {
+    const status = params.status !== undefined ? Number(params.status) : undefined;
+    const eventType = params.eventType ? String(params.eventType).toLowerCase() : undefined;
+    const group = params.group ? String(params.group) : undefined;
+    const reference = params.reference ? String(params.reference).toLowerCase() : undefined;
+    const page = params.page !== undefined ? Number(params.page) : 0;
+    const pageSize = params.pageSize !== undefined ? Number(params.pageSize) : 20;
+    const filtered = demoWebhooks.filter((x) => {
+      if (status !== undefined && x.status !== (status as WebhookDeliveryStatus)) {
+        return false;
+      }
+      if (eventType && !x.eventType.toLowerCase().includes(eventType)) {
+        return false;
+      }
+      if (group && (x.groupName ?? x.url) !== group) {
+        return false;
+      }
+      if (reference && !(x.reference ?? '').toLowerCase().includes(reference)) {
+        return false;
+      }
+
+      return true;
+    });
+
+    const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const items = filtered.slice(page * pageSize, page * pageSize + pageSize);
+
+    return resolve({ totalCount: filtered.length, pageCount, items }, config);
+  }
+
+  // POST /webhooks/{id}/redeliver — mirrors the real endpoint's status codes (checked before the {id}
+  // detail route). A settled delivery redelivers (200); a Pending one already owns a live executor job,
+  // so the server rejects it with 409 (Rejected). Unknown id is 404. Deterministic off the fixed fixture
+  // status. Unavailable (no worker) can't occur in the single-process demo, so it is not modelled.
+  const redeliverMatch = url.match(/^\/webhooks\/([^/?]+)\/redeliver$/);
+  if (method === 'post' && redeliverMatch) {
+    const id = decodeURIComponent(redeliverMatch[1]);
+    const detail = demoWebhookDetails[id];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+    if (detail.status === WebhookDeliveryStatus.Pending) {
+      return Promise.reject({
+        response: {
+          status: 409,
+          statusText: 'Conflict',
+          data: { message: 'Delivery is already pending — it already has a live executor job.' },
+          headers: {},
+          config,
+        },
+      });
+    }
+
+    return resolve({}, config);
+  }
+
+  // GET /webhooks/{id} — detail.
+  const detailMatch = url.match(/^\/webhooks\/([^/?]+)$/);
+  if (method === 'get' && detailMatch) {
+    const id = decodeURIComponent(detailMatch[1]);
+    const detail = demoWebhookDetails[id];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(detail, config);
   }
 
   return undefined;
@@ -373,7 +590,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true };
+    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, webhooks: true };
   }
 
   // Dashboard

@@ -10,6 +10,9 @@
     <Project Path="benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj" />
   </Folder>
   <Folder Name="/core/">
+    <Project Path="core/Warp.Adapters.Http/Warp.Adapters.Http.csproj" />
+    <Project Path="core/Warp.Adapters.Refit/Warp.Adapters.Refit.csproj" />
+    <Project Path="core/Warp.Adapters.Webhooks/Warp.Adapters.Webhooks.csproj" />
     <Project Path="core/Warp.Core/Warp.Core.csproj" />
     <Project Path="core/Warp.Http/Warp.Http.csproj" />
     <Project Path="core/Warp.Http.SourceGenerator/Warp.Http.SourceGenerator.csproj" />

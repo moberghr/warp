@@ -2,13 +2,16 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Warp.Core;
+using Warp.Core.Adapters;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Concurrency;
+using Warp.Core.Endpoints;
 using Warp.Core.Enums;
 using Warp.Core.Models;
 using Warp.Core.RateLimit;
 using Warp.Core.Sagas;
 using Warp.Core.Services;
+using Warp.Core.Webhooks;
 using Warp.UI.DashboardPush;
 using Warp.UI.Extensions;
 using Warp.UI.UIMiddleware;
@@ -138,13 +141,30 @@ public static class WarpEndpoints
             [FromServices] IConcurrencyLimitManager? concurrency,
             [FromServices] IRateLimitManager? rateLimits,
             [FromServices] IDashboardPushMarker? push,
-            [FromServices] ISagaQueryService? sagas) =>
+            [FromServices] ISagaQueryService? sagas,
+            [FromServices] IWarpAdapters? adapters,
+            [FromServices] IEndpointCallRecorder? endpoints,
+            [FromServices] IWebhookRedeliveryEnqueuer? webhooks) =>
             Results.Ok(new WarpAddonsInfo
             {
                 Concurrency = concurrency is not null,
                 Push = push is not null,
                 RateLimits = rateLimits is not null,
                 Sagas = sagas is not null,
+
+                // IWarpAdapters is registered only by AddAdapters(); IAdapterQueryService (always
+                // registered by AddWarp for dashboard-only processes) can't gate the flag.
+                Adapters = adapters is not null,
+
+                // IEndpointCallRecorder is registered only by AddEndpointObservability(); IEndpointQueryService
+                // (always registered by AddWarp for dashboard-only processes) can't gate the flag. The
+                // endpoints nav shows only where inbound requests are actually being recorded.
+                Endpoints = endpoints is not null,
+
+                // IWebhookRedeliveryEnqueuer is registered only by AddWebhooks(); IWebhookQueryService /
+                // IWebhookCommandService (always registered by AddWarp for dashboard-only processes) can't
+                // gate the flag. The webhooks nav shows only where a delivery can actually be executed.
+                Webhooks = webhooks is not null,
             }));
 
         apiGroup.MapGet("concurrency", async ([FromServices] IConcurrencyLimitManager? mgr, CancellationToken ct) =>
@@ -453,6 +473,152 @@ public static class WarpEndpoints
             var removed = await svc.ForceComplete(id);
 
             return removed ? Results.NoContent() : Results.NotFound();
+        });
+
+        // Adapters — outbound service-call observability. IAdapterQueryService is always registered by
+        // AddWarp (dashboard-only processes resolve it), so these endpoints are non-nullable; the
+        // sidebar nav is gated on the addons flag (IWarpAdapters presence), not on a 404.
+        apiGroup.MapGet("adapters", async ([FromServices] IAdapterQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetAdapters(ct)));
+
+        apiGroup.MapGet("adapters/history", async ([FromServices] IAdapterQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetGlobalHistory(ct)));
+
+        apiGroup.MapGet("adapters/{name}", async ([FromServices] IAdapterQueryService svc, string name, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return Results.BadRequest();
+            }
+
+            var detail = await svc.GetAdapterDetail(name, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        apiGroup.MapGet("adapters/{name}/calls/{id}", async ([FromServices] IAdapterQueryService svc, string name, Guid id, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return Results.BadRequest();
+            }
+
+            var detail = await svc.GetCallDetail(name, id, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        // Endpoints — inbound endpoint observability. IEndpointQueryService is always registered by AddWarp
+        // (dashboard-only processes resolve it); the sidebar nav is gated on the addons flag
+        // (IEndpointCallRecorder presence), not on a 404. The {id} is the URL-safe encoded route identity.
+        apiGroup.MapGet("endpoints", async ([FromServices] IEndpointQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetEndpoints(ct)));
+
+        apiGroup.MapGet("endpoints/history", async ([FromServices] IEndpointQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetGlobalHistory(ct)));
+
+        apiGroup.MapGet("endpoints/{id}", async ([FromServices] IEndpointQueryService svc, string id, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                return Results.BadRequest();
+            }
+
+            var detail = await svc.GetEndpointDetail(id, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        apiGroup.MapGet("endpoints/{id}/calls/{callId}", async ([FromServices] IEndpointQueryService svc, string id, Guid callId, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                return Results.BadRequest();
+            }
+
+            var detail = await svc.GetCallDetail(id, callId, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
+        // registered by AddWarp (dashboard-only processes resolve them), so these data routes are
+        // non-nullable; the sidebar nav is gated on the addons flag (IWebhookRedeliveryEnqueuer presence),
+        // not on a 404. Attempt timelines ride on the detail payload (AdapterCallLog via CorrelationId).
+        apiGroup.MapGet("webhooks", async (
+            [FromServices] IWebhookQueryService svc,
+            [FromQuery] int? status,
+            [FromQuery] string? eventType,
+            [FromQuery] string? reference,
+            [FromQuery] string? group,
+            [FromQuery] DateTime? since,
+            [FromQuery] DateTime? until,
+            [FromQuery] int? page,
+            [FromQuery] int? pageSize,
+            CancellationToken ct) =>
+        {
+            var filter = new WebhookDeliveryFilter
+            {
+                Status = status.HasValue ? (WebhookDeliveryStatus?)status.Value : null,
+                EventType = eventType,
+                Reference = reference,
+                GroupName = group,
+                Since = since,
+                Until = until,
+                Page = page ?? 0,
+                PageSize = pageSize ?? 20,
+            };
+
+            return Results.Ok(await svc.GetDeliveries(filter, ct));
+        });
+
+        apiGroup.MapGet("webhooks/groups", async (
+            [FromServices] IWebhookQueryService svc,
+            [FromQuery] string? by,
+            CancellationToken ct) =>
+        {
+            var dimension = string.Equals(by, "endpoint", StringComparison.OrdinalIgnoreCase)
+                ? WebhookGroupBy.Endpoint
+                : WebhookGroupBy.EventType;
+
+            return Results.Ok(await svc.GetGroups(dimension, ct));
+        });
+
+        apiGroup.MapGet("webhooks/history", async (
+            [FromServices] IWebhookQueryService svc,
+            [FromQuery] string? eventType,
+            [FromQuery] string? group,
+            CancellationToken ct) =>
+        {
+            var filter = new WebhookDeliveryFilter { EventType = eventType, GroupName = group };
+
+            return Results.Ok(await svc.GetDeliveryHistory(filter, ct));
+        });
+
+        apiGroup.MapGet("webhooks/summary", async ([FromServices] IWebhookQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetSummary(ct)));
+
+        apiGroup.MapGet("webhooks/{id}", async ([FromServices] IWebhookQueryService svc, Guid id, CancellationToken ct) =>
+        {
+            var detail = await svc.GetDeliveryDetail(id, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        apiGroup.MapPost("webhooks/{id}/redeliver", async ([FromServices] IWebhookCommandService svc, Guid id, CancellationToken ct) =>
+        {
+            var result = await svc.Redeliver(id, ct);
+
+            return result switch
+            {
+                WebhookRedeliveryResult.Enqueued => Results.Ok(),
+                WebhookRedeliveryResult.NotFound => Results.NotFound(),
+                WebhookRedeliveryResult.Rejected => Results.Conflict(
+                    new { message = "Delivery is already pending — it already has a live executor job." }),
+                WebhookRedeliveryResult.Unavailable => Results.Conflict(
+                    new { message = "Redelivery is unavailable in this process — no webhooks worker is wired here. Redeliver from a server host running AddWebhooks()." }),
+                _ => Results.NotFound(),
+            };
         });
 
         apiGroup.MapGet("services", async ([FromServices] IBackgroundServiceQueryService svc, CancellationToken ct) =>

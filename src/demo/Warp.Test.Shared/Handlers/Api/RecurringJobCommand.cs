@@ -43,7 +43,7 @@ public class RecurringJobCommand : IJobHandler<RecurringJobRequest>
 
         await _context.SaveChangesAsync(cancellationToken);
 
-        var sendEmailRequest = new SendEmailRequest
+        var sendEmailRequest = new OrderConfirmationRequest
         {
             EmailLogId = emailLog.Id,
         };

@@ -8,6 +8,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.BackgroundServices;
+using Warp.Core.Data.Converters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
@@ -16,6 +17,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Interceptors;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
+using Warp.Core.Webhooks;
 
 namespace Warp.Core;
 
@@ -97,6 +99,25 @@ public static class ServiceConfiguration
         // can still serve the /api/services endpoints. Only depends on TContext.
         services.TryAddScoped<IBackgroundServiceQueryService, BackgroundServiceQueryService<TContext>>();
 
+        // Adapters dashboard read service. Registered in AddWarp (not AddAdapters) so dashboard-only /
+        // publisher-only processes that never call AddAdapters() can still serve the /api/adapters
+        // endpoints (§2.14 stays-on-TContext). Only depends on TContext. The adapter tables are always
+        // in the schema (§2.11); AddAdapters() gates recording services + the addons flag only.
+        services.TryAddScoped<IAdapterQueryService, AdapterQueryService<TContext>>();
+
+        // Inbound endpoint observability dashboard read service. Registered in AddWarp (not
+        // AddEndpointObservability) so dashboard-only / publisher-only processes can serve /api/endpoints
+        // without running the middleware. The EndpointCallLog table is always in the schema (§2.11), so
+        // AddEndpointObservability() gates only the recorder/flusher/middleware plus the addons flag.
+        services.TryAddScoped<IEndpointQueryService, EndpointQueryService<TContext>>();
+
+        // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
+        // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
+        // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
+        // schema (§2.11); AddWebhooks() gates the executor/dispatcher + the addons flag only.
+        services.TryAddScoped<IWebhookQueryService, WebhookQueryService<TContext>>();
+        services.TryAddScoped<IWebhookCommandService, WebhookCommandService<TContext>>();
+
         // Default no-op transport. opt.UseDatabasePush() (inside the AddWarp/AddWarpServer lambda) replaces this with a
         // provider-specific implementation (Postgres LISTEN/NOTIFY or SQL Server Service Broker).
         services.TryAddSingleton<IWarpNotificationTransport, NullNotificationTransport>();
@@ -128,10 +149,7 @@ public static class ServiceConfiguration
     private static void EnsureDbContextRegisteredAsScoped<TContext>(IServiceCollection services)
         where TContext : DbContext
     {
-        var descriptor = services.LastOrDefault(d => d.ServiceType == typeof(TContext));
-        if (descriptor is null)
-        {
-            throw new InvalidOperationException(
+        var descriptor = services.LastOrDefault(d => d.ServiceType == typeof(TContext)) ?? throw new InvalidOperationException(
                 $"AddWarp<{typeof(TContext).Name}>() requires {typeof(TContext).Name} to be registered " +
                 $"via services.AddDbContext<{typeof(TContext).Name}>(...). If you're using " +
                 $"AddDbContextFactory<{typeof(TContext).Name}>(...) (e.g. for Blazor / design-time tooling), " +
@@ -140,8 +158,6 @@ public static class ServiceConfiguration
                 "use a real Host builder that calls AddDbContext — Warp's model customizer wires in via " +
                 $"DbContextOptions<{typeof(TContext).Name}>, which AddDbContextFactory does not expose to " +
                 "design-time tooling.");
-        }
-
         if (descriptor.Lifetime != ServiceLifetime.Scoped)
         {
             throw new InvalidOperationException(
@@ -246,6 +262,10 @@ public static class ServiceConfiguration
         AddBackgroundServiceInstanceEntity(modelBuilder, schema);
         AddBackgroundServiceLeaseEntity(modelBuilder, schema);
         AddBackgroundServiceLogEntity(modelBuilder, schema);
+        AddAdapterDefinitionEntity(modelBuilder, schema);
+        AddAdapterCallLogEntity(modelBuilder, schema);
+        AddWebhookDeliveryEntity(modelBuilder, schema);
+        AddEndpointCallLogEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -688,6 +708,164 @@ public static class ServiceConfiguration
         lease.HasIndex(p => p.HolderServerId);
 
         lease.Metadata.SetSchema(schema);
+    }
+
+    public static void AddAdapterDefinitionEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var def = modelBuilder.Entity<AdapterDefinition>();
+
+        def.Property(p => p.Id);
+        def.HasKey(p => p.Id);
+
+        def.Property(p => p.Name).HasMaxLength(200).IsRequired();
+        def.Property(p => p.FirstSeenAt);
+        def.Property(p => p.LastSeenAt);
+        def.Property(p => p.ConfigSummary).HasMaxLength(1024);
+        def.Property(p => p.GroupLabel).HasMaxLength(64);
+        def.Property(p => p.SharedPolicyJson);
+        def.Property(p => p.SharedPolicyHash).HasMaxLength(128);
+        def.Property(p => p.HasPolicyConflict);
+
+        // Adapter name is the cluster-wide identity — one definition per name.
+        def.HasIndex(p => p.Name).IsUnique();
+
+        // ExpirationCleanup scans by LastSeenAt to remove orphaned definitions.
+        def.HasIndex(p => p.LastSeenAt);
+
+        def.Metadata.SetSchema(schema);
+    }
+
+    public static void AddAdapterCallLogEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var log = modelBuilder.Entity<AdapterCallLog>();
+
+        log.Property(p => p.Id);
+        log.HasKey(p => p.Id);
+
+        log.Property(p => p.AdapterName).HasMaxLength(200).IsRequired();
+        log.Property(p => p.Operation).HasMaxLength(200).IsRequired();
+        log.Property(p => p.GroupName).HasMaxLength(200);
+        log.Property(p => p.Timestamp);
+        log.Property(p => p.DurationMs);
+        log.Property(p => p.Attempts);
+        log.Property(p => p.Outcome).HasConversion<int>();
+        log.Property(p => p.StatusCode);
+        log.Property(p => p.ExceptionType).HasMaxLength(512);
+        log.Property(p => p.ExceptionMessage).HasMaxLength(4096);
+        log.Property(p => p.RequestSummary).HasMaxLength(2048);
+        log.Property(p => p.RequestHeaders);
+        log.Property(p => p.ResponseHeaders);
+        log.Property(p => p.RequestBody);
+        log.Property(p => p.ResponseBody);
+        log.Property(p => p.MachineName).HasMaxLength(256).IsRequired();
+        log.Property(p => p.TraceId).HasMaxLength(64);
+        log.Property(p => p.TagsJson);
+        log.Property(p => p.CorrelationId).HasMaxLength(200);
+        log.Property(p => p.ExpireAt);
+
+        // Per-adapter recent-calls listing.
+        log.HasIndex(p => new { p.AdapterName, p.Timestamp });
+
+        // Per-group recent-calls listing / stats.
+        log.HasIndex(p => new { p.AdapterName, p.GroupName, p.Timestamp });
+
+        // Domain-record lookup by correlation id (e.g. webhook delivery attempts).
+        log.HasIndex(p => new { p.AdapterName, p.CorrelationId });
+
+        // ExpirationCleanup range scan on expiry.
+        log.HasIndex(p => p.ExpireAt);
+
+        log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddEndpointCallLogEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var log = modelBuilder.Entity<EndpointCallLog>();
+
+        log.Property(p => p.Id);
+        log.HasKey(p => p.Id);
+
+        log.Property(p => p.Method).HasMaxLength(16).IsRequired();
+        log.Property(p => p.RouteTemplate).HasMaxLength(1024).IsRequired();
+        log.Property(p => p.Operation).HasMaxLength(200).IsRequired();
+        log.Property(p => p.GroupName).HasMaxLength(200);
+        log.Property(p => p.Timestamp);
+        log.Property(p => p.DurationMs);
+        log.Property(p => p.Outcome).HasConversion<int>();
+        log.Property(p => p.StatusCode);
+        log.Property(p => p.RemoteIp).HasMaxLength(64);
+        log.Property(p => p.UserAgent).HasMaxLength(1024);
+        log.Property(p => p.User).HasMaxLength(256);
+        log.Property(p => p.ExceptionType).HasMaxLength(512);
+        log.Property(p => p.ExceptionMessage).HasMaxLength(4096);
+        log.Property(p => p.RequestHeaders);
+        log.Property(p => p.ResponseHeaders);
+        log.Property(p => p.RequestBody);
+        log.Property(p => p.ResponseBody);
+        log.Property(p => p.MachineName).HasMaxLength(256).IsRequired();
+        log.Property(p => p.TraceId);
+        log.Property(p => p.TagsJson);
+        log.Property(p => p.ExpireAt);
+
+        // Per-endpoint recent-calls listing (identity = method + route template).
+        log.HasIndex(p => new { p.Method, p.RouteTemplate, p.Timestamp });
+
+        // Request→jobs drill-down joins jobs on the shared trace id.
+        log.HasIndex(p => p.TraceId);
+
+        // ExpirationCleanup range scan on expiry.
+        log.HasIndex(p => p.ExpireAt);
+
+        log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var delivery = modelBuilder.Entity<WebhookDelivery>();
+
+        delivery.Property(p => p.Id);
+        delivery.HasKey(p => p.Id);
+
+        // Column caps mirror the SendAsync build choke point's clamp in Warp.Adapters.Webhooks (the single
+        // place a WebhookDelivery row is built from caller input) so an over-long caller value clamps before
+        // insert and never fails the row write. Only capped columns carry a length. HeadersJson, PayloadJson,
+        // the converted RetrySchedule, and SuccessCodesJson hold unbounded content.
+        delivery.Property(p => p.EventType).HasMaxLength(200).IsRequired();
+        delivery.Property(p => p.EventId).HasMaxLength(200).IsRequired();
+        delivery.Property(p => p.Url).HasMaxLength(2048).IsRequired();
+        delivery.Property(p => p.HeadersJson);
+        delivery.Property(p => p.GroupName).HasMaxLength(200);
+        delivery.Property(p => p.Reference).HasMaxLength(200);
+        delivery.Property(p => p.PayloadJson).IsRequired();
+        delivery.Property(p => p.SigningMode).HasConversion<int>();
+        delivery.Property(p => p.Secret).HasMaxLength(512);
+        delivery.Property(p => p.RetrySchedule).HasConversion(RetryScheduleConverter.Converter, RetryScheduleConverter.Comparer);
+        delivery.Property(p => p.SuccessCodesJson);
+        delivery.Property(p => p.Status).HasConversion<int>();
+        delivery.Property(p => p.AttemptCount);
+        delivery.Property(p => p.ExhaustedCallbackPending);
+        delivery.Property(p => p.NextAttemptAt);
+        delivery.Property(p => p.CreatedAt);
+        delivery.Property(p => p.ExpireAt);
+
+        // Status filtering + display of the pending/next-attempt band.
+        delivery.HasIndex(p => new { p.Status, p.NextAttemptAt });
+
+        // Host lookup by its own subscription/definition reference.
+        delivery.HasIndex(p => p.Reference);
+
+        // Deliveries-by-event-type listing, newest first.
+        delivery.HasIndex(p => new { p.EventType, p.CreatedAt });
+
+        // ExpirationCleanup count-trim orders the settled set by CreatedAt globally (the composite
+        // (EventType, CreatedAt) index can't serve a cross-event-type sort). A dedicated CreatedAt index
+        // gives the sweep a pre-sorted scan — Pending rows are the residual predicate, not a sort key.
+        delivery.HasIndex(p => p.CreatedAt);
+
+        // ExpirationCleanup range scan on expiry.
+        delivery.HasIndex(p => p.ExpireAt);
+
+        delivery.Metadata.SetSchema(schema);
     }
 
     public static void AddBackgroundServiceLogEntity(ModelBuilder modelBuilder, string? schema)

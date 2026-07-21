@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<PackageId>Moberg.Warp.Adapters.Http</PackageId>
+		<Description>Outbound HTTP service-call observability for Warp: a DelegatingHandler that names, times, captures, and records IHttpClientFactory calls, with Polly resilience and cluster-shared rate limiting.</Description>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Http" Version="10.0.9" />
+		<PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.7.0" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Warp.Core\Warp.Core.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="Warp.Tests" />
+	</ItemGroup>
+
+</Project>

@@ -768,6 +768,7 @@ export const jobDetailFailed: UnifiedJobDetailModel = {
   spawnedByJob: null,
   continuations: [],
   spawnedJobs: [],
+  origin: null,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata: { correlationId: 'order-1042', source: 'OrderService', MaxRetries: 3, RetriedTimes: 3, RetryDelays: [15, 60, 300] } as any,
   logs: [
@@ -836,6 +837,7 @@ export const jobDetailCompleted: UnifiedJobDetailModel = {
   spawnedJobs: [
     { id: IDS.trCalculateTax, kind: 1, currentState: State.Completed, type: 'Acme.Billing.CalculateTaxRequest', handlerType: 'Acme.Billing.CalculateTaxHandler' },
   ],
+  origin: { method: 'POST', routeTemplate: '/orders', user: 'alice', callId: '00000000-0000-0000-0000-0000000000aa', endpointId: 'UE9TVCAvb3JkZXJz' },
   metadata: { correlationId: 'order-2847', source: 'WebApp', priority: 'high' },
   logs: [
     makeLog('log-c1', 'Created', 600, null, null),
@@ -875,6 +877,7 @@ export const jobDetailProcessing: UnifiedJobDetailModel = {
   spawnedByJob: null,
   continuations: [],
   spawnedJobs: [],
+  origin: null,
   metadata: { tenantId: 'acme-corp', priority: 'normal' },
   logs: [
     makeLog('log-p1', 'Created', 120, null, null),
@@ -929,6 +932,7 @@ export const batchDetailUnified: UnifiedJobDetailModel = {
     { id: IDS.trPublishInvoice, kind: 1, currentState: State.Awaiting, type: 'Acme.Billing.PublishInvoiceRequest', handlerType: 'Acme.Billing.PublishInvoiceHandler' },
   ],
   spawnedJobs: [],
+  origin: null,
   metadata: null,
   logs: [
     makeLog('log-b1', 'Created', 590, null, null),
@@ -1011,6 +1015,7 @@ export const messageDetailUnified: UnifiedJobDetailModel = {
   spawnedByJob: null,
   continuations: [],
   spawnedJobs: [],
+  origin: null,
   metadata: null,
   logs: [
     makeLog('log-m1', 'Created', 410, null, null),

@@ -1,0 +1,16 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/aspire/">
+    <Project Path="Warp.Demo.AppHost/Warp.Demo.AppHost.csproj" />
+    <Project Path="Warp.Demo.ServiceDefaults/Warp.Demo.ServiceDefaults.csproj" />
+  </Folder>
+  <Folder Name="/apps/">
+    <Project Path="Warp.Demo.PartnerApi/Warp.Demo.PartnerApi.csproj" />
+    <Project Path="Warp.TestApp/Warp.Test.App.csproj" />
+    <Project Path="Warp.TestWorker/Warp.Test.Worker.csproj" />
+    <Project Path="Warp.Test.Shared/Warp.Test.Shared.csproj" />
+  </Folder>
+</Solution>

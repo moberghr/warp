@@ -18,6 +18,11 @@ import {
   Timer,
   GitBranch,
   Activity,
+  Cable,
+  ArrowDownToLine,
+  Webhook,
+  Menu,
+  X,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useRealtimeInvalidation } from '@/hooks/useRealtimeInvalidation';
@@ -41,6 +46,9 @@ const builtInNavItems = [
 const concurrencyNavItem = { to: '/concurrency', label: 'Concurrency', icon: KeyRound };
 const rateLimitsNavItem = { to: '/ratelimits', label: 'Rate Limits', icon: Timer };
 const sagasNavItem = { to: '/sagas', label: 'Sagas', icon: GitBranch };
+const adaptersNavItem = { to: '/adapters', label: 'Adapters', icon: Cable };
+const endpointsNavItem = { to: '/endpoints', label: 'Endpoints', icon: ArrowDownToLine };
+const webhooksNavItem = { to: '/webhooks', label: 'Webhooks', icon: Webhook };
 const servicesNavItem = { to: '/services', label: 'Services', icon: Activity };
 
 function resolveIcon(name?: string): React.ComponentType<{ className?: string }> {
@@ -67,6 +75,13 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   const [concurrencyAvailable, setConcurrencyAvailable] = useState(false);
   const [rateLimitsAvailable, setRateLimitsAvailable] = useState(false);
   const [sagasAvailable, setSagasAvailable] = useState(false);
+  const [adaptersAvailable, setAdaptersAvailable] = useState(false);
+  const [endpointsAvailable, setEndpointsAvailable] = useState(false);
+  const [webhooksAvailable, setWebhooksAvailable] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Close the mobile nav whenever the route changes so tapping an item dismisses it.
+  useEffect(() => { setMobileMenuOpen(false); }, [location.pathname]);
 
   // Bridge realtime hub events into React Query invalidation for any page that
   // uses the useQuery-based hooks. Pages still on the older `useRealtimeRefetch`
@@ -115,6 +130,9 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         setConcurrencyAvailable(addons.concurrency);
         setRateLimitsAvailable(addons.rateLimits);
         setSagasAvailable(addons.sagas);
+        setAdaptersAvailable(addons.adapters);
+        setEndpointsAvailable(addons.endpoints);
+        setWebhooksAvailable(addons.webhooks);
         void useRealtimeStore.getState().connectIfEnabled(addons.push);
       })
       .catch(() => {
@@ -122,6 +140,9 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         setConcurrencyAvailable(false);
         setRateLimitsAvailable(false);
         setSagasAvailable(false);
+        setAdaptersAvailable(false);
+        setEndpointsAvailable(false);
+        setWebhooksAvailable(false);
         void useRealtimeStore.getState().connectIfEnabled(false);
       });
 
@@ -134,88 +155,98 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   const isBatchesSection = location.pathname.startsWith('/batches');
   const isMessagesSection = location.pathname.startsWith('/messages');
 
+  const navItems = [
+    ...builtInNavItems,
+    ...(concurrencyAvailable ? [concurrencyNavItem] : []),
+    ...(rateLimitsAvailable ? [rateLimitsNavItem] : []),
+    ...(sagasAvailable ? [sagasNavItem] : []),
+    ...(adaptersAvailable ? [adaptersNavItem] : []),
+    ...(endpointsAvailable ? [endpointsNavItem] : []),
+    ...(webhooksAvailable ? [webhooksNavItem] : []),
+    servicesNavItem,
+    ...extensions.flatMap((ext) =>
+      ext.pages.map((page) => ({
+        to: page.path,
+        label: page.label,
+        icon: resolveIcon(page.icon),
+      }))
+    ),
+  ];
+
+  const renderNavItem = (item: (typeof navItems)[number]) => {
+    const Icon = item.icon;
+    const matchPath = item.to.includes('/') && item.to !== '/'
+      ? '/' + item.to.split('/')[1]
+      : item.to;
+    const isActive = item.to === '/'
+      ? location.pathname === '/'
+      : location.pathname.startsWith(matchPath);
+    return (
+      <Link
+        key={item.to}
+        to={item.to}
+        onClick={(e) => {
+          setMobileMenuOpen(false);
+          if (isActive) {
+            e.preventDefault();
+            navigate(item.to, { replace: true, state: { refreshKey: Date.now() } });
+          }
+        }}
+        className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+          isActive
+            ? 'bg-primary text-primary-foreground'
+            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+        }`}
+      >
+        <Icon className="h-4 w-4" />
+        {item.label}
+        {item.label === 'Jobs' && stats && stats.created > 0 && (
+          <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+            {stats.created}
+          </span>
+        )}
+        {item.label === 'Jobs' && stats && stats.failed > 0 && (
+          <span className="text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 font-bold">
+            {stats.failed}
+          </span>
+        )}
+        {item.label === 'Messages' && stats && stats.messages > 0 && (
+          <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+            {stats.messages}
+          </span>
+        )}
+        {item.label === 'Messages' && stats && stats.messagesFailed > 0 && (
+          <span className="text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 font-bold">
+            {stats.messagesFailed}
+          </span>
+        )}
+        {item.label === 'Batches' && stats && stats.batchesProcessing > 0 && (
+          <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+            {stats.batchesProcessing}
+          </span>
+        )}
+        {item.label === 'Batches' && stats && stats.batchesFailed > 0 && (
+          <span className="text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 font-bold">
+            {stats.batchesFailed}
+          </span>
+        )}
+        {item.label === 'Servers' && stats && (
+          <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">{stats.servers}</span>
+        )}
+      </Link>
+    );
+  };
+
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="min-h-screen bg-background flex flex-col overflow-x-hidden">
       {/* Top navbar */}
       <header className="border-b bg-card">
-        <div className="flex h-14 items-center px-6">
-          <Link to="/" className="text-lg font-bold mr-8">Warp</Link>
-          <nav className="flex gap-1">
-            {[
-              ...builtInNavItems,
-              ...(concurrencyAvailable ? [concurrencyNavItem] : []),
-              ...(rateLimitsAvailable ? [rateLimitsNavItem] : []),
-              ...(sagasAvailable ? [sagasNavItem] : []),
-              servicesNavItem,
-              ...extensions.flatMap((ext) =>
-                ext.pages.map((page) => ({
-                  to: page.path,
-                  label: page.label,
-                  icon: resolveIcon(page.icon),
-                }))
-              ),
-            ].map((item) => {
-              const Icon = item.icon;
-              const matchPath = item.to.includes('/') && item.to !== '/'
-                ? '/' + item.to.split('/')[1]
-                : item.to;
-              const isActive = item.to === '/'
-                ? location.pathname === '/'
-                : location.pathname.startsWith(matchPath);
-              return (
-                <Link
-                  key={item.to}
-                  to={item.to}
-                  onClick={(e) => {
-                    if (isActive) {
-                      e.preventDefault();
-                      navigate(item.to, { replace: true, state: { refreshKey: Date.now() } });
-                    }
-                  }}
-                  className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                    isActive
-                      ? 'bg-primary text-primary-foreground'
-                      : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-                  }`}
-                >
-                  <Icon className="h-4 w-4" />
-                  {item.label}
-                  {item.label === 'Jobs' && stats && stats.created > 0 && (
-                    <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-                      {stats.created}
-                    </span>
-                  )}
-                  {item.label === 'Jobs' && stats && stats.failed > 0 && (
-                    <span className="text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 font-bold">
-                      {stats.failed}
-                    </span>
-                  )}
-                  {item.label === 'Messages' && stats && stats.messages > 0 && (
-                    <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-                      {stats.messages}
-                    </span>
-                  )}
-                  {item.label === 'Messages' && stats && stats.messagesFailed > 0 && (
-                    <span className="text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 font-bold">
-                      {stats.messagesFailed}
-                    </span>
-                  )}
-                  {item.label === 'Batches' && stats && stats.batchesProcessing > 0 && (
-                    <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-                      {stats.batchesProcessing}
-                    </span>
-                  )}
-                  {item.label === 'Batches' && stats && stats.batchesFailed > 0 && (
-                    <span className="text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 font-bold">
-                      {stats.batchesFailed}
-                    </span>
-                  )}
-                  {item.label === 'Servers' && stats && (
-                    <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">{stats.servers}</span>
-                  )}
-                </Link>
-              );
-            })}
+        <div className="flex h-14 items-center px-4 md:px-6">
+          <Link to="/" className="text-lg font-bold mr-4 md:mr-8">Warp</Link>
+          {/* Desktop nav — collapses to a hamburger below md so the row never
+              exceeds the viewport width on phones. */}
+          <nav className="hidden md:flex gap-1">
+            {navItems.map(renderNavItem)}
           </nav>
           <div className="flex-1" />
           <RealtimeStatusIndicator status={realtimeStatus} />
@@ -234,7 +265,20 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
               <LogOut className="h-4 w-4" />
             </button>
           )}
+          <button
+            onClick={() => setMobileMenuOpen((open) => !open)}
+            className="md:hidden p-2 rounded-md hover:bg-accent text-muted-foreground ml-1"
+            aria-label="Toggle navigation menu"
+            aria-expanded={mobileMenuOpen}
+          >
+            {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+          </button>
         </div>
+        {mobileMenuOpen && (
+          <nav className="md:hidden flex flex-col gap-1 border-t px-3 py-2 max-h-[75vh] overflow-y-auto">
+            {navItems.map(renderNavItem)}
+          </nav>
+        )}
       </header>
 
       {error && (
@@ -249,7 +293,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         {isBatchesSection && <BatchesSidebar stats={stats} />}
         {isMessagesSection && <MessagesSidebar stats={stats} />}
 
-        <main className="flex-1 p-6">
+        <main className="flex-1 min-w-0 p-4 md:p-6">
           {/* Max-width + center so dashboard content is readable on ultra-wide displays
               without the cards floating off to the left of empty whitespace. 1536px
               (Tailwind's max-w-screen-2xl) matches what most modern admin dashboards
@@ -266,7 +310,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
       </div>
 
       {/* Footer */}
-      <footer className="border-t bg-card px-6 py-3 text-xs text-muted-foreground flex items-center justify-between">
+      <footer className="border-t bg-card px-4 md:px-6 py-3 text-xs text-muted-foreground flex flex-wrap items-center justify-between gap-2">
         <span>{stats?.databaseConnection ?? 'Warp Dashboard'}</span>
         <div className="flex items-center gap-4 tabular-nums">
           {stats && <span>Servers: {stats.servers} · Workers active</span>}
@@ -320,7 +364,7 @@ function JobsSidebar({ stats }: { stats: DashboardStatistics | null }) {
   ];
 
   return (
-    <aside className="w-64 shrink-0 border-r bg-card min-h-[calc(100vh-3.5rem)] p-4">
+    <aside className="hidden md:block w-64 shrink-0 border-r bg-card min-h-[calc(100vh-3.5rem)] p-4">
       <h3 className="text-xs font-semibold text-muted-foreground uppercase mb-3">Jobs</h3>
       <nav className="space-y-1">
         {sidebarItems.map((item) => {
@@ -360,7 +404,7 @@ function SidebarNav({ title, items }: { title: string; items: { to: string; labe
   const navigate = useNavigate();
 
   return (
-    <aside className="w-64 shrink-0 border-r bg-card min-h-[calc(100vh-3.5rem)] p-4">
+    <aside className="hidden md:block w-64 shrink-0 border-r bg-card min-h-[calc(100vh-3.5rem)] p-4">
       <h3 className="text-xs font-semibold text-muted-foreground uppercase mb-3">{title}</h3>
       <nav className="space-y-1">
         {items.map((item) => {

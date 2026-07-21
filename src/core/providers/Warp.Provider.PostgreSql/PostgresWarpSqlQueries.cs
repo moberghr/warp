@@ -27,6 +27,11 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     private readonly string _lockLeaseByServiceNameSql;
     private readonly string _lockDefinitionByServiceNameSql;
 
+    // Built lazily from the resolved model on first use: WarpJobTableNames does not carry the
+    // RateLimitBucket names (adapter rate limiting is an opt-in, cold path), so the SQL is derived
+    // from context.Model once and cached. A benign double-compute under a race is harmless.
+    private string? _lockRateLimitBucketSql;
+
     public PostgresWarpSqlQueries(WarpJobTableNames names)
     {
         _n = names;
@@ -462,5 +467,32 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         return await context.Set<BackgroundServiceDefinition>()
             .FromSqlRaw(_lockDefinitionByServiceNameSql, serviceName)
             .FirstOrDefaultAsync(ct);
+    }
+
+    public async Task<RateLimitBucket?> LockRateLimitBucketByKeyAsync(DbContext context, string key, CancellationToken ct)
+    {
+        _lockRateLimitBucketSql ??= BuildLockRateLimitBucketSql(context.Model);
+
+        return await context.Set<RateLimitBucket>()
+            .FromSqlRaw(_lockRateLimitBucketSql, key)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    private static string BuildLockRateLimitBucketSql(Microsoft.EntityFrameworkCore.Metadata.IModel model)
+    {
+        var entity = model.FindEntityType(typeof(RateLimitBucket))
+            ?? throw new InvalidOperationException("RateLimitBucket entity not registered in the DbContext model.");
+
+        var schema = entity.GetSchema();
+        var table = entity.GetTableName()
+            ?? throw new InvalidOperationException("RateLimitBucket entity has no resolved table name.");
+        var nameColumn = entity.FindProperty(nameof(RateLimitBucket.Name))?.GetColumnName()
+            ?? throw new InvalidOperationException("RateLimitBucket.Name has no resolved column name.");
+
+        var qualified = string.IsNullOrEmpty(schema)
+            ? $"\"{table}\""
+            : $"\"{schema}\".\"{table}\"";
+
+        return $"SELECT * FROM {qualified} WHERE \"{nameColumn}\" = {{0}} FOR NO KEY UPDATE";
     }
 }

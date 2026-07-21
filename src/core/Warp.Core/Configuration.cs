@@ -72,4 +72,108 @@ public class WarpConfiguration
     /// losing <c>FirstSeenAt</c> history. Increase for environments with longer deploys.
     /// </summary>
     public TimeSpan BackgroundServiceDefinitionOrphanGrace { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Global default retention for <c>AdapterCallLog</c> rows. The adapter flusher stamps each
+    /// row's <c>ExpireAt</c> at <c>Timestamp + retention</c>; <c>ExpirationCleanup</c> deletes rows
+    /// past <c>ExpireAt</c>. Per-adapter overrides via <c>WarpAdapterOptions.CallLogRetention</c>
+    /// take precedence. Call logs are diagnostics, not an audit trail — same lossy, bounded stance
+    /// as <c>JobLog</c>/<c>ServerLog</c>.
+    /// </summary>
+    public TimeSpan AdapterCallLogRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// Global default <b>count</b> cap for <c>AdapterCallLog</c> rows — keep at most this many rows per
+    /// adapter, deleting the oldest beyond the cap (by <c>Timestamp</c>). Complements the age cap
+    /// (<see cref="AdapterCallLogRetention"/>): a row is removed once it exceeds <b>either</b> limit,
+    /// so a hot adapter is bounded by row count between age sweeps. <c>null</c> (default) disables the
+    /// count cap. Per-adapter override via <c>WarpAdapterOptions.CallLogRetentionCount</c> takes precedence.
+    /// </summary>
+    public int? AdapterCallLogRetentionCount { get; set; }
+
+    /// <summary>
+    /// Grace window before an orphaned <c>AdapterDefinition</c> row is deleted by
+    /// <c>ExpirationCleanup</c>. A definition is considered orphaned when its <c>LastSeenAt</c> is
+    /// older than this value (adapters run in non-server processes, so there is no live-instance
+    /// signal — staleness alone drives removal). Mirrors
+    /// <see cref="BackgroundServiceDefinitionOrphanGrace"/>.
+    /// <para>
+    /// <b>INVARIANT:</b> this grace MUST stay comfortably larger than
+    /// <c>AdapterFlush.LastSeenStaleThreshold</c> (the flusher's lazy-refresh cadence, 5 min). Between
+    /// refreshes an actively-used adapter's <c>LastSeenAt</c> is up to <c>LastSeenStaleThreshold</c>
+    /// stale; if the grace were ≤ that window, cleanup would delete a live adapter's definition (wiping
+    /// <c>SharedPolicyJson</c>/<c>Hash</c>/<c>HasPolicyConflict</c>/<c>FirstSeenAt</c>) and re-insert it
+    /// on the next flush. Default 30 min = 6× the refresh cadence — do not lower below it without also
+    /// lowering the threshold. If you change one, change the other.
+    /// </para>
+    /// </summary>
+    public TimeSpan AdapterDefinitionOrphanGrace { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Global default retention for <c>WebhookDelivery</c> rows. <c>SendAsync</c> stamps each row's
+    /// <c>ExpireAt</c> at <c>CreatedAt + retention</c>; <c>ExpirationCleanup</c> deletes rows past
+    /// <c>ExpireAt</c>. Delivery rows are operational history, not an audit trail — same lossy, bounded
+    /// stance as <c>AdapterCallLog</c>. Aligned by default with the <c>warp-webhooks</c> adapter's
+    /// <c>CallLogRetention</c> so a delivery and its attempt rows expire together.
+    /// </summary>
+    public TimeSpan WebhookDeliveryRetention { get; set; } = TimeSpan.FromDays(30);
+
+    /// <summary>
+    /// Global <b>count</b> cap for settled (<c>Delivered</c>/<c>Exhausted</c>) <c>WebhookDelivery</c> rows —
+    /// keep at most this many, deleting the oldest beyond the cap (by <c>CreatedAt</c>). Complements the age
+    /// cap (<see cref="WebhookDeliveryRetention"/>): a settled row is removed once it exceeds <b>either</b>
+    /// limit. <c>Pending</c> deliveries are never count-trimmed (they still own live work). <c>null</c>
+    /// (default) disables the count cap.
+    /// </summary>
+    public int? WebhookDeliveryRetentionCount { get; set; }
+
+    /// <summary>
+    /// Global default retention for <c>EndpointCallLog</c> rows (inbound endpoint observability). The
+    /// inbound middleware stamps each row's <c>ExpireAt</c> at <c>Timestamp + retention</c>;
+    /// <c>ExpirationCleanup</c> deletes rows past <c>ExpireAt</c>. Same lossy, bounded stance as
+    /// <c>AdapterCallLog</c> — diagnostics, not an audit trail.
+    /// </summary>
+    public TimeSpan EndpointCallLogRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// Global <b>count</b> cap for <c>EndpointCallLog</c> rows — keep at most this many rows per endpoint
+    /// (method + route template), deleting the oldest beyond the cap. Complements the age cap
+    /// (<see cref="EndpointCallLogRetention"/>): a row is removed once it exceeds <b>either</b> limit.
+    /// <c>null</c> (default) disables the count cap.
+    /// </summary>
+    public int? EndpointCallLogRetentionCount { get; set; }
+
+    /// <summary>
+    /// How long hourly-bucketed <c>Statistic</c> rows (keys ending in <c>:yyyy-MM-dd-HH</c> — the job/saga
+    /// dashboard history and the adapter/endpoint performance-chart series) are retained before
+    /// <c>ExpirationCleanup</c>'s generic hourly sweep prunes them. Raise it to keep deeper chart history
+    /// (e.g. to match a longer <c>*CallLogRetention</c>); the buckets are small. Default 7 days.
+    /// </summary>
+    public TimeSpan HourlyStatisticsRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// Bounded in-memory buffer capacity for the outbound adapter and inbound endpoint call-log recorders
+    /// (each owns its own channel of this size). Records are enqueued non-blocking; once the buffer is full
+    /// further records are dropped (counted, never blocking or failing a call — recording is lossy by
+    /// design). Raise for bursty, high-volume observability; lower to cap memory. Default 10,000.
+    /// </summary>
+    public int CallLogBufferCapacity { get; set; } = 10_000;
+
+    /// <summary>
+    /// Max call-log records the adapter/endpoint flushers fold into a single DI scope + <c>SaveChanges</c>
+    /// batch when draining their buffer. Larger batches amortise the round-trip; smaller batches bound the
+    /// work per transaction. Does not affect the shutdown-drain budget. Default 500.
+    /// </summary>
+    public int CallLogFlushBatchSize { get; set; } = 500;
+
+    /// <summary>
+    /// How far past its <c>NextAttemptAt</c> a <c>Pending</c> <c>WebhookDelivery</c> must be before the
+    /// stuck-delivery sweep (part of <c>StaleJobRecovery</c>) re-enqueues an executor job for it. A row
+    /// only reaches this state when the executor's outcome commit faulted after the attempt claim — the
+    /// scheduled retry job was staged in the same failed transaction, so nothing else will ever revisit
+    /// the row. Must stay well above the worst-case scheduled-activation + worker-pickup delay: a sweep
+    /// that fires while the delivery's real executor job is merely delayed enqueues a duplicate, which the
+    /// attempt claim serialises but which still costs an extra (at-least-once) attempt.
+    /// </summary>
+    public TimeSpan WebhookStuckDeliveryGrace { get; set; } = TimeSpan.FromMinutes(10);
 }

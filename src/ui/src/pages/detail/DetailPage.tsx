@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StateBadge } from '@/components/StateBadge';
@@ -229,6 +229,24 @@ export default function DetailPage() {
               </CardContent>
             </Card>
           </div>
+
+          {/* Origin: the inbound HTTP request that started this trace */}
+          {job.origin && (
+            <div data-warp-slot="detail.origin" data-warp-context={jobContext} key={`origin-${job.id}`}>
+              <Card>
+                <CardHeader className="pb-2"><CardTitle className="text-sm">Origin</CardTitle></CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  <div>
+                    <span className="text-muted-foreground">Request:</span>{' '}
+                    <Link to={`/endpoints/${encodeURIComponent(job.origin.endpointId)}`} className="text-primary hover:underline font-mono text-xs">
+                      {job.origin.method} {job.origin.routeTemplate}
+                    </Link>
+                  </div>
+                  {job.origin.user && <div><span className="text-muted-foreground">User:</span> {job.origin.user}</div>}
+                </CardContent>
+              </Card>
+            </div>
+          )}
 
           {/* Flow */}
           <div data-warp-slot="detail.flow" data-warp-context={jobContext} key={`flow-${job.id}`}>

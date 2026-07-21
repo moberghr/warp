@@ -4,7 +4,7 @@
 
 Warp provides three patterns — Messages (pub/sub), Jobs (orchestrated background work), and Requests (in-memory mediator) — through a unified pipeline. It uses the transactional outbox pattern: jobs are committed atomically with business data in the same DbContext. No separate message broker required.
 
-Ships as NuGet packages: Moberg.Warp.Core, Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
+Ships as NuGet packages: Moberg.Warp.Core, Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). Observability add-ons: Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls the app makes to other services), and Moberg.Warp.Adapters.Webhooks (durable outbound webhook delivery). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
 
 ---
 
@@ -15,7 +15,10 @@ dotnet add package Moberg.Warp.Core              # Publishing (required)
 dotnet add package Moberg.Warp.Provider.PostgreSql  # or Moberg.Warp.Provider.SqlServer (required)
 dotnet add package Moberg.Warp.Worker            # Worker service (if processing jobs)
 dotnet add package Moberg.Warp.UI                # Dashboard (optional)
-dotnet add package Moberg.Warp.Http              # HTTP exposure for IRequest<T> / IStreamRequest<T> (optional)
+dotnet add package Moberg.Warp.Http              # HTTP exposure for IRequest<T> / IStreamRequest<T> + inbound observability (optional)
+dotnet add package Moberg.Warp.Adapters.Http     # Observe outbound HttpClient calls (optional)
+dotnet add package Moberg.Warp.Adapters.Refit    # Refit operation-name sugar for adapters (optional)
+dotnet add package Moberg.Warp.Adapters.Webhooks # Durable outbound webhook delivery (optional)
 ```
 
 ---
@@ -761,6 +764,106 @@ The `RunJobMonitor` task runs alongside each handler execution, periodically dra
 
 ---
 
+## Concurrency Control: Mutex & Semaphore
+
+Opt-in addon: `opt.AddConcurrency()`. One primitive (`IWarpSemaphoreProvider`, Medallion distributed locks), two attributes. At most N jobs per key run at any moment across all workers/servers. Zero overhead for jobs without a key.
+
+- `[Mutex("key")]` — limit fixed at 1, default `ConcurrencyMode.Skip`. Also `.WithMutex("key", mode?)` on `JobParameters`.
+- `[Semaphore("key", limit: N)]` — N slots, default `ConcurrencyMode.Wait`. Also `.WithSemaphore("key", limit, mode?)`.
+- `ConcurrencyMode` (from 1): `Skip` → surplus short-circuited to `Deleted`; `Wait` → surplus requeued (`Enqueued`, `ScheduleTime = now`).
+- Lock is held for the **whole handler execution** (contrast rate limit). Lock name `warp:concurrency:{key}`.
+- Admin overrides via `IConcurrencyLimitManager.AddOrUpdateLimit/RemoveLimit` (entity `ConcurrencyLimit`). Precedence: admin row > attribute/extension limit > 1. Admin rows are sticky across deploys.
+- Namespaces are disjoint by design: `[Mutex("k")]` uses `warp:concurrency:k`; `[Semaphore("k", N)]` uses `warp:concurrency:k:0..k:{N-1}`. Don't put both on the same key.
+- Dashboard `/warp/concurrency` (hide-on-404 nav).
+
+## Job Timeout
+
+Opt-in addon: `opt.AddTimeout(o => { o.Default; o.DefaultMode; o.DefaultScope; })` (`Default = null` = unrestricted). Caps handler run time; on deadline the handler's `CancellationToken` is cancelled (cooperative only — a handler that ignores the token runs to `Completed`).
+
+- `[Timeout(seconds: N, Mode =, Scope =)]` or `.WithTimeout(TimeSpan)` (per-publish wins).
+- `TimeoutMode` (from 1): `Delete` (default) → `Deleted`, **not** retried by `AddRetry`; `Fail` → throws `TimeoutException`, **caught** by `AddRetry`.
+- `TimeoutScope` (from 1): `PerAttempt` (default) → fresh budget per retry; `Total` → `DeadlineUtc` stamped at publish, bounds the whole chain (only useful with `Fail`).
+- **Ordering: `AddRetry()` before `AddTimeout()`** (DI order = outer → inner; retry must wrap timeout to catch its `TimeoutException`).
+
+## Rate Limit
+
+Opt-in addon: `opt.AddRateLimit()`. Throttles jobs sharing a key to N starts per window.
+
+- `[RateLimit("key", count: N, perSeconds: S, Mode =, Style =)]` or `.WithRateLimit("key", count, window)`.
+- `RateLimitMode` (from 1): `Skip` (default) → `Deleted`; `Wait` → rescheduled via `JobOutcome.RescheduledState` (100–500 ms jitter).
+- `RateLimitStyle` (from 1): `Fixed` (default) → wall-clock window floor-aligned to UTC ticks; `Sliding` → rolling window over last N starts.
+- `perSeconds` capped at 7 days. Live state in `RateLimitBucket`. Lock held only for the brief check-and-increment (**not** during handler execution, unlike Mutex).
+- Admin overrides via `IRateLimitOverrideManager`; precedence admin row > attribute > publish-time. Dashboard `/warp/ratelimits`.
+- **Ordering: `AddConcurrency()` before `AddRateLimit()`** so a mutex rejection doesn't waste a token. DB push does **not** accelerate `Wait` reschedules (they ride `ScheduledJobActivation`).
+
+## Circuit Breaker
+
+Opt-in addon: `opt.AddCircuitBreaker(o => { o.Threshold = 3; o.Duration = 1m; o.ResetJitter = 10s; })`. `CircuitBreakerState` entity is in the base schema.
+
+- `[CircuitBreaker(Group =, Threshold =, DurationSeconds =, ResetJitterSeconds =)]`. Default key = `typeof(TRequest).Name`; `Group` shares one circuit across handlers.
+- Three states: `Closed` (runs; failure count resets on success, opens at `Threshold` consecutive failures) → `Open` (`OpenUntil > now`; jobs rescheduled to `OpenUntil + jitter` without running) → `HalfOpen` (one worker wins a CAS probe; success → Closed, failure → Open).
+- Short-circuits **before** Retry — a job blocked by an open circuit does not increment `RetriedTimes` (retry budget preserved). Runs after the concurrency behavior.
+
+## No-Restart (Stale-Recovery Opt-Out)
+
+Opt-in addon: `opt.AddNoRestart()`. Controls whether a job requeues or fails when a worker crashes mid-execution (independent of Retry, which governs handler throws).
+
+- `[NoRestart]` (never requeue on crash → `Failed`), `[Restart]` (opt back in), or `.WithRestart(bool)` (per-publish, wins). Both attributes inherit through base classes (closest declaration wins); applying both to one class throws.
+- Global default `RestartStaleJobsByDefault` on `WarpServerConfiguration` (default `true`).
+- Override chain (first non-null wins): `.WithRestart()` > attribute > global default. `StaleJobRecovery` resolves it: `false` → `Failed` (`ExpireAt = null`, never auto-deleted); `true` → `Enqueued`.
+- Use for non-idempotent work (payments, outbound notifications, non-idempotent APIs). `.WithRestart(bool)` works even without the addon; the attributes need it.
+
+## Batched Completions (Dispatcher Mode)
+
+Automatic when `UseDispatcher = true` — each `WarpDispatcherWorker` buffers job completions and flushes them as one multi-row transaction, collapsing N commits into one.
+
+- `CompletionBatchSize` (default 50), `CompletionFlushInterval` (default 100 ms). Set `CompletionBatchSize = 1` to opt out (immediate flush).
+- Poison-entry isolation: a failing batch splits in half recursively; a single bad row is dropped, the rest commit. `StaleJobRecovery` handles orphaned `Processing` rows.
+- At-least-once: a crash between handler completion and flush leaves the job `Processing` → recovered per `CanBeRestarted`. Pair non-idempotent handlers with `[NoRestart]`. Throughput optimization, not latency.
+
+## Sagas
+
+Opt-in addon: `opt.AddSagas()`; register handlers with `services.AddSagaHandler<TSagaHandler>()`. In `Warp.Core.Sagas`. Adds entities `SagaState` (one row per live saga, deleted on completion) + `SagaJobLink` (activity log, FK cascade).
+
+- State class: subclass `Saga` (or `Saga<TKey>` for typed `string`/`Guid`/`int`/`long` keys).
+- Messages: carry exactly one `[Correlate]` property (`string`/`Guid`/`int`/`long`, canonicalized to one `varchar(200)`); mark saga-starting messages `[StartsSaga]`.
+- Handler: implement `ISagaHandler<TSaga, TMessage>` per message type. Call `saga.MarkCompleted()` to delete the row in the same `SaveChanges` (key immediately reusable).
+- Proxy serializes per correlation key on `warp:saga:{TSaga.FullName}:{key}` via `IWarpSemaphoreProvider`; optimistic `Version` concurrency. `SagaPiiCheck` blocks PII-named `[Correlate]` props at registration (opt out with `[Correlate(IsAnonymized = true)]`). `ISagaCommandService.ForceComplete`. Dashboard `/warp/sagas`.
+
+## Background Services
+
+Base feature (no addon opt-in for the schema — `AddWarp<TContext>` always adds the four entities `Definition`/`Instance`/`Lease`/`Log` and `IBackgroundServiceQueryService`). Register services with `opt.AddBackgroundService<T>()`; `AddWarpServer` adds the host. In `Warp.Core.BackgroundServices`.
+
+- Subclass `WarpBackgroundService`; override `Scope` → `ServiceScope.PerServer` (default, one instance per server) or `ServiceScope.Singleton` (one active cluster-wide, coordinated via `BackgroundServiceLease` 30 s TTL renewed in `Heartbeat`; ~30 s failover on hard-kill / ~0 s on graceful shutdown).
+- Subclasses are **singletons** — inject `IServiceScopeFactory`, never `DbContext` (`ValidateScopes = true` catches the captive-dependency foot-gun at startup).
+- `opt.DisableWorker()` → service-only server (background services + `Heartbeat`/`ServerCleanup`/`ExpirationCleanup`, no job worker or job tasks; provider still required).
+- Log capture auto-wired (`MinLogLevel` default Information, 100/s cap, 4 KB truncation, 1000-row/7-day retention). Dashboard `/warp/services`.
+
+## Database Push
+
+Opt-in addon: call the provider first, then `opt.UseDatabasePush()`. Replaces polling wake-up with PostgreSQL `LISTEN`/`NOTIFY` or SQL Server Service Broker.
+
+- Accelerates (< 50 ms): dispatcher fetch (`JobEnqueued`, only when `UseDispatcher = true`), `MessageRouter` (`MessageEnqueued`), `Orchestrator` (`JobFinalized`). Individual-worker mode keeps polling (thundering-herd avoidance).
+- In-process every `WarpWorker` already shortcuts backoff on a same-server `JobEnqueued` signal regardless of push. Scheduled jobs are still bounded by `ScheduledActivationInterval` (default 5 s) — push accelerates only what happens after activation.
+- Transports never throw from publish (log + `warp.notifications.publish_failures`); missed notifications caught by drain-on-reconnect. SQL Server requires `ALTER DATABASE ... SET ENABLE_BROKER` (degrades to polling with an actionable log otherwise).
+
+## Dashboard Push
+
+Opt-in addon: `opt.AddDashboardPush(o => o.CoalesceWindow = 100ms)`. SignalR hub at `${RoutePrefix}/api/hub`; broadcasts `JobFinalized` / `MessageEnqueued` events carrying a `DashboardStatistics` snapshot. Without it the dashboard runs on REST refetch + a 30 s safety-net poll.
+
+- The broadcaster is the third consumer of `ServerTaskSignals<TContext>` (after `Orchestrator` and `MessageRouter`). Per-view data (job lists, detail, logs) stays on event-driven REST refetch.
+- Multi-server fanout requires `opt.UseDatabasePush()` (single-server works without it). Frontend reads `${RoutePrefix}/api/addons` once at boot and connects only when `push: true`.
+
+## Database-Generated IDs (outbox gotcha)
+
+`publisher.Enqueue`/`Publish` serialize the message payload to JSON **immediately** (writing the `Job` row into the change tracker), before `SaveChangesAsync` populates a DB-generated identity — so a payload capturing `entity.Id` freezes `0`. Three fixes, all preserving the outbox guarantee:
+
+1. **Client-assigned `Guid` PK** (recommended for new schemas) — assign `Id = Guid.NewGuid()` before `Add`; one save. Use Guid v7 if insertion order matters.
+2. **EF Core Hi/Lo** (`modelBuilder.Entity<T>().Property(x => x.Id).UseHiLo()`) — client-side id block, keeps integer PKs; one save; gaps after restarts.
+3. **Two `SaveChanges` in one explicit transaction** — save the entity to populate its id, then enqueue; works on legacy schemas, extra round-trip.
+
+---
+
 ## Configuration Reference
 
 ### Core Configuration (AddWarp)
@@ -937,6 +1040,7 @@ options.Authorization = new LocalRequestsOnlyAuthorizationFilter();
 - Optional count-based cleanup: `MaxExpirableJobCount` deletes oldest by ExpireAt when threshold exceeded
 - Statistics survive job deletion (persistent counters)
 - Recurring job logs: last 100 per recurring job retained
+- Observability call logs (adapter / webhook / endpoint) retain on **age AND count** — whichever trims first. Age via `*Retention` `TimeSpan`; count via `*RetentionCount` `int?` (null = off). Aggregate metrics (counts, error rate, average latency) survive log deletion.
 
 ---
 
@@ -1114,6 +1218,90 @@ Endpoint metadata is populated automatically: `.Accepts<TRequest>("application/j
 
 ---
 
+## Outbound Adapters (Moberg.Warp.Adapters)
+
+Observes calls your app **makes to** other services — the mirror of the inbound `Warp.Http` binding. An adapter is a named outbound dependency (vendor API, SOAP service, payment gateway). Three layers:
+
+1. **Protocol-agnostic core** (`Warp.Core.Adapters`) — `IWarpAdapters.BeginCall(adapter, operation, group?)` returns an `AdapterCallScope` (`Succeed`/`Fail`/`SetGroup`/`SetCorrelation`/`SetTag`) usable for any transport via manual scopes.
+2. **HTTP binding** (`Warp.Adapters.Http`) — a `DelegatingHandler` that auto-scopes `IHttpClientFactory` clients; Polly resilience via `Microsoft.Extensions.Http.Resilience`.
+3. **Refit sugar** (`Warp.Adapters.Refit`) — operation names from `RestMethodInfo`.
+
+**Telemetry is unconditional** (null-listener, zero cost without a listener): every completed scope emits a `Client` Activity named `{adapter}.{operation}` plus `warp.adapter.calls` / `warp.adapter.duration` meters, regardless of `AddAdapters()`. **Only DB call-log recording is gated by `opt.AddAdapters()`** (a bounded lossy channel + flusher; a full channel drops the record and increments `warp.adapter.records_dropped` — never blocks or fails a user call). Entities (`AdapterDefinition`, `AdapterCallLog`) are always in the schema.
+
+**Three-axis identity:** adapter = policy + health boundary (registration-time); group = runtime who/where (destination, tenant — a runtime value, unbounded); operation = what (the API-contract axis, bounded). Litmus: swapping the value changes the request's *structure* → operation; only changes *where it goes / on whose behalf* → group.
+
+**Cluster-shared rate limiter** — the differentiator per-process Polly cannot provide: same adapter name across the fleet shares one DB-backed token limit (`RateLimitBucket`, key `warp:adapter:{name}`). Shared-policy persistence is first-writer-wins; a later process whose local policy differs enforces the persisted policy, logs a Warning, and sets `HasPolicyConflict`. Change a shared limit via a `RateLimitOverride` admin row or by clearing the persisted policy — not by redeploying.
+
+**Capture is opt-in and PII-owned:** metadata always; request bodies, response bodies, and headers each independently `None` / `OnFailure` / `Always`, truncated (`MaxCapturedBodySize` 8 KB / `MaxCapturedHeaderSize` 4 KB) and passed through the user-owned `RedactedHeaders` denylist (prepopulated with `Authorization`/`Cookie`/`X-Api-Key`/etc., fully overridable). Enums from 1: `CallRecording { All, FailuresOnly }`, `CaptureMode { None, OnFailure, Always }`, `AdapterCallOutcome { Success, Failed, Throttled, CircuitOpen }`.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql(conn);
+    opt.AddAdapters();                       // gates DB recording
+    opt.AddAdapter("acme-payments", a =>
+    {
+        a.Recording.CaptureResponseBodies = CaptureMode.OnFailure;
+        a.Recording.CallLogRetentionCount = 50_000;   // per-adapter count cap
+        a.UseSharedRateLimit(perSeconds: 1, limit: 10);
+    });
+});
+```
+
+`Warp.Adapters.Http` wires the observing handler onto a named client; `Warp.Adapters.Refit` adds a typed client. Observe-first rollout: register with no resilience/rate-limit policy (zero behavioural change), read the data, add policy per adapter later. `IAdapterQueryService` is registered by `AddWarp` itself, so dashboard-only / publisher-only processes serve `/api/adapters*` without a server. Dashboard: `/warp/adapters`.
+
+---
+
+## Durable Webhooks (Moberg.Warp.Adapters.Webhooks)
+
+`opt.AddWebhooks(...)` (builds on adapters) makes outbound webhook *delivery* durable. **Boundary:** the host owns subscriptions, fan-out, payload building, and endpoint enable/disable; Warp owns everything after `IWebhookDispatcher.SendAsync(WebhookSend)` — delivery lifecycle, retry scheduling, signing, redelivery, exhaustion, dashboard.
+
+**The delivery, not the job, is the state machine.** The executor (an ordinary source-gen job on queue `warp:webhooks`) always completes; every attempt exception is caught and recorded as an attempt failure — webhook failures never surface as failed jobs. State lives on the always-in-schema `WebhookDelivery` row: `WebhookDeliveryStatus { Pending, Delivered, Exhausted }`. The row is self-contained (URL, headers, payload, schedule, success codes, signing mode + secret) stamped at `SendAsync` time, so a later config deploy never reshapes an in-flight delivery. `SendAsync` persists `Pending` + enqueues the first attempt in the caller's transaction (outbox) and returns the delivery id.
+
+**Attempts are adapter calls** through the auto-registered `warp-webhooks` adapter (group = endpoint, operation = event type, `CorrelationId` = delivery id; response bodies always captured, request bodies never — the payload is already on the row). The attempt timeline is `AdapterCallLog WHERE CorrelationId = deliveryId` — no separate attempt table.
+
+**No timers/scans:** each retry is a fresh executor job in `State.Scheduled` at `now + schedule[N]` riding `ScheduledJobActivation`. `RetrySchedule` is per-send `IReadOnlyList<TimeSpan>?`: `null` = built-in `[1m, 10m, 1h, 6h]`, `[]` = single attempt then `Exhausted`. Cadence is delay + up to ~5s activation + worker pickup — a backoff, not a precision scheduler.
+
+**Signing** (`WebhookSigning { None, StandardWebhooks, Custom }`): `StandardWebhooks` = HMAC-SHA256 over `{id}.{timestamp}.{payload}` with `webhook-id`/`webhook-timestamp`/`webhook-signature` headers; `Custom` = a registered `IWebhookSigner` via `w.UseCustomSigner<T>()` (declaring `Custom` without a signer throws at `AddWebhooks` time). Secrets are stored on the row for self-containment but redacted on every read surface. `IWebhookCommandService.Redeliver(id)` requeues a settled delivery. Exhaustion invokes the host's `IWebhookDeliveryExhaustedHandler` at-least-once, post-commit. Retention: age (`WebhookDeliveryRetention`, default 30d) + count (`WebhookDeliveryRetentionCount`).
+
+**Prerequisite:** a Warp server (worker) must run somewhere to drain `warp:webhooks` — coexists with another job system. `IWebhookQueryService` / `IWebhookCommandService` resolve in any `AddWarp` process. Dashboard: `/warp/webhooks`.
+
+```csharp
+opt.AddWebhooks(w => w.OnDeliveryExhausted<MyExhaustedHandler>());
+// inside your transaction:
+var id = await dispatcher.SendAsync(new WebhookSend
+{
+    Url = endpoint.Url, EventType = "order.created", Payload = json,
+    Signing = WebhookSigning.StandardWebhooks, Secret = endpoint.Secret,
+    RetrySchedule = null,   // built-in backoff
+});
+```
+
+---
+
+## Inbound Endpoint Observability (Moberg.Warp.Http)
+
+The inbound mirror of adapters: observes requests **made to** your Warp HTTP endpoints (handlers exposed via `MapWarpHttp`). Opt in with `opt.AddEndpointObservability(o => ...)` inside the `AddWarp` lambda **and** `app.UseWarpHttpObservability()` after `UseRouting()`. The middleware no-ops unless the matched endpoint carries `WarpEndpointIdentity` — it never observes your own controllers, the dashboard, health, or static files.
+
+**Identity = HTTP method + route TEMPLATE** (`GET /orders/{id}`) — already bounded (inline constraints normalized: `{id:int}` → `{id}`), no path-cardinality heuristic. Counter dimensions are Total + optional low-cardinality Group (from `o.GroupSelector(HttpContext)` — a channel/client/tenant key, never raw IP/user id).
+
+**Capture (PII):** caller IP (`RemoteIpAddress`, or first `X-Forwarded-For` hop when `UseForwardedForIp`), user-agent, and `User.Identity.Name` are captured by default (the point of the feature) but are PII — redactable/disableable, never logged Info+. Request/response bodies + headers each `None` / `OnFailure` / `Always` (default `OnFailure`), truncated and redacted through the same `RedactedHeaders` denylist as adapters. `CaptureBodyStream` never buffers a whole streaming/`IResult` response.
+
+**Outcome:** `Failed` = status ≥ 500 or an unhandled exception; **4xx is counted Success** (client error) so the error rate stays a meaningful server-health signal. `RecordCalls = FailuresOnly` skips success ROWS only (counters still written). Recording is lossy and never blocks/fails the request. Retention is global on `WarpConfiguration.EndpointCallLogRetention` (age, default 7d) + `EndpointCallLogRetentionCount` (count). `IEndpointQueryService` is registered by `AddWarp`, so dashboard-only processes serve `/api/endpoints*` without the middleware. Dashboard: `/warp/endpoints`.
+
+```csharp
+opt.AddEndpointObservability(o =>
+{
+    o.CaptureResponseBodies = CaptureMode.OnFailure;
+    o.UseForwardedForIp = true;
+    o.GroupSelector = ctx => ctx.Request.Headers["X-Client"].FirstOrDefault();
+});
+// after app.UseRouting():
+app.UseWarpHttpObservability();
+```
+
+---
+
 ## DI Services Available
 
 After calling `AddWarp<TContext>()` or `AddWarpServer<TContext>()`, these services are available via dependency injection:
@@ -1131,6 +1319,10 @@ After calling `AddWarp<TContext>()` or `AddWarpServer<TContext>()`, these servic
 | `IDashboardStatsService` | Dashboard statistics, server/worker info |
 | `IJobContext` | Current job's ID, trace ID, and metadata (available inside handlers) |
 | `IServerCommandService` | Pause/resume servers and worker groups |
+| `IAdapterQueryService` | Query outbound-adapter stats, call logs, history (registered by AddWarp) |
+| `IEndpointQueryService` | Query inbound-endpoint stats, call logs (registered by AddWarp) |
+| `IWebhookQueryService` / `IWebhookCommandService` | Query webhook deliveries; redeliver a settled delivery (registered by AddWarp) |
+| `IWebhookDispatcher` | Send a durable webhook delivery (only after `AddWebhooks()`) |
 | `TimeProvider` | Injectable time (registered as `TimeProvider.System` by default, override in tests) |
 
 ---
@@ -1322,6 +1514,12 @@ opt.AddNoRestart();
 opt.AddSagas();
 opt.UseDatabasePush();
 opt.AddDashboardPush();
+opt.AddBackgroundService<T>();               // register a WarpBackgroundService (base feature)
+opt.DisableWorker();                         // service-only server (no job worker)
+opt.AddAdapters();                           // gate outbound-adapter DB recording
+opt.AddAdapter(name, Action<WarpAdapterOptions>);
+opt.AddWebhooks(Action<WarpWebhookOptions>); // durable outbound webhook delivery
+opt.AddEndpointObservability(Action<WarpEndpointObservabilityOptions>); // inbound endpoint observability
 opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi-Project page
 
 // Handlers and pipeline behaviors are source-gen registered — no AddJobHandlers / AddPipelineBehaviors
@@ -1330,6 +1528,9 @@ opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi
 // Dashboard
 WebApplication.UseWarpUI();
 WebApplication.UseWarpUI(Action<WarpUIOptions> setupAction);
+
+// Inbound endpoint observability middleware (after UseRouting) — pairs with opt.AddEndpointObservability()
+IApplicationBuilder.UseWarpHttpObservability();
 ```
 
 ---
