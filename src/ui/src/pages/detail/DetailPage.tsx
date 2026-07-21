@@ -101,6 +101,38 @@ function kindLabel(kind: number) {
   return 'Job';
 }
 
+// #241: surface known addon metadata (retry / rate-limit / concurrency / timeout) as friendly chips.
+// The raw metadata stays available via the expandable Metadata block below the chips.
+function addonChips(metadata: Record<string, unknown>): string[] {
+  const chips: string[] = [];
+  const num = (k: string): number | undefined => {
+    const v = metadata[k];
+    if (v == null || v === '') return undefined;
+    const n = Number(v);
+    return Number.isNaN(n) ? undefined : n;
+  };
+  const str = (k: string): string | undefined => (metadata[k] == null ? undefined : String(metadata[k]));
+
+  const maxRetries = num('MaxRetries');
+  if (maxRetries !== undefined) chips.push(`Retry ${num('RetriedTimes') ?? 0}/${maxRetries}`);
+
+  const rlKey = str('RateLimitKey');
+  const rlCount = num('RateLimitCount');
+  const rlWindow = num('RateLimitWindowSeconds');
+  if (rlKey && rlCount !== undefined && rlWindow !== undefined) chips.push(`Rate limit ${rlCount}/${rlWindow}s · ${rlKey}`);
+
+  const ck = str('ConcurrencyKey');
+  if (ck) {
+    const limit = num('ConcurrencyLimit') ?? 1;
+    chips.push(limit > 1 ? `Semaphore ${ck} (${limit})` : `Mutex ${ck}`);
+  }
+
+  const timeout = num('TimeoutSeconds');
+  if (timeout !== undefined) chips.push(`Timeout ${timeout}s`);
+
+  return chips;
+}
+
 export default function DetailPage() {
   const { id } = useParams<{ id: string }>();
   const [job, setJob] = useState<UnifiedJobDetailModel | null>(null);
@@ -211,6 +243,13 @@ export default function DetailPage() {
                 <CardContent className="pt-4 space-y-4">
                   {job.message && (
                     <ExpandableJsonBlock heading="Payload" content={formatJson(job.message)} />
+                  )}
+                  {job.metadata && addonChips(job.metadata).length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {addonChips(job.metadata).map((chip) => (
+                        <span key={chip} className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium">{chip}</span>
+                      ))}
+                    </div>
                   )}
                   {job.metadata && Object.keys(job.metadata).length > 0 && (
                     <ExpandableJsonBlock heading="Metadata" content={JSON.stringify(job.metadata, null, 2)} />
