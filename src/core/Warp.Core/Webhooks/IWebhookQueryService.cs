@@ -23,6 +23,14 @@ public interface IWebhookQueryService
     Task<IReadOnlyList<WebhookGroupModel>> GetGroups(WebhookGroupBy by, CancellationToken ct = default);
 
     /// <summary>
+    /// Hourly delivery-statistics time-series (created-per-hour, split by current status), oldest first,
+    /// for the delivery-stats chart. Honours the <see cref="WebhookDeliveryFilter"/>'s event-type / endpoint
+    /// / status / date scope (an empty filter = global). Aggregated DB-side off the durable
+    /// <c>WebhookDelivery</c> rows (deliveries are not lossy), bounded by the delivery retention.
+    /// </summary>
+    Task<IReadOnlyList<WebhookDeliveryHistoryPoint>> GetDeliveryHistory(WebhookDeliveryFilter filter, CancellationToken ct = default);
+
+    /// <summary>
     /// One delivery's self-contained contract (URL, redacted headers, payload, schedule, success codes,
     /// signing mode, status) for the detail page. Returns null when no delivery matches the id.
     /// </summary>
@@ -82,6 +90,21 @@ public sealed class WebhookGroupModel
 
     /// <summary>Most recent <c>CreatedAt</c> in the group — drives the newest-activity-first ordering.</summary>
     public DateTime LastActivityAt { get; set; }
+}
+
+/// <summary>One hourly point of the delivery-statistics time-series (deliveries created that hour, by status).</summary>
+public sealed class WebhookDeliveryHistoryPoint
+{
+    /// <summary>Start of the UTC hour this point covers.</summary>
+    public DateTime Hour { get; set; }
+
+    public int Delivered { get; set; }
+
+    public int Exhausted { get; set; }
+
+    public int Pending { get; set; }
+
+    public int Total { get; set; }
 }
 
 /// <summary>One row on the deliveries list page (no payload, headers, or secret).</summary>

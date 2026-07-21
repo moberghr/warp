@@ -52,6 +52,26 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         ];
     }
 
+    public async Task<IReadOnlyList<EndpointHistoryPointModel>> GetGlobalHistory(CancellationToken ct = default)
+    {
+        var buckets = await LoadHistoryBucketsAsync(route: null, ct);
+
+        return
+        [
+            .. buckets
+                .OrderBy(x => x.Key)
+                .Select(x =>
+                    new EndpointHistoryPointModel
+                    {
+                        Hour = x.Key,
+                        Calls = x.Value.Calls,
+                        Errors = x.Value.Errors,
+                        ErrorRate = x.Value.Calls == 0 ? 0 : (double)x.Value.Errors / x.Value.Calls,
+                        AvgDurationMs = x.Value.Calls == 0 ? 0 : (double)x.Value.DurationSum / x.Value.Calls,
+                    }),
+        ];
+    }
+
     public async Task<EndpointDetailModel?> GetEndpointDetail(string id, CancellationToken ct = default)
     {
         var route = TryDecodeId(id);
@@ -262,17 +282,44 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         return space < 0 ? string.Empty : route[(space + 1)..];
     }
 
-    // Builds the hourly performance time-series for one route from the durable history buckets
-    // (endpoint:{route}:hist:{outcome}:{hour}). Reads the aggregated Statistic rows + the not-yet-collapsed
-    // Counter rows (so the current hour isn't missing) and sums per hour into calls / errors / duration.
-    // Bounded by the 7-day hourly-stat retention; points with no traffic simply don't exist (gaps).
+    // Builds the hourly performance time-series for one route from the durable hourly history buckets,
+    // oldest first. Bounded by the 7-day hourly-stat retention; hours with no traffic simply don't exist.
     private async Task<List<EndpointHistoryPointModel>> LoadHistoryAsync(string route, CancellationToken ct)
     {
-        var prefix = $"{EndpointCounterKeys.Prefix}:{route}:{EndpointCounterKeys.HistoryMarker}:";
+        var buckets = await LoadHistoryBucketsAsync(route, ct);
+
+        return
+        [
+            .. buckets
+                .OrderBy(x => x.Key)
+                .Select(x =>
+                    new EndpointHistoryPointModel
+                    {
+                        Hour = x.Key,
+                        Calls = x.Value.Calls,
+                        Errors = x.Value.Errors,
+                        ErrorRate = x.Value.Calls == 0 ? 0 : (double)x.Value.Errors / x.Value.Calls,
+                        AvgDurationMs = x.Value.Calls == 0 ? 0 : (double)x.Value.DurationSum / x.Value.Calls,
+                    }),
+        ];
+    }
+
+    // Reads the durable hourly history counters (Statistic plus the not-yet-collapsed Counter rows, so the
+    // current hour is not missing) and folds them per hour. A null route aggregates across every endpoint
+    // for the global overview; a supplied route scopes to that one. The scoped read uses a prefix; the
+    // global read narrows to history keys via the reserved history marker.
+    private async Task<Dictionary<DateTime, HistoryBucket>> LoadHistoryBucketsAsync(string? route, CancellationToken ct)
+    {
+        var prefix = route is null
+            ? $"{EndpointCounterKeys.Prefix}:"
+            : $"{EndpointCounterKeys.Prefix}:{route}:{EndpointCounterKeys.HistoryMarker}:";
+
+        var histMarker = $":{EndpointCounterKeys.HistoryMarker}:";
 
         var aggregated = await _context.Set<Statistic>()
             .AsNoTracking()
             .Where(x => x.Key.StartsWith(prefix))
+            .Where(x => x.Key.Contains(histMarker))
             .Select(x =>
                 new
                 {
@@ -284,6 +331,7 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         var pending = await _context.Set<Counter>()
             .AsNoTracking()
             .Where(x => x.Key.StartsWith(prefix))
+            .Where(x => x.Key.Contains(histMarker))
             .GroupBy(x => x.Key)
             .Select(g =>
                 new
@@ -302,7 +350,7 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
                 continue;
             }
 
-            if (!string.Equals(keyRoute, route, StringComparison.Ordinal))
+            if (route is not null && !string.Equals(keyRoute, route, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -316,20 +364,7 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
             bucket.Add(outcome, row.Value);
         }
 
-        return
-        [
-            .. buckets
-                .OrderBy(x => x.Key)
-                .Select(x =>
-                    new EndpointHistoryPointModel
-                    {
-                        Hour = x.Key,
-                        Calls = x.Value.Calls,
-                        Errors = x.Value.Errors,
-                        ErrorRate = x.Value.Calls == 0 ? 0 : (double)x.Value.Errors / x.Value.Calls,
-                        AvgDurationMs = x.Value.Calls == 0 ? 0 : (double)x.Value.DurationSum / x.Value.Calls,
-                    }),
-        ];
+        return buckets;
     }
 
     private async Task<StatSet> LoadStatsAsync(CancellationToken ct)

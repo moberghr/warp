@@ -171,6 +171,31 @@ function routeAdapters(
     return resolve(demoAdapters, config);
   }
 
+  // GET /adapters/history — global overview, aggregated across every demo adapter's per-hour history.
+  if (method === 'get' && url.startsWith('/adapters/history')) {
+    const map = new Map<string, { hour: string; calls: number; errors: number; durSum: number }>();
+    for (const detail of Object.values(demoAdapterDetails)) {
+      for (const p of detail.history) {
+        const g = map.get(p.hour) ?? { hour: p.hour, calls: 0, errors: 0, durSum: 0 };
+        g.calls += p.calls;
+        g.errors += p.errors;
+        g.durSum += p.avgDurationMs * p.calls;
+        map.set(p.hour, g);
+      }
+    }
+    const points = [...map.values()]
+      .sort((a, b) => (a.hour < b.hour ? -1 : 1))
+      .map((g) => ({
+        hour: g.hour,
+        calls: g.calls,
+        errors: g.errors,
+        errorRate: g.calls === 0 ? 0 : g.errors / g.calls,
+        avgDurationMs: g.calls === 0 ? 0 : g.durSum / g.calls,
+      }));
+
+    return resolve(points, config);
+  }
+
   // GET /adapters/{name}/calls/{id} — call detail (checked before the {name} detail route)
   const callMatch = url.match(/^\/adapters\/([^/?]+)\/calls\/([^/?]+)$/);
   if (method === 'get' && callMatch) {
@@ -232,6 +257,31 @@ function routeWebhooks(
     const groups = [...map.values()].sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1));
 
     return resolve(groups, config);
+  }
+
+  // GET /webhooks/history?eventType=&group= — hourly delivery stats by status (global or scoped).
+  if (method === 'get' && url.startsWith('/webhooks/history')) {
+    const eventType = params.eventType ? String(params.eventType) : undefined;
+    const group = params.group ? String(params.group) : undefined;
+    const scoped = demoWebhooks.filter((x) => {
+      if (eventType && x.eventType !== eventType) return false;
+      if (group && (x.groupName ?? x.url) !== group) return false;
+
+      return true;
+    });
+    const map = new Map<string, { hour: string; delivered: number; exhausted: number; pending: number; total: number }>();
+    for (const x of scoped) {
+      const hour = `${x.createdAt.slice(0, 13)}:00:00.000Z`;
+      const g = map.get(hour) ?? { hour, delivered: 0, exhausted: 0, pending: 0, total: 0 };
+      g.total += 1;
+      if (x.status === WebhookDeliveryStatus.Delivered) g.delivered += 1;
+      if (x.status === WebhookDeliveryStatus.Exhausted) g.exhausted += 1;
+      if (x.status === WebhookDeliveryStatus.Pending) g.pending += 1;
+      map.set(hour, g);
+    }
+    const points = [...map.values()].sort((a, b) => (a.hour < b.hour ? -1 : 1));
+
+    return resolve(points, config);
   }
 
   // GET /webhooks — filtered, paged list. Server does the real filtering; mirror

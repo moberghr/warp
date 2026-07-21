@@ -1,8 +1,8 @@
 import axios from 'axios';
 import api from './client';
 import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
-import type { AdapterListItem, AdapterDetail, AdapterCallDetail } from '@/types/adapters';
-import type { EndpointListItem, EndpointDetail, EndpointCallDetail } from '@/types/endpoints';
+import type { AdapterListItem, AdapterDetail, AdapterCallDetail, AdapterHistoryPoint } from '@/types/adapters';
+import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
 import type {
   WebhookDeliveryListItem,
   WebhookDeliveryDetail,
@@ -10,6 +10,7 @@ import type {
   WebhookDeliveryFilter,
   WebhookGroupModel,
   WebhookGroupBy,
+  WebhookDeliveryHistoryPoint,
 } from '@/types/webhooks';
 import type { ExtensionManifest } from '@/extensions/types';
 
@@ -213,6 +214,9 @@ export const getAdapterDetail = (name: string) =>
 export const getAdapterCall = (name: string, id: string) =>
   api.get<AdapterCallDetail>(`/adapters/${encodeURIComponent(name)}/calls/${encodeURIComponent(id)}`).then(r => r.data);
 
+export const getAdapterGlobalHistory = () =>
+  api.get<AdapterHistoryPoint[]>('/adapters/history').then(r => r.data);
+
 // Endpoints — inbound HTTP request observability, the mirror of adapters. Nav gated on
 // addons.endpoints; the query endpoints themselves are always registered (dashboard-only
 // processes resolve them).
@@ -221,6 +225,9 @@ export const getEndpoints = () =>
 
 export const getEndpointDetail = (id: string) =>
   api.get<EndpointDetail>(`/endpoints/${encodeURIComponent(id)}`).then(r => r.data);
+
+export const getEndpointGlobalHistory = () =>
+  api.get<EndpointHistoryPoint[]>('/endpoints/history').then(r => r.data);
 
 export const getEndpointCall = (id: string, callId: string) =>
   api.get<EndpointCallDetail>(`/endpoints/${encodeURIComponent(id)}/calls/${encodeURIComponent(callId)}`).then(r => r.data);
@@ -244,6 +251,14 @@ export const getWebhooks = (filter: WebhookDeliveryFilter = {}) => {
 
 export const getWebhookGroups = (by: WebhookGroupBy) =>
   api.get<WebhookGroupModel[]>('/webhooks/groups', { params: { by } }).then(r => r.data);
+
+export const getWebhookDeliveryHistory = (scope: { eventType?: string; group?: string } = {}) => {
+  const params: Record<string, string> = {};
+  if (scope.eventType) params.eventType = scope.eventType;
+  if (scope.group) params.group = scope.group;
+
+  return api.get<WebhookDeliveryHistoryPoint[]>('/webhooks/history', { params }).then(r => r.data);
+};
 
 export const getWebhookSummary = () =>
   api.get<WebhookDeliverySummary>('/webhooks/summary').then(r => r.data);

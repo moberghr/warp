@@ -481,6 +481,9 @@ public static class WarpEndpoints
         apiGroup.MapGet("adapters", async ([FromServices] IAdapterQueryService svc, CancellationToken ct) =>
             Results.Ok(await svc.GetAdapters(ct)));
 
+        apiGroup.MapGet("adapters/history", async ([FromServices] IAdapterQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetGlobalHistory(ct)));
+
         apiGroup.MapGet("adapters/{name}", async ([FromServices] IAdapterQueryService svc, string name, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(name))
@@ -510,6 +513,9 @@ public static class WarpEndpoints
         // (IEndpointCallRecorder presence), not on a 404. The {id} is the URL-safe encoded route identity.
         apiGroup.MapGet("endpoints", async ([FromServices] IEndpointQueryService svc, CancellationToken ct) =>
             Results.Ok(await svc.GetEndpoints(ct)));
+
+        apiGroup.MapGet("endpoints/history", async ([FromServices] IEndpointQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetGlobalHistory(ct)));
 
         apiGroup.MapGet("endpoints/{id}", async ([FromServices] IEndpointQueryService svc, string id, CancellationToken ct) =>
         {
@@ -576,6 +582,17 @@ public static class WarpEndpoints
                 : WebhookGroupBy.EventType;
 
             return Results.Ok(await svc.GetGroups(dimension, ct));
+        });
+
+        apiGroup.MapGet("webhooks/history", async (
+            [FromServices] IWebhookQueryService svc,
+            [FromQuery] string? eventType,
+            [FromQuery] string? group,
+            CancellationToken ct) =>
+        {
+            var filter = new WebhookDeliveryFilter { EventType = eventType, GroupName = group };
+
+            return Results.Ok(await svc.GetDeliveryHistory(filter, ct));
         });
 
         apiGroup.MapGet("webhooks/summary", async ([FromServices] IWebhookQueryService svc, CancellationToken ct) =>

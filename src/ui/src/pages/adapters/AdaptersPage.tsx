@@ -3,8 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { AlertTriangle } from 'lucide-react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DataTable } from '@/components/DataTable';
 import { MetricCard } from '@/components/MetricCard';
+import { PerformanceChart } from '@/components/PerformanceChart';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
@@ -16,6 +18,11 @@ export default function AdaptersPage() {
   const query = useQuery({
     queryKey: ['adapters', 'list'] as const,
     queryFn: () => api.getAdapters(),
+  });
+
+  const historyQuery = useQuery({
+    queryKey: ['adapters', 'history', 'global'] as const,
+    queryFn: () => api.getAdapterGlobalHistory(),
   });
 
   const adapters = useMemo(() => (Array.isArray(query.data) ? query.data : []), [query.data]);
@@ -125,6 +132,13 @@ export default function AdaptersPage() {
           color={summary.errorRate > 0 ? 'text-destructive' : undefined}
         />
       </div>
+
+      <Card className="mb-4">
+        <CardHeader><CardTitle className="text-base">Performance over time (all adapters)</CardTitle></CardHeader>
+        <CardContent>
+          <PerformanceChart points={historyQuery.data ?? []} />
+        </CardContent>
+      </Card>
 
       <DataTable
         columns={columns}

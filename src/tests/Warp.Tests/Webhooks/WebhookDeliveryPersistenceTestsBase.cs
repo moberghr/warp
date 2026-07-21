@@ -355,11 +355,47 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
         groups.Single(x => string.Equals(x.Key, "https://raw.test/hook", StringComparison.Ordinal)).Total.ShouldBe(1);
     }
 
+    [TimedFact]
+    public async Task GetDeliveryHistory_BucketsByHourAndStatus_ScopedByFilter()
+    {
+        var h1 = new DateTime(2026, 7, 10, 9, 0, 0, DateTimeKind.Utc);
+        var h2 = new DateTime(2026, 7, 10, 10, 0, 0, DateTimeKind.Utc);
+
+        // Hour 1: order.created → 1 delivered + 1 exhausted; order.shipped → 1 pending.
+        await InsertGroupedAsync("order.created", "ep-eu", WebhookDeliveryStatus.Delivered, createdAt: h1.AddMinutes(5));
+        await InsertGroupedAsync("order.created", "ep-eu", WebhookDeliveryStatus.Exhausted, createdAt: h1.AddMinutes(40));
+        await InsertGroupedAsync("order.shipped", "ep-eu", WebhookDeliveryStatus.Pending, createdAt: h1.AddMinutes(50));
+
+        // Hour 2: order.created → 1 delivered.
+        await InsertGroupedAsync("order.created", "ep-eu", WebhookDeliveryStatus.Delivered, createdAt: h2.AddMinutes(15));
+
+        var svc = new WebhookQueryService<TestContext>(_fixture.CreateContext());
+
+        // Global: hour 1 has 3 total (1 delivered, 1 exhausted, 1 pending); hour 2 has 1 delivered.
+        var global = await svc.GetDeliveryHistory(new WebhookDeliveryFilter(), Xunit.TestContext.Current.CancellationToken);
+        global.Count.ShouldBe(2);
+        global[0].Hour.ShouldBe(h1);
+        global[0].Total.ShouldBe(3);
+        global[0].Delivered.ShouldBe(1);
+        global[0].Exhausted.ShouldBe(1);
+        global[0].Pending.ShouldBe(1);
+        global[1].Hour.ShouldBe(h2);
+        global[1].Delivered.ShouldBe(1);
+
+        // Scoped to order.created: hour 1 has 2 (delivered + exhausted, no pending), hour 2 has 1 delivered.
+        var scoped = await svc.GetDeliveryHistory(new WebhookDeliveryFilter { EventType = "order.created" }, Xunit.TestContext.Current.CancellationToken);
+        scoped.Count.ShouldBe(2);
+        scoped[0].Total.ShouldBe(2);
+        scoped[0].Pending.ShouldBe(0);
+        scoped[1].Delivered.ShouldBe(1);
+    }
+
     private async Task InsertGroupedAsync(
         string eventType,
         string? groupName,
         WebhookDeliveryStatus status,
-        string url = "https://example.test/hook")
+        string url = "https://example.test/hook",
+        DateTime? createdAt = null)
     {
         var ctx = _fixture.CreateContext();
         ctx.Set<WebhookDelivery>().Add(new WebhookDelivery
@@ -373,7 +409,7 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
             SigningMode = WebhookSigning.None,
             RetrySchedule = [TimeSpan.FromMinutes(1)],
             Status = status,
-            CreatedAt = DateTime.UtcNow,
+            CreatedAt = createdAt ?? DateTime.UtcNow,
         });
 
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);

@@ -15,6 +15,13 @@ public interface IEndpointQueryService
 {
     Task<IReadOnlyList<EndpointListItemModel>> GetEndpoints(CancellationToken ct = default);
 
+    /// <summary>
+    /// Global hourly performance time-series aggregated across <b>all</b> endpoints (volume, error rate,
+    /// average latency), oldest first — the overview chart on the endpoints list page. Same durable
+    /// aggregate source as the per-endpoint history, summed over every route.
+    /// </summary>
+    Task<IReadOnlyList<EndpointHistoryPointModel>> GetGlobalHistory(CancellationToken ct = default);
+
     Task<EndpointDetailModel?> GetEndpointDetail(string id, CancellationToken ct = default);
 
     Task<EndpointCallDetailModel?> GetCallDetail(string id, Guid callId, CancellationToken ct = default);

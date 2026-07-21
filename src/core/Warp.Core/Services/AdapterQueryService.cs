@@ -225,17 +225,38 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
             .FirstOrDefaultAsync(ct);
     }
 
-    // Builds the hourly performance time-series for one adapter from the durable history buckets
-    // (adapter:{name}:hist:{outcome}:{hour}). Reads the aggregated Statistic rows + the not-yet-collapsed
-    // Counter rows (so the current hour isn't missing) and sums per hour into calls / errors / duration.
-    // Bounded by the 7-day hourly-stat retention; hours with no traffic simply don't exist (gaps).
+    public async Task<IReadOnlyList<AdapterHistoryPointModel>> GetGlobalHistory(CancellationToken ct = default)
+    {
+        var buckets = await LoadHistoryBucketsAsync(name: null, ct);
+
+        return ProjectHistory(buckets);
+    }
+
+    // Builds the hourly performance time-series for one adapter from the durable hourly history buckets,
+    // oldest first. Bounded by the 7-day hourly-stat retention; hours with no traffic simply don't exist.
     private async Task<List<AdapterHistoryPointModel>> LoadHistoryAsync(string name, CancellationToken ct)
     {
-        var prefix = $"{AdapterCounterKeys.Prefix}:{name}:{AdapterCounterKeys.HistoryMarker}:";
+        var buckets = await LoadHistoryBucketsAsync(name, ct);
+
+        return ProjectHistory(buckets);
+    }
+
+    // Reads the durable hourly history counters (Statistic plus the not-yet-collapsed Counter rows, so the
+    // current hour is not missing) and folds them per hour. A null name aggregates across every adapter for
+    // the global overview; a supplied name scopes to that one. The scoped read uses a prefix; the global
+    // read narrows to history keys via the reserved history marker.
+    private async Task<Dictionary<DateTime, HistoryBucket>> LoadHistoryBucketsAsync(string? name, CancellationToken ct)
+    {
+        var prefix = name is null
+            ? $"{AdapterCounterKeys.Prefix}:"
+            : $"{AdapterCounterKeys.Prefix}:{name}:{AdapterCounterKeys.HistoryMarker}:";
+
+        var histMarker = $":{AdapterCounterKeys.HistoryMarker}:";
 
         var aggregated = await _context.Set<Statistic>()
             .AsNoTracking()
             .Where(x => x.Key.StartsWith(prefix))
+            .Where(x => x.Key.Contains(histMarker))
             .Select(x =>
                 new
                 {
@@ -247,6 +268,7 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
         var pending = await _context.Set<Counter>()
             .AsNoTracking()
             .Where(x => x.Key.StartsWith(prefix))
+            .Where(x => x.Key.Contains(histMarker))
             .GroupBy(x => x.Key)
             .Select(g =>
                 new
@@ -265,7 +287,7 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
                 continue;
             }
 
-            if (!string.Equals(keyName, name, StringComparison.Ordinal))
+            if (name is not null && !string.Equals(keyName, name, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -279,6 +301,11 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
             bucket.Add(outcome, row.Value);
         }
 
+        return buckets;
+    }
+
+    private static List<AdapterHistoryPointModel> ProjectHistory(Dictionary<DateTime, HistoryBucket> buckets)
+    {
         return
         [
             .. buckets

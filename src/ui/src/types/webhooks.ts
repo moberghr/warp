@@ -103,3 +103,12 @@ export interface WebhookGroupModel {
   exhausted: number;
   lastActivityAt: string;
 }
+
+/** One hourly point of the delivery-statistics time-series (created that hour, by status). */
+export interface WebhookDeliveryHistoryPoint {
+  hour: string;
+  delivered: number;
+  exhausted: number;
+  pending: number;
+  total: number;
+}

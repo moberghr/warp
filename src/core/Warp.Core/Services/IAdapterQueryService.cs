@@ -19,6 +19,13 @@ public interface IAdapterQueryService
     Task<IReadOnlyList<AdapterListItemModel>> GetAdapters(CancellationToken ct = default);
 
     /// <summary>
+    /// Global hourly performance time-series aggregated across <b>all</b> adapters (volume, error rate,
+    /// average latency), oldest first — the overview chart on the adapters list page. Same durable
+    /// aggregate source as the per-adapter history, summed over every adapter.
+    /// </summary>
+    Task<IReadOnlyList<AdapterHistoryPointModel>> GetGlobalHistory(CancellationToken ct = default);
+
+    /// <summary>
     /// One adapter's detail: per-operation and per-group stat tables, the recent-calls list, and the
     /// shared-policy conflict flag. Returns null when no <c>AdapterDefinition</c> exists for the name.
     /// </summary>

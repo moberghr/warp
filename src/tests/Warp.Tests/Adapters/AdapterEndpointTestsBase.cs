@@ -186,6 +186,31 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetGlobalHistory_AggregatesAcrossAllAdapters()
+    {
+        // Two adapters, same hour → one global point summing both. vendor-a: 2 success + dur 40; vendor-b:
+        // 1 failed + dur 20. Global: 3 calls, 1 error, avg (40+20)/3 = 20ms. No AdapterDefinition needed —
+        // the global overview reads the durable counters, not the definitions.
+        var hour = new DateTime(2026, 7, 20, 10, 0, 0, DateTimeKind.Utc);
+        var b = AdapterCounterKeys.HourBucket(hour);
+
+        var seed = _fixture.CreateContext();
+        AddOutcomeCounters(seed, AdapterCounterKeys.History("vendor-a", "success", b), 2);
+        AddDurationCounter(seed, AdapterCounterKeys.History("vendor-a", AdapterCounterKeys.DurationToken, b), 40);
+        AddOutcomeCounters(seed, AdapterCounterKeys.History("vendor-b", "failed", b), 1);
+        AddDurationCounter(seed, AdapterCounterKeys.History("vendor-b", AdapterCounterKeys.DurationToken, b), 20);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var history = await CreateService().GetGlobalHistory(Xunit.TestContext.Current.CancellationToken);
+
+        var point = history.ShouldHaveSingleItem();
+        point.Hour.ShouldBe(hour);
+        point.Calls.ShouldBe(3);
+        point.Errors.ShouldBe(1);
+        point.AvgDurationMs.ShouldBe(20);
+    }
+
+    [TimedFact]
     public async Task GetAdapterDetail_RecentCallsIdenticalTimestamp_OrdersByIdDescendingAsStableTiebreaker()
     {
         // SMALL-5: OrderByDescending(Timestamp) alone leaves the recent-calls order non-deterministic when

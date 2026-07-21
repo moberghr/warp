@@ -2,12 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
-import { X } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { DataTable } from '@/components/DataTable';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
+import { WebhookDeliveryChart } from '@/components/WebhookDeliveryChart';
 import * as api from '@/api';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { WebhookDeliveryListItem, WebhookDeliveryFilter, WebhookGroupModel } from '@/types/webhooks';
@@ -17,27 +17,22 @@ const PAGE_SIZE = 20;
 export default function WebhooksPage() {
   const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState<string>('');
-  const [eventFilter, setEventFilter] = useState<string>('');
-  const [groupFilter, setGroupFilter] = useState<string>('');
   const [referenceFilter, setReferenceFilter] = useState<string>('');
   const [page, setPage] = useState(0);
 
   const filter = useMemo<WebhookDeliveryFilter>(
     () => ({
       status: statusFilter ? (Number(statusFilter) as WebhookDeliveryStatus) : undefined,
-      eventType: eventFilter || undefined,
-      group: groupFilter || undefined,
       reference: referenceFilter || undefined,
       page,
       pageSize: PAGE_SIZE,
     }),
-    [statusFilter, eventFilter, groupFilter, referenceFilter, page],
+    [statusFilter, referenceFilter, page],
   );
 
-  // Any filter change resets to the first page so the view never lands past the last page.
   useEffect(() => {
     setPage(0);
-  }, [statusFilter, eventFilter, groupFilter, referenceFilter]);
+  }, [statusFilter, referenceFilter]);
 
   const listQuery = useQuery({
     queryKey: ['webhooks', 'list', filter] as const,
@@ -47,6 +42,11 @@ export default function WebhooksPage() {
   const summaryQuery = useQuery({
     queryKey: ['webhooks', 'summary'] as const,
     queryFn: () => api.getWebhookSummary(),
+  });
+
+  const historyQuery = useQuery({
+    queryKey: ['webhooks', 'history', 'global'] as const,
+    queryFn: () => api.getWebhookDeliveryHistory(),
   });
 
   const typeGroupsQuery = useQuery({
@@ -130,9 +130,6 @@ export default function WebhooksPage() {
 
   const paged = listQuery.data;
   const summary = summaryQuery.data;
-  // The summary is a separate query from the deliveries list: when it fails we must not paint
-  // fake-healthy zero tiles (0 deliveries / 0% delivered reads as "all clear"). Show em-dashes and an
-  // inline note instead, while the deliveries list below stays fully usable.
   const summaryError = summaryQuery.isError;
   const deliveredPercent =
     summary && summary.total > 0 ? Math.round((summary.delivered / summary.total) * 100) : 0;
@@ -159,21 +156,27 @@ export default function WebhooksPage() {
         <p className="text-sm text-destructive mb-4">Delivery totals are unavailable right now.</p>
       )}
 
-      {/* Group webhooks by type + by endpoint — click a row to filter the deliveries list below. */}
+      {/* Global delivery statistics over time */}
+      <Card className="mb-4">
+        <CardHeader><CardTitle className="text-base">Delivery statistics</CardTitle></CardHeader>
+        <CardContent>
+          <WebhookDeliveryChart points={historyQuery.data ?? []} />
+        </CardContent>
+      </Card>
+
+      {/* Group webhooks by type + by endpoint — click a row to open that group's page. */}
       <div className="grid gap-4 md:grid-cols-2 mb-4">
         <GroupCard
           title="By event type"
           groups={typeGroupsQuery.data}
           keyHeader="Event type"
-          activeKey={eventFilter}
-          onSelect={(key) => setEventFilter((prev) => (prev === key ? '' : key))}
+          onOpen={(key) => navigate(`/webhooks/group/type/${encodeURIComponent(key)}`)}
         />
         <GroupCard
           title="By endpoint"
           groups={endpointGroupsQuery.data}
           keyHeader="Endpoint"
-          activeKey={groupFilter}
-          onSelect={(key) => setGroupFilter((prev) => (prev === key ? '' : key))}
+          onOpen={(key) => navigate(`/webhooks/group/endpoint/${encodeURIComponent(key)}`)}
         />
       </div>
 
@@ -195,8 +198,6 @@ export default function WebhooksPage() {
           value={referenceFilter}
           onChange={(e) => setReferenceFilter(e.target.value)}
         />
-        {eventFilter && <FilterChip label={`Type: ${eventFilter}`} onClear={() => setEventFilter('')} />}
-        {groupFilter && <FilterChip label={`Endpoint: ${groupFilter}`} onClear={() => setGroupFilter('')} />}
       </div>
 
       <DataTable
@@ -216,20 +217,17 @@ export default function WebhooksPage() {
   );
 }
 
-// A grouped-summary table (by type or by endpoint). Each row is clickable to filter the deliveries list;
-// the active row is highlighted. Exhausted counts render in the destructive colour so a bad group stands out.
+// A grouped-summary table (by type or by endpoint). Each row opens that group's own page.
 function GroupCard({
   title,
   groups,
   keyHeader,
-  activeKey,
-  onSelect,
+  onOpen,
 }: {
   title: string;
   groups: WebhookGroupModel[] | undefined;
   keyHeader: string;
-  activeKey: string;
-  onSelect: (key: string) => void;
+  onOpen: (key: string) => void;
 }) {
   return (
     <Card>
@@ -256,11 +254,11 @@ function GroupCard({
               groups.map((g) => (
                 <TableRow
                   key={g.key}
-                  className={`cursor-pointer ${activeKey === g.key ? 'bg-accent' : ''}`}
-                  onClick={() => onSelect(g.key)}
-                  title="Filter deliveries by this group"
+                  className="cursor-pointer"
+                  onClick={() => onOpen(g.key)}
+                  title="Open this group"
                 >
-                  <TableCell className="font-mono text-xs truncate max-w-[16rem]">{g.key}</TableCell>
+                  <TableCell className="font-mono text-xs truncate max-w-[16rem] text-primary">{g.key}</TableCell>
                   <TableCell className="text-right tabular-nums">{g.total.toLocaleString()}</TableCell>
                   <TableCell className="text-right tabular-nums text-green-600 dark:text-green-400">{g.delivered.toLocaleString()}</TableCell>
                   <TableCell className="text-right tabular-nums text-amber-600 dark:text-amber-400">{g.pending.toLocaleString()}</TableCell>
@@ -272,17 +270,6 @@ function GroupCard({
         </Table>
       </CardContent>
     </Card>
-  );
-}
-
-function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 text-primary px-2 py-0.5 text-xs font-medium">
-      {label}
-      <button type="button" onClick={onClear} className="rounded-full hover:bg-primary/20 p-0.5" title="Clear filter">
-        <X className="h-3 w-3" />
-      </button>
-    </span>
   );
 }
 
@@ -298,8 +285,7 @@ function Tile({ label, value, emphasis }: { label: string; value: string; emphas
 }
 
 // Delivery-status pill. Pending is in-flight (amber), Delivered settled OK (green), Exhausted
-// settled after the schedule ran out (red). Duplicated (small) in the detail page rather than
-// factored into a shared module to keep the deliveries list its own lazy chunk.
+// settled after the schedule ran out (red).
 const statusStyles: Record<WebhookDeliveryStatus, { label: string; cls: string }> = {
   [WebhookDeliveryStatus.Pending]: {
     label: 'Pending',

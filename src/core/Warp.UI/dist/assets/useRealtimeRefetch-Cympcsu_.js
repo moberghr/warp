@@ -1,1 +1,0 @@
-import{a as e,l as t}from"./client-CjLQ7F7-.js";import{r as n}from"./index-DE4F94WC.js";var r=t(e(),1);function i(e,t,i=3e4){let a=(0,r.useRef)(t);(0,r.useEffect)(()=>{a.current=t},[t]);let o=Array.isArray(e)?e:[e];(0,r.useEffect)(()=>{let e=()=>a.current(),t=o.map(t=>n(t,e)),r=setInterval(e,i);return()=>{for(let e of t)e();clearInterval(r)}},[o.join(`,`),i])}export{i as t};

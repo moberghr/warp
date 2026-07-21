@@ -2,8 +2,10 @@ import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DataTable } from '@/components/DataTable';
 import { MetricCard } from '@/components/MetricCard';
+import { PerformanceChart } from '@/components/PerformanceChart';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import type { EndpointListItem } from '@/types/endpoints';
@@ -14,6 +16,11 @@ export default function EndpointsPage() {
   const query = useQuery({
     queryKey: ['endpoints', 'list'] as const,
     queryFn: () => api.getEndpoints(),
+  });
+
+  const historyQuery = useQuery({
+    queryKey: ['endpoints', 'history', 'global'] as const,
+    queryFn: () => api.getEndpointGlobalHistory(),
   });
 
   const endpoints = useMemo(() => (Array.isArray(query.data) ? query.data : []), [query.data]);
@@ -94,6 +101,13 @@ export default function EndpointsPage() {
           color={summary.errorRate > 0 ? 'text-destructive' : undefined}
         />
       </div>
+
+      <Card className="mb-4">
+        <CardHeader><CardTitle className="text-base">Performance over time (all endpoints)</CardTitle></CardHeader>
+        <CardContent>
+          <PerformanceChart points={historyQuery.data ?? []} />
+        </CardContent>
+      </Card>
 
       <DataTable
         columns={columns}

@@ -82,6 +82,44 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
         ];
     }
 
+    public async Task<IReadOnlyList<WebhookDeliveryHistoryPoint>> GetDeliveryHistory(WebhookDeliveryFilter filter, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+
+        // Bucket by UTC hour DB-side (Year/Month/Day/Hour translate on both Npgsql and SqlServer), counting
+        // per current status — deliveries are durable rows (not lossy), so this is exact over the retention.
+        var buckets = await ApplyFilter(_context.Set<WebhookDelivery>().AsNoTracking(), filter)
+            .GroupBy(x => new { x.CreatedAt.Year, x.CreatedAt.Month, x.CreatedAt.Day, x.CreatedAt.Hour })
+            .Select(g =>
+                new
+                {
+                    g.Key.Year,
+                    g.Key.Month,
+                    g.Key.Day,
+                    g.Key.Hour,
+                    Delivered = g.Count(x => x.Status == WebhookDeliveryStatus.Delivered),
+                    Exhausted = g.Count(x => x.Status == WebhookDeliveryStatus.Exhausted),
+                    Pending = g.Count(x => x.Status == WebhookDeliveryStatus.Pending),
+                    Total = g.Count(),
+                })
+            .ToListAsync(ct);
+
+        return
+        [
+            .. buckets
+                .Select(x =>
+                    new WebhookDeliveryHistoryPoint
+                    {
+                        Hour = new DateTime(x.Year, x.Month, x.Day, x.Hour, 0, 0, DateTimeKind.Utc),
+                        Delivered = x.Delivered,
+                        Exhausted = x.Exhausted,
+                        Pending = x.Pending,
+                        Total = x.Total,
+                    })
+                .OrderBy(x => x.Hour),
+        ];
+    }
+
     private static IQueryable<WebhookDelivery> ApplyFilter(IQueryable<WebhookDelivery> query, WebhookDeliveryFilter filter)
     {
         if (filter.Status is not null)
