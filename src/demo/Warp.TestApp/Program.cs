@@ -714,6 +714,113 @@ app.MapPost("/seed/webhooks", async (IWebhookDispatcher dispatcher, IConfigurati
     });
 });
 
+// Showcase seed for the live demo. It backfills 24 hours of hourly performance history for the adapters
+// and endpoints, plus back-dated webhook deliveries, so the time-series graphs have real depth. Real
+// traffic from the trigger routes still supplies the adapter definitions, lifetime totals, and
+// percentiles; this only adds the historical bars and spread-out deliveries that now-only triggers cannot.
+app.MapPost("/seed/showcase", async (TestContext ctx) =>
+{
+    var now = DateTime.UtcNow;
+
+    string Hour(int hoursAgo) => now.AddHours(-hoursAgo).ToString("yyyy-MM-dd-HH", System.Globalization.CultureInfo.InvariantCulture);
+
+    void AddCounter(string key, int value)
+    {
+        if (value > 0)
+        {
+            ctx.Set<Counter>().Add(new Counter { Key = key, Value = value });
+        }
+    }
+
+    // Hourly history counters use the same layout the Adapter and Endpoint counter keys emit at runtime.
+    void Series(string prefix, string id, int baseCalls, double errorFraction, int baseLatencyMs)
+    {
+        for (var h = 23; h >= 0; h--)
+        {
+            var swell = 1 + ((12 - Math.Abs(12 - (23 - h))) / 2);
+            var calls = baseCalls + swell + ((h * 7) % 13);
+            var failed = (int)Math.Round(calls * errorFraction * (0.3 + ((h % 4) * 0.4)));
+            var success = calls - failed;
+            var durationSum = calls * (baseLatencyMs + ((h * 13) % 55));
+            var hour = Hour(h);
+            AddCounter($"{prefix}:{id}:hist:success:{hour}", success);
+            AddCounter($"{prefix}:{id}:hist:failed:{hour}", failed);
+            AddCounter($"{prefix}:{id}:hist:dur:{hour}", durationSum);
+        }
+    }
+
+    Series("adapter", "stripe", 30, 0.02, 70);
+    Series("adapter", "paypal", 30, 0.04, 110);
+    Series("adapter", "adyen", 30, 0.03, 90);
+    Series("adapter", "ups", 30, 0.06, 180);
+    Series("adapter", "fedex", 30, 0.05, 150);
+    Series("adapter", "dhl", 30, 0.12, 240);
+
+    Series("endpoint", "POST /http/queue-email", 25, 0.03, 12);
+    Series("endpoint", "POST /http/orders", 25, 0.02, 8);
+    Series("endpoint", "GET /http/feed", 25, 0.10, 20);
+
+    string EventAt(int i) => (i % 6) switch
+    {
+        0 => "order.completed",
+        1 => "order.shipped",
+        2 => "invoice.finalized",
+        3 => "invoice.payment_failed",
+        4 => "customer.created",
+        _ => "shipment.delivered",
+    };
+    string SubscriberAt(int i) => (i % 4) switch
+    {
+        0 => "https://hooks.acme.example/orders",
+        1 => "https://hooks.globex.example/inbound",
+        2 => "https://hooks.initech.example/ship",
+        _ => "https://hooks.umbrella.example/billing",
+    };
+
+    var deliveries = 0;
+    for (var h = 24; h >= 1; h--)
+    {
+        for (var k = 0; k < 3; k++)
+        {
+            var idx = (h * 3) + k;
+            var status = (idx % 11, idx % 4) switch
+            {
+                (0, _) => WebhookDeliveryStatus.Exhausted,
+                (_, 0) => WebhookDeliveryStatus.Pending,
+                _ => WebhookDeliveryStatus.Delivered,
+            };
+            var attemptCount = status switch
+            {
+                WebhookDeliveryStatus.Exhausted => 4,
+                _ => 1,
+            };
+            var created = now.AddHours(-h).AddMinutes(k * 17);
+            var endpoint = SubscriberAt(idx);
+            ctx.Set<WebhookDelivery>().Add(new WebhookDelivery
+            {
+                Id = Guid.NewGuid(),
+                EventType = EventAt(idx),
+                EventId = $"evt_{idx:x6}",
+                Url = endpoint,
+                GroupName = endpoint,
+                Reference = $"sub_{2000 + idx}",
+                PayloadJson = "{}",
+                SigningMode = WebhookSigning.StandardWebhooks,
+                RetrySchedule = [TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(10), TimeSpan.FromHours(1)],
+                Status = status,
+                AttemptCount = attemptCount,
+                CreatedAt = created,
+                ExpireAt = created.AddDays(30),
+            });
+            deliveries++;
+        }
+    }
+
+    await ctx.SaveChangesAsync();
+
+    return Results.Ok(new { historyHours = 24, adapters = 6, endpoints = 3, webhookDeliveries = deliveries });
+});
+
 app.MapPost("/seed-perf", async (IPublisher publisher, int? count) =>
 {
     var total = count ?? 10000;
