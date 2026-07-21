@@ -163,7 +163,10 @@ export default function DetailPage() {
     <div>
       {/* Header */}
       <div data-warp-slot="detail.header" data-warp-context={jobContext} key={`header-${job.id}`} className="flex items-center gap-4 mb-6">
-        <h1 className="text-2xl font-bold">{kindLabel(job.kind)} {shortId(job.id)}</h1>
+        <h1 className="text-2xl font-bold">
+          {job.type ? shortType(job.type) : kindLabel(job.kind)}{' '}
+          <span className="font-mono text-base font-normal text-muted-foreground">{kindLabel(job.kind)} · {shortId(job.id)}</span>
+        </h1>
         <StateBadge state={job.currentState} cancellationMode={job.cancellationMode} />
         {job.queue && <span className="text-sm text-muted-foreground">Queue: {job.queue}</span>}
         <div className="flex-1" />
