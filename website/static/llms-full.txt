@@ -764,6 +764,106 @@ The `RunJobMonitor` task runs alongside each handler execution, periodically dra
 
 ---
 
+## Concurrency Control: Mutex & Semaphore
+
+Opt-in addon: `opt.AddConcurrency()`. One primitive (`IWarpSemaphoreProvider`, Medallion distributed locks), two attributes. At most N jobs per key run at any moment across all workers/servers. Zero overhead for jobs without a key.
+
+- `[Mutex("key")]` — limit fixed at 1, default `ConcurrencyMode.Skip`. Also `.WithMutex("key", mode?)` on `JobParameters`.
+- `[Semaphore("key", limit: N)]` — N slots, default `ConcurrencyMode.Wait`. Also `.WithSemaphore("key", limit, mode?)`.
+- `ConcurrencyMode` (from 1): `Skip` → surplus short-circuited to `Deleted`; `Wait` → surplus requeued (`Enqueued`, `ScheduleTime = now`).
+- Lock is held for the **whole handler execution** (contrast rate limit). Lock name `warp:concurrency:{key}`.
+- Admin overrides via `IConcurrencyLimitManager.AddOrUpdateLimit/RemoveLimit` (entity `ConcurrencyLimit`). Precedence: admin row > attribute/extension limit > 1. Admin rows are sticky across deploys.
+- Namespaces are disjoint by design: `[Mutex("k")]` uses `warp:concurrency:k`; `[Semaphore("k", N)]` uses `warp:concurrency:k:0..k:{N-1}`. Don't put both on the same key.
+- Dashboard `/warp/concurrency` (hide-on-404 nav).
+
+## Job Timeout
+
+Opt-in addon: `opt.AddTimeout(o => { o.Default; o.DefaultMode; o.DefaultScope; })` (`Default = null` = unrestricted). Caps handler run time; on deadline the handler's `CancellationToken` is cancelled (cooperative only — a handler that ignores the token runs to `Completed`).
+
+- `[Timeout(seconds: N, Mode =, Scope =)]` or `.WithTimeout(TimeSpan)` (per-publish wins).
+- `TimeoutMode` (from 1): `Delete` (default) → `Deleted`, **not** retried by `AddRetry`; `Fail` → throws `TimeoutException`, **caught** by `AddRetry`.
+- `TimeoutScope` (from 1): `PerAttempt` (default) → fresh budget per retry; `Total` → `DeadlineUtc` stamped at publish, bounds the whole chain (only useful with `Fail`).
+- **Ordering: `AddRetry()` before `AddTimeout()`** (DI order = outer → inner; retry must wrap timeout to catch its `TimeoutException`).
+
+## Rate Limit
+
+Opt-in addon: `opt.AddRateLimit()`. Throttles jobs sharing a key to N starts per window.
+
+- `[RateLimit("key", count: N, perSeconds: S, Mode =, Style =)]` or `.WithRateLimit("key", count, window)`.
+- `RateLimitMode` (from 1): `Skip` (default) → `Deleted`; `Wait` → rescheduled via `JobOutcome.RescheduledState` (100–500 ms jitter).
+- `RateLimitStyle` (from 1): `Fixed` (default) → wall-clock window floor-aligned to UTC ticks; `Sliding` → rolling window over last N starts.
+- `perSeconds` capped at 7 days. Live state in `RateLimitBucket`. Lock held only for the brief check-and-increment (**not** during handler execution, unlike Mutex).
+- Admin overrides via `IRateLimitOverrideManager`; precedence admin row > attribute > publish-time. Dashboard `/warp/ratelimits`.
+- **Ordering: `AddConcurrency()` before `AddRateLimit()`** so a mutex rejection doesn't waste a token. DB push does **not** accelerate `Wait` reschedules (they ride `ScheduledJobActivation`).
+
+## Circuit Breaker
+
+Opt-in addon: `opt.AddCircuitBreaker(o => { o.Threshold = 3; o.Duration = 1m; o.ResetJitter = 10s; })`. `CircuitBreakerState` entity is in the base schema.
+
+- `[CircuitBreaker(Group =, Threshold =, DurationSeconds =, ResetJitterSeconds =)]`. Default key = `typeof(TRequest).Name`; `Group` shares one circuit across handlers.
+- Three states: `Closed` (runs; failure count resets on success, opens at `Threshold` consecutive failures) → `Open` (`OpenUntil > now`; jobs rescheduled to `OpenUntil + jitter` without running) → `HalfOpen` (one worker wins a CAS probe; success → Closed, failure → Open).
+- Short-circuits **before** Retry — a job blocked by an open circuit does not increment `RetriedTimes` (retry budget preserved). Runs after the concurrency behavior.
+
+## No-Restart (Stale-Recovery Opt-Out)
+
+Opt-in addon: `opt.AddNoRestart()`. Controls whether a job requeues or fails when a worker crashes mid-execution (independent of Retry, which governs handler throws).
+
+- `[NoRestart]` (never requeue on crash → `Failed`), `[Restart]` (opt back in), or `.WithRestart(bool)` (per-publish, wins). Both attributes inherit through base classes (closest declaration wins); applying both to one class throws.
+- Global default `RestartStaleJobsByDefault` on `WarpServerConfiguration` (default `true`).
+- Override chain (first non-null wins): `.WithRestart()` > attribute > global default. `StaleJobRecovery` resolves it: `false` → `Failed` (`ExpireAt = null`, never auto-deleted); `true` → `Enqueued`.
+- Use for non-idempotent work (payments, outbound notifications, non-idempotent APIs). `.WithRestart(bool)` works even without the addon; the attributes need it.
+
+## Batched Completions (Dispatcher Mode)
+
+Automatic when `UseDispatcher = true` — each `WarpDispatcherWorker` buffers job completions and flushes them as one multi-row transaction, collapsing N commits into one.
+
+- `CompletionBatchSize` (default 50), `CompletionFlushInterval` (default 100 ms). Set `CompletionBatchSize = 1` to opt out (immediate flush).
+- Poison-entry isolation: a failing batch splits in half recursively; a single bad row is dropped, the rest commit. `StaleJobRecovery` handles orphaned `Processing` rows.
+- At-least-once: a crash between handler completion and flush leaves the job `Processing` → recovered per `CanBeRestarted`. Pair non-idempotent handlers with `[NoRestart]`. Throughput optimization, not latency.
+
+## Sagas
+
+Opt-in addon: `opt.AddSagas()`; register handlers with `services.AddSagaHandler<TSagaHandler>()`. In `Warp.Core.Sagas`. Adds entities `SagaState` (one row per live saga, deleted on completion) + `SagaJobLink` (activity log, FK cascade).
+
+- State class: subclass `Saga` (or `Saga<TKey>` for typed `string`/`Guid`/`int`/`long` keys).
+- Messages: carry exactly one `[Correlate]` property (`string`/`Guid`/`int`/`long`, canonicalized to one `varchar(200)`); mark saga-starting messages `[StartsSaga]`.
+- Handler: implement `ISagaHandler<TSaga, TMessage>` per message type. Call `saga.MarkCompleted()` to delete the row in the same `SaveChanges` (key immediately reusable).
+- Proxy serializes per correlation key on `warp:saga:{TSaga.FullName}:{key}` via `IWarpSemaphoreProvider`; optimistic `Version` concurrency. `SagaPiiCheck` blocks PII-named `[Correlate]` props at registration (opt out with `[Correlate(IsAnonymized = true)]`). `ISagaCommandService.ForceComplete`. Dashboard `/warp/sagas`.
+
+## Background Services
+
+Base feature (no addon opt-in for the schema — `AddWarp<TContext>` always adds the four entities `Definition`/`Instance`/`Lease`/`Log` and `IBackgroundServiceQueryService`). Register services with `opt.AddBackgroundService<T>()`; `AddWarpServer` adds the host. In `Warp.Core.BackgroundServices`.
+
+- Subclass `WarpBackgroundService`; override `Scope` → `ServiceScope.PerServer` (default, one instance per server) or `ServiceScope.Singleton` (one active cluster-wide, coordinated via `BackgroundServiceLease` 30 s TTL renewed in `Heartbeat`; ~30 s failover on hard-kill / ~0 s on graceful shutdown).
+- Subclasses are **singletons** — inject `IServiceScopeFactory`, never `DbContext` (`ValidateScopes = true` catches the captive-dependency foot-gun at startup).
+- `opt.DisableWorker()` → service-only server (background services + `Heartbeat`/`ServerCleanup`/`ExpirationCleanup`, no job worker or job tasks; provider still required).
+- Log capture auto-wired (`MinLogLevel` default Information, 100/s cap, 4 KB truncation, 1000-row/7-day retention). Dashboard `/warp/services`.
+
+## Database Push
+
+Opt-in addon: call the provider first, then `opt.UseDatabasePush()`. Replaces polling wake-up with PostgreSQL `LISTEN`/`NOTIFY` or SQL Server Service Broker.
+
+- Accelerates (< 50 ms): dispatcher fetch (`JobEnqueued`, only when `UseDispatcher = true`), `MessageRouter` (`MessageEnqueued`), `Orchestrator` (`JobFinalized`). Individual-worker mode keeps polling (thundering-herd avoidance).
+- In-process every `WarpWorker` already shortcuts backoff on a same-server `JobEnqueued` signal regardless of push. Scheduled jobs are still bounded by `ScheduledActivationInterval` (default 5 s) — push accelerates only what happens after activation.
+- Transports never throw from publish (log + `warp.notifications.publish_failures`); missed notifications caught by drain-on-reconnect. SQL Server requires `ALTER DATABASE ... SET ENABLE_BROKER` (degrades to polling with an actionable log otherwise).
+
+## Dashboard Push
+
+Opt-in addon: `opt.AddDashboardPush(o => o.CoalesceWindow = 100ms)`. SignalR hub at `${RoutePrefix}/api/hub`; broadcasts `JobFinalized` / `MessageEnqueued` events carrying a `DashboardStatistics` snapshot. Without it the dashboard runs on REST refetch + a 30 s safety-net poll.
+
+- The broadcaster is the third consumer of `ServerTaskSignals<TContext>` (after `Orchestrator` and `MessageRouter`). Per-view data (job lists, detail, logs) stays on event-driven REST refetch.
+- Multi-server fanout requires `opt.UseDatabasePush()` (single-server works without it). Frontend reads `${RoutePrefix}/api/addons` once at boot and connects only when `push: true`.
+
+## Database-Generated IDs (outbox gotcha)
+
+`publisher.Enqueue`/`Publish` serialize the message payload to JSON **immediately** (writing the `Job` row into the change tracker), before `SaveChangesAsync` populates a DB-generated identity — so a payload capturing `entity.Id` freezes `0`. Three fixes, all preserving the outbox guarantee:
+
+1. **Client-assigned `Guid` PK** (recommended for new schemas) — assign `Id = Guid.NewGuid()` before `Add`; one save. Use Guid v7 if insertion order matters.
+2. **EF Core Hi/Lo** (`modelBuilder.Entity<T>().Property(x => x.Id).UseHiLo()`) — client-side id block, keeps integer PKs; one save; gaps after restarts.
+3. **Two `SaveChanges` in one explicit transaction** — save the entity to populate its id, then enqueue; works on legacy schemas, extra round-trip.
+
+---
+
 ## Configuration Reference
 
 ### Core Configuration (AddWarp)
@@ -1414,6 +1514,12 @@ opt.AddNoRestart();
 opt.AddSagas();
 opt.UseDatabasePush();
 opt.AddDashboardPush();
+opt.AddBackgroundService<T>();               // register a WarpBackgroundService (base feature)
+opt.DisableWorker();                         // service-only server (no job worker)
+opt.AddAdapters();                           // gate outbound-adapter DB recording
+opt.AddAdapter(name, Action<WarpAdapterOptions>);
+opt.AddWebhooks(Action<WarpWebhookOptions>); // durable outbound webhook delivery
+opt.AddEndpointObservability(Action<WarpEndpointObservabilityOptions>); // inbound endpoint observability
 opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi-Project page
 
 // Handlers and pipeline behaviors are source-gen registered — no AddJobHandlers / AddPipelineBehaviors
@@ -1422,6 +1528,9 @@ opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi
 // Dashboard
 WebApplication.UseWarpUI();
 WebApplication.UseWarpUI(Action<WarpUIOptions> setupAction);
+
+// Inbound endpoint observability middleware (after UseRouting) — pairs with opt.AddEndpointObservability()
+IApplicationBuilder.UseWarpHttpObservability();
 ```
 
 ---
