@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Endpoints;
 using Warp.Core.Enums;
+using Warp.Core.Logging;
 
 namespace Warp.Http.Observability;
 
@@ -156,7 +157,12 @@ internal sealed class WarpInboundObservabilityMiddleware
                 SuppressLog = suppressLog,
             };
 
-            _recorder.Record(record);
+            // Lossy by design: a full channel drops the record (counted, never blocking or failing the
+            // request), mirroring the outbound adapter recorder.
+            if (!_recorder.Record(record))
+            {
+                WarpTelemetry.EndpointRecordsDropped.Add(1);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

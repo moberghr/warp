@@ -120,6 +120,11 @@ public static class WarpTelemetry
         unit: "{conflict}",
         description: "Total times a process's local shared-rate-limit policy differed from the persisted AdapterDefinition policy; the persisted policy is enforced. Tag: adapter.");
 
+    public static readonly Counter<long> EndpointRecordsDropped = Meter.CreateCounter<long>(
+        "warp.endpoint.records_dropped",
+        unit: "{record}",
+        description: "Total inbound endpoint call-log records dropped because the recording channel was full. Recording is lossy by design; requests are never blocked or failed.");
+
     public static readonly Counter<long> WebhookDeliveries = Meter.CreateCounter<long>(
         "warp.webhooks.deliveries",
         unit: "{delivery}",

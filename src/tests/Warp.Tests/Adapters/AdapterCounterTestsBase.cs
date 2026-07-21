@@ -109,6 +109,25 @@ public abstract class AdapterCounterTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Aggregator_LargeDurationCounters_DoNotOverflowInt32()
+    {
+        // Duration counters carry per-call latency (ms), so a hot adapter's un-collapsed :dur key can
+        // exceed int.MaxValue (~2.147e9) between aggregation ticks. The collapse must sum as long — a
+        // checked Int32 sum throws OverflowException and wedges the whole counter→statistic pipeline.
+        var key = AdapterCounterKeys.Total("vendor", AdapterCounterKeys.DurationToken);
+
+        var seed = _fixture.CreateContext();
+        seed.Set<Counter>().Add(new Counter { Key = key, Value = 800_000_000 });
+        seed.Set<Counter>().Add(new Counter { Key = key, Value = 800_000_000 });
+        seed.Set<Counter>().Add(new Counter { Key = key, Value = 800_000_000 });
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(Xunit.TestContext.Current.CancellationToken);
+
+        (await StatisticValueAsync(key)).ShouldBe(2_400_000_000L);
+    }
+
+    [TimedFact]
     public async Task Persist_ConfiguredGroupLabel_LandsOnDefinition()
     {
         // The registry carries the AddAdapter-time GroupLabel; the flusher upserts it onto the definition

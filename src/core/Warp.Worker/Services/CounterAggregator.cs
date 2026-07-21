@@ -49,7 +49,7 @@ public sealed class CounterAggregator<TContext> : IServerTask
 
         var grouped = counters
             .GroupBy(x => x.Key)
-            .Select(g => new { Key = g.Key, Sum = g.Sum(x => x.Value) });
+            .Select(g => new { Key = g.Key, Sum = g.Sum(x => (long)x.Value) });
 
         foreach (var group in grouped)
         {

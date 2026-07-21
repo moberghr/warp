@@ -19,7 +19,10 @@ export default function WebhookGroupDetailPage() {
   const navigate = useNavigate();
   const { dim: rawDim, key: rawKey } = useParams<{ dim: string; key: string }>();
   const isEndpoint = rawDim === 'endpoint';
-  const key = rawKey ? decodeURIComponent(rawKey) : '';
+  // React Router already URL-decodes route params, so `rawKey` is the decoded group key (an endpoint URL
+  // for the "by endpoint" dimension). A second decodeURIComponent here would corrupt keys containing '%'
+  // (or throw URIError on a lone '%'), so use it as-is.
+  const key = rawKey ?? '';
   const [page, setPage] = useState(0);
 
   // Navigating between groups reuses this component — reset to the first page so we never land out of range.

@@ -461,6 +461,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                     .Where(x => x.Method == method)
                     .Where(x => x.RouteTemplate == route)
                     .OrderBy(x => x.Timestamp)
+                    .ThenBy(x => x.Id)
                     .Select(x => x.Id)
                     .Take(toDelete)
                     .ToListAsync(ct);
@@ -521,6 +522,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 var ids = await _context.Set<AdapterCallLog>()
                     .Where(x => x.AdapterName == name)
                     .OrderBy(x => x.Timestamp)
+                    .ThenBy(x => x.Id)
                     .Select(x => x.Id)
                     .Take(toDelete)
                     .ToListAsync(ct);
@@ -631,6 +633,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             var ids = await _context.Set<WebhookDelivery>()
                 .Where(x => x.Status != WebhookDeliveryStatus.Pending)
                 .OrderBy(x => x.CreatedAt)
+                .ThenBy(x => x.Id)
                 .Select(x => x.Id)
                 .Take(toDelete)
                 .ToListAsync(ct);

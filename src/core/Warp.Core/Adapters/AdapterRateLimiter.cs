@@ -329,7 +329,11 @@ internal sealed class AdapterRateLimiter<TContext> : IAdapterRateLimiter
 
     private static DateTime FloorWindow(DateTime nowUtc, int perSeconds)
     {
-        var windowTicks = perSeconds * TimeSpan.TicksPerSecond;
+        // Guard against a non-positive window (only reachable via a hand-written RateLimitOverride row with
+        // WindowSeconds <= 0): a 0 would divide-by-zero here and throw on every rate-limited attempt. Clamp
+        // to a 1-second window rather than crash the call.
+        var windowSeconds = perSeconds < 1 ? 1 : perSeconds;
+        var windowTicks = windowSeconds * TimeSpan.TicksPerSecond;
 
         return new DateTime(nowUtc.Ticks / windowTicks * windowTicks, DateTimeKind.Utc);
     }

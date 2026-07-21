@@ -186,17 +186,19 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         bool forceCapture,
         CancellationToken cancellationToken)
     {
+        // Status code is always-recorded metadata (§8.19), not a capture column — set it regardless of the
+        // capture mode so an observe-first adapter (no payload capture) can still tell a 404 from a 500.
+        if (response is not null)
+        {
+            scope.SetStatusCode((int)response.StatusCode);
+        }
+
         if (!AnyCaptureEnabled && !forceCapture)
         {
             return;
         }
 
         scope.SetRequestSummary($"{request.Method.Method} {request.RequestUri?.GetLeftPart(UriPartial.Path)}");
-
-        if (response is not null)
-        {
-            scope.SetStatusCode((int)response.StatusCode);
-        }
 
         if (ShouldCapture(_recording.CaptureHeaders, isFailure, forceCapture))
         {

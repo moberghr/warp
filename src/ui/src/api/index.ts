@@ -234,7 +234,7 @@ export const getEndpointCall = (id: string, callId: string) =>
 
 // Webhooks — durable outbound delivery. Nav gated on addons.webhooks (IWebhookRedeliveryEnqueuer
 // presence); the query endpoints themselves are always registered (dashboard-only processes resolve
-// them). The list returns a plain filtered array (server clamps the limit), not a paged envelope.
+// them). The list returns a paged envelope (PagedList) — page/pageSize params, items/pageCount/totalCount.
 export const getWebhooks = (filter: WebhookDeliveryFilter = {}) => {
   const params: Record<string, string | number> = {};
   if (filter.status !== undefined) params.status = filter.status;

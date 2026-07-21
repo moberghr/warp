@@ -26,12 +26,32 @@ public class CaptureRedactionTests
 
         var record = recorder.Records.ShouldHaveSingleItem();
         record.RequestSummary.ShouldBeNull();
-        record.StatusCode.ShouldBeNull();
+
+        // Status code is metadata (§8.19) — recorded even with capture off (see CaptureNone_RecordsStatusCode_AsMetadata).
+        record.StatusCode.ShouldBe(200);
         record.RequestHeaders.ShouldBeNull();
         record.ResponseHeaders.ShouldBeNull();
         record.RequestBody.ShouldBeNull();
         record.ResponseBody.ShouldBeNull();
         record.Tags.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task CaptureNone_RecordsStatusCode_AsMetadata()
+    {
+        // §8.19: status code is always-recorded METADATA, not a capture column. An observe-first adapter
+        // (no capture) must still record the status code so the dashboard can tell a 404 from a 500.
+        var (adapters, recorder) = Harness();
+        var options = new WarpAdapterHttpOptions();
+
+        await SendAsync(adapters, options, Get("https://api.vendor.com/orders"), Status(System.Net.HttpStatusCode.NotFound, "nope"));
+
+        var record = recorder.Records.ShouldHaveSingleItem();
+        record.StatusCode.ShouldBe(404);
+
+        // Payloads stay uncaptured (capture off) even though the status-code metadata is recorded.
+        record.ResponseBody.ShouldBeNull();
+        record.RequestSummary.ShouldBeNull();
     }
 
     [TimedFact]
