@@ -55,5 +55,8 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.57.0",
     "vite": "^8.0.1"
+  },
+  "overrides": {
+    "@hono/node-server": ">=2.0.5"
   }
 }
