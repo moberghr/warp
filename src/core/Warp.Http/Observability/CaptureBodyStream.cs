@@ -20,6 +20,10 @@ internal sealed class CaptureBodyStream : Stream
 
     public byte[] CapturedBytes => _captured.ToArray();
 
+    // True once a write was dropped because the cap was hit — the captured buffer is a prefix, so the
+    // decoder must cut on a UTF-8 boundary and append the truncation marker.
+    public bool Truncated { get; private set; }
+
     public override bool CanRead => false;
 
     public override bool CanSeek => false;
@@ -67,7 +71,14 @@ internal sealed class CaptureBodyStream : Stream
         var room = _maxBytes - (int)_captured.Length;
         if (room <= 0)
         {
+            Truncated = true;
+
             return;
+        }
+
+        if (span.Length > room)
+        {
+            Truncated = true;
         }
 
         _captured.Write(span[..Math.Min(room, span.Length)]);

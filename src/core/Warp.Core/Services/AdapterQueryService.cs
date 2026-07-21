@@ -94,7 +94,7 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
             return null;
         }
 
-        var stats = await LoadStatsAsync(ct);
+        var stats = await LoadStatsAsync(ct, name);
 
         var totals = stats.Totals.GetValueOrDefault(name);
 
@@ -322,13 +322,16 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
         ];
     }
 
-    // Loads every adapter-namespaced Statistic + pending Counter row once, merges them (aggregated
+    // Loads adapter-namespaced Statistic + pending Counter rows once, merges them (aggregated
     // Statistic value + un-collapsed Counter rows for the same key), and folds each into its
-    // adapter / operation / group outcome bucket. The prefix is a constant, so there is no
-    // user-supplied LIKE pattern to escape.
-    private async Task<StatSet> LoadStatsAsync(CancellationToken ct)
+    // adapter / operation / group outcome bucket. When <paramref name="name"/> is given the load is
+    // scoped to that adapter's keys ("adapter:{name}:") so a detail page never materialises every
+    // adapter's stat rows — adapter names are colon-free (the key delimiter), so the prefix is exact.
+    private async Task<StatSet> LoadStatsAsync(CancellationToken ct, string? name = null)
     {
-        const string prefix = AdapterCounterKeys.Prefix + ":";
+        var prefix = name is null
+            ? AdapterCounterKeys.Prefix + ":"
+            : AdapterCounterKeys.Prefix + ":" + name + ":";
 
         var aggregated = await _context.Set<Statistic>()
             .AsNoTracking()

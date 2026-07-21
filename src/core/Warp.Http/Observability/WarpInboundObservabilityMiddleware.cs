@@ -216,11 +216,14 @@ internal sealed class WarpInboundObservabilityMiddleware
         context.Request.Body.Position = 0;
 
         var max = _options.MaxCapturedBodySize;
-        var buffer = new byte[max];
+
+        // Read one byte past the cap so an over-cap body is detectable — then decode only the first `max`
+        // bytes on a UTF-8 boundary (a raw GetString over a mid-character cut surfaces U+FFFD).
+        var buffer = new byte[max + 1];
         var read = 0;
-        while (read < max)
+        while (read < buffer.Length)
         {
-            var n = await context.Request.Body.ReadAsync(buffer.AsMemory(read, max - read), CancellationToken.None);
+            var n = await context.Request.Body.ReadAsync(buffer.AsMemory(read, buffer.Length - read), CancellationToken.None);
             if (n == 0)
             {
                 break;
@@ -231,7 +234,14 @@ internal sealed class WarpInboundObservabilityMiddleware
 
         context.Request.Body.Position = 0;
 
-        return read == 0 ? null : Encoding.UTF8.GetString(buffer, 0, read);
+        if (read == 0)
+        {
+            return null;
+        }
+
+        var truncated = read > max;
+
+        return HttpCaptureHelpers.DecodePrefix(buffer, truncated ? max : read, truncated);
     }
 
     private static string? DecodeCaptured(CaptureBodyStream? capture)
@@ -243,7 +253,7 @@ internal sealed class WarpInboundObservabilityMiddleware
 
         var bytes = capture.CapturedBytes;
 
-        return bytes.Length == 0 ? null : Encoding.UTF8.GetString(bytes);
+        return bytes.Length == 0 ? null : HttpCaptureHelpers.DecodePrefix(bytes, bytes.Length, capture.Truncated);
     }
 
     private static string? NullIfEmpty(string? value) => string.IsNullOrEmpty(value) ? null : value;

@@ -80,7 +80,7 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
             return null;
         }
 
-        var stats = await LoadStatsAsync(ct);
+        var stats = await LoadStatsAsync(ct, route);
 
         var totals = stats.Totals.GetValueOrDefault(route);
         if (totals is null)
@@ -367,9 +367,14 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         return buckets;
     }
 
-    private async Task<StatSet> LoadStatsAsync(CancellationToken ct)
+    // When <paramref name="route"/> is given the load is scoped to that endpoint's keys
+    // ("endpoint:{route}:") so a detail page never materialises every endpoint's stat rows — the route
+    // ("{METHOD} {template}") is colon-free (NormalizeTemplate guarantees it), so the prefix is exact.
+    private async Task<StatSet> LoadStatsAsync(CancellationToken ct, string? route = null)
     {
-        const string prefix = EndpointCounterKeys.Prefix + ":";
+        var prefix = route is null
+            ? EndpointCounterKeys.Prefix + ":"
+            : EndpointCounterKeys.Prefix + ":" + route + ":";
 
         var aggregated = await _context.Set<Statistic>()
             .AsNoTracking()

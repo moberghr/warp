@@ -185,6 +185,36 @@ public abstract class EndpointQueryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetEndpointDetail_OtherEndpointsPresent_ScopesStatsToRequestedRoute()
+    {
+        // The detail load is scoped to "endpoint:{route}:" so it never materialises every endpoint's stat
+        // rows. This pins that the scoping stays CORRECT: a second endpoint's totals/histogram must not bleed
+        // into the requested route's detail (totals + percentiles stay clean).
+        var other = EndpointCounterKeys.NormalizeRoute("POST", "/charge");
+
+        var seed = _fixture.CreateContext();
+        AddOutcomeCounters(seed, EndpointCounterKeys.Total(Route, "success"), 2);
+        AddBucketCounter(seed, EndpointCounterKeys.Pct(Route, 50), 2);
+
+        // "/charge" data that must be excluded from the "/orders" detail.
+        AddOutcomeCounters(seed, EndpointCounterKeys.Total(other, "failed"), 99);
+        AddBucketCounter(seed, EndpointCounterKeys.Pct(other, 10000), 99);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var id = (await CreateService().GetEndpoints(Xunit.TestContext.Current.CancellationToken))
+            .Single(x => string.Equals(x.RouteTemplate, "/orders", StringComparison.Ordinal)).Id;
+
+        var detail = await CreateService().GetEndpointDetail(id, Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.TotalCalls.ShouldBe(2);
+        detail.ErrorCount.ShouldBe(0);
+
+        // p99 stays in the 50ms bucket — "/charge"'s 99 calls in the 10000ms bucket must not shift it.
+        detail.P99DurationMs.ShouldBe(50);
+    }
+
+    [TimedFact]
     public async Task GetEndpointDetail_Percentiles_ComputedFromHistogramBuckets()
     {
         // 100 samples across the latency histogram: 90 ≤50ms, 5 ≤100ms, 4 ≤500ms, 1 ≤10000ms. Walking

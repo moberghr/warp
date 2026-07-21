@@ -128,6 +128,27 @@ public abstract class AdapterCounterTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Aggregator_BacklogExceedingBatchSize_AggregatesAllAdditively()
+    {
+        // The aggregator drains in id-ordered batches (1000). A key with more rows than one batch must
+        // still total correctly — the later batch folds into the Statistic the earlier batch committed.
+        var key = AdapterCounterKeys.Total("vendor", "success");
+
+        var seed = _fixture.CreateContext();
+        for (var i = 0; i < 1500; i++)
+        {
+            seed.Set<Counter>().Add(new Counter { Key = key, Value = 1 });
+        }
+
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(Xunit.TestContext.Current.CancellationToken);
+
+        (await StatisticValueAsync(key)).ShouldBe(1500);
+        (await _fixture.CreateContext().Set<Counter>().CountAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBe(0);
+    }
+
+    [TimedFact]
     public async Task Persist_ConfiguredGroupLabel_LandsOnDefinition()
     {
         // The registry carries the AddAdapter-time GroupLabel; the flusher upserts it onto the definition

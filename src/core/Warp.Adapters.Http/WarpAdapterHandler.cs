@@ -227,7 +227,7 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
             // the scope with the call's TRUE outcome before the OCE propagates.
             try
             {
-                var responseBody = await ReadBufferedAsync(response.Content, cancellationToken);
+                var responseBody = await ReadBufferedAsync(response.Content, _recording.MaxCapturedBodySize, cancellationToken);
                 if (responseBody is not null)
                 {
                     scope.SetResponseBody(TruncateToBytes(responseBody, _recording.MaxCapturedBodySize));
@@ -254,17 +254,46 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
             return null;
         }
 
-        return await ReadBufferedAsync(request.Content, cancellationToken);
+        return await ReadBufferedAsync(request.Content, _recording.MaxCapturedBodySize, cancellationToken);
     }
 
-    private static async Task<string?> ReadBufferedAsync(HttpContent content, CancellationToken cancellationToken)
+    private static async Task<string?> ReadBufferedAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
     {
         try
         {
             // Buffer so the content stays readable for the transport (request) or the caller (response).
             await content.LoadIntoBufferAsync(cancellationToken);
 
-            return await content.ReadAsStringAsync(cancellationToken);
+            if (maxBytes <= 0)
+            {
+                return string.Empty;
+            }
+
+            await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+            if (stream.CanSeek)
+            {
+                stream.Seek(0, SeekOrigin.Begin);
+            }
+
+            // Read only a bounded prefix rather than materialising the whole body into a string just to
+            // truncate it to maxBytes elsewhere — a hot adapter returning a large payload would otherwise
+            // allocate the full body (on top of the already-buffered bytes) on EVERY captured call. Read one
+            // extra byte so an over-cap body still trips the caller's TruncateToBytes marker; TruncateToBytes
+            // does the boundary-safe cut, so a raw decode here is fine (it re-encodes and trims).
+            var buffer = new byte[maxBytes + 1];
+            var read = 0;
+            while (read < buffer.Length)
+            {
+                var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), cancellationToken);
+                if (n == 0)
+                {
+                    break;
+                }
+
+                read += n;
+            }
+
+            return read == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, read);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

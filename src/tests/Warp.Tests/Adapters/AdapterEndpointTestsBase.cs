@@ -147,6 +147,35 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetAdapterDetail_OtherAdaptersPresent_ScopesStatsToRequestedAdapter()
+    {
+        // The detail load is scoped to "adapter:{name}:" so it never materialises every adapter's stat rows.
+        // This pins that the scoping stays CORRECT: a second adapter with its own totals/operations/histogram
+        // must not bleed into the requested adapter's detail (totals, operations, percentiles all stay clean).
+        var seed = _fixture.CreateContext();
+        seed.Set<AdapterDefinition>().Add(Definition("vendor"));
+        seed.Set<AdapterDefinition>().Add(Definition("other"));
+        AddOutcomeCounters(seed, AdapterCounterKeys.Total("vendor", "success"), 2);
+        AddOutcomeCounters(seed, AdapterCounterKeys.Operation("vendor", "GetOrders", "success"), 2);
+        AddBucketCounter(seed, AdapterCounterKeys.Pct("vendor", 50), 2);
+
+        // "other" adapter data that must be excluded from the "vendor" detail.
+        AddOutcomeCounters(seed, AdapterCounterKeys.Total("other", "success"), 99);
+        AddOutcomeCounters(seed, AdapterCounterKeys.Operation("other", "Charge", "failed"), 99);
+        AddBucketCounter(seed, AdapterCounterKeys.Pct("other", 5000), 99);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var detail = await CreateService().GetAdapterDetail("vendor", Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.TotalCalls.ShouldBe(2);
+        detail.Operations.ShouldHaveSingleItem().Operation.ShouldBe("GetOrders");
+
+        // The p50 bucket has vendor's 2 calls — "other"'s 99 in the 5000ms bucket must not shift the percentile.
+        detail.P99DurationMs.ShouldBe(50);
+    }
+
+    [TimedFact]
     public async Task GetAdapterDetail_History_BuiltFromHourlyAggregates_OrderedOldestFirst()
     {
         // Two hourly buckets seeded directly (no call-log rows) so this proves the series comes from the

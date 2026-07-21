@@ -36,6 +36,29 @@ internal static class HttpCaptureHelpers
         return Encoding.UTF8.GetString(bytes, 0, boundary) + "…";
     }
 
+    // Decode a captured byte PREFIX to a string. `length` bytes are valid content; a complete
+    // (non-truncated) body is valid UTF-8 and decodes verbatim. When the prefix was truncated we reserve
+    // room for the marker and cut on a UTF-8 boundary — a raw Encoding.UTF8.GetString over a mid-character
+    // cut surfaces U+FFFD, and the marker byte always lies within the captured buffer so SafeBoundary can
+    // inspect it. Keeps the stored value within the byte cap, marker included (matches TruncateToBytes).
+    public static string DecodePrefix(byte[] buffer, int length, bool truncated)
+    {
+        if (length <= 0)
+        {
+            return string.Empty;
+        }
+
+        if (!truncated)
+        {
+            return Encoding.UTF8.GetString(buffer, 0, length);
+        }
+
+        var markerBytes = Encoding.UTF8.GetByteCount("…");
+        var boundary = SafeBoundary(buffer, Math.Max(0, length - markerBytes));
+
+        return Encoding.UTF8.GetString(buffer, 0, boundary) + "…";
+    }
+
     // Walk back off any UTF-8 continuation bytes (0b10xxxxxx) so a multibyte character is never split.
     private static int SafeBoundary(byte[] buffer, int limit)
     {
