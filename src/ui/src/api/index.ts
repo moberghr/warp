@@ -8,6 +8,8 @@ import type {
   WebhookDeliveryDetail,
   WebhookDeliverySummary,
   WebhookDeliveryFilter,
+  WebhookGroupModel,
+  WebhookGroupBy,
 } from '@/types/webhooks';
 import type { ExtensionManifest } from '@/extensions/types';
 
@@ -234,10 +236,14 @@ export const getWebhooks = (filter: WebhookDeliveryFilter = {}) => {
   if (filter.group) params.group = filter.group;
   if (filter.since) params.since = filter.since;
   if (filter.until) params.until = filter.until;
-  if (filter.limit !== undefined) params.limit = filter.limit;
+  if (filter.page !== undefined) params.page = filter.page;
+  if (filter.pageSize !== undefined) params.pageSize = filter.pageSize;
 
-  return api.get<WebhookDeliveryListItem[]>('/webhooks', { params }).then(r => r.data);
+  return api.get<PagedList<WebhookDeliveryListItem>>('/webhooks', { params }).then(r => r.data);
 };
+
+export const getWebhookGroups = (by: WebhookGroupBy) =>
+  api.get<WebhookGroupModel[]>('/webhooks/groups', { params: { by } }).then(r => r.data);
 
 export const getWebhookSummary = () =>
   api.get<WebhookDeliverySummary>('/webhooks/summary').then(r => r.data);

@@ -61,10 +61,11 @@ public abstract class WebhookEndpointTestsBase : IAsyncLifetime
         var (app, client) = await CreateEndpointHost();
         try
         {
-            var list = await client.GetFromJsonAsync<List<WebhookDeliveryListItem>>("/warp/api/webhooks", Ct);
+            var list = await client.GetFromJsonAsync<PagedList<WebhookDeliveryListItem>>("/warp/api/webhooks", Ct);
 
             list.ShouldNotBeNull();
-            list.Count.ShouldBe(2);
+            list.TotalCount.ShouldBe(2);
+            list.Items.Count.ShouldBe(2);
         }
         finally
         {
@@ -82,11 +83,11 @@ public abstract class WebhookEndpointTestsBase : IAsyncLifetime
         var (app, client) = await CreateEndpointHost();
         try
         {
-            var list = await client.GetFromJsonAsync<List<WebhookDeliveryListItem>>(
+            var list = await client.GetFromJsonAsync<PagedList<WebhookDeliveryListItem>>(
                 $"/warp/api/webhooks?status={(int)WebhookDeliveryStatus.Exhausted}",
                 Ct);
 
-            var item = list.ShouldNotBeNull().ShouldHaveSingleItem();
+            var item = list.ShouldNotBeNull().Items.ShouldHaveSingleItem();
             item.EventType.ShouldBe("order.shipped");
             item.Status.ShouldBe(WebhookDeliveryStatus.Exhausted);
         }

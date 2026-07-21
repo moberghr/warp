@@ -22,12 +22,68 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
 
     public WebhookQueryService(TContext context) => _context = context;
 
-    public async Task<IReadOnlyList<WebhookDeliveryListItem>> GetDeliveries(WebhookDeliveryFilter filter, CancellationToken ct = default)
+    public async Task<PagedList<WebhookDeliveryListItem>> GetDeliveries(WebhookDeliveryFilter filter, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(filter);
 
-        var query = _context.Set<WebhookDelivery>().AsNoTracking();
+        var request = new BaseListRequest
+        {
+            Page = filter.Page < 0 ? 0 : filter.Page,
+            PageSize = filter.PageSize is > 0 ? Math.Min(filter.PageSize, MaxPageSize) : 20,
+        };
 
+        return await ApplyFilter(_context.Set<WebhookDelivery>().AsNoTracking(), filter)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .Select(x =>
+                new WebhookDeliveryListItem
+                {
+                    Id = x.Id,
+                    EventType = x.EventType,
+                    EventId = x.EventId,
+                    Url = x.Url,
+                    GroupName = x.GroupName,
+                    Reference = x.Reference,
+                    Status = x.Status,
+                    SigningMode = x.SigningMode,
+                    AttemptCount = x.AttemptCount,
+                    NextAttemptAt = x.NextAttemptAt,
+                    CreatedAt = x.CreatedAt,
+                })
+            .ToPagedListAsync(request);
+    }
+
+    public async Task<IReadOnlyList<WebhookGroupModel>> GetGroups(WebhookGroupBy by, CancellationToken ct = default)
+    {
+        // Group by the chosen dimension and fold the per-status counts in one pass. Endpoint groups by
+        // GroupName, falling back to Url when a delivery carried no group (same identity the list shows).
+        var grouped = by == WebhookGroupBy.EventType
+            ? _context.Set<WebhookDelivery>().AsNoTracking().GroupBy(x => x.EventType)
+            : _context.Set<WebhookDelivery>().AsNoTracking().GroupBy(x => x.GroupName ?? x.Url);
+
+        var rows = await grouped
+            .Select(g =>
+                new WebhookGroupModel
+                {
+                    Key = g.Key,
+                    Total = g.Count(),
+                    Pending = g.Count(x => x.Status == WebhookDeliveryStatus.Pending),
+                    Delivered = g.Count(x => x.Status == WebhookDeliveryStatus.Delivered),
+                    Exhausted = g.Count(x => x.Status == WebhookDeliveryStatus.Exhausted),
+                    LastActivityAt = g.Max(x => x.CreatedAt),
+                })
+            .ToListAsync(ct);
+
+        return
+        [
+            .. rows
+                .OrderByDescending(x => x.LastActivityAt)
+                .ThenBy(x => x.Key, StringComparer.Ordinal),
+        ];
+    }
+
+    private static IQueryable<WebhookDelivery> ApplyFilter(IQueryable<WebhookDelivery> query, WebhookDeliveryFilter filter)
+    {
         if (filter.Status is not null)
         {
             query = query.Where(x => x.Status == filter.Status);
@@ -45,7 +101,7 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
 
         if (!string.IsNullOrWhiteSpace(filter.GroupName))
         {
-            query = query.Where(x => x.GroupName == filter.GroupName);
+            query = query.Where(x => (x.GroupName ?? x.Url) == filter.GroupName);
         }
 
         if (filter.Since is not null)
@@ -58,28 +114,7 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
             query = query.Where(x => x.CreatedAt <= filter.Until);
         }
 
-        var limit = filter.Limit is > 0 ? Math.Min(filter.Limit.Value, MaxPageSize) : MaxPageSize;
-
-        return await query
-            .OrderByDescending(x => x.CreatedAt)
-            .ThenByDescending(x => x.Id)
-            .Take(limit)
-            .Select(x =>
-                new WebhookDeliveryListItem
-                {
-                    Id = x.Id,
-                    EventType = x.EventType,
-                    EventId = x.EventId,
-                    Url = x.Url,
-                    GroupName = x.GroupName,
-                    Reference = x.Reference,
-                    Status = x.Status,
-                    SigningMode = x.SigningMode,
-                    AttemptCount = x.AttemptCount,
-                    NextAttemptAt = x.NextAttemptAt,
-                    CreatedAt = x.CreatedAt,
-                })
-            .ToListAsync(ct);
+        return query;
     }
 
     public async Task<WebhookDeliveryDetail?> GetDeliveryDetail(Guid id, CancellationToken ct = default)

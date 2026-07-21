@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Webhooks;
@@ -136,7 +137,7 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
         var results = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
             .GetDeliveries(new WebhookDeliveryFilter { Status = WebhookDeliveryStatus.Delivered }, Xunit.TestContext.Current.CancellationToken);
 
-        results.ShouldHaveSingleItem().Status.ShouldBe(WebhookDeliveryStatus.Delivered);
+        results.Items.ShouldHaveSingleItem().Status.ShouldBe(WebhookDeliveryStatus.Delivered);
     }
 
     [TimedFact]
@@ -148,7 +149,7 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
         var results = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
             .GetDeliveries(new WebhookDeliveryFilter { EventType = "order.created" }, Xunit.TestContext.Current.CancellationToken);
 
-        results.ShouldHaveSingleItem().EventType.ShouldBe("order.created");
+        results.Items.ShouldHaveSingleItem().EventType.ShouldBe("order.created");
     }
 
     [TimedFact]
@@ -160,7 +161,7 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
         var results = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
             .GetDeliveries(new WebhookDeliveryFilter { Reference = "sub-1" }, Xunit.TestContext.Current.CancellationToken);
 
-        results.ShouldHaveSingleItem().Reference.ShouldBe("sub-1");
+        results.Items.ShouldHaveSingleItem().Reference.ShouldBe("sub-1");
     }
 
     [TimedFact]
@@ -172,7 +173,7 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
         var results = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
             .GetDeliveries(new WebhookDeliveryFilter { GroupName = "endpoint-eu" }, Xunit.TestContext.Current.CancellationToken);
 
-        results.ShouldHaveSingleItem().GroupName.ShouldBe("endpoint-eu");
+        results.Items.ShouldHaveSingleItem().GroupName.ShouldBe("endpoint-eu");
     }
 
     [TimedFact]
@@ -188,7 +189,7 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
                 new WebhookDeliveryFilter { Since = inside.AddHours(-1), Until = inside.AddHours(1) },
                 Xunit.TestContext.Current.CancellationToken);
 
-        results.ShouldHaveSingleItem().Reference.ShouldBe("inside");
+        results.Items.ShouldHaveSingleItem().Reference.ShouldBe("inside");
     }
 
     private async Task InsertFilterRowAsync(
@@ -229,7 +230,7 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
         }
 
         var page = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
-            .GetDeliveries(new WebhookDeliveryFilter { Limit = 3 }, Xunit.TestContext.Current.CancellationToken);
+            .GetDeliveries(new WebhookDeliveryFilter { PageSize = 3 }, Xunit.TestContext.Current.CancellationToken);
 
         // The same total order the service applies (CreatedAt desc, then Id desc) — the deterministic prefix.
         var expected = await _fixture.CreateContext().Set<WebhookDelivery>()
@@ -239,13 +240,13 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
             .Take(3)
             .ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
-        page.Select(x => x.Id).ShouldBe(expected);
+        page.Items.Select(x => x.Id).ShouldBe(expected);
     }
 
     [TimedFact]
-    public async Task GetDeliveries_LimitAboveMaxPageSize_ClampedTo200()
+    public async Task GetDeliveries_PageSizeAboveMaxPageSize_ClampedTo200()
     {
-        // The one place caller-controlled numeric input reaches a Take(): a limit of 100000 from the
+        // The one place caller-controlled numeric input reaches a Take(): a page size of 100000 from the
         // endpoint must clamp to MaxPageSize (200), not materialise the whole table.
         var createdAt = new DateTime(2026, 7, 10, 8, 30, 0, DateTimeKind.Utc);
         var ctx = _fixture.CreateContext();
@@ -268,22 +269,114 @@ public abstract class WebhookDeliveryPersistenceTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var page = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
-            .GetDeliveries(new WebhookDeliveryFilter { Limit = 100_000 }, Xunit.TestContext.Current.CancellationToken);
+            .GetDeliveries(new WebhookDeliveryFilter { PageSize = 100_000 }, Xunit.TestContext.Current.CancellationToken);
 
-        page.Count.ShouldBe(200);
+        page.Items.Count.ShouldBe(200);
     }
 
     [TimedFact]
-    public async Task GetDeliveries_NonPositiveLimit_FallsBackToDefaultPageSize()
+    public async Task GetDeliveries_NonPositivePageSize_FallsBackToDefaultPageSize()
     {
-        // Pins the documented semantics: Limit <= 0 means "not specified" (default page), NOT "return
-        // nothing" — the dashboard sends 0 for an unset filter field.
+        // Pins the documented semantics: PageSize <= 0 means "not specified" (default page of 20), NOT
+        // "return nothing" — the dashboard omits the field for an unset page size.
         await InsertWithCreatedAtAsync(Guid.NewGuid(), DateTime.UtcNow);
 
         var page = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
-            .GetDeliveries(new WebhookDeliveryFilter { Limit = 0 }, Xunit.TestContext.Current.CancellationToken);
+            .GetDeliveries(new WebhookDeliveryFilter { PageSize = 0 }, Xunit.TestContext.Current.CancellationToken);
 
-        page.Count.ShouldBe(1);
+        page.Items.Count.ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task GetDeliveries_Paging_ReturnsRequestedPageWithTotals()
+    {
+        // Five rows on distinct timestamps (newest first) → page 1 of size 2 is the 3rd+4th newest.
+        var baseAt = new DateTime(2026, 7, 10, 8, 0, 0, DateTimeKind.Utc);
+        for (var i = 0; i < 5; i++)
+        {
+            await InsertWithCreatedAtAsync(Guid.NewGuid(), baseAt.AddMinutes(i));
+        }
+
+        var page = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
+            .GetDeliveries(new WebhookDeliveryFilter { Page = 1, PageSize = 2 }, Xunit.TestContext.Current.CancellationToken);
+
+        page.TotalCount.ShouldBe(5);
+        page.PageCount.ShouldBe(3);
+        page.Items.Count.ShouldBe(2);
+
+        var expected = await _fixture.CreateContext().Set<WebhookDelivery>()
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .Select(x => x.Id)
+            .Skip(2)
+            .Take(2)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        page.Items.Select(x => x.Id).ShouldBe(expected);
+    }
+
+    [TimedFact]
+    public async Task GetGroups_ByEventType_CountsPerStatus()
+    {
+        await InsertGroupedAsync("order.created", groupName: "ep-eu", status: WebhookDeliveryStatus.Delivered);
+        await InsertGroupedAsync("order.created", groupName: "ep-eu", status: WebhookDeliveryStatus.Pending);
+        await InsertGroupedAsync("order.shipped", groupName: "ep-eu", status: WebhookDeliveryStatus.Exhausted);
+
+        var groups = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
+            .GetGroups(WebhookGroupBy.EventType, Xunit.TestContext.Current.CancellationToken);
+
+        groups.Count.ShouldBe(2);
+
+        var created = groups.Single(x => string.Equals(x.Key, "order.created", StringComparison.Ordinal));
+        created.Total.ShouldBe(2);
+        created.Delivered.ShouldBe(1);
+        created.Pending.ShouldBe(1);
+        created.Exhausted.ShouldBe(0);
+
+        var shipped = groups.Single(x => string.Equals(x.Key, "order.shipped", StringComparison.Ordinal));
+        shipped.Total.ShouldBe(1);
+        shipped.Exhausted.ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task GetGroups_ByEndpoint_GroupsByGroupNameFallingBackToUrl()
+    {
+        await InsertGroupedAsync("order.created", groupName: "ep-eu", status: WebhookDeliveryStatus.Delivered);
+        await InsertGroupedAsync("order.created", groupName: "ep-eu", status: WebhookDeliveryStatus.Delivered);
+        await InsertGroupedAsync("order.created", groupName: null, url: "https://raw.test/hook", status: WebhookDeliveryStatus.Pending);
+
+        var groups = await new WebhookQueryService<TestContext>(_fixture.CreateContext())
+            .GetGroups(WebhookGroupBy.Endpoint, Xunit.TestContext.Current.CancellationToken);
+
+        groups.Count.ShouldBe(2);
+        groups.Single(x => string.Equals(x.Key, "ep-eu", StringComparison.Ordinal)).Total.ShouldBe(2);
+
+        // A delivery with no group falls back to its URL as the endpoint key.
+        groups.Single(x => string.Equals(x.Key, "https://raw.test/hook", StringComparison.Ordinal)).Total.ShouldBe(1);
+    }
+
+    private async Task InsertGroupedAsync(
+        string eventType,
+        string? groupName,
+        WebhookDeliveryStatus status,
+        string url = "https://example.test/hook")
+    {
+        var ctx = _fixture.CreateContext();
+        ctx.Set<WebhookDelivery>().Add(new WebhookDelivery
+        {
+            Id = Guid.NewGuid(),
+            EventType = eventType,
+            EventId = Guid.NewGuid().ToString(),
+            Url = url,
+            GroupName = groupName,
+            PayloadJson = "{}",
+            SigningMode = WebhookSigning.None,
+            RetrySchedule = [TimeSpan.FromMinutes(1)],
+            Status = status,
+            CreatedAt = DateTime.UtcNow,
+        });
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
     }
 
     private async Task InsertWithCreatedAtAsync(Guid id, DateTime createdAt)

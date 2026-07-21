@@ -214,17 +214,43 @@ function routeWebhooks(
     return resolve(demoWebhookSummary, config);
   }
 
-  // GET /webhooks — filtered list. Server does the real filtering; mirror status/event/reference
-  // here so the demo filters feel live.
+  // GET /webhooks/groups?by=type|endpoint — grouped counts (checked before the list + {id} routes).
+  if (method === 'get' && url.startsWith('/webhooks/groups')) {
+    const by = String(params.by ?? 'type');
+    const keyOf = (x: (typeof demoWebhooks)[number]) => (by === 'endpoint' ? (x.groupName ?? x.url) : x.eventType);
+    const map = new Map<string, { key: string; total: number; pending: number; delivered: number; exhausted: number; lastActivityAt: string }>();
+    for (const x of demoWebhooks) {
+      const key = keyOf(x);
+      const g = map.get(key) ?? { key, total: 0, pending: 0, delivered: 0, exhausted: 0, lastActivityAt: x.createdAt };
+      g.total += 1;
+      if (x.status === WebhookDeliveryStatus.Pending) g.pending += 1;
+      if (x.status === WebhookDeliveryStatus.Delivered) g.delivered += 1;
+      if (x.status === WebhookDeliveryStatus.Exhausted) g.exhausted += 1;
+      if (x.createdAt > g.lastActivityAt) g.lastActivityAt = x.createdAt;
+      map.set(key, g);
+    }
+    const groups = [...map.values()].sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1));
+
+    return resolve(groups, config);
+  }
+
+  // GET /webhooks — filtered, paged list. Server does the real filtering; mirror
+  // status/event/endpoint/reference + paging here so the demo filters feel live.
   if (method === 'get' && (url === '/webhooks' || url.startsWith('/webhooks?'))) {
     const status = params.status !== undefined ? Number(params.status) : undefined;
     const eventType = params.eventType ? String(params.eventType).toLowerCase() : undefined;
+    const group = params.group ? String(params.group) : undefined;
     const reference = params.reference ? String(params.reference).toLowerCase() : undefined;
+    const page = params.page !== undefined ? Number(params.page) : 0;
+    const pageSize = params.pageSize !== undefined ? Number(params.pageSize) : 20;
     const filtered = demoWebhooks.filter((x) => {
       if (status !== undefined && x.status !== (status as WebhookDeliveryStatus)) {
         return false;
       }
       if (eventType && !x.eventType.toLowerCase().includes(eventType)) {
+        return false;
+      }
+      if (group && (x.groupName ?? x.url) !== group) {
         return false;
       }
       if (reference && !(x.reference ?? '').toLowerCase().includes(reference)) {
@@ -234,7 +260,10 @@ function routeWebhooks(
       return true;
     });
 
-    return resolve(filtered, config);
+    const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const items = filtered.slice(page * pageSize, page * pageSize + pageSize);
+
+    return resolve({ totalCount: filtered.length, pageCount, items }, config);
   }
 
   // POST /webhooks/{id}/redeliver — mirrors the real endpoint's status codes (checked before the {id}

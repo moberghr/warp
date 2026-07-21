@@ -87,5 +87,19 @@ export interface WebhookDeliveryFilter {
   group?: string;
   since?: string;
   until?: string;
-  limit?: number;
+  page?: number;
+  pageSize?: number;
+}
+
+/** Dimension for the "group webhooks" summary tables. */
+export type WebhookGroupBy = 'type' | 'endpoint';
+
+/** One row of a grouped-webhooks summary table — a key with its per-status counts. */
+export interface WebhookGroupModel {
+  key: string;
+  total: number;
+  pending: number;
+  delivered: number;
+  exhausted: number;
+  lastActivityAt: string;
 }

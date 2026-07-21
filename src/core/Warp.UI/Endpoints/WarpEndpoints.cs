@@ -547,7 +547,8 @@ public static class WarpEndpoints
             [FromQuery] string? group,
             [FromQuery] DateTime? since,
             [FromQuery] DateTime? until,
-            [FromQuery] int? limit,
+            [FromQuery] int? page,
+            [FromQuery] int? pageSize,
             CancellationToken ct) =>
         {
             var filter = new WebhookDeliveryFilter
@@ -558,10 +559,23 @@ public static class WarpEndpoints
                 GroupName = group,
                 Since = since,
                 Until = until,
-                Limit = limit,
+                Page = page ?? 0,
+                PageSize = pageSize ?? 20,
             };
 
             return Results.Ok(await svc.GetDeliveries(filter, ct));
+        });
+
+        apiGroup.MapGet("webhooks/groups", async (
+            [FromServices] IWebhookQueryService svc,
+            [FromQuery] string? by,
+            CancellationToken ct) =>
+        {
+            var dimension = string.Equals(by, "endpoint", StringComparison.OrdinalIgnoreCase)
+                ? WebhookGroupBy.Endpoint
+                : WebhookGroupBy.EventType;
+
+            return Results.Ok(await svc.GetGroups(dimension, ct));
         });
 
         apiGroup.MapGet("webhooks/summary", async ([FromServices] IWebhookQueryService svc, CancellationToken ct) =>

@@ -13,8 +13,14 @@ namespace Warp.Core.Webhooks;
 /// </summary>
 public interface IWebhookQueryService
 {
-    /// <summary>Filtered, newest-first page of deliveries for the list page.</summary>
-    Task<IReadOnlyList<WebhookDeliveryListItem>> GetDeliveries(WebhookDeliveryFilter filter, CancellationToken ct = default);
+    /// <summary>Filtered, newest-first, paged deliveries for the list page.</summary>
+    Task<PagedList<WebhookDeliveryListItem>> GetDeliveries(WebhookDeliveryFilter filter, CancellationToken ct = default);
+
+    /// <summary>
+    /// Delivery counts grouped by event type or by endpoint (destination), each with a per-status
+    /// breakdown, for the "group webhooks" summary tables. Newest-activity first, then by key.
+    /// </summary>
+    Task<IReadOnlyList<WebhookGroupModel>> GetGroups(WebhookGroupBy by, CancellationToken ct = default);
 
     /// <summary>
     /// One delivery's self-contained contract (URL, redacted headers, payload, schedule, success codes,
@@ -43,8 +49,39 @@ public sealed class WebhookDeliveryFilter
     /// <summary>Inclusive upper bound on <c>CreatedAt</c>.</summary>
     public DateTime? Until { get; set; }
 
-    /// <summary>Max rows to return; clamped to the service's page cap.</summary>
-    public int? Limit { get; set; }
+    /// <summary>Zero-based page index.</summary>
+    public int Page { get; set; }
+
+    /// <summary>Rows per page; clamped to the service's page cap.</summary>
+    public int PageSize { get; set; } = 20;
+}
+
+/// <summary>The dimension to group webhook deliveries by (§8.11 enums-from-1).</summary>
+public enum WebhookGroupBy
+{
+    /// <summary>Group by the delivery's event type.</summary>
+    EventType = 1,
+
+    /// <summary>Group by the delivery's endpoint (destination — <c>GroupName</c>, falling back to <c>Url</c>).</summary>
+    Endpoint = 2,
+}
+
+/// <summary>One row of the "group webhooks" summary — a key with its per-status delivery counts.</summary>
+public sealed class WebhookGroupModel
+{
+    /// <summary>The event type or endpoint this row aggregates.</summary>
+    public string Key { get; set; } = string.Empty;
+
+    public int Total { get; set; }
+
+    public int Pending { get; set; }
+
+    public int Delivered { get; set; }
+
+    public int Exhausted { get; set; }
+
+    /// <summary>Most recent <c>CreatedAt</c> in the group — drives the newest-activity-first ordering.</summary>
+    public DateTime LastActivityAt { get; set; }
 }
 
 /// <summary>One row on the deliveries list page (no payload, headers, or secret).</summary>
