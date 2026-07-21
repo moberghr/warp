@@ -8,6 +8,88 @@ sidebar_position: 6
 
 _Nothing yet._
 
+## 3.2.0
+
+*2026-07-21*
+
+Additive minor release — no breaking API changes, every feature **opt-in and off by default**. Three new observability surfaces turn Warp into a one-stop shop for HTTP traffic in both directions, plus durable outbound webhook delivery. Ships three new packages (`Moberg.Warp.Adapters.Http`, `Moberg.Warp.Adapters.Refit`, `Moberg.Warp.Adapters.Webhooks`); inbound endpoint observability lands inside the existing `Moberg.Warp.Http`. Adds new dashboard sections.
+
+:::warning Schema change — generate a migration
+This release adds new tables (`AdapterDefinition`, `AdapterCallLog`, `WebhookDelivery`, `EndpointCallLog`). They are added to the model **unconditionally** (so the migration story doesn't depend on which hosts opt into which feature) and sit empty until a feature is enabled. Run `dotnet ef migrations add` against your `DbContext` and apply it when upgrading from 3.1.x.
+:::
+
+### Outbound adapters — observe the calls you make to other services
+
+`Warp.Adapters` makes every call your app *makes to* an external dependency (a vendor API, a SOAP service, a payment gateway) first-class: named, timed, telemetered, and captured on failure. The protocol-agnostic core (`Warp.Core.Adapters`) exposes a call-scope API usable for any transport; `Warp.Adapters.Http` auto-scopes `IHttpClientFactory` clients via a `DelegatingHandler`, and `Warp.Adapters.Refit` derives operation names from Refit interfaces.
+
+**Telemetry is unconditional** (null-listener, zero cost without a listener) — every completed call emits a `Client` Activity plus `warp.adapter.*` meters. **Only DB recording is gated by `opt.AddAdapters()`**, which wires the bounded, lossy call-log channel + flusher. The differentiator is a **cluster-shared rate limiter** (DB-backed token leasing on `RateLimitBucket`) that per-process Polly cannot provide — same adapter name across the fleet shares one limit, first-writer-wins on the persisted policy.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.AddAdapters();
+    opt.AddAdapter("acme-payments", a =>
+    {
+        a.Recording.CaptureResponseBodies = CaptureMode.OnFailure;
+        a.UseSharedRateLimit(perSeconds: 1, limit: 10);
+    });
+});
+```
+
+Observe-first is the recommended rollout: register with no resilience/rate-limit policy (the passive observing handler alone is zero behavioural change), read the data, then add policy per adapter once it justifies the split. Dashboard at **/warp/adapters**.
+
+### Durable webhooks — delivery as a Warp feature
+
+`Warp.Adapters.Webhooks` (`opt.AddWebhooks(...)`, builds on adapters) makes outbound webhook *delivery* durable. The host owns subscriptions, fan-out, and payload building; Warp owns everything after `IWebhookDispatcher.SendAsync` — delivery lifecycle, retries, signing, redelivery, exhaustion, and the dashboard. **The delivery, not the job, is the state machine**: the executor always completes, and every attempt failure is recorded as an attempt (an `AdapterCallLog` row through the auto-registered `warp-webhooks` adapter) — webhook failures never surface as failed jobs or pollute the Jobs UI.
+
+```csharp
+opt.AddWebhooks(w => w.UseCustomSigner<MySigner>());
+// ...later, inside your transaction:
+var deliveryId = await dispatcher.SendAsync(new WebhookSend
+{
+    Url = endpoint.Url,
+    EventType = "order.created",
+    Payload = json,
+    Signing = WebhookSigning.StandardWebhooks,
+    Secret = endpoint.Secret,
+    RetrySchedule = null, // built-in [1m, 10m, 1h, 6h]; [] = single attempt
+});
+```
+
+Retries ride `ScheduledJobActivation` (no timers/scans) — a backoff, not a precision scheduler. Signing supports `StandardWebhooks` (HMAC-SHA256) or a custom `IWebhookSigner`; declaring custom signing without a signer throws at `AddWebhooks` time. Secrets are self-contained on the row but redacted on every read surface. A settled delivery can be redelivered via `IWebhookCommandService.Redeliver`. Requires a worker somewhere to drain the `warp:webhooks` queue. Dashboard at **/warp/webhooks**.
+
+### Inbound endpoint observability — the mirror of adapters
+
+`Warp.Http` gains `opt.AddEndpointObservability(...)` + `app.UseWarpHttpObservability()`: adapters observe calls the app *makes to* other services; this observes requests *made to* your **Warp HTTP endpoints** (handlers exposed via `MapWarpHttp`). Identity is HTTP method + route **template** (`GET /orders/{id}`) — already bounded, no path-cardinality heuristic. It captures caller IP / user-agent / authenticated user (PII, redactable), duration, status, and request/response bodies + headers on failure or always. The middleware no-ops for anything that isn't a Warp endpoint.
+
+```csharp
+opt.AddEndpointObservability(o =>
+{
+    o.CaptureResponseBodies = CaptureMode.OnFailure;
+    o.GroupSelector = ctx => ctx.Request.Headers["X-Client"].FirstOrDefault();
+});
+// after UseRouting():
+app.UseWarpHttpObservability();
+```
+
+4xx is counted as success (client error, keeps the server-health error rate meaningful); `Failed` is reserved for 5xx or an unhandled exception. Dashboard at **/warp/endpoints**.
+
+### Log retention is now age *and* count
+
+Adapter call logs, webhook deliveries, and endpoint call logs are each cleaned on **both** a time cap and a row-count cap, whichever trims first. New `int?` count caps on `WarpConfiguration` (`AdapterCallLogRetentionCount`, `WebhookDeliveryRetentionCount`, `EndpointCallLogRetentionCount`, all null = off) sit beside the existing `*Retention` `TimeSpan`s; adapters also take a per-adapter `WarpAdapterOptions.CallLogRetentionCount` override. Webhook count-trim excludes `Pending` (live work).
+
+### Aggregate metrics survive log deletion
+
+Counts, error rate, **and average latency** now come from `Counter`→`Statistic` aggregates (a per-dimension duration-sum counter backs the average), so they persist after the raw call-log rows are swept. Only last-failure timestamps and recent-call lists read raw rows and degrade gracefully to empty/null once logs are deleted.
+
+### Performance hardening
+
+- **Counter aggregation** drains in bounded id-ordered batches with a single `Statistic` batch-load per batch, instead of materialising the entire `Counter` table and doing a per-key lookup — bounds memory and round-trips under a hot-adapter write backlog.
+- **Body capture** reads only a bounded prefix rather than materialising a whole response/request body into a string just to truncate it.
+- **Detail pages** scope their stat load to the single adapter/route instead of loading every adapter's rows.
+- **Capture truncation** cuts on a UTF-8 character boundary (no `U+FFFD` from a split multibyte char).
+- Indexed `WebhookDelivery.CreatedAt` for the count-based cleanup sweep.
+
 ## 3.1.0
 
 *2026-06-29*

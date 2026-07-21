@@ -4,7 +4,7 @@
 
 Warp provides three patterns — Messages (pub/sub), Jobs (orchestrated background work), and Requests (in-memory mediator) — through a unified pipeline. It uses the transactional outbox pattern: jobs are committed atomically with business data in the same DbContext. No separate message broker required.
 
-Ships as NuGet packages: Moberg.Warp.Core, Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
+Ships as NuGet packages: Moberg.Warp.Core, Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). Observability add-ons: Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls the app makes to other services), and Moberg.Warp.Adapters.Webhooks (durable outbound webhook delivery). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
 
 ---
 
@@ -15,7 +15,10 @@ dotnet add package Moberg.Warp.Core              # Publishing (required)
 dotnet add package Moberg.Warp.Provider.PostgreSql  # or Moberg.Warp.Provider.SqlServer (required)
 dotnet add package Moberg.Warp.Worker            # Worker service (if processing jobs)
 dotnet add package Moberg.Warp.UI                # Dashboard (optional)
-dotnet add package Moberg.Warp.Http              # HTTP exposure for IRequest<T> / IStreamRequest<T> (optional)
+dotnet add package Moberg.Warp.Http              # HTTP exposure for IRequest<T> / IStreamRequest<T> + inbound observability (optional)
+dotnet add package Moberg.Warp.Adapters.Http     # Observe outbound HttpClient calls (optional)
+dotnet add package Moberg.Warp.Adapters.Refit    # Refit operation-name sugar for adapters (optional)
+dotnet add package Moberg.Warp.Adapters.Webhooks # Durable outbound webhook delivery (optional)
 ```
 
 ---
@@ -937,6 +940,7 @@ options.Authorization = new LocalRequestsOnlyAuthorizationFilter();
 - Optional count-based cleanup: `MaxExpirableJobCount` deletes oldest by ExpireAt when threshold exceeded
 - Statistics survive job deletion (persistent counters)
 - Recurring job logs: last 100 per recurring job retained
+- Observability call logs (adapter / webhook / endpoint) retain on **age AND count** — whichever trims first. Age via `*Retention` `TimeSpan`; count via `*RetentionCount` `int?` (null = off). Aggregate metrics (counts, error rate, average latency) survive log deletion.
 
 ---
 
@@ -1114,6 +1118,90 @@ Endpoint metadata is populated automatically: `.Accepts<TRequest>("application/j
 
 ---
 
+## Outbound Adapters (Moberg.Warp.Adapters)
+
+Observes calls your app **makes to** other services — the mirror of the inbound `Warp.Http` binding. An adapter is a named outbound dependency (vendor API, SOAP service, payment gateway). Three layers:
+
+1. **Protocol-agnostic core** (`Warp.Core.Adapters`) — `IWarpAdapters.BeginCall(adapter, operation, group?)` returns an `AdapterCallScope` (`Succeed`/`Fail`/`SetGroup`/`SetCorrelation`/`SetTag`) usable for any transport via manual scopes.
+2. **HTTP binding** (`Warp.Adapters.Http`) — a `DelegatingHandler` that auto-scopes `IHttpClientFactory` clients; Polly resilience via `Microsoft.Extensions.Http.Resilience`.
+3. **Refit sugar** (`Warp.Adapters.Refit`) — operation names from `RestMethodInfo`.
+
+**Telemetry is unconditional** (null-listener, zero cost without a listener): every completed scope emits a `Client` Activity named `{adapter}.{operation}` plus `warp.adapter.calls` / `warp.adapter.duration` meters, regardless of `AddAdapters()`. **Only DB call-log recording is gated by `opt.AddAdapters()`** (a bounded lossy channel + flusher; a full channel drops the record and increments `warp.adapter.records_dropped` — never blocks or fails a user call). Entities (`AdapterDefinition`, `AdapterCallLog`) are always in the schema.
+
+**Three-axis identity:** adapter = policy + health boundary (registration-time); group = runtime who/where (destination, tenant — a runtime value, unbounded); operation = what (the API-contract axis, bounded). Litmus: swapping the value changes the request's *structure* → operation; only changes *where it goes / on whose behalf* → group.
+
+**Cluster-shared rate limiter** — the differentiator per-process Polly cannot provide: same adapter name across the fleet shares one DB-backed token limit (`RateLimitBucket`, key `warp:adapter:{name}`). Shared-policy persistence is first-writer-wins; a later process whose local policy differs enforces the persisted policy, logs a Warning, and sets `HasPolicyConflict`. Change a shared limit via a `RateLimitOverride` admin row or by clearing the persisted policy — not by redeploying.
+
+**Capture is opt-in and PII-owned:** metadata always; request bodies, response bodies, and headers each independently `None` / `OnFailure` / `Always`, truncated (`MaxCapturedBodySize` 8 KB / `MaxCapturedHeaderSize` 4 KB) and passed through the user-owned `RedactedHeaders` denylist (prepopulated with `Authorization`/`Cookie`/`X-Api-Key`/etc., fully overridable). Enums from 1: `CallRecording { All, FailuresOnly }`, `CaptureMode { None, OnFailure, Always }`, `AdapterCallOutcome { Success, Failed, Throttled, CircuitOpen }`.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql(conn);
+    opt.AddAdapters();                       // gates DB recording
+    opt.AddAdapter("acme-payments", a =>
+    {
+        a.Recording.CaptureResponseBodies = CaptureMode.OnFailure;
+        a.Recording.CallLogRetentionCount = 50_000;   // per-adapter count cap
+        a.UseSharedRateLimit(perSeconds: 1, limit: 10);
+    });
+});
+```
+
+`Warp.Adapters.Http` wires the observing handler onto a named client; `Warp.Adapters.Refit` adds a typed client. Observe-first rollout: register with no resilience/rate-limit policy (zero behavioural change), read the data, add policy per adapter later. `IAdapterQueryService` is registered by `AddWarp` itself, so dashboard-only / publisher-only processes serve `/api/adapters*` without a server. Dashboard: `/warp/adapters`.
+
+---
+
+## Durable Webhooks (Moberg.Warp.Adapters.Webhooks)
+
+`opt.AddWebhooks(...)` (builds on adapters) makes outbound webhook *delivery* durable. **Boundary:** the host owns subscriptions, fan-out, payload building, and endpoint enable/disable; Warp owns everything after `IWebhookDispatcher.SendAsync(WebhookSend)` — delivery lifecycle, retry scheduling, signing, redelivery, exhaustion, dashboard.
+
+**The delivery, not the job, is the state machine.** The executor (an ordinary source-gen job on queue `warp:webhooks`) always completes; every attempt exception is caught and recorded as an attempt failure — webhook failures never surface as failed jobs. State lives on the always-in-schema `WebhookDelivery` row: `WebhookDeliveryStatus { Pending, Delivered, Exhausted }`. The row is self-contained (URL, headers, payload, schedule, success codes, signing mode + secret) stamped at `SendAsync` time, so a later config deploy never reshapes an in-flight delivery. `SendAsync` persists `Pending` + enqueues the first attempt in the caller's transaction (outbox) and returns the delivery id.
+
+**Attempts are adapter calls** through the auto-registered `warp-webhooks` adapter (group = endpoint, operation = event type, `CorrelationId` = delivery id; response bodies always captured, request bodies never — the payload is already on the row). The attempt timeline is `AdapterCallLog WHERE CorrelationId = deliveryId` — no separate attempt table.
+
+**No timers/scans:** each retry is a fresh executor job in `State.Scheduled` at `now + schedule[N]` riding `ScheduledJobActivation`. `RetrySchedule` is per-send `IReadOnlyList<TimeSpan>?`: `null` = built-in `[1m, 10m, 1h, 6h]`, `[]` = single attempt then `Exhausted`. Cadence is delay + up to ~5s activation + worker pickup — a backoff, not a precision scheduler.
+
+**Signing** (`WebhookSigning { None, StandardWebhooks, Custom }`): `StandardWebhooks` = HMAC-SHA256 over `{id}.{timestamp}.{payload}` with `webhook-id`/`webhook-timestamp`/`webhook-signature` headers; `Custom` = a registered `IWebhookSigner` via `w.UseCustomSigner<T>()` (declaring `Custom` without a signer throws at `AddWebhooks` time). Secrets are stored on the row for self-containment but redacted on every read surface. `IWebhookCommandService.Redeliver(id)` requeues a settled delivery. Exhaustion invokes the host's `IWebhookDeliveryExhaustedHandler` at-least-once, post-commit. Retention: age (`WebhookDeliveryRetention`, default 30d) + count (`WebhookDeliveryRetentionCount`).
+
+**Prerequisite:** a Warp server (worker) must run somewhere to drain `warp:webhooks` — coexists with another job system. `IWebhookQueryService` / `IWebhookCommandService` resolve in any `AddWarp` process. Dashboard: `/warp/webhooks`.
+
+```csharp
+opt.AddWebhooks(w => w.OnDeliveryExhausted<MyExhaustedHandler>());
+// inside your transaction:
+var id = await dispatcher.SendAsync(new WebhookSend
+{
+    Url = endpoint.Url, EventType = "order.created", Payload = json,
+    Signing = WebhookSigning.StandardWebhooks, Secret = endpoint.Secret,
+    RetrySchedule = null,   // built-in backoff
+});
+```
+
+---
+
+## Inbound Endpoint Observability (Moberg.Warp.Http)
+
+The inbound mirror of adapters: observes requests **made to** your Warp HTTP endpoints (handlers exposed via `MapWarpHttp`). Opt in with `opt.AddEndpointObservability(o => ...)` inside the `AddWarp` lambda **and** `app.UseWarpHttpObservability()` after `UseRouting()`. The middleware no-ops unless the matched endpoint carries `WarpEndpointIdentity` — it never observes your own controllers, the dashboard, health, or static files.
+
+**Identity = HTTP method + route TEMPLATE** (`GET /orders/{id}`) — already bounded (inline constraints normalized: `{id:int}` → `{id}`), no path-cardinality heuristic. Counter dimensions are Total + optional low-cardinality Group (from `o.GroupSelector(HttpContext)` — a channel/client/tenant key, never raw IP/user id).
+
+**Capture (PII):** caller IP (`RemoteIpAddress`, or first `X-Forwarded-For` hop when `UseForwardedForIp`), user-agent, and `User.Identity.Name` are captured by default (the point of the feature) but are PII — redactable/disableable, never logged Info+. Request/response bodies + headers each `None` / `OnFailure` / `Always` (default `OnFailure`), truncated and redacted through the same `RedactedHeaders` denylist as adapters. `CaptureBodyStream` never buffers a whole streaming/`IResult` response.
+
+**Outcome:** `Failed` = status ≥ 500 or an unhandled exception; **4xx is counted Success** (client error) so the error rate stays a meaningful server-health signal. `RecordCalls = FailuresOnly` skips success ROWS only (counters still written). Recording is lossy and never blocks/fails the request. Retention is global on `WarpConfiguration.EndpointCallLogRetention` (age, default 7d) + `EndpointCallLogRetentionCount` (count). `IEndpointQueryService` is registered by `AddWarp`, so dashboard-only processes serve `/api/endpoints*` without the middleware. Dashboard: `/warp/endpoints`.
+
+```csharp
+opt.AddEndpointObservability(o =>
+{
+    o.CaptureResponseBodies = CaptureMode.OnFailure;
+    o.UseForwardedForIp = true;
+    o.GroupSelector = ctx => ctx.Request.Headers["X-Client"].FirstOrDefault();
+});
+// after app.UseRouting():
+app.UseWarpHttpObservability();
+```
+
+---
+
 ## DI Services Available
 
 After calling `AddWarp<TContext>()` or `AddWarpServer<TContext>()`, these services are available via dependency injection:
@@ -1131,6 +1219,10 @@ After calling `AddWarp<TContext>()` or `AddWarpServer<TContext>()`, these servic
 | `IDashboardStatsService` | Dashboard statistics, server/worker info |
 | `IJobContext` | Current job's ID, trace ID, and metadata (available inside handlers) |
 | `IServerCommandService` | Pause/resume servers and worker groups |
+| `IAdapterQueryService` | Query outbound-adapter stats, call logs, history (registered by AddWarp) |
+| `IEndpointQueryService` | Query inbound-endpoint stats, call logs (registered by AddWarp) |
+| `IWebhookQueryService` / `IWebhookCommandService` | Query webhook deliveries; redeliver a settled delivery (registered by AddWarp) |
+| `IWebhookDispatcher` | Send a durable webhook delivery (only after `AddWebhooks()`) |
 | `TimeProvider` | Injectable time (registered as `TimeProvider.System` by default, override in tests) |
 
 ---
