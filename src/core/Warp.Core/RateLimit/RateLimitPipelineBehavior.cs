@@ -129,9 +129,55 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
     {
         var bucket = await _store.GetAsync(key, ct);
 
-        return style == RateLimitStyle.Sliding
-            ? await EvaluateSliding(key, count, window, now, bucket, ct)
-            : await EvaluateFixed(key, count, window, now, bucket, ct);
+        return style switch
+        {
+            RateLimitStyle.Sliding => await EvaluateSliding(key, count, window, now, bucket, ct),
+            RateLimitStyle.TokenBucket => await EvaluateTokenBucket(key, count, window, now, bucket, ct),
+            _ => await EvaluateFixed(key, count, window, now, bucket, ct),
+        };
+    }
+
+    private async Task<RateLimitEvaluation> EvaluateTokenBucket(
+        string key,
+        int count,
+        TimeSpan window,
+        DateTime now,
+        RateLimitBucket? bucket,
+        CancellationToken ct)
+    {
+        // Token bucket: burst capacity = count, refill rate = count / window per second. A fresh key
+        // starts full (allows an initial burst up to capacity). Tokens accrue continuously, but only an
+        // ACCEPT changes stored state — so between accepts the available tokens are derived from the time
+        // elapsed since the last accept (WindowStartUtc = last-refill instant, TimestampsJson = the
+        // fractional token count at that instant). Rejections write nothing, mirroring Fixed/Sliding.
+        var capacity = (double)count;
+        var ratePerSecond = capacity / window.TotalSeconds;
+
+        double available;
+        if (bucket == null)
+        {
+            available = capacity;
+        }
+        else
+        {
+            var stored = ParseTokens(bucket.TimestampsJson);
+            var elapsedSeconds = (now - bucket.WindowStartUtc).TotalSeconds;
+            var accrued = elapsedSeconds > 0 ? elapsedSeconds * ratePerSecond : 0;
+            available = Math.Min(capacity, stored + accrued);
+        }
+
+        if (available >= 1.0)
+        {
+            var remaining = available - 1.0;
+            await _store.UpsertAsync(key, now, (int)remaining, SerializeTokens(remaining), now, ct);
+
+            return new RateLimitEvaluation(true, default);
+        }
+
+        // Not enough for one token — pace: reschedule to when the deficit will have refilled.
+        var secondsToNextToken = (1.0 - available) / ratePerSecond;
+
+        return new RateLimitEvaluation(false, now.AddSeconds(secondsToNextToken));
     }
 
     private async Task<RateLimitEvaluation> EvaluateFixed(
@@ -224,6 +270,13 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
 
         return JsonSerializer.Serialize(ticks);
     }
+
+    // Token bucket stores a single fractional token count in the same TimestampsJson column the sliding
+    // window uses for its tick array — the two styles never share a bucket row, so the column is free.
+    private static double ParseTokens(string? json)
+        => string.IsNullOrEmpty(json) ? 0 : JsonSerializer.Deserialize<double>(json);
+
+    private static string SerializeTokens(double tokens) => JsonSerializer.Serialize(tokens);
 
     private readonly record struct RateLimitEvaluation(bool Allowed, DateTime NextAvailable);
 }

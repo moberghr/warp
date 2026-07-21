@@ -791,7 +791,7 @@ Opt-in addon: `opt.AddRateLimit()`. Throttles jobs sharing a key to N starts per
 
 - `[RateLimit("key", count: N, perSeconds: S, Mode =, Style =)]` or `.WithRateLimit("key", count, window)`.
 - `RateLimitMode` (from 1): `Skip` (default) → `Deleted`; `Wait` → rescheduled via `JobOutcome.RescheduledState` (100–500 ms jitter).
-- `RateLimitStyle` (from 1): `Fixed` (default) → wall-clock window floor-aligned to UTC ticks; `Sliding` → rolling window over last N starts.
+- `RateLimitStyle` (from 1): `Fixed` (default) → wall-clock window floor-aligned to UTC ticks; `Sliding` → rolling window over last N starts; `TokenBucket` → paces (not caps): tokens refill continuously at `count/perSeconds`/s up to a burst of `count`, `Wait`-mode reschedules to the next token-refill instant so a backlog trickles at the steady rate.
 - `perSeconds` capped at 7 days. Live state in `RateLimitBucket`. Lock held only for the brief check-and-increment (**not** during handler execution, unlike Mutex).
 - Admin overrides via `IRateLimitOverrideManager`; precedence admin row > attribute > publish-time. Dashboard `/warp/ratelimits`.
 - **Ordering: `AddConcurrency()` before `AddRateLimit()`** so a mutex rejection doesn't waste a token. DB push does **not** accelerate `Wait` reschedules (they ride `ScheduledJobActivation`).
