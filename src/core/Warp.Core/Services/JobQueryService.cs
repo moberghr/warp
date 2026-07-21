@@ -32,6 +32,8 @@ public interface IJobQueryService
     Task<List<TypeCountModel>> GetFailedJobTypeCounts();
 
     Task<PagedList<JobModel>> GetFailedJobsByType(BaseListRequest request, string type);
+
+    Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state);
 }
 
 public class JobQueryService<TContext> : IJobQueryService
@@ -389,6 +391,34 @@ public class JobQueryService<TContext> : IJobQueryService
                 CancellationMode = x.CancellationMode,
                 HandlerType = x.HandlerType,
             })
+            .ToPagedListAsync(request);
+    }
+
+    // #1: all jobs of a given type across states (newest-first by create time), with an optional state
+    // filter. Backs the clickable job type in the dashboard. Ordered by create time (not finished time)
+    // because the result mixes terminal and in-flight jobs.
+    public async Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state)
+    {
+        var jobs = Jobs().Where(x => x.Type == type);
+
+        if (state is { } s)
+        {
+            jobs = jobs.Where(x => x.CurrentState == s);
+        }
+
+        return await OrderByCreateTimeDescending(jobs)
+            .Select(x =>
+                new JobModel
+                {
+                    Id = x.Id,
+                    Type = x.Type,
+                    Message = x.Message,
+                    CreateTime = x.CreateTime,
+                    ScheduleTime = x.ScheduleTime,
+                    CurrentState = x.CurrentState,
+                    CancellationMode = x.CancellationMode,
+                    HandlerType = x.HandlerType,
+                })
             .ToPagedListAsync(request);
     }
 

@@ -39,6 +39,14 @@ export function useFailedJobsByType(type: string, page: number, pageSize: number
   });
 }
 
+export function useJobsByType(type: string, page: number, pageSize: number, state?: string) {
+  return useQuery({
+    queryKey: ['jobsByType', type, state ?? null, page, pageSize],
+    queryFn: () => api.getJobsByType(type, page, pageSize, state),
+    enabled: !!type,
+  });
+}
+
 export function useFailedJobTypes(enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.failedJobTypes,
