@@ -1476,7 +1476,7 @@ Breaking release because of both the rename and the removal of reflection-based 
 
 ### Bug Fixes
 
-- **Queue-name encoding collision (SQL Server)** — `JobHelper` now rejects queue names containing the unit-separator (``) that SQL Server's `STRING_SPLIT` uses internally for encoding. Previously a job published to a ``-containing queue could be delivered to the wrong worker group.
+- **Queue-name encoding collision (SQL Server)** — `JobHelper` now rejects queue names containing the unit-separator (`\x1f`) that SQL Server's `STRING_SPLIT` uses internally for encoding. Previously a job published to a `\x1f`-containing queue could be delivered to the wrong worker group.
 
 ### Migration
 
