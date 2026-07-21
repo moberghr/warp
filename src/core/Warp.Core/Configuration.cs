@@ -144,6 +144,14 @@ public class WarpConfiguration
     public int? EndpointCallLogRetentionCount { get; set; }
 
     /// <summary>
+    /// How long hourly-bucketed <c>Statistic</c> rows (keys ending in <c>:yyyy-MM-dd-HH</c> — the job/saga
+    /// dashboard history and the adapter/endpoint performance-chart series) are retained before
+    /// <c>ExpirationCleanup</c>'s generic hourly sweep prunes them. Raise it to keep deeper chart history
+    /// (e.g. to match a longer <c>*CallLogRetention</c>); the buckets are small. Default 7 days.
+    /// </summary>
+    public TimeSpan HourlyStatisticsRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
     /// Bounded in-memory buffer capacity for the outbound adapter and inbound endpoint call-log recorders
     /// (each owns its own channel of this size). Records are enqueued non-blocking; once the buffer is full
     /// further records are dropped (counted, never blocking or failing a call — recording is lossy by

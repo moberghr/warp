@@ -197,6 +197,23 @@ public abstract class AdapterCleanupTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task CleanupByCount_ZeroCap_KeepsAll()
+    {
+        // A count cap of 0 means "off" (like null), NOT "delete everything each tick while the flusher
+        // keeps re-inserting" — that would be a thrash footgun.
+        await InsertDefinitionAsync("zerocap", DateTime.UtcNow, retentionCount: 0);
+        for (var i = 0; i < 4; i++)
+        {
+            await InsertCallLogAsync("zerocap", expireAt: null);
+        }
+
+        var deleted = await CreateCleanup().CleanupAdapterCallLogsByCountAsync(Ct);
+
+        deleted.ShouldBe(0);
+        (await CallLogCountAsync("zerocap")).ShouldBe(4);
+    }
+
+    [TimedFact]
     public async Task CleanupByCount_DeletesOldestByTimestamp_KeepsNewest()
     {
         await InsertDefinitionAsync("ordered", DateTime.UtcNow, retentionCount: 1);

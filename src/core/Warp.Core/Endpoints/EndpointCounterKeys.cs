@@ -76,8 +76,12 @@ internal static partial class EndpointCounterKeys
 
     // Strips inline route constraints from a template only (no method). The flusher stamps this onto the
     // EndpointCallLog row so the stored identity matches the counter-key route exactly (both colon-free,
-    // constraint-free) and the detail page can join log rows to aggregate stats.
-    public static string NormalizeTemplate(string routeTemplate) => ConstraintRegex().Replace(routeTemplate, "{${name}}");
+    // constraint-free) and the detail page can join log rows to aggregate stats. Any literal ':' left after
+    // constraint-stripping (e.g. the custom-method syntax "orders/{id}:export") is replaced with '-' so the
+    // route is GUARANTEED colon-free — otherwise it would corrupt the colon-delimited counter key and the
+    // endpoint would silently vanish from the aggregate stats.
+    public static string NormalizeTemplate(string routeTemplate)
+        => ConstraintRegex().Replace(routeTemplate, "{${name}}").Replace(':', '-');
 
     // Inverse of the builders above — kept in the SAME type so the key format and its parser can never
     // drift apart (drift silently zeroes the dashboard, which drops unparseable keys). Layout:

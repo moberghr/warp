@@ -50,7 +50,7 @@ public class WebhookQueryService<TContext> : IWebhookQueryService
                     NextAttemptAt = x.NextAttemptAt,
                     CreatedAt = x.CreatedAt,
                 })
-            .ToPagedListAsync(request);
+            .ToPagedListAsync(request, ct);
     }
 
     public async Task<IReadOnlyList<WebhookGroupModel>> GetGroups(WebhookGroupBy by, CancellationToken ct = default)

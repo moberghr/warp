@@ -10,6 +10,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
+using Warp.Core.NoRestart;
 
 namespace Warp.Adapters.Webhooks;
 
@@ -19,7 +20,14 @@ namespace Warp.Adapters.Webhooks;
 /// and each retry is a fresh copy of this job in <c>State.Scheduled</c> — the job <em>is</em> the clock,
 /// there are no timers or scans. Carries only the delivery id; every field needed to execute lives on the
 /// self-contained <see cref="WebhookDelivery"/> row.
+/// <para>
+/// Marked <see cref="RestartAttribute">[Restart]</see> so a stale (crashed-mid-execution) executor is
+/// always re-run regardless of the host's <c>RestartStaleJobsByDefault</c>: the at-least-once
+/// exhausted-callback recovery (and the general delivery-completes guarantee) depends on the crashed job
+/// being restarted, so it must not be left to a global toggle.
+/// </para>
 /// </summary>
+[Restart]
 public sealed class ExecuteWebhookDelivery : IJob
 {
     public Guid DeliveryId { get; set; }

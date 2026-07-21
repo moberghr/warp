@@ -98,11 +98,12 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             .Where(x => expiredJobIds.Contains(x.Id))
             .ExecuteDeleteAsync(ct);
 
-        // Hourly bucket rows (any key ending in :yyyy-MM-dd-HH) older than 7 days. Generic so
-        // addon-defined hourly metrics get pruned with the same retention. Coarse SQL filter
-        // narrows to keys with at least one ':', then the in-memory parse rejects keys whose
-        // suffix isn't actually a date — so an addon writing :foo-bar-baz wouldn't be deleted.
-        var hourlyCutoff = now.AddDays(-7);
+        // Hourly bucket rows (any key ending in :yyyy-MM-dd-HH) older than the configured retention
+        // (default 7 days). Generic so addon-defined hourly metrics (adapter/endpoint performance series
+        // included) get pruned with the same retention. Coarse SQL filter narrows to keys with at least
+        // one ':', then the in-memory parse rejects keys whose suffix isn't actually a date — so an addon
+        // writing :foo-bar-baz wouldn't be deleted.
+        var hourlyCutoff = now.Subtract(_configuration.HourlyStatisticsRetention);
         var candidateKeys = await _context.Set<Statistic>()
             .Where(x => EF.Functions.Like(x.Key, "%:%"))
             .Select(x => x.Key)
@@ -424,8 +425,10 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     internal async Task<int> CleanupEndpointCallLogsByCountAsync(CancellationToken ct)
     {
         var cap = _configuration.EndpointCallLogRetentionCount;
-        if (cap is null)
+        if (cap is null or <= 0)
         {
+            // null OR a non-positive value = no count cap. Treating 0 as "delete everything each tick"
+            // (while the flusher keeps re-inserting) would be a thrash footgun, so 0 disables like null.
             return 0;
         }
 
@@ -498,7 +501,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         foreach (var definition in definitions)
         {
             var cap = definition.CallLogRetentionCount ?? globalCap;
-            if (cap is null)
+            if (cap is null or <= 0)
             {
                 continue;
             }
@@ -608,7 +611,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     internal async Task<int> CleanupWebhookDeliveriesByCountAsync(CancellationToken ct)
     {
         var cap = _configuration.WebhookDeliveryRetentionCount;
-        if (cap is null)
+        if (cap is null or <= 0)
         {
             return 0;
         }

@@ -40,7 +40,13 @@ public sealed class WarpEndpointObservabilityOptions
     /// </summary>
     public Func<HttpContext, bool>? ForceCapture { get; set; }
 
-    /// <summary>Capture tier for the request body (None / OnFailure / Always). Default OnFailure.</summary>
+    /// <summary>
+    /// Capture tier for the request body. Unlike the response body, the request body must be buffered
+    /// up-front (before the handler consumes it), so <c>OnFailure</c> would force buffering EVERY request
+    /// (spilling large uploads to disk). To avoid that, request bodies are captured only under
+    /// <c>Always</c> or a matched <c>ForceCapture</c> — <c>OnFailure</c> here behaves like <c>None</c> for
+    /// the request body (response bodies + headers still honour <c>OnFailure</c>). Default OnFailure.
+    /// </summary>
     public CaptureMode CaptureRequestBodies { get; set; } = CaptureMode.OnFailure;
 
     /// <summary>Capture tier for the response body (None / OnFailure / Always). Default OnFailure.</summary>
@@ -56,8 +62,11 @@ public sealed class WarpEndpointObservabilityOptions
     public int MaxCapturedHeaderSize { get; set; } = 4 * 1024;
 
     /// <summary>
-    /// Trust <c>X-Forwarded-For</c> (its first hop) for the caller IP instead of the immediate peer. Off by
-    /// default — only enable behind a trusted proxy that sets the header, or a client can spoof the IP.
+    /// Trust <c>X-Forwarded-For</c> for the caller IP instead of the immediate peer. Uses the <b>leftmost</b>
+    /// entry — the original client — which is what you want for caller attribution, but is also the
+    /// client-<i>controlled</i> end and therefore spoofable unless your proxy strips/rewrites inbound
+    /// <c>X-Forwarded-For</c>. Off by default; only enable behind a trusted proxy you control, and treat the
+    /// captured IP as advisory (it's a diagnostic, not an authorization input).
     /// </summary>
     public bool UseForwardedForIp { get; set; }
 

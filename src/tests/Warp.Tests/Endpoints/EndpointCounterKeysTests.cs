@@ -143,6 +143,23 @@ public class EndpointCounterKeysTests
     }
 
     [TimedFact]
+    public void NormalizeTemplate_LiteralColonInRoute_MadeColonFree_AndKeyRoundTrips()
+    {
+        // A custom-method route ("orders/{id}:export") leaves a literal ':' after constraint-stripping.
+        // It must be made colon-free so the colon-delimited counter key parses (otherwise the endpoint
+        // silently vanishes from the aggregate stats).
+        var template = EndpointCounterKeys.NormalizeTemplate("/orders/{id:int}:export");
+        template.ShouldNotContain(":");
+        template.ShouldBe("/orders/{id}-export");
+
+        var route = EndpointCounterKeys.NormalizeRoute("post", "/orders/{id:int}:export");
+        EndpointCounterKeys.TryParse(EndpointCounterKeys.Total(route, "success"), out var parsed).ShouldBeTrue();
+        parsed.Route.ShouldBe("POST /orders/{id}-export");
+        parsed.Dimension.ShouldBe(EndpointStatDimension.Total);
+        parsed.Outcome.ShouldBe("success");
+    }
+
+    [TimedFact]
     public void TryParseHistory_NonHistoryKey_ReturnsFalse()
     {
         EndpointCounterKeys.TryParseHistory(EndpointCounterKeys.Total("GET /orders", "success"), out _, out _, out _).ShouldBeFalse();

@@ -57,9 +57,12 @@ internal sealed class WarpInboundObservabilityMiddleware
         // bypassing SampleRate / RecordCalls (folded in RecordAsync).
         var forceCapture = _options.ForceCapture?.Invoke(context) ?? false;
 
-        if (_options.CaptureRequestBodies != CaptureMode.None || forceCapture)
+        // Request-body capture requires buffering the body up-front (the transport consumes it), and the
+        // decision must be made before the outcome is known. To avoid buffering EVERY request (spilling
+        // large uploads to a temp file) for the common OnFailure default, we buffer only for Always or a
+        // forced request — OnFailure applies to response bodies + headers, not request bodies.
+        if (_options.CaptureRequestBodies == CaptureMode.Always || forceCapture)
         {
-            // Buffer the body before model binding consumes it, so it can be re-read after the handler runs.
             context.Request.EnableBuffering();
         }
 
@@ -74,6 +77,7 @@ internal sealed class WarpInboundObservabilityMiddleware
         var start = _timeProvider.GetTimestamp();
         string? exceptionType = null;
         string? exceptionMessage = null;
+        var clientAborted = false;
 
         try
         {
@@ -81,6 +85,10 @@ internal sealed class WarpInboundObservabilityMiddleware
         }
         catch (Exception ex)
         {
+            // A client disconnect surfaces as a cancellation of the request-aborted token. That is not a
+            // server error — don't record it (it would inflate the error rate and produce a StatusCode=200,
+            // Outcome=Failed row for a request that never completed).
+            clientAborted = ex is OperationCanceledException && context.RequestAborted.IsCancellationRequested;
             exceptionType = ex.GetType().FullName;
             exceptionMessage = HttpCaptureHelpers.TruncateToBytes(ex.Message, MaxExceptionMessage);
 
@@ -93,7 +101,10 @@ internal sealed class WarpInboundObservabilityMiddleware
                 context.Response.Body = originalBody;
             }
 
-            await RecordAsync(context, identity, start, capture, forceCapture, exceptionType, exceptionMessage);
+            if (!clientAborted)
+            {
+                await RecordAsync(context, identity, start, capture, forceCapture, exceptionType, exceptionMessage);
+            }
         }
     }
 
@@ -115,9 +126,11 @@ internal sealed class WarpInboundObservabilityMiddleware
             var outcome = failed ? AdapterCallOutcome.Failed : AdapterCallOutcome.Success;
 
             // Capture tiers: full fidelity iff Always, OnFailure-and-failed, or forced. A forced request
-            // captures bodies + headers even on success and even if the tier is None/OnFailure.
+            // captures bodies + headers even on success and even if the tier is None/OnFailure. Request
+            // bodies are the exception — they are only captured for Always/force (see the buffering note in
+            // InvokeAsync), never OnFailure, because that would require buffering every request up-front.
             var captureBodies = forceCapture || _options.CaptureResponseBodies == CaptureMode.Always || (failed && _options.CaptureResponseBodies == CaptureMode.OnFailure);
-            var captureReq = forceCapture || _options.CaptureRequestBodies == CaptureMode.Always || (failed && _options.CaptureRequestBodies == CaptureMode.OnFailure);
+            var captureReq = forceCapture || _options.CaptureRequestBodies == CaptureMode.Always;
             var captureHeaders = forceCapture || _options.CaptureHeaders == CaptureMode.Always || (failed && _options.CaptureHeaders == CaptureMode.OnFailure);
 
             // A row is written for any failure, any forced request, and successes kept by both the record
