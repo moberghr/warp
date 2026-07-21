@@ -340,6 +340,71 @@ public class EndpointMiddlewareTests
     }
 
     [TimedFact]
+    public async Task WarpEndpoint_ClientError4xx_CountedSuccess()
+    {
+        // 4xx is a client error, not a server failure — it is classified Success (outcome Failed is reserved
+        // for status >= 500 or an unhandled exception) so the error rate stays a meaningful server-health
+        // signal. The status code is still recorded verbatim.
+        var (app, client, recorder) = await CreateHost();
+
+        try
+        {
+            var response = await client.GetAsync("/notfound", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(404);
+
+            var record = recorder.Records.ShouldHaveSingleItem();
+            record.Outcome.ShouldBe(AdapterCallOutcome.Success);
+            record.StatusCode.ShouldBe(404);
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task RecordCallsFailuresOnly_Success_SuppressesRow()
+    {
+        // FailuresOnly skips the raw row for successful calls (counters are still written, so aggregates stay
+        // exact) — the volume knob for chatty endpoints. The record is handed over flagged SuppressLog.
+        var (app, client, recorder) = await CreateHost(o => o.RecordCalls = CallRecording.FailuresOnly);
+
+        try
+        {
+            var response = await client.PostAsync("/probe", new StringContent("x"), Xunit.TestContext.Current.CancellationToken);
+
+            response.IsSuccessStatusCode.ShouldBeTrue();
+            recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeTrue();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task RecordCallsFailuresOnly_ServerError_NotSuppressed()
+    {
+        var (app, client, recorder) = await CreateHost(o => o.RecordCalls = CallRecording.FailuresOnly);
+
+        try
+        {
+            var response = await client.GetAsync("/boom", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(500);
+            recorder.Records.ShouldHaveSingleItem().SuppressLog.ShouldBeFalse();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
     public async Task RecorderThrows_RequestStillSucceeds()
     {
         // Recording is diagnostics, never a request failure — a recorder that throws must not surface to the
@@ -391,6 +456,8 @@ public class EndpointMiddlewareTests
             .WithMetadata(new WarpEndpointIdentity("GET", "/throw", "Throw"));
         app.MapPost("/hdr", () => Results.Ok())
             .WithMetadata(new WarpEndpointIdentity("POST", "/hdr", "Hdr"));
+        app.MapGet("/notfound", () => Results.NotFound())
+            .WithMetadata(new WarpEndpointIdentity("GET", "/notfound", "NotFound"));
 
         await app.StartAsync(CancellationToken.None);
 

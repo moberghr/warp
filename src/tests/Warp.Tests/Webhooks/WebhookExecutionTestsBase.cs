@@ -66,6 +66,41 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
+    public async Task Send_DeliveredAttempt_CapturesResponseBodyButNotRequestPayload()
+    {
+        // The auto-registered warp-webhooks adapter is configured CaptureResponseBodies=Always /
+        // CaptureRequestBodies=None: the response is captured for diagnosis, but the request payload is NOT
+        // (it already lives on the delivery row, so duplicating it would double the storage + PII surface).
+        // Proven end-to-end on the recorded AdapterCallLog rather than by inspecting registration internals.
+        await using var server = await StartServerAsync(HttpStatusCode.OK);
+
+        var deliveryId = await SendAsync(server, new WebhookSend
+        {
+            Url = "https://example.test/hook",
+            EventType = "order.created",
+            Payload = "{\"order\":42}",
+            RetrySchedule = [],
+        });
+
+        await WaitForDeliveryStatusAsync(server, deliveryId, WebhookDeliveryStatus.Delivered);
+
+        await WarpTestServer.WaitUntil(
+            async () => await server.CreateContext().Set<AdapterCallLog>()
+                .AnyAsync(x => x.CorrelationId == deliveryId.ToString(), Ct),
+            timeout: TimeSpan.FromSeconds(5),
+            ct: Ct);
+
+        var call = await server.CreateContext().Set<AdapterCallLog>()
+            .Where(x => x.CorrelationId == deliveryId.ToString())
+            .FirstAsync(Ct);
+
+        call.ResponseBody.ShouldBe("\"ok\"");
+        call.RequestBody.ShouldBeNull();
+
+        await AssertNoFailedJobsAsync(server);
+    }
+
+    [TimedFact]
     public async Task Send_FailedAttemptWithRetriesLeft_StaysPendingAndSchedulesNext()
     {
         await using var server = await StartServerAsync(HttpStatusCode.InternalServerError);
