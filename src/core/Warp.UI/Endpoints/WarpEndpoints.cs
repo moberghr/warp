@@ -126,6 +126,8 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("batches/{batchId}/jobs/counts", async ([FromServices] IJobGroupQueryService svc, Guid batchId) => await svc.GetJobGroupJobCounts(batchId));
 
+        apiGroup.MapPost("batches/{batchId}/cancel", async ([FromServices] IJobCommandService jobCommandService, Guid batchId) => await jobCommandService.CancelBatch(batchId));
+
         apiGroup.MapGet("stats/history", async ([FromServices] IDashboardStatsService statsService, [FromQuery] int? hours) => await statsService.GetStatsHistory(hours ?? 24));
 
         apiGroup.MapGet("stats/counters", async ([FromServices] IDashboardStatsService statsService) => await statsService.GetCounters());

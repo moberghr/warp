@@ -933,4 +933,77 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         parent.JobCount.ShouldBeGreaterThanOrEqualTo(actuallyEnqueued);
         parent.JobCount.ShouldBeLessThanOrEqualTo(childIds.Length);
     }
+
+    [TimedFact]
+    public async Task CancelBatch_CancelsNonTerminalChildren_LeavesTerminalUntouched()
+    {
+        // #238: cancelling a batch deletes/cancels every child that hasn't finished; terminal children
+        // (Completed/Failed) are left as-is, and a Processing child is signalled for graceful cancellation.
+        var batchId = Guid.NewGuid();
+        var enqueued = Guid.NewGuid();
+        var scheduled = Guid.NewGuid();
+        var processing = Guid.NewGuid();
+        var completed = Guid.NewGuid();
+        var failed = Guid.NewGuid();
+
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(Job(batchId, JobKind.Batch, State.Processing, parent: null));
+        ctx.Set<Job>().Add(Job(enqueued, JobKind.Job, State.Enqueued, parent: batchId));
+        ctx.Set<Job>().Add(Job(scheduled, JobKind.Job, State.Scheduled, parent: batchId));
+        ctx.Set<Job>().Add(Job(processing, JobKind.Job, State.Processing, parent: batchId));
+        ctx.Set<Job>().Add(Job(completed, JobKind.Job, State.Completed, parent: batchId));
+        ctx.Set<Job>().Add(Job(failed, JobKind.Job, State.Failed, parent: batchId));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext());
+        var result = await svc.CancelBatch(batchId);
+
+        var readCtx = _fixture.CreateContext();
+        var jobs = await readCtx.Set<Job>()
+            .Where(x => x.ParentJobId == batchId)
+            .ToDictionaryAsync(x => x.Id, Xunit.TestContext.Current.CancellationToken);
+
+        jobs[enqueued].CurrentState.ShouldBe(State.Deleted);
+        jobs[scheduled].CurrentState.ShouldBe(State.Deleted);
+        jobs[processing].CurrentState.ShouldBe(State.Processing);
+        jobs[processing].CancellationMode.ShouldBe(CancellationMode.Graceful);
+        jobs[completed].CurrentState.ShouldBe(State.Completed);
+        jobs[failed].CurrentState.ShouldBe(State.Failed);
+
+        // Three non-terminal children were acted on (2 deleted + 1 graceful).
+        result.Succeeded.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task CancelBatch_JobIsNotABatch_Throws()
+    {
+        var jobId = Guid.NewGuid();
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(Job(jobId, JobKind.Job, State.Enqueued, parent: null));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext());
+
+        await Should.ThrowAsync<ArgumentException>(() => svc.CancelBatch(jobId));
+    }
+
+    [TimedFact]
+    public async Task CancelBatch_BatchNotFound_Throws()
+    {
+        var svc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext());
+
+        await Should.ThrowAsync<ArgumentException>(() => svc.CancelBatch(Guid.NewGuid()));
+    }
+
+    private static Job Job(Guid id, JobKind kind, State state, Guid? parent) =>
+        new()
+        {
+            Id = id,
+            Kind = kind,
+            CurrentState = state,
+            ParentJobId = parent,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        };
 }

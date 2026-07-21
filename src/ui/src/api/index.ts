@@ -122,6 +122,9 @@ export const getBatchJobCounts = (batchId: string) =>
 export const getBatchJobs = (batchId: string, page = 0, pageSize = 20, state?: string) =>
   api.get<PagedList<JobModel>>(`/batches/${batchId}/jobs`, { params: { page, pageSize, state } }).then(r => r.data);
 
+export const cancelBatch = (batchId: string) =>
+  api.post<BulkResult>(`/batches/${batchId}/cancel`).then(r => r.data);
+
 // Servers
 export const getServers = () => api.get<ServerModel[]>('/servers').then(r => r.data);
 

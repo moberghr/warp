@@ -14,7 +14,7 @@ import { State } from '@/types';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import * as api from '@/api';
 
-type DetailPendingAction = 'cancel' | 'requeue' | 'delete';
+type DetailPendingAction = 'cancel' | 'requeue' | 'delete' | 'cancelBatch';
 
 // Color rules for the history panel: any event carrying an exception payload renders
 // red (whole card, not just the inner <pre>), Completed renders green, everything else
@@ -174,6 +174,8 @@ export default function DetailPage() {
             <Button variant="outline" size="sm" onClick={() => setPending('requeue')}>Requeue</Button>
             <Button variant="destructive" size="sm" onClick={() => setPending('delete')}>Delete</Button>
           </>
+        ) : job.kind === 3 && (job.currentState === State.Processing || job.currentState === State.Awaiting) ? (
+          <Button variant="destructive" size="sm" onClick={() => setPending('cancelBatch')}>Cancel batch</Button>
         ) : null}
       </div>
 
@@ -376,7 +378,8 @@ export default function DetailPage() {
           pending === 'cancel' ? 'Cancel running job?'
             : pending === 'requeue' ? 'Requeue job?'
               : pending === 'delete' ? 'Delete job?'
-                : ''
+                : pending === 'cancelBatch' ? 'Cancel batch?'
+                  : ''
         }
         description={
           pending === 'cancel'
@@ -385,13 +388,16 @@ export default function DetailPage() {
               ? 'The job will be re-enqueued and picked up by a worker on the next poll.'
               : pending === 'delete'
                 ? 'The job will be removed permanently. This cannot be undone.'
-                : null
+                : pending === 'cancelBatch'
+                  ? 'Every child job that has not finished yet will be cancelled: enqueued/scheduled children are deleted, and running children are signalled for graceful cancellation. Completed and failed children are left as-is.'
+                  : null
         }
-        confirmLabel={pending === 'requeue' ? 'Requeue' : pending === 'cancel' ? 'Cancel job' : 'Delete'}
-        variant={pending === 'delete' || pending === 'cancel' ? 'destructive' : 'default'}
+        confirmLabel={pending === 'requeue' ? 'Requeue' : pending === 'cancel' ? 'Cancel job' : pending === 'cancelBatch' ? 'Cancel batch' : 'Delete'}
+        variant={pending === 'delete' || pending === 'cancel' || pending === 'cancelBatch' ? 'destructive' : 'default'}
         onConfirm={() => {
           if (pending === 'cancel' || pending === 'delete') api.deleteJob(job.id);
           else if (pending === 'requeue') api.requeueJob(job.id);
+          else if (pending === 'cancelBatch') api.cancelBatch(job.id);
           setPending(null);
         }}
       />

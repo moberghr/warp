@@ -23,6 +23,8 @@ public interface IJobCommandService
     Task<BulkResultModel> DeleteFailedJobsByType(string type);
 
     Task<BulkResultModel> RequeueFailedJobsByType(string type);
+
+    Task<BulkResultModel> CancelBatch(Guid batchId);
 }
 
 public class JobCommandService<TContext> : IJobCommandService
@@ -331,6 +333,40 @@ public class JobCommandService<TContext> : IJobCommandService
         }
 
         return result;
+    }
+
+    // #238: cancel a batch — cancel/delete every child job that hasn't finished yet. Terminal children
+    // (Completed/Failed/Deleted) are left untouched; the rest are routed through BulkDeleteJobs, which
+    // deletes Enqueued/Scheduled/Awaiting children and signals graceful cancellation for Processing ones.
+    // The batch parent is not touched directly — the Orchestrator finalizes it once its children settle.
+    public async Task<BulkResultModel> CancelBatch(Guid batchId)
+    {
+        var kind = await _context.Set<Job>()
+            .AsNoTracking()
+            .Where(x => x.Id == batchId)
+            .Select(x => (JobKind?)x.Kind)
+            .FirstOrDefaultAsync();
+
+        if (kind is null)
+        {
+            throw new ArgumentException("Batch not found.", nameof(batchId));
+        }
+
+        if (kind != JobKind.Batch)
+        {
+            throw new ArgumentException("Job is not a batch.", nameof(batchId));
+        }
+
+        var childIds = await _context.Set<Job>()
+            .AsNoTracking()
+            .Where(x => x.ParentJobId == batchId)
+            .Where(x => x.CurrentState != State.Completed)
+            .Where(x => x.CurrentState != State.Failed)
+            .Where(x => x.CurrentState != State.Deleted)
+            .Select(x => x.Id)
+            .ToListAsync();
+
+        return await BulkDeleteJobs([.. childIds]);
     }
 
     public async Task<BulkResultModel> BulkRequeueJobs(Guid[] jobIds)
