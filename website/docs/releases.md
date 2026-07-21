@@ -6,11 +6,7 @@ sidebar_position: 6
 
 ## Unreleased
 
-_Nothing yet._
-
-## 3.2.0
-
-*2026-07-21*
+> Merged to `main`, not yet published. Targets **3.2.0** — assign the version heading + date at release time.
 
 Additive minor release — no breaking API changes, every feature **opt-in and off by default**. Three new observability surfaces turn Warp into a one-stop shop for HTTP traffic in both directions, plus durable outbound webhook delivery. Ships three new packages (`Moberg.Warp.Adapters.Http`, `Moberg.Warp.Adapters.Refit`, `Moberg.Warp.Adapters.Webhooks`); inbound endpoint observability lands inside the existing `Moberg.Warp.Http`. Adds new dashboard sections.
 
