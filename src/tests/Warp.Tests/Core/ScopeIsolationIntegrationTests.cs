@@ -112,7 +112,7 @@ public abstract class ScopeIsolationIntegrationTestsBase : IntegrationTestBase
     {
         await using var server = await WarpTestServer.StartAsync(Fixture);
         var publisher = server.CreatePublisher();
-        var jobId = await publisher.Enqueue(new UnitRequest());
+        var jobId = await publisher.Enqueue(new MetadataWriterRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         await server.WaitForJobState(jobId, State.Completed);
@@ -123,7 +123,9 @@ public abstract class ScopeIsolationIntegrationTestsBase : IntegrationTestBase
             .FirstAsync(Xunit.TestContext.Current.CancellationToken);
         job.CurrentState.ShouldBe(State.Completed);
 
-        // Metadata should be persisted even on success (RetryPublishBehavior injects $maxRetries)
+        // Metadata should be persisted even on success. MetadataWriterRequest carries [Retry(3)], so the
+        // publish pipeline stamps MaxRetries into metadata at publish (RetryPublishBehavior no longer
+        // stamps the global default — #236 — it freezes the job-type [Retry] attribute).
         job.Metadata.ShouldNotBeNull();
         var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata);
         metadata.ShouldNotBeNull();

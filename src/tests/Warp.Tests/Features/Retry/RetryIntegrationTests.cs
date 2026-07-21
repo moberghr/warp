@@ -70,6 +70,58 @@ public abstract class RetryIntegrationTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
+    public async Task GivenJobClassRetryAttribute_PublishedWithoutMetadata_HonorsAttributeNotGlobalDefault()
+    {
+        // #236 regression: RetryPublishBehavior used to stamp the global default (MaxRetries=1) into
+        // every job's metadata, so at execution `metadata ?? attribute ?? options` never reached the
+        // [Retry] attribute — the job retried once, not per the attribute. Publishing through the REAL
+        // publisher (so the publish behavior runs) is what triggered it; the direct-insert unit tests
+        // bypass publish and never saw the bug. Global default here is 1 (WarpTestServer), attribute is 3.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new RetryAttributeThreeJobRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(jobId, State.Failed, timeout: TimeSpan.FromSeconds(8));
+
+        var ctx = Fixture.CreateContext();
+        var job = await ctx.Set<Job>().FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Failed);
+        GetRetriedTimes(job).ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task GivenHandlerRetryAttribute_PublishedWithoutMetadata_RetriesPastGlobalDefault()
+    {
+        // #236's exact scenario: the HANDLER declares [Retry(5)] (RetryAttributeHandlerRequest handler).
+        // The handler attribute is resolved at execution, so the publish behavior must not stamp the
+        // global default (1) into metadata and shadow it. We assert the job retries PAST the global cap
+        // of 1 (reaches RetriedTimes >= 2) rather than waiting for the full 5-retry chain — exact
+        // attribute counts are covered by the direct-insert unit tests; this proves the publish path
+        // no longer shadows the attribute. Before the fix the job fails at RetriedTimes == 1.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new RetryAttributeHandlerRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await WarpTestServer.WaitUntil(
+            async () =>
+            {
+                var job = await Fixture.CreateContext().Set<Job>()
+                    .Where(x => x.Id == jobId)
+                    .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
+
+                return job != null && GetRetriedTimes(job) >= 2;
+            },
+            timeout: TimeSpan.FromSeconds(7),
+            ct: Xunit.TestContext.Current.CancellationToken);
+
+        var final = await Fixture.CreateContext().Set<Job>()
+            .FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        GetRetriedTimes(final).ShouldBeGreaterThanOrEqualTo(2);
+    }
+
+    [TimedFact]
     public async Task GivenFailingJobWithZeroRetries_WhenProcessed_ThenFailsImmediately()
     {
         await using var server = await WarpTestServer.StartAsync(Fixture);
