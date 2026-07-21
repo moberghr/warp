@@ -93,6 +93,28 @@ public sealed class AdapterDetailModel
     public List<AdapterGroupStatModel> Groups { get; set; } = [];
 
     public List<AdapterCallSummaryModel> RecentCalls { get; set; } = [];
+
+    /// <summary>
+    /// Hourly performance time-series (call volume, error rate, average latency), oldest first, from the
+    /// durable hourly <c>Counter</c>/<c>Statistic</c> buckets — exact-over-all-calls, unaffected by
+    /// FailuresOnly/sampling, and surviving <c>AdapterCallLog</c> deletion. Bounded by the 7-day retention.
+    /// </summary>
+    public List<AdapterHistoryPointModel> History { get; set; } = [];
+}
+
+/// <summary>One hourly point of an adapter's performance time-series.</summary>
+public sealed class AdapterHistoryPointModel
+{
+    /// <summary>Start of the UTC hour this point covers.</summary>
+    public DateTime Hour { get; set; }
+
+    public long Calls { get; set; }
+
+    public long Errors { get; set; }
+
+    public double ErrorRate { get; set; }
+
+    public double AvgDurationMs { get; set; }
 }
 
 /// <summary>Per-operation row of the detail page operations table.</summary>

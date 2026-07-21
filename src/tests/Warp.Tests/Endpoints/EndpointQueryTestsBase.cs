@@ -208,6 +208,47 @@ public abstract class EndpointQueryTestsBase : IAsyncLifetime
         detail.P99DurationMs.ShouldBe(500);
     }
 
+    [TimedFact]
+    public async Task GetEndpointDetail_History_BuiltFromHourlyAggregates_OrderedOldestFirst()
+    {
+        // Two hourly buckets seeded directly (no call-log rows) so this proves the series comes from the
+        // durable aggregates and survives log deletion. Hour 1: 3 success + 1 failed, duration sum 80 →
+        // 4 calls, 25% errors, avg 20ms. Hour 2: 2 success, duration sum 30 → avg 15ms, 0% errors.
+        var h1 = new DateTime(2026, 7, 20, 10, 0, 0, DateTimeKind.Utc);
+        var h2 = new DateTime(2026, 7, 20, 11, 0, 0, DateTimeKind.Utc);
+        var b1 = EndpointCounterKeys.HourBucket(h1);
+        var b2 = EndpointCounterKeys.HourBucket(h2);
+
+        var seed = _fixture.CreateContext();
+        AddOutcomeCounters(seed, EndpointCounterKeys.Total(Route, "success"), 1);
+        AddOutcomeCounters(seed, EndpointCounterKeys.History(Route, "success", b1), 3);
+        AddOutcomeCounters(seed, EndpointCounterKeys.History(Route, "failed", b1), 1);
+        AddDurationCounter(seed, EndpointCounterKeys.History(Route, EndpointCounterKeys.DurationToken, b1), 80);
+        AddOutcomeCounters(seed, EndpointCounterKeys.History(Route, "success", b2), 2);
+        AddDurationCounter(seed, EndpointCounterKeys.History(Route, EndpointCounterKeys.DurationToken, b2), 30);
+        await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var id = (await CreateService().GetEndpoints(Xunit.TestContext.Current.CancellationToken)).Single().Id;
+
+        var detail = await CreateService().GetEndpointDetail(id, Xunit.TestContext.Current.CancellationToken);
+
+        detail.ShouldNotBeNull();
+        detail.History.Count.ShouldBe(2);
+
+        var first = detail.History[0];
+        first.Hour.ShouldBe(h1);
+        first.Calls.ShouldBe(4);
+        first.Errors.ShouldBe(1);
+        first.ErrorRate.ShouldBe(0.25, 0.001);
+        first.AvgDurationMs.ShouldBe(20);
+
+        var second = detail.History[1];
+        second.Hour.ShouldBe(h2);
+        second.Calls.ShouldBe(2);
+        second.Errors.ShouldBe(0);
+        second.AvgDurationMs.ShouldBe(15);
+    }
+
     private static EndpointCallLog CallLog(
         AdapterCallOutcome outcome,
         double durationMs,

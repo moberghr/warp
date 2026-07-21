@@ -11,10 +11,37 @@ import type {
   AdapterListItem,
   AdapterDetail,
   AdapterCallDetail,
+  AdapterHistoryPoint,
 } from '@/types/adapters';
 
 function ago(minutes: number): string {
   return new Date(FROZEN_NOW - minutes * 60_000).toISOString();
+}
+
+// Start of the UTC hour `hours` before the pinned demo clock — the x value of a history point.
+function hourAgo(hours: number): string {
+  const d = new Date(FROZEN_NOW - hours * 3_600_000);
+  d.setUTCMinutes(0, 0, 0);
+
+  return d.toISOString();
+}
+
+// Deterministic 12-hour performance series (oldest first) for the demo chart — no randomness so it
+// renders identically across screenshot runs. Values wobble by index so the bars/line have shape.
+function demoHistory(baseCalls: number, errorFraction: number, baseLatencyMs: number): AdapterHistoryPoint[] {
+  return Array.from({ length: 12 }, (_, i) => {
+    const calls = baseCalls + ((i * 7) % 13);
+    const errors = Math.round(calls * errorFraction * (0.4 + ((i % 3) * 0.5)));
+    const avgDurationMs = baseLatencyMs + ((i * 11) % 40);
+
+    return {
+      hour: hourAgo(11 - i),
+      calls,
+      errors,
+      errorRate: calls === 0 ? 0 : errors / calls,
+      avgDurationMs,
+    };
+  });
 }
 
 export const demoAdapters: AdapterListItem[] = [
@@ -126,6 +153,7 @@ export const demoAdapterDetails: Record<string, AdapterDetail> = {
         tagsJson: null,
       },
     ],
+    history: demoHistory(38, 0.03, 110),
   },
   'shipping-webhooks': {
     name: 'shipping-webhooks',
@@ -189,6 +217,7 @@ export const demoAdapterDetails: Record<string, AdapterDetail> = {
         tagsJson: null,
       },
     ],
+    history: demoHistory(22, 0.12, 240),
   },
   'legacy-soap-tax': {
     name: 'legacy-soap-tax',
@@ -222,6 +251,7 @@ export const demoAdapterDetails: Record<string, AdapterDetail> = {
         tagsJson: null,
       },
     ],
+    history: demoHistory(9, 0.28, 520),
   },
   geocoder: {
     name: 'geocoder',
@@ -240,6 +270,7 @@ export const demoAdapterDetails: Record<string, AdapterDetail> = {
     operations: [],
     groups: [],
     recentCalls: [],
+    history: [],
   },
 };
 

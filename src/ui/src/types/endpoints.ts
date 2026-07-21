@@ -64,6 +64,17 @@ export interface EndpointDetail {
   p99DurationMs: number;
   groups: EndpointGroupStat[];
   recentCalls: EndpointCallSummary[];
+  /** Hourly performance time-series (durable, sampling-proof), oldest first. */
+  history: EndpointHistoryPoint[];
+}
+
+/** One hourly point of an endpoint's performance time-series. */
+export interface EndpointHistoryPoint {
+  hour: string;
+  calls: number;
+  errors: number;
+  errorRate: number;
+  avgDurationMs: number;
 }
 
 /** Full call-log row with the captured (already redacted + truncated) payloads and caller metadata. */

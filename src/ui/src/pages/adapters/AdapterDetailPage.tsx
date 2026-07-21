@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
+import { PerformanceChart } from '@/components/PerformanceChart';
 import * as api from '@/api';
 import { HealthPill, adapterHealth, OutcomeBadge, formatPercent, formatMs, parseTags } from './shared';
 
@@ -112,6 +113,14 @@ export default function AdapterDetailPage() {
 
       {/* Policy — parsed from the config summary into labeled badges */}
       <PolicyCard configSummary={detail.configSummary} hasConflict={detail.hasPolicyConflict} firstSeenAt={detail.firstSeenAt} />
+
+      {/* Performance over time — durable hourly volume + error + latency series */}
+      <Card className="mb-4">
+        <CardHeader><CardTitle className="text-base">Performance over time</CardTitle></CardHeader>
+        <CardContent>
+          <PerformanceChart points={detail.history} />
+        </CardContent>
+      </Card>
 
       {/* Operations — click a row to filter the recent-calls list to that operation */}
       <Card className="mb-4">

@@ -321,6 +321,14 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
             context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Group(record.AdapterName, record.GroupName, outcome), Value = 1 });
             context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.Group(record.AdapterName, record.GroupName, AdapterCounterKeys.DurationToken), Value = durationMs });
         }
+
+        // Hourly time-series buckets (per-outcome count + duration sum) power the per-adapter performance
+        // chart — volume, error rate and average latency over time. Aggregate-backed like everything above,
+        // so the chart survives AdapterCallLog deletion and is unaffected by FailuresOnly/sampling; the key
+        // ends in the date bucket so the generic 7-day hourly-stat cleanup prunes it with no bespoke sweep.
+        var hour = AdapterCounterKeys.HourBucket(record.Timestamp);
+        context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.History(record.AdapterName, outcome, hour), Value = 1 });
+        context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.History(record.AdapterName, AdapterCounterKeys.DurationToken, hour), Value = durationMs });
     }
 
     private static async Task UpsertDefinitionsAsync(
@@ -462,6 +470,13 @@ internal static class AdapterCounterKeys
     // Total at length 3 and op/grp at length >= 5) never folds it into the count/error StatSet.
     public const string PctMarker = "pct";
 
+    // Marker for the hourly time-series buckets. An hourly key has the fixed shape
+    // adapter:{adapter}:hist:{outcome}:{yyyy-MM-dd-HH} — its trailing segment is a date, so the generic
+    // hourly-stat sweep in ExpirationCleanup prunes it at 7 days with no bespoke cleanup, and TryParse
+    // (which matches only op/grp at this length) rejects it so it never pollutes the lifetime StatSet. Read
+    // separately via TryParseHistory to build the per-adapter performance chart.
+    public const string HistoryMarker = "hist";
+
     // Ascending latency-bucket upper bounds (ms); the trailing int.MaxValue is the "> 10000 ms" catch-all
     // overflow bucket. A single call increments the ONE bucket whose bound is the smallest >= its rounded
     // ms (see BucketFor); the read side walks these cumulatively to derive p90/p95/p99.
@@ -474,6 +489,12 @@ internal static class AdapterCounterKeys
     public static string Group(string adapter, string group, string outcome) => $"{Prefix}:{adapter}:grp:{group}:{outcome}";
 
     public static string Pct(string adapter, int upperMs) => $"{Prefix}:{adapter}:{PctMarker}:{upperMs.ToString(CultureInfo.InvariantCulture)}";
+
+    public static string History(string adapter, string outcome, string hour) => $"{Prefix}:{adapter}:{HistoryMarker}:{outcome}:{hour}";
+
+    // The hourly bucket label (UTC) a timestamp falls in — the trailing segment of a history key. Matches
+    // the "yyyy-MM-dd-HH" format the job-stats history and the generic hourly-stat cleanup both use.
+    public static string HourBucket(DateTime timestampUtc) => timestampUtc.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
 
     // The smallest bucket upper bound that is >= the rounded duration. Buckets is ascending and its last
     // entry is int.MaxValue, so First always matches (the final entry is the "> 10000 ms" catch-all).
@@ -568,6 +589,43 @@ internal static class AdapterCounterKeys
         }
 
         adapter = parts[1];
+
+        return true;
+    }
+
+    // Parses an hourly time-series bucket key (adapter:{adapter}:hist:{outcome}:{yyyy-MM-dd-HH}). Returns
+    // false for every other key shape — the disjoint counterpart to TryParse, which rejects hist keys. The
+    // outcome is a count outcome token (success/failed/throttled/…) or the DurationToken; the read side sums
+    // them per hour into calls / errors / duration for the performance chart.
+    public static bool TryParseHistory(string key, out string adapter, out string outcome, out DateTime hour)
+    {
+        adapter = string.Empty;
+        outcome = string.Empty;
+        hour = default;
+
+        var parts = key.Split(':');
+        if (parts.Length != 5)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], Prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!DateTime.TryParseExact(parts[4], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
+        {
+            return false;
+        }
+
+        adapter = parts[1];
+        outcome = parts[3];
 
         return true;
     }

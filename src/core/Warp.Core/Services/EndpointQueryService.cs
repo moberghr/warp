@@ -143,6 +143,7 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
             P99DurationMs = p99,
             Groups = groups,
             RecentCalls = recentCalls,
+            History = await LoadHistoryAsync(route, ct),
         };
     }
 
@@ -259,6 +260,76 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         var space = route.IndexOf(' ', StringComparison.Ordinal);
 
         return space < 0 ? string.Empty : route[(space + 1)..];
+    }
+
+    // Builds the hourly performance time-series for one route from the durable history buckets
+    // (endpoint:{route}:hist:{outcome}:{hour}). Reads the aggregated Statistic rows + the not-yet-collapsed
+    // Counter rows (so the current hour isn't missing) and sums per hour into calls / errors / duration.
+    // Bounded by the 7-day hourly-stat retention; points with no traffic simply don't exist (gaps).
+    private async Task<List<EndpointHistoryPointModel>> LoadHistoryAsync(string route, CancellationToken ct)
+    {
+        var prefix = $"{EndpointCounterKeys.Prefix}:{route}:{EndpointCounterKeys.HistoryMarker}:";
+
+        var aggregated = await _context.Set<Statistic>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith(prefix))
+            .Select(x =>
+                new
+                {
+                    x.Key,
+                    x.Value,
+                })
+            .ToListAsync(ct);
+
+        var pending = await _context.Set<Counter>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith(prefix))
+            .GroupBy(x => x.Key)
+            .Select(g =>
+                new
+                {
+                    Key = g.Key,
+                    Value = g.Sum(c => (long)c.Value),
+                })
+            .ToListAsync(ct);
+
+        var buckets = new Dictionary<DateTime, HistoryBucket>();
+
+        foreach (var row in aggregated.Concat(pending))
+        {
+            if (!EndpointCounterKeys.TryParseHistory(row.Key, out var keyRoute, out var outcome, out var hour))
+            {
+                continue;
+            }
+
+            if (!string.Equals(keyRoute, route, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!buckets.TryGetValue(hour, out var bucket))
+            {
+                bucket = new HistoryBucket();
+                buckets[hour] = bucket;
+            }
+
+            bucket.Add(outcome, row.Value);
+        }
+
+        return
+        [
+            .. buckets
+                .OrderBy(x => x.Key)
+                .Select(x =>
+                    new EndpointHistoryPointModel
+                    {
+                        Hour = x.Key,
+                        Calls = x.Value.Calls,
+                        Errors = x.Value.Errors,
+                        ErrorRate = x.Value.Calls == 0 ? 0 : (double)x.Value.Errors / x.Value.Calls,
+                        AvgDurationMs = x.Value.Calls == 0 ? 0 : (double)x.Value.DurationSum / x.Value.Calls,
+                    }),
+        ];
     }
 
     private async Task<StatSet> LoadStatsAsync(CancellationToken ct)
@@ -439,5 +510,33 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         }
 
         private static bool IsError(string outcome) => string.Equals(outcome, "failed", StringComparison.Ordinal);
+    }
+
+    // Accumulates one hourly time-series bucket: total calls, error calls, and summed duration. Mirrors the
+    // count/error/duration split of OutcomeCounts but over a single hour, for the performance chart.
+    private sealed class HistoryBucket
+    {
+        public long Calls { get; private set; }
+
+        public long Errors { get; private set; }
+
+        public long DurationSum { get; private set; }
+
+        public void Add(string outcome, long value)
+        {
+            if (string.Equals(outcome, EndpointCounterKeys.DurationToken, StringComparison.Ordinal))
+            {
+                DurationSum += value;
+
+                return;
+            }
+
+            Calls += value;
+
+            if (string.Equals(outcome, "failed", StringComparison.Ordinal))
+            {
+                Errors += value;
+            }
+        }
     }
 }

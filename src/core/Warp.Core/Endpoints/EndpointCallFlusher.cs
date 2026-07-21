@@ -307,6 +307,14 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
             context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.Group(route, record.GroupName, outcome), Value = 1 });
             context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.Group(route, record.GroupName, EndpointCounterKeys.DurationToken), Value = durationMs });
         }
+
+        // Hourly time-series buckets (per-outcome count + duration sum) power the per-endpoint performance
+        // chart — volume, error rate and average latency over time. Aggregate-backed like everything above,
+        // so the chart survives EndpointCallLog deletion and is unaffected by sampling; the key ends in the
+        // date bucket so the generic 7-day hourly-stat cleanup prunes it with no bespoke sweep.
+        var hour = EndpointCounterKeys.HourBucket(record.Timestamp);
+        context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.History(route, outcome, hour), Value = 1 });
+        context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.History(route, EndpointCounterKeys.DurationToken, hour), Value = durationMs });
     }
 }
 

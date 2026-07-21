@@ -99,6 +99,30 @@ public class AdapterCoreTests
         grp.Outcome.ShouldBe("throttled");
     }
 
+    [TimedFact]
+    public void HistoryKey_BuildThenParse_RoundTrips_And_DoesNotPolluteLifetimeStats()
+    {
+        var hour = AdapterCounterKeys.HourBucket(new DateTime(2026, 7, 20, 14, 37, 12, DateTimeKind.Utc));
+        hour.ShouldBe("2026-07-20-14");
+
+        var key = AdapterCounterKeys.History("vendor", "failed", hour);
+        key.ShouldBe("adapter:vendor:hist:failed:2026-07-20-14");
+
+        AdapterCounterKeys.TryParseHistory(key, out var adapter, out var outcome, out var parsedHour).ShouldBeTrue();
+        adapter.ShouldBe("vendor");
+        outcome.ShouldBe("failed");
+        parsedHour.ShouldBe(new DateTime(2026, 7, 20, 14, 0, 0, DateTimeKind.Utc));
+
+        // An hourly history key is neither a count/error row nor a latency-histogram row — both lifetime
+        // parsers must reject it so it never inflates the totals or the percentiles.
+        AdapterCounterKeys.TryParse(key, out _).ShouldBeFalse();
+        AdapterCounterKeys.TryParsePct(key, out _, out _).ShouldBeFalse();
+
+        // And the disjoint parser rejects lifetime keys.
+        AdapterCounterKeys.TryParseHistory(AdapterCounterKeys.Total("vendor", "success"), out _, out _, out _).ShouldBeFalse();
+        AdapterCounterKeys.TryParseHistory(AdapterCounterKeys.Operation("vendor", "GetOrders", "failed"), out _, out _, out _).ShouldBeFalse();
+    }
+
     private static Task<string> MapUnderBarrier(CardinalityGuard guard, string value, BarrierSignal barrier)
         => Task.Run(async () =>
         {

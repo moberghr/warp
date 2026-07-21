@@ -112,6 +112,19 @@ public abstract class EndpointFlusherTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Persist_WritesHourlyHistoryCounters()
+    {
+        var timestamp = new DateTime(2026, 7, 20, 14, 37, 0, DateTimeKind.Utc);
+        await PersistAsync(Record("GET", "/orders", AdapterCallOutcome.Failed, durationMs: 30, timestamp: timestamp));
+
+        var route = EndpointCounterKeys.NormalizeRoute("GET", "/orders");
+        var hour = EndpointCounterKeys.HourBucket(timestamp);
+
+        (await CounterValueAsync(EndpointCounterKeys.History(route, "failed", hour))).ShouldBe(1);
+        (await CounterValueAsync(EndpointCounterKeys.History(route, EndpointCounterKeys.DurationToken, hour))).ShouldBe(30);
+    }
+
+    [TimedFact]
     public async Task Persist_ExpireAt_PersistedToRow()
     {
         var expireAt = new DateTime(2030, 1, 2, 3, 4, 5, DateTimeKind.Utc);
@@ -132,14 +145,15 @@ public abstract class EndpointFlusherTestsBase : IAsyncLifetime
         string? group = null,
         double durationMs = 5,
         bool suppressLog = false,
-        DateTime? expireAt = null)
+        DateTime? expireAt = null,
+        DateTime? timestamp = null)
         => new()
         {
             Method = method,
             RouteTemplate = routeTemplate,
             Operation = "Probe",
             GroupName = group,
-            Timestamp = DateTime.UtcNow,
+            Timestamp = timestamp ?? DateTime.UtcNow,
             DurationMs = durationMs,
             Outcome = outcome,
             MachineName = "test-host",

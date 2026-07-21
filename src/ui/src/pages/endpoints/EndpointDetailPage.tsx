@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
+import { PerformanceChart } from '@/components/PerformanceChart';
 import * as api from '@/api';
 import { HealthPill, adapterHealth, OutcomeBadge, formatPercent, formatMs } from '../adapters/shared';
 
@@ -100,6 +101,14 @@ export default function EndpointDetailPage() {
 
       {/* Latency percentiles from the durable histogram — shown once there is request data */}
       <LatencyLine detail={detail} />
+
+      {/* Performance over time — durable hourly volume + error + latency series */}
+      <Card className="mb-4">
+        <CardHeader><CardTitle className="text-base">Performance over time</CardTitle></CardHeader>
+        <CardContent>
+          <PerformanceChart points={detail.history} />
+        </CardContent>
+      </Card>
 
       {/* Callers (groups) — only when calls carry a group; click a row to filter recent calls */}
       {hasGroups && (

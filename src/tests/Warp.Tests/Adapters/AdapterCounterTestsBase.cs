@@ -48,6 +48,18 @@ public abstract class AdapterCounterTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Persist_WritesHourlyHistoryCounters()
+    {
+        var timestamp = new DateTime(2026, 7, 20, 14, 37, 0, DateTimeKind.Utc);
+        await PersistAsync(Record("vendor", "GetOrders", AdapterCallOutcome.Throttled, durationMs: 30, timestamp: timestamp));
+
+        var hour = AdapterCounterKeys.HourBucket(timestamp);
+
+        (await CounterValueAsync(AdapterCounterKeys.History("vendor", "throttled", hour))).ShouldBe(1);
+        (await CounterValueAsync(AdapterCounterKeys.History("vendor", AdapterCounterKeys.DurationToken, hour))).ShouldBe(30);
+    }
+
+    [TimedFact]
     public async Task Persist_WritesLatencyHistogramBucket()
     {
         // 42ms rounds into the 50ms bucket (the smallest bound >= 42); no other bucket is touched. The
@@ -120,13 +132,13 @@ public abstract class AdapterCounterTestsBase : IAsyncLifetime
         definition.GroupLabel.ShouldBe("Endpoint");
     }
 
-    private static AdapterCallRecord Record(string adapter, string operation, AdapterCallOutcome outcome, string? group = null, double durationMs = 5)
+    private static AdapterCallRecord Record(string adapter, string operation, AdapterCallOutcome outcome, string? group = null, double durationMs = 5, DateTime? timestamp = null)
         => new()
         {
             AdapterName = adapter,
             Operation = operation,
             GroupName = group,
-            Timestamp = DateTime.UtcNow,
+            Timestamp = timestamp ?? DateTime.UtcNow,
             DurationMs = durationMs,
             Attempts = 1,
             Outcome = outcome,

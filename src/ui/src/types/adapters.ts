@@ -82,6 +82,17 @@ export interface AdapterDetail {
   operations: AdapterOperationStat[];
   groups: AdapterGroupStat[];
   recentCalls: AdapterCallSummary[];
+  /** Hourly performance time-series (durable, sampling-proof), oldest first. */
+  history: AdapterHistoryPoint[];
+}
+
+/** One hourly point of an adapter's performance time-series. */
+export interface AdapterHistoryPoint {
+  hour: string;
+  calls: number;
+  errors: number;
+  errorRate: number;
+  avgDurationMs: number;
 }
 
 /** Full call-log row with the captured (already redacted + truncated) payloads. */

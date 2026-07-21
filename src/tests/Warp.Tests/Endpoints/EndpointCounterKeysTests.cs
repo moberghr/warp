@@ -113,4 +113,39 @@ public class EndpointCounterKeysTests
         EndpointCounterKeys.TryParsePct(EndpointCounterKeys.Total("GET /orders", "success"), out _, out _).ShouldBeFalse();
         EndpointCounterKeys.TryParsePct("adapter:vendor:pct:50", out _, out _).ShouldBeFalse();
     }
+
+    [TimedFact]
+    public void History_BuildsHourlyKey_RoundTripsRouteOutcomeAndHour()
+    {
+        var route = EndpointCounterKeys.NormalizeRoute("get", "/orders/{id:int}");
+        var hour = EndpointCounterKeys.HourBucket(new DateTime(2026, 7, 20, 14, 37, 12, DateTimeKind.Utc));
+
+        hour.ShouldBe("2026-07-20-14");
+        var key = EndpointCounterKeys.History(route, "failed", hour);
+        key.ShouldBe("endpoint:GET /orders/{id}:hist:failed:2026-07-20-14");
+
+        EndpointCounterKeys.TryParseHistory(key, out var parsedRoute, out var outcome, out var parsedHour).ShouldBeTrue();
+        parsedRoute.ShouldBe("GET /orders/{id}");
+        outcome.ShouldBe("failed");
+        parsedHour.ShouldBe(new DateTime(2026, 7, 20, 14, 0, 0, DateTimeKind.Utc));
+    }
+
+    [TimedFact]
+    public void History_DoesNotPolluteLifetimeStats()
+    {
+        var route = EndpointCounterKeys.NormalizeRoute("get", "/orders/{id:int}");
+        var key = EndpointCounterKeys.History(route, "success", "2026-07-20-14");
+
+        // An hourly history key is neither a count/error row nor a latency-histogram row — both lifetime
+        // parsers must reject it so it never inflates the totals or the percentiles.
+        EndpointCounterKeys.TryParse(key, out _).ShouldBeFalse();
+        EndpointCounterKeys.TryParsePct(key, out _, out _).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public void TryParseHistory_NonHistoryKey_ReturnsFalse()
+    {
+        EndpointCounterKeys.TryParseHistory(EndpointCounterKeys.Total("GET /orders", "success"), out _, out _, out _).ShouldBeFalse();
+        EndpointCounterKeys.TryParseHistory(EndpointCounterKeys.Group("GET /orders", "shop-1", "failed"), out _, out _, out _).ShouldBeFalse();
+    }
 }

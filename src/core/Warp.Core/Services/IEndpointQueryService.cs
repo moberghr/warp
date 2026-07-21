@@ -111,6 +111,28 @@ public sealed class EndpointDetailModel
     public IReadOnlyList<EndpointGroupStatModel> Groups { get; set; } = [];
 
     public IReadOnlyList<EndpointCallSummaryModel> RecentCalls { get; set; } = [];
+
+    /// <summary>
+    /// Hourly performance time-series (call volume, error rate, average latency), oldest first, from the
+    /// durable hourly <c>Counter</c>/<c>Statistic</c> buckets — so it is exact-over-all-calls, unaffected by
+    /// sampling, and survives <c>EndpointCallLog</c> deletion. Bounded by the 7-day hourly-stat retention.
+    /// </summary>
+    public IReadOnlyList<EndpointHistoryPointModel> History { get; set; } = [];
+}
+
+/// <summary>One hourly point of an endpoint's performance time-series.</summary>
+public sealed class EndpointHistoryPointModel
+{
+    /// <summary>Start of the UTC hour this point covers.</summary>
+    public DateTime Hour { get; set; }
+
+    public long Calls { get; set; }
+
+    public long Errors { get; set; }
+
+    public double ErrorRate { get; set; }
+
+    public double AvgDurationMs { get; set; }
 }
 
 /// <summary>Full call-log row with the captured (already redacted + truncated) payloads and caller metadata.</summary>

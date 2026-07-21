@@ -31,6 +31,13 @@ internal static partial class EndpointCounterKeys
     // Total at length 3 and grp at length >= 5) never folds it into the count/error StatSet.
     public const string PctMarker = "pct";
 
+    // Marker for the hourly time-series buckets. An hourly key has the fixed shape
+    // endpoint:{route}:hist:{outcome}:{yyyy-MM-dd-HH} — its trailing segment is a date, so the generic
+    // hourly-stat sweep in ExpirationCleanup prunes it at 7 days with no bespoke cleanup, and TryParse
+    // (which matches only grp at this length) rejects it so it never pollutes the lifetime count/error/pct
+    // StatSet. Read separately via TryParseHistory to build the per-endpoint performance chart.
+    public const string HistoryMarker = "hist";
+
     // Ascending latency-bucket upper bounds (ms); the trailing int.MaxValue is the "> 10000 ms" catch-all
     // overflow bucket. A single call increments the ONE bucket whose bound is the smallest >= its rounded
     // ms (see BucketFor); the read side walks these cumulatively to derive p90/p95/p99.
@@ -41,6 +48,12 @@ internal static partial class EndpointCounterKeys
     public static string Group(string route, string group, string outcome) => $"{Prefix}:{route}:grp:{group}:{outcome}";
 
     public static string Pct(string route, int upperMs) => $"{Prefix}:{route}:{PctMarker}:{upperMs.ToString(CultureInfo.InvariantCulture)}";
+
+    public static string History(string route, string outcome, string hour) => $"{Prefix}:{route}:{HistoryMarker}:{outcome}:{hour}";
+
+    // The hourly bucket label (UTC) a timestamp falls in — the trailing segment of a history key. Matches
+    // the "yyyy-MM-dd-HH" format the job-stats history and the generic hourly-stat cleanup both use.
+    public static string HourBucket(DateTime timestampUtc) => timestampUtc.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
 
     // The smallest bucket upper bound that is >= the rounded duration. Buckets is ascending and its last
     // entry is int.MaxValue, so First always matches (the final entry is the "> 10000 ms" catch-all).
@@ -148,6 +161,43 @@ internal static partial class EndpointCounterKeys
         }
 
         route = parts[1];
+
+        return true;
+    }
+
+    // Parses an hourly time-series bucket key (endpoint:{route}:hist:{outcome}:{yyyy-MM-dd-HH}). Returns
+    // false for every other key shape — the disjoint counterpart to TryParse, which rejects hist keys. The
+    // outcome is the count outcome token (success/failed) or the DurationToken; the read side sums them per
+    // hour into calls / errors / duration for the performance chart.
+    public static bool TryParseHistory(string key, out string route, out string outcome, out DateTime hour)
+    {
+        route = string.Empty;
+        outcome = string.Empty;
+        hour = default;
+
+        var parts = key.Split(':');
+        if (parts.Length != 5)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], Prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!DateTime.TryParseExact(parts[4], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
+        {
+            return false;
+        }
+
+        route = parts[1];
+        outcome = parts[3];
 
         return true;
     }
