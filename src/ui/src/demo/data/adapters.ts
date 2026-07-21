@@ -26,16 +26,21 @@ function hourAgo(hours: number): string {
   return d.toISOString();
 }
 
-// Deterministic 12-hour performance series (oldest first) for the demo chart — no randomness so it
-// renders identically across screenshot runs. Values wobble by index so the bars/line have shape.
+// Deterministic 24-hour performance series (oldest first) for the demo chart — no randomness so it
+// renders identically across screenshot runs. Values wobble by index (a slow sine-like swell via modular
+// arithmetic) so the bars/line have realistic shape across the day.
 function demoHistory(baseCalls: number, errorFraction: number, baseLatencyMs: number): AdapterHistoryPoint[] {
-  return Array.from({ length: 12 }, (_, i) => {
-    const calls = baseCalls + ((i * 7) % 13);
-    const errors = Math.round(calls * errorFraction * (0.4 + ((i % 3) * 0.5)));
-    const avgDurationMs = baseLatencyMs + ((i * 11) % 40);
+  const hours = 24;
+
+  return Array.from({ length: hours }, (_, i) => {
+    // A daytime swell: busier in the middle of the window, quieter at the edges.
+    const swell = 1 + Math.round((hours / 2 - Math.abs(hours / 2 - i)) * 0.6);
+    const calls = baseCalls + swell + ((i * 7) % 13);
+    const errors = Math.round(calls * errorFraction * (0.3 + ((i % 4) * 0.4)));
+    const avgDurationMs = baseLatencyMs + ((i * 13) % 55) + (i % 5) * 6;
 
     return {
-      hour: hourAgo(11 - i),
+      hour: hourAgo(hours - 1 - i),
       calls,
       errors,
       errorRate: calls === 0 ? 0 : errors / calls,
