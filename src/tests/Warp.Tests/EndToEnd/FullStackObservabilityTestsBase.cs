@@ -185,6 +185,11 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
                 opt.UseSqlServer();
             }
 
+            // One worker is all this test needs (drain one job + one webhook executor). Left at the default
+            // (min(cores*5, 20) = up to 20) it would hammer the SHARED test-container every 100ms in parallel
+            // with the whole PG suite — a load spike that destabilizes timing-sensitive neighbours. Integration
+            // tests that boot a full worker host must be good neighbours (WarpTestServer caps itself the same way).
+            opt.WorkerCount = 1;
             opt.PollingInterval = TimeSpan.FromMilliseconds(100);
             opt.MaxPollingInterval = TimeSpan.FromMilliseconds(100);
             opt.PollingIntervalFactor = 1.0;
