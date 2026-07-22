@@ -13,5 +13,14 @@ export default defineConfig({
     globals: true,
     // Playwright screenshot specs under e2e/ are a separate runner.
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text-summary', 'text'],
+      // Gate coverage on the non-view logic only. React pages/components, thin axios/react-query
+      // wrappers, demo fixtures, and generated types are integration/rendering concerns that the unit
+      // suite intentionally does not assert on (#187) — including them would make the threshold noise.
+      include: ['src/lib/**', 'src/stores/**', 'src/hooks/**', 'src/utils/**', 'src/config.ts'],
+      thresholds: { statements: 85, branches: 80, functions: 85, lines: 85 },
+    },
   },
 });

@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { shortType, shortId, stateName, formatBytes, isServerStale } from './format';
+import {
+  shortType, shortId, stateName, formatBytes, isServerStale,
+  formatRelativeTime, formatDateTime, formatDateTimeExact, stateColor, serverStatusDotColor,
+} from './format';
 import { State } from '@/types';
 
 describe('shortType', () => {
@@ -44,6 +47,36 @@ describe('formatBytes', () => {
   });
 });
 
+describe('date formatters', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('formatDateTime / formatDateTimeExact render the yyyy-MM-dd HH:mm:ss.SSS shape', () => {
+    // Zone-dependent value → assert the shape, not the exact local time (CI vs local zone differ).
+    const shape = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/;
+    expect(formatDateTime('2026-01-02T03:04:05.678Z')).toMatch(shape);
+    expect(formatDateTimeExact('2026-01-02T03:04:05.678Z')).toMatch(shape);
+  });
+
+  it('formatRelativeTime is relative to the current clock', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:01:00Z'));
+    // Locale-agnostic: 1 minute ago renders the "1" quantity in any locale (e.g. "1 minute ago",
+    // "prije 1 minutu"); asserting the English word would be locale-dependent.
+    const rel = formatRelativeTime('2026-01-01T00:00:00Z');
+    expect(rel).toBeTruthy();
+    expect(rel).toContain('1');
+  });
+});
+
+describe('stateColor', () => {
+  it('returns a tailwind class for every state and a default', () => {
+    for (const s of [State.Enqueued, State.Awaiting, State.Processing, State.Completed, State.Failed, State.Deleted, State.Scheduled]) {
+      expect(stateColor(s)).toContain('bg-');
+    }
+    expect(stateColor(999 as State)).toContain('bg-');
+  });
+});
+
 describe('isServerStale', () => {
   afterEach(() => vi.useRealTimers());
 
@@ -54,5 +87,20 @@ describe('isServerStale', () => {
     expect(isServerStale('2026-01-01T00:00:00Z')).toBe(false);
     expect(isServerStale('2025-12-31T23:59:55Z')).toBe(false); // 5s ago
     expect(isServerStale('2025-12-31T23:59:00Z')).toBe(true); // 60s ago
+  });
+});
+
+describe('serverStatusDotColor', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('is amber when paused (regardless of heartbeat)', () => {
+    expect(serverStatusDotColor('2020-01-01T00:00:00Z', '2026-01-01T00:00:00Z')).toBe('bg-amber-500');
+  });
+
+  it('is green when the heartbeat is fresh and red when stale', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    expect(serverStatusDotColor('2026-01-01T00:00:00Z', null)).toBe('bg-green-500');
+    expect(serverStatusDotColor('2025-12-31T23:59:00Z', null)).toBe('bg-red-500');
   });
 });

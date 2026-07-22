@@ -14,6 +14,41 @@ describe('queryKeys', () => {
     expect(queryKeys.batches(undefined, 0, 20)).toEqual(['batches', 'all', 0, 20]);
     expect(queryKeys.dashboardStats()).toEqual(['dashboard', 'stats', '24h']);
   });
+
+  it('builds every remaining key with its expected shape', () => {
+    expect(queryKeys.dashboardStatus).toEqual(['dashboard', 'status']);
+    expect(queryKeys.dashboardStats('7d')).toEqual(['dashboard', 'stats', '7d']);
+    expect(queryKeys.statsHistory(48)).toEqual(['stats', 'history', 48]);
+    expect(queryKeys.failedJobTypes).toEqual(['jobs', 'failed', 'types']);
+    expect(queryKeys.job('j')).toEqual(['job', 'j']);
+    expect(queryKeys.jobLogs('j')).toEqual(['job', 'j', 'logs']);
+    expect(queryKeys.messageJobs('m', 0, 20, 'processing')).toEqual(['messages', 'm', 'jobs', 'processing', 0, 20]);
+    expect(queryKeys.messageJobs('m', 0, 20)).toEqual(['messages', 'm', 'jobs', 'all', 0, 20]);
+    expect(queryKeys.messageJobCounts('m')).toEqual(['messages', 'm', 'jobs', 'counts']);
+    expect(queryKeys.batchJobCounts('b')).toEqual(['batches', 'b', 'jobs', 'counts']);
+    expect(queryKeys.recurring(0, 20)).toEqual(['recurring', 0, 20]);
+    expect(queryKeys.recurringDetail(3)).toEqual(['recurring', 3]);
+    expect(queryKeys.recurringJobs(3, 0, 20)).toEqual(['recurring', 3, 'jobs', 0, 20]);
+    expect(queryKeys.servers).toEqual(['servers']);
+    expect(queryKeys.serverDetail('s')).toEqual(['servers', 's']);
+    expect(queryKeys.serverTasks('s')).toEqual(['servers', 's', 'tasks']);
+    expect(queryKeys.serverLogs('s', 0, 20, 'Heartbeat')).toEqual(['servers', 's', 'logs', 'Heartbeat', 0, 20]);
+    expect(queryKeys.serverLogs('s', 0, 20)).toEqual(['servers', 's', 'logs', 'all', 0, 20]);
+    expect(queryKeys.workerDetail('w')).toEqual(['workers', 'w']);
+    expect(queryKeys.workerLogs('w', 0, 20)).toEqual(['workers', 'w', 'logs', 0, 20]);
+    expect(queryKeys.counters).toEqual(['counters']);
+    expect(queryKeys.countersHistory(24)).toEqual(['counters', 'history', 24]);
+    expect(queryKeys.concurrencyLimits).toEqual(['concurrency-limits']);
+    expect(queryKeys.rateLimits).toEqual(['rate-limits']);
+    expect(queryKeys.detail('d')).toEqual(['detail', 'd']);
+  });
+
+  it('exposes every scope as a single-segment prefix', () => {
+    expect(Object.values(queryScopes).every((s) => s.length === 1)).toBe(true);
+    expect(queryScopes.workers).toEqual(['workers']);
+    expect(queryScopes.recurring).toEqual(['recurring']);
+    expect(queryScopes.servers).toEqual(['servers']);
+  });
 });
 
 describe('queryScopes', () => {

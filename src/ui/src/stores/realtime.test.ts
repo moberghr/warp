@@ -35,6 +35,9 @@ import { subscribeRealtime } from '@/lib/realtimeBus';
 beforeEach(() => {
   for (const k of Object.keys(h.handlers)) delete h.handlers[k];
   h.conn.on.mockClear();
+  h.conn.onreconnecting.mockClear();
+  h.conn.onreconnected.mockClear();
+  h.conn.onclose.mockClear();
   h.conn.stop.mockClear().mockResolvedValue(undefined);
   h.conn.start.mockClear().mockResolvedValue(undefined);
   h.conn.state = 'Disconnected';
@@ -119,5 +122,30 @@ describe('realtime store', () => {
     expect(h.conn.stop).toHaveBeenCalledOnce();
     expect(useRealtimeStore.getState().status).toBe('idle');
     expect(useRealtimeStore.getState().connection).toBeNull();
+  });
+
+  it('reconnect lifecycle callbacks drive status, and reconnected drains missed events', async () => {
+    const drained: string[] = [];
+    const u1 = subscribeRealtime('JobFinalized', () => drained.push('job'));
+    const u2 = subscribeRealtime('MessageEnqueued', () => drained.push('msg'));
+    await useRealtimeStore.getState().connectIfEnabled(true);
+    drained.length = 0; // discard the initial-connect drain
+
+    const onReconnecting = h.conn.onreconnecting.mock.calls.at(-1)![0] as () => void;
+    const onReconnected = h.conn.onreconnected.mock.calls.at(-1)![0] as () => void;
+    const onClose = h.conn.onclose.mock.calls.at(-1)![0] as () => void;
+
+    onReconnecting();
+    expect(useRealtimeStore.getState().status).toBe('reconnecting');
+
+    onReconnected();
+    expect(useRealtimeStore.getState().status).toBe('connected');
+    expect(drained).toEqual(['job', 'msg']);
+
+    onClose();
+    expect(useRealtimeStore.getState().status).toBe('disabled');
+    expect(useRealtimeStore.getState().connection).toBeNull();
+
+    u1(); u2();
   });
 });

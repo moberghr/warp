@@ -28,9 +28,9 @@ jobs:
         working-directory: src/ui
         run: npm ci
 
-      - name: Run Vitest
+      - name: Run Vitest (with coverage gate)
         working-directory: src/ui
-        run: npm test
+        run: npm test -- --coverage
 
   test:
     name: ${{ matrix.database }}

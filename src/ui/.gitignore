@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 test-results/
 bundle-stats.html
+
+# Vitest coverage output
+coverage
