@@ -185,21 +185,26 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
 
     private Task<WarpTestServer> StartIdleServerAsync()
     {
-        // Worker polls only "default": a recovered executor job lands on "warp:webhooks" and stays Enqueued
-        // for a deterministic count assertion instead of racing a worker pickup. The Queues assignment comes
-        // deliberately AFTER AddWebhooks — the addon auto-appends its queue (CRITICAL-2), and a worker that
-        // consumed the recovered job would re-stamp NextAttemptAt mid-assert.
-        // StaleJobRecoveryInterval = null disables the server's OWN background sweep so the test's manual
-        // RecoverStuckWebhookDeliveriesAsync is the sole recoverer — otherwise the background tick (holding
-        // the task lock) could recover the seeded row first and the guarded bump would make the manual call
-        // observe zero (§4.6 deterministic-timing pattern).
+        // Webhook delivery is now always-on (§8.20): the implicit default worker group polls warp:webhooks
+        // unconditionally and there is deliberately no config to opt a server out. To keep the seeded and
+        // recovered executor jobs off a live worker deterministically (no pause-timing race), the implicit
+        // default group is given zero workers so registration skips it and its webhooks subscription is never
+        // polled, while the sole worker runs in an explicit group bound to the default queue only (explicit
+        // groups get no webhooks subscription). The stale-recovery task is still wired because worker mode is
+        // on, so the test resolves it and invokes recovery manually. A null recovery interval keeps the
+        // server's own background sweep off, leaving the manual call as the sole recoverer (the deterministic
+        // timing pattern of section 4.6).
         return WarpTestServer.StartAsync(
             Fixture,
             configure: cfg =>
             {
-                cfg.AddWebhooks();
-                cfg.Queues = ["default"];
+                cfg.WorkerCount = 0;
                 cfg.StaleJobRecoveryInterval = null;
+                cfg.AddWorkerGroup(g =>
+                {
+                    g.WorkerCount = 1;
+                    g.Queues = ["default"];
+                });
             });
     }
 
