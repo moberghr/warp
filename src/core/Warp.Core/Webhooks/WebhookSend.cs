@@ -1,6 +1,6 @@
 using Warp.Core.Enums;
 
-namespace Warp.Adapters.Webhooks;
+namespace Warp.Core.Webhooks;
 
 /// <summary>
 /// A single outbound webhook to deliver — the self-contained description handed to

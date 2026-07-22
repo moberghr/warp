@@ -5,7 +5,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 
-namespace Warp.Adapters.Webhooks;
+namespace Warp.Core.Webhooks;
 
 /// <summary>
 /// <see cref="IWebhookDispatcher"/> over the caller's <typeparamref name="TContext"/>. Builds the

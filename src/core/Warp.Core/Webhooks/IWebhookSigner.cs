@@ -1,4 +1,4 @@
-namespace Warp.Adapters.Webhooks;
+namespace Warp.Core.Webhooks;
 
 /// <summary>
 /// Computes the signing headers added to a webhook attempt. Warp ships

@@ -1,8 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
-using Warp.Adapters.Webhooks;
 using Warp.Core;
 using Warp.Core.Enums;
+using Warp.Core.Webhooks;
 
 namespace Warp.Tests.Webhooks;
 
@@ -105,16 +105,16 @@ public class WebhookSigningTests
     }
 
     [TimedFact]
-    public void AddWebhooks_Default_RegistersStandardSignerButNoCustomSigner()
+    public void AddWebhooks_Default_WiresNoCustomSigner()
     {
-        // WebhookSigning.None (the send default) adds no headers: it selects no signer, and the default
-        // registration wires no IWebhookSigner at all — only the built-in Standard signer for Standard mode.
+        // WebhookSigning.None (the send default) adds no headers and selects no signer. AddWarp registers
+        // the built-in StandardWebhooksSigner because the engine is part of Core (§8.20), so AddWebhooks with
+        // no options must wire no custom IWebhookSigner of its own.
         new WebhookSend { Url = "https://example.test", EventType = "e" }.Signing.ShouldBe(WebhookSigning.None);
 
         var services = new ServiceCollection();
         new WarpBuilder<TestContext>(services).AddWebhooks();
 
-        services.Any(x => x.ServiceType == typeof(StandardWebhooksSigner)).ShouldBeTrue();
         services.Any(x => x.ServiceType == typeof(IWebhookSigner)).ShouldBeFalse();
     }
 

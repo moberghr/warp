@@ -24,6 +24,20 @@ internal interface IAdapterCallRecorder
 }
 
 /// <summary>
+/// No-op recorder registered by <c>AddWarp</c> so <see cref="IWarpAdapters.BeginCall"/> (and its
+/// unconditional telemetry, §2.15) always works even when DB recording was never opted into via
+/// <c>AddAdapters()</c>. <c>AddAdapters()</c> runs inside the <c>AddWarp</c> lambda — before Core's
+/// fallback <c>TryAdd</c> — so its <see cref="DbAdapterCallRecorder"/> wins whenever it is present; this
+/// null object is the default only otherwise. Returns <c>true</c> (record discarded, not "dropped"): a
+/// null recorder is recording-disabled, not a full channel, so it must not inflate
+/// <c>warp.adapter.records_dropped</c>.
+/// </summary>
+internal sealed class NullAdapterCallRecorder : IAdapterCallRecorder
+{
+    public bool Record(AdapterCallRecord record) => true;
+}
+
+/// <summary>
 /// Immutable snapshot of a completed adapter call, produced by <see cref="AdapterCallScope"/> and
 /// consumed by an <see cref="IAdapterCallRecorder"/>. Capture-tier payload fields (headers/bodies/
 /// status) are populated by the transport binding; the protocol-agnostic core populates the rest.

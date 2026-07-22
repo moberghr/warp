@@ -3,9 +3,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Warp.Adapters.Http;
-using Warp.Adapters.Webhooks;
 using Warp.Core;
 using Warp.Core.Handlers;
+using Warp.Core.Webhooks;
 using Warp.Test.Shared.Entities;
 
 namespace Warp.Test.Shared.Shop;

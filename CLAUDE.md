@@ -1,6 +1,6 @@
 # Warp — Engineering Standards
 
-> Distributed job processing and message queue library for .NET 10. Provider-agnostic core + Postgres / SQL Server providers. Ships as `Warp.Core`, `Warp.Worker`, `Warp.UI`, `Warp.Http` (inbound HTTP endpoints), `Warp.Adapters.Http` + `Warp.Adapters.Refit` (outbound service-call observability), `Warp.Adapters.Webhooks` (durable outbound webhook delivery), `Warp.Provider.PostgreSql`, `Warp.Provider.SqlServer`.
+> Distributed job processing and message queue library for .NET 10. Provider-agnostic core + Postgres / SQL Server providers. Ships as `Warp.Core` (includes durable outbound webhook delivery — `Warp.Core.Webhooks`, always-on, no opt-in), `Warp.Worker`, `Warp.UI`, `Warp.Http` (inbound HTTP endpoints), `Warp.Adapters.Http` + `Warp.Adapters.Refit` (outbound service-call observability), `Warp.Provider.PostgreSql`, `Warp.Provider.SqlServer`.
 >
 > Source of truth for AI agents: this file + `.claude/rules/`. Reference docs in `.claude/references/`.
 

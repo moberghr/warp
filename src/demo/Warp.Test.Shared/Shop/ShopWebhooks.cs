@@ -1,8 +1,8 @@
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Warp.Adapters.Webhooks;
 using Warp.Core.Enums;
+using Warp.Core.Webhooks;
 
 namespace Warp.Test.Shared.Shop;
 

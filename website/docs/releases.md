@@ -8,7 +8,7 @@ sidebar_position: 6
 
 > Merged to `main`, not yet published. Targets **3.2.0** — assign the version heading + date at release time.
 
-Additive minor release — no breaking API changes, every feature **opt-in and off by default**. Three new observability surfaces turn Warp into a one-stop shop for HTTP traffic in both directions, plus durable outbound webhook delivery. Ships three new packages (`Moberg.Warp.Adapters.Http`, `Moberg.Warp.Adapters.Refit`, `Moberg.Warp.Adapters.Webhooks`); inbound endpoint observability lands inside the existing `Moberg.Warp.Http`. Adds new dashboard sections.
+Additive minor release — no breaking API changes. Three new observability surfaces turn Warp into a one-stop shop for HTTP traffic in both directions, plus durable outbound webhook delivery. Ships two new packages (`Moberg.Warp.Adapters.Http`, `Moberg.Warp.Adapters.Refit`); inbound endpoint observability lands inside the existing `Moberg.Warp.Http`, and durable webhook delivery is built into `Moberg.Warp.Core` (always on, no opt-in). Adds new dashboard sections.
 
 :::warning Schema change — generate a migration
 This release adds new tables (`AdapterDefinition`, `AdapterCallLog`, `WebhookDelivery`, `EndpointCallLog`). They are added to the model **unconditionally** (so the migration story doesn't depend on which hosts opt into which feature) and sit empty until a feature is enabled. Run `dotnet ef migrations add` against your `DbContext` and apply it when upgrading from 3.1.x.
@@ -36,7 +36,7 @@ Observe-first is the recommended rollout: register with no resilience/rate-limit
 
 ### Durable webhooks — delivery as a Warp feature
 
-`Warp.Adapters.Webhooks` (`opt.AddWebhooks(...)`, builds on adapters) makes outbound webhook *delivery* durable. The host owns subscriptions, fan-out, and payload building; Warp owns everything after `IWebhookDispatcher.SendAsync` — delivery lifecycle, retries, signing, redelivery, exhaustion, and the dashboard. **The delivery, not the job, is the state machine**: the executor always completes, and every attempt failure is recorded as an attempt (an `AdapterCallLog` row through the auto-registered `warp-webhooks` adapter) — webhook failures never surface as failed jobs or pollute the Jobs UI.
+Durable outbound webhook delivery is now **built into Core** (`Warp.Core.Webhooks`) and **always on** — no package, no opt-in. `AddWarp` wires the dispatcher/executor/signer and every `AddWarpServer` worker drains the `warp:webhooks` queue, so a delivery staged by any process is executed by any server (the old "server without the webhooks package silently doesn't drain" footgun is gone). The host owns subscriptions, fan-out, and payload building; Warp owns everything after `IWebhookDispatcher.SendAsync` — delivery lifecycle, retries, signing, redelivery, exhaustion, and the dashboard. **The delivery, not the job, is the state machine**: the executor always completes; webhook failures never surface as failed jobs or pollute the Jobs UI. Each attempt is recorded as an `AdapterCallLog` row through the `warp-webhooks` adapter when `AddAdapters()` is enabled (the per-attempt timeline); the delivery state, retries, and exhaustion work regardless. `opt.AddWebhooks(...)` remains only for optional config — a custom `IWebhookSigner` or an exhausted-delivery callback.
 
 ```csharp
 opt.AddWebhooks(w => w.UseCustomSigner<MySigner>());

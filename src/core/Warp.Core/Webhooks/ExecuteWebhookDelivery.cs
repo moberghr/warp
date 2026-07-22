@@ -1,10 +1,9 @@
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Warp.Adapters.Http;
-using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
@@ -12,7 +11,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Logging;
 using Warp.Core.NoRestart;
 
-namespace Warp.Adapters.Webhooks;
+namespace Warp.Core.Webhooks;
 
 /// <summary>
 /// The executor job for one webhook delivery. It is an ordinary source-generated-style job (worker hot
@@ -58,6 +57,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
     private readonly IEnumerable<IWebhookDeliveryExhaustedHandler> _exhaustedHandlers;
     private readonly IEnumerable<IWebhookSigner> _customSigners;
     private readonly IWarpAdapters _adapters;
+    private readonly AdapterRegistry _adapterRegistry;
     private readonly ILogger<ExecuteWebhookDeliveryHandler<TContext>> _logger;
 
     public ExecuteWebhookDeliveryHandler(
@@ -69,6 +69,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         IEnumerable<IWebhookDeliveryExhaustedHandler> exhaustedHandlers,
         IEnumerable<IWebhookSigner> customSigners,
         IWarpAdapters adapters,
+        AdapterRegistry adapterRegistry,
         ILogger<ExecuteWebhookDeliveryHandler<TContext>> logger)
     {
         _context = context;
@@ -79,6 +80,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         _exhaustedHandlers = exhaustedHandlers;
         _customSigners = customSigners;
         _adapters = adapters;
+        _adapterRegistry = adapterRegistry;
         _logger = logger;
     }
 
@@ -252,6 +254,15 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 
     private async Task<bool> TryDeliverAsync(WebhookDelivery delivery, CancellationToken cancellationToken)
     {
+        // Each attempt is one warp-webhooks adapter call (group = endpoint, operation = event type,
+        // correlation = delivery id) — the attempt timeline is AdapterCallLog WHERE CorrelationId =
+        // deliveryId, no separate table. A manual scope (not the Warp.Adapters.Http auto-recording handler)
+        // keeps webhooks free of any binding-package dependency; telemetry flows unconditionally (§2.15)
+        // and a row is written only where AddAdapters() enabled DB recording. A pre-HTTP fault (bad URL,
+        // signing) fails the same scope, so the timeline is never empty.
+        using var scope = _adapters.BeginCall(WebhookConstants.AdapterName, delivery.EventType, delivery.GroupName);
+        scope.SetCorrelation(delivery.Id.ToString());
+
         HttpRequestMessage? request = null;
         try
         {
@@ -263,10 +274,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 #pragma warning restore CA1031
         {
             request?.Dispose();
-
-            // Pre-HTTP failure: the HTTP handler pipeline never ran, so no warp-webhooks adapter row exists
-            // for this attempt. Record one manually so the delivery's attempt timeline is never empty (W-3).
-            RecordPreHttpFailure(delivery, ex);
+            scope.Fail(ex);
             _logger.LogWarning(ex, "Webhook delivery {DeliveryId} attempt {Attempt} failed before the HTTP request was sent.", delivery.Id, delivery.AttemptCount + 1);
 
             return false;
@@ -274,16 +282,32 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 
         try
         {
-            var client = _httpClientFactory.CreateClient(WebhookDefaults.AdapterName);
+            var client = _httpClientFactory.CreateClient(WebhookConstants.AdapterName);
 
             using var response = await client.SendAsync(request, cancellationToken);
 
-            return IsSuccess(response, delivery);
+            var success = IsSuccess(response, delivery);
+            await CaptureResponseAsync(scope, request, response, isFailure: !success, cancellationToken);
+
+            if (success)
+            {
+                scope.Succeed();
+
+                return true;
+            }
+
+            scope.Fail(new HttpRequestException(
+                $"Response status code does not indicate success: {(int)response.StatusCode} ({response.ReasonPhrase}).",
+                inner: null,
+                statusCode: response.StatusCode));
+
+            return false;
         }
 #pragma warning disable CA1031 // executor jobs must ALWAYS complete: every attempt exception is a failed attempt, never a failed job.
         catch (Exception ex)
 #pragma warning restore CA1031
         {
+            scope.Fail(ex);
             _logger.LogWarning(ex, "Webhook delivery {DeliveryId} attempt {Attempt} failed.", delivery.Id, delivery.AttemptCount + 1);
 
             return false;
@@ -294,14 +318,83 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         }
     }
 
-    // Records a manual warp-webhooks adapter call for an attempt that faulted before the HTTP handler
-    // pipeline ran (bad URL, signing fault), so the failure lands on the same attempt timeline as network
-    // failures instead of leaving a gap. Correlated by delivery id exactly like the pipeline-recorded rows.
-    private void RecordPreHttpFailure(WebhookDelivery delivery, Exception exception)
+    // Applies the warp-webhooks adapter's capture tiers to the completed attempt. Status is always-recorded
+    // metadata (§8.19); response headers/body follow the resolved CaptureMode (webhooks defaults to
+    // response-body Always, request-body never — the payload already lives on the delivery row). Values are
+    // redacted (§1.2) and byte-truncated before they reach the scope's capture columns. The executor owns
+    // the response, so the body is read destructively (no downstream consumer to preserve it for).
+    private async Task CaptureResponseAsync(AdapterCallScope scope, HttpRequestMessage request, HttpResponseMessage response, bool isFailure, CancellationToken cancellationToken)
     {
-        using var scope = _adapters.BeginCall(WebhookDefaults.AdapterName, delivery.EventType, delivery.GroupName);
-        scope.SetCorrelation(delivery.Id.ToString());
-        scope.Fail(exception);
+        scope.SetStatusCode((int)response.StatusCode);
+
+        var recording = _adapterRegistry.Resolve(WebhookConstants.AdapterName);
+        scope.SetRequestSummary($"{request.Method.Method} {request.RequestUri?.GetLeftPart(UriPartial.Path)}");
+
+        if (HttpCaptureHelpers.ShouldCapture(recording.CaptureHeaders, isFailure))
+        {
+            scope.SetResponseHeaders(HttpCaptureHelpers.RedactHeaders(AllHeaders(response.Headers, response.Content?.Headers), recording.RedactedHeaders, recording.MaxCapturedHeaderSize));
+        }
+
+        if (response.Content is not null && HttpCaptureHelpers.ShouldCapture(recording.CaptureResponseBodies, isFailure))
+        {
+            var body = await ReadResponseBodyAsync(response.Content, recording.MaxCapturedBodySize, cancellationToken);
+            if (body is not null)
+            {
+                scope.SetResponseBody(HttpCaptureHelpers.TruncateToBytes(body, recording.MaxCapturedBodySize));
+            }
+        }
+    }
+
+    private static async Task<string?> ReadResponseBodyAsync(HttpContent content, int maxBytes, CancellationToken cancellationToken)
+    {
+        if (maxBytes <= 0)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+
+            // Read only a bounded prefix (+1 byte so an over-cap body still trips TruncateToBytes' marker).
+            var buffer = new byte[maxBytes + 1];
+            var read = 0;
+            while (read < buffer.Length)
+            {
+                var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), cancellationToken);
+                if (n == 0)
+                {
+                    break;
+                }
+
+                read += n;
+            }
+
+            return read == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, read);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Capture is best-effort and must never fail the attempt.
+            return null;
+        }
+    }
+
+    private static IEnumerable<KeyValuePair<string, IEnumerable<string>>> AllHeaders(HttpHeaders primary, HttpHeaders? content)
+    {
+        foreach (var header in primary)
+        {
+            yield return header;
+        }
+
+        if (content is null)
+        {
+            yield break;
+        }
+
+        foreach (var header in content)
+        {
+            yield return header;
+        }
     }
 
     // attemptCount is passed explicitly rather than read from the row: on the post-Redeliver recovery path
@@ -381,17 +474,10 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
 
         ApplyHeaders(request, delivery);
 
-        // Signing seam (W3): StandardWebhooks/Custom add the webhook-id/webhook-timestamp/webhook-signature
-        // headers here via IWebhookSigner. The SigningMode + Secret already ride the delivery row; W2
-        // delivers unsigned for SigningMode.None.
-        request.WithWarpOperation(delivery.EventType);
-        if (!string.IsNullOrEmpty(delivery.GroupName))
-        {
-            request.WithWarpGroup(delivery.GroupName);
-        }
-
-        request.WithWarpCorrelation(delivery.Id.ToString());
-
+        // Signing (W3): StandardWebhooks/Custom add the webhook-id/webhook-timestamp/webhook-signature
+        // headers via IWebhookSigner in ApplySigning. The operation/group/correlation that used to ride the
+        // request (for the auto-recording handler) now go straight to the manual BeginCall scope, so the
+        // request carries only what the destination sees.
         return request;
     }
 

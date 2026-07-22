@@ -147,7 +147,7 @@ public static class WarpEndpoints
             [FromServices] IRateLimitManager? rateLimits,
             [FromServices] IDashboardPushMarker? push,
             [FromServices] ISagaQueryService? sagas,
-            [FromServices] IWarpAdapters? adapters,
+            [FromServices] IAdapterRecordingMarker? adapters,
             [FromServices] IEndpointCallRecorder? endpoints,
             [FromServices] IWebhookRedeliveryEnqueuer? webhooks) =>
             Results.Ok(new WarpAddonsInfo

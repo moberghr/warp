@@ -4,7 +4,7 @@
 
 Warp provides three patterns — Messages (pub/sub), Jobs (orchestrated background work), and Requests (in-memory mediator) — through a unified pipeline. It uses the transactional outbox pattern: jobs are committed atomically with business data in the same DbContext. No separate message broker required.
 
-Ships as NuGet packages: Moberg.Warp.Core, Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). Observability add-ons: Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls the app makes to other services), and Moberg.Warp.Adapters.Webhooks (durable outbound webhook delivery). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
+Ships as NuGet packages: Moberg.Warp.Core (also includes always-on durable outbound webhook delivery), Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). Observability add-ons: Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls the app makes to other services). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
 
 ---
 
@@ -18,7 +18,6 @@ dotnet add package Moberg.Warp.UI                # Dashboard (optional)
 dotnet add package Moberg.Warp.Http              # HTTP exposure for IRequest<T> / IStreamRequest<T> + inbound observability (optional)
 dotnet add package Moberg.Warp.Adapters.Http     # Observe outbound HttpClient calls (optional)
 dotnet add package Moberg.Warp.Adapters.Refit    # Refit operation-name sugar for adapters (optional)
-dotnet add package Moberg.Warp.Adapters.Webhooks # Durable outbound webhook delivery (optional)
 ```
 
 ---
@@ -1254,9 +1253,9 @@ services.AddWarp<AppDb>(opt =>
 
 ---
 
-## Durable Webhooks (Moberg.Warp.Adapters.Webhooks)
+## Durable Webhooks (built into Moberg.Warp.Core)
 
-`opt.AddWebhooks(...)` (builds on adapters) makes outbound webhook *delivery* durable. **Boundary:** the host owns subscriptions, fan-out, payload building, and endpoint enable/disable; Warp owns everything after `IWebhookDispatcher.SendAsync(WebhookSend)` — delivery lifecycle, retry scheduling, signing, redelivery, exhaustion, dashboard.
+Durable outbound webhook *delivery* is part of Core (`Warp.Core.Webhooks`) and **always on** — no package, no opt-in. `AddWarp` wires the dispatcher/executor/signer/redelivery-enqueuer and every `AddWarpServer` worker drains the `warp:webhooks` queue, so a delivery staged by any process is executed by any server (no per-process opt-in). `opt.AddWebhooks(...)` is optional config only (custom `IWebhookSigner`, exhausted-handler). Per-attempt `AdapterCallLog` rows require `AddAdapters()`; the delivery state machine works without it. **Boundary:** the host owns subscriptions, fan-out, payload building, and endpoint enable/disable; Warp owns everything after `IWebhookDispatcher.SendAsync(WebhookSend)` — delivery lifecycle, retry scheduling, signing, redelivery, exhaustion, dashboard.
 
 **The delivery, not the job, is the state machine.** The executor (an ordinary source-gen job on queue `warp:webhooks`) always completes; every attempt exception is caught and recorded as an attempt failure — webhook failures never surface as failed jobs. State lives on the always-in-schema `WebhookDelivery` row: `WebhookDeliveryStatus { Pending, Delivered, Exhausted }`. The row is self-contained (URL, headers, payload, schedule, success codes, signing mode + secret) stamped at `SendAsync` time, so a later config deploy never reshapes an in-flight delivery. `SendAsync` persists `Pending` + enqueues the first attempt in the caller's transaction (outbox) and returns the delivery id.
 
@@ -1324,7 +1323,7 @@ After calling `AddWarp<TContext>()` or `AddWarpServer<TContext>()`, these servic
 | `IAdapterQueryService` | Query outbound-adapter stats, call logs, history (registered by AddWarp) |
 | `IEndpointQueryService` | Query inbound-endpoint stats, call logs (registered by AddWarp) |
 | `IWebhookQueryService` / `IWebhookCommandService` | Query webhook deliveries; redeliver a settled delivery (registered by AddWarp) |
-| `IWebhookDispatcher` | Send a durable webhook delivery (only after `AddWebhooks()`) |
+| `IWebhookDispatcher` | Send a durable webhook delivery (always registered by `AddWarp`) |
 | `TimeProvider` | Injectable time (registered as `TimeProvider.System` by default, override in tests) |
 
 ---
@@ -1520,7 +1519,7 @@ opt.AddBackgroundService<T>();               // register a WarpBackgroundService
 opt.DisableWorker();                         // service-only server (no job worker)
 opt.AddAdapters();                           // gate outbound-adapter DB recording
 opt.AddAdapter(name, Action<WarpAdapterOptions>);
-opt.AddWebhooks(Action<WarpWebhookOptions>); // durable outbound webhook delivery
+opt.AddWebhooks(Action<WarpWebhookOptions>); // OPTIONAL webhook config (custom signer / exhausted-handler); delivery is always on
 opt.AddEndpointObservability(Action<WarpEndpointObservabilityOptions>); // inbound endpoint observability
 opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi-Project page
 

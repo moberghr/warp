@@ -7,11 +7,13 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Warp.Core.Adapters;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Converters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
+using Warp.Core.Enums;
 using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Interceptors;
@@ -106,6 +108,15 @@ public static class ServiceConfiguration
         // in the schema (§2.11); AddAdapters() gates recording services + the addons flag only.
         services.TryAddScoped<IAdapterQueryService, AdapterQueryService<TContext>>();
 
+        // Adapter call-scope primitive is always available (§2.15 telemetry is unconditional): every
+        // BeginCall emits its Activity + meters, and manual scopes (e.g. the webhook executor) can record
+        // regardless of AddAdapters(). AddAdapters() runs earlier in the AddWarp lambda and TryAdds the real
+        // DbAdapterCallRecorder + flusher, so it wins; absent it, the null recorder discards rows while
+        // telemetry still flows. The dashboard "adapters" flag keys on DbAdapterCallRecorder, not this.
+        services.TryAddSingleton<AdapterRegistry>();
+        services.TryAddSingleton<IAdapterCallRecorder, NullAdapterCallRecorder>();
+        services.TryAddSingleton<IWarpAdapters, WarpAdapters>();
+
         // Inbound endpoint observability dashboard read service. Registered in AddWarp (not
         // AddEndpointObservability) so dashboard-only / publisher-only processes can serve /api/endpoints
         // without running the middleware. The EndpointCallLog table is always in the schema (§2.11), so
@@ -118,6 +129,35 @@ public static class ServiceConfiguration
         // schema (§2.11); AddWebhooks() gates the executor/dispatcher + the addons flag only.
         services.TryAddScoped<IWebhookQueryService, WebhookQueryService<TContext>>();
         services.TryAddScoped<IWebhookCommandService, WebhookCommandService<TContext>>();
+
+        // Webhook delivery engine (part of Core, §8.20) wired unconditionally: dispatcher, executor job
+        // handler, redelivery enqueuer, and the built-in signer. Always-on so any AddWarpServer drains
+        // warp:webhooks with no per-process opt-in to forget — nothing runs until SendAsync stages a
+        // delivery. Optional host hooks (custom signer, exhausted handler) come from opt.AddWebhooks(...).
+        services.TryAddScoped<IWebhookDispatcher, WebhookDispatcher<TContext>>();
+        services.TryAddScoped<IJobHandler<ExecuteWebhookDelivery>, ExecuteWebhookDeliveryHandler<TContext>>();
+        services.TryAddScoped<IWebhookRedeliveryEnqueuer, WebhookRedeliveryEnqueuer>();
+        services.TryAddSingleton<StandardWebhooksSigner>();
+
+        // Recording config for the warp-webhooks adapter every attempt is logged under (§8.20): response
+        // bodies always captured (diagnosis), request bodies never (payload is on the row), call-log
+        // retention aligned to the delivery retention, grouped by endpoint. Folded into AdapterRegistry so
+        // the executor's manual scope + the flusher resolve it; a row is written only where AddAdapters() ran.
+        services.AddSingleton(x =>
+        {
+            var config = x.GetRequiredService<IOptions<WarpConfiguration>>().Value;
+
+            return new AdapterRegistrationEntry(
+                WebhookConstants.AdapterName,
+                new WarpAdapterOptions
+                {
+                    CaptureResponseBodies = CaptureMode.Always,
+                    CaptureRequestBodies = CaptureMode.None,
+                    GroupLabel = "Endpoint",
+                    CallLogRetention = config.WebhookDeliveryRetention,
+                },
+                ConfigSummary: null);
+        });
 
         // Default no-op transport. opt.UseDatabasePush() (inside the AddWarp/AddWarpServer lambda) replaces this with a
         // provider-specific implementation (Postgres LISTEN/NOTIFY or SQL Server Service Broker).
@@ -887,7 +927,7 @@ public static class ServiceConfiguration
         delivery.Property(p => p.Id);
         delivery.HasKey(p => p.Id);
 
-        // Column caps mirror the SendAsync build choke point's clamp in Warp.Adapters.Webhooks (the single
+        // Column caps mirror the SendAsync build choke point's clamp in the WebhookDispatcher (the single
         // place a WebhookDelivery row is built from caller input) so an over-long caller value clamps before
         // insert and never fails the row write. Only capped columns carry a length. HeadersJson, PayloadJson,
         // the converted RetrySchedule, and SuccessCodesJson hold unbounded content.

@@ -1,4 +1,4 @@
-namespace Warp.Adapters.Webhooks;
+namespace Warp.Core.Webhooks;
 
 /// <summary>
 /// Host callback invoked when a delivery exhausts its retry schedule without success. This is the

@@ -38,14 +38,15 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     [TimedFact]
-    public void AddAdapters_RegistersWarpAdaptersMarker()
+    public void AddAdapters_RegistersRecordingMarker()
     {
-        // The addons flag is gated on IWarpAdapters presence — only AddAdapters() registers it.
+        // The addons flag gates on IAdapterRecordingMarker — only AddAdapters() registers it. (IWarpAdapters
+        // is now always registered by AddWarp for unconditional telemetry, §2.15, so it can't gate the flag.)
         var services = new ServiceCollection();
 
         new WarpBuilder<TestContext>(services).AddAdapters();
 
-        services.Any(x => x.ServiceType == typeof(IWarpAdapters)).ShouldBeTrue();
+        services.Any(x => x.ServiceType == typeof(IAdapterRecordingMarker)).ShouldBeTrue();
     }
 
     [TimedFact]
@@ -526,7 +527,9 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
 
         if (registerAdapters)
         {
-            builder.Services.AddSingleton(Mock.Of<IWarpAdapters>());
+            // The addons flag gates on IAdapterRecordingMarker (only AddAdapters registers it); IWarpAdapters
+            // is now always registered by AddWarp for unconditional telemetry, so it can't gate the flag.
+            builder.Services.AddSingleton(Mock.Of<IAdapterRecordingMarker>());
         }
 
         var app = builder.Build();

@@ -1,4 +1,4 @@
-namespace Warp.Adapters.Webhooks;
+namespace Warp.Core.Webhooks;
 
 /// <summary>
 /// Entry point for the webhooks feature: hand a fully-described <see cref="WebhookSend"/> and Warp

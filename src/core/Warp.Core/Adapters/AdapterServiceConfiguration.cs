@@ -17,11 +17,25 @@ namespace Warp.Core.Adapters;
 /// unconditionally from every completed <see cref="AdapterCallScope"/>.
 /// </para>
 /// </summary>
+/// <summary>
+/// Presence marker for opt-in adapter DB recording. Registered only by <see cref="AdapterServiceConfiguration.AddAdapters"/>,
+/// so the dashboard "adapters" nav flag can distinguish "recording enabled" from the now-unconditional
+/// <see cref="IWarpAdapters"/> (which is always registered by <c>AddWarp</c> for telemetry, §2.15). Mirrors
+/// the <c>IDashboardPushMarker</c> precedent.
+/// </summary>
+public interface IAdapterRecordingMarker;
+
+internal sealed class AdapterRecordingMarker : IAdapterRecordingMarker;
+
 public static class AdapterServiceConfiguration
 {
     public static IWarpBuilder AddAdapters(this IWarpBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);
+
+        // Presence marker for the dashboard "adapters" flag (AddWarp now always registers IWarpAdapters for
+        // unconditional telemetry, so it can no longer gate the flag — this can).
+        builder.Services.TryAddSingleton<IAdapterRecordingMarker, AdapterRecordingMarker>();
 
         // Singletons so per-adapter cardinality state + the bounded recording channel persist across
         // calls. TryAdd throughout so a second AddAdapters() is a no-op. The DB-backed recorder owns
