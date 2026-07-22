@@ -335,9 +335,11 @@ public class JobCommandService<TContext> : IJobCommandService
         return result;
     }
 
-    // #238: cancel a batch — cancel/delete every child job that hasn't finished yet. Terminal children
-    // (Completed/Failed/Deleted) are left untouched; the rest are routed through BulkDeleteJobs, which
-    // deletes Enqueued/Scheduled/Awaiting children and signals graceful cancellation for Processing ones.
+    // #238: cancel a batch — cancel/delete every DESCENDANT job that hasn't finished yet. Terminal jobs
+    // (Completed/Failed/Deleted) are left as-is; the rest go through BulkDeleteJobs (deletes
+    // Enqueued/Scheduled/Awaiting, signals graceful cancellation for Processing). Traversal is transitive
+    // via ParentJobId (§2.1) so a nested batch or a continuation chain hanging off a batch child is also
+    // cancelled — we walk through terminal jobs too, since a Completed child can have pending continuations.
     // The batch parent is not touched directly — the Orchestrator finalizes it once its children settle.
     public async Task<BulkResultModel> CancelBatch(Guid batchId)
     {
@@ -357,16 +359,52 @@ public class JobCommandService<TContext> : IJobCommandService
             throw new ArgumentException("Job is not a batch.", nameof(batchId));
         }
 
-        var childIds = await _context.Set<Job>()
-            .AsNoTracking()
-            .Where(x => x.ParentJobId == batchId)
-            .Where(x => x.CurrentState != State.Completed)
-            .Where(x => x.CurrentState != State.Failed)
-            .Where(x => x.CurrentState != State.Deleted)
-            .Select(x => x.Id)
-            .ToListAsync();
+        var toCancel = new List<Guid>();
+        var seen = new HashSet<Guid> { batchId };
+        var frontier = new List<Guid> { batchId };
 
-        return await BulkDeleteJobs([.. childIds]);
+        // Breadth-first over ParentJobId. Each level's parent-id IN-list is chunked to stay under the SQL
+        // Server 2100-parameter limit; the seen-set guards against a pathological parent cycle.
+        while (frontier.Count > 0)
+        {
+            var nextFrontier = new List<Guid>();
+
+            foreach (var chunk in frontier.Chunk(500))
+            {
+                var children = await _context.Set<Job>()
+                    .AsNoTracking()
+                    .Where(x => x.ParentJobId != null)
+                    .Where(x => chunk.Contains(x.ParentJobId!.Value))
+                    .Select(x =>
+                        new
+                        {
+                            x.Id,
+                            x.CurrentState,
+                        })
+                    .ToListAsync();
+
+                foreach (var child in children)
+                {
+                    if (!seen.Add(child.Id))
+                    {
+                        continue;
+                    }
+
+                    nextFrontier.Add(child.Id);
+
+                    if (child.CurrentState != State.Completed
+                        && child.CurrentState != State.Failed
+                        && child.CurrentState != State.Deleted)
+                    {
+                        toCancel.Add(child.Id);
+                    }
+                }
+            }
+
+            frontier = nextFrontier;
+        }
+
+        return await BulkDeleteJobs([.. toCancel]);
     }
 
     public async Task<BulkResultModel> BulkRequeueJobs(Guid[] jobIds)

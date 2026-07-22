@@ -181,10 +181,12 @@ public class WarpUIMiddleware
         var headEndIndex = htmlString.IndexOf("</head>", StringComparison.Ordinal);
         var hasLogin = _options.CredentialValidatorType != null ? "true" : "false";
 
-        // Branding values are host-controlled config but JSON-encode them anyway so a stray quote can't
-        // break the injected script (System.Text.Json emits a safe JS string literal, or `null`).
+        // All host-supplied values are JSON-encoded so a stray quote or "</script>" can't break the
+        // injected script (System.Text.Json's default HTML-safe encoder escapes < > & and emits a safe JS
+        // string literal, or `null`). RoutePrefix is config, not user input, but encode it too for
+        // consistency and defence in depth.
         var appSettingsString =
-            $"<script> window.apiPath = \"{_options.RoutePrefix}/api/\"; window.basePath = \"{_options.RoutePrefix}\"; window.hasBuiltInLogin = {hasLogin};"
+            $"<script> window.apiPath = {JsonValue(_options.RoutePrefix + "/api/")}; window.basePath = {JsonValue(_options.RoutePrefix)}; window.hasBuiltInLogin = {hasLogin};"
             + $" window.warpInstanceName = {JsonValue(_options.InstanceName)};"
             + $" window.warpPortalUrl = {JsonValue(_options.PortalUrl)};"
             + $" window.warpPortalLabel = {JsonValue(_options.PortalLabel)};"

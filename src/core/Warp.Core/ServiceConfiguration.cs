@@ -241,6 +241,7 @@ public static class ServiceConfiguration
         };
 
         var handlers = services
+            .Where(x => !x.IsKeyedService) // ImplementationType getter throws for keyed descriptors
             .Where(x => x.ServiceType.IsGenericType)
             .Where(x => handlerDefinitions.Contains(x.ServiceType.GetGenericTypeDefinition()))
             .Where(x => x.ImplementationType is not null)

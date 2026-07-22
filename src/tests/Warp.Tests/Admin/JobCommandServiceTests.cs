@@ -995,6 +995,46 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         await Should.ThrowAsync<ArgumentException>(() => svc.CancelBatch(Guid.NewGuid()));
     }
 
+    [TimedFact]
+    public async Task CancelBatch_CancelsNonTerminalDescendants_Transitively()
+    {
+        // #238 review fix: cancellation must reach descendants, not just direct children — a pending
+        // continuation hanging off an already-completed batch child would otherwise still run.
+        var batchId = Guid.NewGuid();
+        var childCompleted = Guid.NewGuid();
+        var childProcessing = Guid.NewGuid();
+        var pendingContinuation = Guid.NewGuid(); // Scheduled, parent = childCompleted (terminal)
+        var grandOfProcessing = Guid.NewGuid();   // Enqueued, parent = childProcessing
+        var terminalGrandchild = Guid.NewGuid();  // Completed, parent = childCompleted
+
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(Job(batchId, JobKind.Batch, State.Processing, parent: null));
+        ctx.Set<Job>().Add(Job(childCompleted, JobKind.Job, State.Completed, parent: batchId));
+        ctx.Set<Job>().Add(Job(childProcessing, JobKind.Job, State.Processing, parent: batchId));
+        ctx.Set<Job>().Add(Job(pendingContinuation, JobKind.Job, State.Scheduled, parent: childCompleted));
+        ctx.Set<Job>().Add(Job(grandOfProcessing, JobKind.Job, State.Enqueued, parent: childProcessing));
+        ctx.Set<Job>().Add(Job(terminalGrandchild, JobKind.Job, State.Completed, parent: childCompleted));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext());
+        await svc.CancelBatch(batchId);
+
+        var readCtx = _fixture.CreateContext();
+        var jobs = await readCtx.Set<Job>()
+            .Where(x => x.Id != batchId)
+            .ToDictionaryAsync(x => x.Id, Xunit.TestContext.Current.CancellationToken);
+
+        // Non-terminal descendants cancelled, including one under a terminal child.
+        jobs[pendingContinuation].CurrentState.ShouldBe(State.Deleted);
+        jobs[grandOfProcessing].CurrentState.ShouldBe(State.Deleted);
+        jobs[childProcessing].CurrentState.ShouldBe(State.Processing);
+        jobs[childProcessing].CancellationMode.ShouldBe(CancellationMode.Graceful);
+
+        // Terminal jobs left untouched.
+        jobs[childCompleted].CurrentState.ShouldBe(State.Completed);
+        jobs[terminalGrandchild].CurrentState.ShouldBe(State.Completed);
+    }
+
     private static Job Job(Guid id, JobKind kind, State state, Guid? parent) =>
         new()
         {
