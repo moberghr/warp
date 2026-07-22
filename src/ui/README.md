@@ -71,3 +71,19 @@ export default defineConfig([
   },
 ])
 ```
+
+## Testing
+
+Unit tests run on [Vitest](https://vitest.dev) with the `happy-dom` environment:
+
+```bash
+npm test          # run once
+npm run test:watch
+```
+
+Convention: colocate `*.test.ts(x)` next to the source. Assert **behavior** on pure
+logic, stores, hooks, and lib modules (e.g. `lib/addonChips`, `lib/traceLayout`,
+`config.safeUrl`, `utils/format`). Component tests that render to a real canvas
+(Chart.js charts) are intentionally out of scope. The Playwright suite under
+`e2e/` is a separate runner (`npm run screenshots`) that snapshots pages for the
+docs site and does not assert behavior.

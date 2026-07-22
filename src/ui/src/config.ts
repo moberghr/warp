@@ -12,7 +12,7 @@ declare global {
 
 // Only allow http(s) or root-relative URLs for branding hrefs/srcs — React does not scheme-sanitize
 // href/src, so this blocks a javascript:/data: value slipping through from a misconfigured WarpUIOptions.
-function safeUrl(url: string | null | undefined): string | null {
+export function safeUrl(url: string | null | undefined): string | null {
   return url && /^(https?:\/\/|\/)/i.test(url) ? url : null;
 }
 

@@ -15,6 +15,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import dagre from '@dagrejs/dagre';
 import { StateBadge } from '@/components/StateBadge';
+import { cappedChildSlots } from '@/lib/traceLayout';
 import { shortType, shortId } from '@/utils/format';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { Briefcase, Mail, Layers } from 'lucide-react';
@@ -125,9 +126,8 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
   const CHILD_RENDER_CAP = 24;
   const hiddenChildIds = new Set<string>();
   for (const children of containers.values()) {
-    if (children.length > CHILD_RENDER_CAP) {
-      for (const c of children.slice(CHILD_RENDER_CAP)) hiddenChildIds.add(c.id);
-    }
+    const { visible } = cappedChildSlots(children.length, CHILD_RENDER_CAP);
+    for (const c of children.slice(visible)) hiddenChildIds.add(c.id);
   }
   // Container parents are replaced by group boxes — map their ID to group ID
   const containerGroupId = new Map<string, string>();
@@ -220,10 +220,10 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
     const childCount = containers.get(job.id)?.length ?? 0;
     // Reserve height for the CAPPED render (visible children + one "+N more" slot), not the full child
     // count — otherwise dagre reserves thousands of rows for a large fan-out and blows the layout apart,
-    // defeating the collapse. Must match the manual group-box sizing below.
-    const renderedSlots = childCount > CHILD_RENDER_CAP ? CHILD_RENDER_CAP + 1 : childCount;
-    const height = renderedSlots > 0
-      ? renderedSlots * NODE_HEIGHT + (renderedSlots - 1) * CHILD_GAP + GROUP_PADDING * 2 + 30
+    // defeating the collapse. Derived from the same helper as the manual group-box sizing below.
+    const { slots } = cappedChildSlots(childCount, CHILD_RENDER_CAP);
+    const height = slots > 0
+      ? slots * NODE_HEIGHT + (slots - 1) * CHILD_GAP + GROUP_PADDING * 2 + 30
       : NODE_HEIGHT;
     g.setNode(job.id, { width: NODE_WIDTH, height });
   }
@@ -264,9 +264,9 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
   // Create group nodes — position children inside group at container parent's dagre position
   for (const [parentId, children] of containers) {
     const parent = jobMap.get(parentId)!;
-    const visibleChildren = children.length > CHILD_RENDER_CAP ? children.slice(0, CHILD_RENDER_CAP) : children;
+    const { visible, hidden: hiddenCount } = cappedChildSlots(children.length, CHILD_RENDER_CAP);
+    const visibleChildren = children.slice(0, visible);
     const childIds = visibleChildren.map(c => c.id);
-    const hiddenCount = children.length - visibleChildren.length;
 
     // Use container parent's dagre position as the group anchor
     const parentPos = g.node(parentId);
