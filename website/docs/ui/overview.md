@@ -14,6 +14,22 @@ app.UseWarpUI(); // Serves at /warp
 
 To restrict access to the dashboard, see [Dashboard Auth](/docs/operations/dashboard-auth).
 
+### Branding
+
+When you run the same dashboard across several environments, brand it so operators can tell them apart and jump back to your own portal:
+
+```csharp
+app.UseWarpUI(o =>
+{
+    o.InstanceName = "Production";           // shown in the header + browser tab title
+    o.LogoUrl = "/img/acme-logo.svg";        // header logo
+    o.PortalUrl = "https://portal.acme.com"; // back-link target
+    o.PortalLabel = "Back to Acme";          // link text (defaults to "Back to app")
+});
+```
+
+All four are optional. Values are injected into the SPA as JSON-encoded runtime config, so a stray quote or markup in a branding string can't break the page.
+
 ## Dashboard
 
 The main dashboard shows real-time statistics, live graphs, and server status.

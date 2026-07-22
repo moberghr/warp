@@ -121,16 +121,11 @@ public class WebhookCommandService<TContext> : IWebhookCommandService
 }
 
 /// <summary>
-/// Seam that enqueues the webhook executor job for a redelivery. The executor job type lives in the
-/// webhooks addon (<c>Warp.Adapters.Webhooks</c>) because it needs <c>IHttpClientFactory</c> — the same
-/// dependency line that keeps HTTP out of Core — so Core cannot construct or enqueue it directly. The
-/// addon registers the implementation inside <c>AddWebhooks()</c>; <see cref="WebhookCommandService{TContext}"/>
-/// drives it after applying the redeliver state reset.
-/// <para>
-/// Registered <b>only</b> by <c>AddWebhooks()</c>, so its presence doubles as the dashboard "webhooks"
-/// addon marker (the pattern <c>IWarpAdapters</c> follows for adapters): <c>GET /api/addons</c> reports
-/// the <c>webhooks</c> flag from whether this service resolves, gating the dashboard nav.
-/// </para>
+/// Seam that enqueues the webhook executor job for a redelivery, keeping the enqueue behind an interface so
+/// <see cref="WebhookCommandService{TContext}"/> drives it after applying the redeliver state reset (both
+/// commit on the same scoped context in one <c>SaveChanges</c>). The implementation and the executor job
+/// both live in <c>Warp.Core.Webhooks</c> and are registered unconditionally by <c>AddWarp</c>, so
+/// redelivery works in any process — the webhooks engine is part of Core (§8.20), not an opt-in addon.
 /// </summary>
 public interface IWebhookRedeliveryEnqueuer
 {

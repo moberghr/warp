@@ -4,7 +4,7 @@ sidebar_position: 5.7
 
 # Rate Limit
 
-Throttle jobs sharing a key to N starts per window. When the bucket is full, the surplus is either dropped (`Skip`) or rescheduled (`Wait`). Window shape picks between a wall-clock floor (`Fixed`) and a rolling tail (`Sliding`).
+Throttle jobs sharing a key to N starts per window. When the bucket is full, the surplus is either dropped (`Skip`) or rescheduled (`Wait`). Style picks between a wall-clock floor (`Fixed`), a rolling tail (`Sliding`), and a steady-rate `TokenBucket` that paces instead of caps.
 
 Opt-in addon — register with `opt.AddRateLimit()` on the builder.
 
@@ -18,7 +18,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
     opt.AddRateLimit();
 });
 
-// Per-handler attribute (default: Mode = Skip, Style = Fixed)
+// On the job/request type — never the handler (default: Mode = Skip, Style = Fixed)
 [RateLimit("sendgrid", count: 10, perSeconds: 60)]
 public class SendEmail : IJob { }
 
@@ -50,11 +50,18 @@ public class SyncCrm : IJob { }
 |---|---|---|
 | `Fixed` (default) | Wall-clock window floor-aligned to global UTC ticks. Bucket resets at the boundary. Cheap, predictable boundary bursts (up to `2 × count` across two adjacent windows). | One row per `(key, windowStart)`. |
 | `Sliding` | Rolling window over the last N start timestamps within `perSeconds`. Defensively trimmed each check. Smoother distribution; no boundary burst. | Slightly more churn — one row per `(key, start)` within the window. |
+| `TokenBucket` | **Paces** rather than caps: tokens refill continuously at `count / perSeconds` per second up to a burst capacity of `count`; each start consumes one. A fresh key starts full. When empty, a `Wait`-mode start is rescheduled to the moment the next token refills — so a backlog trickles out at the steady refill rate instead of releasing a full window at once. | One row per key holding the fractional token count + last-refill instant (written only on accept). |
 
 ```csharp
 [RateLimit("partner-api", count: 5, perSeconds: 1, Style = RateLimitStyle.Sliding)]
 public class CallPartnerApi : IJob { }
+
+// Steady pacing: ~4 requests/sec (240/min), bursts of up to 240 smoothed to the refill rate.
+[RateLimit("metered-api", count: 240, perSeconds: 60, Style = RateLimitStyle.TokenBucket, Mode = RateLimitMode.Wait)]
+public class CallMeteredApi : IJob { }
 ```
+
+Use `Fixed`/`Sliding` to enforce a **ceiling** (reject/defer once the count is hit); use `TokenBucket` to enforce a **steady rate** against a downstream that wants smooth traffic. `TokenBucket` reschedules `Wait`-mode starts to sub-window token-refill instants, so — like the other styles — those reschedules ride `ScheduledJobActivation` (§ DB push does not accelerate `Wait`).
 
 `perSeconds` is capped at 7 days (`RateLimitAttribute.MaxWindowSeconds`). Inputs past the cap throw at construction.
 

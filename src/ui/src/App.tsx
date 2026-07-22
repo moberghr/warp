@@ -13,6 +13,7 @@ import ExtensionPage from '@/extensions/ExtensionPage';
 // around <Outlet>, so the shell/nav stays put while a page chunk loads.
 const DashboardPage = lazy(() => import('@/pages/dashboard/DashboardPage'));
 const JobListPage = lazy(() => import('@/pages/jobs/JobListPage'));
+const JobsByTypePage = lazy(() => import('@/pages/jobs/JobsByTypePage'));
 const MessagesPage = lazy(() => import('@/pages/messages/MessagesPage'));
 const BatchesPage = lazy(() => import('@/pages/batches/BatchesPage'));
 const RecurringPage = lazy(() => import('@/pages/recurring/RecurringPage'));
@@ -117,6 +118,7 @@ function App() {
             <Route index element={<DashboardPage />} />
             <Route path="/detail/:id" element={<DetailPage />} />
             <Route path="/jobs/detail/:id" element={<DetailPage />} />
+            <Route path="/jobs/by-type/:type" element={<JobsByTypePage />} />
             <Route path="/jobs/:state" element={<JobListPage />} />
             <Route path="/messages/detail/:id" element={<DetailPage />} />
             <Route path="/messages/:state" element={<MessagesPage />} />

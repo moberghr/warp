@@ -1,4 +1,5 @@
 using Warp.Core;
+using Warp.Core.Webhooks;
 
 namespace Warp.Worker;
 
@@ -281,12 +282,19 @@ public class WarpServerConfiguration : WarpConfiguration
     /// </summary>
     internal List<WorkerGroupConfiguration> GetEffectiveWorkerGroups()
     {
+        // Webhook delivery is a Core feature (§8.20): the implicit default group always subscribes to the
+        // dedicated warp:webhooks queue so any server with a worker drains deliveries — no per-process opt-in
+        // to forget. Deduped so an explicit Queues that already lists it stays single.
+        var defaultQueues = Queues.Contains(WebhookConstants.Queue, StringComparer.Ordinal)
+            ? Queues
+            : [.. Queues, WebhookConstants.Queue];
+
         var groups = new List<WorkerGroupConfiguration>
         {
             new()
             {
                 WorkerCount = WorkerCount,
-                Queues = Queues,
+                Queues = defaultQueues,
                 PollingInterval = PollingInterval,
                 MaxPollingInterval = MaxPollingInterval,
                 PollingIntervalFactor = PollingIntervalFactor,

@@ -27,7 +27,6 @@
     <ProjectReference Include="..\..\core\Warp.Worker\Warp.Worker.csproj" />
     <ProjectReference Include="..\..\core\Warp.Adapters.Http\Warp.Adapters.Http.csproj" />
     <ProjectReference Include="..\..\core\Warp.Adapters.Refit\Warp.Adapters.Refit.csproj" />
-    <ProjectReference Include="..\..\core\Warp.Adapters.Webhooks\Warp.Adapters.Webhooks.csproj" />
     <ProjectReference Include="..\..\core\providers\Warp.Provider.PostgreSql\Warp.Provider.PostgreSql.csproj" />
     <ProjectReference Include="..\Warp.Demo.ServiceDefaults\Warp.Demo.ServiceDefaults.csproj" />
     <ProjectReference Include="..\Warp.Test.Shared\Warp.Test.Shared.csproj" />

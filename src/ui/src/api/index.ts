@@ -37,6 +37,9 @@ export const getFailedJobTypes = () =>
 export const getFailedJobsByType = (type: string, page = 0, pageSize = 20) =>
   api.get<PagedList<JobModel>>('/jobs/failed/by-type', { params: { type, page, pageSize } }).then(r => r.data);
 
+export const getJobsByType = (type: string, page = 0, pageSize = 20, state?: string) =>
+  api.get<PagedList<JobModel>>('/jobs/by-type', { params: { type, page, pageSize, state } }).then(r => r.data);
+
 export const deleteFailedJobsByType = (type: string) =>
   api.post<BulkResult>('/jobs/failed/delete-by-type', null, { params: { type } }).then(r => r.data);
 
@@ -121,6 +124,9 @@ export const getBatchJobCounts = (batchId: string) =>
 
 export const getBatchJobs = (batchId: string, page = 0, pageSize = 20, state?: string) =>
   api.get<PagedList<JobModel>>(`/batches/${batchId}/jobs`, { params: { page, pageSize, state } }).then(r => r.data);
+
+export const cancelBatch = (batchId: string) =>
+  api.post<BulkResult>(`/batches/${batchId}/cancel`).then(r => r.data);
 
 // Servers
 export const getServers = () => api.get<ServerModel[]>('/servers').then(r => r.data);

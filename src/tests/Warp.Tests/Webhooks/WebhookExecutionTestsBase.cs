@@ -3,7 +3,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
-using Warp.Adapters.Webhooks;
 using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
@@ -11,6 +10,7 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Helper;
+using Warp.Core.Webhooks;
 using Warp.Tests.Fixtures;
 
 namespace Warp.Tests.Webhooks;
@@ -62,6 +62,30 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
         call.Operation.ShouldBe("order.created");
         call.GroupName.ShouldBe("endpoint-eu");
 
+        await AssertNoFailedJobsAsync(server);
+    }
+
+    [TimedFact]
+    public async Task Send_ServerWithoutAddWebhooks_StillDrainsAndDelivers()
+    {
+        // The whole point of webhooks-in-Core (§8.20): a server that NEVER called AddWebhooks still polls
+        // warp:webhooks and executes the delivery. The two-process footgun (a server that silently doesn't
+        // drain because it lacked the opt-in) is gone — there is nothing to forget.
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg => cfg.Queues = ["default"],
+            configureServices: services =>
+                services.AddHttpClient("warp-webhooks")
+                    .ConfigurePrimaryHttpMessageHandler(() => new StubWebhookHandler(HttpStatusCode.OK)));
+
+        var deliveryId = await SendAsync(server, new WebhookSend
+        {
+            Url = "https://example.test/hook",
+            EventType = "order.created",
+            RetrySchedule = [],
+        });
+
+        await WaitForDeliveryStatusAsync(server, deliveryId, WebhookDeliveryStatus.Delivered);
         await AssertNoFailedJobsAsync(server);
     }
 
@@ -523,13 +547,16 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
 
     private Task<WarpTestServer> StartServerAsync(HttpStatusCode responseStatus)
     {
-        // No manual warp:webhooks queue wiring: AddWebhooks appends it to the default group automatically
-        // (CRITICAL-2), so the default wiring is what these end-to-end tests prove.
+        // No manual warp:webhooks queue wiring: the default worker group polls warp:webhooks unconditionally
+        // (webhooks are Core, §8.20), so the default wiring is what these end-to-end tests prove. AddAdapters
+        // turns on per-attempt AdapterCallLog recording — the tests that assert the attempt timeline need it
+        // (delivery itself works without it; the inline-cfg tests prove that path).
         return WarpTestServer.StartAsync(
             Fixture,
             configure: cfg =>
             {
                 cfg.Queues = ["default"];
+                cfg.AddAdapters();
                 cfg.AddWebhooks(w => w.OnDeliveryExhausted<CountingExhaustedHandler>());
             },
             configureServices: services =>
@@ -582,6 +609,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
             configure: cfg =>
             {
                 cfg.Queues = ["default"];
+                cfg.AddAdapters();
                 cfg.AddWebhooks();
             },
             configureServices: services =>
@@ -619,6 +647,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
             configure: cfg =>
             {
                 cfg.Queues = ["default"];
+                cfg.AddAdapters();
                 cfg.AddWebhooks(w => w.UseCustomSigner<ThrowingSigner>());
             },
             configureServices: services =>
@@ -910,6 +939,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
             exhaustedHandlers: [],
             customSigners: [],
             scope.ServiceProvider.GetRequiredService<IWarpAdapters>(),
+            scope.ServiceProvider.GetRequiredService<AdapterRegistry>(),
             NullLogger<ExecuteWebhookDeliveryHandler<TestContext>>.Instance);
 
         // The executor still completes (no-failed-jobs invariant) even though the outcome commit faulted.

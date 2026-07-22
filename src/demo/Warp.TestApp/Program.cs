@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Warp.Adapters.Http;
 using Warp.Adapters.Refit;
-using Warp.Adapters.Webhooks;
 using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.BackgroundServices;
@@ -15,6 +14,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Helper;
 using Warp.Core.Retry;
 using Warp.Core.Sagas;
+using Warp.Core.Webhooks;
 using Warp.Demo.ServiceDefaults;
 using Warp.Http;
 using Warp.Http.Observability;
@@ -581,7 +581,11 @@ app.MapPost("/seed/mutex", async (IPublisher publisher) =>
 var shopSkus = new[] { "SKU-TEE", "SKU-MUG", "SKU-CAP", "SKU-BAG", "SKU-PEN" };
 var shopPrices = new Dictionary<string, decimal>(StringComparer.Ordinal)
 {
-    ["SKU-TEE"] = 24.99m, ["SKU-MUG"] = 12.50m, ["SKU-CAP"] = 19.00m, ["SKU-BAG"] = 39.90m, ["SKU-PEN"] = 3.25m,
+    ["SKU-TEE"] = 24.99m,
+    ["SKU-MUG"] = 12.50m,
+    ["SKU-CAP"] = 19.00m,
+    ["SKU-BAG"] = 39.90m,
+    ["SKU-PEN"] = 3.25m,
 };
 var subscriberMix = new[]
 {

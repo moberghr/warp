@@ -16,4 +16,6 @@ import Screenshot from '@site/src/components/Screenshot';
 
 Shows the stacked green/red progress bar, creation time, full ID, and a table of all jobs in the batch with their current state.
 
+A **Cancel** action cancels the whole batch — every non-terminal descendant (children and pending continuations) is gracefully cancelled; jobs that already finished are left as-is. See [Job Cancellation](/docs/features/cancellation#cancelling-a-batch).
+
 <Screenshot light="/img/screenshots/10-batch-detail.png" dark="/img/screenshots/10-batch-detail-dark.png" alt="Batch Detail" />

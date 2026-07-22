@@ -19,7 +19,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
     opt.AddTimeout();
 });
 
-// Per-handler attribute (default: Mode = Delete, Scope = PerAttempt)
+// On the job/request type — never the handler (default: Mode = Delete, Scope = PerAttempt)
 [Timeout(seconds: 30)]
 public class GenerateReport : IJob { }
 
@@ -66,7 +66,7 @@ Most specific wins for both timeout duration and mode/scope:
 
 ```
 WithTimeout(...)            // per-publish, highest priority
-  → [Timeout(...)]          // per-handler-type attribute
+  → [Timeout(...)]          // on the job/request type
     → opt.AddTimeout(o =>   // global default, lowest priority
         o.Default = ...)
 ```

@@ -1,8 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
-using Warp.Adapters.Webhooks;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Webhooks;
 using Warp.Tests.Fixtures;
 
 namespace Warp.Tests.Webhooks;

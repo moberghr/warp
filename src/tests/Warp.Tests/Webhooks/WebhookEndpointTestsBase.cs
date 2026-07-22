@@ -8,7 +8,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Moq;
 using Shouldly;
-using Warp.Adapters.Webhooks;
 using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
@@ -41,15 +40,17 @@ public abstract class WebhookEndpointTestsBase : IAsyncLifetime
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
     [TimedFact]
-    public void AddWebhooks_RegistersRedeliveryEnqueuerMarker()
+    public void AddWarp_RegistersWebhookEngine_WithoutAddWebhooks()
     {
-        // The addons flag + the redelivery enqueue are gated on IWebhookRedeliveryEnqueuer — only
-        // AddWebhooks() registers it. Drives the real ServiceCollection + builder path (adapters lesson).
+        // Webhooks are part of Core (§8.20): AddWarp alone wires the dispatcher and the redelivery enqueuer
+        // (the addons flag gates on the latter, so the nav shows everywhere) — no AddWebhooks opt-in needed.
         var services = new ServiceCollection();
+        services.AddDbContext<TestContext>();
 
-        new WarpBuilder<TestContext>(services).AddWebhooks();
+        services.AddWarp<TestContext>();
 
         services.Any(x => x.ServiceType == typeof(IWebhookRedeliveryEnqueuer)).ShouldBeTrue();
+        services.Any(x => x.ServiceType == typeof(IWebhookDispatcher)).ShouldBeTrue();
     }
 
     [TimedFact]

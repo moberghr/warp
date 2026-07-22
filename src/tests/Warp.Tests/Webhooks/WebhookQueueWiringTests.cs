@@ -1,69 +1,49 @@
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
-using Warp.Adapters.Webhooks;
-using Warp.Core;
 using Warp.Worker;
 
 namespace Warp.Tests.Webhooks;
 
 /// <summary>
-/// Shape coverage for the <c>AddWebhooks</c> queue wiring (CRITICAL-2): a server host that calls
-/// <c>AddWebhooks</c> must poll the dedicated <c>warp:webhooks</c> queue or deliveries never drain. The
-/// executor tests prove the runtime effect end-to-end; these prove the builder-shape contract directly and
-/// fast (NoDb) across the three builder shapes.
+/// Shape coverage for the webhook queue wiring. Webhook delivery is a Core feature (§8.20), so the
+/// implicit default worker group subscribes to the dedicated <c>warp:webhooks</c> queue
+/// <b>unconditionally</b> — with no <c>AddWebhooks</c> opt-in. This is what closes the two-process
+/// footgun: any server with a worker drains deliveries staged by any process. The executor tests prove
+/// the runtime effect end-to-end; these prove the builder-shape contract directly and fast (NoDb).
 /// </summary>
 [Trait("Category", "NoDb")]
 public class WebhookQueueWiringTests
 {
     [TimedFact]
-    public void AddWebhooks_OnServerBuilderWithWorker_AppendsWebhookQueueToDefaultGroup()
+    public void EffectiveWorkerGroups_WithoutAddWebhooks_DefaultGroupPollsWebhookQueue()
     {
+        // No AddWebhooks call — a plain server still drains warp:webhooks.
         var builder = new WarpServerBuilder<TestContext>(new ServiceCollection()) { Queues = ["default"] };
 
-        builder.AddWebhooks();
+        var groups = builder.GetEffectiveWorkerGroups();
 
-        builder.Queues.ShouldContain("warp:webhooks");
-        builder.Queues.ShouldContain("default");
+        groups[0].Queues.ShouldContain("warp:webhooks");
+        groups[0].Queues.ShouldContain("default");
     }
 
     [TimedFact]
-    public void AddWebhooks_WhenQueueAlreadyPresent_IsIdempotent()
+    public void EffectiveWorkerGroups_WhenQueueAlreadyListed_IsDeduped()
     {
         var builder = new WarpServerBuilder<TestContext>(new ServiceCollection()) { Queues = ["default", "warp:webhooks"] };
 
-        builder.AddWebhooks();
+        var groups = builder.GetEffectiveWorkerGroups();
 
-        builder.Queues.Count(x => string.Equals(x, "warp:webhooks", StringComparison.Ordinal)).ShouldBe(1);
+        groups[0].Queues.Count(x => string.Equals(x, "warp:webhooks", StringComparison.Ordinal)).ShouldBe(1);
     }
 
     [TimedFact]
-    public void AddWebhooks_OnServiceOnlyServer_DoesNotWireQueue()
+    public void EffectiveWorkerGroups_DoesNotMutateConfiguredQueues()
     {
-        var builder = new WarpServerBuilder<TestContext>(new ServiceCollection());
-        builder.DisableWorker();
+        // The webhook queue is added to the effective group only — the caller's configured Queues stay as-is.
+        var builder = new WarpServerBuilder<TestContext>(new ServiceCollection()) { Queues = ["default"] };
 
-        builder.AddWebhooks();
+        _ = builder.GetEffectiveWorkerGroups();
 
-        builder.Queues.ShouldNotContain("warp:webhooks");
-    }
-
-    [TimedFact]
-    public void AddWebhooks_OnPublisherOnlyBuilder_SkipsQueueWiringWithoutThrowing()
-    {
-        var builder = new WarpBuilder<TestContext>(new ServiceCollection());
-
-        // AddWarp-only (no worker, no Queues property): the queue probe finds no server shape and skips.
-        Should.NotThrow(() => builder.AddWebhooks());
-    }
-
-    [TimedFact]
-    public void AddWebhooks_CalledTwice_Throws()
-    {
-        // A second AddWebhooks would double-register options-dependent services (exhausted handler,
-        // custom signer) with conflicting configuration — rejected up front at registration time.
-        var builder = new WarpBuilder<TestContext>(new ServiceCollection());
-        builder.AddWebhooks();
-
-        Should.Throw<InvalidOperationException>(() => builder.AddWebhooks());
+        builder.Queues.ShouldBe(["default"]);
     }
 }

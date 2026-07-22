@@ -340,4 +340,4 @@ Deferred by design (some with their own specs):
 - **Minimal GraphQL client generator** (`Warp.Adapters.GraphQL`) — designed fast-follow; hand-written clients over the named adapter client are the v1 path.
 - **Replay of failed calls** — records only; replay needs explicit idempotency opt-in.
 
-**Shipped since this list was written:** durable webhook *delivery* — originally the first entry here — is now its own feature, [`Warp.Adapters.Webhooks`](./webhooks.md), built exactly as designed: deliveries in their own `WebhookDelivery` table, attempts read from `AdapterCallLog` via `CorrelationId`.
+**Shipped since this list was written:** durable webhook *delivery* — originally the first entry here — is now a built-in Core feature, [Outbound Webhooks](./webhooks.md) (`Warp.Core.Webhooks`, always on), built exactly as designed: deliveries in their own `WebhookDelivery` table, attempts read from `AdapterCallLog` via `CorrelationId` (when `AddAdapters()` recording is on).

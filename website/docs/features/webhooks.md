@@ -2,11 +2,11 @@
 sidebar_position: 13
 ---
 
-# Outbound Webhooks (Warp.Adapters.Webhooks)
+# Outbound Webhooks
 
 There is no maintained embedded .NET library for *sending* webhooks. Microsoft's ASP.NET WebHooks is archived; the serious options (Svix, Hookdeck Outpost, Convoy) are standalone Rust/Go services you deploy and operate. So teams hand-roll delivery on top of their job scheduler and re-accumulate the same defects: per-attempt correlation ids, 200-only success checks, hand-coupled backoff switches, no redelivery, no dead-letter.
 
-`Warp.Adapters.Webhooks` makes durable outbound webhook delivery a Warp feature. The split is deliberate and narrow: **the host owns subscriptions and fan-out; Warp owns everything after `SendAsync`** — durability, signing, scheduled retries, tracking, redelivery, and a dedicated dashboard section. Positioning mirrors Warp itself: durable delivery on the Postgres/SQL Server you already run, no extra infrastructure.
+Durable outbound webhook delivery is a **built-in Core feature** (`Warp.Core.Webhooks`) — always on, no package to add and no opt-in switch. The split is deliberate and narrow: **the host owns subscriptions and fan-out; Warp owns everything after `SendAsync`** — durability, signing, scheduled retries, tracking, redelivery, and a dedicated dashboard section. Positioning mirrors Warp itself: durable delivery on the Postgres/SQL Server you already run, no extra infrastructure.
 
 It builds directly on [Outbound Adapters](./adapters.md): every attempt is an ordinary `warp-webhooks` adapter call, so the attempt timeline is just `AdapterCallLog` rows keyed by the delivery id — no separate attempt table.
 
@@ -35,24 +35,23 @@ Warp does **not** model subscriptions or fan-out — that would duplicate every 
 
 ## Setup
 
-`AddWebhooks(...)` is opt-in, called inside your `AddWarp` / `AddWarpServer` lambda. It wires the dispatcher, the executor job handler, and — automatically — the `warp-webhooks` HTTP adapter every attempt flows through:
+There is nothing to enable. `AddWarp` wires the dispatcher, executor, redelivery enqueuer, and built-in signer; `AddWarpServer`'s worker polls the dedicated `warp:webhooks` queue automatically. Just inject `IWebhookDispatcher` and call `SendAsync`:
 
 ```csharp
 builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();
-    opt.AddAdapters();          // webhooks record attempts through the adapter layer
-    opt.AddWebhooks();
+    opt.AddAdapters();          // OPTIONAL: record each attempt as an AdapterCallLog row
+    opt.AddWebhooks(w =>        // OPTIONAL: only for a custom signer / exhausted-handler
+        w.OnDeliveryExhausted<MyExhaustedHandler>());
 });
 ```
 
-`AddWebhooks` configures **infrastructure only** — the exhausted-handler registration, the optional custom signer, and the auto-registered adapter (`RecordCalls = All`, response bodies always captured, request bodies never captured because the payload already lives on the delivery row, and `CallLogRetention` aligned to `WebhookDeliveryRetention`). Everything describing *a delivery* rides the `WebhookSend`.
+`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner` and the `OnDeliveryExhausted` callback. It is not an enable switch; delivery runs without it. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
 
-### Requires a Warp server
+### Requires a Warp server somewhere
 
-Unlike adapters-only observability — which runs in any `AddWarp` process with no worker — webhooks **execute jobs**, so a Warp server (worker) must run somewhere in the deployment to drain the dedicated `warp:webhooks` queue. This is the adoption prerequisite. The publisher process that calls `SendAsync` does not itself need to be the worker; the delivery row and executor job are committed through the outbox and any server in the cluster picks the job up.
-
-**Queue wiring is automatic on server hosts.** When `AddWebhooks` runs inside an `AddWarpServer` lambda with the worker enabled, it appends `warp:webhooks` to the default worker group's queues idempotently — so `AddWarpServer(...).AddWebhooks()` drains deliveries with no manual queue configuration. (Call `AddWebhooks` *after* any explicit `opt.Queues = [...]` assignment so the append is not overwritten.) An `AddWarp`-only publisher/dashboard process has no worker to wire, so the queue is left untouched there — a server host somewhere else in the deployment must run `AddWebhooks` (or otherwise poll `warp:webhooks`) to actually deliver.
+Webhooks **execute jobs**, so a Warp server (worker) must run somewhere in the deployment to drain the `warp:webhooks` queue. Because delivery is a Core feature, **every `AddWarpServer` with a worker drains it** — there is no per-server opt-in to remember. The publisher process that calls `SendAsync` need not be the worker; the delivery row and executor job commit through the outbox and any server in the cluster picks the job up. An `AddWarp`-only publisher/dashboard process stages deliveries and relies on a server elsewhere to run them.
 
 ### Sending
 
@@ -181,7 +180,7 @@ This is the `OnDeliveryExhausted` signal from the boundary table. Warp reports t
 
 A settled (`Delivered` or `Exhausted`) delivery can be requeued from the dashboard or through `IWebhookCommandService.Redeliver(deliveryId)`: it resets to `Pending` with a fresh attempt budget, refreshes `ExpireAt` so it can't be swept mid-flight, and enqueues an immediate executor job — the settled→`Pending` flip and the enqueue commit atomically in one transaction, so two concurrent redelivers on one delivery enqueue exactly one job.
 
-`Redeliver` returns a `WebhookRedeliveryResult` so callers map outcomes precisely: `Enqueued` (requeued), `NotFound` (unknown id), `Rejected` (already `Pending` — it owns a live job), and `Unavailable`. `Unavailable` is returned when the call runs in a process with **no webhooks worker wired** (a dashboard-only / publisher-only process that never called `AddWebhooks`): there is nothing there to run an executor job and nothing scans `NextAttemptAt`, so the delivery is deliberately left untouched rather than stranded `Pending` forever. Redeliver from a server host that runs `AddWebhooks`. The REST endpoint maps `Enqueued`→`200`, `NotFound`→`404`, and both `Rejected` and `Unavailable`→`409` (with distinct messages).
+`Redeliver` returns a `WebhookRedeliveryResult` so callers map outcomes precisely: `Enqueued` (requeued), `NotFound` (unknown id), and `Rejected` (already `Pending` — it owns a live job). Because the redelivery enqueuer is part of Core and registered by `AddWarp`, `Redeliver` works from **any** process (dashboard-only / publisher-only included) — it stages the executor job through the outbox and a server elsewhere runs it. (The `Unavailable` result remains defined for defensiveness but is no longer reachable in a normal `AddWarp` process now that the enqueuer is always present.) The REST endpoint maps `Enqueued`→`200`, `NotFound`→`404`, and `Rejected`→`409`.
 
 ## Migrating from a hand-rolled implementation
 
@@ -215,7 +214,7 @@ Three counters, in addition to the HTTP leg's spans/duration/error counters that
 
 ## Dashboard
 
-A **Webhooks** nav item (gated on the `webhooks` flag from `GET {prefix}/api/addons`, hidden otherwise) opens two screens:
+A **Webhooks** nav item (always shown — webhooks is a Core feature; the `webhooks` flag from `GET {prefix}/api/addons` gates on the always-registered redelivery enqueuer) opens two screens:
 
 **Deliveries list** — summary tiles (deliveries, delivered %, pending, exhausted) over a table of status, event, endpoint (the group value), reference, attempts, next-attempt time, and created time — with filters for status, event type, reference, group, and date.
 

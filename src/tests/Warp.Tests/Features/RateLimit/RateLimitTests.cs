@@ -397,6 +397,206 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task TokenBucket_FreshKey_AllowsInitialBurst_AndLeavesRemainingTokens()
+    {
+        // #240: a fresh key starts full (capacity = count). One start consumes one token, leaving count-1.
+        var jobId = Guid.NewGuid();
+        var seedCtx = _fixture.CreateContext();
+        seedCtx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow.AddMinutes(-1),
+            Queue = "default",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = "{}",
+            Metadata = SerializeMetadata("rl-tb-fresh", 2, 60, style: RateLimitStyle.TokenBucket),
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker();
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FindAsync([jobId], Xunit.TestContext.Current.CancellationToken);
+        job.ShouldNotBeNull();
+        job.CurrentState.ShouldBe(State.Completed);
+
+        var bucket = await readCtx.Set<RateLimitBucket>()
+            .Where(x => x.Name == "rl-tb-fresh")
+            .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
+        bucket.ShouldNotBeNull();
+        JsonSerializer.Deserialize<double>(bucket.TimestampsJson!).ShouldBe(1.0, 0.001);
+    }
+
+    [TimedFact]
+    public async Task TokenBucket_Empty_SkipMode_JobCancelled()
+    {
+        // Bucket empty (0 tokens, just refilled), low refill rate (4/60s) so no full token accrues during
+        // the test → the start is dropped in Skip mode.
+        var now = DateTime.UtcNow;
+        var seedCtx = _fixture.CreateContext();
+        seedCtx.Set<RateLimitBucket>().Add(new RateLimitBucket
+        {
+            Name = "rl-tb-empty-skip",
+            WindowStartUtc = now,
+            CurrentCount = 0,
+            TimestampsJson = JsonSerializer.Serialize(0.0),
+            UpdatedAt = now,
+        });
+        var jobId = Guid.NewGuid();
+        seedCtx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = now,
+            ScheduleTime = now.AddMinutes(-1),
+            Queue = "default",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = "{}",
+            Metadata = SerializeMetadata("rl-tb-empty-skip", 4, 60, RateLimitMode.Skip, RateLimitStyle.TokenBucket),
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker();
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FindAsync([jobId], Xunit.TestContext.Current.CancellationToken);
+        job.ShouldNotBeNull();
+        job.CurrentState.ShouldBe(State.Deleted);
+    }
+
+    [TimedFact]
+    public async Task TokenBucket_Empty_WaitMode_ReschedulesToNextTokenRefillInstant()
+    {
+        // Bucket empty, capacity 1 / 60s → rate 1 token / 60s, so the next token refills ~60s out. A slow
+        // rate (vs 1/1s) keeps the bucket reliably empty for the test's duration — no flake from a token
+        // accruing mid-test — and lets us assert the reschedule lands at the refill INSTANT (~now + 60s),
+        // not merely "in the future" and not a fixed-window boundary.
+        var now = DateTime.UtcNow;
+        var seedCtx = _fixture.CreateContext();
+        seedCtx.Set<RateLimitBucket>().Add(new RateLimitBucket
+        {
+            Name = "rl-tb-empty-wait",
+            WindowStartUtc = now,
+            CurrentCount = 0,
+            TimestampsJson = JsonSerializer.Serialize(0.0),
+            UpdatedAt = now,
+        });
+        var jobId = Guid.NewGuid();
+        seedCtx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = now,
+            ScheduleTime = now.AddMinutes(-1),
+            Queue = "default",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = "{}",
+            Metadata = SerializeMetadata("rl-tb-empty-wait", 1, 60, RateLimitMode.Wait, RateLimitStyle.TokenBucket),
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker();
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FindAsync([jobId], Xunit.TestContext.Current.CancellationToken);
+        job.ShouldNotBeNull();
+        job.CurrentState.ShouldBe(State.Scheduled);
+
+        // ~60s to refill one token (small slack for the tokens accrued during test execution).
+        job.ScheduleTime.ShouldBeGreaterThan(now.AddSeconds(45));
+        job.ScheduleTime.ShouldBeLessThan(now.AddSeconds(75));
+    }
+
+    [TimedFact]
+    public async Task TokenBucket_BucketRowHoldsSlidingTickArray_DegradesGracefullyNotThrows()
+    {
+        // The bucket row is keyed by name only, so a key reused across styles (or a hand-edit) can leave a
+        // sliding-window tick ARRAY in TimestampsJson where the token bucket expects a scalar. Parsing must
+        // degrade to an empty bucket instead of throwing a JsonException out of the pipeline (which would
+        // fail the job on every attempt). With an empty bucket + no accrual, a Skip-mode start is Deleted —
+        // crucially NOT Failed with an exception.
+        var now = DateTime.UtcNow;
+        var seedCtx = _fixture.CreateContext();
+        seedCtx.Set<RateLimitBucket>().Add(new RateLimitBucket
+        {
+            Name = "rl-tb-crossstyle",
+            WindowStartUtc = now,
+            CurrentCount = 2,
+            TimestampsJson = JsonSerializer.Serialize(new[] { now.AddSeconds(-10).Ticks, now.AddSeconds(-5).Ticks }),
+            UpdatedAt = now,
+        });
+        var jobId = Guid.NewGuid();
+        seedCtx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = now,
+            ScheduleTime = now.AddMinutes(-1),
+            Queue = "default",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = "{}",
+            Metadata = SerializeMetadata("rl-tb-crossstyle", 4, 60, RateLimitMode.Skip, RateLimitStyle.TokenBucket),
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker();
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FindAsync([jobId], Xunit.TestContext.Current.CancellationToken);
+        job.ShouldNotBeNull();
+        job.CurrentState.ShouldBe(State.Deleted);
+    }
+
+    [TimedFact]
+    public async Task TokenBucket_RefillsOverElapsedTime_AllowsAfterEnoughElapsed()
+    {
+        // Bucket last refilled 3s ago with 0 tokens; at 1 token/sec (5/5s) ~3 tokens have accrued, so the
+        // start is allowed — proves the lazy continuous refill from the elapsed time since last accept.
+        var now = DateTime.UtcNow;
+        var seedCtx = _fixture.CreateContext();
+        seedCtx.Set<RateLimitBucket>().Add(new RateLimitBucket
+        {
+            Name = "rl-tb-refill",
+            WindowStartUtc = now.AddSeconds(-3),
+            CurrentCount = 0,
+            TimestampsJson = JsonSerializer.Serialize(0.0),
+            UpdatedAt = now.AddSeconds(-3),
+        });
+        var jobId = Guid.NewGuid();
+        seedCtx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = now,
+            ScheduleTime = now.AddMinutes(-1),
+            Queue = "default",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = "{}",
+            Metadata = SerializeMetadata("rl-tb-refill", 5, 5, RateLimitMode.Skip, RateLimitStyle.TokenBucket),
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker();
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FindAsync([jobId], Xunit.TestContext.Current.CancellationToken);
+        job.ShouldNotBeNull();
+        job.CurrentState.ShouldBe(State.Completed);
+    }
+
+    [TimedFact]
     public async Task WaitMode_AfterRescheduleFires_JobActuallyRuns()
     {
         // Round-trip: throttle → Scheduled → activation flips back → worker re-runs → Completed.

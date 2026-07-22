@@ -270,4 +270,50 @@ public abstract class FailedJobTypeFilterTestsBase : IAsyncLifetime
             job.CurrentState.ShouldBe(State.Enqueued);
         }
     }
+
+    [TimedFact]
+    public async Task GetJobsByType_NoStateFilter_ReturnsAllStatesForThatType()
+    {
+        // #1: the clickable-type list spans every state, unlike GetFailedJobsByType.
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(TypedJob("SyncBooking", State.Completed));
+        ctx.Set<Job>().Add(TypedJob("SyncBooking", State.Failed));
+        ctx.Set<Job>().Add(TypedJob("SyncBooking", State.Processing));
+        ctx.Set<Job>().Add(TypedJob("OtherJob", State.Completed));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var result = await svc.GetJobsByType(new BaseListRequest { Page = 0, PageSize = 100 }, "SyncBooking", null);
+
+        result.TotalCount.ShouldBe(3);
+        result.Items.ShouldAllBe(j => j.Type == "SyncBooking");
+    }
+
+    [TimedFact]
+    public async Task GetJobsByType_WithStateFilter_ReturnsOnlyThatState()
+    {
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(TypedJob("SyncBooking", State.Completed));
+        ctx.Set<Job>().Add(TypedJob("SyncBooking", State.Failed));
+        ctx.Set<Job>().Add(TypedJob("SyncBooking", State.Failed));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var result = await svc.GetJobsByType(new BaseListRequest { Page = 0, PageSize = 100 }, "SyncBooking", State.Failed);
+
+        result.TotalCount.ShouldBe(2);
+        result.Items.ShouldAllBe(j => j.CurrentState == State.Failed);
+    }
+
+    private static Job TypedJob(string type, State state) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = state,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            Type = type,
+        };
 }

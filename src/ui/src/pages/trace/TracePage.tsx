@@ -15,6 +15,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import dagre from '@dagrejs/dagre';
 import { StateBadge } from '@/components/StateBadge';
+import { cappedChildSlots } from '@/lib/traceLayout';
 import { shortType, shortId } from '@/utils/format';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { Briefcase, Mail, Layers } from 'lucide-react';
@@ -117,6 +118,17 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
   for (const children of containers.values()) {
     for (const c of children) childrenInContainer.add(c.id);
   }
+
+  // #241: a container that fans out to hundreds/thousands of children used to render every child as its
+  // own node, making the graph unusable. Cap the individually-rendered children per container and collapse
+  // the remainder into a single "+N more" summary node (container children carry no individual edges, so
+  // hiding a node needs no edge cleanup).
+  const CHILD_RENDER_CAP = 24;
+  const hiddenChildIds = new Set<string>();
+  for (const children of containers.values()) {
+    const { visible } = cappedChildSlots(children.length, CHILD_RENDER_CAP);
+    for (const c of children.slice(visible)) hiddenChildIds.add(c.id);
+  }
   // Container parents are replaced by group boxes — map their ID to group ID
   const containerGroupId = new Map<string, string>();
   for (const parentId of containers.keys()) {
@@ -159,9 +171,9 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
     }
   }
 
-  // Create job nodes (skip container parents — they become group boxes)
+  // Create job nodes (skip container parents — they become group boxes — and collapsed-away children)
   for (const job of jobs) {
-    if (containers.has(job.id)) continue;
+    if (containers.has(job.id) || hiddenChildIds.has(job.id)) continue;
 
     nodes.push({
       id: job.id,
@@ -206,8 +218,12 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
   for (const job of jobs) {
     if (childrenInContainer.has(job.id)) continue; // positioned inside group, not by dagre
     const childCount = containers.get(job.id)?.length ?? 0;
-    const height = childCount > 0
-      ? childCount * NODE_HEIGHT + (childCount - 1) * CHILD_GAP + GROUP_PADDING * 2 + 30
+    // Reserve height for the CAPPED render (visible children + one "+N more" slot), not the full child
+    // count — otherwise dagre reserves thousands of rows for a large fan-out and blows the layout apart,
+    // defeating the collapse. Derived from the same helper as the manual group-box sizing below.
+    const { slots } = cappedChildSlots(childCount, CHILD_RENDER_CAP);
+    const height = slots > 0
+      ? slots * NODE_HEIGHT + (slots - 1) * CHILD_GAP + GROUP_PADDING * 2 + 30
       : NODE_HEIGHT;
     g.setNode(job.id, { width: NODE_WIDTH, height });
   }
@@ -248,20 +264,36 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
   // Create group nodes — position children inside group at container parent's dagre position
   for (const [parentId, children] of containers) {
     const parent = jobMap.get(parentId)!;
-    const childIds = children.map(c => c.id);
+    const { visible, hidden: hiddenCount } = cappedChildSlots(children.length, CHILD_RENDER_CAP);
+    const visibleChildren = children.slice(0, visible);
+    const childIds = visibleChildren.map(c => c.id);
 
     // Use container parent's dagre position as the group anchor
     const parentPos = g.node(parentId);
     const parentX = parentPos.x - NODE_WIDTH / 2;
     const parentY = parentPos.y;
 
-    // Stack children vertically inside the group
-    const totalChildHeight = childIds.length * NODE_HEIGHT + (childIds.length - 1) * CHILD_GAP;
+    // Stack visible children vertically inside the group, plus one "+N more" slot when collapsed.
+    const slotCount = childIds.length + (hiddenCount > 0 ? 1 : 0);
+    const totalChildHeight = slotCount * NODE_HEIGHT + (slotCount - 1) * CHILD_GAP;
     const startY = parentY - totalChildHeight / 2;
 
     for (let i = 0; i < childIds.length; i++) {
       const childNode = nodes.find(n => n.id === childIds[i])!;
       childNode.position = { x: parentX, y: startY + i * (NODE_HEIGHT + CHILD_GAP) };
+    }
+
+    const summaryId = hiddenCount > 0 ? `summary-${parentId}` : null;
+    if (summaryId) {
+      nodes.push({
+        id: summaryId,
+        type: 'default',
+        data: { label: `+${hiddenCount} more` },
+        position: { x: parentX, y: startY + childIds.length * (NODE_HEIGHT + CHILD_GAP) },
+        selectable: false,
+        focusable: false,
+        style: { width: NODE_WIDTH, height: NODE_HEIGHT, fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' },
+      });
     }
 
     const minX = parentX - GROUP_PADDING;
@@ -282,8 +314,9 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
       style: { width: maxX - minX, height: maxY - minY2, zIndex: -1, backgroundColor: 'transparent', pointerEvents: 'all' },
     });
 
-    // Make child nodes relative to group
-    for (const id of childIds) {
+    // Make child nodes (and the summary node) relative to group
+    const inGroup = summaryId ? [...childIds, summaryId] : childIds;
+    for (const id of inGroup) {
       const node = nodes.find(n => n.id === id)!;
       node.parentId = groupId;
       node.position = { x: node.position.x - minX, y: node.position.y - minY2 };

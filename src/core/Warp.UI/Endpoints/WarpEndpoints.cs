@@ -50,6 +50,9 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("jobs/failed/by-type", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string type) => await jobQueryService.GetFailedJobsByType(request, type));
 
+        apiGroup.MapGet("jobs/by-type", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string type, [FromQuery] string? state) =>
+            await jobQueryService.GetJobsByType(request, type, Enum.TryParse<State>(state, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed) ? parsed : null));
+
         apiGroup.MapPost("jobs/failed/delete-by-type", async ([FromServices] IJobCommandService jobCommandService, [FromQuery] string type) => await jobCommandService.DeleteFailedJobsByType(type));
 
         apiGroup.MapPost("jobs/failed/requeue-by-type", async ([FromServices] IJobCommandService jobCommandService, [FromQuery] string type) => await jobCommandService.RequeueFailedJobsByType(type));
@@ -126,6 +129,8 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("batches/{batchId}/jobs/counts", async ([FromServices] IJobGroupQueryService svc, Guid batchId) => await svc.GetJobGroupJobCounts(batchId));
 
+        apiGroup.MapPost("batches/{batchId}/cancel", async ([FromServices] IJobCommandService jobCommandService, Guid batchId) => await jobCommandService.CancelBatch(batchId));
+
         apiGroup.MapGet("stats/history", async ([FromServices] IDashboardStatsService statsService, [FromQuery] int? hours) => await statsService.GetStatsHistory(hours ?? 24));
 
         apiGroup.MapGet("stats/counters", async ([FromServices] IDashboardStatsService statsService) => await statsService.GetCounters());
@@ -142,7 +147,7 @@ public static class WarpEndpoints
             [FromServices] IRateLimitManager? rateLimits,
             [FromServices] IDashboardPushMarker? push,
             [FromServices] ISagaQueryService? sagas,
-            [FromServices] IWarpAdapters? adapters,
+            [FromServices] IAdapterRecordingMarker? adapters,
             [FromServices] IEndpointCallRecorder? endpoints,
             [FromServices] IWebhookRedeliveryEnqueuer? webhooks) =>
             Results.Ok(new WarpAddonsInfo

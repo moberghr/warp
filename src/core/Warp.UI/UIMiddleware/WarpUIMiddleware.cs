@@ -180,11 +180,24 @@ public class WarpUIMiddleware
 
         var headEndIndex = htmlString.IndexOf("</head>", StringComparison.Ordinal);
         var hasLogin = _options.CredentialValidatorType != null ? "true" : "false";
-        var appSettingsString = $"<script> window.apiPath = \"{_options.RoutePrefix}/api/\"; window.basePath = \"{_options.RoutePrefix}\"; window.hasBuiltInLogin = {hasLogin};</script>";
+
+        // All host-supplied values are JSON-encoded so a stray quote or "</script>" can't break the
+        // injected script (System.Text.Json's default HTML-safe encoder escapes < > & and emits a safe JS
+        // string literal, or `null`). RoutePrefix is config, not user input, but encode it too for
+        // consistency and defence in depth.
+        var appSettingsString =
+            $"<script> window.apiPath = {JsonValue(_options.RoutePrefix + "/api/")}; window.basePath = {JsonValue(_options.RoutePrefix)}; window.hasBuiltInLogin = {hasLogin};"
+            + $" window.warpInstanceName = {JsonValue(_options.InstanceName)};"
+            + $" window.warpPortalUrl = {JsonValue(_options.PortalUrl)};"
+            + $" window.warpPortalLabel = {JsonValue(_options.PortalLabel)};"
+            + $" window.warpLogoUrl = {JsonValue(_options.LogoUrl)};</script>";
         htmlString = htmlString.Insert(headEndIndex, appSettingsString);
 
         await response.WriteAsync(htmlString, Encoding.UTF8, response.HttpContext.RequestAborted);
     }
+
+    // Emits a safe JS string literal (or `null`) for host-supplied branding values injected into the SPA.
+    private static string JsonValue(string? value) => System.Text.Json.JsonSerializer.Serialize(value);
 
     /// <summary>
     /// Built-in auth filter that validates the Warp cookie.

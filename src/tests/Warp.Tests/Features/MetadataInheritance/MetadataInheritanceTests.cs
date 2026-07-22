@@ -148,11 +148,12 @@ public abstract class MetadataInheritanceTestsBase : IntegrationTestBase
         parent.CurrentState.ShouldBe(State.Completed);
         child.CurrentState.ShouldBe(State.Completed);
 
-        // The child declared no retry policy, so it must resolve the global default
-        // (MaxRetries=1, RetryDelays=[1]) — not inherit the parent's WithRetry(5, [7]).
-        var childMetadata = JsonSerializer.Deserialize<Dictionary<string, object>>(child.Metadata!)!;
-        ((JsonElement)childMetadata["MaxRetries"]).GetInt32().ShouldBe(1);
-        ((JsonElement)childMetadata["RetryDelays"]).EnumerateArray().Select(x => x.GetInt32()).ShouldBe([1]);
+        // The child declared no retry policy, so it must carry none: it neither inherits the parent's
+        // WithRetry(5, [7]) (#239) nor has the global default materialized into its metadata (#236 —
+        // the default is resolved at execution via IOptions, not stamped at publish). Absence of both
+        // keys is what proves the child resolved its own default (MaxRetries=1) rather than the parent's.
+        ShouldNotHaveMetadataKey(child, "MaxRetries");
+        ShouldNotHaveMetadataKey(child, "RetryDelays");
     }
 
     private async Task<(Job Parent, Job Child)> LoadParentAndChild(Guid parentId)

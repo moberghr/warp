@@ -50,3 +50,17 @@ public class RetryAttributeWithDelaysCommand : IJobHandler<RetryAttributeWithDel
 }
 
 public class RetryAttributeWithDelaysRequest : IJob;
+
+// #236 regression: job class carrying [Retry(3)], published through the REAL publisher (no explicit
+// metadata). Global default is 1 retry; the attribute must win (3 retries). Kept at 3 so the retry
+// chain matches the timing of the proven GivenFailingJobWithThreeRetries integration test.
+public class RetryAttributeThreeJobCommand : IJobHandler<RetryAttributeThreeJobRequest>
+{
+    public Task HandleAsync(RetryAttributeThreeJobRequest message, CancellationToken cancellationToken)
+    {
+        throw new InvalidOperationException("Always fails");
+    }
+}
+
+[Retry(3)]
+public class RetryAttributeThreeJobRequest : IJob;

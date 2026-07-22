@@ -129,9 +129,63 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
     {
         var bucket = await _store.GetAsync(key, ct);
 
-        return style == RateLimitStyle.Sliding
-            ? await EvaluateSliding(key, count, window, now, bucket, ct)
-            : await EvaluateFixed(key, count, window, now, bucket, ct);
+        return style switch
+        {
+            RateLimitStyle.Sliding => await EvaluateSliding(key, count, window, now, bucket, ct),
+            RateLimitStyle.TokenBucket => await EvaluateTokenBucket(key, count, window, now, bucket, ct),
+            _ => await EvaluateFixed(key, count, window, now, bucket, ct),
+        };
+    }
+
+    private async Task<RateLimitEvaluation> EvaluateTokenBucket(
+        string key,
+        int count,
+        TimeSpan window,
+        DateTime now,
+        RateLimitBucket? bucket,
+        CancellationToken ct)
+    {
+        // Token bucket: burst capacity = count, refill rate = count / window per second. A fresh key
+        // starts full (allows an initial burst up to capacity). Tokens accrue continuously, but only an
+        // ACCEPT changes stored state — so between accepts the available tokens are derived from the time
+        // elapsed since the last accept (WindowStartUtc = last-refill instant, TimestampsJson = the
+        // fractional token count at that instant). Rejections write nothing, mirroring Fixed/Sliding.
+        var capacity = (double)count;
+
+        // Degenerate window (only reachable via a hand-constructed IRateLimitMetadata; all public entry
+        // points clamp perSeconds >= 1) — don't divide by zero / produce NaN schedule times; just allow.
+        if (window.TotalSeconds <= 0)
+        {
+            return new RateLimitEvaluation(true, default);
+        }
+
+        var ratePerSecond = capacity / window.TotalSeconds;
+
+        double available;
+        if (bucket == null)
+        {
+            available = capacity;
+        }
+        else
+        {
+            var stored = ParseTokens(bucket.TimestampsJson);
+            var elapsedSeconds = (now - bucket.WindowStartUtc).TotalSeconds;
+            var accrued = elapsedSeconds > 0 ? elapsedSeconds * ratePerSecond : 0;
+            available = Math.Min(capacity, stored + accrued);
+        }
+
+        if (available >= 1.0)
+        {
+            var remaining = available - 1.0;
+            await _store.UpsertAsync(key, now, (int)remaining, SerializeTokens(remaining), now, ct);
+
+            return new RateLimitEvaluation(true, default);
+        }
+
+        // Not enough for one token — pace: reschedule to when the deficit will have refilled.
+        var secondsToNextToken = (1.0 - available) / ratePerSecond;
+
+        return new RateLimitEvaluation(false, now.AddSeconds(secondsToNextToken));
     }
 
     private async Task<RateLimitEvaluation> EvaluateFixed(
@@ -213,9 +267,19 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             return [];
         }
 
-        var ticks = JsonSerializer.Deserialize<long[]>(json) ?? [];
+        // Defensive: the bucket row is keyed by name only, so a key reused across styles (or a hand-edit)
+        // could leave a non-array payload here (e.g. a token-bucket scalar). Treat anything unparseable as
+        // an empty window rather than throwing out of the pipeline and failing the job.
+        try
+        {
+            var ticks = JsonSerializer.Deserialize<long[]>(json) ?? [];
 
-        return [.. ticks.Select(t => new DateTime(t, DateTimeKind.Utc))];
+            return [.. ticks.Select(t => new DateTime(t, DateTimeKind.Utc))];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     private static string SerializeTimestamps(List<DateTime> timestamps)
@@ -224,6 +288,29 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
 
         return JsonSerializer.Serialize(ticks);
     }
+
+    // Token bucket stores a single fractional token count in the same TimestampsJson column the sliding
+    // window uses for its tick array — the two styles never share a bucket row, so the column is free.
+    private static double ParseTokens(string? json)
+    {
+        if (string.IsNullOrEmpty(json))
+        {
+            return 0;
+        }
+
+        // Defensive: same shared-row concern as ParseTimestamps — a sliding-window tick array left on the
+        // row would not deserialize to a double. Treat an unparseable payload as an empty bucket.
+        try
+        {
+            return JsonSerializer.Deserialize<double>(json);
+        }
+        catch (JsonException)
+        {
+            return 0;
+        }
+    }
+
+    private static string SerializeTokens(double tokens) => JsonSerializer.Serialize(tokens);
 
     private readonly record struct RateLimitEvaluation(bool Allowed, DateTime NextAvailable);
 }

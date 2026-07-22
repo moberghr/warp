@@ -8,13 +8,14 @@ import { FilteredJobsTable } from '@/components/FilteredJobsTable';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { RelativeTime } from '@/components/RelativeTime';
 import { shortType, formatDateTime, shortId } from '@/utils/format';
+import { addonChips } from '@/lib/addonChips';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { useRealtimeRefetch } from '@/hooks/useRealtimeRefetch';
 import { State } from '@/types';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import * as api from '@/api';
 
-type DetailPendingAction = 'cancel' | 'requeue' | 'delete';
+type DetailPendingAction = 'cancel' | 'requeue' | 'delete' | 'cancelBatch';
 
 // Color rules for the history panel: any event carrying an exception payload renders
 // red (whole card, not just the inner <pre>), Completed renders green, everything else
@@ -101,6 +102,7 @@ function kindLabel(kind: number) {
   return 'Job';
 }
 
+
 export default function DetailPage() {
   const { id } = useParams<{ id: string }>();
   const [job, setJob] = useState<UnifiedJobDetailModel | null>(null);
@@ -163,7 +165,12 @@ export default function DetailPage() {
     <div>
       {/* Header */}
       <div data-warp-slot="detail.header" data-warp-context={jobContext} key={`header-${job.id}`} className="flex items-center gap-4 mb-6">
-        <h1 className="text-2xl font-bold">{kindLabel(job.kind)} {shortId(job.id)}</h1>
+        <h1 className="text-2xl font-bold">
+          {job.type
+            ? <Link to={`/jobs/by-type/${encodeURIComponent(job.type)}`} className="hover:underline" title="See all jobs of this type">{shortType(job.type)}</Link>
+            : kindLabel(job.kind)}{' '}
+          <span className="font-mono text-base font-normal text-muted-foreground">{kindLabel(job.kind)} · {shortId(job.id)}</span>
+        </h1>
         <StateBadge state={job.currentState} cancellationMode={job.cancellationMode} />
         {job.queue && <span className="text-sm text-muted-foreground">Queue: {job.queue}</span>}
         <div className="flex-1" />
@@ -174,6 +181,8 @@ export default function DetailPage() {
             <Button variant="outline" size="sm" onClick={() => setPending('requeue')}>Requeue</Button>
             <Button variant="destructive" size="sm" onClick={() => setPending('delete')}>Delete</Button>
           </>
+        ) : job.kind === 3 && (job.currentState === State.Processing || job.currentState === State.Awaiting) ? (
+          <Button variant="destructive" size="sm" onClick={() => setPending('cancelBatch')}>Cancel batch</Button>
         ) : null}
       </div>
 
@@ -206,6 +215,13 @@ export default function DetailPage() {
                 <CardContent className="pt-4 space-y-4">
                   {job.message && (
                     <ExpandableJsonBlock heading="Payload" content={formatJson(job.message)} />
+                  )}
+                  {job.metadata && addonChips(job.metadata).length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {addonChips(job.metadata).map((chip) => (
+                        <span key={chip} className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium">{chip}</span>
+                      ))}
+                    </div>
                   )}
                   {job.metadata && Object.keys(job.metadata).length > 0 && (
                     <ExpandableJsonBlock heading="Metadata" content={JSON.stringify(job.metadata, null, 2)} />
@@ -376,7 +392,8 @@ export default function DetailPage() {
           pending === 'cancel' ? 'Cancel running job?'
             : pending === 'requeue' ? 'Requeue job?'
               : pending === 'delete' ? 'Delete job?'
-                : ''
+                : pending === 'cancelBatch' ? 'Cancel batch?'
+                  : ''
         }
         description={
           pending === 'cancel'
@@ -385,13 +402,16 @@ export default function DetailPage() {
               ? 'The job will be re-enqueued and picked up by a worker on the next poll.'
               : pending === 'delete'
                 ? 'The job will be removed permanently. This cannot be undone.'
-                : null
+                : pending === 'cancelBatch'
+                  ? 'Every child job that has not finished yet will be cancelled: enqueued/scheduled children are deleted, and running children are signalled for graceful cancellation. Completed and failed children are left as-is.'
+                  : null
         }
-        confirmLabel={pending === 'requeue' ? 'Requeue' : pending === 'cancel' ? 'Cancel job' : 'Delete'}
-        variant={pending === 'delete' || pending === 'cancel' ? 'destructive' : 'default'}
+        confirmLabel={pending === 'requeue' ? 'Requeue' : pending === 'cancel' ? 'Cancel job' : pending === 'cancelBatch' ? 'Cancel batch' : 'Delete'}
+        variant={pending === 'delete' || pending === 'cancel' || pending === 'cancelBatch' ? 'destructive' : 'default'}
         onConfirm={() => {
           if (pending === 'cancel' || pending === 'delete') api.deleteJob(job.id);
           else if (pending === 'requeue') api.requeueJob(job.id);
+          else if (pending === 'cancelBatch') api.cancelBatch(job.id);
           setPending(null);
         }}
       />
