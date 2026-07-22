@@ -127,6 +127,24 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             log.Timestamp.ShouldBeInRange(startedAt, now);
             log.WorkerId.ShouldNotBeNull();
             log.WorkerId!.Value.ShouldNotBe(Guid.Empty);
+            log.DurationMs.ShouldBeNull();   // duration/name/value are for lifecycle+counter logs, not handler logs
+            log.Name.ShouldBeNull();
+            log.Value.ShouldBeNull();
+
+            // The Completed lifecycle row (worker-written) — every column.
+            var completed = await ctx.Set<JobLog>().AsNoTracking().Where(x => x.JobId == jobId && x.EventType == "Completed").SingleAsync(Ct);
+            completed.Id.ShouldNotBe(Guid.Empty);
+            completed.JobId.ShouldBe(jobId);
+            completed.EventType.ShouldBe("Completed");
+            completed.Level.ShouldBe("Information");
+            completed.Message.ShouldBe($"Job {jobId} completed");
+            completed.Exception.ShouldBeNull();
+            completed.Timestamp.ShouldBeInRange(startedAt, now);
+            completed.DurationMs.ShouldNotBeNull();
+            completed.DurationMs!.Value.ShouldBeGreaterThanOrEqualTo(0);
+            completed.WorkerId.ShouldNotBeNull();
+            completed.Name.ShouldBeNull();
+            completed.Value.ShouldBeNull();
         }
 
         // ==================== 2. AdapterCallLog — the outbound vendor call ====================
@@ -153,6 +171,9 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             call.MachineName.ShouldBe(Environment.MachineName);
             call.Timestamp.ShouldBeInRange(startedAt, now);
             call.TagsJson.ShouldBeNull();
+            call.TraceId.ShouldBeNull();   // no OTel listener in the test → no ambient trace id
+            call.ExpireAt.ShouldNotBeNull();
+            call.ExpireAt!.Value.ShouldBeGreaterThan(call.Timestamp);   // Timestamp + 7d global retention
         }
 
         // ============= 3. AdapterCallLog — the webhook attempt (warp-webhooks) =============
@@ -170,8 +191,19 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             attempt.Attempts.ShouldBe(1);
             attempt.ResponseBody.ShouldBe(HookResponseBody);   // webhooks capture response bodies always
             attempt.RequestBody.ShouldBeNull();   // ...but never request bodies (payload already on the row)
+            attempt.RequestHeaders.ShouldBeNull();   // warp-webhooks adapter leaves CaptureHeaders = None
+            attempt.ResponseHeaders.ShouldBeNull();
+            attempt.RequestSummary.ShouldBe("POST http://localhost/hook");
             attempt.ExceptionType.ShouldBeNull();
+            attempt.ExceptionMessage.ShouldBeNull();
             attempt.MachineName.ShouldBe(Environment.MachineName);
+            attempt.Id.ShouldNotBe(Guid.Empty);
+            attempt.Timestamp.ShouldBeInRange(startedAt, now);
+            attempt.DurationMs.ShouldBeGreaterThanOrEqualTo(0);
+            attempt.TraceId.ShouldBeNull();
+            attempt.TagsJson.ShouldBeNull();
+            attempt.ExpireAt.ShouldNotBeNull();   // Timestamp + WebhookDeliveryRetention (aligned)
+            attempt.ExpireAt!.Value.ShouldBeGreaterThan(attempt.Timestamp);
         }
 
         // ============================ 4. WebhookDelivery row ============================
@@ -221,10 +253,16 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             ep.DurationMs.ShouldBeGreaterThanOrEqualTo(0);
             ep.MachineName.ShouldBe(Environment.MachineName);
             ep.Timestamp.ShouldBeInRange(startedAt, now);
+            ep.ExceptionMessage.ShouldBeNull();
+            ep.TraceId.ShouldNotBeNull();   // inbound runs under the ASP.NET request Activity → trace id captured
+            ep.TraceId!.Value.ShouldNotBe(Guid.Empty);
+            ep.TagsJson.ShouldBeNull();
+            ep.ExpireAt.ShouldNotBeNull();
+            ep.ExpireAt!.Value.ShouldBeGreaterThan(ep.Timestamp);   // Timestamp + 7d global retention
 
-            // The looped-back adapter/webhook calls also hit Warp endpoints, so their rows exist too.
-            (await ctx.Set<EndpointCallLog>().AnyAsync(x => x.RouteTemplate == "/vendor", Ct)).ShouldBeTrue();
-            (await ctx.Set<EndpointCallLog>().AnyAsync(x => x.RouteTemplate == "/hook", Ct)).ShouldBeTrue();
+            // The looped-back adapter (/vendor) and webhook (/hook) calls are also inbound Warp endpoints.
+            await AssertLoopedBackEndpointAsync(ctx, "/vendor", "{\"src\":\"vendor\"}", VendorResponseBody, startedAt, now);
+            await AssertLoopedBackEndpointAsync(ctx, "/hook", "{\"hello\":\"world\"}", HookResponseBody, startedAt, now);
         }
 
         // ============================ 6. Dashboard API (the UI's JSON) ============================
@@ -299,6 +337,38 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         attemptItem.Outcome.ShouldBe(AdapterCallOutcome.Success);
         attemptItem.StatusCode.ShouldBe(200);
 
+        // ==================== 7. Counter rows (the stats pipeline behind the dashboard) ====================
+        await using (var ctx = _fixture.CreateContext())
+        {
+            (await ctx.Set<Counter>().AnyAsync(x => x.Key.Contains(VendorAdapter), Ct)).ShouldBeTrue();
+            (await ctx.Set<Counter>().AnyAsync(x => x.Key.Contains(WebhookConstants.AdapterName), Ct)).ShouldBeTrue();
+            (await ctx.Set<Counter>().AnyAsync(x => x.Key.Contains("/inbound"), Ct)).ShouldBeTrue();
+        }
+
+        // ==================== 8. AdapterDefinition rows (registration ledger) ====================
+        await using (var ctx = _fixture.CreateContext())
+        {
+            var vendorDef = await ctx.Set<AdapterDefinition>().AsNoTracking().SingleAsync(x => x.Name == VendorAdapter, Ct);
+            vendorDef.Id.ShouldNotBe(Guid.Empty);
+            vendorDef.Name.ShouldBe(VendorAdapter);
+            vendorDef.ConfigSummary.ShouldNotBeNullOrEmpty();
+            vendorDef.GroupLabel.ShouldBe("Group");   // vendor set no GroupLabel → default
+            vendorDef.CallLogRetentionCount.ShouldBeNull();
+            vendorDef.SharedPolicyJson.ShouldBeNull();
+            vendorDef.SharedPolicyHash.ShouldBeNull();
+            vendorDef.HasPolicyConflict.ShouldBeFalse();
+            vendorDef.FirstSeenAt.ShouldBeInRange(startedAt, now);
+            vendorDef.LastSeenAt.ShouldBeInRange(startedAt, now);
+
+            var hookDef = await ctx.Set<AdapterDefinition>().AsNoTracking().SingleAsync(x => x.Name == WebhookConstants.AdapterName, Ct);
+            hookDef.Name.ShouldBe(WebhookConstants.AdapterName);
+            hookDef.GroupLabel.ShouldBe("Endpoint");   // set by the webhook adapter registration
+            hookDef.HasPolicyConflict.ShouldBeFalse();
+            hookDef.SharedPolicyJson.ShouldBeNull();
+            hookDef.FirstSeenAt.ShouldBeInRange(startedAt, now);
+            hookDef.LastSeenAt.ShouldBeInRange(startedAt, now);
+        }
+
         await app.StopAsync(Ct);
     }
 
@@ -317,6 +387,37 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         }
 
         throw new TimeoutException("Condition not met within 20s.");
+    }
+
+    // Full field assertion for a looped-back inbound endpoint row (the adapter /vendor and webhook /hook
+    // calls). These callers send no X-Client / X-Forwarded-For / User-Agent, so group/IP/UA are null.
+    private static async Task AssertLoopedBackEndpointAsync(TestContext ctx, string route, string requestBody, string responseBody, DateTime startedAt, DateTime now)
+    {
+        var ep = await ctx.Set<EndpointCallLog>().AsNoTracking().Where(x => x.RouteTemplate == route).SingleAsync(Ct);
+        ep.Id.ShouldNotBe(Guid.Empty);
+        ep.Method.ShouldBe("POST");
+        ep.RouteTemplate.ShouldBe(route);
+        ep.Operation.ShouldNotBeNullOrEmpty();
+        ep.GroupName.ShouldBeNull();
+        ep.Outcome.ShouldBe(AdapterCallOutcome.Success);
+        ep.StatusCode.ShouldBe(200);
+        ep.RemoteIp.ShouldBeNull();
+        ep.UserAgent.ShouldBeNull();
+        ep.User.ShouldBeNull();
+        ep.RequestBody.ShouldBe(requestBody);
+        ep.ResponseBody.ShouldBe(responseBody);
+        ep.RequestHeaders.ShouldNotBeNullOrEmpty();
+        ep.ResponseHeaders.ShouldNotBeNullOrEmpty();
+        ep.ExceptionType.ShouldBeNull();
+        ep.ExceptionMessage.ShouldBeNull();
+        ep.MachineName.ShouldBe(Environment.MachineName);
+        ep.Timestamp.ShouldBeInRange(startedAt, now);
+        ep.DurationMs.ShouldBeGreaterThanOrEqualTo(0);
+        ep.TraceId.ShouldNotBeNull();   // inbound runs under the ASP.NET request Activity → trace id captured
+        ep.TraceId!.Value.ShouldNotBe(Guid.Empty);
+        ep.TagsJson.ShouldBeNull();
+        ep.ExpireAt.ShouldNotBeNull();
+        ep.ExpireAt!.Value.ShouldBeGreaterThan(ep.Timestamp);
     }
 
     private async Task<WebApplication> StartAppAsync()
