@@ -66,6 +66,16 @@ jobs:
       working-directory: src/core/providers/Warp.Provider.SqlServer
       run: dotnet pack -c Release -p:PackageVersion=${{ env.PACKAGE_VERSION }} -o ${{ github.workspace }}/nupkgs
 
+    # Outbound adapter binding packages. Adapters.Http depends on Core; Adapters.Refit depends on
+    # Adapters.Http, so pack Http first. (Webhook delivery is part of Core — no separate package.)
+    - name: Pack Moberg.Warp.Adapters.Http
+      working-directory: src/core/Warp.Adapters.Http
+      run: dotnet pack -c Release -p:PackageVersion=${{ env.PACKAGE_VERSION }} -o ${{ github.workspace }}/nupkgs
+
+    - name: Pack Moberg.Warp.Adapters.Refit
+      working-directory: src/core/Warp.Adapters.Refit
+      run: dotnet pack -c Release -p:PackageVersion=${{ env.PACKAGE_VERSION }} -o ${{ github.workspace }}/nupkgs
+
     # Get short-lived API key via trusted publishing (OIDC, no stored secrets)
     - name: NuGet login
       uses: NuGet/login@v1
