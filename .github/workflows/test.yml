@@ -11,6 +11,27 @@ env:
   DOTNET_VERSION: '10.0'
 
 jobs:
+  ui-tests:
+    name: UI unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: src/ui/package-lock.json
+
+      - name: Install UI dependencies
+        working-directory: src/ui
+        run: npm ci
+
+      - name: Run Vitest
+        working-directory: src/ui
+        run: npm test
+
   test:
     name: ${{ matrix.database }}
     runs-on: ubuntu-latest
