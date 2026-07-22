@@ -15,7 +15,7 @@ using Warp.Worker.Services;
 
 namespace Warp.Tests.EndToEnd;
 
-[GenerateDatabaseTests]
+[GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class MultiServerTestsBase : IntegrationTestBase
 {
     protected MultiServerTestsBase(IDatabaseFixture fixture)

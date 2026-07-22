@@ -40,7 +40,7 @@ namespace Warp.Tests.EndToEnd;
 /// uniquely identifiable so field values are deterministic (generated fields — ids, timestamps, durations,
 /// machine name — get presence/range checks).
 /// </summary>
-[GenerateDatabaseTests]
+[GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
 {
     private const string VendorAdapter = "loopback-vendor";

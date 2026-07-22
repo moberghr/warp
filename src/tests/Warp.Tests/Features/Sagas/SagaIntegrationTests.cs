@@ -8,7 +8,7 @@ using Warp.Tests.TestData.Sagas;
 
 namespace Warp.Tests.Features.Sagas;
 
-[GenerateDatabaseTests]
+[GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class SagaIntegrationTestsBase : IntegrationTestBase
 {
     protected SagaIntegrationTestsBase(IDatabaseFixture fixture)
@@ -151,8 +151,13 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartsMessage { CorrelationKey = "contended" });
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Wait for the first handler to be pinned at the barrier.
-        await signal.Running.WaitAsync(TimeSpan.FromSeconds(10), Xunit.TestContext.Current.CancellationToken);
+        // Wait for the first handler to be pinned at the barrier. Assert the wait actually
+        // succeeded — SemaphoreSlim.WaitAsync returns false on timeout, and silently proceeding
+        // would run every downstream assertion on the false premise that the mutex is held,
+        // masking the real failure (starved worker / handler never picked up) behind a generic
+        // 20s hang. Fail fast and descriptively instead.
+        var pinned = await signal.Running.WaitAsync(TimeSpan.FromSeconds(10), Xunit.TestContext.Current.CancellationToken);
+        pinned.ShouldBeTrue("first saga handler was not picked up and pinned at the barrier within 10s");
 
         // Now publish a second message for the same correlation key. The proxy will fail to
         // acquire the mutex (held by the first handler) and set Outcome = Enqueued requeue.
