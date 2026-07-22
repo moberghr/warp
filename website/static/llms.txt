@@ -17,7 +17,7 @@ Warp ships as core packages — Moberg.Warp.Core (publishing), Moberg.Warp.Worke
 - [Mutex](https://moberghr.github.io/warp/docs/features/mutex): ConcurrencyKey-based mutual exclusion for jobs
 - [Semaphore](https://moberghr.github.io/warp/docs/features/semaphore): Bounded concurrency (limit > 1) via [Semaphore], Wait/Skip policies
 - [Timeout](https://moberghr.github.io/warp/docs/features/timeout): Per-attempt / total deadlines, Delete vs Fail modes
-- [Rate Limiting](https://moberghr.github.io/warp/docs/features/rate-limit): Fixed / sliding windows, Skip vs Wait, per-key buckets
+- [Rate Limiting](https://moberghr.github.io/warp/docs/features/rate-limit): Fixed / sliding / token-bucket styles, Skip vs Wait, per-key buckets
 - [Circuit Breaker](https://moberghr.github.io/warp/docs/features/circuit-breaker): Trip on failure threshold, half-open probe recovery
 - [No-Restart](https://moberghr.github.io/warp/docs/features/no-restart): [NoRestart] / [Restart] for non-idempotent work and stale-job recovery
 - [Batched Completions](https://moberghr.github.io/warp/docs/features/batched-completions): Coalesced completion writes for throughput
@@ -26,7 +26,7 @@ Warp ships as core packages — Moberg.Warp.Core (publishing), Moberg.Warp.Worke
 - [Database Push](https://moberghr.github.io/warp/docs/features/db-push): LISTEN/NOTIFY & Service Broker wake-up, opt-in low-latency pickup
 - [Dashboard Push](https://moberghr.github.io/warp/docs/features/dashboard-push): SignalR realtime dashboard updates
 - [DB-Generated IDs](https://moberghr.github.io/warp/docs/features/db-generated-ids): Database-assigned identifiers
-- [Job Cancellation](https://moberghr.github.io/warp/docs/features/cancellation): Graceful CancellationMode, handler CancellationToken
+- [Job Cancellation](https://moberghr.github.io/warp/docs/features/cancellation): Graceful CancellationMode, handler CancellationToken, transitive batch cancel
 - [Pause / Resume](https://moberghr.github.io/warp/docs/features/pause): Pause servers and worker groups, resume processing
 - [Job Tracing](https://moberghr.github.io/warp/docs/features/tracing): TraceId and SpawnedByJobId for cross-job flow visibility
 - [HTTP Endpoints](https://moberghr.github.io/warp/docs/features/http): Expose IRequest<T> / IStreamRequest<T> handlers as ASP.NET endpoints via [WarpHttp...] on handler classes (inbound)

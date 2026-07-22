@@ -18,7 +18,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
     opt.AddRateLimit();
 });
 
-// Per-handler attribute (default: Mode = Skip, Style = Fixed)
+// On the job/request type — never the handler (default: Mode = Skip, Style = Fixed)
 [RateLimit("sendgrid", count: 10, perSeconds: 60)]
 public class SendEmail : IJob { }
 

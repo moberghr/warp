@@ -48,6 +48,12 @@ public class LongRunningHandler : IJobHandler<LongRunningRequest>
 
 If your handler ignores the token, cancellation still works — but the handler runs to completion and the job is marked `Completed`, not `Deleted`.
 
+## Cancelling a Batch
+
+`CancelBatch(batchId)` cancels a whole batch in one call (surfaced as a **Cancel** action on the batch detail page). It is **transitive**: it walks the `ParentJobId` tree breadth-first from the batch and gracefully cancels every non-terminal descendant — not just the direct children, but also pending continuations reached *through* children that have already finished. Jobs already in a terminal state (`Completed`, `Failed`, `Deleted`) are left untouched, so cancelling a mostly-finished batch only affects the work still outstanding.
+
+Each cancelled job follows the same graceful path as a single `DeleteJob`: `CancellationMode = Graceful`, the handler's token is cancelled on the next monitor tick, and the job settles to `Deleted` once the handler exits (or `Completed` if it ignores the token and finishes). Passing a non-batch id throws `ArgumentException`.
+
 ## CancellationMode Enum
 
 | Value | Description |

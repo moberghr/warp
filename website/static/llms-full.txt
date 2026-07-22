@@ -606,6 +606,8 @@ await jobCommandService.DeleteJob(jobId);
 3. If handler respects the token: state becomes `Deleted`
 4. If handler completes despite cancellation: state becomes `Completed` (work happened)
 
+`CancelBatch(batchId)` cancels a whole batch (surfaced as a Cancel action on the batch detail page). It walks the `ParentJobId` tree breadth-first and gracefully cancels every non-terminal descendant — direct children plus pending continuations reached through already-finished children — leaving terminal jobs (`Completed`/`Failed`/`Deleted`) untouched.
+
 ### Writing cancellable handlers
 
 ```csharp

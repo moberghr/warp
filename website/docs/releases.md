@@ -86,6 +86,25 @@ Counts, error rate, **and average latency** now come from `Counter`→`Statistic
 - **Capture truncation** cuts on a UTF-8 character boundary (no `U+FFFD` from a split multibyte char).
 - Indexed `WebhookDelivery.CreatedAt` for the count-based cleanup sweep.
 
+### Token-bucket rate limiting
+
+`RateLimitStyle` gains a third shape, `TokenBucket`, alongside `Fixed` and `Sliding`. Where the other two enforce a **ceiling** (reject/defer once the count is hit in a window), token-bucket enforces a **steady rate**: tokens refill continuously at `count / perSeconds` per second up to a burst capacity of `count`, and each start consumes one. A fresh key starts full; when empty, a `Wait`-mode start is rescheduled to the moment the next token refills, so a backlog trickles out at the refill rate instead of releasing a full window at once. Use it against a downstream that wants smooth traffic rather than a hard cap. Reschedules ride `ScheduledJobActivation` like the other styles (DB push does not accelerate `Wait`). See [Rate Limiting](/docs/features/rate-limit).
+
+### Dashboard quality-of-life
+
+- **Cancel a batch from the dashboard** — a batch detail page can cancel the whole batch in one action. Cancellation is transitive: every non-terminal descendant (children *and* pending continuations reached through already-finished children) is gracefully cancelled; terminal jobs are left untouched.
+- **Job detail leads with the type, not the GUID** — the detail page headline is now the job type (a clickable link to that type's list), with the id demoted to a subline. The job list and detail surface addon-metadata chips (`[Mutex]`, `[Retry]`, `[Timeout]`, …) so you can see a job's applied policies at a glance.
+- **Jobs-by-type list** — click a job type anywhere it appears to get a filtered list of every job of that type, with an optional state filter.
+- **Large trace fan-outs collapse** — a message/batch that spawns hundreds of children no longer renders an unusable trace graph; child slots are capped with a "+N more" affordance.
+- **Host-configurable branding** — `UseWarpUI` accepts an instance name, logo URL, and a portal back-link (label + URL) so a shared dashboard can identify which environment it is and link back to your own portal. See [Dashboard Overview](/docs/ui/overview).
+
+### Bug fixes
+
+- **Addon attributes on handler classes are rejected at startup** — `[Timeout]`, `[Mutex]`, `[Semaphore]`, and `[RateLimit]` belong on the request/job type, not the handler implementation (the pipeline reads them off the request). Misplacing one used to silently no-op; `AddWarp` now throws a clear startup error pointing at the offending handler. Self-handling jobs (where the request *is* the handler) are exempt.
+- **Retry no longer shadows the `[Retry]` attribute** — `RetryPublishBehavior` stamped the global default retry policy into metadata even when the job type carried its own `[Retry]` attribute, masking the per-type policy. It now stamps the type's attribute when present and falls back to the default otherwise.
+- **Child jobs no longer inherit parent metadata** — spawned children started with a copy of the parent's metadata (addon keys, retry policy), causing unintended policy bleed. Children start clean.
+- **npm supply chain** — cleared all 37 npm Dependabot alerts across `src/ui` and `website` via transitive lockfile bumps.
+
 ## 3.1.0
 
 *2026-06-29*

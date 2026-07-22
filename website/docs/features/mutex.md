@@ -59,6 +59,10 @@ public class ProcessPayment : IJob
 await publisher.Enqueue(new ProcessPayment { CustomerId = 123 });
 ```
 
+:::note Put the attribute on the request, not the handler
+`[Mutex]` / `[Semaphore]` (like `[Timeout]` and `[RateLimit]`) is read off the **request/job type**. When your request and handler are separate types, annotate the request — a misplaced attribute on the handler class used to silently no-op, so `AddWarp` now throws a clear startup error if it finds one there.
+:::
+
 You can also set the key via typed metadata:
 
 ```csharp
