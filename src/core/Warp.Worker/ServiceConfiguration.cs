@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.BackgroundServices;
+using Warp.Core.Diagnostics;
 using Warp.Core.Events;
 using Warp.Core.Logging;
 using Warp.Worker.BackgroundServices;

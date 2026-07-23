@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
+using Warp.Core.Diagnostics;
 using Warp.Core.Events;
 using Warp.Core.Logging;
 

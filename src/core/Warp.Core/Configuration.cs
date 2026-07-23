@@ -144,6 +144,44 @@ public class WarpConfiguration
     public int? EndpointCallLogRetentionCount { get; set; }
 
     /// <summary>
+    /// Opt-in logical application name for multi-application observability on a shared database. When set,
+    /// this process registers/heartbeats an instance (server processes stamp their <c>Server</c> row;
+    /// non-server processes write an <c>ApplicationInstance</c> row), stamps provenance on jobs it publishes
+    /// and adapter/endpoint/webhook rows it produces, and appears in the dashboard Applications view.
+    /// <c>null</c> (default) ⇒ the feature is entirely off and behavior is byte-for-byte unchanged. Same name
+    /// across processes ⇒ same application (stats/instances group by it); different apps ⇒ different names.
+    /// </summary>
+    public string? ApplicationName { get; set; }
+
+    /// <summary>Opt-in self-reported build/assembly version, stamped on this process's instance row. Per-instance — replicas may report different values mid rolling-deploy. Ignored when <see cref="ApplicationName"/> is null.</summary>
+    public string? ApplicationVersion { get; set; }
+
+    /// <summary>Opt-in self-reported environment (prod/staging/…), stamped on this process's instance row. Ignored when <see cref="ApplicationName"/> is null.</summary>
+    public string? ApplicationEnvironment { get; set; }
+
+    /// <summary>
+    /// Heartbeat cadence for the NON-server application heartbeat host (the loop that refreshes a
+    /// publisher/API/dashboard-only process's <c>ApplicationInstance.LastHeartbeatAt</c> + CPU/RAM). Server
+    /// processes ride the existing <c>Heartbeat</c> server task instead. Default 15s — non-server liveness is
+    /// less time-critical than the 3s server heartbeat. Only runs when <see cref="ApplicationName"/> is set.
+    /// </summary>
+    public TimeSpan ApplicationHeartbeatInterval { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Grace window before a non-heartbeating <c>ApplicationInstance</c> row is swept by
+    /// <c>ExpirationCleanup</c> (its process died without a graceful deregister). Must stay comfortably
+    /// larger than <see cref="ApplicationHeartbeatInterval"/> so a merely-slow instance isn't reaped.
+    /// Default 2 min (8× the default heartbeat).
+    /// </summary>
+    public TimeSpan ApplicationInstanceStaleGrace { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>Global default retention (age) for <c>ApplicationInstanceLog</c> lifecycle rows. <c>ExpirationCleanup</c> deletes rows past <c>ExpireAt</c> (stamped <c>Timestamp + retention</c>). Default 7 days.</summary>
+    public TimeSpan ApplicationInstanceLogRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>Global <b>count</b> cap for <c>ApplicationInstanceLog</c> rows (keep newest N per instance, by <c>Timestamp</c>). Complements the age cap — a row is removed once it exceeds <b>either</b>. <c>null</c> (default) disables the count cap.</summary>
+    public int? ApplicationInstanceLogRetentionCount { get; set; }
+
+    /// <summary>
     /// How long hourly-bucketed <c>Statistic</c> rows (keys ending in <c>:yyyy-MM-dd-HH</c> — the job/saga
     /// dashboard history and the adapter/endpoint performance-chart series) are retained before
     /// <c>ExpirationCleanup</c>'s generic hourly sweep prunes them. Raise it to keep deeper chart history
