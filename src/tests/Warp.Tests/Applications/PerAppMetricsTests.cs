@@ -96,6 +96,47 @@ public class PerAppMetricsTests
         parsedHour.ShouldBe(new DateTime(2026, 7, 20, 14, 0, 0, DateTimeKind.Utc));
     }
 
+    // ---- (a2) a colon-bearing application is sanitized so the key still round-trips (F1) ----
+    [TimedFact]
+    public void AdapterAppKeys_ApplicationWithColon_IsSanitizedAndStillRoundTrips()
+    {
+        // An ApplicationName containing ':' would corrupt the colon-delimited key (splitting into an
+        // extra part) and make TryParseApp silently drop it. The formatter sanitizes ':' → '-', so the
+        // write side and the parser agree and the key is never lost.
+        var total = AdapterCounterKeys.AppTotal("checkout:v2", "vendor", "success");
+        var history = AdapterCounterKeys.AppHistory("checkout:v2", "vendor", "failed", "2026-07-20-14");
+
+        total.ShouldBe("adapter-app:checkout-v2:vendor:success");
+        history.ShouldBe("adapter-app:checkout-v2:vendor:hist:failed:2026-07-20-14");
+
+        AdapterCounterKeys.TryParseApp(total, out var app, out var adapter, out var outcome).ShouldBeTrue();
+        app.ShouldBe("checkout-v2");
+        adapter.ShouldBe("vendor");
+        outcome.ShouldBe("success");
+
+        AdapterCounterKeys.TryParseAppHistory(history, out var histApp, out _, out _, out _).ShouldBeTrue();
+        histApp.ShouldBe("checkout-v2");
+    }
+
+    [TimedFact]
+    public void EndpointAppKeys_ApplicationWithColon_IsSanitizedAndStillRoundTrips()
+    {
+        var route = EndpointCounterKeys.NormalizeRoute("get", "/orders/{id:int}");
+        var total = EndpointCounterKeys.AppTotal("checkout:v2", route, "success");
+        var history = EndpointCounterKeys.AppHistory("checkout:v2", route, "failed", "2026-07-20-14");
+
+        total.ShouldBe("endpoint-app:checkout-v2:GET /orders/{id}:success");
+        history.ShouldBe("endpoint-app:checkout-v2:GET /orders/{id}:hist:failed:2026-07-20-14");
+
+        EndpointCounterKeys.TryParseApp(total, out var app, out var parsedRoute, out var outcome).ShouldBeTrue();
+        app.ShouldBe("checkout-v2");
+        parsedRoute.ShouldBe("GET /orders/{id}");
+        outcome.ShouldBe("success");
+
+        EndpointCounterKeys.TryParseAppHistory(history, out var histApp, out _, out _, out _).ShouldBeTrue();
+        histApp.ShouldBe("checkout-v2");
+    }
+
     // ---- (b) back-compat proof: EVERY existing parser rejects a new per-app key ----
     [TimedFact]
     public void ExistingAdapterParsers_RejectPerAppKeys()

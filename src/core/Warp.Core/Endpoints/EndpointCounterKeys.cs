@@ -220,9 +220,16 @@ internal static partial class EndpointCounterKeys
     //   endpoint-app:{app}:{route}:hist:{outcome}:{yyyy-MM-dd-HH}  → per-app hourly history
     public const string AppPrefix = "endpoint-app";
 
-    public static string AppTotal(string application, string route, string outcome) => $"{AppPrefix}:{application}:{route}:{outcome}";
+    public static string AppTotal(string application, string route, string outcome) => $"{AppPrefix}:{Sanitize(application)}:{route}:{outcome}";
 
-    public static string AppHistory(string application, string route, string outcome, string hour) => $"{AppPrefix}:{application}:{route}:{HistoryMarker}:{outcome}:{hour}";
+    public static string AppHistory(string application, string route, string outcome, string hour) => $"{AppPrefix}:{Sanitize(application)}:{route}:{HistoryMarker}:{outcome}:{hour}";
+
+    // Replaces any stray ':' with '-' so the application segment is GUARANTEED colon-free and the
+    // colon-delimited key parses unambiguously (mirrors Services.JobStatsKeys.Sanitize). The route is already
+    // normalised colon-free (see NormalizeRoute), so the application is the only gap; sanitizing it here keeps
+    // the write side and TryParseApp/TryParseAppHistory in agreement, so a colon-bearing ApplicationName is
+    // never silently dropped by the parser.
+    private static string Sanitize(string value) => value.Replace(':', '-');
 
     // Parses a per-app total key (endpoint-app:{app}:{route}:{outcome}). Returns false for every other
     // shape, including the per-app history keys (length 6) and every app-agnostic "endpoint:" key.

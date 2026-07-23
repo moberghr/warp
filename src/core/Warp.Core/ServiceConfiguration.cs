@@ -76,7 +76,16 @@ public static class ServiceConfiguration
             // Shared CPU/RAM sampler (also registered by AddWarpServer). TryAdd so the two paths don't
             // fight when a process calls both AddWarp and AddWarpServer.
             configured.TryAddSingleton<ProcessCpuTracker>();
-            configured.AddHostedService<ApplicationHeartbeatHost<TContext>>();
+
+            // Registered only once per TContext — a second AddWarp<TContext> call must not add a second
+            // heartbeat host (which would insert a second ApplicationInstance row for the one process).
+            // Mirrors the BackgroundServiceHost guard in Warp.Worker/ServiceConfiguration.
+            if (!configured.Any(d =>
+                    d.ServiceType == typeof(IHostedService)
+                    && d.ImplementationType == typeof(ApplicationHeartbeatHost<TContext>)))
+            {
+                configured.AddHostedService<ApplicationHeartbeatHost<TContext>>();
+            }
         }
 
         return configured;

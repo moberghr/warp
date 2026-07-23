@@ -61,6 +61,8 @@ When `ApplicationName` is set, the producing app's name is stamped as a nullable
 
 Every dashboard list (Jobs, Adapters, Endpoints) gains a **global application filter** driven by these columns. Rows produced before the feature was enabled — or by an old-version process — have `Application = null` and surface under an **"(unassigned)"** bucket.
 
+> **Limitation:** recurring-job firings carry no `Application` and — until this is revisited — are not attributed to a publishing application (a recurring definition has no owning app to inherit from), so they surface under the "(unassigned)" bucket.
+
 ### Per-application metrics
 
 Adapters and endpoints accrue **per-application** metrics (count, duration, error rate) in addition to their existing app-agnostic totals. `Application` also becomes part of **endpoint identity**, so the same route served by two applications stays two distinct aggregates rather than collapsing into one.

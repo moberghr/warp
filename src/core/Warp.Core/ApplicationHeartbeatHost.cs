@@ -36,6 +36,9 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
 
     private bool _active;
 
+    // Latches once the row is found swept-while-alive so the warning below is logged at most once.
+    private bool _staleSweptWarned;
+
     public ApplicationHeartbeatHost(
         IServiceScopeFactory scopeFactory,
         IOptions<WarpConfiguration> configuration,
@@ -153,7 +156,16 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         if (instance is null)
         {
             // Swept while this process was unresponsive. A later tick deliberately does not recreate the
-            // row — the process is treated as gone, so there is nothing to refresh.
+            // row — the process is treated as gone, so there is nothing to refresh. Warn ONCE so operators
+            // can see this happened without spamming the log every tick for the rest of the process life.
+            if (!_staleSweptWarned)
+            {
+                _staleSweptWarned = true;
+                _logger.LogWarning(
+                    "Application instance {InstanceId} was stale-swept (heartbeat lost / process unresponsive past ApplicationInstanceStaleGrace). The row is not recreated, so this process will not reappear on the Applications view until it is restarted.",
+                    _instanceId);
+            }
+
             return;
         }
 
