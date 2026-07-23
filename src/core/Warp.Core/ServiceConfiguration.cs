@@ -126,6 +126,15 @@ public static class ServiceConfiguration
         // in the schema (§2.11); AddAdapters() gates recording services + the addons flag only.
         services.TryAddScoped<IAdapterQueryService, AdapterQueryService<TContext>>();
 
+        // Applications dashboard read service (§8.19 multi-app observability). Registered in AddWarp (not
+        // gated on ApplicationName) so dashboard-only / publisher-only processes serve /api/applications
+        // without running a server — it unifies the Server + ApplicationInstance tables (both always in the
+        // schema §2.11) into one roster and resolves on TContext (§2.14 stays-on-TContext).
+        services.TryAddScoped<IApplicationQueryService>(x => new ApplicationQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>()));
+
         // Adapter call-scope primitive is always available (§2.15 telemetry is unconditional): every
         // BeginCall emits its Activity + meters, and manual scopes (e.g. the webhook executor) can record
         // regardless of AddAdapters(). AddAdapters() runs earlier in the AddWarp lambda and TryAdds the real

@@ -17,4 +17,9 @@ public sealed class WarpAddonsInfo
     public bool Endpoints { get; init; }
 
     public bool Webhooks { get; init; }
+
+    // Multi-app observability (§8.19). The dashboard's Applications page IS the renamed Servers page and is
+    // always available; this flag only toggles the app-grouping columns / app filter, and is true when this
+    // process opted in by setting WarpConfiguration.ApplicationName.
+    public bool Applications { get; init; }
 }

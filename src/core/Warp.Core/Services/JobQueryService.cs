@@ -9,7 +9,7 @@ namespace Warp.Core.Services;
 
 public interface IJobQueryService
 {
-    Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state);
+    Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state, string? application = null);
 
     Task<PagedList<JobModel>> GetScheduledJobs(BaseListRequest request);
 
@@ -33,7 +33,7 @@ public interface IJobQueryService
 
     Task<PagedList<JobModel>> GetFailedJobsByType(BaseListRequest request, string type);
 
-    Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state);
+    Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state, string? application = null);
 
     Task<JobExecutionMetricsModel> GetJobExecutionMetrics(string? application = null);
 }
@@ -50,9 +50,9 @@ public class JobQueryService<TContext> : IJobQueryService
         _timeProvider = timeProvider;
     }
 
-    public async Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state)
+    public async Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state, string? application = null)
     {
-        return await GetJobsByState(state)
+        return await GetJobsByState(state, application)
             .ToPagedListAsync(request);
     }
 
@@ -93,7 +93,7 @@ public class JobQueryService<TContext> : IJobQueryService
 
     public async Task<PagedList<JobModel>> GetAwaitingJobs(BaseListRequest request)
     {
-        return await GetJobsByState(State.Awaiting).ToPagedListAsync(request);
+        return await GetJobsByState(State.Awaiting, application: null).ToPagedListAsync(request);
     }
 
     public async Task<PagedList<JobModel>> GetSiblingJobs(Guid jobId, BaseListRequest request)
@@ -399,13 +399,18 @@ public class JobQueryService<TContext> : IJobQueryService
     // #1: all jobs of a given type across states (newest-first by create time), with an optional state
     // filter. Backs the clickable job type in the dashboard. Ordered by create time (not finished time)
     // because the result mixes terminal and in-flight jobs.
-    public async Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state)
+    public async Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state, string? application = null)
     {
         var jobs = Jobs().Where(x => x.Type == type);
 
         if (state is { } s)
         {
             jobs = jobs.Where(x => x.CurrentState == s);
+        }
+
+        if (!string.IsNullOrEmpty(application))
+        {
+            jobs = jobs.Where(x => x.Application == application);
         }
 
         return await OrderByCreateTimeDescending(jobs)
@@ -595,7 +600,7 @@ public class JobQueryService<TContext> : IJobQueryService
         ];
     }
 
-    private IQueryable<JobModel> GetJobsByState(State state)
+    private IQueryable<JobModel> GetJobsByState(State state, string? application)
     {
         var jobs = Jobs()
             .Where(x => x.CurrentState == state);
@@ -605,6 +610,12 @@ public class JobQueryService<TContext> : IJobQueryService
         {
             var now = _timeProvider.GetUtcNow().UtcDateTime;
             jobs = jobs.Where(x => x.ScheduleTime <= now);
+        }
+
+        // Optional per-application (creator/provenance) filter for the multi-app dashboard (§8.19).
+        if (!string.IsNullOrEmpty(application))
+        {
+            jobs = jobs.Where(x => x.Application == application);
         }
 
         var ordered = IsTerminalState(state)
