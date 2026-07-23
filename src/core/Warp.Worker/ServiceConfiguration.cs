@@ -194,9 +194,13 @@ public static class ServiceConfiguration
 
         // DispatcherRegistry is registered for every server (not gated on RunWorker): a
         // service-only server with UseDatabasePush() still hosts NotificationListenerTask, which
-        // injects DispatcherRegistry. It's a cheap dependency-free singleton; the dispatcher-mode
-        // worker is the only other consumer.
+        // wakes dispatchers through the IDispatcherWake seam. It's a cheap dependency-free
+        // singleton; the dispatcher-mode worker is the only other consumer. Exposing the same
+        // instance as IDispatcherWake lets the Core listener resolve IEnumerable<IDispatcherWake>
+        // (empty in an AddWarp-only process — no dispatchers to wake) without Warp.Core depending
+        // on Warp.Worker (§0.5).
         services.AddSingleton<DispatcherRegistry>();
+        services.AddSingleton<Warp.Core.Notifications.IDispatcherWake>(sp => sp.GetRequiredService<DispatcherRegistry>());
 
         // IWarpLockProvider is registered by the provider package (Warp.Provider.PostgreSql /
         // Warp.Provider.SqlServer) via their UsePostgreSql / UseSqlServer builder extensions.

@@ -1,41 +1,45 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Warp.Core.Events;
-using Warp.Core.Notifications;
 
-namespace Warp.Worker.Services;
+namespace Warp.Core.Notifications;
 
 /// <summary>
-/// Hosted service that consumes <see cref="IWarpNotificationTransport.ListenAsync"/> and
-/// signals the in-process background tasks (dispatcher, MessageRouter, Orchestrator)
-/// on each notification. Only registered when the user opts in via
-/// <c>opt.UseDatabasePush() (inside the AddWarp/AddWarpServer lambda)</c>.
+/// Hosted service that consumes <see cref="IWarpNotificationTransport.ListenAsync"/> and republishes
+/// each cross-process notification onto the in-process <see cref="ServerTaskSignals{TContext}"/> pipe
+/// (waking the dispatcher, bare workers, MessageRouter, Orchestrator, and the dashboard broadcaster).
+/// Only registered when the user opts in via <c>opt.UseDatabasePush()</c> (inside the
+/// <c>AddWarp</c>/<c>AddWarpServer</c> lambda).
+/// <para>
+/// Lives in <c>Warp.Core</c> so it runs in <b>any</b> process that opted into a provider + DB push —
+/// server or not. In a non-server (<c>AddWarp</c>-only) process the dispatcher-wake portion is inert
+/// (<see cref="IDispatcherWake"/> resolves to an empty set — no workers/dispatchers to wake), while the
+/// dashboard channels (<see cref="NotificationKind.JobFinalized"/> / <see cref="NotificationKind.MessageEnqueued"/>)
+/// still fire, so a non-server dashboard host receives realtime push (§2.9/§2.10). In a server process
+/// behavior is identical to before the move.
+/// </para>
 /// </summary>
 public class NotificationListenerTask<TContext> : BackgroundService
     where TContext : DbContext
 {
     private readonly IWarpNotificationTransport _transport;
     private readonly WarpDatabasePushConfiguration _options;
-    private readonly WarpServerConfiguration _workerConfiguration;
     private readonly ServerTaskSignals<TContext> _signals;
-    private readonly DispatcherRegistry _dispatcherRegistry;
+    private readonly IReadOnlyList<IDispatcherWake> _dispatcherWakes;
     private readonly ILogger<NotificationListenerTask<TContext>> _logger;
 
     public NotificationListenerTask(
         IWarpNotificationTransport transport,
         WarpDatabasePushConfiguration options,
-        IOptions<WarpServerConfiguration> workerConfiguration,
         ServerTaskSignals<TContext> signals,
-        DispatcherRegistry dispatcherRegistry,
+        IEnumerable<IDispatcherWake> dispatcherWakes,
         ILogger<NotificationListenerTask<TContext>> logger)
     {
         _transport = transport;
         _options = options;
-        _workerConfiguration = workerConfiguration.Value;
         _signals = signals;
-        _dispatcherRegistry = dispatcherRegistry;
+        _dispatcherWakes = [.. dispatcherWakes];
         _logger = logger;
     }
 
@@ -45,13 +49,6 @@ public class NotificationListenerTask<TContext> : BackgroundService
         {
             _logger.LogWarning("NotificationListenerTask started but no real transport is registered; listener will idle.");
             return;
-        }
-
-        if (!_workerConfiguration.UseDispatcher)
-        {
-            _logger.LogWarning(
-                "Warp DB push is enabled but UseDispatcher=false; worker fetch will keep polling. " +
-                "Enable UseDispatcher on WarpServerConfiguration to get the full benefit.");
         }
 
         var delay = _options.ReconnectInitialDelay;
@@ -105,7 +102,7 @@ public class NotificationListenerTask<TContext> : BackgroundService
 
     private void DrainSignals()
     {
-        _dispatcherRegistry.SignalAll();
+        WakeDispatchers();
         _signals.SignalJobEnqueued();
         _signals.SignalMessageEnqueued();
         _signals.SignalJobFinalized();
@@ -116,10 +113,11 @@ public class NotificationListenerTask<TContext> : BackgroundService
         switch (notification.Kind)
         {
             case NotificationKind.JobEnqueued:
-                // Two consumers: dispatcher-mode WarpDispatcher (via DispatcherRegistry) and
+                // Two consumers: dispatcher-mode WarpDispatcher (via IDispatcherWake) and
                 // bare-worker WarpWorker instances (via ServerTaskSignals.JobEnqueued). Firing
-                // both is harmless — each consumer's semaphore caps at 1.
-                _dispatcherRegistry.SignalAll();
+                // both is harmless — each consumer's semaphore caps at 1. In an AddWarp-only
+                // process both sets are empty/inert (no workers), so this is a no-op there.
+                WakeDispatchers();
                 _signals.SignalJobEnqueued();
                 break;
             case NotificationKind.MessageEnqueued:
@@ -130,6 +128,14 @@ public class NotificationListenerTask<TContext> : BackgroundService
                 break;
             default:
                 break;
+        }
+    }
+
+    private void WakeDispatchers()
+    {
+        for (var i = 0; i < _dispatcherWakes.Count; i++)
+        {
+            _dispatcherWakes[i].SignalAll();
         }
     }
 }
