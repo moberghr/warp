@@ -13,6 +13,7 @@ using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
 using Warp.Core.Notifications;
+using Warp.Core.Services;
 using Warp.Worker.Logging;
 using Warp.Worker.Services;
 
@@ -540,10 +541,12 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         {
             job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
             AddCounters(context, "stats:succeeded", $"stats:succeeded:{hourSuffix}");
+            AddJobStatsCounters(context, job, JobStatsKeys.SucceededToken, durationMs, hourSuffix);
         }
         else if (state == State.Failed)
         {
             AddCounters(context, "stats:failed", $"stats:failed:{hourSuffix}");
+            AddJobStatsCounters(context, job, JobStatsKeys.FailedToken, durationMs, hourSuffix);
         }
         else if (state == State.Deleted)
         {
@@ -590,5 +593,16 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     {
         context.Set<Counter>().Add(new Counter { Key = totalKey, Value = 1 });
         context.Set<Counter>().Add(new Counter { Key = hourlyKey, Value = 1 });
+    }
+
+    // Per-job-TYPE + per-HANDLER execution counters (§8.19 multi-app observability), sliced by this worker
+    // process's executor ApplicationName. Counter writes only — no reads/orchestration — so the fetch/execute
+    // hot path stays sacred (§0.2/§6.1). Rides the standard Counter→Statistic fold; hourly keys auto-prune.
+    private void AddJobStatsCounters(DbContext context, Job job, string outcomeToken, double? durationMs, string hourSuffix)
+    {
+        foreach (var counter in JobStatsKeys.Build(job, outcomeToken, durationMs, _configuration.ApplicationName, hourSuffix))
+        {
+            context.Set<Counter>().Add(counter);
+        }
     }
 }

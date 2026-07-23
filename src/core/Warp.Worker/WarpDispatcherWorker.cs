@@ -16,6 +16,7 @@ using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
 using Warp.Core.Notifications;
+using Warp.Core.Services;
 using Warp.Worker.Logging;
 using Warp.Worker.Services;
 
@@ -611,11 +612,13 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
             counters.Add(new Counter { Key = "stats:succeeded", Value = 1 });
             counters.Add(new Counter { Key = $"stats:succeeded:{hourSuffix}", Value = 1 });
+            counters.AddRange(JobStatsKeys.Build(job, JobStatsKeys.SucceededToken, durationMs, _configuration.ApplicationName, hourSuffix));
         }
         else if (state == State.Failed)
         {
             counters.Add(new Counter { Key = "stats:failed", Value = 1 });
             counters.Add(new Counter { Key = $"stats:failed:{hourSuffix}", Value = 1 });
+            counters.AddRange(JobStatsKeys.Build(job, JobStatsKeys.FailedToken, durationMs, _configuration.ApplicationName, hourSuffix));
         }
         else if (state == State.Deleted)
         {
