@@ -16,6 +16,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Models;
 using Warp.Core.Services;
 using Warp.Core.Webhooks;
 using Warp.Http;
@@ -47,6 +48,9 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
     private const string VendorResponseBody = "vendor-response-payload";
     private const string HookResponseBody = "hook-response-payload";
     private const string InboundResponseBody = "inbound-response-payload";
+    private const string AppName = "full-stack-app";
+    private const string AppVersion = "9.9.9";
+    private const string AppEnvironment = "test";
 
     private readonly IDatabaseFixture _fixture;
 
@@ -116,6 +120,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             var job = await ctx.Set<Job>().AsNoTracking().SingleAsync(x => x.Id == jobId, Ct);
             job.CurrentState.ShouldBe(State.Completed);
             job.Type!.ShouldContain(nameof(LoopbackCallerJob));
+            job.Application.ShouldBe(AppName);   // provenance: stamped with the creating application (§8.19)
 
             var log = await ctx.Set<JobLog>().AsNoTracking().Where(x => x.JobId == jobId && x.Message == expectedLog).SingleAsync(Ct);
             log.Id.ShouldNotBe(Guid.Empty);
@@ -154,6 +159,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             var call = await ctx.Set<AdapterCallLog>().AsNoTracking().Where(x => x.AdapterName == VendorAdapter).SingleAsync(Ct);
             call.Id.ShouldNotBe(Guid.Empty);
             call.AdapterName.ShouldBe(VendorAdapter);
+            call.Application.ShouldBe(AppName);   // provenance: the calling application (§8.19)
             call.Operation.ShouldBe("VendorPing");
             call.GroupName.ShouldBe("vendor-grp");
             call.Outcome.ShouldBe(AdapterCallOutcome.Success);
@@ -183,6 +189,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             var attempt = await ctx.Set<AdapterCallLog>().AsNoTracking()
                 .Where(x => x.AdapterName == WebhookConstants.AdapterName && x.CorrelationId == deliveryId.ToString()).SingleAsync(Ct);
             attempt.AdapterName.ShouldBe(WebhookConstants.AdapterName);
+            attempt.Application.ShouldBe(AppName);   // provenance: the application that sent the webhook (§8.19)
             attempt.Operation.ShouldBe("order.created");   // operation = event type
             attempt.GroupName.ShouldBe("loopback-endpoint");   // group = endpoint
             attempt.CorrelationId.ShouldBe(deliveryId.ToString());
@@ -211,6 +218,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         {
             var d = await ctx.Set<WebhookDelivery>().AsNoTracking().SingleAsync(x => x.Id == deliveryId, Ct);
             d.EventType.ShouldBe("order.created");
+            d.Application.ShouldBe(AppName);   // provenance: the application that sent the webhook (§8.19)
             d.EventId.ShouldBe("evt-fullstack-1");
             d.Url.ShouldBe("http://localhost/hook");
             d.GroupName.ShouldBe("loopback-endpoint");
@@ -238,6 +246,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             ep.Id.ShouldNotBe(Guid.Empty);
             ep.Method.ShouldBe("POST");
             ep.RouteTemplate.ShouldBe("/inbound");
+            ep.Application.ShouldBe(AppName);   // provenance: the application that owns the endpoint (§8.19)
             ep.Operation.ShouldNotBeNullOrEmpty();
             ep.GroupName.ShouldBe("acme-portal");   // from GroupSelector reading X-Client
             ep.Outcome.ShouldBe(AdapterCallOutcome.Success);
@@ -271,6 +280,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         addons.Adapters.ShouldBeTrue();
         addons.Endpoints.ShouldBeTrue();
         addons.Webhooks.ShouldBeTrue();
+        addons.Applications.ShouldBeTrue();
 
         // Adapters: list item + detail + call detail for the vendor adapter.
         var adapterList = await client.GetFromJsonAsync<List<AdapterListItemModel>>("/warp/api/adapters", Ct);
@@ -369,6 +379,35 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             hookDef.LastSeenAt.ShouldBeInRange(startedAt, now);
         }
 
+        // ============= 9. Server registry stamp (this host is a server → its Server row) =============
+        // A server process is its own application-instance record on the Server row (not ApplicationInstance —
+        // that table is non-server processes only). WarpServerRegistration stamps app/version/env at startup.
+        await using (var ctx = _fixture.CreateContext())
+        {
+            var server = await ctx.Set<Server>().AsNoTracking().Where(x => x.Application == AppName).SingleAsync(Ct);
+            server.Application.ShouldBe(AppName);
+            server.Version.ShouldBe(AppVersion);
+            server.Environment.ShouldBe(AppEnvironment);
+        }
+
+        // ================= 10. Applications dashboard surface (multi-app observability API) =================
+        var apps = await client.GetFromJsonAsync<List<ApplicationSummaryModel>>("/warp/api/applications", Ct);
+        var appRow = apps!.Single(x => string.Equals(x.Name, AppName, StringComparison.Ordinal));
+        appRow.InstanceCount.ShouldBeGreaterThanOrEqualTo(1);
+        appRow.LiveInstanceCount.ShouldBeGreaterThanOrEqualTo(1);
+
+        var appDetail = await client.GetFromJsonAsync<ApplicationDetailModel>($"/warp/api/applications/{UrlSafeId.Encode(AppName)}", Ct);
+        appDetail!.Name.ShouldBe(AppName);
+        var serverInstance = appDetail.Instances.ShouldHaveSingleItem();   // exactly one process (this server) carries the app name
+        serverInstance.IsServer.ShouldBeTrue();
+        serverInstance.Version.ShouldBe(AppVersion);
+        serverInstance.Environment.ShouldBe(AppEnvironment);
+
+        var jobMetrics = await client.GetFromJsonAsync<JobExecutionMetricsModel>("/warp/api/jobs/metrics", Ct);
+        jobMetrics!.ByType.ShouldNotBeEmpty();
+        var loopbackStat = jobMetrics.ByType.Single(x => x.Identifier.Contains(nameof(LoopbackCallerJob), StringComparison.Ordinal));
+        loopbackStat.ExecutedCount.ShouldBeGreaterThanOrEqualTo(1);
+
         await app.StopAsync(Ct);
     }
 
@@ -397,6 +436,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         ep.Id.ShouldNotBe(Guid.Empty);
         ep.Method.ShouldBe("POST");
         ep.RouteTemplate.ShouldBe(route);
+        ep.Application.ShouldBe(AppName);   // provenance: the application that owns the endpoint (§8.19)
         ep.Operation.ShouldNotBeNullOrEmpty();
         ep.GroupName.ShouldBeNull();
         ep.Outcome.ShouldBe(AdapterCallOutcome.Success);
@@ -464,6 +504,12 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             opt.MaxPollingInterval = TimeSpan.FromMilliseconds(100);
             opt.PollingIntervalFactor = 1.0;
             opt.ScheduledActivationInterval = TimeSpan.FromMilliseconds(250);
+
+            // Multi-app observability trigger: identify this host as an application (stamps Server row +
+            // provenance columns, lights up the /api/applications surface). §8.19.
+            opt.ApplicationName = AppName;
+            opt.ApplicationVersion = AppVersion;
+            opt.ApplicationEnvironment = AppEnvironment;
 
             opt.AddAdapters();
             opt.AddEndpointObservability(o =>
