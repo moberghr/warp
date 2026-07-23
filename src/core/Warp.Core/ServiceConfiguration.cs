@@ -18,6 +18,7 @@ using Warp.Core.Enums;
 using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Interceptors;
+using Warp.Core.Logging;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
 using Warp.Core.Webhooks;
@@ -66,6 +67,12 @@ public static class ServiceConfiguration
         // Null ApplicationName ⇒ the host is not registered at all, so behavior is byte-for-byte unchanged.
         if (builder.ApplicationName is not null)
         {
+            // Stamp the process-wide origin for cross-application traces (§ tracing). A static is fine:
+            // ApplicationName is a deploy-time constant for the process, so every Warp-created Activity in
+            // it carries the same warp.application tag. Null ApplicationName ⇒ this is never set and the
+            // factories add no tag (feature off).
+            WarpTelemetry.ApplicationName = builder.ApplicationName;
+
             // Shared CPU/RAM sampler (also registered by AddWarpServer). TryAdd so the two paths don't
             // fight when a process calls both AddWarp and AddWarpServer.
             configured.TryAddSingleton<ProcessCpuTracker>();

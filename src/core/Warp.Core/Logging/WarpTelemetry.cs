@@ -7,6 +7,15 @@ public static class WarpTelemetry
 {
     public const string ServiceName = "Warp";
 
+    /// <summary>
+    /// Process-wide origin stamp for cross-application traces. Set once from <c>AddWarp</c> when
+    /// <c>WarpConfiguration.ApplicationName</c> is non-null. A process-wide static is acceptable here
+    /// because ApplicationName is a deploy-time constant for the whole process — threading it through
+    /// every activity-factory call would add plumbing for a value that never varies at runtime. Null
+    /// (the default) ⇒ no <c>warp.application</c> tag is added to any Activity (feature off).
+    /// </summary>
+    internal static string? ApplicationName { get; set; }
+
     public static readonly ActivitySource ActivitySource = new(ServiceName);
     public static readonly Meter Meter = new(ServiceName);
 
@@ -169,6 +178,11 @@ public static class WarpTelemetry
         activity.SetTag(WarpTelemetryAttributes.MessagingOperationType, WarpTelemetryAttributes.OperationProcess);
         activity.SetTag(WarpTelemetryAttributes.MessagingDestinationName, queue);
 
+        if (ApplicationName is not null)
+        {
+            activity.SetTag(WarpTelemetryAttributes.WarpApplication, ApplicationName);
+        }
+
         return activity;
     }
 
@@ -196,6 +210,11 @@ public static class WarpTelemetry
         activity.SetTag(WarpTelemetryAttributes.MessagingOperationType, operation);
         activity.SetTag(WarpTelemetryAttributes.MessagingDestinationName, queue);
 
+        if (ApplicationName is not null)
+        {
+            activity.SetTag(WarpTelemetryAttributes.WarpApplication, ApplicationName);
+        }
+
         return activity;
     }
 
@@ -215,6 +234,11 @@ public static class WarpTelemetry
         activity.SetTag(WarpTelemetryAttributes.MessagingOperationName, WarpTelemetryAttributes.OperationReceive);
         activity.SetTag(WarpTelemetryAttributes.MessagingOperationType, WarpTelemetryAttributes.OperationReceive);
         activity.SetTag(WarpTelemetryAttributes.MessagingDestinationName, queue);
+
+        if (ApplicationName is not null)
+        {
+            activity.SetTag(WarpTelemetryAttributes.WarpApplication, ApplicationName);
+        }
 
         return activity;
     }
@@ -286,6 +310,11 @@ public static class WarpTelemetry
 
         activity.SetTag(WarpTelemetryAttributes.WarpAdapterName, adapter);
         activity.SetTag(WarpTelemetryAttributes.WarpAdapterOperation, operation);
+
+        if (ApplicationName is not null)
+        {
+            activity.SetTag(WarpTelemetryAttributes.WarpApplication, ApplicationName);
+        }
 
         return activity;
     }
