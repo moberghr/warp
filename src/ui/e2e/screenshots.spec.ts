@@ -16,7 +16,7 @@ const pages = [
   { name: '05-messages', path: '/messages/enqueued' },
   { name: '06-batches', path: '/batches/processing' },
   { name: '07-recurring', path: '/recurring' },
-  { name: '08-servers', path: '/servers' },
+  { name: '08-applications', path: '/applications' },
   { name: '09-job-detail-failed', path: `/detail/${DEMO_IDS.failedJob}` },
   { name: '16-job-detail-retry-extension', path: `/detail/${DEMO_IDS.failedJob}` },
   { name: '10-batch-detail', path: `/detail/${DEMO_IDS.batch1}` },
@@ -31,6 +31,11 @@ const pages = [
   { name: '19-services-list', path: '/services' },
   { name: '20-services-detail-singleton', path: '/services/JobStatsLoggerService' },
   { name: '21-services-detail-perserver', path: '/services/TickCounterService' },
+  // '/applications/{id}' where id is the URL-safe base64 of the app name (mirrors UrlSafeId.Encode).
+  // Y2hlY2tvdXQtd29ya2Vy === base64('checkout-worker') — the demo app with server instances + job activity.
+  { name: '27-application-detail', path: '/applications/Y2hlY2tvdXQtd29ya2Vy' },
+  // '/jobs/by-type/{type}' for a demo job type present in /jobs/metrics so the execution-metrics header renders.
+  { name: '28-jobs-by-type-metrics', path: '/jobs/by-type/Acme.Orders.ProcessOrderRequest' },
 ];
 
 for (const pg of pages) {

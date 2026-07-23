@@ -2,6 +2,14 @@ import type { InternalAxiosRequestConfig, AxiosResponse } from 'axios';
 import * as data from './data';
 import { demoAdapters, demoAdapterDetails, demoAdapterCalls } from './data/adapters';
 import { demoWebhooks, demoWebhookDetails, demoWebhookSummary } from './data/webhooks';
+import {
+  demoApplications,
+  demoApplicationDetails,
+  demoApplicationJobStats,
+  demoInstanceDetails,
+  demoJobMetrics,
+  decodeAppId,
+} from './data/applications';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
@@ -70,6 +78,13 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const webhookResult = routeWebhooks(method, url, config);
     if (webhookResult !== undefined) {
       return webhookResult;
+    }
+
+    // Applications: the renamed Servers surface (§8.19). /addons reports applications:true in demo
+    // mode (see routeGet); these routes serve the static roster/detail/instance/jobstats fixtures.
+    const applicationResult = routeApplications(method, url, config);
+    if (applicationResult !== undefined) {
+      return applicationResult;
     }
 
     // All POST/DELETE routes return success
@@ -357,6 +372,55 @@ function routeWebhooks(
   return undefined;
 }
 
+function routeApplications(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (!url.startsWith('/applications')) {
+    return undefined;
+  }
+
+  // GET /applications — roster
+  if (method === 'get' && (url === '/applications' || url.startsWith('/applications?'))) {
+    return resolve(demoApplications, config);
+  }
+
+  // GET /applications/{id}/instances/{instanceId} — single-instance detail (checked before the {id} route).
+  const instanceMatch = url.match(/^\/applications\/([^/?]+)\/instances\/([^/?]+)$/);
+  if (method === 'get' && instanceMatch) {
+    const instanceId = decodeURIComponent(instanceMatch[2]);
+    const detail = demoInstanceDetails[instanceId];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(detail, config);
+  }
+
+  // GET /applications/{id}/jobstats — per-application execution metrics (checked before the {id} route).
+  const jobStatsMatch = url.match(/^\/applications\/([^/?]+)\/jobstats$/);
+  if (method === 'get' && jobStatsMatch) {
+    const name = decodeAppId(decodeURIComponent(jobStatsMatch[1]));
+
+    return resolve(demoApplicationJobStats[name] ?? { byType: [], byHandler: [] }, config);
+  }
+
+  // GET /applications/{id} — application detail (id is the URL-safe base64 of the name).
+  const detailMatch = url.match(/^\/applications\/([^/?]+)$/);
+  if (method === 'get' && detailMatch) {
+    const name = decodeAppId(decodeURIComponent(detailMatch[1]));
+    const detail = demoApplicationDetails[name];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(detail, config);
+  }
+
+  return undefined;
+}
+
 function routeBackgroundServices(
   method: string,
   url: string,
@@ -590,7 +654,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, webhooks: true };
+    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, webhooks: true, applications: true };
   }
 
   // Dashboard
@@ -634,6 +698,27 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
       page,
       pageSize,
     );
+  }
+  // Every job of a given type across all states — the JobsByTypePage list (below its metrics header).
+  if (url === '/jobs/by-type') {
+    const type = params.type as string;
+    const pool = [
+      ...data.completedJobs,
+      ...data.failedJobs,
+      ...data.processingJobs,
+      ...data.enqueuedJobs,
+    ];
+
+    return data.paginate(
+      pool.filter((j) => j.type === type),
+      page,
+      pageSize,
+    );
+  }
+  // Durable per-type / per-handler execution metrics (JobsByTypePage header; app detail composes
+  // its own per-application slice via /applications/{id}/jobstats).
+  if (url === '/jobs/metrics') {
+    return demoJobMetrics;
   }
   if (url === '/jobs/awaiting') {
     return data.paginate(data.awaitingJobs, page, pageSize);
