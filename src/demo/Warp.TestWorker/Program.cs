@@ -17,6 +17,13 @@ var host = Host.CreateDefaultBuilder(args)
             options.UsePostgreSql();
             options.WorkerCount = 10;
             options.PollingInterval = TimeSpan.FromSeconds(5);
+
+            // Multi-application observability (§8.23): a distinct application from the TestApp web host,
+            // sharing the one TestContext DB. This worker executes the jobs TestApp publishes, so the
+            // dashboard shows per-job-type execution metrics attributed to "warp-demo-worker".
+            options.ApplicationName = "warp-demo-worker";
+            options.ApplicationVersion = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString();
+            options.ApplicationEnvironment = context.HostingEnvironment.EnvironmentName;
             options.AddRetry(o => o.MaxRetries = 3);
             options.AddSagas();
 

@@ -79,6 +79,14 @@ builder.Services.AddWarpServer<TestContext>(options =>
     options.ServerName = "warp-demo-server";
     options.DefaultQueue = "default";
 
+    // Multi-application observability (§8.23): this web/publisher server and the TestWorker share the
+    // one TestContext database. Distinct ApplicationNames make the dashboard Applications page show two
+    // apps, and demonstrate the provenance-vs-execution split — jobs published here carry
+    // Application="warp-demo-web" but are executed on "warp-demo-worker".
+    options.ApplicationName = "warp-demo-web";
+    options.ApplicationVersion = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString();
+    options.ApplicationEnvironment = builder.Environment.EnvironmentName;
+
     // "fulfillment" is polled only by this app's workers (TestWorker polls "default"), so the order jobs
     // that call the adapters run here where the adapters are registered. AddWebhooks appends "warp:webhooks".
     options.Queues = ["a-critical", "b-default", "c-low", "default", ShopQueues.Fulfillment];
