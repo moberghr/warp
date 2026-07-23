@@ -1,20 +1,21 @@
 using System.Text;
 
-namespace Warp.Core.Endpoints;
+namespace Warp.Core.Models;
 
 /// <summary>
-/// URL-safe base64 encoding of a string identity so it survives a dashboard path segment (the raw value
-/// may contain '/' and spaces). Used for the "{METHOD} {template}" endpoint route (the reverse trace
-/// drill-down, job → originating request, builds the endpoint-detail link) and for the application-name
-/// identity on the Applications detail routes (§8.19).
+/// URL-safe base64 codec for a string identity so it survives a dashboard path segment (the raw value
+/// may contain '/' and spaces). A neutral shared utility used by BOTH the endpoints detail route (the
+/// "{METHOD} {template}" route identity, and the reverse trace drill-down job → originating request) and
+/// the applications routes (the application-name identity, §8.19). Kept protocol/feature-neutral so the
+/// two surfaces provably share one scheme.
 /// </summary>
-public static class EndpointRouteId
+public static class UrlSafeId
 {
     // MUST stay in sync with EndpointQueryService.EncodeId — the produced id has to match what the
     // endpoint list/detail pages use, so the drill-down link resolves to the same route.
-    public static string Encode(string route)
+    public static string Encode(string value)
     {
-        return Convert.ToBase64String(Encoding.UTF8.GetBytes(route))
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(value))
             .Replace('+', '-')
             .Replace('/', '_')
             .TrimEnd('=');

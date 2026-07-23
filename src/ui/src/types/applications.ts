@@ -90,7 +90,7 @@ export interface JobExecutionMetricsModel {
 
 /**
  * URL-safe base64 of an application name for the detail route segment — mirrors the backend
- * Warp.Core.Endpoints.EndpointRouteId.Encode (base64 of the UTF-8 bytes, '+'→'-', '/'→'_', trailing
+ * Warp.Core.Models.UrlSafeId.Encode (base64 of the UTF-8 bytes, '+'→'-', '/'→'_', trailing
  * '=' trimmed) so the route decodes back to the exact name.
  */
 export function encodeAppId(name: string): string {

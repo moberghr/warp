@@ -164,7 +164,7 @@ export const resumeWorkerGroup = (groupId: string) => api.post(`/groups/${groupI
 
 // Applications — multi-app observability roster (§8.19). The renamed Servers surface: IApplicationQueryService
 // is always registered by AddWarp, so these resolve in dashboard-only processes. The {id} path segment is the
-// URL-safe base64 of the application name (encodeAppId, mirrors the backend EndpointRouteId.Encode).
+// URL-safe base64 of the application name (encodeAppId, mirrors the backend UrlSafeId.Encode).
 export const getApplications = () =>
   api.get<ApplicationSummaryModel[]>('/applications').then(r => r.data);
 

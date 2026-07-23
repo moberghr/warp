@@ -146,7 +146,10 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         await context.SaveChangesAsync(ct);
     }
 
-    private async Task HeartbeatAsync(CancellationToken ct)
+    // Internal (not private) so tests can drive one tick of the periodic-refresh body deterministically —
+    // the PeriodicTimer loop above calls exactly this. Behaviour is identical whether invoked by the loop
+    // or directly.
+    internal async Task HeartbeatAsync(CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<TContext>();

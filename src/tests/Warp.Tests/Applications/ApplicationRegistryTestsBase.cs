@@ -1,12 +1,15 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Diagnostics;
 using Warp.Core.Enums;
+using Warp.Tests.Adapters;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Worker;
@@ -95,6 +98,64 @@ public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
 
         events.ShouldContain(ApplicationInstanceEventType.Registered);
         events.ShouldContain(ApplicationInstanceEventType.Stopped);
+    }
+
+    [TimedFact]
+    public async Task Heartbeat_PeriodicTick_AdvancesLastHeartbeatAndRefreshesCpuRam()
+    {
+        // Drives the exact body the periodic loop runs (HeartbeatAsync) with a controlled clock, so the
+        // LastHeartbeatAt advance + CPU/RAM refresh are deterministic (no wall-clock poll / flake). The
+        // interval is set long so the real background loop stays dormant while the tick is driven directly.
+        var start = new DateTimeOffset(2026, 7, 20, 12, 0, 0, TimeSpan.Zero);
+        var time = new FakeTimeProvider(start);
+        var host = CreateHost("publisher", timeProvider: time, heartbeatInterval: TimeSpan.FromHours(1));
+
+        await host.StartAsync(Ct);
+        try
+        {
+            var registered = await _fixture.CreateContext().Set<ApplicationInstance>().SingleAsync(Ct);
+            registered.LastHeartbeatAt.ShouldBe(start.UtcDateTime);
+
+            // Advance the clock, then drive one heartbeat tick.
+            time.Advance(TimeSpan.FromMinutes(5));
+            await host.HeartbeatAsync(Ct);
+
+            var refreshed = await _fixture.CreateContext().Set<ApplicationInstance>().SingleAsync(Ct);
+            refreshed.LastHeartbeatAt.ShouldBeGreaterThan(registered.LastHeartbeatAt);
+            refreshed.MemoryWorkingSetBytes.ShouldNotBeNull();
+            refreshed.CpuUsagePercent.ShouldNotBeNull();
+        }
+        finally
+        {
+            await host.StopAsync(Ct);
+        }
+    }
+
+    [TimedFact]
+    public async Task Heartbeat_InstanceSweptWhileAlive_WarnsExactlyOnce()
+    {
+        // Exercises the warn-once stale-swept branch: the row is deleted out from under a running host, then
+        // two ticks are driven — the latch must fire the warning exactly once and never recreate the row.
+        var logger = new CapturingLogger<ApplicationHeartbeatHost<TestContext>>();
+        var host = CreateHost("publisher", logger: logger, heartbeatInterval: TimeSpan.FromHours(1));
+
+        await host.StartAsync(Ct);
+        try
+        {
+            await _fixture.CreateContext().Set<ApplicationInstance>().ExecuteDeleteAsync(Ct);
+
+            await host.HeartbeatAsync(Ct);
+            await host.HeartbeatAsync(Ct);
+
+            logger.WarningCount.ShouldBe(1);
+
+            // The row is deliberately NOT recreated by a tick against a swept instance.
+            (await _fixture.CreateContext().Set<ApplicationInstance>().AnyAsync(Ct)).ShouldBeFalse();
+        }
+        finally
+        {
+            await host.StopAsync(Ct);
+        }
     }
 
     [TimedFact]
@@ -193,18 +254,28 @@ public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
         string applicationName,
         string? version = null,
         string? environment = null,
-        bool serverPresent = false)
+        bool serverPresent = false,
+        TimeProvider? timeProvider = null,
+        ILogger<ApplicationHeartbeatHost<TestContext>>? logger = null,
+        TimeSpan? heartbeatInterval = null)
     {
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
-        var configuration = Options.Create(new WarpConfiguration
+        var time = timeProvider ?? TimeProvider.System;
+
+        var config = new WarpConfiguration
         {
             ApplicationName = applicationName,
             ApplicationVersion = version,
             ApplicationEnvironment = environment,
-        });
+        };
+
+        if (heartbeatInterval is { } interval)
+        {
+            config.ApplicationHeartbeatInterval = interval;
+        }
 
         IEnumerable<IWarpServerPresence> presences = serverPresent
             ? [new StubServerPresence()]
@@ -212,10 +283,10 @@ public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
 
         return new ApplicationHeartbeatHost<TestContext>(
             scopeFactory,
-            configuration,
-            TimeProvider.System,
-            new ProcessCpuTracker(TimeProvider.System),
-            NullLogger<ApplicationHeartbeatHost<TestContext>>.Instance,
+            Options.Create(config),
+            time,
+            new ProcessCpuTracker(time),
+            logger ?? NullLogger<ApplicationHeartbeatHost<TestContext>>.Instance,
             presences);
     }
 

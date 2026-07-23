@@ -54,6 +54,42 @@ public abstract class ProvenanceStampingTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task StartNewBatch_ApplicationNameSet_StampsParentAndChildren()
+    {
+        // BatchPublisher stamps Application on the batch parent AND each child — a separate call site from
+        // Publisher, so it needs its own provenance coverage.
+        var parentId = await PublishBatchAsync(AppName);
+
+        var ctx = _fixture.CreateContext();
+        var parent = await ctx.Set<Job>().SingleAsync(x => x.Id == parentId, Ct);
+        parent.Application.ShouldBe(AppName);
+
+        var children = await ctx.Set<Job>()
+            .Where(x => x.ParentJobId == parentId)
+            .ToListAsync(Ct);
+
+        children.Count.ShouldBe(2);
+        children.ShouldAllBe(x => string.Equals(x.Application, AppName, StringComparison.Ordinal));
+    }
+
+    [TimedFact]
+    public async Task StartNewBatch_ApplicationNameUnset_LeavesParentAndChildrenNull()
+    {
+        var parentId = await PublishBatchAsync(application: null);
+
+        var ctx = _fixture.CreateContext();
+        var parent = await ctx.Set<Job>().SingleAsync(x => x.Id == parentId, Ct);
+        parent.Application.ShouldBeNull();
+
+        var children = await ctx.Set<Job>()
+            .Where(x => x.ParentJobId == parentId)
+            .ToListAsync(Ct);
+
+        children.Count.ShouldBe(2);
+        children.ShouldAllBe(x => x.Application == null);
+    }
+
+    [TimedFact]
     public async Task RequeueJob_PreservesJobApplication()
     {
         var jobId = Guid.NewGuid();
@@ -168,6 +204,23 @@ public abstract class ProvenanceStampingTestsBase : IAsyncLifetime
         await publisher.SaveChangesAsync(Ct);
 
         return id;
+    }
+
+    private async Task<Guid> PublishBatchAsync(string? application)
+    {
+        var ctx = _fixture.CreateContext();
+        var batchPublisher = new BatchPublisher<TestContext>(
+            ctx,
+            Options.Create(new WarpConfiguration { ApplicationName = application }),
+            TimeProvider.System,
+            new ServiceCollection().BuildServiceProvider(),
+            TestTasks.NullTransport,
+            TestTasks.NullSignals);
+
+        var parentId = await batchPublisher.StartNew(new List<ProvenanceJob> { new(), new() });
+        await batchPublisher.SaveChangesAsync(Ct);
+
+        return parentId;
     }
 
     private sealed record ProvenanceJob : IJob;

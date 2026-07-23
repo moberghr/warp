@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
-using Warp.Core.Endpoints;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Models;
@@ -266,7 +265,7 @@ public class JobQueryService<TContext> : IJobQueryService
                     RouteTemplate = origin.RouteTemplate,
                     User = origin.User,
                     CallId = origin.Id,
-                    EndpointId = EndpointRouteId.Encode($"{origin.Method} {origin.RouteTemplate}"),
+                    EndpointId = UrlSafeId.Encode($"{origin.Method} {origin.RouteTemplate}"),
                 };
             }
         }

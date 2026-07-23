@@ -87,12 +87,17 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
 
     public async Task<IReadOnlyList<EndpointAppStatModel>> GetEndpointStatsByApplication(string application, CancellationToken ct = default)
     {
-        var stats = await LoadAppStatsAsync(application, ct);
+        // Sanitize with the SAME transform the write side (EndpointCounterKeys.AppTotal/AppHistory) applies,
+        // BEFORE building the prefix filter — otherwise a colon-bearing app name would query a prefix that
+        // never matches (the keys store the sanitized form) and silently return empty.
+        var sanitized = EndpointCounterKeys.SanitizeApplication(application);
+
+        var stats = await LoadAppStatsAsync(sanitized, ct);
 
         return
         [
             .. stats
-                .Where(x => string.Equals(x.Key.Application, application, StringComparison.Ordinal))
+                .Where(x => string.Equals(x.Key.Application, sanitized, StringComparison.Ordinal))
                 .OrderBy(x => x.Key.Route, StringComparer.Ordinal)
                 .Select(x =>
                     new EndpointAppStatModel

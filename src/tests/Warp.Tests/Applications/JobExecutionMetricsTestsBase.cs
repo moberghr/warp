@@ -30,7 +30,10 @@ public abstract class JobExecutionMetricsTestsBase : IntegrationTestBase
     private static readonly string TypeUnit = typeof(UnitRequest).AssemblyQualifiedName!;
     private static readonly string TypeThrow = typeof(ThrowExceptionRequest).AssemblyQualifiedName!;
     private static readonly string TypeMessage = typeof(SingleHandlerMessage).AssemblyQualifiedName!;
+    private static readonly string TypeMulti = typeof(MultiRequest).AssemblyQualifiedName!;
     private static readonly string HandlerSingle = typeof(SingleMessageHandler).AssemblyQualifiedName!;
+    private static readonly string HandlerMultiA = typeof(MultiHandlerA).AssemblyQualifiedName!;
+    private static readonly string HandlerMultiB = typeof(MultiHandlerB).AssemblyQualifiedName!;
 
     protected JobExecutionMetricsTestsBase(IDatabaseFixture fixture)
         : base(fixture)
@@ -63,10 +66,11 @@ public abstract class JobExecutionMetricsTestsBase : IntegrationTestBase
         ByHandler(metrics, HandlerSingle).ErrorCount.ShouldBe(0);
         metrics.ByHandler.ShouldNotContain(x => string.Equals(x.Identifier, TypeUnit, StringComparison.Ordinal));
 
-        // Duration + percentiles are real-time-dependent (a no-op handler may round to 0 ms), so assert only
-        // they are populated non-negatively — the exact dur math is covered deterministically in the NoDb test.
+        // A sub-millisecond no-op handler can round its AVG to 0 ms, but the latency HISTOGRAM always lands an
+        // executed job in the smallest bucket (>= 5 ms bound), so P95 is a reliable nonzero signal that a real
+        // duration was recorded and folded (avg's exact value is covered deterministically in the NoDb test).
+        ByType(metrics, TypeUnit).P95DurationMs.ShouldBeGreaterThan(0);
         ByType(metrics, TypeUnit).AvgDurationMs.ShouldBeGreaterThanOrEqualTo(0);
-        ByType(metrics, TypeUnit).P95DurationMs.ShouldBeGreaterThanOrEqualTo(0);
     }
 
     [TimedFact]
@@ -74,6 +78,12 @@ public abstract class JobExecutionMetricsTestsBase : IntegrationTestBase
     {
         await SeedAndWaitAsync();
         await AggregateAsync();
+
+        // Snapshot the duration aggregates BEFORE deleting the source rows. P95 is bucket-backed so it is a
+        // reliable nonzero value for a job that actually ran.
+        var before = await Reader().GetJobExecutionMetrics();
+        var unitBefore = ByType(before, TypeUnit);
+        unitBefore.P95DurationMs.ShouldBeGreaterThan(0);
 
         // Delete every Job (and its logs) — the raw source rows are gone.
         var wipe = Fixture.CreateContext();
@@ -83,12 +93,55 @@ public abstract class JobExecutionMetricsTestsBase : IntegrationTestBase
         (await Fixture.CreateContext().Set<Job>().CountAsync(Ct)).ShouldBe(0);
 
         // Metrics still resolve — they come from Statistic, not Job (the whole point).
+        var after = await Reader().GetJobExecutionMetrics();
+
+        ByType(after, TypeThrow).ExecutedCount.ShouldBe(1);
+        ByType(after, TypeThrow).ErrorRate.ShouldBe(1.0);
+        ByType(after, TypeUnit).ExecutedCount.ShouldBe(2);
+        ByHandler(after, HandlerSingle).ExecutedCount.ShouldBe(2);
+
+        // The duration aggregates (avg via dur-sum, p95 via the histogram) are UNCHANGED after the Job rows
+        // are deleted — proving they ride the durable Statistic rows, not the wiped Job rows (the dur-token
+        // survives). P95 is still the same nonzero bucket value.
+        var unitAfter = ByType(after, TypeUnit);
+        unitAfter.AvgDurationMs.ShouldBe(unitBefore.AvgDurationMs);
+        unitAfter.P95DurationMs.ShouldBe(unitBefore.P95DurationMs);
+        unitAfter.P95DurationMs.ShouldBeGreaterThan(0);
+    }
+
+    [TimedFact]
+    public async Task Metrics_ByHandler_IsIndependentOfType()
+    {
+        // One message TYPE (MultiRequest) fans out to TWO handlers (MultiHandlerA + MultiHandlerB), so a
+        // single type's executions split across two DISTINCT handler buckets — proving the ByHandler
+        // dimension is folded independently of ByType (not a 1:1 type↔handler mirror).
+        await using (var server = await WarpTestServer.StartAsync(Fixture, cfg =>
+        {
+            cfg.WorkerCount = 1;
+            cfg.ApplicationName = AppName;
+        }))
+        {
+            var publisher = server.CreatePublisher();
+            await publisher.Publish(new MultiRequest());
+            await publisher.SaveChangesAsync(Ct);
+
+            await server.WaitForCompletion();
+        }
+
+        await AggregateAsync();
+
         var metrics = await Reader().GetJobExecutionMetrics();
 
-        ByType(metrics, TypeThrow).ExecutedCount.ShouldBe(1);
-        ByType(metrics, TypeThrow).ErrorRate.ShouldBe(1.0);
-        ByType(metrics, TypeUnit).ExecutedCount.ShouldBe(2);
-        ByHandler(metrics, HandlerSingle).ExecutedCount.ShouldBe(2);
+        // The single type ran twice (once per handler) ...
+        ByType(metrics, TypeMulti).ExecutedCount.ShouldBe(2);
+
+        // ... but each handler bucket saw exactly ONE execution.
+        ByHandler(metrics, HandlerMultiA).ExecutedCount.ShouldBe(1);
+        ByHandler(metrics, HandlerMultiB).ExecutedCount.ShouldBe(1);
+
+        // The handler bucket count (1) differs from the single type's count (2) — the handler dimension is
+        // not a mirror of the type.
+        ByHandler(metrics, HandlerMultiA).ExecutedCount.ShouldNotBe(ByType(metrics, TypeMulti).ExecutedCount);
     }
 
     [TimedFact]

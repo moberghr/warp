@@ -667,16 +667,17 @@ internal static class AdapterCounterKeys
     //   adapter-app:{app}:{adapter}:hist:{outcome}:{yyyy-MM-dd-HH}  → per-app hourly history
     public const string AppPrefix = "adapter-app";
 
-    public static string AppTotal(string application, string adapter, string outcome) => $"{AppPrefix}:{Sanitize(application)}:{adapter}:{outcome}";
+    public static string AppTotal(string application, string adapter, string outcome) => $"{AppPrefix}:{SanitizeApplication(application)}:{adapter}:{outcome}";
 
-    public static string AppHistory(string application, string adapter, string outcome, string hour) => $"{AppPrefix}:{Sanitize(application)}:{adapter}:{HistoryMarker}:{outcome}:{hour}";
+    public static string AppHistory(string application, string adapter, string outcome, string hour) => $"{AppPrefix}:{SanitizeApplication(application)}:{adapter}:{HistoryMarker}:{outcome}:{hour}";
 
     // Replaces any stray ':' with '-' so the application segment is GUARANTEED colon-free and the
     // colon-delimited key parses unambiguously (mirrors Services.JobStatsKeys.Sanitize). The adapter name is
     // validated colon-free at registration, so the application is the only gap; sanitizing it here keeps the
     // write side and TryParseApp/TryParseAppHistory in agreement, so a colon-bearing ApplicationName is
-    // never silently dropped by the parser.
-    private static string Sanitize(string value) => value.Replace(':', '-');
+    // never silently dropped by the parser. Public so the read side (AdapterQueryService) applies the SAME
+    // transform before building its prefix filter — write and read provably agree, no drift.
+    public static string SanitizeApplication(string value) => value.Replace(':', '-');
 
     // Parses a per-app total key (adapter-app:{app}:{adapter}:{outcome}). Returns false for every other
     // shape, including the per-app history keys (length 6) and every app-agnostic "adapter:" key.

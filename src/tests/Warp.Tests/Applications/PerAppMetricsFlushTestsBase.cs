@@ -182,6 +182,54 @@ public abstract class PerAppMetricsFlushTestsBase : IAsyncLifetime
         endpoint.AvgDurationMs.ShouldBe(20);
     }
 
+    [TimedFact]
+    public async Task AdapterQuery_GetStatsByApplication_ColonBearingAppName_MatchesSanitizedKeys()
+    {
+        // C1 regression guard. The write side sanitizes ':' → '-' in the app segment of the counter key
+        // (AdapterCounterKeys.AppTotal). The read side MUST apply the SAME transform before building its
+        // prefix filter, or a colon-bearing app name queries a prefix ("adapter-app:team:orders:") that
+        // never matches the stored (sanitized) keys ("adapter-app:team-orders:…") and silently returns
+        // empty. Without the read-side sanitize this ShouldHaveSingleItem fails (empty result).
+        await PersistAdapterAsync(
+            "team:orders",
+            AdapterRecord("vendor", "GetOrders", AdapterCallOutcome.Success, durationMs: 10),
+            AdapterRecord("vendor", "GetOrders", AdapterCallOutcome.Failed, durationMs: 30));
+
+        await TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(Ct);
+
+        var service = new AdapterQueryService<TestContext>(_fixture.CreateContext());
+
+        var stats = await service.GetAdapterStatsByApplication("team:orders", Ct);
+
+        var vendor = stats.ShouldHaveSingleItem();
+        vendor.Adapter.ShouldBe("vendor");
+        vendor.Calls.ShouldBe(2);
+        vendor.Errors.ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task EndpointQuery_GetStatsByApplication_ColonBearingAppName_MatchesSanitizedKeys()
+    {
+        // C1 regression guard (endpoint mirror). Same sanitize agreement between EndpointCounterKeys.AppTotal
+        // (write) and the read-side prefix filter; a colon-bearing app name must resolve to the sanitized
+        // keys, not silently return empty.
+        await PersistEndpointAsync(
+            "team:orders",
+            EndpointRecord("GET", "/orders", AdapterCallOutcome.Success, durationMs: 10),
+            EndpointRecord("GET", "/orders", AdapterCallOutcome.Failed, durationMs: 30));
+
+        await TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(Ct);
+
+        var service = new EndpointQueryService<TestContext>(_fixture.CreateContext());
+
+        var stats = await service.GetEndpointStatsByApplication("team:orders", Ct);
+
+        var endpoint = stats.ShouldHaveSingleItem();
+        endpoint.Route.ShouldBe("GET /orders");
+        endpoint.Calls.ShouldBe(2);
+        endpoint.Errors.ShouldBe(1);
+    }
+
     private static AdapterCallRecord AdapterRecord(string adapter, string operation, AdapterCallOutcome outcome, double durationMs = 5, DateTime? timestamp = null)
         => new()
         {

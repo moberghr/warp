@@ -677,13 +677,14 @@ public static class WarpEndpoints
         // Applications — multi-app observability roster (§8.19). IApplicationQueryService is always
         // registered by AddWarp (dashboard-only processes resolve it), so these routes are non-nullable; the
         // Applications page is the renamed Servers page and is always shown. The {id} is the URL-safe base64
-        // of the application name (EndpointRouteId.Encode/TryDecode — reused from the endpoints detail route).
+        // of the application name (UrlSafeId.Encode/TryDecode — the shared codec, also used by the endpoints
+        // detail route).
         apiGroup.MapGet("applications", async ([FromServices] IApplicationQueryService svc, CancellationToken ct) =>
             Results.Ok(await svc.GetApplications(ct)));
 
         apiGroup.MapGet("applications/{id}", async ([FromServices] IApplicationQueryService svc, string id, CancellationToken ct) =>
         {
-            var application = EndpointRouteId.TryDecode(id);
+            var application = UrlSafeId.TryDecode(id);
             if (application is null)
             {
                 return Results.NotFound();
@@ -696,7 +697,7 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("applications/{id}/instances/{instanceId}", async ([FromServices] IApplicationQueryService svc, string id, Guid instanceId, CancellationToken ct) =>
         {
-            var application = EndpointRouteId.TryDecode(id);
+            var application = UrlSafeId.TryDecode(id);
             if (application is null)
             {
                 return Results.NotFound();
@@ -716,7 +717,7 @@ public static class WarpEndpoints
         // Per-app job execution metrics (by-type / by-handler, from the durable Statistic aggregates).
         apiGroup.MapGet("applications/{id}/jobstats", async ([FromServices] IJobQueryService svc, string id) =>
         {
-            var application = EndpointRouteId.TryDecode(id);
+            var application = UrlSafeId.TryDecode(id);
 
             return application is null
                 ? Results.NotFound()
