@@ -1,11 +1,7 @@
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
-using Warp.Adapters.Http;
-using Warp.Adapters.Refit;
 using Warp.Core;
-using Warp.Core.Adapters;
-using Warp.Core.BackgroundServices;
 using Warp.Core.Concurrency;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -13,7 +9,6 @@ using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Helper;
 using Warp.Core.Retry;
-using Warp.Core.Sagas;
 using Warp.Core.Webhooks;
 using Warp.Demo.ServiceDefaults;
 using Warp.Http;
@@ -21,7 +16,6 @@ using Warp.Http.Observability;
 using Warp.Provider.PostgreSql;
 using Warp.Test.Shared;
 using Warp.Test.Shared.Entities;
-using Warp.Test.Shared.Handlers.BackgroundServices;
 using Warp.Test.Shared.Handlers.Sagas;
 using Warp.Test.Shared.Shop;
 using Warp.TestApp.Authentication;
@@ -37,10 +31,6 @@ var builder = WebApplication.CreateBuilder(args);
 // Aspire service defaults — OTLP export so adapter/webhook spans + meters also appear in the Aspire
 // dashboard's trace/metric views (in addition to the Warp dashboard's Adapters/Webhooks pages).
 builder.AddServiceDefaults();
-
-// The external shop-providers service base URL, injected by the Aspire AppHost (PartnerApi:BaseUrl).
-// Both outbound adapters (payment gateway + shipping carrier) point at it; webhooks target its subscriber.
-var providersBaseUrl = new Uri(ShopWebhooks.SubscriberBaseUrl(builder.Configuration));
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -71,107 +61,27 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddSingleton<IWarpUIExtension, RetryUIExtension>();
-builder.Services.AddWarpServer<TestContext>(options =>
+builder.Services.AddWarp<TestContext>(options =>
 {
     options.UsePostgreSql();
 
-    options.WorkerCount = 10;
-    options.ServerName = "warp-demo-server";
-    options.DefaultQueue = "default";
-
-    // Multi-application observability (§8.23): this web/publisher server and the TestWorker share the
-    // one TestContext database. Distinct ApplicationNames make the dashboard Applications page show two
-    // apps, and demonstrate the provenance-vs-execution split — jobs published here carry
-    // Application="warp-demo-web" but are executed on "warp-demo-worker".
+    // Multi-application observability (§8.23): this is a NON-server process — publisher + dashboard host +
+    // inbound HTTP endpoints, with NO worker. It shares the one TestContext database with the TestWorker,
+    // which is the demo's sole server and does all job execution. Distinct ApplicationNames make the
+    // dashboard Applications page show two apps and demonstrate the provenance-vs-execution split — jobs
+    // published here carry Application="warp-demo-web" but are executed on "warp-demo-worker". As a
+    // non-server AddWarp process it registers an ApplicationInstance (heartbeat) row, not a Server row.
     options.ApplicationName = "warp-demo-web";
     options.ApplicationVersion = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString();
     options.ApplicationEnvironment = builder.Environment.EnvironmentName;
 
-    // "fulfillment" is polled only by this app's workers (TestWorker polls "default"), so the order jobs
-    // that call the adapters run here where the adapters are registered. AddWebhooks appends "warp:webhooks".
-    options.Queues = ["a-critical", "b-default", "c-low", "default", ShopQueues.Fulfillment];
-    options.PollingInterval = TimeSpan.FromMilliseconds(500);
-    options.HealthCheckInterval = TimeSpan.FromSeconds(10);
-    options.HealthCheckTimeout = TimeSpan.FromSeconds(30);
-    options.JobExpirationTimeout = TimeSpan.FromMinutes(30);
-
-    // Dispatcher batch-fetches and distributes jobs to workers, and (combined with
-    // UseDatabasePush below) wakes instantly on JobEnqueued notifications instead of
-    // waiting for the next poll. Without this, idle workers exponentially back off to
-    // MaxPollingInterval (default 30s), so newly seeded jobs wait up to 30s for pickup.
-    options.UseDispatcher = true;
-
-    options.AddRetry(o => o.MaxRetries = 3);
-    options.AddConcurrency();
-    options.AddSagas();
-
-    // Cross-server push backbone — also fans dashboard events from TestWorker to TestApp.
+    // Cross-process push backbone. The DB-push notification listener lives in Warp.Core, so this
+    // non-server process still receives the TestWorker's JobFinalized / MessageEnqueued events over
+    // Postgres LISTEN/NOTIFY and drives realtime dashboard push — no worker required here.
     options.UseDatabasePush();
 
     // Realtime dashboard push — replaces polling on the dashboard with SignalR push.
     options.AddDashboardPush();
-
-    // Second worker group — different queues and polling
-    options.AddWorkerGroup(group =>
-    {
-        group.WorkerCount = 3;
-        group.Queues = ["reports", "analytics"];
-        group.PollingInterval = TimeSpan.FromSeconds(5);
-    });
-
-    // Demo background services — visible under /warp/services on the dashboard. The first
-    // service runs once on every host (per-server scope). The second uses singleton scope —
-    // one host across the cluster holds the lease and reports job stats every 10 seconds.
-    // Watch the lease panel on the detail page to see which host currently holds it.
-    options.AddBackgroundService<TickCounterService>();
-    options.AddBackgroundService<JobStatsLoggerService>();
-
-    // Shop cluster-singleton service — logs SKUs below the reorder threshold as orders deplete stock.
-    options.AddBackgroundService<LowStockMonitor>();
-
-    // === Outbound adapters — one adapter per external VENDOR (its own health + rate-limit boundary) ===
-    // Each payment provider and each shipping carrier is a genuinely different dependency, so each is its
-    // own adapter (stripe/paypal/adyen; ups/fedex/dhl). The GROUP axis is the storefront CHANNEL the order
-    // came through (web/mobile/marketplace) — same vendor, sliced by who the call is on behalf of — so the
-    // per-Channel table shows e.g. marketplace's higher fraud-decline rate across every payment vendor.
-    // Diagnosis then reads off the axes: an operation red across channels = a caller bug; a channel red
-    // across operations = that storefront's problem; a whole adapter red = that vendor is down.
-    // (Real vendors would each have a distinct base URL; the demo points them all at one mock partner and
-    //  lets the adapter identity do the modelling.)
-
-    // Payment providers — named HTTP-client adapters. Bodies captured on failure only (payments carry
-    // data — §1.2). Resilience retries transient errors; each vendor gets its OWN cluster-shared rate
-    // limit (keyed by adapter name), a differentiator per-process Polly cannot provide.
-    foreach (var provider in ShopProviders.Payment)
-    {
-        options.AddAdapter(provider, a =>
-        {
-            a.BaseUrl = providersBaseUrl;
-            a.Recording.GroupLabel = "Channel";
-            a.Recording.CaptureRequestBodies = CaptureMode.OnFailure;
-            a.Recording.CaptureResponseBodies = CaptureMode.OnFailure;
-            a.Recording.IncludeGroupInMetrics = true;
-            a.UseResilience();
-            a.UseSharedRateLimit(limit: 50, perSeconds: 10, AdapterRateLimitOverflow.Wait, maxWait: TimeSpan.FromSeconds(5));
-        });
-    }
-
-    // Shipping carriers — Refit adapters (one marker interface each). Operation names come from the
-    // interface methods (CreateShipment / GetRate); the storefront channel rides as the group.
-    options.AddAdapter<IUpsShipping>("ups", ConfigureCarrier);
-    options.AddAdapter<IFedExShipping>("fedex", ConfigureCarrier);
-    options.AddAdapter<IDhlShipping>("dhl", ConfigureCarrier);
-
-    void ConfigureCarrier(WarpAdapterHttpOptions a)
-    {
-        a.BaseUrl = providersBaseUrl;
-        a.Recording.GroupLabel = "Channel";
-        a.Recording.IncludeGroupInMetrics = true;
-        a.UseResilience();
-    }
-
-    // === Durable outbound webhooks — order.paid / order.shipped delivered to subscribers, tracked to done ===
-    options.AddWebhooks(w => w.OnDeliveryExhausted<OrderWebhookExhaustedHandler>());
 
     // === Inbound endpoint observability — who calls OUR Warp HTTP endpoints (the inbound mirror of adapters) ===
     // Records IP / user-agent / user + duration + status per request to MapWarpHttp endpoints. Request bodies
@@ -217,7 +127,6 @@ builder.Services.AddWarpServer<TestContext>(options =>
         };
     });
 });
-builder.Services.AddSagaHandler<OrderSagaWorkflow>();
 
 var app = builder.Build();
 
@@ -660,27 +569,6 @@ app.MapGet("/trigger/order", async (IPublisher publisher, TestContext context, s
     await publisher.SaveChangesAsync();
 
     return Results.Ok(new { orderId = order.Id, order.Sku, order.Provider, order.Carrier, order.Channel, watch = $"/warp/adapters/{order.Provider}" });
-});
-
-// One shipping rate quote through a carrier's Refit adapter (GetRate operation, channel group).
-app.MapGet("/trigger/rate", async (IUpsShipping ups, IFedExShipping fedex, IDhlShipping dhl, string? carrierName, string? sku, string? channel) =>
-{
-    var name = carrierName ?? "dhl";
-    var group = channel ?? "web";
-    IShippingApi carrier = name switch
-    {
-        "fedex" => fedex,
-        "ups" => ups,
-        _ => dhl,
-    };
-
-    RateQuote quote;
-    using (WarpAdapterCall.Group(group))
-    {
-        quote = await carrier.GetRate(sku ?? "SKU-TEE", name, group, CancellationToken.None);
-    }
-
-    return Results.Ok(new { quote.Sku, quote.Carrier, quote.Price, channel = group, watch = $"/warp/adapters/{name}" });
 });
 
 // One durable webhook to a chosen subscriber. ?subscriber=reliable|flaky|down → Delivered /
