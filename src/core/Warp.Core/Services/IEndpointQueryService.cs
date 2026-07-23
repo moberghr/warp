@@ -25,6 +25,42 @@ public interface IEndpointQueryService
     Task<EndpointDetailModel?> GetEndpointDetail(string id, CancellationToken ct = default);
 
     Task<EndpointCallDetailModel?> GetCallDetail(string id, Guid callId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Distinct application names that have emitted per-app endpoint metrics (§8.19 multi-app), sorted
+    /// ordinally. Read from the disjoint per-app counter-key namespace; empty when no opted-in process
+    /// has recorded endpoint calls.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetApplications(CancellationToken ct = default);
+
+    /// <summary>
+    /// Per-(application, endpoint) call / error / average-latency aggregates for one application, from the
+    /// durable per-app <c>Counter</c> → <c>Statistic</c> rows (survives <c>EndpointCallLog</c> deletion).
+    /// Application is part of the endpoint identity, so the same route under two apps stays distinct.
+    /// Sorted by route; empty when the application has recorded nothing.
+    /// </summary>
+    Task<IReadOnlyList<EndpointAppStatModel>> GetEndpointStatsByApplication(string application, CancellationToken ct = default);
+}
+
+/// <summary>Per-(application, endpoint) aggregate row from the disjoint per-app counter namespace.</summary>
+public sealed class EndpointAppStatModel
+{
+    public string Application { get; set; } = string.Empty;
+
+    /// <summary>The normalized "{METHOD} {template}" route identity.</summary>
+    public string Route { get; set; } = string.Empty;
+
+    public string Method { get; set; } = string.Empty;
+
+    public string RouteTemplate { get; set; } = string.Empty;
+
+    public long Calls { get; set; }
+
+    public long Errors { get; set; }
+
+    public double ErrorRate { get; set; }
+
+    public double AvgDurationMs { get; set; }
 }
 
 /// <summary>One row on the endpoints (list) page. Identity is the HTTP method + normalized route template.</summary>

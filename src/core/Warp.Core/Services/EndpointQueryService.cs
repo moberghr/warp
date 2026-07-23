@@ -72,6 +72,94 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         ];
     }
 
+    public async Task<IReadOnlyList<string>> GetApplications(CancellationToken ct = default)
+    {
+        var stats = await LoadAppStatsAsync(application: null, ct);
+
+        return
+        [
+            .. stats.Keys
+                .Select(x => x.Application)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(x => x, StringComparer.Ordinal),
+        ];
+    }
+
+    public async Task<IReadOnlyList<EndpointAppStatModel>> GetEndpointStatsByApplication(string application, CancellationToken ct = default)
+    {
+        var stats = await LoadAppStatsAsync(application, ct);
+
+        return
+        [
+            .. stats
+                .Where(x => string.Equals(x.Key.Application, application, StringComparison.Ordinal))
+                .OrderBy(x => x.Key.Route, StringComparer.Ordinal)
+                .Select(x =>
+                    new EndpointAppStatModel
+                    {
+                        Application = x.Key.Application,
+                        Route = x.Key.Route,
+                        Method = SplitMethod(x.Key.Route),
+                        RouteTemplate = SplitTemplate(x.Key.Route),
+                        Calls = x.Value.Total,
+                        Errors = x.Value.Errors,
+                        ErrorRate = Rate(x.Value),
+                        AvgDurationMs = x.Value.AvgDurationMs,
+                    }),
+        ];
+    }
+
+    // Reads the disjoint per-app total keys (Statistic + not-yet-collapsed Counter rows) and folds each
+    // into its (application, route) outcome bucket. A null application loads every app's keys
+    // ("endpoint-app:"); a supplied one scopes to that app ("endpoint-app:{app}:") — application is
+    // colon-free (config identity), so the prefix is exact. Per-app history keys ride the same prefix but
+    // are length-6 and are simply skipped by TryParseApp (they power charts read elsewhere, not these
+    // lifetime aggregates). Application is part of the endpoint identity, so the same route under two apps
+    // yields two distinct (application, route) buckets.
+    private async Task<Dictionary<AppRouteKey, OutcomeCounts>> LoadAppStatsAsync(string? application, CancellationToken ct)
+    {
+        var prefix = application is null
+            ? EndpointCounterKeys.AppPrefix + ":"
+            : EndpointCounterKeys.AppPrefix + ":" + application + ":";
+
+        var aggregated = await _context.Set<Statistic>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith(prefix))
+            .Select(x =>
+                new
+                {
+                    x.Key,
+                    x.Value,
+                })
+            .ToListAsync(ct);
+
+        var pending = await _context.Set<Counter>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith(prefix))
+            .GroupBy(x => x.Key)
+            .Select(g =>
+                new
+                {
+                    Key = g.Key,
+                    Value = g.Sum(c => (long)c.Value),
+                })
+            .ToListAsync(ct);
+
+        var map = new Dictionary<AppRouteKey, OutcomeCounts>();
+
+        foreach (var row in aggregated.Concat(pending))
+        {
+            if (!EndpointCounterKeys.TryParseApp(row.Key, out var app, out var route, out var outcome))
+            {
+                continue;
+            }
+
+            Bucket(map, new AppRouteKey(app, route)).Add(outcome, row.Value);
+        }
+
+        return map;
+    }
+
     public async Task<EndpointDetailModel?> GetEndpointDetail(string id, CancellationToken ct = default)
     {
         var route = TryDecodeId(id);
@@ -469,6 +557,8 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
     }
 
     private readonly record struct GroupKey(string Route, string Group);
+
+    private readonly record struct AppRouteKey(string Application, string Route);
 
     // Walks the ascending latency buckets cumulatively: the percentile for quantile q over N samples is the
     // upper bound of the smallest bucket whose cumulative count reaches ceil(q*N). The overflow bucket

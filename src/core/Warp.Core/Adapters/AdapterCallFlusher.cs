@@ -283,7 +283,7 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
                 });
             }
 
-            AddCounters(context, record);
+            AddCounters(context, record, configuration.ApplicationName);
         }
 
         await UpsertDefinitionsAsync(context, batch, registry, now, ct);
@@ -293,7 +293,7 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
         return batch.Count;
     }
 
-    private static void AddCounters(DbContext context, AdapterCallRecord record)
+    private static void AddCounters(DbContext context, AdapterCallRecord record, string? application)
     {
         var outcome = AdapterCounterKeys.OutcomeToken(record.Outcome);
 
@@ -330,6 +330,20 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
         var hour = AdapterCounterKeys.HourBucket(record.Timestamp);
         context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.History(record.AdapterName, outcome, hour), Value = 1 });
         context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.History(record.AdapterName, AdapterCounterKeys.DurationToken, hour), Value = durationMs });
+
+        // Per-application slice (§8.19 multi-app observability): only when this process opted into an
+        // ApplicationName. Emitted IN ADDITION to the app-agnostic keys above (never instead) under a
+        // DISJOINT top-level prefix ("adapter-app") that the existing "adapter:" readers/parsers provably
+        // reject — an old-version deployment reading the shared Statistic table can never mis-attribute
+        // these. Count + duration-sum + hourly history so per-app avg latency survives AdapterCallLog
+        // deletion and rides the generic hourly-stat prune. Group-less (application is low-cardinality).
+        if (application is not null)
+        {
+            context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.AppTotal(application, record.AdapterName, outcome), Value = 1 });
+            context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.AppTotal(application, record.AdapterName, AdapterCounterKeys.DurationToken), Value = durationMs });
+            context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.AppHistory(application, record.AdapterName, outcome, hour), Value = 1 });
+            context.Set<Counter>().Add(new Counter { Key = AdapterCounterKeys.AppHistory(application, record.AdapterName, AdapterCounterKeys.DurationToken, hour), Value = durationMs });
+        }
     }
 
     private static async Task UpsertDefinitionsAsync(
@@ -639,6 +653,93 @@ internal static class AdapterCounterKeys
         AdapterCallOutcome.CircuitOpen => "circuit_open",
         _ => "unknown",
     };
+
+    // ---------------------------------------------------------------------------------------------------
+    // Per-application key family (§8.19 multi-app observability). A DISJOINT namespace under its OWN
+    // top-level prefix "adapter-app" — deliberately NOT a sub-namespace of "adapter:". The existing
+    // readers filter on StartsWith("adapter:") (colon boundary) and the existing parsers gate on
+    // parts[0] == "adapter" (exact first-segment equality); "adapter-app:…" satisfies NEITHER, so old code
+    // (including an old-version deployment on the shared table) provably ignores these keys and can never
+    // mis-attribute them. Additive only: the app-agnostic keys above are still written byte-for-byte.
+    // Layout (application + adapter are colon-free — application is a low-cardinality config identity,
+    // adapter names are colon-free by the same contract as the app-agnostic keys):
+    //   adapter-app:{app}:{adapter}:{outcome}                       → per-app total (count / dur)
+    //   adapter-app:{app}:{adapter}:hist:{outcome}:{yyyy-MM-dd-HH}  → per-app hourly history
+    public const string AppPrefix = "adapter-app";
+
+    public static string AppTotal(string application, string adapter, string outcome) => $"{AppPrefix}:{application}:{adapter}:{outcome}";
+
+    public static string AppHistory(string application, string adapter, string outcome, string hour) => $"{AppPrefix}:{application}:{adapter}:{HistoryMarker}:{outcome}:{hour}";
+
+    // Parses a per-app total key (adapter-app:{app}:{adapter}:{outcome}). Returns false for every other
+    // shape, including the per-app history keys (length 6) and every app-agnostic "adapter:" key.
+    public static bool TryParseApp(string key, out string application, out string adapter, out string outcome)
+    {
+        application = string.Empty;
+        adapter = string.Empty;
+        outcome = string.Empty;
+
+        var parts = key.Split(':');
+        if (parts.Length != 4)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], AppPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        // A per-app history key collapses to length 6, never 4 — but guard against a marker landing in the
+        // adapter slot so an "app:hist" mis-shape can't masquerade as a total.
+        if (string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        application = parts[1];
+        adapter = parts[2];
+        outcome = parts[3];
+
+        return true;
+    }
+
+    // Parses a per-app hourly history key (adapter-app:{app}:{adapter}:hist:{outcome}:{yyyy-MM-dd-HH}).
+    // Returns false for every other shape — the disjoint counterpart to TryParseApp.
+    public static bool TryParseAppHistory(string key, out string application, out string adapter, out string outcome, out DateTime hour)
+    {
+        application = string.Empty;
+        adapter = string.Empty;
+        outcome = string.Empty;
+        hour = default;
+
+        var parts = key.Split(':');
+        if (parts.Length != 6)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], AppPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[3], HistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!DateTime.TryParseExact(parts[5], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
+        {
+            return false;
+        }
+
+        application = parts[1];
+        adapter = parts[2];
+        outcome = parts[4];
+
+        return true;
+    }
 }
 
 /// <summary>The stat dimension a parsed adapter <see cref="Counter"/> key belongs to.</summary>

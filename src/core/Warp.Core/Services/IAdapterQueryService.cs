@@ -36,6 +36,36 @@ public interface IAdapterQueryService
     /// Returns null when no row matches the adapter/id pair.
     /// </summary>
     Task<AdapterCallDetailModel?> GetCallDetail(string name, Guid callId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Distinct application names that have emitted per-app adapter metrics (§8.19 multi-app), sorted
+    /// ordinally. Read from the disjoint per-app counter-key namespace; empty when no opted-in process
+    /// has recorded adapter calls.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetApplications(CancellationToken ct = default);
+
+    /// <summary>
+    /// Per-(application, adapter) call / error / average-latency aggregates for one application, from the
+    /// durable per-app <c>Counter</c> → <c>Statistic</c> rows (survives <c>AdapterCallLog</c> deletion).
+    /// Sorted by adapter name; empty when the application has recorded nothing.
+    /// </summary>
+    Task<IReadOnlyList<AdapterAppStatModel>> GetAdapterStatsByApplication(string application, CancellationToken ct = default);
+}
+
+/// <summary>Per-(application, adapter) aggregate row from the disjoint per-app counter namespace.</summary>
+public sealed class AdapterAppStatModel
+{
+    public string Application { get; set; } = string.Empty;
+
+    public string Adapter { get; set; } = string.Empty;
+
+    public long Calls { get; set; }
+
+    public long Errors { get; set; }
+
+    public double ErrorRate { get; set; }
+
+    public double AvgDurationMs { get; set; }
 }
 
 /// <summary>One row on the adapters list page.</summary>
