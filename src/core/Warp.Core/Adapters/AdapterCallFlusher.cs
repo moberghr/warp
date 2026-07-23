@@ -278,6 +278,7 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
                     TraceId = record.TraceId,
                     TagsJson = SerializeTags(record.Tags),
                     CorrelationId = record.CorrelationId,
+                    Application = configuration.ApplicationName,
                     ExpireAt = record.Timestamp.Add(retention),
                 });
             }

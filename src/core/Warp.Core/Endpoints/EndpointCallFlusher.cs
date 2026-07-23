@@ -140,7 +140,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
         var scopes = new List<IServiceScope>();
         try
         {
-            await PersistWithFallbackAsync(CreateContext, batch, _logger, ct);
+            await PersistWithFallbackAsync(CreateContext, batch, _configuration, _logger, ct);
         }
         finally
         {
@@ -172,13 +172,14 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
     internal static async Task PersistWithFallbackAsync(
         Func<(DbContext Context, TimeProvider TimeProvider)> contextFactory,
         List<EndpointCallRecord> batch,
+        WarpConfiguration configuration,
         ILogger logger,
         CancellationToken ct)
     {
         try
         {
             var (context, timeProvider) = contextFactory();
-            await PersistBatchAsync(context, batch, timeProvider, ct);
+            await PersistBatchAsync(context, batch, configuration, timeProvider, ct);
 
             return;
         }
@@ -199,7 +200,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
             try
             {
                 var (context, timeProvider) = contextFactory();
-                await PersistBatchAsync(context, [record], timeProvider, ct);
+                await PersistBatchAsync(context, [record], configuration, timeProvider, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -223,6 +224,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
     internal static async Task<int> PersistBatchAsync(
         DbContext context,
         IReadOnlyList<EndpointCallRecord> batch,
+        WarpConfiguration configuration,
         TimeProvider timeProvider,
         CancellationToken ct)
     {
@@ -267,6 +269,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
                     MachineName = record.MachineName,
                     TraceId = record.TraceId,
                     TagsJson = record.TagsJson,
+                    Application = configuration.ApplicationName,
                     ExpireAt = record.ExpireAt,
                 });
             }

@@ -392,7 +392,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         // Act: enqueue a job type that has [Mutex("static-key")]
         var jobId = await publisher.Enqueue(new MutexAttributeRequest());
@@ -429,7 +429,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         // Act: enqueue with WithMutex extension
         var jobId = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithMutex("dynamic-key"));
@@ -466,7 +466,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         // Act
         var jobId = await publisher.Enqueue(new MutexAttributeRequest());
@@ -503,7 +503,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         // Act
         var jobId = await publisher.Enqueue(new UnitRequest(), new JobParameters().WithMutex("limit-one-key"));
@@ -540,7 +540,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         // Act
         var jobId = await publisher.Enqueue(new MutexWaitAttributeRequest());

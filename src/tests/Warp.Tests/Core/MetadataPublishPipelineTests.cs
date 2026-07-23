@@ -47,7 +47,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
         var ctx = _fixture.CreateContext();
         var first = new AppendMetadataBehavior("key-a", "value-a");
         var second = new AppendMetadataBehavior("key-b", "value-b");
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, BuildProvider(first, second), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, BuildProvider(first, second), TestTasks.NullTransport, TestTasks.NullSignals);
 
         var id = await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -65,7 +65,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
         var ctx = _fixture.CreateContext();
         var first = new AppendMessageMetadataBehavior("msg-key-a", "msg-val-a");
         var second = new AppendMessageMetadataBehavior("msg-key-b", "msg-val-b");
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, BuildProvider(first, second), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, BuildProvider(first, second), TestTasks.NullTransport, TestTasks.NullSignals);
 
         var id = await publisher.Publish(new SingleHandlerMessage());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -83,7 +83,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
     {
         var ctx = _fixture.CreateContext();
         var behavior = new CancellationTokenCaptureBehavior();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
 
         await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(CancellationToken.None);
@@ -99,7 +99,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
     public async Task Enqueue_NoBehaviors_MetadataIsNull()
     {
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
 
         var id = await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -113,7 +113,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
     public async Task Enqueue_WithJobParametersMetadata_MetadataPersisted()
     {
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
 
         var id = await publisher.Enqueue(new UnitRequest(), new JobParameters
         {
@@ -132,7 +132,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
     {
         var ctx = _fixture.CreateContext();
         var behavior = new AppendMetadataBehavior("pipeline-key", "pipeline-val");
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
 
         var id = await publisher.Enqueue(new UnitRequest(), new JobParameters
         {
@@ -232,7 +232,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
         try
         {
             var ctx = _fixture.CreateContext();
-            var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
+            var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
 
             var id = await publisher.Enqueue(new UnitRequest());
             await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -280,7 +280,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
     {
         var ctx = _fixture.CreateContext();
         var behavior = new PostNextBehavior();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
 
         var id = await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -297,7 +297,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
     {
         var ctx = _fixture.CreateContext();
         var behavior = new ShortCircuitBehavior();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
 
         var id = await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -314,7 +314,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
     {
         var ctx = _fixture.CreateContext();
         var behavior = new ThrowingBehavior();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, BuildProvider(behavior), TestTasks.NullTransport, TestTasks.NullSignals);
 
         await Should.ThrowAsync<InvalidOperationException>(async () => await publisher.Enqueue(new UnitRequest()));
 
@@ -332,7 +332,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
         var executionLog = new List<string>();
         var outer = new OrderTrackingBehavior(executionLog, "outer");
         var inner = new OrderTrackingBehavior(executionLog, "inner");
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, BuildProvider(outer, inner), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, BuildProvider(outer, inner), TestTasks.NullTransport, TestTasks.NullSignals);
 
         await publisher.Enqueue(new UnitRequest());
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -354,7 +354,7 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
         try
         {
             var ctx = _fixture.CreateContext();
-            var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
+            var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
 
             var id = await publisher.Enqueue(new UnitRequest(), new JobParameters
             {

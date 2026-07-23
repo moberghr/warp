@@ -88,6 +88,7 @@ public static class ServiceConfiguration
 
         services.AddScoped<IPublisher>(x => new Publisher<TContext>(
             x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
             x.GetRequiredService<TimeProvider>(),
             x,
             x.GetRequiredService<IWarpNotificationTransport>(),

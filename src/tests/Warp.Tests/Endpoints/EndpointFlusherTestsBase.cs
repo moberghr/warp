@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
 using Warp.Core.Enums;
@@ -166,6 +167,7 @@ public abstract class EndpointFlusherTestsBase : IAsyncLifetime
         await EndpointCallFlusher<TestContext>.PersistBatchAsync(
             _fixture.CreateContext(),
             records,
+            new WarpConfiguration(),
             TimeProvider.System,
             Xunit.TestContext.Current.CancellationToken);
     }
