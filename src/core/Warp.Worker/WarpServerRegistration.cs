@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
+using Warp.Core.Enums;
 
 namespace Warp.Worker;
 
@@ -54,11 +55,32 @@ public class WarpServerRegistration<TContext> : IHostedService
         {
             Id = _configuration.ServerId,
             ServerName = _configuration.ServerName ?? $"{Environment.MachineName}.{_configuration.ServerId}",
+            Application = _configuration.ApplicationName,
+            Version = _configuration.ApplicationVersion,
+            Environment = _configuration.ApplicationEnvironment,
             StartedTime = now,
             LastHeartbeatTime = now,
             ServiceCount = totalWorkerCount,
         };
         await context.Set<Server>().AddAsync(server, cancellationToken);
+
+        // Server processes are their own instance record (the Server row above); when the process opted
+        // into multi-application observability, emit a Registered lifecycle event on the unified
+        // application/instance log too (InstanceId = the server's Id — a soft ref, no FK). ExpireAt is
+        // stamped at write time so ExpirationCleanup's age sweep can drop it (§8.22).
+        if (_configuration.ApplicationName is not null)
+        {
+            await context.Set<ApplicationInstanceLog>().AddAsync(
+                new ApplicationInstanceLog
+                {
+                    InstanceId = server.Id,
+                    ApplicationName = _configuration.ApplicationName,
+                    Timestamp = now,
+                    EventType = ApplicationInstanceEventType.Registered,
+                    ExpireAt = now.Add(_configuration.ApplicationInstanceLogRetention),
+                },
+                cancellationToken);
+        }
 
         var registrations = new List<ServerRegistrationState.GroupRegistration>();
         foreach (var group in workerGroups)

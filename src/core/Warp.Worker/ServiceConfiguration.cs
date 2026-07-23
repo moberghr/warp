@@ -218,6 +218,11 @@ public static class ServiceConfiguration
         services.AddSingleton<ProcessCpuTracker>();
         services.AddSingleton<HeartbeatLeaseTracker>();
 
+        // Marks this process as a server (§multi-app observability). Its only consumer is the
+        // Core-side ApplicationHeartbeatHost, which self-inerts when any IWarpServerPresence is
+        // present — a server records itself on its Server row, not a duplicate ApplicationInstance.
+        services.AddSingleton<IWarpServerPresence, WarpServerPresence>();
+
         // Server-infrastructure tasks: heartbeat (renews singleton lease + bumps instance
         // heartbeat), stale-server cleanup (releases dead-server leases/instances), and expiration
         // cleanup (background-service log retention + orphaned-definition GC; its job-cleanup half

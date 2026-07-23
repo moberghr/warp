@@ -12,6 +12,7 @@ using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Converters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
+using Warp.Core.Diagnostics;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Events;
@@ -55,7 +56,23 @@ public static class ServiceConfiguration
         // AddWarpServer, which inherits WarpConfiguration), keep theirs.
         services.TryAddSingleton<IOptions<WarpConfiguration>>(Options.Create<WarpConfiguration>(builder));
 
-        return CreateWarpServices<TContext>(services);
+        var configured = CreateWarpServices<TContext>(services);
+
+        // Non-server application heartbeat host — registered ONLY when this process opted into
+        // multi-application observability (ApplicationName set). A deliberate change to the passive
+        // AddWarp contract (§2.13): a publisher/API/dashboard-only process now writes an
+        // ApplicationInstance row so it is visible in the Applications view. It self-inerts in server
+        // processes (the IWarpServerPresence marker is present) — those record themselves on Server.
+        // Null ApplicationName ⇒ the host is not registered at all, so behavior is byte-for-byte unchanged.
+        if (builder.ApplicationName is not null)
+        {
+            // Shared CPU/RAM sampler (also registered by AddWarpServer). TryAdd so the two paths don't
+            // fight when a process calls both AddWarp and AddWarpServer.
+            configured.TryAddSingleton<ProcessCpuTracker>();
+            configured.AddHostedService<ApplicationHeartbeatHost<TContext>>();
+        }
+
+        return configured;
     }
 
     private static IServiceCollection CreateWarpServices<TContext>(this IServiceCollection services)
