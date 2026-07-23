@@ -12,6 +12,9 @@ namespace Warp.Core.Data.Entities;
 /// </summary>
 public class AdapterCallLog
 {
+    /// <summary>Opt-in provenance: the application that MADE this call (<c>WarpConfiguration.ApplicationName</c>). Null ⇒ feature off / legacy row.</summary>
+    public string? Application { get; set; }
+
     public Guid Id { get; set; } = Guid.NewGuid();
 
     public string AdapterName { get; set; } = string.Empty;

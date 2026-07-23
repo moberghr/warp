@@ -367,6 +367,8 @@ public static class ServiceConfiguration
         AddAdapterCallLogEntity(modelBuilder, schema);
         AddWebhookDeliveryEntity(modelBuilder, schema);
         AddEndpointCallLogEntity(modelBuilder, schema);
+        AddApplicationInstanceEntity(modelBuilder, schema);
+        AddApplicationInstanceLogEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -411,6 +413,8 @@ public static class ServiceConfiguration
         job.Property(p => p.CancellationMode);
 
         job.Property(p => p.Metadata);
+
+        job.Property(p => p.Application).HasMaxLength(200);
 
         job.Metadata.SetSchema(schema);
     }
@@ -472,6 +476,10 @@ public static class ServiceConfiguration
         server.Property(p => p.ServiceCount);
 
         server.Property(p => p.PausedAt);
+
+        server.Property(p => p.Application).HasMaxLength(200);
+        server.Property(p => p.Version).HasMaxLength(200);
+        server.Property(p => p.Environment).HasMaxLength(200);
 
         server.Metadata.SetSchema(schema);
     }
@@ -862,6 +870,7 @@ public static class ServiceConfiguration
         log.Property(p => p.TraceId).HasMaxLength(64);
         log.Property(p => p.TagsJson);
         log.Property(p => p.CorrelationId).HasMaxLength(200);
+        log.Property(p => p.Application).HasMaxLength(200);
         log.Property(p => p.ExpireAt);
 
         // Per-adapter recent-calls listing.
@@ -906,6 +915,7 @@ public static class ServiceConfiguration
         log.Property(p => p.MachineName).HasMaxLength(256).IsRequired();
         log.Property(p => p.TraceId);
         log.Property(p => p.TagsJson);
+        log.Property(p => p.Application).HasMaxLength(200);
         log.Property(p => p.ExpireAt);
 
         // Per-endpoint recent-calls listing (identity = method + route template).
@@ -947,6 +957,7 @@ public static class ServiceConfiguration
         delivery.Property(p => p.ExhaustedCallbackPending);
         delivery.Property(p => p.NextAttemptAt);
         delivery.Property(p => p.CreatedAt);
+        delivery.Property(p => p.Application).HasMaxLength(200);
         delivery.Property(p => p.ExpireAt);
 
         // Status filtering + display of the pending/next-attempt band.
@@ -967,6 +978,58 @@ public static class ServiceConfiguration
         delivery.HasIndex(p => p.ExpireAt);
 
         delivery.Metadata.SetSchema(schema);
+    }
+
+    public static void AddApplicationInstanceEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var instance = modelBuilder.Entity<ApplicationInstance>();
+
+        instance.Property(p => p.Id);
+        instance.HasKey(p => p.Id);
+
+        instance.Property(p => p.ApplicationName).HasMaxLength(200).IsRequired();
+        instance.Property(p => p.MachineName).HasMaxLength(256).IsRequired();
+        instance.Property(p => p.StartedAt);
+        instance.Property(p => p.LastHeartbeatAt);
+        instance.Property(p => p.CpuUsagePercent);
+        instance.Property(p => p.MemoryWorkingSetBytes);
+        instance.Property(p => p.Version).HasMaxLength(200);
+        instance.Property(p => p.Environment).HasMaxLength(200);
+
+        // Applications overview: instances grouped by application.
+        instance.HasIndex(p => p.ApplicationName);
+
+        // ExpirationCleanup stale-instance sweep by last heartbeat.
+        instance.HasIndex(p => p.LastHeartbeatAt);
+
+        instance.Metadata.SetSchema(schema);
+    }
+
+    public static void AddApplicationInstanceLogEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var log = modelBuilder.Entity<ApplicationInstanceLog>();
+
+        log.Property(p => p.Id);
+        log.HasKey(p => p.Id);
+
+        // InstanceId is a soft reference (Server.Id OR ApplicationInstance.Id) — no FK, like JobLog.
+        log.Property(p => p.InstanceId);
+        log.Property(p => p.ApplicationName).HasMaxLength(200).IsRequired();
+        log.Property(p => p.Timestamp);
+        log.Property(p => p.EventType).HasConversion<int>();
+        log.Property(p => p.Message).HasMaxLength(4096);
+        log.Property(p => p.ExpireAt);
+
+        // Per-instance lifecycle timeline, newest first.
+        log.HasIndex(p => new { p.InstanceId, p.Timestamp });
+
+        // Per-application lifecycle timeline.
+        log.HasIndex(p => new { p.ApplicationName, p.Timestamp });
+
+        // ExpirationCleanup range scan on expiry.
+        log.HasIndex(p => p.ExpireAt);
+
+        log.Metadata.SetSchema(schema);
     }
 
     public static void AddBackgroundServiceLogEntity(ModelBuilder modelBuilder, string? schema)

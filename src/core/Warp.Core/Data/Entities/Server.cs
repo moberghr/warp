@@ -4,7 +4,16 @@ public class Server
 {
     public required Guid Id { get; set; }
 
-    public string ServerName { get; set; } = Environment.MachineName;
+    public string ServerName { get; set; } = System.Environment.MachineName;
+
+    /// <summary>Opt-in logical application name (<c>WarpConfiguration.ApplicationName</c>), stamped at registration. Null ⇒ feature off.</summary>
+    public string? Application { get; set; }
+
+    /// <summary>Opt-in self-reported build/assembly version, stamped at registration. Per-instance (mixed values during a rolling deploy).</summary>
+    public string? Version { get; set; }
+
+    /// <summary>Opt-in self-reported environment (prod/staging/…), stamped at registration.</summary>
+    public string? Environment { get; set; }
 
     public required DateTime StartedTime { get; set; }
 

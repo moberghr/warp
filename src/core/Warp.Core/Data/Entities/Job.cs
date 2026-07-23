@@ -8,6 +8,9 @@ public class Job
 
     public JobKind Kind { get; set; } = JobKind.Job;
 
+    /// <summary>Opt-in provenance: the application that PUBLISHED this job (<c>WarpConfiguration.ApplicationName</c>), stamped at publish and preserved on requeue. Filter/display only — execution happens on a worker app, so this is not a metrics dimension. Null ⇒ feature off / legacy row.</summary>
+    public string? Application { get; set; }
+
     public string? Type { get; set; }
 
     public string? Message { get; set; }
