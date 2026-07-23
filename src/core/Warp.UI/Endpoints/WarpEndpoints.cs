@@ -707,6 +707,12 @@ public static class WarpEndpoints
             return detail is null ? Results.NotFound() : Results.Ok(detail);
         });
 
+        // Global job execution metrics (by-type / by-handler, from the durable Statistic aggregates, so they
+        // survive Job-row cleanup). Optional ?application= narrows to a single executor application. The model
+        // carries both ByType and ByHandler; the Jobs-by-Type page toggles between them client-side.
+        apiGroup.MapGet("jobs/metrics", async ([FromServices] IJobQueryService svc, [FromQuery] string? application) =>
+            Results.Ok(await svc.GetJobExecutionMetrics(application)));
+
         // Per-app job execution metrics (by-type / by-handler, from the durable Statistic aggregates).
         apiGroup.MapGet("applications/{id}/jobstats", async ([FromServices] IJobQueryService svc, string id) =>
         {

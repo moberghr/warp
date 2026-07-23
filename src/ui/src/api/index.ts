@@ -2,6 +2,12 @@ import axios from 'axios';
 import api from './client';
 import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
 import type { AdapterListItem, AdapterDetail, AdapterCallDetail, AdapterHistoryPoint } from '@/types/adapters';
+import type {
+  ApplicationSummaryModel,
+  ApplicationDetailModel,
+  ApplicationInstanceDetailModel,
+  JobExecutionMetricsModel,
+} from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
 import type {
   WebhookDeliveryListItem,
@@ -39,6 +45,11 @@ export const getFailedJobsByType = (type: string, page = 0, pageSize = 20) =>
 
 export const getJobsByType = (type: string, page = 0, pageSize = 20, state?: string) =>
   api.get<PagedList<JobModel>>('/jobs/by-type', { params: { type, page, pageSize, state } }).then(r => r.data);
+
+// Durable per-type / per-handler execution metrics (folded Statistic aggregates; survive Job-row cleanup).
+// Optional application filter narrows to a single executor application (percentiles are 0 for that slice).
+export const getJobMetrics = (application?: string) =>
+  api.get<JobExecutionMetricsModel>('/jobs/metrics', { params: application ? { application } : undefined }).then(r => r.data);
 
 export const deleteFailedJobsByType = (type: string) =>
   api.post<BulkResult>('/jobs/failed/delete-by-type', null, { params: { type } }).then(r => r.data);
@@ -150,6 +161,21 @@ export const pauseServer = (serverId: string) => api.post(`/servers/${serverId}/
 export const resumeServer = (serverId: string) => api.post(`/servers/${serverId}/resume`);
 export const pauseWorkerGroup = (groupId: string) => api.post(`/groups/${groupId}/pause`);
 export const resumeWorkerGroup = (groupId: string) => api.post(`/groups/${groupId}/resume`);
+
+// Applications — multi-app observability roster (§8.19). The renamed Servers surface: IApplicationQueryService
+// is always registered by AddWarp, so these resolve in dashboard-only processes. The {id} path segment is the
+// URL-safe base64 of the application name (encodeAppId, mirrors the backend EndpointRouteId.Encode).
+export const getApplications = () =>
+  api.get<ApplicationSummaryModel[]>('/applications').then(r => r.data);
+
+export const getApplicationDetail = (id: string) =>
+  api.get<ApplicationDetailModel>(`/applications/${encodeURIComponent(id)}`).then(r => r.data);
+
+export const getInstanceDetail = (id: string, instanceId: string) =>
+  api.get<ApplicationInstanceDetailModel>(`/applications/${encodeURIComponent(id)}/instances/${encodeURIComponent(instanceId)}`).then(r => r.data);
+
+export const getApplicationJobStats = (id: string) =>
+  api.get<JobExecutionMetricsModel>(`/applications/${encodeURIComponent(id)}/jobstats`).then(r => r.data);
 
 export const getStatsHistory = (hours = 24) =>
   api.get<StatsHistoryPoint[]>('/stats/history', { params: { hours } }).then(r => r.data);

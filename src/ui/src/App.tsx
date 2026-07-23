@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState, useEffect, useCallback } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { queryClient } from '@/lib/queryClient';
@@ -18,7 +18,9 @@ const MessagesPage = lazy(() => import('@/pages/messages/MessagesPage'));
 const BatchesPage = lazy(() => import('@/pages/batches/BatchesPage'));
 const RecurringPage = lazy(() => import('@/pages/recurring/RecurringPage'));
 const RecurringDetailPage = lazy(() => import('@/pages/recurring/RecurringDetailPage'));
-const ServersPage = lazy(() => import('@/pages/servers/ServersPage'));
+const ApplicationsPage = lazy(() => import('@/pages/applications/ApplicationsPage'));
+const ApplicationDetailPage = lazy(() => import('@/pages/applications/ApplicationDetailPage'));
+const ApplicationInstanceDetailPage = lazy(() => import('@/pages/applications/ApplicationInstanceDetailPage'));
 const ServerDetailPage = lazy(() => import('@/pages/servers/ServerDetailPage'));
 const CountersPage = lazy(() => import('@/pages/counters/CountersPage'));
 const ConcurrencyLimitsPage = lazy(() => import('@/pages/concurrency/ConcurrencyLimitsPage'));
@@ -128,8 +130,14 @@ function App() {
             <Route path="/recurring" element={<RecurringPage />} />
             <Route path="/trace/:traceId/:highlightId?" element={<TracePage />} />
             <Route path="/workers/:id" element={<WorkerDetailPage />} />
+            {/* Server-instance detail keeps its own route (worker groups / pause live here); the
+                Applications list links server instances straight to it. */}
             <Route path="/servers/:id" element={<ServerDetailPage />} />
-            <Route path="/servers" element={<ServersPage />} />
+            {/* Old /servers bookmarks land on the renamed Applications page. */}
+            <Route path="/servers" element={<Navigate to="/applications" replace />} />
+            <Route path="/applications/:id/instances/:instanceId" element={<ApplicationInstanceDetailPage />} />
+            <Route path="/applications/:id" element={<ApplicationDetailPage />} />
+            <Route path="/applications" element={<ApplicationsPage />} />
             <Route path="/counters" element={<CountersPage />} />
             <Route path="/concurrency" element={<ConcurrencyLimitsPage />} />
             <Route path="/ratelimits" element={<RateLimitsPage />} />
