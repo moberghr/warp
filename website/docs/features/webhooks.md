@@ -204,6 +204,10 @@ Webhooks require a Warp worker, but you do **not** have to move your whole job w
 
 The `WebhookDelivery` table is added to the model **unconditionally** by `WarpModelCustomizer`, whether or not any host calls `AddWebhooks()` — same principle as the other addon entities, so the migration story is independent of which processes opt in.
 
+## Multi-application provenance
+
+In a shared-database deployment with [multi-application observability](./applications.md) enabled (`opt.ApplicationName` set), every `WebhookDelivery` row is stamped with the **producing application** — the app that called `SendAsync` — as a nullable `Application` column, so deliveries can be filtered by the app that sent them. When `ApplicationName` is unset the column is `null` and nothing changes.
+
 ## Telemetry
 
 Three counters, in addition to the HTTP leg's spans/duration/error counters that come from the adapter layer (not duplicated here):

@@ -308,6 +308,10 @@ The OTel histogram carries exact per-call latency for external backends. The das
 
 Statistics are written as `Counter` rows (per adapter/operation/outcome and per group/outcome, successes included, plus per-outcome duration-sum and latency-bucket counters) that `CounterAggregator` collapses into `Statistic` rows — never a direct `Statistic` write from the call path. Because average latency and the percentiles are read from these aggregates rather than the raw `AdapterCallLog` rows, they stay correct after retention prunes the rows.
 
+## Multi-application provenance
+
+In a shared-database deployment with [multi-application observability](./applications.md) enabled (`opt.ApplicationName` set), every `AdapterCallLog` row is stamped with the **producing application** — the app that made the call — as a nullable `Application` column, and per-application adapter metrics (calls, error rate, latency) accrue alongside the app-agnostic totals under a disjoint counter-key namespace. The dashboard's global application filter then scopes the Adapters surfaces to one app. When `ApplicationName` is unset the column is `null` and nothing changes.
+
 ## Dashboard
 
 An **Adapters** nav item (gated on the `adapters` flag from `GET {prefix}/api/addons` — true only where `AddAdapters()` ran, hidden otherwise) opens two screens:

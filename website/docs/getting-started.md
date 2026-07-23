@@ -56,7 +56,7 @@ dotnet ef migrations add UpgradeWarp
 dotnet ef database update
 ```
 
-EF Core detects the model diff automatically — no manual SQL needed.
+EF Core detects the model diff automatically — no manual SQL needed. Warp upgrades are **additive** — new features add tables and (nullable) columns to your model, which your normal `dotnet ef migrations add` / `dotnet ef database update` flow picks up alongside your own changes. Opt-in features stay dormant until you enable them: [multi-application observability](./features/applications.md), for example, adds its two tables and provenance columns to the schema unconditionally but does nothing at runtime until you set `opt.ApplicationName`.
 
 **Using EnsureCreatedAsync** (quick start / development):
 
