@@ -7,6 +7,7 @@ using Warp.Core;
 using Warp.Core.Endpoints;
 using Warp.Core.Enums;
 using Warp.Core.Logging;
+using Warp.Core.Observability;
 
 namespace Warp.Http.Observability;
 
@@ -23,21 +24,25 @@ internal sealed class WarpInboundObservabilityMiddleware
     private const int MaxExceptionMessage = 4096;
 
     private readonly RequestDelegate _next;
-    private readonly IEndpointCallRecorder _recorder;
+    private readonly IEndpointCallRecorder? _recorder;
     private readonly WarpEndpointObservabilityOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _retention;
     private readonly string? _applicationName;
+    private readonly bool _enrichSpan;
 
     public WarpInboundObservabilityMiddleware(
         RequestDelegate next,
-        IEndpointCallRecorder recorder,
+        IEnumerable<IEndpointCallRecorder> recorders,
         IOptions<WarpEndpointObservabilityOptions> options,
         IOptions<WarpConfiguration> configuration,
         TimeProvider timeProvider)
     {
         _next = next;
-        _recorder = recorder;
+
+        // Optional: the DB recorder is registered only under the Database/Both sink. Under Otel-only there is
+        // none — the captured detail rides the request span instead (§8.24), so recording is span-only.
+        _recorder = recorders.FirstOrDefault();
         _options = options.Value;
         _timeProvider = timeProvider;
         _retention = configuration.Value.EndpointCallLogRetention;
@@ -46,6 +51,9 @@ internal sealed class WarpInboundObservabilityMiddleware
         // instead. Read the process origin from the already-resolved WarpConfiguration (same value the
         // static WarpTelemetry.ApplicationName carries); null ⇒ nothing is stamped (feature off).
         _applicationName = configuration.Value.ApplicationName;
+
+        // Under the Otel/Both sink, attach the captured call detail to the request span.
+        _enrichSpan = _options.Sink is RecordingSink.Otel or RecordingSink.Both;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -151,6 +159,33 @@ internal sealed class WarpInboundObservabilityMiddleware
             var captureReq = forceCapture || _options.CaptureRequestBodies == CaptureMode.Always;
             var captureHeaders = forceCapture || _options.CaptureHeaders == CaptureMode.Always || (failed && _options.CaptureHeaders == CaptureMode.OnFailure);
 
+            // Compute the captured detail once — both the span enrichment (Otel/Both) and the DB row
+            // (Database/Both) draw from the same already-redacted/truncated values.
+            var group = ResolveGroup(context);
+            var remoteIp = ResolveRemoteIp(context);
+            var userAgent = NullIfEmpty(context.Request.Headers.UserAgent.ToString());
+            var user = context.User.Identity?.Name;
+            var requestHeaders = captureHeaders ? HttpCaptureHelpers.RedactHeaders(context.Request.Headers, _options.RedactedHeaders, _options.MaxCapturedHeaderSize) : null;
+            var responseHeaders = captureHeaders ? HttpCaptureHelpers.RedactHeaders(context.Response.Headers, _options.RedactedHeaders, _options.MaxCapturedHeaderSize) : null;
+            var requestBody = captureReq ? await ReadRequestBodyAsync(context) : null;
+            var responseBody = captureBodies ? DecodeCaptured(capture) : null;
+
+            // Otel/Both: attach the detail to the ambient request span, but only when it is being recorded
+            // (sampled in), so the trace sampling decision governs the whole request coherently (§8.24). The
+            // caller metadata (IP / user-agent / user) is captured-by-design PII riding the trace exporter
+            // only — never the ILogger provider chain.
+            if (_enrichSpan && Activity.Current is { IsAllDataRequested: true } activity)
+            {
+                EnrichSpan(activity, identity, statusCode, outcome, group, remoteIp, userAgent, user, requestHeaders, responseHeaders, requestBody, responseBody);
+            }
+
+            // Database/Both: hand the record to the DB recorder. Under Otel-only there is none — the span
+            // enrichment above is the whole recording, so nothing more to do.
+            if (_recorder is null)
+            {
+                return;
+            }
+
             // A row is written for any failure, any forced request, and successes kept by both the record
             // mode and the sample rate; counters are ALWAYS written (never gated by sampling or suppression),
             // keeping the aggregates 100% exact.
@@ -167,20 +202,20 @@ internal sealed class WarpInboundObservabilityMiddleware
                 Method = identity.Method,
                 RouteTemplate = identity.RouteTemplate,
                 Operation = identity.Operation,
-                GroupName = ResolveGroup(context),
+                GroupName = group,
                 Timestamp = now,
                 DurationMs = durationMs,
                 Outcome = outcome,
                 StatusCode = statusCode,
-                RemoteIp = ResolveRemoteIp(context),
-                UserAgent = NullIfEmpty(context.Request.Headers.UserAgent.ToString()),
-                User = context.User.Identity?.Name,
+                RemoteIp = remoteIp,
+                UserAgent = userAgent,
+                User = user,
                 ExceptionType = exceptionType,
                 ExceptionMessage = exceptionMessage,
-                RequestHeaders = captureHeaders ? HttpCaptureHelpers.RedactHeaders(context.Request.Headers, _options.RedactedHeaders, _options.MaxCapturedHeaderSize) : null,
-                ResponseHeaders = captureHeaders ? HttpCaptureHelpers.RedactHeaders(context.Response.Headers, _options.RedactedHeaders, _options.MaxCapturedHeaderSize) : null,
-                RequestBody = captureReq ? await ReadRequestBodyAsync(context) : null,
-                ResponseBody = captureBodies ? DecodeCaptured(capture) : null,
+                RequestHeaders = requestHeaders,
+                ResponseHeaders = responseHeaders,
+                RequestBody = requestBody,
+                ResponseBody = responseBody,
                 MachineName = Environment.MachineName,
                 TraceId = ResolveTraceId(),
                 TagsJson = ResolveTags(context),
@@ -198,6 +233,41 @@ internal sealed class WarpInboundObservabilityMiddleware
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Recording is diagnostics, never a request failure — swallow anything the capture path throws.
+        }
+    }
+
+    private static void EnrichSpan(
+        Activity activity,
+        WarpEndpointIdentity identity,
+        int statusCode,
+        AdapterCallOutcome outcome,
+        string? group,
+        string? remoteIp,
+        string? userAgent,
+        string? user,
+        string? requestHeaders,
+        string? responseHeaders,
+        string? requestBody,
+        string? responseBody)
+    {
+        activity.SetTag(WarpTelemetryAttributes.WarpEndpointRoute, $"{identity.Method} {identity.RouteTemplate}");
+        activity.SetTag(WarpTelemetryAttributes.WarpEndpointStatusCode, statusCode);
+        activity.SetTag(WarpTelemetryAttributes.WarpEndpointOutcome, outcome.ToString());
+        SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointGroup, group);
+        SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointClientIp, remoteIp);
+        SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointUserAgent, userAgent);
+        SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointUser, user);
+        SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointRequestHeaders, requestHeaders);
+        SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointResponseHeaders, responseHeaders);
+        SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointRequestBody, requestBody);
+        SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointResponseBody, responseBody);
+    }
+
+    private static void SetTagIfNotNull(Activity activity, string key, string? value)
+    {
+        if (value is not null)
+        {
+            activity.SetTag(key, value);
         }
     }
 

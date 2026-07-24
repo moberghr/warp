@@ -43,6 +43,7 @@ public sealed class AdapterCallScope : IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
     private readonly Activity? _activity;
+    private readonly bool _enrichSpanDetail;
     private readonly long _startTimestamp;
     private readonly DateTime _startedAt;
     private readonly int _attempts;
@@ -68,7 +69,8 @@ public sealed class AdapterCallScope : IDisposable
         IAdapterCallRecorder recorder,
         TimeProvider timeProvider,
         ILogger logger,
-        Activity? activity)
+        Activity? activity,
+        bool enrichSpanDetail)
     {
         _adapter = adapter;
         _operation = operation;
@@ -79,6 +81,7 @@ public sealed class AdapterCallScope : IDisposable
         _timeProvider = timeProvider;
         _logger = logger;
         _activity = activity;
+        _enrichSpanDetail = enrichSpanDetail;
         _attempts = 1;
         _startTimestamp = timeProvider.GetTimestamp();
         _startedAt = timeProvider.GetUtcNow().UtcDateTime;
@@ -259,6 +262,16 @@ public sealed class AdapterCallScope : IDisposable
                 _activity.SetStatus(ActivityStatusCode.Error, WarpTelemetry.TruncateMessage(exception.Message, 256));
             }
 
+            // Under the Otel/Both recording sink, the captured detail rides the span instead of a DB row
+            // (§8.24). Gate on IsAllDataRequested so we only enrich a span the trace pipeline is actually
+            // recording — a sampled-out call adds nothing, and a sampled-in call carries its full detail with
+            // the trace (consistent sampling). Values are the same already-redacted/truncated capture fields
+            // the DB row would carry; they travel only on the trace exporter, never the ILogger provider chain.
+            if (_enrichSpanDetail && _activity.IsAllDataRequested)
+            {
+                EnrichSpanDetail();
+            }
+
             _activity.Stop();
         }
 
@@ -284,6 +297,34 @@ public sealed class AdapterCallScope : IDisposable
 
         WarpTelemetry.AdapterCalls.Add(1, tags);
         WarpTelemetry.AdapterDuration.Record(duration, tags);
+    }
+
+    private void EnrichSpanDetail()
+    {
+        SetSpanTag(WarpTelemetryAttributes.WarpAdapterStatusCode, _statusCode);
+        SetSpanTag(WarpTelemetryAttributes.WarpAdapterAttempts, _attempts);
+        SetSpanTag(WarpTelemetryAttributes.WarpAdapterCorrelationId, _correlationId);
+        SetSpanTag(WarpTelemetryAttributes.WarpAdapterRequestSummary, _requestSummary);
+        SetSpanTag(WarpTelemetryAttributes.WarpAdapterRequestHeaders, _requestHeaders);
+        SetSpanTag(WarpTelemetryAttributes.WarpAdapterRequestBody, _requestBody);
+        SetSpanTag(WarpTelemetryAttributes.WarpAdapterResponseHeaders, _responseHeaders);
+        SetSpanTag(WarpTelemetryAttributes.WarpAdapterResponseBody, _responseBody);
+
+        if (_tags is not null)
+        {
+            foreach (var tag in _tags)
+            {
+                SetSpanTag($"warp.adapter.tag.{tag.Key}", tag.Value);
+            }
+        }
+    }
+
+    private void SetSpanTag(string key, object? value)
+    {
+        if (value is not null)
+        {
+            _activity?.SetTag(key, value);
+        }
     }
 
     private void RecordCall(AdapterCallOutcome outcome, Exception? exception, double duration)

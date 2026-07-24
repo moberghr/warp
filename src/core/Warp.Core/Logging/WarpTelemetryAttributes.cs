@@ -76,6 +76,19 @@ public static class WarpTelemetryAttributes
     public const string WarpAdapterGroup = "warp.adapter.group";
     public const string WarpAdapterOutcome = "warp.adapter.outcome";
 
+    // Detail span attributes attached to the adapter Client span under the Otel/Both recording sink
+    // (RecordingSink.Otel|Both). The captured payload fields carry the same already-redacted/truncated
+    // values as the DB call-log row — set only when the span is being recorded (sampled in), so the
+    // trace sampling decision governs the whole call coherently (§8.24).
+    public const string WarpAdapterStatusCode = "warp.adapter.status_code";
+    public const string WarpAdapterAttempts = "warp.adapter.attempts";
+    public const string WarpAdapterCorrelationId = "warp.adapter.correlation_id";
+    public const string WarpAdapterRequestSummary = "warp.adapter.request.summary";
+    public const string WarpAdapterRequestHeaders = "warp.adapter.request.headers";
+    public const string WarpAdapterRequestBody = "warp.adapter.request.body";
+    public const string WarpAdapterResponseHeaders = "warp.adapter.response.headers";
+    public const string WarpAdapterResponseBody = "warp.adapter.response.body";
+
     // Meter tag keys for warp.adapter.* instruments. Bounded dimensions only (adapter/operation/
     // outcome); group is excluded unless the adapter opts in via IncludeGroupInMetrics.
     public const string AdapterMeterAdapter = "adapter";
@@ -92,6 +105,22 @@ public static class WarpTelemetryAttributes
     // (group is a diagnostics dimension, not a meter tag here).
     public const string EndpointMeterRoute = "route";
     public const string EndpointMeterOutcome = "outcome";
+
+    // Detail span attributes attached to the ambient ASP.NET request span under the Otel/Both recording
+    // sink. Caller metadata (IP / user-agent / user) is captured-by-design PII (§1.2) — it rides the trace
+    // exporter only (never the ILogger provider chain), and is set only when the span is being recorded so
+    // trace sampling governs the whole request coherently (§8.24).
+    public const string WarpEndpointRoute = "warp.endpoint.route";
+    public const string WarpEndpointStatusCode = "warp.endpoint.status_code";
+    public const string WarpEndpointOutcome = "warp.endpoint.outcome";
+    public const string WarpEndpointGroup = "warp.endpoint.group";
+    public const string WarpEndpointClientIp = "warp.endpoint.client_ip";
+    public const string WarpEndpointUserAgent = "warp.endpoint.user_agent";
+    public const string WarpEndpointUser = "warp.endpoint.user";
+    public const string WarpEndpointRequestHeaders = "warp.endpoint.request.headers";
+    public const string WarpEndpointRequestBody = "warp.endpoint.request.body";
+    public const string WarpEndpointResponseHeaders = "warp.endpoint.response.headers";
+    public const string WarpEndpointResponseBody = "warp.endpoint.response.body";
 
     // Meter tag keys for warp.job.execution.* instruments. Mirror the jobstat DB dimensions: job type,
     // routed-message handler (omitted when absent), and terminal outcome (succeeded | failed).

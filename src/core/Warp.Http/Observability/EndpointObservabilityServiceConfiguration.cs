@@ -15,7 +15,7 @@ namespace Warp.Http.Observability;
 /// options; <c>UseWarpHttpObservability</c> (after <c>UseRouting</c>, before the endpoints run) installs the
 /// middleware. The read service <c>IEndpointQueryService</c> is always registered by <c>AddWarp</c>, so the
 /// dashboard serves <c>/api/endpoints</c> even in processes that don't record; this method gates the
-/// recorder/flusher/middleware and the addons flag (keyed on <see cref="IEndpointCallRecorder"/> presence).
+/// recorder/flusher/middleware and the addons flag (keyed on <see cref="IEndpointObservabilityMarker"/>).
 /// </summary>
 public static class EndpointObservabilityServiceConfiguration
 {
@@ -33,28 +33,24 @@ public static class EndpointObservabilityServiceConfiguration
 
         var contextType = ResolveContextType(builder);
 
+        // Presence marker for the dashboard "endpoints" flag, registered regardless of sink (the middleware
+        // observes under every sink; under Otel the detail rides the request span, §8.24). Keyed on this
+        // rather than IEndpointCallRecorder, which is absent under Otel-only.
+        builder.Services.TryAddSingleton<IEndpointObservabilityMarker, EndpointObservabilityMarker>();
+
         // Database / Both: the DB-backed recorder owns the bounded channel + the flusher drains it onto the
         // user's TContext (§0.5). Under Otel-only NEITHER is registered — no DB rows and no Counter-aggregate
-        // writes for this surface (aggregates come from OTel meters instead).
+        // writes for this surface: the middleware enriches the ambient request span with the captured detail
+        // and the OTel meters carry the aggregates (§8.24). The middleware takes the recorder optionally.
         if (sink is RecordingSink.Database or RecordingSink.Both)
         {
             builder.Services.TryAddSingleton(x => new DbEndpointCallRecorder(
                 x.GetRequiredService<IOptions<WarpConfiguration>>().Value.CallLogBufferCapacity));
+            builder.Services.TryAddSingleton<IEndpointCallRecorder>(x => x.GetRequiredService<DbEndpointCallRecorder>());
 
             var flusherType = typeof(EndpointCallFlusher<>).MakeGenericType(contextType);
             builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IHostedService), flusherType));
         }
-
-        // Otel / Both: Core ships the OTel recorder (structured OTLP log per call; no DB writes).
-        if (sink is RecordingSink.Otel or RecordingSink.Both)
-        {
-            builder.Services.TryAddSingleton<OtelEndpointCallRecorder>();
-        }
-
-        // Bind IEndpointCallRecorder to the selected recorder (or a composite fanning to both). This binding
-        // also doubles as the addons-flag marker — registered under every sink so the "endpoints" nav flag
-        // reports true even under Otel-only.
-        RegisterRecorder(builder.Services, sink);
 
         if (configure is not null)
         {
@@ -75,29 +71,6 @@ public static class EndpointObservabilityServiceConfiguration
         ArgumentNullException.ThrowIfNull(app);
 
         return app.UseMiddleware<WarpInboundObservabilityMiddleware>();
-    }
-
-    private static void RegisterRecorder(IServiceCollection services, RecordingSink sink)
-    {
-        switch (sink)
-        {
-            case RecordingSink.Otel:
-                services.TryAddSingleton<IEndpointCallRecorder>(x => x.GetRequiredService<OtelEndpointCallRecorder>());
-
-                break;
-
-            case RecordingSink.Both:
-                services.TryAddSingleton<IEndpointCallRecorder>(x => new CompositeEndpointCallRecorder(
-                    x.GetRequiredService<DbEndpointCallRecorder>(),
-                    x.GetRequiredService<OtelEndpointCallRecorder>()));
-
-                break;
-
-            default:
-                services.TryAddSingleton<IEndpointCallRecorder>(x => x.GetRequiredService<DbEndpointCallRecorder>());
-
-                break;
-        }
     }
 
     private static Type ResolveContextType(IWarpBuilder builder)
