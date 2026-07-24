@@ -1,4 +1,5 @@
 using Warp.Core.Enums;
+using Warp.Core.Observability;
 
 namespace Warp.Core.Adapters;
 
@@ -15,6 +16,15 @@ public sealed class WarpAdapterOptions
     /// (successes included). Decoupled from capture, which controls payload richness only.
     /// </summary>
     public CallRecording RecordCalls { get; set; } = CallRecording.All;
+
+    /// <summary>
+    /// Where completed call records are sent. Default <see cref="RecordingSink.Database"/> (DB rows +
+    /// <c>Counter</c> aggregates for the dashboard — unchanged behavior); <see cref="RecordingSink.Otel"/>
+    /// emits each record as a structured OTLP log (no DB rows/flusher/aggregates); <see cref="RecordingSink.Both"/>
+    /// fans to both. Read at <c>AddAdapters()</c> registration time to select the process-wide recorder — the
+    /// recording channel is a single per-process singleton, so this is a process-level knob, not per-adapter.
+    /// </summary>
+    public RecordingSink Sink { get; set; } = RecordingSink.Database;
 
     /// <summary>
     /// Fraction of <b>successful</b> call-log <b>rows</b> to keep (0.0–1.0). Applies to the raw row only:

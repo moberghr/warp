@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http;
 using Warp.Core.Enums;
+using Warp.Core.Observability;
 
 namespace Warp.Http.Observability;
 
@@ -19,6 +20,15 @@ public sealed class WarpEndpointObservabilityOptions
 {
     /// <summary>Whether a row is written per call. <c>All</c> (default) writes every call; <c>FailuresOnly</c> is the volume knob for chatty endpoints (counters still record all calls).</summary>
     public CallRecording RecordCalls { get; set; } = CallRecording.All;
+
+    /// <summary>
+    /// Where completed call records are sent. Default <see cref="RecordingSink.Database"/> (DB rows +
+    /// <c>Counter</c> aggregates for the dashboard — unchanged behavior); <see cref="RecordingSink.Otel"/>
+    /// emits each record as a structured OTLP log (no DB rows/flusher/aggregates); <see cref="RecordingSink.Both"/>
+    /// fans to both. Read at <c>AddEndpointObservability()</c> registration time to select the process-wide
+    /// recorder — the recording channel is a single per-process singleton.
+    /// </summary>
+    public RecordingSink Sink { get; set; } = RecordingSink.Database;
 
     /// <summary>
     /// Fraction of <b>successful</b> request rows to keep (0.0–1.0). Applies to the raw call-log row only:
