@@ -28,6 +28,19 @@ using Warp.Worker;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// This is a NON-server publisher: it references Warp.Test.Shared (for the request types it publishes
+// and the inbound HTTP endpoint handlers it serves), so the source generator registers ALL of that
+// assembly's handlers here — including the shop JOB handlers (e.g. PlaceOrderHandler) that this process
+// never executes (no worker) and whose deps (the shipping-carrier adapters IUpsShipping/…) live only on
+// the worker. The dev-default ValidateOnBuild eagerly tries to construct every registered service and
+// would fail on those never-run handlers, so turn it off here (a publisher legitimately registers
+// handlers it won't run). ValidateScopes stays on — captive-dependency detection is still wanted.
+builder.Host.UseDefaultServiceProvider((_, o) =>
+{
+    o.ValidateScopes = true;
+    o.ValidateOnBuild = false;
+});
+
 // Aspire service defaults — OTLP export so adapter/webhook spans + meters also appear in the Aspire
 // dashboard's trace/metric views (in addition to the Warp dashboard's Adapters/Webhooks pages).
 builder.AddServiceDefaults();
