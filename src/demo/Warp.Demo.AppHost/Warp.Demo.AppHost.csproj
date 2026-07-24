@@ -17,6 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Warp.Demo.Migrator\Warp.Demo.Migrator.csproj" />
     <ProjectReference Include="..\Warp.Demo.PartnerApi\Warp.Demo.PartnerApi.csproj" />
     <ProjectReference Include="..\Warp.TestApp\Warp.Test.App.csproj" />
     <ProjectReference Include="..\Warp.TestWorker\Warp.Test.Worker.csproj" />

@@ -117,6 +117,10 @@ Call counts, error rate, **average latency**, and the **latency percentiles** ar
 - `WarpConfiguration.EndpointCallLogRetention` (default 7 days) — the middleware stamps `ExpireAt`.
 - `WarpConfiguration.EndpointCallLogRetentionCount` (default null = disabled) — keep at most N rows per endpoint (method + route template), deleting the oldest.
 
+## Multi-application provenance
+
+In a shared-database deployment with [multi-application observability](./applications.md) enabled (`opt.ApplicationName` set), every `EndpointCallLog` row is stamped with the **producing application** — the app that served the request — as a nullable `Application` column, and per-application endpoint metrics accrue under a disjoint counter-key namespace. `Application` also becomes part of **endpoint identity**, so the same route template served by two applications stays two distinct aggregates rather than collapsing into one. The dashboard's global application filter then scopes the Endpoints surfaces to one app. When `ApplicationName` is unset the column is `null` and identity is unchanged.
+
 ## Dashboard
 
 The **Endpoints** nav appears when `GET {prefix}/api/addons` reports `endpoints: true` (only where `AddEndpointObservability()` ran). The list shows each observed endpoint with its call volume, error rate, and average latency. The detail page adds latency percentiles, a per-caller (group) table, and a paged recent-calls list; each call opens a drawer with the caller metadata, enrichment tags, the related jobs the request spawned, and the captured (redacted) headers and bodies.

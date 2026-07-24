@@ -6,6 +6,10 @@ namespace Warp.Core.Logging;
 /// </summary>
 public static class WarpTelemetryAttributes
 {
+    // Cross-cutting: stamped on every Warp-created Activity when WarpConfiguration.ApplicationName is
+    // set, so cross-application traces carry their origin process. Absent when ApplicationName is null.
+    public const string WarpApplication = "warp.application";
+
     public const string MessagingSystem = "messaging.system";
     public const string MessagingOperationName = "messaging.operation.name";
     public const string MessagingOperationType = "messaging.operation.type";

@@ -17,6 +17,9 @@ public class WebhookDelivery
 {
     public Guid Id { get; set; } = Guid.NewGuid();
 
+    /// <summary>Opt-in provenance: the application that SENT this delivery (<c>WarpConfiguration.ApplicationName</c>). Null ⇒ feature off / legacy row.</summary>
+    public string? Application { get; set; }
+
     /// <summary>What happened (e.g. <c>order.created</c>) — forwarded as the adapter operation.</summary>
     public string EventType { get; set; } = string.Empty;
 

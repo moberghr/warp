@@ -40,7 +40,7 @@ const builtInNavItems = [
   { to: '/messages/enqueued', label: 'Messages', icon: Mail },
   { to: '/batches/processing', label: 'Batches', icon: Layers },
   { to: '/recurring', label: 'Recurring', icon: RefreshCw },
-  { to: '/servers', label: 'Servers', icon: Server },
+  { to: '/applications', label: 'Applications', icon: Server },
   { to: '/counters', label: 'Counters', icon: Gauge },
 ];
 
@@ -237,7 +237,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
             {stats.batchesFailed}
           </span>
         )}
-        {item.label === 'Servers' && stats && (
+        {item.label === 'Applications' && stats && (
           <span className="ml-1 text-xs min-w-10 text-center tabular-nums px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">{stats.servers}</span>
         )}
       </Link>

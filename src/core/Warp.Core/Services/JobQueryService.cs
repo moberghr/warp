@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
-using Warp.Core.Endpoints;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Models;
@@ -9,7 +8,7 @@ namespace Warp.Core.Services;
 
 public interface IJobQueryService
 {
-    Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state);
+    Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state, string? application = null);
 
     Task<PagedList<JobModel>> GetScheduledJobs(BaseListRequest request);
 
@@ -33,7 +32,9 @@ public interface IJobQueryService
 
     Task<PagedList<JobModel>> GetFailedJobsByType(BaseListRequest request, string type);
 
-    Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state);
+    Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state, string? application = null);
+
+    Task<JobExecutionMetricsModel> GetJobExecutionMetrics(string? application = null);
 }
 
 public class JobQueryService<TContext> : IJobQueryService
@@ -48,9 +49,9 @@ public class JobQueryService<TContext> : IJobQueryService
         _timeProvider = timeProvider;
     }
 
-    public async Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state)
+    public async Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state, string? application = null)
     {
-        return await GetJobsByState(state)
+        return await GetJobsByState(state, application)
             .ToPagedListAsync(request);
     }
 
@@ -91,7 +92,7 @@ public class JobQueryService<TContext> : IJobQueryService
 
     public async Task<PagedList<JobModel>> GetAwaitingJobs(BaseListRequest request)
     {
-        return await GetJobsByState(State.Awaiting).ToPagedListAsync(request);
+        return await GetJobsByState(State.Awaiting, application: null).ToPagedListAsync(request);
     }
 
     public async Task<PagedList<JobModel>> GetSiblingJobs(Guid jobId, BaseListRequest request)
@@ -264,7 +265,7 @@ public class JobQueryService<TContext> : IJobQueryService
                     RouteTemplate = origin.RouteTemplate,
                     User = origin.User,
                     CallId = origin.Id,
-                    EndpointId = EndpointRouteId.Encode($"{origin.Method} {origin.RouteTemplate}"),
+                    EndpointId = UrlSafeId.Encode($"{origin.Method} {origin.RouteTemplate}"),
                 };
             }
         }
@@ -397,13 +398,18 @@ public class JobQueryService<TContext> : IJobQueryService
     // #1: all jobs of a given type across states (newest-first by create time), with an optional state
     // filter. Backs the clickable job type in the dashboard. Ordered by create time (not finished time)
     // because the result mixes terminal and in-flight jobs.
-    public async Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state)
+    public async Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state, string? application = null)
     {
         var jobs = Jobs().Where(x => x.Type == type);
 
         if (state is { } s)
         {
             jobs = jobs.Where(x => x.CurrentState == s);
+        }
+
+        if (!string.IsNullOrEmpty(application))
+        {
+            jobs = jobs.Where(x => x.Application == application);
         }
 
         return await OrderByCreateTimeDescending(jobs)
@@ -476,7 +482,124 @@ public class JobQueryService<TContext> : IJobQueryService
                 });
     }
 
-    private IQueryable<JobModel> GetJobsByState(State state)
+    // Per-job-TYPE + per-HANDLER execution metrics (§8.19 multi-app observability), read from the durable
+    // Statistic aggregates (plus not-yet-collapsed Counter rows so a just-folded value is not missing) folded
+    // from the jobstat: / jobstat-app: counter family (§ JobStatsKeys). Read-only §5.3 (AsNoTracking + Select).
+    // Because the metrics live in Statistic — not Job — they remain readable AFTER the underlying Job rows are
+    // cleaned up (the whole point). A null application reads the app-agnostic totals + latency histogram
+    // (percentiles populated); a supplied application reads the disjoint per-app slice (count/duration/error
+    // rate; percentiles 0 — the app family carries no histogram, to bound counter volume).
+    public async Task<JobExecutionMetricsModel> GetJobExecutionMetrics(string? application = null)
+    {
+        var byType = new Dictionary<string, ExecutionAccumulator>(StringComparer.Ordinal);
+        var byHandler = new Dictionary<string, ExecutionAccumulator>(StringComparer.Ordinal);
+
+        ExecutionAccumulator Bucket(string dimension, string id)
+        {
+            var map = string.Equals(dimension, JobStatsKeys.HandlerMarker, StringComparison.Ordinal) ? byHandler : byType;
+            if (!map.TryGetValue(id, out var acc))
+            {
+                acc = new ExecutionAccumulator();
+                map[id] = acc;
+            }
+
+            return acc;
+        }
+
+        if (application is null)
+        {
+            const string prefix = JobStatsKeys.Prefix + ":";
+            foreach (var row in await LoadMergedStatsAsync(prefix))
+            {
+                if (JobStatsKeys.TryParsePct(row.Key, out var pctDim, out var pctId, out var upperMs))
+                {
+                    Bucket(pctDim, pctId).AddBucket(upperMs, row.Value);
+
+                    continue;
+                }
+
+                if (JobStatsKeys.TryParseTotal(row.Key, out var dim, out var id, out var token))
+                {
+                    Bucket(dim, id).Add(token, row.Value);
+                }
+            }
+        }
+        else
+        {
+            var prefix = JobStatsKeys.AppPrefix + ":" + JobStatsKeys.Sanitize(application) + ":";
+            foreach (var row in await LoadMergedStatsAsync(prefix))
+            {
+                if (JobStatsKeys.TryParseApp(row.Key, out _, out var dim, out var id, out var token))
+                {
+                    Bucket(dim, id).Add(token, row.Value);
+                }
+            }
+        }
+
+        return new JobExecutionMetricsModel
+        {
+            ByType = Project(byType),
+            ByHandler = Project(byHandler),
+        };
+    }
+
+    private async Task<IEnumerable<KeyValueRow>> LoadMergedStatsAsync(string prefix)
+    {
+        var aggregated = await _context.Set<Statistic>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith(prefix))
+            .Select(x =>
+                new
+                {
+                    x.Key,
+                    x.Value,
+                })
+            .ToListAsync();
+
+        var pending = await _context.Set<Counter>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith(prefix))
+            .GroupBy(x => x.Key)
+            .Select(g =>
+                new
+                {
+                    Key = g.Key,
+                    Value = g.Sum(c => (long)c.Value),
+                })
+            .ToListAsync();
+
+        return aggregated
+            .Concat(pending)
+            .GroupBy(x => x.Key, StringComparer.Ordinal)
+            .Select(g => new KeyValueRow(g.Key, g.Sum(x => x.Value)));
+    }
+
+    private static IReadOnlyList<JobExecutionStatModel> Project(Dictionary<string, ExecutionAccumulator> map)
+    {
+        return
+        [
+            .. map
+                .OrderByDescending(x => x.Value.ExecutedCount)
+                .ThenBy(x => x.Key, StringComparer.Ordinal)
+                .Select(x =>
+                {
+                    var (p95, p99) = x.Value.Percentiles();
+
+                    return new JobExecutionStatModel
+                    {
+                        Identifier = x.Key,
+                        ExecutedCount = x.Value.ExecutedCount,
+                        ErrorCount = x.Value.Errors,
+                        ErrorRate = x.Value.ErrorRate,
+                        AvgDurationMs = x.Value.AvgDurationMs,
+                        P95DurationMs = p95,
+                        P99DurationMs = p99,
+                    };
+                }),
+        ];
+    }
+
+    private IQueryable<JobModel> GetJobsByState(State state, string? application)
     {
         var jobs = Jobs()
             .Where(x => x.CurrentState == state);
@@ -486,6 +609,12 @@ public class JobQueryService<TContext> : IJobQueryService
         {
             var now = _timeProvider.GetUtcNow().UtcDateTime;
             jobs = jobs.Where(x => x.ScheduleTime <= now);
+        }
+
+        // Optional per-application (creator/provenance) filter for the multi-app dashboard (§8.19).
+        if (!string.IsNullOrEmpty(application))
+        {
+            jobs = jobs.Where(x => x.Application == application);
         }
 
         var ordered = IsTerminalState(state)
@@ -506,6 +635,78 @@ public class JobQueryService<TContext> : IJobQueryService
                     Type = x.Type,
                 });
     }
+
+    // Accumulates one job type / handler's execution metrics from its parsed jobstat counter rows: the
+    // execution count (succeeded + failed), error count (failed), summed duration, and — for the app-agnostic
+    // read — the latency histogram. The "dur" token folds into DurationSum, never the execution Total, so the
+    // average is sum ÷ executions.
+    private sealed class ExecutionAccumulator
+    {
+        private readonly Dictionary<int, long> _buckets = [];
+
+        public long ExecutedCount { get; private set; }
+
+        public long Errors { get; private set; }
+
+        public long DurationSum { get; private set; }
+
+        public double AvgDurationMs => ExecutedCount == 0 ? 0 : (double)DurationSum / ExecutedCount;
+
+        public double ErrorRate => ExecutedCount == 0 ? 0 : (double)Errors / ExecutedCount;
+
+        public void Add(string token, long value)
+        {
+            if (string.Equals(token, JobStatsKeys.DurationToken, StringComparison.Ordinal))
+            {
+                DurationSum += value;
+
+                return;
+            }
+
+            ExecutedCount += value;
+
+            if (string.Equals(token, JobStatsKeys.FailedToken, StringComparison.Ordinal))
+            {
+                Errors += value;
+            }
+        }
+
+        public void AddBucket(int upperMs, long value) => _buckets[upperMs] = _buckets.GetValueOrDefault(upperMs) + value;
+
+        // p95 / p99 over the latency histogram: the percentile for quantile q over N samples is the upper
+        // bound of the smallest bucket whose cumulative count reaches ceil(q*N). The overflow bucket
+        // (int.MaxValue) reports the last real bound as a displayable floor. Mirrors AdapterQueryService.
+        public (double P95, double P99) Percentiles()
+        {
+            var total = _buckets.Values.Sum();
+            if (total == 0)
+            {
+                return (0, 0);
+            }
+
+            return (Quantile(total, 0.95), Quantile(total, 0.99));
+        }
+
+        private double Quantile(long total, double q)
+        {
+            var threshold = (long)Math.Ceiling(q * total);
+            long cumulative = 0;
+
+            foreach (var bound in JobStatsKeys.Buckets)
+            {
+                cumulative += _buckets.GetValueOrDefault(bound);
+
+                if (cumulative >= threshold)
+                {
+                    return bound == int.MaxValue ? JobStatsKeys.Buckets[^2] : bound;
+                }
+            }
+
+            return JobStatsKeys.Buckets[^2];
+        }
+    }
+
+    private readonly record struct KeyValueRow(string Key, long Value);
 }
 
 // Terminal-state event types written by the worker on job finalization. Sourced from

@@ -841,7 +841,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(new RateLimitAttributeRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
@@ -868,7 +868,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(
             new UnitRequest(),
@@ -894,7 +894,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         var provider = services.BuildServiceProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
 
         var jobId = await publisher.Enqueue(new RateLimitWaitAttributeRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);

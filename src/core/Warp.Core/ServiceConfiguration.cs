@@ -12,11 +12,13 @@ using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Converters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
+using Warp.Core.Diagnostics;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Interceptors;
+using Warp.Core.Logging;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
 using Warp.Core.Webhooks;
@@ -55,7 +57,38 @@ public static class ServiceConfiguration
         // AddWarpServer, which inherits WarpConfiguration), keep theirs.
         services.TryAddSingleton<IOptions<WarpConfiguration>>(Options.Create<WarpConfiguration>(builder));
 
-        return CreateWarpServices<TContext>(services);
+        var configured = CreateWarpServices<TContext>(services);
+
+        // Non-server application heartbeat host — registered ONLY when this process opted into
+        // multi-application observability (ApplicationName set). A deliberate change to the passive
+        // AddWarp contract (§2.13): a publisher/API/dashboard-only process now writes an
+        // ApplicationInstance row so it is visible in the Applications view. It self-inerts in server
+        // processes (the IWarpServerPresence marker is present) — those record themselves on Server.
+        // Null ApplicationName ⇒ the host is not registered at all, so behavior is byte-for-byte unchanged.
+        if (builder.ApplicationName is not null)
+        {
+            // Stamp the process-wide origin for cross-application traces (§ tracing). A static is fine:
+            // ApplicationName is a deploy-time constant for the process, so every Warp-created Activity in
+            // it carries the same warp.application tag. Null ApplicationName ⇒ this is never set and the
+            // factories add no tag (feature off).
+            WarpTelemetry.ApplicationName = builder.ApplicationName;
+
+            // Shared CPU/RAM sampler (also registered by AddWarpServer). TryAdd so the two paths don't
+            // fight when a process calls both AddWarp and AddWarpServer.
+            configured.TryAddSingleton<ProcessCpuTracker>();
+
+            // Registered only once per TContext — a second AddWarp<TContext> call must not add a second
+            // heartbeat host (which would insert a second ApplicationInstance row for the one process).
+            // Mirrors the BackgroundServiceHost guard in Warp.Worker/ServiceConfiguration.
+            if (!configured.Any(d =>
+                    d.ServiceType == typeof(IHostedService)
+                    && d.ImplementationType == typeof(ApplicationHeartbeatHost<TContext>)))
+            {
+                configured.AddHostedService<ApplicationHeartbeatHost<TContext>>();
+            }
+        }
+
+        return configured;
     }
 
     private static IServiceCollection CreateWarpServices<TContext>(this IServiceCollection services)
@@ -71,6 +104,7 @@ public static class ServiceConfiguration
 
         services.AddScoped<IPublisher>(x => new Publisher<TContext>(
             x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
             x.GetRequiredService<TimeProvider>(),
             x,
             x.GetRequiredService<IWarpNotificationTransport>(),
@@ -107,6 +141,15 @@ public static class ServiceConfiguration
         // endpoints (§2.14 stays-on-TContext). Only depends on TContext. The adapter tables are always
         // in the schema (§2.11); AddAdapters() gates recording services + the addons flag only.
         services.TryAddScoped<IAdapterQueryService, AdapterQueryService<TContext>>();
+
+        // Applications dashboard read service (§8.19 multi-app observability). Registered in AddWarp (not
+        // gated on ApplicationName) so dashboard-only / publisher-only processes serve /api/applications
+        // without running a server — it unifies the Server + ApplicationInstance tables (both always in the
+        // schema §2.11) into one roster and resolves on TContext (§2.14 stays-on-TContext).
+        services.TryAddScoped<IApplicationQueryService>(x => new ApplicationQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>()));
 
         // Adapter call-scope primitive is always available (§2.15 telemetry is unconditional): every
         // BeginCall emits its Activity + meters, and manual scopes (e.g. the webhook executor) can record
@@ -367,6 +410,8 @@ public static class ServiceConfiguration
         AddAdapterCallLogEntity(modelBuilder, schema);
         AddWebhookDeliveryEntity(modelBuilder, schema);
         AddEndpointCallLogEntity(modelBuilder, schema);
+        AddApplicationInstanceEntity(modelBuilder, schema);
+        AddApplicationInstanceLogEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -411,6 +456,8 @@ public static class ServiceConfiguration
         job.Property(p => p.CancellationMode);
 
         job.Property(p => p.Metadata);
+
+        job.Property(p => p.Application).HasMaxLength(200);
 
         job.Metadata.SetSchema(schema);
     }
@@ -472,6 +519,10 @@ public static class ServiceConfiguration
         server.Property(p => p.ServiceCount);
 
         server.Property(p => p.PausedAt);
+
+        server.Property(p => p.Application).HasMaxLength(200);
+        server.Property(p => p.Version).HasMaxLength(200);
+        server.Property(p => p.Environment).HasMaxLength(200);
 
         server.Metadata.SetSchema(schema);
     }
@@ -862,6 +913,7 @@ public static class ServiceConfiguration
         log.Property(p => p.TraceId).HasMaxLength(64);
         log.Property(p => p.TagsJson);
         log.Property(p => p.CorrelationId).HasMaxLength(200);
+        log.Property(p => p.Application).HasMaxLength(200);
         log.Property(p => p.ExpireAt);
 
         // Per-adapter recent-calls listing.
@@ -906,6 +958,7 @@ public static class ServiceConfiguration
         log.Property(p => p.MachineName).HasMaxLength(256).IsRequired();
         log.Property(p => p.TraceId);
         log.Property(p => p.TagsJson);
+        log.Property(p => p.Application).HasMaxLength(200);
         log.Property(p => p.ExpireAt);
 
         // Per-endpoint recent-calls listing (identity = method + route template).
@@ -947,6 +1000,7 @@ public static class ServiceConfiguration
         delivery.Property(p => p.ExhaustedCallbackPending);
         delivery.Property(p => p.NextAttemptAt);
         delivery.Property(p => p.CreatedAt);
+        delivery.Property(p => p.Application).HasMaxLength(200);
         delivery.Property(p => p.ExpireAt);
 
         // Status filtering + display of the pending/next-attempt band.
@@ -967,6 +1021,58 @@ public static class ServiceConfiguration
         delivery.HasIndex(p => p.ExpireAt);
 
         delivery.Metadata.SetSchema(schema);
+    }
+
+    public static void AddApplicationInstanceEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var instance = modelBuilder.Entity<ApplicationInstance>();
+
+        instance.Property(p => p.Id);
+        instance.HasKey(p => p.Id);
+
+        instance.Property(p => p.ApplicationName).HasMaxLength(200).IsRequired();
+        instance.Property(p => p.MachineName).HasMaxLength(256).IsRequired();
+        instance.Property(p => p.StartedAt);
+        instance.Property(p => p.LastHeartbeatAt);
+        instance.Property(p => p.CpuUsagePercent);
+        instance.Property(p => p.MemoryWorkingSetBytes);
+        instance.Property(p => p.Version).HasMaxLength(200);
+        instance.Property(p => p.Environment).HasMaxLength(200);
+
+        // Applications overview: instances grouped by application.
+        instance.HasIndex(p => p.ApplicationName);
+
+        // ExpirationCleanup stale-instance sweep by last heartbeat.
+        instance.HasIndex(p => p.LastHeartbeatAt);
+
+        instance.Metadata.SetSchema(schema);
+    }
+
+    public static void AddApplicationInstanceLogEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var log = modelBuilder.Entity<ApplicationInstanceLog>();
+
+        log.Property(p => p.Id);
+        log.HasKey(p => p.Id);
+
+        // InstanceId is a soft reference (Server.Id OR ApplicationInstance.Id) — no FK, like JobLog.
+        log.Property(p => p.InstanceId);
+        log.Property(p => p.ApplicationName).HasMaxLength(200).IsRequired();
+        log.Property(p => p.Timestamp);
+        log.Property(p => p.EventType).HasConversion<int>();
+        log.Property(p => p.Message).HasMaxLength(4096);
+        log.Property(p => p.ExpireAt);
+
+        // Per-instance lifecycle timeline, newest first.
+        log.HasIndex(p => new { p.InstanceId, p.Timestamp });
+
+        // Per-application lifecycle timeline.
+        log.HasIndex(p => new { p.ApplicationName, p.Timestamp });
+
+        // ExpirationCleanup range scan on expiry.
+        log.HasIndex(p => p.ExpireAt);
+
+        log.Metadata.SetSchema(schema);
     }
 
     public static void AddBackgroundServiceLogEntity(ModelBuilder modelBuilder, string? schema)

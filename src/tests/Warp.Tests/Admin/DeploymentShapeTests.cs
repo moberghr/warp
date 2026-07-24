@@ -354,6 +354,7 @@ public class DeploymentShapeTests
         scoped.GetRequiredService<IDashboardStatsService>().ShouldNotBeNull();
         scoped.GetRequiredService<IServerCommandService>().ShouldNotBeNull();
         scoped.GetRequiredService<IBackgroundServiceQueryService>().ShouldNotBeNull();
+        scoped.GetRequiredService<IApplicationQueryService>().ShouldNotBeNull();
         scoped.GetRequiredService<IJobContext>().ShouldNotBeNull();
         scoped.GetRequiredService<IWarpNotificationTransport>().ShouldNotBeNull();
         scoped.GetRequiredService<TimeProvider>().ShouldNotBeNull();

@@ -340,6 +340,7 @@ export interface WarpAddonsInfo {
   adapters: boolean;
   endpoints: boolean;
   webhooks: boolean;
+  applications: boolean;
 }
 
 export type {

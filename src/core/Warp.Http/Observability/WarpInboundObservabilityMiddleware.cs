@@ -27,6 +27,7 @@ internal sealed class WarpInboundObservabilityMiddleware
     private readonly WarpEndpointObservabilityOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _retention;
+    private readonly string? _applicationName;
 
     public WarpInboundObservabilityMiddleware(
         RequestDelegate next,
@@ -40,6 +41,11 @@ internal sealed class WarpInboundObservabilityMiddleware
         _options = options.Value;
         _timeProvider = timeProvider;
         _retention = configuration.Value.EndpointCallLogRetention;
+
+        // Endpoints have no Warp-created Activity, so we enrich the ambient ASP.NET request activity
+        // instead. Read the process origin from the already-resolved WarpConfiguration (same value the
+        // static WarpTelemetry.ApplicationName carries); null ⇒ nothing is stamped (feature off).
+        _applicationName = configuration.Value.ApplicationName;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -50,6 +56,13 @@ internal sealed class WarpInboundObservabilityMiddleware
             await _next(context);
 
             return;
+        }
+
+        // Stamp the process origin on the ambient request activity once per observed request so
+        // cross-application traces carry where the inbound call landed. Null ⇒ nothing added (feature off).
+        if (_applicationName is not null)
+        {
+            Activity.Current?.SetTag(WarpTelemetryAttributes.WarpApplication, _applicationName);
         }
 
         // Force-capture is evaluated at request START (before body buffering) so a forced request buffers its

@@ -232,6 +232,96 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
         return ProjectHistory(buckets);
     }
 
+    public async Task<IReadOnlyList<string>> GetApplications(CancellationToken ct = default)
+    {
+        var stats = await LoadAppStatsAsync(application: null, ct);
+
+        return
+        [
+            .. stats.Keys
+                .Select(x => x.Application)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(x => x, StringComparer.Ordinal),
+        ];
+    }
+
+    public async Task<IReadOnlyList<AdapterAppStatModel>> GetAdapterStatsByApplication(string application, CancellationToken ct = default)
+    {
+        // Sanitize with the SAME transform the write side (AdapterCounterKeys.AppTotal/AppHistory) applies,
+        // BEFORE building the prefix filter — otherwise a colon-bearing app name would query a prefix that
+        // never matches (the keys store the sanitized form) and silently return empty.
+        var sanitized = AdapterCounterKeys.SanitizeApplication(application);
+
+        var stats = await LoadAppStatsAsync(sanitized, ct);
+
+        return
+        [
+            .. stats
+                .Where(x => string.Equals(x.Key.Application, sanitized, StringComparison.Ordinal))
+                .OrderBy(x => x.Key.Adapter, StringComparer.Ordinal)
+                .Select(x =>
+                    new AdapterAppStatModel
+                    {
+                        Application = x.Key.Application,
+                        Adapter = x.Key.Adapter,
+                        Calls = x.Value.Total,
+                        Errors = x.Value.Errors,
+                        ErrorRate = Rate(x.Value),
+                        AvgDurationMs = x.Value.AvgDurationMs,
+                    }),
+        ];
+    }
+
+    // Reads the disjoint per-app total keys (Statistic + not-yet-collapsed Counter rows) and folds each
+    // into its (application, adapter) outcome bucket. A null application loads every app's keys
+    // ("adapter-app:"); a supplied one scopes to that app ("adapter-app:{app}:") — application is
+    // colon-free (config identity), so the prefix is exact. Per-app history keys ride the same prefix but
+    // are length-6 and are simply skipped by TryParseApp (they power charts read elsewhere, not these
+    // lifetime aggregates).
+    private async Task<Dictionary<AppAdapterKey, OutcomeCounts>> LoadAppStatsAsync(string? application, CancellationToken ct)
+    {
+        var prefix = application is null
+            ? AdapterCounterKeys.AppPrefix + ":"
+            : AdapterCounterKeys.AppPrefix + ":" + application + ":";
+
+        var aggregated = await _context.Set<Statistic>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith(prefix))
+            .Select(x =>
+                new
+                {
+                    x.Key,
+                    x.Value,
+                })
+            .ToListAsync(ct);
+
+        var pending = await _context.Set<Counter>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith(prefix))
+            .GroupBy(x => x.Key)
+            .Select(g =>
+                new
+                {
+                    Key = g.Key,
+                    Value = g.Sum(c => (long)c.Value),
+                })
+            .ToListAsync(ct);
+
+        var map = new Dictionary<AppAdapterKey, OutcomeCounts>();
+
+        foreach (var row in aggregated.Concat(pending))
+        {
+            if (!AdapterCounterKeys.TryParseApp(row.Key, out var app, out var adapter, out var outcome))
+            {
+                continue;
+            }
+
+            Bucket(map, new AppAdapterKey(app, adapter)).Add(outcome, row.Value);
+        }
+
+        return map;
+    }
+
     // Builds the hourly performance time-series for one adapter from the durable hourly history buckets,
     // oldest first. Bounded by the 7-day hourly-stat retention; hours with no traffic simply don't exist.
     private async Task<List<AdapterHistoryPointModel>> LoadHistoryAsync(string name, CancellationToken ct)
@@ -427,6 +517,8 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
     }
 
     private readonly record struct DimensionKey(string Adapter, string Value);
+
+    private readonly record struct AppAdapterKey(string Application, string Adapter);
 
     // Walks the ascending latency buckets cumulatively: the percentile for quantile q over N samples is the
     // upper bound of the smallest bucket whose cumulative count reaches ceil(q*N). The overflow bucket

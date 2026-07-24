@@ -178,6 +178,11 @@ public sealed class MessageRouter<TContext> : IServerTask
                     job.ParentSpanId = message.ParentSpanId;
                     job.Metadata = message.Metadata;
 
+                    // Provenance follows the parent (§ multi-app observability): the publishing application
+                    // stamped on the Message row propagates to every routed handler job, so a routed job is
+                    // attributed to the app that created it — not left null.
+                    job.Application = message.Application;
+
                     _context.Set<Job>().Add(job);
                     _context.Set<JobLog>().Add(new JobLog
                     {

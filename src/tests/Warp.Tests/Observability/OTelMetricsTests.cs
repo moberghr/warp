@@ -269,7 +269,7 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
         // Arrange — publisher uses unique queue, no worker needed
         var queue = $"metrics-enqueue-{Guid.NewGuid():N}";
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         long enqueuedCount = 0;
 
         using var listener = new MeterListener();

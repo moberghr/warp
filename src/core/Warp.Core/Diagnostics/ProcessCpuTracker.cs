@@ -1,12 +1,12 @@
 using System.Runtime.InteropServices;
 
-namespace Warp.Worker.Services;
+namespace Warp.Core.Diagnostics;
 
 /// <summary>
-/// Per-process, cross-iteration state for CPU % / working-set sampling. Scoped
-/// <see cref="Heartbeat{TContext}"/> instances can't hold this themselves because they are
-/// disposed between iterations — the <c>_previousCpuTime</c> delta would reset every few
-/// seconds and produce near-zero CPU % readings. Registered as a singleton.
+/// Per-process, cross-iteration state for CPU % / working-set sampling. Scoped heartbeat instances
+/// can't hold this themselves because they are disposed between iterations — the <c>_previousCpuTime</c>
+/// delta would reset every few seconds and produce near-zero CPU % readings. Registered as a singleton
+/// and shared by the server <c>Heartbeat</c> task and the non-server application heartbeat host.
 /// </summary>
 public sealed class ProcessCpuTracker
 {

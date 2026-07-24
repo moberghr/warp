@@ -140,7 +140,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
         var scopes = new List<IServiceScope>();
         try
         {
-            await PersistWithFallbackAsync(CreateContext, batch, _logger, ct);
+            await PersistWithFallbackAsync(CreateContext, batch, _configuration, _logger, ct);
         }
         finally
         {
@@ -172,13 +172,14 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
     internal static async Task PersistWithFallbackAsync(
         Func<(DbContext Context, TimeProvider TimeProvider)> contextFactory,
         List<EndpointCallRecord> batch,
+        WarpConfiguration configuration,
         ILogger logger,
         CancellationToken ct)
     {
         try
         {
             var (context, timeProvider) = contextFactory();
-            await PersistBatchAsync(context, batch, timeProvider, ct);
+            await PersistBatchAsync(context, batch, configuration, timeProvider, ct);
 
             return;
         }
@@ -199,7 +200,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
             try
             {
                 var (context, timeProvider) = contextFactory();
-                await PersistBatchAsync(context, [record], timeProvider, ct);
+                await PersistBatchAsync(context, [record], configuration, timeProvider, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -223,6 +224,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
     internal static async Task<int> PersistBatchAsync(
         DbContext context,
         IReadOnlyList<EndpointCallRecord> batch,
+        WarpConfiguration configuration,
         TimeProvider timeProvider,
         CancellationToken ct)
     {
@@ -267,11 +269,12 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
                     MachineName = record.MachineName,
                     TraceId = record.TraceId,
                     TagsJson = record.TagsJson,
+                    Application = configuration.ApplicationName,
                     ExpireAt = record.ExpireAt,
                 });
             }
 
-            AddCounters(context, record);
+            AddCounters(context, record, configuration.ApplicationName);
         }
 
         await context.SaveChangesAsync(ct);
@@ -279,7 +282,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
         return batch.Count;
     }
 
-    private static void AddCounters(DbContext context, EndpointCallRecord record)
+    private static void AddCounters(DbContext context, EndpointCallRecord record, string? application)
     {
         var route = EndpointCounterKeys.NormalizeRoute(record.Method, record.RouteTemplate);
         var outcome = EndpointCounterKeys.OutcomeToken(record.Outcome);
@@ -315,6 +318,21 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
         var hour = EndpointCounterKeys.HourBucket(record.Timestamp);
         context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.History(route, outcome, hour), Value = 1 });
         context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.History(route, EndpointCounterKeys.DurationToken, hour), Value = durationMs });
+
+        // Per-application slice (§8.19 multi-app observability): only when this process opted into an
+        // ApplicationName. Emitted IN ADDITION to the app-agnostic keys above (never instead) under a
+        // DISJOINT top-level prefix ("endpoint-app") that the existing "endpoint:" readers/parsers provably
+        // reject — an old-version deployment reading the shared Statistic table can never mis-attribute
+        // these. Application joins the endpoint IDENTITY here, so the same route under two apps stays two
+        // distinct keys. Count + duration-sum + hourly history so per-app avg latency survives
+        // EndpointCallLog deletion and rides the generic hourly-stat prune. Group-less (app is low-card).
+        if (application is not null)
+        {
+            context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.AppTotal(application, route, outcome), Value = 1 });
+            context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.AppTotal(application, route, EndpointCounterKeys.DurationToken), Value = durationMs });
+            context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.AppHistory(application, route, outcome, hour), Value = 1 });
+            context.Set<Counter>().Add(new Counter { Key = EndpointCounterKeys.AppHistory(application, route, EndpointCounterKeys.DurationToken, hour), Value = durationMs });
+        }
     }
 }
 

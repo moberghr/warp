@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.BackgroundServices;
+using Warp.Core.Diagnostics;
 using Warp.Core.Events;
 using Warp.Core.Logging;
 using Warp.Worker.BackgroundServices;
@@ -193,9 +194,13 @@ public static class ServiceConfiguration
 
         // DispatcherRegistry is registered for every server (not gated on RunWorker): a
         // service-only server with UseDatabasePush() still hosts NotificationListenerTask, which
-        // injects DispatcherRegistry. It's a cheap dependency-free singleton; the dispatcher-mode
-        // worker is the only other consumer.
+        // wakes dispatchers through the IDispatcherWake seam. It's a cheap dependency-free
+        // singleton; the dispatcher-mode worker is the only other consumer. Exposing the same
+        // instance as IDispatcherWake lets the Core listener resolve IEnumerable<IDispatcherWake>
+        // (empty in an AddWarp-only process — no dispatchers to wake) without Warp.Core depending
+        // on Warp.Worker (§0.5).
         services.AddSingleton<DispatcherRegistry>();
+        services.AddSingleton<Warp.Core.Notifications.IDispatcherWake>(sp => sp.GetRequiredService<DispatcherRegistry>());
 
         // IWarpLockProvider is registered by the provider package (Warp.Provider.PostgreSql /
         // Warp.Provider.SqlServer) via their UsePostgreSql / UseSqlServer builder extensions.
@@ -216,6 +221,11 @@ public static class ServiceConfiguration
         // is in place by the time we get here — no duplicate needed.
         services.AddSingleton<ProcessCpuTracker>();
         services.AddSingleton<HeartbeatLeaseTracker>();
+
+        // Marks this process as a server (§multi-app observability). Its only consumer is the
+        // Core-side ApplicationHeartbeatHost, which self-inerts when any IWarpServerPresence is
+        // present — a server records itself on its Server row, not a duplicate ApplicationInstance.
+        services.AddSingleton<IWarpServerPresence, WarpServerPresence>();
 
         // Server-infrastructure tasks: heartbeat (renews singleton lease + bumps instance
         // heartbeat), stale-server cleanup (releases dead-server leases/instances), and expiration

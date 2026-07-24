@@ -4,7 +4,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Warp.Core.Notifications;
-using Warp.Worker.Services;
 
 namespace Warp.Worker;
 

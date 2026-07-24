@@ -206,6 +206,102 @@ internal static partial class EndpointCounterKeys
         return true;
     }
 
+    // ---------------------------------------------------------------------------------------------------
+    // Per-application key family (§8.19 multi-app observability). A DISJOINT namespace under its OWN
+    // top-level prefix "endpoint-app" — deliberately NOT a sub-namespace of "endpoint:". The existing
+    // readers filter on StartsWith("endpoint:") (colon boundary) and the existing parsers gate on
+    // parts[0] == "endpoint" (exact first-segment equality); "endpoint-app:…" satisfies NEITHER, so old
+    // code (including an old-version deployment on the shared table) provably ignores these keys and can
+    // never mis-attribute them. Additive only: the app-agnostic keys above are still written byte-for-byte.
+    // Application joins the endpoint IDENTITY, so the same route under two apps stays two distinct keys.
+    // Layout (application + route are colon-free — application is a low-cardinality config identity, route
+    // is colon-free by NormalizeRoute):
+    //   endpoint-app:{app}:{route}:{outcome}                       → per-app total (count / dur)
+    //   endpoint-app:{app}:{route}:hist:{outcome}:{yyyy-MM-dd-HH}  → per-app hourly history
+    public const string AppPrefix = "endpoint-app";
+
+    public static string AppTotal(string application, string route, string outcome) => $"{AppPrefix}:{SanitizeApplication(application)}:{route}:{outcome}";
+
+    public static string AppHistory(string application, string route, string outcome, string hour) => $"{AppPrefix}:{SanitizeApplication(application)}:{route}:{HistoryMarker}:{outcome}:{hour}";
+
+    // Replaces any stray ':' with '-' so the application segment is GUARANTEED colon-free and the
+    // colon-delimited key parses unambiguously (mirrors Services.JobStatsKeys.Sanitize). The route is already
+    // normalised colon-free (see NormalizeRoute), so the application is the only gap; sanitizing it here keeps
+    // the write side and TryParseApp/TryParseAppHistory in agreement, so a colon-bearing ApplicationName is
+    // never silently dropped by the parser. Public so the read side (EndpointQueryService) applies the SAME
+    // transform before building its prefix filter — write and read provably agree, no drift.
+    public static string SanitizeApplication(string value) => value.Replace(':', '-');
+
+    // Parses a per-app total key (endpoint-app:{app}:{route}:{outcome}). Returns false for every other
+    // shape, including the per-app history keys (length 6) and every app-agnostic "endpoint:" key.
+    public static bool TryParseApp(string key, out string application, out string route, out string outcome)
+    {
+        application = string.Empty;
+        route = string.Empty;
+        outcome = string.Empty;
+
+        var parts = key.Split(':');
+        if (parts.Length != 4)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], AppPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        // A per-app history key collapses to length 6, never 4 — but guard against a marker landing in the
+        // route slot so an "app:hist" mis-shape can't masquerade as a total.
+        if (string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        application = parts[1];
+        route = parts[2];
+        outcome = parts[3];
+
+        return true;
+    }
+
+    // Parses a per-app hourly history key (endpoint-app:{app}:{route}:hist:{outcome}:{yyyy-MM-dd-HH}).
+    // Returns false for every other shape — the disjoint counterpart to TryParseApp.
+    public static bool TryParseAppHistory(string key, out string application, out string route, out string outcome, out DateTime hour)
+    {
+        application = string.Empty;
+        route = string.Empty;
+        outcome = string.Empty;
+        hour = default;
+
+        var parts = key.Split(':');
+        if (parts.Length != 6)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], AppPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[3], HistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!DateTime.TryParseExact(parts[5], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
+        {
+            return false;
+        }
+
+        application = parts[1];
+        route = parts[2];
+        outcome = parts[4];
+
+        return true;
+    }
+
     [GeneratedRegex(@"\{(?<name>[^{}:]+):[^{}]*\}", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | RegexOptions.NonBacktracking)]
     private static partial Regex ConstraintRegex();
 }

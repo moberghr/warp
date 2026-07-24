@@ -161,7 +161,7 @@ public abstract class BatchPublisherUnitTestsBase : IAsyncLifetime
     {
         // Arrange: parent and continuation batch in same context (not committed yet)
         var ctx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         var batchPublisher = CreateBatchPublisher(ctx);
 
         var parentId = await publisher.Enqueue(new UnitRequest());
@@ -186,7 +186,7 @@ public abstract class BatchPublisherUnitTestsBase : IAsyncLifetime
     {
         // Arrange: parent already committed
         var setupCtx = _fixture.CreateContext();
-        var publisher = new Publisher<TestContext>(setupCtx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
+        var publisher = new Publisher<TestContext>(setupCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
         var parentId = await publisher.Enqueue(new UnitRequest());
         await setupCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 

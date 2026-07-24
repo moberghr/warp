@@ -94,16 +94,18 @@ public class Publisher<TContext> : IPublisher
     where TContext : DbContext
 {
     private readonly TContext _context;
+    private readonly WarpConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
     private readonly IServiceProvider _serviceProvider;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
 
-    public Publisher(TContext context, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
+    public Publisher(TContext context, IOptions<WarpConfiguration> configuration, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
         WarpModelGuard.EnsureWarpModelApplied(context);
 
         _context = context;
+        _configuration = configuration.Value;
         _timeProvider = timeProvider;
         _serviceProvider = serviceProvider;
         _notificationTransport = notificationTransport;
@@ -155,6 +157,7 @@ public class Publisher<TContext> : IPublisher
             CurrentState = state,
             JobCount = 0,
             Metadata = SerializeMetadata(publishCtx.Metadata),
+            Application = _configuration.ApplicationName,
         };
 
         // Trace propagation: inherit from execution context if inside a handler
@@ -249,7 +252,8 @@ public class Publisher<TContext> : IPublisher
             parentId,
             null,
             now,
-            metadata: SerializeMetadata(publishCtx.Metadata));
+            metadata: SerializeMetadata(publishCtx.Metadata),
+            application: _configuration.ApplicationName);
 
         // Snapshot caller's trace context before opening the producer span. The consumer's
         // ParentSpanId must be the caller's span, not the one-tick producer span we open below.

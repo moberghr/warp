@@ -101,6 +101,9 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
             // unit of work and gets a fresh trace (mirrors Publisher's root fallback).
             newJob.TraceId = newJob.Id;
 
+            // Application (§ multi-app observability) is intentionally left null: a recurring definition
+            // carries no owning application, so a firing has no publishing app to inherit. Recurring-job
+            // firings are therefore unattributed until this is revisited.
             _context.Set<Job>().Add(newJob);
             _context.Set<JobLog>().Add(new JobLog
             {

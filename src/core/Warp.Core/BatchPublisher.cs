@@ -81,13 +81,14 @@ public class BatchPublisher<TContext> : IBatchPublisher
             ParentJobId = parentId,
             JobCount = batchJobMessages.Count,
             ContinuationOptions = options,
+            Application = _warpConfiguration.ApplicationName,
         };
 
         // Run publish pipeline once for the child type — all children get the same metadata
         var metadata = await RunPublishPipeline(batchJobMessages[0], adHocMetadata);
         var serializedMetadata = metadata.Count > 0 ? JsonSerializer.Serialize(metadata) : null;
 
-        var batchChildJobs = batchJobMessages.ConvertAll(x => JobHelper.CreateJob(x, null, _warpConfiguration.DefaultQueue, batchJob.Id, batchJobsState, now, metadata: serializedMetadata));
+        var batchChildJobs = batchJobMessages.ConvertAll(x => JobHelper.CreateJob(x, null, _warpConfiguration.DefaultQueue, batchJob.Id, batchJobsState, now, metadata: serializedMetadata, application: _warpConfiguration.ApplicationName));
 
         // Propagate trace: execution context > parent's trace > self
         var executionContext = JobExecutionContext.Current;

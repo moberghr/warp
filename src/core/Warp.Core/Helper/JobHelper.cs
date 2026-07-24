@@ -13,7 +13,7 @@ internal static class JobHelper
     // the caller instead of quietly widening their fetch filter in production.
     private const char QueueSeparatorChar = '\x1F';
 
-    private static Job CreateJobInternal(string message, string type, DateTime? scheduleTime, string? queue, Guid? parentId, State? state, DateTime now, string? metadata = null)
+    private static Job CreateJobInternal(string message, string type, DateTime? scheduleTime, string? queue, Guid? parentId, State? state, DateTime now, string? metadata = null, string? application = null)
     {
         var effectiveQueue = queue ?? "default";
         if (effectiveQueue.Contains(QueueSeparatorChar, StringComparison.Ordinal))
@@ -34,6 +34,7 @@ internal static class JobHelper
             Queue = effectiveQueue,
             ParentJobId = parentId,
             Metadata = metadata,
+            Application = application,
         };
 
         return job;
@@ -46,18 +47,19 @@ internal static class JobHelper
         Guid? parentId,
         State? state,
         DateTime now,
-        string? metadata = null)
+        string? metadata = null,
+        string? application = null)
         where T : class, IJob
     {
         var serializedMessage = JsonSerializer.Serialize(message);
         var type = message!.GetType().AssemblyQualifiedName!;
 
-        return CreateJobInternal(serializedMessage, type, scheduleTime, queue, parentId, state, now, metadata);
+        return CreateJobInternal(serializedMessage, type, scheduleTime, queue, parentId, state, now, metadata, application);
     }
 
-    public static Job CreateJob(string message, string type, DateTime? scheduleTime, string? queue, Guid? parentId, State? state, DateTime now, string? metadata = null)
+    public static Job CreateJob(string message, string type, DateTime? scheduleTime, string? queue, Guid? parentId, State? state, DateTime now, string? metadata = null, string? application = null)
     {
-        return CreateJobInternal(message, type, scheduleTime, queue, parentId, state, now, metadata);
+        return CreateJobInternal(message, type, scheduleTime, queue, parentId, state, now, metadata, application);
     }
 
     private static State DefaultState(Guid? parentId, DateTime scheduleTime, DateTime now)

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.BackgroundServices;
@@ -40,18 +41,18 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("status", async ([FromServices] IDashboardStatsService statsService) => await statsService.GetWarpStatus());
 
-        apiGroup.MapGet("jobs/enqueued", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetJobsList(request, State.Enqueued));
+        apiGroup.MapGet("jobs/enqueued", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string? application) => await jobQueryService.GetJobsList(request, State.Enqueued, application));
 
-        apiGroup.MapGet("jobs/completed", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetJobsList(request, State.Completed));
+        apiGroup.MapGet("jobs/completed", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string? application) => await jobQueryService.GetJobsList(request, State.Completed, application));
 
-        apiGroup.MapGet("jobs/failed", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetJobsList(request, State.Failed));
+        apiGroup.MapGet("jobs/failed", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string? application) => await jobQueryService.GetJobsList(request, State.Failed, application));
 
         apiGroup.MapGet("jobs/failed/types", async ([FromServices] IJobQueryService jobQueryService) => await jobQueryService.GetFailedJobTypeCounts());
 
         apiGroup.MapGet("jobs/failed/by-type", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string type) => await jobQueryService.GetFailedJobsByType(request, type));
 
-        apiGroup.MapGet("jobs/by-type", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string type, [FromQuery] string? state) =>
-            await jobQueryService.GetJobsByType(request, type, Enum.TryParse<State>(state, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed) ? parsed : null));
+        apiGroup.MapGet("jobs/by-type", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string type, [FromQuery] string? state, [FromQuery] string? application) =>
+            await jobQueryService.GetJobsByType(request, type, Enum.TryParse<State>(state, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed) ? parsed : null, application));
 
         apiGroup.MapPost("jobs/failed/delete-by-type", async ([FromServices] IJobCommandService jobCommandService, [FromQuery] string type) => await jobCommandService.DeleteFailedJobsByType(type));
 
@@ -63,7 +64,7 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("jobs/awaiting", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetAwaitingJobs(request));
 
-        apiGroup.MapGet("jobs/deleted", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetJobsList(request, State.Deleted));
+        apiGroup.MapGet("jobs/deleted", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string? application) => await jobQueryService.GetJobsList(request, State.Deleted, application));
 
         apiGroup.MapGet("jobs/{jobId}/siblings", async ([FromServices] IJobQueryService jobQueryService, Guid jobId, [AsParameters] BaseListRequest request) => await jobQueryService.GetSiblingJobs(jobId, request));
 
@@ -149,7 +150,8 @@ public static class WarpEndpoints
             [FromServices] ISagaQueryService? sagas,
             [FromServices] IAdapterRecordingMarker? adapters,
             [FromServices] IEndpointCallRecorder? endpoints,
-            [FromServices] IWebhookRedeliveryEnqueuer? webhooks) =>
+            [FromServices] IWebhookRedeliveryEnqueuer? webhooks,
+            [FromServices] IOptions<WarpConfiguration> configuration) =>
             Results.Ok(new WarpAddonsInfo
             {
                 Concurrency = concurrency is not null,
@@ -170,6 +172,11 @@ public static class WarpEndpoints
                 // IWebhookCommandService (always registered by AddWarp for dashboard-only processes) can't
                 // gate the flag. The webhooks nav shows only where a delivery can actually be executed.
                 Webhooks = webhooks is not null,
+
+                // Multi-app observability (§8.19). Unlike the other flags (which gate on a DI service), this
+                // reads config: the feature is on when this process set an ApplicationName. The Applications
+                // page itself (the renamed Servers page) is always available; the flag toggles app-grouping.
+                Applications = configuration.Value.ApplicationName is not null,
             }));
 
         apiGroup.MapGet("concurrency", async ([FromServices] IConcurrencyLimitManager? mgr, CancellationToken ct) =>
@@ -483,8 +490,10 @@ public static class WarpEndpoints
         // Adapters — outbound service-call observability. IAdapterQueryService is always registered by
         // AddWarp (dashboard-only processes resolve it), so these endpoints are non-nullable; the
         // sidebar nav is gated on the addons flag (IWarpAdapters presence), not on a 404.
-        apiGroup.MapGet("adapters", async ([FromServices] IAdapterQueryService svc, CancellationToken ct) =>
-            Results.Ok(await svc.GetAdapters(ct)));
+        apiGroup.MapGet("adapters", async ([FromServices] IAdapterQueryService svc, [FromQuery] string? application, CancellationToken ct) =>
+            string.IsNullOrEmpty(application)
+                ? Results.Ok(await svc.GetAdapters(ct))
+                : Results.Ok(await svc.GetAdapterStatsByApplication(application, ct)));
 
         apiGroup.MapGet("adapters/history", async ([FromServices] IAdapterQueryService svc, CancellationToken ct) =>
             Results.Ok(await svc.GetGlobalHistory(ct)));
@@ -516,8 +525,10 @@ public static class WarpEndpoints
         // Endpoints — inbound endpoint observability. IEndpointQueryService is always registered by AddWarp
         // (dashboard-only processes resolve it); the sidebar nav is gated on the addons flag
         // (IEndpointCallRecorder presence), not on a 404. The {id} is the URL-safe encoded route identity.
-        apiGroup.MapGet("endpoints", async ([FromServices] IEndpointQueryService svc, CancellationToken ct) =>
-            Results.Ok(await svc.GetEndpoints(ct)));
+        apiGroup.MapGet("endpoints", async ([FromServices] IEndpointQueryService svc, [FromQuery] string? application, CancellationToken ct) =>
+            string.IsNullOrEmpty(application)
+                ? Results.Ok(await svc.GetEndpoints(ct))
+                : Results.Ok(await svc.GetEndpointStatsByApplication(application, ct)));
 
         apiGroup.MapGet("endpoints/history", async ([FromServices] IEndpointQueryService svc, CancellationToken ct) =>
             Results.Ok(await svc.GetGlobalHistory(ct)));
@@ -661,6 +672,56 @@ public static class WarpEndpoints
             var lease = await svc.GetLeaseAsync(name, ct);
 
             return lease is null ? Results.NotFound() : Results.Ok(lease);
+        });
+
+        // Applications — multi-app observability roster (§8.19). IApplicationQueryService is always
+        // registered by AddWarp (dashboard-only processes resolve it), so these routes are non-nullable; the
+        // Applications page is the renamed Servers page and is always shown. The {id} is the URL-safe base64
+        // of the application name (UrlSafeId.Encode/TryDecode — the shared codec, also used by the endpoints
+        // detail route).
+        apiGroup.MapGet("applications", async ([FromServices] IApplicationQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetApplications(ct)));
+
+        apiGroup.MapGet("applications/{id}", async ([FromServices] IApplicationQueryService svc, string id, CancellationToken ct) =>
+        {
+            var application = UrlSafeId.TryDecode(id);
+            if (application is null)
+            {
+                return Results.NotFound();
+            }
+
+            var detail = await svc.GetApplicationDetail(application, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        apiGroup.MapGet("applications/{id}/instances/{instanceId}", async ([FromServices] IApplicationQueryService svc, string id, Guid instanceId, CancellationToken ct) =>
+        {
+            var application = UrlSafeId.TryDecode(id);
+            if (application is null)
+            {
+                return Results.NotFound();
+            }
+
+            var detail = await svc.GetInstanceDetail(application, instanceId, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        // Global job execution metrics (by-type / by-handler, from the durable Statistic aggregates, so they
+        // survive Job-row cleanup). Optional ?application= narrows to a single executor application. The model
+        // carries both ByType and ByHandler; the Jobs-by-Type page toggles between them client-side.
+        apiGroup.MapGet("jobs/metrics", async ([FromServices] IJobQueryService svc, [FromQuery] string? application) =>
+            Results.Ok(await svc.GetJobExecutionMetrics(application)));
+
+        // Per-app job execution metrics (by-type / by-handler, from the durable Statistic aggregates).
+        apiGroup.MapGet("applications/{id}/jobstats", async ([FromServices] IJobQueryService svc, string id) =>
+        {
+            var application = UrlSafeId.TryDecode(id);
+
+            return application is null
+                ? Results.NotFound()
+                : Results.Ok(await svc.GetJobExecutionMetrics(application));
         });
 
         // Extension manifests

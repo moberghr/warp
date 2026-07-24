@@ -26,7 +26,7 @@ public abstract class ProducerSpanTestsBase : IAsyncLifetime
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private static Publisher<TestContext> CreatePublisher(TestContext ctx)
-        => new(ctx, TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
+        => new(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);
 
     private static BatchPublisher<TestContext> CreateBatchPublisher(TestContext ctx)
         => new(ctx, Options.Create(new WarpConfiguration()), TimeProvider.System, new ServiceCollection().BuildServiceProvider(), TestTasks.NullTransport, TestTasks.NullSignals);

@@ -56,6 +56,9 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupWebhookDeliveriesByCountAsync(ct);
         await CleanupExpiredEndpointCallLogsAsync(ct);
         await CleanupEndpointCallLogsByCountAsync(ct);
+        await CleanupStaleApplicationInstancesAsync(ct);
+        await CleanupExpiredApplicationInstanceLogsAsync(ct);
+        await CleanupApplicationInstanceLogsByCountAsync(ct);
 
         var total = timeExpired + countCleaned;
         if (total == 0)
@@ -557,6 +560,158 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await _context.Set<AdapterDefinition>()
             .Where(x => x.LastSeenAt < threshold)
             .ExecuteDeleteAsync(ct);
+    }
+
+    // Sweeps non-server ApplicationInstance rows whose LastHeartbeatAt is older than
+    // ApplicationInstanceStaleGrace — the process died without a graceful deregister. Each reaped
+    // instance gets a StaleSwept lifecycle event before removal, so the timeline records the reason it
+    // vanished. Instances are low cardinality (one row per non-server process), so the batch loads full
+    // entities and does the log-write + delete in ONE SaveChanges per batch (atomic — no window where a
+    // StaleSwept log outlives-or-precedes its delete). Batched + MaxSweepBatchesPerTick-capped like the
+    // call-log sweeps.
+    internal async Task<int> CleanupStaleApplicationInstancesAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var threshold = now.Subtract(_configuration.ApplicationInstanceStaleGrace);
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var stale = await _context.Set<ApplicationInstance>()
+                .Where(x => x.LastHeartbeatAt < threshold)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (stale.Count == 0)
+            {
+                break;
+            }
+
+            foreach (var instance in stale)
+            {
+                _context.Set<ApplicationInstanceLog>().Add(new ApplicationInstanceLog
+                {
+                    InstanceId = instance.Id,
+                    ApplicationName = instance.ApplicationName,
+                    Timestamp = now,
+                    EventType = ApplicationInstanceEventType.StaleSwept,
+                    ExpireAt = now.Add(_configuration.ApplicationInstanceLogRetention),
+                });
+            }
+
+            _context.Set<ApplicationInstance>().RemoveRange(stale);
+            await _context.SaveChangesAsync(ct);
+
+            total += stale.Count;
+
+            if (stale.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // Deletes ApplicationInstanceLog rows past their stamped ExpireAt (age sweep). Rows are stamped
+    // Timestamp + ApplicationInstanceLogRetention wherever they are written (heartbeat host, server
+    // registration, and the StaleSwept write above). Same batched, MaxSweepBatchesPerTick-capped shape as
+    // the other call-log sweeps.
+    internal async Task<int> CleanupExpiredApplicationInstanceLogsAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var ids = await _context.Set<ApplicationInstanceLog>()
+                .Where(x => x.ExpireAt != null)
+                .Where(x => x.ExpireAt < now)
+                .Select(x => x.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<ApplicationInstanceLog>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+
+            if (ids.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // Count cap for ApplicationInstanceLog: keep at most N rows per instance
+    // (ApplicationInstanceLogRetentionCount), deleting the oldest by Timestamp beyond the cap. Complements
+    // the age sweep. Distinct instances come from the log itself (soft InstanceId ref — no definition
+    // table). Per-instance batched delete, capped by MaxSweepBatchesPerTick.
+    internal async Task<int> CleanupApplicationInstanceLogsByCountAsync(CancellationToken ct)
+    {
+        var cap = _configuration.ApplicationInstanceLogRetentionCount;
+        if (cap is null or <= 0)
+        {
+            return 0;
+        }
+
+        var batchSize = _configuration.ExpirationBatchSize;
+        var total = 0;
+
+        var instanceIds = await _context.Set<ApplicationInstanceLog>()
+            .Select(x => x.InstanceId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        foreach (var instanceId in instanceIds)
+        {
+            var batches = 0;
+
+            while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+            {
+                batches++;
+                var count = await _context.Set<ApplicationInstanceLog>()
+                    .Where(x => x.InstanceId == instanceId)
+                    .CountAsync(ct);
+
+                if (count <= cap.Value)
+                {
+                    break;
+                }
+
+                var toDelete = Math.Min(count - cap.Value, batchSize);
+                var ids = await _context.Set<ApplicationInstanceLog>()
+                    .Where(x => x.InstanceId == instanceId)
+                    .OrderBy(x => x.Timestamp)
+                    .ThenBy(x => x.Id)
+                    .Select(x => x.Id)
+                    .Take(toDelete)
+                    .ToListAsync(ct);
+
+                if (ids.Count == 0)
+                {
+                    break;
+                }
+
+                total += await _context.Set<ApplicationInstanceLog>()
+                    .Where(x => ids.Contains(x.Id))
+                    .ExecuteDeleteAsync(ct);
+            }
+        }
+
+        return total;
     }
 
     // Deletes settled WebhookDelivery rows past their stamped ExpireAt. Delivery rows are operational

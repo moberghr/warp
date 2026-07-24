@@ -16,6 +16,9 @@ public class EndpointCallLog
 {
     public Guid Id { get; set; } = Guid.NewGuid();
 
+    /// <summary>Opt-in provenance: the application that OWNS this endpoint / served the request (<c>WarpConfiguration.ApplicationName</c>). Null ⇒ feature off / legacy row.</summary>
+    public string? Application { get; set; }
+
     public string Method { get; set; } = string.Empty;
 
     public string RouteTemplate { get; set; } = string.Empty;

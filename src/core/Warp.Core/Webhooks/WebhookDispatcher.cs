@@ -107,6 +107,7 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
             AttemptCount = 0,
             NextAttemptAt = now,
             CreatedAt = now,
+            Application = _configuration.ApplicationName,
             ExpireAt = now + _configuration.WebhookDeliveryRetention,
         };
 
