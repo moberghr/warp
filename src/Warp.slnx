@@ -30,6 +30,7 @@
     <Project Path="tests/Warp.Tests.SourceGenerator/Warp.Tests.SourceGenerator.csproj" />
   </Folder>
   <Folder Name="/demo/">
+    <Project Path="demo/Warp.Demo.Migrator/Warp.Demo.Migrator.csproj" />
     <Project Path="demo/Warp.Test.Shared/Warp.Test.Shared.csproj" />
     <Project Path="demo/Warp.TestApp/Warp.Test.App.csproj" />
     <Project Path="demo/Warp.TestWorker/Warp.Test.Worker.csproj" />

@@ -143,7 +143,6 @@ builder.Services.AddWarp<TestContext>(options =>
 
 var app = builder.Build();
 
-await Migrate();
 await RegisterShopRecurringJobs();
 
 if (app.Environment.IsDevelopment())
@@ -896,34 +895,6 @@ app.MapGet("/perf-trace/dump", () =>
 });
 
 await app.RunAsync();
-
-async Task Migrate()
-{
-    await using var scope = app!.Services.CreateAsyncScope();
-    var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-
-    // Set WARP_DEMO_PRESERVE_DB=1 to skip the wipe (useful for multi-host demos where
-    // another worker already has registered state in the DB).
-    if (!string.Equals(Environment.GetEnvironmentVariable("WARP_DEMO_PRESERVE_DB"), "1", StringComparison.Ordinal))
-    {
-        await ctx.Database.EnsureDeletedAsync();
-    }
-
-    await ctx.Database.EnsureCreatedAsync();
-
-    // Seed the shop catalog (some SKUs start below the reorder threshold so the low-stock monitor has
-    // something to report immediately).
-    if (!await ctx.Products.AnyAsync())
-    {
-        ctx.Products.AddRange(
-            new Product { Sku = "SKU-TEE", Name = "T-Shirt", Stock = 40, Price = 24.99m },
-            new Product { Sku = "SKU-MUG", Name = "Mug", Stock = 8, Price = 12.50m },
-            new Product { Sku = "SKU-CAP", Name = "Cap", Stock = 3, Price = 19.00m },
-            new Product { Sku = "SKU-BAG", Name = "Tote Bag", Stock = 25, Price = 39.90m },
-            new Product { Sku = "SKU-PEN", Name = "Pen", Stock = 2, Price = 3.25m });
-        await ctx.SaveChangesAsync();
-    }
-}
 
 async Task RegisterShopRecurringJobs()
 {
