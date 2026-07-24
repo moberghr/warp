@@ -134,6 +134,26 @@ public static class WarpTelemetry
         unit: "{record}",
         description: "Total inbound endpoint call-log records dropped because the recording channel was full. Recording is lossy by design; requests are never blocked or failed.");
 
+    public static readonly Counter<long> EndpointCalls = Meter.CreateCounter<long>(
+        "warp.endpoint.calls",
+        unit: "{call}",
+        description: "Total observed inbound calls to Warp HTTP endpoints. Emitted unconditionally by the observability middleware (independent of the recording Sink). Tags: route, outcome (and application when ApplicationName is set).");
+
+    public static readonly Histogram<double> EndpointDuration = Meter.CreateHistogram<double>(
+        "warp.endpoint.duration",
+        unit: "ms",
+        description: "Duration of an observed inbound Warp HTTP endpoint call. Emitted unconditionally by the observability middleware (independent of the recording Sink). Tags: route, outcome (and application when ApplicationName is set).");
+
+    public static readonly Histogram<double> JobExecutionDuration = Meter.CreateHistogram<double>(
+        "warp.job.execution.duration",
+        unit: "ms",
+        description: "Duration of a terminal job execution, mirroring the jobstat DB aggregates. Emitted unconditionally at finalization (independent of JobMetricsSink). Tags: job.type, job.handler (routed messages only), outcome (succeeded | failed), application (executor app when set).");
+
+    public static readonly Counter<long> JobExecutionTotal = Meter.CreateCounter<long>(
+        "warp.job.execution.total",
+        unit: "{execution}",
+        description: "Total terminal job executions, mirroring the jobstat DB aggregates. Emitted unconditionally at finalization (independent of JobMetricsSink). Tags: job.type, job.handler (routed messages only), outcome (succeeded | failed), application (executor app when set).");
+
     public static readonly Counter<long> WebhookDeliveries = Meter.CreateCounter<long>(
         "warp.webhooks.deliveries",
         unit: "{delivery}",
@@ -317,6 +337,64 @@ public static class WarpTelemetry
         }
 
         return activity;
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.job.execution.*</c> meters for one terminal job execution. Meter records
+    /// are cheap and null-listener (zero cost with no exporter), so this is safe to call on the worker
+    /// fetch/execute hot path (§0.2/§6.1) — it is instrument writes only, no reads/orchestration. Emits
+    /// regardless of <c>WarpConfiguration.JobMetricsSink</c> (the sink gates the DB Counter writes only).
+    /// The handler tag is added only for routed messages (<paramref name="handlerType"/> non-null); the
+    /// application tag only when <paramref name="application"/> (the executor app) is set.
+    /// </summary>
+    public static void RecordJobExecution(string? jobType, string? handlerType, string outcome, double? durationMs, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.JobMeterType, jobType },
+            { WarpTelemetryAttributes.JobMeterOutcome, outcome },
+        };
+
+        if (handlerType is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.JobMeterHandler, handlerType);
+        }
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        JobExecutionTotal.Add(1, tags);
+
+        if (durationMs.HasValue)
+        {
+            JobExecutionDuration.Record(durationMs.Value, tags);
+        }
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.endpoint.*</c> meters for one observed inbound endpoint call. Emitted by
+    /// the observability middleware for every completed (non-client-aborted) Warp endpoint request, independent
+    /// of the recording <c>Sink</c> — so an OTel-only endpoint user reconstructs count / error-rate / latency
+    /// (and per-app) from the meters. <paramref name="route"/> is the bounded <c>{method} {template}</c>
+    /// identity; the application tag is added only when <paramref name="application"/> is set.
+    /// </summary>
+    public static void RecordEndpointCall(string route, string outcome, double durationMs, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.EndpointMeterRoute, route },
+            { WarpTelemetryAttributes.EndpointMeterOutcome, outcome },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        EndpointCalls.Add(1, tags);
+        EndpointDuration.Record(durationMs, tags);
     }
 
     /// <summary>

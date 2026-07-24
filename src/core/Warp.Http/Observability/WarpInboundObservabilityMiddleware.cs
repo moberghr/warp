@@ -138,6 +138,11 @@ internal sealed class WarpInboundObservabilityMiddleware
             var failed = exceptionType is not null || statusCode >= 500;
             var outcome = failed ? AdapterCallOutcome.Failed : AdapterCallOutcome.Success;
 
+            // Always-on meters (independent of the recording Sink): an OTel-only user reconstructs
+            // count / error-rate / latency (and per-app) from these even when no DB rows are written. Route is
+            // the bounded {method} {template} identity; application is the process origin when set.
+            WarpTelemetry.RecordEndpointCall($"{identity.Method} {identity.RouteTemplate}", outcome.ToString(), durationMs, _applicationName);
+
             // Capture tiers: full fidelity iff Always, OnFailure-and-failed, or forced. A forced request
             // captures bodies + headers even on success and even if the tier is None/OnFailure. Request
             // bodies are the exception — they are only captured for Always/force (see the buffering note in

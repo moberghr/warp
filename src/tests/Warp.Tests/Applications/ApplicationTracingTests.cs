@@ -12,12 +12,15 @@ namespace Warp.Tests.Applications;
 /// static (a deploy-time constant per process), which <c>AddWarp</c> sets once. Because it is a shared static,
 /// each test sets it explicitly and resets it in a <c>finally</c> rather than relying on registration order,
 /// so a parallel run can never observe a leaked value. xUnit runs a class's tests sequentially, so the
-/// set/reset pairs here never race each other, and no other test class touches this static.
+/// set/reset pairs here never race each other; this class shares the serialized <c>"Telemetry"</c> collection
+/// with the other tests that mutate this static (<c>OTelAggregateMetricsTests</c>) so they never run
+/// concurrently.
 ///
 /// Span capture uses the AsyncLocal-sentinel <see cref="ActivityListenerHarness"/> constructed in the test-method
 /// body (never in async init) so process-global listener capture stays isolated across parallel test classes.
 /// </summary>
 [Trait("Category", "NoDb")]
+[Collection("Telemetry")]
 public class ApplicationTracingTests
 {
     [TimedFact]

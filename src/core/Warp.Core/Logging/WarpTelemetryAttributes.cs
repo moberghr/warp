@@ -82,4 +82,20 @@ public static class WarpTelemetryAttributes
     public const string AdapterMeterOperation = "operation";
     public const string AdapterMeterOutcome = "outcome";
     public const string AdapterMeterGroup = "group";
+
+    // Shared low-cardinality meter tag for the origin application (WarpConfiguration.ApplicationName).
+    // Added to adapter / endpoint / job-execution meter instruments only when ApplicationName is set.
+    public const string MeterApplication = "application";
+
+    // Meter tag keys for warp.endpoint.* instruments. Bounded dimensions only: route (method + template)
+    // and outcome. Endpoints carry no operation axis (the route IS the operation, §8.21) and no group tag
+    // (group is a diagnostics dimension, not a meter tag here).
+    public const string EndpointMeterRoute = "route";
+    public const string EndpointMeterOutcome = "outcome";
+
+    // Meter tag keys for warp.job.execution.* instruments. Mirror the jobstat DB dimensions: job type,
+    // routed-message handler (omitted when absent), and terminal outcome (succeeded | failed).
+    public const string JobMeterType = "job.type";
+    public const string JobMeterHandler = "job.handler";
+    public const string JobMeterOutcome = "outcome";
 }

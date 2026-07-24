@@ -269,6 +269,14 @@ public sealed class AdapterCallScope : IDisposable
             { WarpTelemetryAttributes.AdapterMeterOutcome, outcomeName },
         };
 
+        // Process origin (WarpConfiguration.ApplicationName) — a low-cardinality identity, added to the meter
+        // tags when set so an OTel user can slice adapter metrics per application (mirrors the per-app DB
+        // Counter dimension). Null (feature off) ⇒ no tag. Group stays gated behind IncludeGroupInMetrics.
+        if (WarpTelemetry.ApplicationName is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, WarpTelemetry.ApplicationName);
+        }
+
         if (_options.IncludeGroupInMetrics && _group is not null)
         {
             tags.Add(WarpTelemetryAttributes.AdapterMeterGroup, _group);
