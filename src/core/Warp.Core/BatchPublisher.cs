@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -25,7 +26,7 @@ public interface IBatchPublisher
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 
-public class BatchPublisher<TContext> : IBatchPublisher
+public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
     where TContext : DbContext
 {
     private readonly TContext _context;
@@ -34,6 +35,7 @@ public class BatchPublisher<TContext> : IBatchPublisher
     private readonly IServiceProvider _serviceProvider;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
+    private bool _staged;
 
     public BatchPublisher(TContext context, IOptions<WarpConfiguration> configuration, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
@@ -179,6 +181,7 @@ public class BatchPublisher<TContext> : IBatchPublisher
         _context.Set<Job>().AddRange(batchChildJobs);
         _context.Set<Job>().Add(batchJob);
         _context.Set<JobLog>().AddRange(logs);
+        _staged = true;
 
         return batchJob.Id;
     }
@@ -188,6 +191,20 @@ public class BatchPublisher<TContext> : IBatchPublisher
         var pending = NotificationDispatch.CapturePending(_context);
         await _context.SaveChangesAsync(cancellationToken);
         await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport, cancellationToken);
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            WarnIfUnsavedStagedJobs();
+        }
+        catch (Exception ex)
+        {
+            // A diagnostic must never break scope disposal — swallow everything (including a
+            // failed logger resolution) rather than let anything propagate out of Dispose.
+            Debug.WriteLine($"Warp: unsaved-outbox diagnostic failed and was ignored: {ex.Message}");
+        }
     }
 
     private async Task<Dictionary<string, object>> RunPublishPipeline<T>(T job, Dictionary<string, object>? seed = null, CancellationToken ct = default)
@@ -223,5 +240,38 @@ public class BatchPublisher<TContext> : IBatchPublisher
 
         await chain();
         return context.Metadata;
+    }
+
+    // Development-time diagnostic for the silent outbox footgun: jobs staged via IBatchPublisher
+    // are discarded without a trace if the scope ends before SaveChangesAsync. Reuses the
+    // already-injected IServiceProvider to resolve the logger, deliberately avoiding a ctor
+    // parameter (which would ripple to the test construction sites) for a dev-only check.
+    private void WarnIfUnsavedStagedJobs()
+    {
+        if (!_warpConfiguration.WarnOnUnsavedStagedJobs || !_staged)
+        {
+            return;
+        }
+
+        // Inside a worker handler scope the worker owns the commit, not the caller — warning here
+        // would be a false positive. JobExecutionContext.Current is set only while a job executes.
+        if (JobExecutionContext.Current != null)
+        {
+            return;
+        }
+
+        var unsaved = _context.ChangeTracker.Entries<Job>().Count(x => x.State == EntityState.Added);
+        if (unsaved == 0)
+        {
+            return;
+        }
+
+        var logger = _serviceProvider.GetService<ILogger<BatchPublisher<TContext>>>();
+        if (logger == null)
+        {
+            return;
+        }
+
+        logger.LogWarning("Warp: {Count} job(s)/message(s) were staged via IBatchPublisher but the scope ended without SaveChangesAsync — they were discarded and will not run. Call 'await publisher.SaveChangesAsync(ct)'. (Disable this check with WarpConfiguration.WarnOnUnsavedStagedJobs = false.)", unsaved);
     }
 }

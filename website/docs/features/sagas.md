@@ -25,6 +25,14 @@ builder.Services.AddSagaHandler<OrderWorkflow>();
 
 `AddSagaHandler<>()` reflects over the handler's implemented `ISagaHandler<TSaga, TMessage>` interfaces and registers a `SagaHandlerProxy<TSaga, TMessage>` as `IMessageHandler<TMessage>` for each.
 
+:::note Prerequisite — a lock provider
+`AddSagas()` **requires `IWarpLockProvider`** (used to serialize concurrent messages per correlation key), so a provider must be opted in **before** it: call `opt.UsePostgreSql()` / `opt.UseSqlServer()` first. Without it, `AddSagas()` throws a clear startup exception (`"AddSagas() requires IWarpLockProvider… Call opt.UsePostgreSql() or opt.UseSqlServer() BEFORE opt.AddSagas()."`). This is why sagas cannot run on a mediator-only / in-process-only host — they need the cross-process lock the provider supplies. To exercise sagas **in tests without a provider or a worker**, use the in-memory saga test harness (see [Testing sagas](#testing-sagas)).
+:::
+
+:::tip Need a "wait N then act" timeout?
+Don't hand-roll a scheduled job — Warp ships it as a first-class primitive. See [Timeouts (`ITimeoutMessage`)](#timeouts-itimeoutmessage) below: a message class with a `Delay` that auto-schedules itself and self-cleans if the saga already completed.
+:::
+
 ## Defining a saga
 
 A saga has three parts: the **state class** (subclass `Saga`), the **correlated messages** (each carries a `[Correlate]` property; one or more are marked `[StartsSaga]`), and the **handler class** (implements `ISagaHandler<TSaga, TMessage>` for each message type that touches the saga).
@@ -317,6 +325,35 @@ public class OrderAbandonedTimeout : ITimeoutMessage
 ```
 
 This pairs with `ITimeoutMessage`'s missing-saga silent-drop behavior — completed sagas don't leave noise behind.
+
+## Testing sagas
+
+The full saga dispatch — correlate → load/create → mutex → converge → complete → dead-letter → timeout — normally runs on a worker driven by the `MessageRouter`, which needs a real database and a running server. To exercise that logic in the **fast test tier** (no worker, no container), use **`SagaTestHarness<TContext>`** (`Warp.Core.Sagas.Testing`). It resolves the registered `SagaHandlerProxy` and invokes it directly against a SQLite in-memory database and the shipped single-process `InProcessLockProvider` — the enabler that lets `AddSagas()` be wired **without a database provider**.
+
+`opt.UseInProcessLock()` satisfies `AddSagas()`'s `IWarpLockProvider` requirement for tests and single-process / mediator-only hosts. It serializes locks **within one process only** — a multi-server deployment MUST still use `opt.UsePostgreSql()` / `opt.UseSqlServer()`, whose lock is scoped to the shared database.
+
+```csharp
+using var connection = new SqliteConnection("DataSource=:memory:");
+connection.Open(); // keep the in-memory DB alive for the connection's lifetime
+
+await using var harness = SagaTestHarness<AppDbContext>.Create(
+    o => o.UseSqlite(connection),                 // caller supplies the DbContext provider
+    s => s.AddSagaHandler<OrderWorkflow>());       // register saga handlers
+
+// Start message → a new saga row exists, correlated.
+var started = await harness.DispatchAsync(new OrderPlaced { OrderId = "O-1" });
+started.Outcome.ShouldBe(SagaDispatchOutcome.Created);
+(await harness.GetSagaAsync<OrderSaga>("O-1"))!.OrderId.ShouldBe("O-1");
+
+// Converge, then complete.
+(await harness.DispatchAsync(new PaymentCaptured { OrderId = "O-1" })).Outcome
+    .ShouldBe(SagaDispatchOutcome.Updated);
+(await harness.DispatchAsync(new InventoryReserved { OrderId = "O-1" })).Outcome
+    .ShouldBe(SagaDispatchOutcome.Completed);
+(await harness.GetSagaAsync<OrderSaga>("O-1")).ShouldBeNull(); // row gone on completion
+```
+
+`DispatchAsync` returns a `SagaDispatchResult` whose `Outcome` is one of `Created`, `Updated`, `Completed`, `NotFound` (dead-lettered), `Busy` (lock held), or `TimeoutDropped`; the raw proxy-set `JobOutcome` is also exposed (null on the success paths). Query helpers `GetSagaAsync<TSaga>(key)` and `CountAsync<TSaga>()` read the current state through the real store. An `ITimeoutMessage` is dispatched **synchronously** — the harness fires the handler immediately rather than waiting out `Delay`, so tests assert the fired behavior (and the timeout-after-completion `TimeoutDropped` drop) directly. All of this runs in the fast (`NoDb`) tier with no worker and no provider. If you prefer to build the container yourself, the `new SagaTestHarness<TContext>(serviceProvider)` constructor wraps a provider you configured (and a schema you created) directly.
 
 ## Limitations (v1)
 

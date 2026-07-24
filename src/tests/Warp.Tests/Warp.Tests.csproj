@@ -36,6 +36,11 @@
 		<PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.5" />
 		<PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.10.0" />
 		<PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.5" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.5" />
+		<!-- Override the vulnerable SQLitePCLRaw.lib.e_sqlite3 2.1.11 (GHSA-2m69-gcr7-jv3q) that
+		     EF Core's Sqlite provider pulls transitively; 2.1.12 is patched. NuGetAuditMode=all +
+		     TreatWarningsAsErrors turns the transitive advisory into a build error otherwise. -->
+		<PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
 		<PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.5" />
 		<PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.1.0" />
 		<PackageReference Include="Moq" Version="4.20.72" />

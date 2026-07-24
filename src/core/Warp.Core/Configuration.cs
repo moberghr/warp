@@ -21,6 +21,14 @@ public class WarpConfiguration
     public string? Schema { get; set; } = "warp";
 
     /// <summary>
+    /// Development diagnostic: when a scope that staged jobs/messages via <c>IPublisher</c> ends
+    /// without <c>SaveChangesAsync</c> (they would be silently discarded and never run), log a
+    /// Warning. Cheap change-tracker check on publisher dispose; set <c>false</c> to disable.
+    /// Never throws, never blocks.
+    /// </summary>
+    public bool WarnOnUnsavedStagedJobs { get; set; } = true;
+
+    /// <summary>
     /// How long completed and deleted jobs are retained before cleanup.
     /// Failed jobs are never auto-expired.
     /// </summary>
