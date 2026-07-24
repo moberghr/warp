@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -90,7 +91,7 @@ public interface IPublisher
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 
-public class Publisher<TContext> : IPublisher
+public sealed class Publisher<TContext> : IPublisher, IDisposable
     where TContext : DbContext
 {
     private readonly TContext _context;
@@ -99,6 +100,7 @@ public class Publisher<TContext> : IPublisher
     private readonly IServiceProvider _serviceProvider;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
+    private bool _staged;
 
     public Publisher(TContext context, IOptions<WarpConfiguration> configuration, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
@@ -192,6 +194,7 @@ public class Publisher<TContext> : IPublisher
         WarpTelemetry.JobsEnqueued.Add(1, new KeyValuePair<string, object?>("queue", msg.Queue), new KeyValuePair<string, object?>("kind", "message"));
 
         await _context.Set<Job>().AddAsync(msg);
+        _staged = true;
 
         return msg.Id;
     }
@@ -315,6 +318,7 @@ public class Publisher<TContext> : IPublisher
             Timestamp = now,
             Message = $"Job created in queue \"{newJob.Queue}\"",
         });
+        _staged = true;
 
         return newJob.Id;
     }
@@ -324,6 +328,20 @@ public class Publisher<TContext> : IPublisher
         var pending = NotificationDispatch.CapturePending(_context);
         await _context.SaveChangesAsync(cancellationToken);
         await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport, cancellationToken);
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            WarnIfUnsavedStagedJobs();
+        }
+        catch (Exception ex)
+        {
+            // A diagnostic must never break scope disposal — swallow everything (including a
+            // failed logger resolution) rather than let anything propagate out of Dispose.
+            Debug.WriteLine($"Warp: unsaved-outbox diagnostic failed and was ignored: {ex.Message}");
+        }
     }
 
     private async Task<PublishContext<T>> RunPublishPipeline<T>(T job, Dictionary<string, object>? seed, CancellationToken ct)
@@ -374,5 +392,38 @@ public class Publisher<TContext> : IPublisher
         }
 
         return (now, State.Enqueued);
+    }
+
+    // Development-time diagnostic for the silent outbox footgun: jobs/messages staged via
+    // IPublisher are discarded without a trace if the scope ends before SaveChangesAsync. Reuses
+    // the already-injected IServiceProvider to resolve the logger, deliberately avoiding a ctor
+    // parameter (which would ripple to ~40 test construction sites) for a dev-only check.
+    private void WarnIfUnsavedStagedJobs()
+    {
+        if (!_configuration.WarnOnUnsavedStagedJobs || !_staged)
+        {
+            return;
+        }
+
+        // Inside a worker handler scope the worker owns the commit, not the caller — warning here
+        // would be a false positive. JobExecutionContext.Current is set only while a job executes.
+        if (JobExecutionContext.Current != null)
+        {
+            return;
+        }
+
+        var unsaved = _context.ChangeTracker.Entries<Job>().Count(x => x.State == EntityState.Added);
+        if (unsaved == 0)
+        {
+            return;
+        }
+
+        var logger = _serviceProvider.GetService<ILogger<Publisher<TContext>>>();
+        if (logger == null)
+        {
+            return;
+        }
+
+        logger.LogWarning("Warp: {Count} job(s)/message(s) were staged via IPublisher but the scope ended without SaveChangesAsync — they were discarded and will not run. Call 'await publisher.SaveChangesAsync(ct)'. (Disable this check with WarpConfiguration.WarnOnUnsavedStagedJobs = false.)", unsaved);
     }
 }
