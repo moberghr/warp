@@ -16,9 +16,6 @@ internal static class TestNotifiers
     /// <summary>A dispatcher wired to <paramref name="spy"/> so a test can assert what was dispatched.</summary>
     public static WarpNotifierDispatcher SpyDispatcher(SpyNotifier spy)
         => new([spy], NullLogger<WarpNotifierDispatcher>.Instance);
-
-    /// <summary>An empty scoped-events buffer, for server-task construction sites that don't assert events.</summary>
-    public static PendingOperationalEvents EmptyPendingEvents() => new();
 }
 
 /// <summary>Captures every event dispatched to it, for assertions.</summary>

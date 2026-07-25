@@ -220,11 +220,6 @@ public static class ServiceConfiguration
         // (opt.AddNotifier<T>()), DispatchAsync is a cheap no-op. See Warp.Core.Notifiers.
         services.TryAddSingleton<WarpNotifierDispatcher>();
 
-        // Scoped per-iteration buffer for operational events a server task raises INSIDE the host's lock
-        // transaction; the ServerTaskLoop drains + dispatches it POST-COMMIT (§8.25). Scoped so a rolled-back
-        // iteration discards its buffer with the scope.
-        services.TryAddScoped<PendingOperationalEvents>();
-
         // Fail-fast model validation at host startup (plain IHostedService → awaited to completion
         // before the app starts). AddHostedService dedups via TryAddEnumerable, so the second AddWarp
         // call from AddWarpServer's AddServerHostCore doesn't double-register. The Publisher /

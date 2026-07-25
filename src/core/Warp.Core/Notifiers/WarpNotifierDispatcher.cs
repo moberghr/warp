@@ -8,6 +8,22 @@ namespace Warp.Core.Notifiers;
 /// pattern). Registered once by <c>AddWarp</c> so every dispatch site resolves it; with no notifiers
 /// registered <see cref="DispatchAsync"/> is a no-op. Singleton — the injected notifier set is singleton too
 /// (see the captive-dependency note on <see cref="IWarpNotifier"/>).
+/// <para>
+/// <b>Dispatch only POST-COMMIT.</b> Call <see cref="DispatchAsync"/> after the triggering state change is
+/// durably committed. This is easy from an ordinary job handler or a cold admin service that owns its own
+/// commit (e.g. the webhook executor, <c>SagaCommandService.ForceComplete</c>). <b>A server task
+/// (<c>IServerTask</c>) runs inside the host's lock transaction</b> (<c>LocksWithTransaction</c>), so its
+/// <c>ExecuteAsync</c> body is PRE-COMMIT — do NOT dispatch there. Buffer the events and dispatch them from
+/// <c>IServerTask.OnCommittedAsync</c>, which the host invokes after the transaction commits (see
+/// <c>ExpirationCleanup</c>/<c>ServerCleanup</c>). Dispatching pre-commit could alert on a change a rollback
+/// then undoes.
+/// </para>
+/// <para>
+/// <b>Public by necessity, not for host use:</b> the intended host seam is <see cref="IWarpNotifier"/> +
+/// <c>opt.AddNotifier&lt;T&gt;()</c>. This type is <c>public</c> only because it is a constructor parameter
+/// of the public dispatch-site classes (a public constructor cannot take a less-accessible parameter, CS0051).
+/// Hosts should not resolve or call it directly.
+/// </para>
 /// </summary>
 public sealed class WarpNotifierDispatcher
 {

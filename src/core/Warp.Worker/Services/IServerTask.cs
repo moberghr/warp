@@ -81,4 +81,18 @@ public interface IServerTask
     /// </para>
     /// </summary>
     bool LocksWithTransaction => true;
+
+    /// <summary>
+    /// Post-commit hook invoked by the host <b>after</b> the iteration's work has committed — after the
+    /// lock transaction commits on the <see cref="LocksWithTransaction"/> path, or after
+    /// <see cref="ExecuteAsync"/> returns on the session-lock path. Not called when the lock was not
+    /// acquired, nor when <see cref="ExecuteAsync"/> throws (the transaction rolled back).
+    /// <para>
+    /// The default is a no-op. Override it for work that must observe committed state — e.g. dispatching an
+    /// operational notification for a change the iteration just made durable. <see cref="ExecuteAsync"/>
+    /// runs inside the lock transaction, so it must <b>not</b> fire such side effects itself (they would be
+    /// pre-commit and a rollback could undo the underlying change); buffer them in the task and act here.
+    /// </para>
+    /// </summary>
+    Task OnCommittedAsync(CancellationToken ct) => Task.CompletedTask;
 }

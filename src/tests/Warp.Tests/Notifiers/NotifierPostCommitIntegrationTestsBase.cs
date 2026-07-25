@@ -23,7 +23,7 @@ public abstract class NotifierPostCommitIntegrationTestsBase : IntegrationTestBa
     {
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task StaleInstanceSweep_DispatchesInstanceDown_ThroughLoop_PostCommit()
     {
         var ct = Xunit.TestContext.Current.CancellationToken;
@@ -49,13 +49,58 @@ public abstract class NotifierPostCommitIntegrationTestsBase : IntegrationTestBa
 
         await server.RunServerTaskThroughLoopAsync<ExpirationCleanup<TestContext>>(ct);
 
-        // The row was reaped and the InstanceDown event dispatched to the registered notifier — post-commit,
-        // via the loop drain (not a direct ExecuteAsync).
-        var received = spy.Received.OfType<InstanceDownEvent>().SingleOrDefault(x => x.InstanceId == instanceId);
-        received.ShouldNotBeNull();
+        // Post-commit, via OnCommittedAsync (not a direct ExecuteAsync). Wait for the spy: the host's own
+        // background server-task loop can race the explicit run for the task's lock, so whichever run wins
+        // dispatches — poll rather than assert on the instant.
+        await WarpTestServer.WaitUntil(
+            () => Task.FromResult(spy.Received.OfType<InstanceDownEvent>().Any(x => x.InstanceId == instanceId)),
+            timeout: TimeSpan.FromSeconds(8),
+            ct: ct);
+
+        var received = spy.Received.OfType<InstanceDownEvent>().Single(x => x.InstanceId == instanceId);
         received.IsServer.ShouldBeFalse();
         received.ApplicationName.ShouldBe("publisher-app");
 
         (await Fixture.CreateContext().Set<ApplicationInstance>().FindAsync([instanceId], ct)).ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task StaleServerSweep_DispatchesInstanceDown_ThroughLoop_PostCommit()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var serverId = Guid.NewGuid();
+        var staleAt = DateTime.UtcNow.AddHours(-1);
+
+        var seedCtx = Fixture.CreateContext();
+        seedCtx.Set<Server>().Add(new Server
+        {
+            Id = serverId,
+            ServerName = "worker-1",
+            Application = "worker-app",
+            StartedTime = staleAt,
+            LastHeartbeatTime = staleAt,
+        });
+        await seedCtx.SaveChangesAsync(ct);
+
+        var spy = new SpyNotifier();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg => cfg.DisableWorker(),
+            configureServices: services => services.AddSingleton<IWarpNotifier>(spy));
+
+        await server.RunServerTaskThroughLoopAsync<ServerCleanup<TestContext>>(ct);
+
+        // Wait for the spy: the host's own background ServerCleanup loop can race the explicit run for
+        // warp:server-cleanup, so whichever run holds the lock dispatches — poll rather than assert instantly.
+        await WarpTestServer.WaitUntil(
+            () => Task.FromResult(spy.Received.OfType<InstanceDownEvent>().Any(x => x.InstanceId == serverId)),
+            timeout: TimeSpan.FromSeconds(8),
+            ct: ct);
+
+        var received = spy.Received.OfType<InstanceDownEvent>().Single(x => x.InstanceId == serverId);
+        received.IsServer.ShouldBeTrue();
+        received.ApplicationName.ShouldBe("worker-app");
+
+        (await Fixture.CreateContext().Set<Server>().FindAsync([serverId], ct)).ShouldBeNull();
     }
 }

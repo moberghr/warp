@@ -111,3 +111,5 @@ Warp raises these from detections it already had — no new scanning loop, and t
 - **Instance down** — the `ExpirationCleanup` server task's stale-instance sweep (non-server processes, `IsServer=false`) and the `ServerCleanup` server task's stale-server sweep (worker servers, `IsServer=true`).
 
 A Warp server must be running somewhere for the server-task-sourced events (instance-down) to fire, since those live in server tasks; the webhook and saga events fire wherever that work runs.
+
+> **For addon authors adding a new event from a server task:** a server task's `ExecuteAsync` runs *inside* the host's lock transaction, so dispatching there would fire pre-commit. Buffer the event and dispatch it from `IServerTask.OnCommittedAsync(ct)` — the post-commit hook the host invokes after the transaction commits (and skips on rollback). The webhook/saga sites dispatch inline only because they own their own commit.

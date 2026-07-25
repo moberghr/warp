@@ -21,20 +21,21 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly WarpServerConfiguration _configuration;
-    private readonly PendingOperationalEvents _pendingEvents;
+    private readonly WarpNotifierDispatcher _notifier;
     private readonly IEnumerable<WarpBackgroundService> _backgroundServices;
+    private readonly List<WarpOperationalEvent> _pendingEvents = [];
 
     public ExpirationCleanup(
         IWarpServerContext serverContext,
         TimeProvider time,
         IOptions<WarpServerConfiguration> configuration,
-        PendingOperationalEvents pendingEvents,
+        WarpNotifierDispatcher notifier,
         IEnumerable<WarpBackgroundService>? backgroundServices = null)
     {
         _context = serverContext.Context;
         _time = time;
         _configuration = configuration.Value;
-        _pendingEvents = pendingEvents;
+        _notifier = notifier;
         _backgroundServices = backgroundServices ?? [];
     }
 
@@ -74,6 +75,19 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         return countCleaned > 0
             ? $"Cleaned up {timeExpired} expired + {countCleaned} over-threshold jobs"
             : $"Cleaned up {timeExpired} expired jobs";
+    }
+
+    // Post-commit (§8.25): the stale sweeps ran inside the host's lock transaction; the host calls this only
+    // after that transaction commits. Dispatch the buffered InstanceDown events now. CancellationToken.None
+    // so a host shutdown doesn't abandon an alert for an already-committed removal.
+    public async Task OnCommittedAsync(CancellationToken ct)
+    {
+        foreach (var evt in _pendingEvents)
+        {
+            await _notifier.DispatchAsync(evt, CancellationToken.None);
+        }
+
+        _pendingEvents.Clear();
     }
 
     internal async Task<int> RunCleanupAsync(CancellationToken ct)
@@ -612,8 +626,8 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
             // Buffer one InstanceDown per reaped non-server instance (§8.25). This method runs INSIDE the
             // server-task host's lock transaction — the SaveChangesAsync above only flushes; the commit happens
-            // after ExecuteAsync returns. So the events are enqueued here and the ServerTaskLoop dispatches them
-            // POST-COMMIT. IsServer=false — stale worker servers are reported separately from ServerCleanup.
+            // after ExecuteAsync returns. So the events are buffered here and dispatched from OnCommittedAsync
+            // (called by the host POST-COMMIT). IsServer=false — stale servers are reported by ServerCleanup.
             foreach (var instance in stale)
             {
                 _pendingEvents.Add(new InstanceDownEvent

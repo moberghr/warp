@@ -233,20 +233,6 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
                     return new[] { _task };
                 }
 
-                // The loop drains + dispatches operational events post-commit (§8.25); AddWarp registers both
-                // in production, so this minimal test double must supply them too.
-                if (serviceType == typeof(Warp.Core.Notifiers.PendingOperationalEvents))
-                {
-                    return new Warp.Core.Notifiers.PendingOperationalEvents();
-                }
-
-                if (serviceType == typeof(Warp.Core.Notifiers.WarpNotifierDispatcher))
-                {
-                    return new Warp.Core.Notifiers.WarpNotifierDispatcher(
-                        [],
-                        Microsoft.Extensions.Logging.Abstractions.NullLogger<Warp.Core.Notifiers.WarpNotifierDispatcher>.Instance);
-                }
-
                 return null;
             }
         }

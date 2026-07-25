@@ -765,6 +765,60 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
+    public async Task Execute_ExhaustedCallbackRecovery_ReEmitsOperationalNotifier()
+    {
+        // The operational notifier (§8.25) is dispatched from the SAME InvokeExhaustedHandlersAsync that the
+        // crash-recovery re-run invokes — so a recovered exhaustion must re-emit the WebhookDeliveryExhausted
+        // event, matching the documented "webhook exhaustion is re-emitted on the executor re-run" guarantee.
+        var recorder = new NotifierEventRecorder();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg =>
+            {
+                cfg.Queues = ["default"];
+                cfg.AddWebhooks();
+            },
+            configureServices: services =>
+            {
+                services.AddSingleton(recorder);
+                services.AddSingleton<IWarpNotifier>(sp => new RecordingNotifier(sp.GetRequiredService<NotifierEventRecorder>()));
+                services.AddHttpClient("warp-webhooks")
+                    .ConfigurePrimaryHttpMessageHandler(() => new StubWebhookHandler(HttpStatusCode.OK));
+            });
+
+        var deliveryId = Guid.NewGuid();
+        var ctx = server.CreateContext();
+        ctx.Set<WebhookDelivery>().Add(new WebhookDelivery
+        {
+            Id = deliveryId,
+            EventType = "order.created",
+            EventId = Guid.NewGuid().ToString(),
+            Url = "https://example.test/hook",
+            PayloadJson = "{}",
+            SigningMode = WebhookSigning.None,
+            RetrySchedule = [],
+            Status = WebhookDeliveryStatus.Exhausted,
+            AttemptCount = 1,
+            ExhaustedCallbackPending = true,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync(Ct);
+
+        // The executor job a crash-recovery re-run would pick up for the already-settled, callback-pending row.
+        var publisher = server.CreatePublisher();
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "warp:webhooks");
+        await publisher.SaveChangesAsync(Ct);
+
+        await WarpTestServer.WaitUntil(
+            () => Task.FromResult(recorder.Events.Any(x => x.DeliveryId == deliveryId)),
+            timeout: TimeSpan.FromSeconds(8),
+            ct: Ct);
+
+        recorder.Events.ShouldContain(x => x.DeliveryId == deliveryId && x.AttemptCount == 1);
+        await AssertNoFailedJobsAsync(server);
+    }
+
+    [TimedFact]
     public async Task Execute_PendingWithCallbackPending_FiresRecoveredCallbackThenProceedsWithAttempt()
     {
         // BUG-B: a Redeliver can flip an Exhausted row back to Pending BEFORE the crash-recovery re-run

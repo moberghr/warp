@@ -22,20 +22,21 @@ public sealed class ServerCleanup<TContext> : IServerTask
     private readonly TimeProvider _time;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly WarpServerConfiguration _configuration;
-    private readonly PendingOperationalEvents _pendingEvents;
+    private readonly WarpNotifierDispatcher _notifier;
+    private readonly List<WarpOperationalEvent> _pendingEvents = [];
 
     public ServerCleanup(
         IWarpServerContext serverContext,
         TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
         IOptions<WarpServerConfiguration> configuration,
-        PendingOperationalEvents pendingEvents)
+        WarpNotifierDispatcher notifier)
     {
         _context = serverContext.Context;
         _time = time;
         _sqlQueries = sqlQueries;
         _configuration = configuration.Value;
-        _pendingEvents = pendingEvents;
+        _notifier = notifier;
     }
 
     public string Name => "ServerCleanup";
@@ -53,6 +54,19 @@ public sealed class ServerCleanup<TContext> : IServerTask
         return count > 0 ? $"Removed {count} stale servers" : null;
     }
 
+    // Post-commit (§8.25): CleanUpServersAsync ran inside the host's lock transaction; the host calls this
+    // only after it commits. Dispatch the buffered InstanceDown events now (CancellationToken.None so a
+    // shutdown doesn't abandon an alert for an already-committed removal).
+    public async Task OnCommittedAsync(CancellationToken ct)
+    {
+        foreach (var evt in _pendingEvents)
+        {
+            await _notifier.DispatchAsync(evt, CancellationToken.None);
+        }
+
+        _pendingEvents.Clear();
+    }
+
     internal async Task<int> CleanUpServersAsync(CancellationToken ct)
     {
         var now = _time.GetUtcNow().UtcDateTime;
@@ -66,12 +80,10 @@ public sealed class ServerCleanup<TContext> : IServerTask
             ? null
             : await _context.Database.BeginTransactionAsync(ct);
 
-        // Buffered during the loop, dispatched POST-COMMIT by the ServerTaskLoop (§8.25). This method runs
+        // Buffered during the loop, dispatched POST-COMMIT from OnCommittedAsync (§8.25). This method runs
         // INSIDE the server-task host's lock transaction (LocksWithTransaction), so the SaveChanges + owned-tx
         // commit below only durably commit once ExecuteAsync returns — a direct dispatch here would fire
         // pre-commit and could alert on a removal a rollback then undoes.
-        var downEvents = new List<InstanceDownEvent>();
-
         var servers = await _sqlQueries.LockAllServersAsync(_context, ct);
         foreach (var server in servers)
         {
@@ -80,7 +92,7 @@ public sealed class ServerCleanup<TContext> : IServerTask
                 continue;
             }
 
-            downEvents.Add(new InstanceDownEvent
+            _pendingEvents.Add(new InstanceDownEvent
             {
                 Type = WarpEventType.InstanceDown,
                 Severity = WarpEventSeverity.Warning,
@@ -129,13 +141,6 @@ public sealed class ServerCleanup<TContext> : IServerTask
         if (ownedTx != null)
         {
             await ownedTx.CommitAsync(ct);
-        }
-
-        // Enqueue for post-commit dispatch by the host (see the note above). On the direct-call path (tests /
-        // admin) ownedTx commits here; on the production path the outer host transaction commits after return.
-        foreach (var downEvent in downEvents)
-        {
-            _pendingEvents.Add(downEvent);
         }
 
         return removedCount;

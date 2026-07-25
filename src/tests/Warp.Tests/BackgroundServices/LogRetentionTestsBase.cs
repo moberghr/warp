@@ -42,7 +42,7 @@ public abstract class LogRetentionTestsBase : IAsyncLifetime
             new Warp.Tests.Helpers.TestServerContext(_fixture.CreateContext()),
             time ?? TimeProvider.System,
             Options.Create(config),
-            Warp.Tests.Helpers.TestNotifiers.EmptyPendingEvents(),
+            Warp.Tests.Helpers.TestNotifiers.EmptyDispatcher(),
             backgroundServices);
     }
 

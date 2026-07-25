@@ -38,7 +38,7 @@ public abstract class OrphanDefinitionCleanupTestsBase : IAsyncLifetime
             new Warp.Tests.Helpers.TestServerContext(_fixture.CreateContext()),
             time ?? TimeProvider.System,
             Options.Create(config),
-            Warp.Tests.Helpers.TestNotifiers.EmptyPendingEvents());
+            Warp.Tests.Helpers.TestNotifiers.EmptyDispatcher());
     }
 
     private async Task InsertDefinitionAsync(string name, DateTime lastSeenAt, DateTime? firstSeenAt = null)
