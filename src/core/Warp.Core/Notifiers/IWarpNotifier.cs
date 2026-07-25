@@ -17,15 +17,20 @@ namespace Warp.Core.Notifiers;
 /// take down the thing it observes.
 /// </para>
 /// <para>
-/// <b>Delivery guarantee is per source.</b> <c>WebhookDeliveryExhausted</c> is <b>at-least-once</b>: the
-/// exhaustion is a persisted delivery state recovered on the executor job's re-run, so a crash between commit
-/// and notification replays it (notifications may repeat — key any side effect on the event id).
-/// <c>SagaForceCompleted</c> and <c>InstanceDown</c> are <b>best-effort</b>: they report a row that was
-/// <em>deleted</em> in the committing transaction, so there is nothing to re-detect — a process crash in the
-/// narrow window between that commit and the dispatch drops the notification. That is acceptable because the
-/// operator action (force-complete) and the instance roster (dashboard) remain the systems of record; the
-/// notification is a convenience alert, not an audit trail. Do not build guaranteed-delivery accounting on
-/// these two events.
+/// <b>Events are NOT persisted — there is no notification outbox.</b> The dispatch is in-process from an
+/// in-memory buffer, so <b>delivery to the sink is best-effort for every event</b>: a process crash in the
+/// window between the triggering commit and the dispatch, or a notifier that is down/throwing when called
+/// (the exception is swallowed + logged, never retried), drops that alert with no replay. Do not build
+/// guaranteed-delivery accounting on any of these events — they are convenience alerts, not an audit trail,
+/// and the operator action / delivery row / instance roster remain the systems of record.
+/// </para>
+/// <para>
+/// <b>The one partial exception is <c>WebhookDeliveryExhausted</c>:</b> the event itself is still not
+/// persisted, but the delivery's <c>Exhausted</c> state <em>is</em>, and the executor job's crash-recovery
+/// re-run re-emits the event — so Warp will regenerate it after a crash-before-dispatch (notifications may
+/// then repeat — key any side effect on the event id). That still does not help if the sink is unreachable
+/// at call time. <c>SagaForceCompleted</c> and <c>InstanceDown</c> have no such replay — they report a row
+/// <em>deleted</em> in the committing transaction, so a lost dispatch is gone for good.
 /// </para>
 /// <para>
 /// Register with <c>opt.AddNotifier&lt;T&gt;()</c>. Notifiers are resolved as a set, so several can coexist;

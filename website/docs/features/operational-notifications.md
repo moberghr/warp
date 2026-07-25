@@ -70,8 +70,18 @@ public sealed class TeamsNotifier : IWarpNotifier
 ## Contract — the guarantees
 
 - **Post-commit.** A notifier fires *after* the triggering state transition is durable — the saga row is already gone, the delivery is already `Exhausted`, the instance is already reaped. You never see an event a rollback could undo. (For the two server-task-sourced events, the dispatch is deferred until after the server task's lock transaction commits — never inside it.)
-- **Delivery guarantee is per source.** `WebhookDeliveryExhausted` is **at-least-once** — the exhaustion is a persisted delivery state recovered on the executor job's re-run, so a crash replays it (an event can repeat; key side effects on the event id). `SagaForceCompleted` and `InstanceDown` are **best-effort** — they report a row that was *deleted* in the committing transaction, so a crash in the narrow window between commit and dispatch drops the notification, with nothing to re-detect. That's fine: the operator action and the instance roster remain the systems of record; these two events are convenience alerts, not an audit trail. Don't build guaranteed-delivery accounting on them.
 - **Never propagates.** A throwing notifier is caught, logged at `Warning`, and swallowed — one bad notifier does not stop the others, and an alert sink can never take down the thing it observes. It also never fails or slows the worker.
+
+## Durability — events are not persisted
+
+There is **no notification outbox.** The dispatch is in-process from an in-memory buffer, so **delivery to your sink is best-effort for every event.** An alert is dropped, with no retry, if:
+
+- the process **crashes** in the window between the triggering commit and the dispatch, or
+- your notifier is **down or throws** when called (the exception is swallowed and logged at `Warning`; there is no notification-level retry).
+
+This is by design — these are convenience alerts, not an audit trail. The operator action, the `WebhookDelivery` row, and the instance roster remain the systems of record; don't build guaranteed-delivery accounting on notifications.
+
+**Per-source nuance.** `WebhookDeliveryExhausted` is the one event Warp will **re-emit** after a crash-before-dispatch: the event itself still isn't persisted, but the delivery's `Exhausted` state is, and the executor job's crash-recovery re-run regenerates the event (so it may repeat — key side effects on the event id). That still doesn't help if your sink is unreachable at call time. `SagaForceCompleted` and `InstanceDown` have no replay at all — they report a row *deleted* in the committing transaction, so a lost dispatch is gone for good.
 
 **Keep `NotifyAsync` quick.** It runs inline at the dispatch site (a server-task tick or the webhook executor job — never the worker fetch/execute hot path). Long or unreliable delivery (an HTTP POST, an SMTP send) is yours to bound; honour the `CancellationToken`.
 
