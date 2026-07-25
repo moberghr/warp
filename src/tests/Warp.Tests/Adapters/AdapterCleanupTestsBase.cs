@@ -244,7 +244,7 @@ public abstract class AdapterCleanupTestsBase : IAsyncLifetime
             new TestServerContext(_fixture.CreateContext()),
             TimeProvider.System,
             Options.Create(configuration),
-            TestNotifiers.EmptyDispatcher());
+            TestNotifiers.EmptyPendingEvents());
     }
 
     private async Task InsertCallLogAsync(string adapterName, DateTime? expireAt, DateTime? timestamp = null, string operation = "GetOrders")

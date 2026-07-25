@@ -146,6 +146,13 @@ public class ServerTaskHostTests
         services.AddSingleton(Options.Create(new WarpServerConfiguration { ServerId = Guid.NewGuid() }));
         services.AddSingleton(signals ?? new ServerTaskSignals<StubContext>());
 
+        // The loop drains + dispatches operational events post-commit (§8.25); AddWarp registers both in
+        // production, so this hand-built provider must supply them for the loop to resolve them per scope.
+        services.AddScoped<Warp.Core.Notifiers.PendingOperationalEvents>();
+        services.AddSingleton(new Warp.Core.Notifiers.WarpNotifierDispatcher(
+            [],
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Warp.Core.Notifiers.WarpNotifierDispatcher>.Instance));
+
         var provider = services.BuildServiceProvider();
 
         return ActivatorUtilities.CreateInstance<ServerTaskHost<StubContext>>(provider);

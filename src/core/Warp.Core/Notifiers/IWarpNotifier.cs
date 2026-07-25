@@ -12,11 +12,20 @@ namespace Warp.Core.Notifiers;
 /// abstraction for internal self-reporting.
 /// </para>
 /// <para>
-/// <b>Contract</b> (mirrors <c>IWebhookDeliveryExhaustedHandler</c>): invoked <b>after</b> the triggering
-/// state transition is committed, <b>at-least-once</b> (a process crash between the commit and the
-/// notification re-runs the source, so notifications may repeat — key any side effect on the event's id),
-/// and a <b>throwing notifier is caught, logged at Warning, and never propagated</b> — an alert sink must
-/// never take down the thing it observes.
+/// <b>Contract:</b> a notifier is invoked <b>after</b> the triggering state transition is committed, and a
+/// <b>throwing notifier is caught, logged at Warning, and never propagated</b> — an alert sink must never
+/// take down the thing it observes.
+/// </para>
+/// <para>
+/// <b>Delivery guarantee is per source.</b> <c>WebhookDeliveryExhausted</c> is <b>at-least-once</b>: the
+/// exhaustion is a persisted delivery state recovered on the executor job's re-run, so a crash between commit
+/// and notification replays it (notifications may repeat — key any side effect on the event id).
+/// <c>SagaForceCompleted</c> and <c>InstanceDown</c> are <b>best-effort</b>: they report a row that was
+/// <em>deleted</em> in the committing transaction, so there is nothing to re-detect — a process crash in the
+/// narrow window between that commit and the dispatch drops the notification. That is acceptable because the
+/// operator action (force-complete) and the instance roster (dashboard) remain the systems of record; the
+/// notification is a convenience alert, not an audit trail. Do not build guaranteed-delivery accounting on
+/// these two events.
 /// </para>
 /// <para>
 /// Register with <c>opt.AddNotifier&lt;T&gt;()</c>. Notifiers are resolved as a set, so several can coexist;

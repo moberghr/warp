@@ -21,20 +21,20 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly WarpServerConfiguration _configuration;
-    private readonly WarpNotifierDispatcher _notifier;
+    private readonly PendingOperationalEvents _pendingEvents;
     private readonly IEnumerable<WarpBackgroundService> _backgroundServices;
 
     public ExpirationCleanup(
         IWarpServerContext serverContext,
         TimeProvider time,
         IOptions<WarpServerConfiguration> configuration,
-        WarpNotifierDispatcher notifier,
+        PendingOperationalEvents pendingEvents,
         IEnumerable<WarpBackgroundService>? backgroundServices = null)
     {
         _context = serverContext.Context;
         _time = time;
         _configuration = configuration.Value;
-        _notifier = notifier;
+        _pendingEvents = pendingEvents;
         _backgroundServices = backgroundServices ?? [];
     }
 
@@ -610,26 +610,25 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             _context.Set<ApplicationInstance>().RemoveRange(stale);
             await _context.SaveChangesAsync(ct);
 
-            // Post-commit operational events (§8.25): one InstanceDown per reaped non-server instance. Fired
-            // after the delete commits; the dispatcher guards each notifier. IsServer=false — stale worker
-            // servers are reported separately from ServerCleanup.
+            // Buffer one InstanceDown per reaped non-server instance (§8.25). This method runs INSIDE the
+            // server-task host's lock transaction — the SaveChangesAsync above only flushes; the commit happens
+            // after ExecuteAsync returns. So the events are enqueued here and the ServerTaskLoop dispatches them
+            // POST-COMMIT. IsServer=false — stale worker servers are reported separately from ServerCleanup.
             foreach (var instance in stale)
             {
-                await _notifier.DispatchAsync(
-                    new InstanceDownEvent
-                    {
-                        Type = WarpEventType.InstanceDown,
-                        Severity = WarpEventSeverity.Warning,
-                        TimestampUtc = now,
-                        MachineName = Environment.MachineName,
-                        Application = WarpTelemetry.ApplicationName,
-                        Message = $"Application instance {instance.Id} ({instance.ApplicationName}) went down (heartbeat lapsed, last seen {instance.LastHeartbeatAt:o}).",
-                        InstanceId = instance.Id,
-                        ApplicationName = instance.ApplicationName,
-                        LastSeenAt = instance.LastHeartbeatAt,
-                        IsServer = false,
-                    },
-                    ct);
+                _pendingEvents.Add(new InstanceDownEvent
+                {
+                    Type = WarpEventType.InstanceDown,
+                    Severity = WarpEventSeverity.Warning,
+                    TimestampUtc = now,
+                    MachineName = Environment.MachineName,
+                    Application = WarpTelemetry.ApplicationName,
+                    Message = $"Application instance {instance.Id} ({instance.ApplicationName}) went down (heartbeat lapsed, last seen {instance.LastHeartbeatAt:o}).",
+                    InstanceId = instance.Id,
+                    ApplicationName = instance.ApplicationName,
+                    LastSeenAt = instance.LastHeartbeatAt,
+                    IsServer = false,
+                });
             }
 
             total += stale.Count;

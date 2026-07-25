@@ -134,7 +134,7 @@ public abstract class EndpointCleanupTestsBase : IAsyncLifetime
             new TestServerContext(_fixture.CreateContext()),
             TimeProvider.System,
             Options.Create(configuration),
-            TestNotifiers.EmptyDispatcher());
+            TestNotifiers.EmptyPendingEvents());
     }
 
     private async Task InsertCallLogAsync(string method, string routeTemplate, DateTime? expireAt, DateTime? timestamp = null, string operation = "GetOrders")

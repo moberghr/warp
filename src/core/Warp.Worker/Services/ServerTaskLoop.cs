@@ -7,6 +7,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Events;
 using Warp.Core.Logging;
+using Warp.Core.Notifiers;
 
 namespace Warp.Worker.Services;
 
@@ -298,6 +299,14 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                 async (_, innerCt) => await task.ExecuteAsync(innerCt),
                 ct);
 
+            // Post-commit: RunUnderTransactionLockAsync has committed the task's transaction, so any
+            // operational events the task buffered are now durable — dispatch them (§8.25). Only when the lock
+            // was actually held (else the task didn't run). Skipped on a throw (the transaction rolled back).
+            if (outcome.LockHeld)
+            {
+                await DispatchPendingEventsAsync(scope.ServiceProvider);
+            }
+
             return (outcome.LockHeld, outcome.Result);
         }
 
@@ -320,7 +329,14 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                 .GetServices<IServerTask>()
                 .First(x => x.GetType() == _taskType);
 
-            return (true, await task.ExecuteAsync(ct));
+            var message = await task.ExecuteAsync(ct);
+
+            // Post-execute: the session-lock task manages its own transactions, so its work is committed by
+            // the time ExecuteAsync returns — dispatch any buffered operational events (§8.25). A throw skips
+            // this (propagates), so nothing is dispatched for work that didn't complete.
+            await DispatchPendingEventsAsync(scope.ServiceProvider);
+
+            return (true, message);
         }
         finally
         {
@@ -328,6 +344,24 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
             {
                 await handle.DisposeAsync();
             }
+        }
+    }
+
+    // Drains the scoped PendingOperationalEvents buffer and dispatches each through the notifier fan-out.
+    // Called only after the task's transaction has committed. Uses CancellationToken.None so a host shutdown
+    // mid-drain does not abandon (or log-as-error) an alert for a change that already committed.
+    private static async Task DispatchPendingEventsAsync(IServiceProvider scopedProvider)
+    {
+        var pending = scopedProvider.GetRequiredService<PendingOperationalEvents>().Drain();
+        if (pending.Count == 0)
+        {
+            return;
+        }
+
+        var dispatcher = scopedProvider.GetRequiredService<WarpNotifierDispatcher>();
+        foreach (var evt in pending)
+        {
+            await dispatcher.DispatchAsync(evt, CancellationToken.None);
         }
     }
 

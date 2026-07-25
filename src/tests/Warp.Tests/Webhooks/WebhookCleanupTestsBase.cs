@@ -151,7 +151,7 @@ public abstract class WebhookCleanupTestsBase : IAsyncLifetime
                 ExpirationBatchSize = batchSize ?? new WarpServerConfiguration().ExpirationBatchSize,
                 WebhookDeliveryRetentionCount = retentionCount,
             }),
-            Warp.Tests.Helpers.TestNotifiers.EmptyDispatcher());
+            Warp.Tests.Helpers.TestNotifiers.EmptyPendingEvents());
 
     private async Task<Guid> InsertDeliveryAsync(DateTime? expireAt, WebhookDeliveryStatus status = WebhookDeliveryStatus.Delivered, DateTime? createdAt = null)
     {

@@ -69,10 +69,8 @@ public sealed class TeamsNotifier : IWarpNotifier
 
 ## Contract — the guarantees
 
-The seam mirrors the webhook exhaustion callback (`IWebhookDeliveryExhaustedHandler`) exactly:
-
-- **Post-commit.** A notifier fires *after* the triggering state transition is durable — the saga row is already gone, the delivery is already `Exhausted`, the instance is already reaped. You never see an event a rollback could undo.
-- **At-least-once.** A crash between the commit and the notification re-runs the source, so an event can repeat. Key any side effect on the event's id if duplicates would matter.
+- **Post-commit.** A notifier fires *after* the triggering state transition is durable — the saga row is already gone, the delivery is already `Exhausted`, the instance is already reaped. You never see an event a rollback could undo. (For the two server-task-sourced events, the dispatch is deferred until after the server task's lock transaction commits — never inside it.)
+- **Delivery guarantee is per source.** `WebhookDeliveryExhausted` is **at-least-once** — the exhaustion is a persisted delivery state recovered on the executor job's re-run, so a crash replays it (an event can repeat; key side effects on the event id). `SagaForceCompleted` and `InstanceDown` are **best-effort** — they report a row that was *deleted* in the committing transaction, so a crash in the narrow window between commit and dispatch drops the notification, with nothing to re-detect. That's fine: the operator action and the instance roster remain the systems of record; these two events are convenience alerts, not an audit trail. Don't build guaranteed-delivery accounting on them.
 - **Never propagates.** A throwing notifier is caught, logged at `Warning`, and swallowed — one bad notifier does not stop the others, and an alert sink can never take down the thing it observes. It also never fails or slows the worker.
 
 **Keep `NotifyAsync` quick.** It runs inline at the dispatch site (a server-task tick or the webhook executor job — never the worker fetch/execute hot path). Long or unreliable delivery (an HTTP POST, an SMTP send) is yours to bound; honour the `CancellationToken`.

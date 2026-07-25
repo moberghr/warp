@@ -79,16 +79,19 @@ public abstract class NotifierDispatchTestsBase : IAsyncLifetime
         });
         await ctx.SaveChangesAsync(Ct);
 
-        var spy = new SpyNotifier();
+        // The sweep runs inside the server-task host's lock transaction, so it BUFFERS events into
+        // PendingOperationalEvents (the ServerTaskLoop dispatches them post-commit — proven end-to-end in
+        // NotifierPostCommitIntegrationTestsBase). Here we assert the site enqueues the right event.
+        var pending = new PendingOperationalEvents();
         var cleanup = new ExpirationCleanup<TestContext>(
             new TestServerContext(_fixture.CreateContext()),
             TimeProvider.System,
             Options.Create(new WarpServerConfiguration()),
-            TestNotifiers.SpyDispatcher(spy));
+            pending);
 
         await cleanup.CleanupStaleApplicationInstancesAsync(Ct);
 
-        var evt = spy.Received.ShouldHaveSingleItem().ShouldBeOfType<InstanceDownEvent>();
+        var evt = pending.Drain().ShouldHaveSingleItem().ShouldBeOfType<InstanceDownEvent>();
         evt.InstanceId.ShouldBe(instanceId);
         evt.ApplicationName.ShouldBe("publisher-app");
         evt.IsServer.ShouldBeFalse();
@@ -110,17 +113,17 @@ public abstract class NotifierDispatchTestsBase : IAsyncLifetime
         });
         await ctx.SaveChangesAsync(Ct);
 
-        var spy = new SpyNotifier();
+        var pending = new PendingOperationalEvents();
         var cleanup = new ServerCleanup<TestContext>(
             new TestServerContext(_fixture.CreateContext()),
             TimeProvider.System,
             TestTasks.QueriesFor(_fixture.CreateContext()),
             Options.Create(new WarpServerConfiguration()),
-            TestNotifiers.SpyDispatcher(spy));
+            pending);
 
         await cleanup.CleanUpServersAsync(Ct);
 
-        var evt = spy.Received.ShouldHaveSingleItem().ShouldBeOfType<InstanceDownEvent>();
+        var evt = pending.Drain().ShouldHaveSingleItem().ShouldBeOfType<InstanceDownEvent>();
         evt.InstanceId.ShouldBe(serverId);
         evt.ApplicationName.ShouldBe("worker-app");
         evt.IsServer.ShouldBeTrue();

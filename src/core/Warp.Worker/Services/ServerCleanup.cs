@@ -22,20 +22,20 @@ public sealed class ServerCleanup<TContext> : IServerTask
     private readonly TimeProvider _time;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly WarpServerConfiguration _configuration;
-    private readonly WarpNotifierDispatcher _notifier;
+    private readonly PendingOperationalEvents _pendingEvents;
 
     public ServerCleanup(
         IWarpServerContext serverContext,
         TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
         IOptions<WarpServerConfiguration> configuration,
-        WarpNotifierDispatcher notifier)
+        PendingOperationalEvents pendingEvents)
     {
         _context = serverContext.Context;
         _time = time;
         _sqlQueries = sqlQueries;
         _configuration = configuration.Value;
-        _notifier = notifier;
+        _pendingEvents = pendingEvents;
     }
 
     public string Name => "ServerCleanup";
@@ -66,8 +66,10 @@ public sealed class ServerCleanup<TContext> : IServerTask
             ? null
             : await _context.Database.BeginTransactionAsync(ct);
 
-        // Collected during the loop, dispatched post-commit (§8.25) so the InstanceDown event never fires
-        // ahead of a persisted removal a rollback could undo.
+        // Buffered during the loop, dispatched POST-COMMIT by the ServerTaskLoop (§8.25). This method runs
+        // INSIDE the server-task host's lock transaction (LocksWithTransaction), so the SaveChanges + owned-tx
+        // commit below only durably commit once ExecuteAsync returns — a direct dispatch here would fire
+        // pre-commit and could alert on a removal a rollback then undoes.
         var downEvents = new List<InstanceDownEvent>();
 
         var servers = await _sqlQueries.LockAllServersAsync(_context, ct);
@@ -129,10 +131,11 @@ public sealed class ServerCleanup<TContext> : IServerTask
             await ownedTx.CommitAsync(ct);
         }
 
-        // Post-commit: the removals are durable, so surface each as an operational event.
+        // Enqueue for post-commit dispatch by the host (see the note above). On the direct-call path (tests /
+        // admin) ownedTx commits here; on the production path the outer host transaction commits after return.
         foreach (var downEvent in downEvents)
         {
-            await _notifier.DispatchAsync(downEvent, ct);
+            _pendingEvents.Add(downEvent);
         }
 
         return removedCount;

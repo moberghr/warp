@@ -304,7 +304,7 @@ public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
             new TestServerContext(_fixture.CreateContext()),
             TimeProvider.System,
             Options.Create(configuration),
-            TestNotifiers.EmptyDispatcher());
+            TestNotifiers.EmptyPendingEvents());
     }
 
     private WarpServerRegistration<TestContext> CreateServerRegistration(

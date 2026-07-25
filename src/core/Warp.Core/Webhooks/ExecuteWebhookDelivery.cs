@@ -450,7 +450,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
                 Reference = snapshot.Reference,
                 AttemptCount = snapshot.AttemptCount,
             },
-            cancellationToken);
+            CancellationToken.None); // None: don't abandon an already-committed exhaustion alert on shutdown.
     }
 
     // Signs the attempt per the delivery's SigningMode. None adds nothing; StandardWebhooks uses the
