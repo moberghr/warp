@@ -95,10 +95,19 @@ public static class PostgreSqlServiceConfiguration
         // documented extension point exposing the DataSource bound to a DbContext — there is no
         // public alternative. Same pattern Aspire's Npgsql component uses to read this back.
 #pragma warning disable EF1001
-        return dbOptions.Extensions
+        var optionsDataSource = dbOptions.Extensions
             .OfType<NpgsqlOptionsExtension>()
             .FirstOrDefault()?.DataSource as NpgsqlDataSource;
 #pragma warning restore EF1001
+
+        // Prefer the data source EF actually uses for TContext (set only when the DbContext was configured
+        // with UseNpgsql(dataSource)). When it's null — the DbContext was configured with a bare connection
+        // string, or UseNpgsql() with the data source resolved from DI — fall back to a DI-registered
+        // NpgsqlDataSource (Aspire's AddNpgsqlDataSource / AddAzureNpgsqlDataSource, or a manual
+        // AddNpgsqlDataSource). This lets Warp's lock / semaphore / notification / server-context connections
+        // inherit that data source's auth + SSL (RDS IAM tokens, Cloud SQL, client certs) instead of opening
+        // from a raw connection string that lacks them. Without it, a DI-only data source was silently ignored.
+        return optionsDataSource ?? sp.GetService<NpgsqlDataSource>();
     }
 }
 
