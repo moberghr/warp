@@ -308,6 +308,10 @@ The OTel histogram carries exact per-call latency for external backends. The das
 
 Statistics are written as `Counter` rows (per adapter/operation/outcome and per group/outcome, successes included, plus per-outcome duration-sum and latency-bucket counters) that `CounterAggregator` collapses into `Statistic` rows — never a direct `Statistic` write from the call path. Because average latency and the percentiles are read from these aggregates rather than the raw `AdapterCallLog` rows, they stay correct after retention prunes the rows.
 
+### Routing to OpenTelemetry instead of the database
+
+By default the per-call detail lands as `AdapterCallLog` rows and the aggregates as `Counter`→`Statistic` rows in your database. On a hot adapter that write volume is the expensive part. `opt.AddAdapters(o => o.Sink = RecordingSink.Otel)` routes the captured detail onto the adapter `Client` span (as `warp.adapter.*` attributes) and relies on the always-on meters for the aggregates — **no call-log rows and no `Counter` writes**, keeping the database out of the hot path. `Both` does both; `Database` (default) is unchanged. See [Observability sinks](./observability-sinks.md).
+
 ## Multi-application provenance
 
 In a shared-database deployment with [multi-application observability](./applications.md) enabled (`opt.ApplicationName` set), every `AdapterCallLog` row is stamped with the **producing application** — the app that made the call — as a nullable `Application` column, and per-application adapter metrics (calls, error rate, latency) accrue alongside the app-agnostic totals under a disjoint counter-key namespace. The dashboard's global application filter then scopes the Adapters surfaces to one app. When `ApplicationName` is unset the column is `null` and nothing changes.

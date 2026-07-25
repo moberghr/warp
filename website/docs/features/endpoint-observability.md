@@ -110,6 +110,10 @@ Rows are handed to a **bounded in-memory channel** and drained to the database b
 
 Call counts, error rate, **average latency**, and the **latency percentiles** are read from aggregated `Counter`→`Statistic` rows (a duration-sum counter backs the average, a bucket histogram backs the percentiles), so they persist after the raw `EndpointCallLog` rows are cleaned up — the same model jobs and adapters use. The recent-calls list and per-caller last-failure timestamp read the retained rows and degrade to empty/null once logs age out.
 
+## Routing to OpenTelemetry instead of the database
+
+By default the per-request detail lands as `EndpointCallLog` rows and the aggregates as `Counter`→`Statistic` rows in your database. `opt.AddEndpointObservability(o => o.Sink = RecordingSink.Otel)` routes the captured detail onto the ambient ASP.NET request span (as `warp.endpoint.*` attributes) and relies on the always-on `warp.endpoint.*` meters for the aggregates — **no call-log rows and no `Counter` writes**, keeping the database out of the hot path. `Both` does both; `Database` (default) is unchanged. See [Observability sinks](./observability-sinks.md).
+
 ## Retention
 
 `EndpointCallLog` rows are cleaned up by `ExpirationCleanup` on **both** an age cap and a count cap, whichever trims first:
@@ -129,4 +133,4 @@ Dashboard-only / publisher-only processes resolve `IEndpointQueryService` (regis
 
 ## Not in scope
 
-Endpoint observability records diagnostics, not an audit trail (same stance as `AdapterCallLog` / `JobLog`): the raw call rows are lossy under load (a full buffer drops the record, never blocking the request), and there is no per-request guaranteed delivery. The **aggregate metrics** (counts, error rate, latency percentiles) are exact regardless. For high-volume export, use the OpenTelemetry ASP.NET Core instrumentation alongside it.
+Endpoint observability records diagnostics, not an audit trail (same stance as `AdapterCallLog` / `JobLog`): the raw call rows are lossy under load (a full buffer drops the record, never blocking the request), and there is no per-request guaranteed delivery. The **aggregate metrics** (counts, error rate, latency percentiles) are exact regardless. For high-volume export, route the surface to OpenTelemetry with `Sink = RecordingSink.Otel` (see [Observability sinks](./observability-sinks.md)) — or run the standard OpenTelemetry ASP.NET Core instrumentation alongside it.
