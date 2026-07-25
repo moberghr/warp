@@ -181,7 +181,8 @@ public static class TestTasks
         return new ExpirationCleanup<TContext>(
             new TestServerContext(context),
             timeProvider,
-            Options.Create(new WarpServerConfiguration { ExpirationBatchSize = batchSize }));
+            Options.Create(new WarpServerConfiguration { ExpirationBatchSize = batchSize }),
+            TestNotifiers.EmptyDispatcher());
     }
 
     public static ServerCleanup<TContext> CreateServerCleanup<TContext>(
@@ -194,6 +195,7 @@ public static class TestTasks
             new TestServerContext(context),
             timeProvider,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),
-            Options.Create(new WarpServerConfiguration { HealthCheckTimeout = healthCheckTimeout }));
+            Options.Create(new WarpServerConfiguration { HealthCheckTimeout = healthCheckTimeout }),
+            TestNotifiers.EmptyDispatcher());
     }
 }

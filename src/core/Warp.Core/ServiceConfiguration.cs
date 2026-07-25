@@ -20,6 +20,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Interceptors;
 using Warp.Core.Logging;
 using Warp.Core.Notifications;
+using Warp.Core.Notifiers;
 using Warp.Core.Services;
 using Warp.Core.Webhooks;
 
@@ -212,6 +213,12 @@ public static class ServiceConfiguration
         // server-task loops and the dashboard broadcaster subscribe to its channels at host
         // construction; with no subscribers the SignalXxx calls are cheap no-ops.
         services.TryAddSingleton<ServerTaskSignals<TContext>>();
+
+        // Operational-event notifier fan-out. Registered by AddWarp (not AddWarpServer) so every dispatch
+        // site — the webhook executor, the saga command service, the server-side stale sweep — resolves it,
+        // and so it works in any AddWarp process. Non-generic + guarded: with no IWarpNotifier registered
+        // (opt.AddNotifier<T>()), DispatchAsync is a cheap no-op. See Warp.Core.Notifiers.
+        services.TryAddSingleton<WarpNotifierDispatcher>();
 
         // Fail-fast model validation at host startup (plain IHostedService → awaited to completion
         // before the app starts). AddHostedService dedups via TryAddEnumerable, so the second AddWarp

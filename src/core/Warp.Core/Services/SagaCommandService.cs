@@ -1,6 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warp.Core.Data.Entities;
+using Warp.Core.Enums;
+using Warp.Core.Logging;
+using Warp.Core.Notifiers;
 using Warp.Core.Sagas;
 
 namespace Warp.Core.Services;
@@ -42,15 +45,18 @@ public class SagaCommandService<TContext> : ISagaCommandService
 {
     private readonly TContext _context;
     private readonly IWarpLockProvider _lockProvider;
+    private readonly WarpNotifierDispatcher _notifier;
     private readonly ILogger<SagaCommandService<TContext>> _logger;
 
     public SagaCommandService(
         TContext context,
         IWarpLockProvider lockProvider,
+        WarpNotifierDispatcher notifier,
         ILogger<SagaCommandService<TContext>> logger)
     {
         _context = context;
         _lockProvider = lockProvider;
+        _notifier = notifier;
         _logger = logger;
     }
 
@@ -127,6 +133,23 @@ public class SagaCommandService<TContext> : ISagaCommandService
             fresh.Type,
             fresh.CorrelationKey,
             links.Count);
+
+        // Post-commit operational event (§8.25). Fires after the saga row is gone; guarded by the dispatcher.
+        await _notifier.DispatchAsync(
+            new SagaForceCompletedEvent
+            {
+                Type = WarpEventType.SagaForceCompleted,
+                Severity = WarpEventSeverity.Info,
+                TimestampUtc = now,
+                MachineName = Environment.MachineName,
+                Application = WarpTelemetry.ApplicationName,
+                Message = $"Saga {sagaId} (type {fresh.Type}) force-completed by operator; {links.Count} link(s) removed.",
+                SagaId = sagaId,
+                SagaType = fresh.Type,
+                CorrelationKey = fresh.CorrelationKey,
+                LinkCount = links.Count,
+            },
+            CancellationToken.None);
 
         return true;
     }

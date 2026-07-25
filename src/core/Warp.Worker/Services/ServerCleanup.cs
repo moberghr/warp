@@ -3,6 +3,9 @@ using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
+using Warp.Core.Enums;
+using Warp.Core.Logging;
+using Warp.Core.Notifiers;
 
 namespace Warp.Worker.Services;
 
@@ -19,17 +22,20 @@ public sealed class ServerCleanup<TContext> : IServerTask
     private readonly TimeProvider _time;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly WarpServerConfiguration _configuration;
+    private readonly WarpNotifierDispatcher _notifier;
 
     public ServerCleanup(
         IWarpServerContext serverContext,
         TimeProvider time,
         IWarpSqlQueries<TContext> sqlQueries,
-        IOptions<WarpServerConfiguration> configuration)
+        IOptions<WarpServerConfiguration> configuration,
+        WarpNotifierDispatcher notifier)
     {
         _context = serverContext.Context;
         _time = time;
         _sqlQueries = sqlQueries;
         _configuration = configuration.Value;
+        _notifier = notifier;
     }
 
     public string Name => "ServerCleanup";
@@ -60,6 +66,10 @@ public sealed class ServerCleanup<TContext> : IServerTask
             ? null
             : await _context.Database.BeginTransactionAsync(ct);
 
+        // Collected during the loop, dispatched post-commit (§8.25) so the InstanceDown event never fires
+        // ahead of a persisted removal a rollback could undo.
+        var downEvents = new List<InstanceDownEvent>();
+
         var servers = await _sqlQueries.LockAllServersAsync(_context, ct);
         foreach (var server in servers)
         {
@@ -67,6 +77,20 @@ public sealed class ServerCleanup<TContext> : IServerTask
             {
                 continue;
             }
+
+            downEvents.Add(new InstanceDownEvent
+            {
+                Type = WarpEventType.InstanceDown,
+                Severity = WarpEventSeverity.Warning,
+                TimestampUtc = now,
+                MachineName = Environment.MachineName,
+                Application = WarpTelemetry.ApplicationName,
+                Message = $"Server {server.ServerName} ({server.Application ?? "unassigned"}) went down (heartbeat lapsed, last seen {server.LastHeartbeatTime:o}).",
+                InstanceId = server.Id,
+                ApplicationName = server.Application ?? server.ServerName,
+                LastSeenAt = server.LastHeartbeatTime,
+                IsServer = true,
+            });
 
             var workers = await _context.Set<Warp.Core.Data.Entities.Worker>()
                 .Where(x => x.ServerId == server.Id)
@@ -103,6 +127,12 @@ public sealed class ServerCleanup<TContext> : IServerTask
         if (ownedTx != null)
         {
             await ownedTx.CommitAsync(ct);
+        }
+
+        // Post-commit: the removals are durable, so surface each as an operational event.
+        foreach (var downEvent in downEvents)
+        {
+            await _notifier.DispatchAsync(downEvent, ct);
         }
 
         return removedCount;

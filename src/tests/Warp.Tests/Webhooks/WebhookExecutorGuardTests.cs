@@ -30,6 +30,7 @@ public class WebhookExecutorGuardTests
             customSigners: [],
             adapters: null!,
             adapterRegistry: null!,
+            notifier: Warp.Tests.Helpers.TestNotifiers.EmptyDispatcher(),
             logger: NullLogger<ExecuteWebhookDeliveryHandler<FaultingContext>>.Instance);
 
         await Should.NotThrowAsync(async () =>

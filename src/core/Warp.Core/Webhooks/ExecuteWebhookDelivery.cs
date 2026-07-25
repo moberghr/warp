@@ -10,6 +10,7 @@ using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
 using Warp.Core.NoRestart;
+using Warp.Core.Notifiers;
 
 namespace Warp.Core.Webhooks;
 
@@ -58,6 +59,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
     private readonly IEnumerable<IWebhookSigner> _customSigners;
     private readonly IWarpAdapters _adapters;
     private readonly AdapterRegistry _adapterRegistry;
+    private readonly WarpNotifierDispatcher _notifier;
     private readonly ILogger<ExecuteWebhookDeliveryHandler<TContext>> _logger;
 
     public ExecuteWebhookDeliveryHandler(
@@ -70,6 +72,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         IEnumerable<IWebhookSigner> customSigners,
         IWarpAdapters adapters,
         AdapterRegistry adapterRegistry,
+        WarpNotifierDispatcher notifier,
         ILogger<ExecuteWebhookDeliveryHandler<TContext>> logger)
     {
         _context = context;
@@ -81,6 +84,7 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
         _customSigners = customSigners;
         _adapters = adapters;
         _adapterRegistry = adapterRegistry;
+        _notifier = notifier;
         _logger = logger;
     }
 
@@ -425,6 +429,28 @@ internal sealed class ExecuteWebhookDeliveryHandler<TContext> : IJobHandler<Exec
                 _logger.LogWarning(ex, "IWebhookDeliveryExhaustedHandler threw for delivery {DeliveryId}; delivery stays Exhausted.", delivery.Id);
             }
         }
+
+        // Also surface the exhaustion as a generic operational event (§8.25). The webhook-specific handler
+        // above and this notifier coexist: the former is a webhook integration hook, the latter the
+        // process-wide alerting seam. Same redaction-safe snapshot; the dispatcher guards each notifier.
+        await _notifier.DispatchAsync(
+            new WebhookDeliveryExhaustedEvent
+            {
+                Type = WarpEventType.WebhookDeliveryExhausted,
+                Severity = WarpEventSeverity.Warning,
+                TimestampUtc = _timeProvider.GetUtcNow().UtcDateTime,
+                MachineName = Environment.MachineName,
+                Application = WarpTelemetry.ApplicationName,
+                Message = $"Webhook delivery {snapshot.DeliveryId} to {snapshot.GroupName ?? snapshot.Url} exhausted after {snapshot.AttemptCount} attempt(s).",
+                DeliveryId = snapshot.DeliveryId,
+                EventType = snapshot.EventType,
+                EventId = snapshot.EventId,
+                Url = snapshot.Url,
+                GroupName = snapshot.GroupName,
+                Reference = snapshot.Reference,
+                AttemptCount = snapshot.AttemptCount,
+            },
+            cancellationToken);
     }
 
     // Signs the attempt per the delivery's SigningMode. None adds nothing; StandardWebhooks uses the

@@ -5,6 +5,8 @@ using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Logging;
+using Warp.Core.Notifiers;
 
 namespace Warp.Worker.Services;
 
@@ -19,17 +21,20 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly WarpServerConfiguration _configuration;
+    private readonly WarpNotifierDispatcher _notifier;
     private readonly IEnumerable<WarpBackgroundService> _backgroundServices;
 
     public ExpirationCleanup(
         IWarpServerContext serverContext,
         TimeProvider time,
         IOptions<WarpServerConfiguration> configuration,
+        WarpNotifierDispatcher notifier,
         IEnumerable<WarpBackgroundService>? backgroundServices = null)
     {
         _context = serverContext.Context;
         _time = time;
         _configuration = configuration.Value;
+        _notifier = notifier;
         _backgroundServices = backgroundServices ?? [];
     }
 
@@ -604,6 +609,28 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
             _context.Set<ApplicationInstance>().RemoveRange(stale);
             await _context.SaveChangesAsync(ct);
+
+            // Post-commit operational events (§8.25): one InstanceDown per reaped non-server instance. Fired
+            // after the delete commits; the dispatcher guards each notifier. IsServer=false — stale worker
+            // servers are reported separately from ServerCleanup.
+            foreach (var instance in stale)
+            {
+                await _notifier.DispatchAsync(
+                    new InstanceDownEvent
+                    {
+                        Type = WarpEventType.InstanceDown,
+                        Severity = WarpEventSeverity.Warning,
+                        TimestampUtc = now,
+                        MachineName = Environment.MachineName,
+                        Application = WarpTelemetry.ApplicationName,
+                        Message = $"Application instance {instance.Id} ({instance.ApplicationName}) went down (heartbeat lapsed, last seen {instance.LastHeartbeatAt:o}).",
+                        InstanceId = instance.Id,
+                        ApplicationName = instance.ApplicationName,
+                        LastSeenAt = instance.LastHeartbeatAt,
+                        IsServer = false,
+                    },
+                    ct);
+            }
 
             total += stale.Count;
 
