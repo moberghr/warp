@@ -34,6 +34,14 @@ public interface IWarpNotificationTransport
     /// host startup and the listener's <c>ListenAsync</c> call. Once set, stays set for the
     /// transport's lifetime — reconnect drops are handled by the listener task's reconnect
     /// drain, not by re-arming this signal.
+    /// <para>
+    /// <b>Default interface member</b> (non-breaking): a custom <see cref="IWarpNotificationTransport"/> that
+    /// does not implement it reports ready immediately (<see cref="Task.CompletedTask"/>) — the behaviour
+    /// before this signal existed; missed notifications are still caught by the listener's drain-on-reconnect.
+    /// The built-in Postgres / SQL Server transports override it with a real readiness signal. (It was added
+    /// as a required member in an earlier release; softened to a default member here so it never breaks an
+    /// external transport implementation.)
+    /// </para>
     /// </summary>
-    Task ListenerReady { get; }
+    Task ListenerReady => Task.CompletedTask;
 }
