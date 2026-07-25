@@ -4,6 +4,74 @@ sidebar_position: 6
 
 # Releases
 
+## 3.6.0
+
+*2026-07-26*
+
+Additive minor release — no breaking API changes. A new operational-event notifier seam, plus three fixes (one a 3.5.0 regression). No schema change.
+
+### Operational notifications — `IWarpNotifier`
+
+Warp hands operational events it already detects — a webhook delivery exhausting, a saga force-completed, an application instance or worker server going down — to a host-implemented `IWarpNotifier`, **post-commit** and as a **redaction-safe snapshot** (identity/metadata only, never a payload body). The host decides what to do (Teams, Slack, email, page, log); Warp ships **no** channel integrations — it's a pure seam, the mirror of `IWebhookDeliveryExhaustedHandler`. Alerting (Warp telling *you* something is wrong) is distinct from webhooks (your app telling *external subscribers* about domain events).
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddNotifier<TeamsNotifier>();   // several coexist; each receives every event; none registered ⇒ inert
+});
+```
+
+Events are **not persisted** (no notification outbox) — delivery to your sink is best-effort (dropped on a crash in the commit→dispatch window, or if the notifier is down); only `WebhookDeliveryExhausted` is re-emitted on the executor's crash-recovery. A new default-no-op `IServerTask.OnCommittedAsync(ct)` hook lets server tasks dispatch strictly post-commit. See **[Operational notifications](./features/operational-notifications.md)**.
+
+### Fixed
+
+- **`UsePostgreSql()` now prefers a DI-registered `NpgsqlDataSource`.** When the DbContext carries only a connection string but an `NpgsqlDataSource` is registered in DI (Aspire `AddNpgsqlDataSource` / `AddAzureNpgsqlDataSource`, AWS RDS IAM, Cloud SQL, client-cert setups), Warp's lock / semaphore / notification / server-context connections now inherit it instead of silently opening from a raw connection string that drops those auth + SSL settings.
+- **Webhook executor no longer breaks `dotnet ef` / ASP.NET Core startup in Development (3.5.0 regression).** `AddWarp` wires the always-on webhook executor, which resolves `IHttpClientFactory`; Core now calls `AddHttpClient` so a plain `AddWarp` process (no `AddAdapters`) passes `ValidateOnBuild` instead of failing to construct the handler.
+- **`IWarpNotificationTransport.ListenerReady` is now a default interface member.** It was added as a *required* member in an earlier release (source-breaking for custom transports); it now defaults to `Task.CompletedTask`, so an external transport implementation compiles without it. The built-in Postgres / SQL Server transports keep their real readiness signal.
+
+## 3.5.0
+
+*2026-07-25*
+
+Additive minor release — no breaking API changes, no schema change. Everything Warp records per call (adapter calls, inbound endpoint requests) and per job (execution metrics) can now be routed to your **database** (default), to **OpenTelemetry**, or to **both** — so a high-throughput deployment can take the diagnostics firehose off its database.
+
+### Observability sinks — `RecordingSink`
+
+`RecordingSink { Database = 1, Otel = 2, Both = 3 }` (`Warp.Core.Observability`), default `Database` ⇒ byte-for-byte current behavior.
+
+- **`opt.AddAdapters(o => o.Sink = …)`** and **`opt.AddEndpointObservability(o => o.Sink = …)`** — `Database` writes call-log rows + `Counter`→`Statistic` aggregates (unchanged); `Otel` writes **neither** and instead enriches the span Warp already emits with the captured detail as span attributes (`warp.adapter.*` on the outbound `Client` span, `warp.endpoint.*` on the ambient inbound request span); `Both` does both.
+- **`WarpConfiguration.JobMetricsSink`** — the equivalent switch for per-job-type/handler execution metrics: `Otel` skips their `jobstat` `Counter` writes on the finalization path (the perf win), since the meters carry the same data.
+- **Meters added / extended** (always-on, null-listener, low-cardinality tags): `warp.endpoint.calls` / `warp.endpoint.duration`, `warp.job.execution.total` / `warp.job.execution.duration`, and an `application` tag on `warp.adapter.*`.
+
+Detail rides the span, **not** a parallel log stream: span attributes are set only when the span is sampled in (`Activity.IsAllDataRequested`), so one consistent trace-sampling decision governs the whole call, and captured payloads travel on the trace exporter only — never the `ILogger` provider chain (§1.2). The always-on meters are never sampled, so counts / error-rate / latency stay exact regardless. See **[Observability sinks](./features/observability-sinks.md)**.
+
+## 3.4.0
+
+*2026-07-24*
+
+Additive minor release — no breaking API changes, no schema change. Saga ergonomics + an outbox diagnostic, from a saga-feature trial.
+
+- **`SagaTestHarness<TContext>`** (`Warp.Core.Sagas.Testing`) — exercise saga correlation / create / converge / complete / dead-letter / timeout **without a worker**, in the fast test tier (SQLite in-memory). `DispatchAsync` → `SagaDispatchOutcome`; `GetSagaAsync` / `CountAsync` for assertions.
+- **`InProcessLockProvider` + `opt.UseInProcessLock()`** — a single-process `IWarpLockProvider` that satisfies `AddSagas()` without a DB provider (tests + single-process / mediator-only hosts; not for multi-server).
+- **`WarpConfiguration.WarnOnUnsavedStagedJobs`** (default on) — Publisher / BatchPublisher warn when a scope stages jobs via `IPublisher` but ends without `SaveChangesAsync` (the silent outbox footgun). Skips worker handler scopes; count-only; never throws.
+
+## 3.3.0
+
+*2026-07-24*
+
+Additive minor release. Multi-application observability for **shared-database** deployments — opt-in via `WarpConfiguration.ApplicationName` (null ⇒ unchanged behavior). Distinguish and filter by which application created a job, made an adapter call, owns an endpoint, or sent a webhook, and see every process (server or not) in one **Applications** view — without changing execution or routing.
+
+:::warning Schema change — generate a migration
+This release adds two tables (`application_instance`, `application_instance_log`) and seven nullable columns. It is **100% additive** — no drops or renames — picked up by the standard `dotnet ef migrations add / database update`. Legacy rows read as "(unassigned)"; rolling-deploy safe (old processes ignore the new columns/tables).
+:::
+
+- **Application registry:** `ApplicationInstance` (non-server processes, via a lightweight `AddWarp` heartbeat host) + `Application` / `Version` / `Environment` on `Server`. Unified dashboard `InstanceView` (servers ∪ non-server instances) — the renamed **Applications** page.
+- **Provenance:** nullable `Application` on `Job` (the publishing app, preserved on requeue), `AdapterCallLog`, `EndpointCallLog`, `WebhookDelivery`; a global `application` filter on Jobs / Adapters / Endpoints.
+- **Per-app metrics:** adapter + endpoint metrics under disjoint `adapter-app` / `endpoint-app` counter namespaces, and per-job-**type** + per-**handler** execution metrics attributed to the **executor** app — all fold to `Statistic` and survive raw-row cleanup.
+- **DB-push listener moved to `Warp.Core`** (via the `IDispatcherWake` seam) so non-server dashboard / publisher processes receive cross-process events and drive realtime push.
+- `warp.application` OTel span attribute; `IApplicationQueryService` + `/api/applications*`. See **[Applications](./features/applications.md)**.
+
 ## 3.2.0
 
 *2026-07-22*
