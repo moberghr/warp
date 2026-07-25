@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Endpoints;
+using Warp.Core.Observability;
 
 namespace Warp.Http.Observability;
 
@@ -14,7 +15,7 @@ namespace Warp.Http.Observability;
 /// options; <c>UseWarpHttpObservability</c> (after <c>UseRouting</c>, before the endpoints run) installs the
 /// middleware. The read service <c>IEndpointQueryService</c> is always registered by <c>AddWarp</c>, so the
 /// dashboard serves <c>/api/endpoints</c> even in processes that don't record; this method gates the
-/// recorder/flusher/middleware and the addons flag (keyed on <see cref="IEndpointCallRecorder"/> presence).
+/// recorder/flusher/middleware and the addons flag (keyed on <see cref="IEndpointObservabilityMarker"/>).
 /// </summary>
 public static class EndpointObservabilityServiceConfiguration
 {
@@ -24,18 +25,32 @@ public static class EndpointObservabilityServiceConfiguration
     {
         ArgumentNullException.ThrowIfNull(builder);
 
-        // Singleton bounded-channel recorder (persists across scopes); IEndpointCallRecorder resolves to the
-        // same instance and doubles as the addons-flag marker (only this method registers it).
-        builder.Services.TryAddSingleton(x => new DbEndpointCallRecorder(
-            x.GetRequiredService<IOptions<WarpConfiguration>>().Value.CallLogBufferCapacity));
-        builder.Services.TryAddSingleton<IEndpointCallRecorder>(x => x.GetRequiredService<DbEndpointCallRecorder>());
+        // The recorder/channel is a SINGLE per-process singleton, so the sink is a process-level choice:
+        // build a throwaway options bag, apply the caller's config, and read Sink to select the recorder.
+        var options = new WarpEndpointObservabilityOptions();
+        configure?.Invoke(options);
+        var sink = options.Sink;
 
-        // The flusher drains the channel onto the user's TContext (§0.5). AddEndpointObservability is
-        // non-generic, but the concrete builder is always an IWarpBuilder<TContext>; recover TContext and
-        // register the closed generic flusher as a hosted service.
         var contextType = ResolveContextType(builder);
-        var flusherType = typeof(EndpointCallFlusher<>).MakeGenericType(contextType);
-        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IHostedService), flusherType));
+
+        // Presence marker for the dashboard "endpoints" flag, registered regardless of sink (the middleware
+        // observes under every sink; under Otel the detail rides the request span, §8.24). Keyed on this
+        // rather than IEndpointCallRecorder, which is absent under Otel-only.
+        builder.Services.TryAddSingleton<IEndpointObservabilityMarker, EndpointObservabilityMarker>();
+
+        // Database / Both: the DB-backed recorder owns the bounded channel + the flusher drains it onto the
+        // user's TContext (§0.5). Under Otel-only NEITHER is registered — no DB rows and no Counter-aggregate
+        // writes for this surface: the middleware enriches the ambient request span with the captured detail
+        // and the OTel meters carry the aggregates (§8.24). The middleware takes the recorder optionally.
+        if (sink is RecordingSink.Database or RecordingSink.Both)
+        {
+            builder.Services.TryAddSingleton(x => new DbEndpointCallRecorder(
+                x.GetRequiredService<IOptions<WarpConfiguration>>().Value.CallLogBufferCapacity));
+            builder.Services.TryAddSingleton<IEndpointCallRecorder>(x => x.GetRequiredService<DbEndpointCallRecorder>());
+
+            var flusherType = typeof(EndpointCallFlusher<>).MakeGenericType(contextType);
+            builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IHostedService), flusherType));
+        }
 
         if (configure is not null)
         {

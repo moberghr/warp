@@ -13,6 +13,7 @@ using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
 using Warp.Core.Notifications;
+using Warp.Core.Observability;
 using Warp.Core.Services;
 using Warp.Worker.Logging;
 using Warp.Worker.Services;
@@ -541,12 +542,27 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         {
             job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
             AddCounters(context, "stats:succeeded", $"stats:succeeded:{hourSuffix}");
-            AddJobStatsCounters(context, job, JobStatsKeys.SucceededToken, durationMs, hourSuffix);
+
+            // Always-on execution meters (null-listener, zero cost) — emitted regardless of JobMetricsSink.
+            WarpTelemetry.RecordJobExecution(job.Type, job.HandlerType, JobStatsKeys.SucceededToken, durationMs, _configuration.ApplicationName);
+
+            // jobstat Counter rows back the dashboard's per-type/per-handler aggregates; skipped under the
+            // Otel sink (the meters carry the data) — the finalization-path perf win. Counter writes only.
+            if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
+            {
+                AddJobStatsCounters(context, job, JobStatsKeys.SucceededToken, durationMs, hourSuffix);
+            }
         }
         else if (state == State.Failed)
         {
             AddCounters(context, "stats:failed", $"stats:failed:{hourSuffix}");
-            AddJobStatsCounters(context, job, JobStatsKeys.FailedToken, durationMs, hourSuffix);
+
+            WarpTelemetry.RecordJobExecution(job.Type, job.HandlerType, JobStatsKeys.FailedToken, durationMs, _configuration.ApplicationName);
+
+            if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
+            {
+                AddJobStatsCounters(context, job, JobStatsKeys.FailedToken, durationMs, hourSuffix);
+            }
         }
         else if (state == State.Deleted)
         {

@@ -31,6 +31,7 @@ internal sealed class WarpAdapters : IWarpAdapters
     private readonly IAdapterCallRecorder _recorder;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<WarpAdapters> _logger;
+    private readonly bool _enrichSpanDetail;
 
     // Ordinal (case-SENSITIVE) so in-memory per-adapter state agrees with the case-sensitive DB rows and
     // counter keys — case variants are independent adapters everywhere (see AdapterName.Validate).
@@ -40,12 +41,17 @@ internal sealed class WarpAdapters : IWarpAdapters
         AdapterRegistry registry,
         IAdapterCallRecorder recorder,
         TimeProvider timeProvider,
-        ILogger<WarpAdapters> logger)
+        ILogger<WarpAdapters> logger,
+        IEnumerable<AdapterRecordingSettings> recordingSettings)
     {
         _registry = registry;
         _recorder = recorder;
         _timeProvider = timeProvider;
         _logger = logger;
+
+        // Optional-marker pattern (§2.9): AddAdapters() registers a single AdapterRecordingSettings carrying
+        // the process-level sink choice. Absent (AddWarp-only telemetry, no AddAdapters) ⇒ no span enrichment.
+        _enrichSpanDetail = recordingSettings.FirstOrDefault()?.EnrichSpanDetail ?? false;
     }
 
     public AdapterCallScope BeginCall(string adapter, string operation, string? group = null)
@@ -66,7 +72,8 @@ internal sealed class WarpAdapters : IWarpAdapters
             _recorder,
             _timeProvider,
             _logger,
-            activity);
+            activity,
+            _enrichSpanDetail);
     }
 
     private AdapterState CreateState(string adapter)
@@ -90,6 +97,13 @@ internal sealed class WarpAdapters : IWarpAdapters
         public CardinalityGuard GroupGuard { get; }
     }
 }
+
+/// <summary>
+/// Process-level recording settings for adapters, registered once by <c>AddAdapters()</c> and injected via
+/// the optional-marker pattern (§2.9). Carries the sink-derived decision to enrich the adapter Client span
+/// with the captured call detail (<c>RecordingSink.Otel</c>/<c>Both</c>) rather than write a DB row.
+/// </summary>
+internal sealed record AdapterRecordingSettings(bool EnrichSpanDetail);
 
 /// <summary>
 /// Holds the per-adapter <see cref="WarpAdapterOptions"/> registered at configuration time. Adapters

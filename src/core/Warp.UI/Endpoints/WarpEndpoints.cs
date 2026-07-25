@@ -149,7 +149,7 @@ public static class WarpEndpoints
             [FromServices] IDashboardPushMarker? push,
             [FromServices] ISagaQueryService? sagas,
             [FromServices] IAdapterRecordingMarker? adapters,
-            [FromServices] IEndpointCallRecorder? endpoints,
+            [FromServices] IEndpointObservabilityMarker? endpoints,
             [FromServices] IWebhookRedeliveryEnqueuer? webhooks,
             [FromServices] IOptions<WarpConfiguration> configuration) =>
             Results.Ok(new WarpAddonsInfo
@@ -163,9 +163,9 @@ public static class WarpEndpoints
                 // registered by AddWarp for dashboard-only processes) can't gate the flag.
                 Adapters = adapters is not null,
 
-                // IEndpointCallRecorder is registered only by AddEndpointObservability(); IEndpointQueryService
-                // (always registered by AddWarp for dashboard-only processes) can't gate the flag. The
-                // endpoints nav shows only where inbound requests are actually being recorded.
+                // IEndpointObservabilityMarker is registered only by AddEndpointObservability() (regardless of
+                // sink); IEndpointQueryService (always registered by AddWarp for dashboard-only processes)
+                // can't gate the flag. The endpoints nav shows wherever inbound requests are being observed.
                 Endpoints = endpoints is not null,
 
                 // IWebhookRedeliveryEnqueuer is registered only by AddWebhooks(); IWebhookQueryService /

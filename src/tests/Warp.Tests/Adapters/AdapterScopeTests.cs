@@ -307,7 +307,7 @@ public class AdapterScopeTests
         using var listener = AdapterTestHarness.StartCounterListener("warp.adapter.records_dropped", adapterName, value => dropped += value);
 
         var recorder = new DbAdapterCallRecorder(capacity: 1);
-        var adapters = new WarpAdapters(new AdapterRegistry(), recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance);
+        var adapters = new WarpAdapters(new AdapterRegistry(), recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance, []);
 
         adapters.BeginCall(adapterName, "GetOrders").Succeed();
         adapters.BeginCall(adapterName, "GetOrders").Succeed();
@@ -329,7 +329,7 @@ public class AdapterScopeTests
         // The handler calls Fail(ex) inside its catch block; an unguarded recorder throw here would replace
         // the caller's real transport exception. Complete must swallow the recorder exception and let the
         // original propagate.
-        var adapters = new WarpAdapters(new AdapterRegistry(), new ThrowingRecorder(), TimeProvider.System, NullLogger<WarpAdapters>.Instance);
+        var adapters = new WarpAdapters(new AdapterRegistry(), new ThrowingRecorder(), TimeProvider.System, NullLogger<WarpAdapters>.Instance, []);
         var original = new InvalidOperationException("real transport failure");
 
         var caught = Should.Throw<InvalidOperationException>(() =>
@@ -424,7 +424,7 @@ internal static class AdapterTestHarness
         }
 
         var recorder = new CapturingRecorder();
-        var adapters = new WarpAdapters(registry, recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance);
+        var adapters = new WarpAdapters(registry, recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance, []);
 
         return (adapters, recorder, registry);
     }

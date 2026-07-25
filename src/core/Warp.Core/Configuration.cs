@@ -1,5 +1,6 @@
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
+using Warp.Core.Observability;
 
 namespace Warp.Core;
 
@@ -150,6 +151,21 @@ public class WarpConfiguration
     /// <c>null</c> (default) disables the count cap.
     /// </summary>
     public int? EndpointCallLogRetentionCount { get; set; }
+
+    /// <summary>
+    /// Where per-job-TYPE / per-HANDLER execution aggregate <b>metrics</b> are written. The OTel
+    /// <c>warp.job.execution.*</c> meters (§2.15) emit <b>unconditionally</b> regardless of this setting
+    /// (null-listener ⇒ zero cost); this knob only gates the write-optimised <c>jobstat</c> <c>Counter</c>
+    /// rows that back the dashboard's per-type/per-handler aggregates.
+    /// <list type="bullet">
+    ///   <item><see cref="RecordingSink.Database"/> (default) / <see cref="RecordingSink.Both"/> — write the
+    ///     <c>jobstat</c> Counter rows at finalization, exactly as before (byte-for-byte current behavior).</item>
+    ///   <item><see cref="RecordingSink.Otel"/> — SKIP the <c>jobstat</c> Counter writes on the worker
+    ///     finalization path (an OTel-only user reconstructs count / error-rate / latency / per-app from the
+    ///     always-on meters instead). The app-agnostic lifecycle <c>stats:*</c> counters are unaffected.</item>
+    /// </list>
+    /// </summary>
+    public RecordingSink JobMetricsSink { get; set; } = RecordingSink.Database;
 
     /// <summary>
     /// Opt-in logical application name for multi-application observability on a shared database. When set,

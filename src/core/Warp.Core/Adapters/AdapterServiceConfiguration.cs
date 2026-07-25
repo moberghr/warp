@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Warp.Core.Observability;
 
 namespace Warp.Core.Adapters;
 
@@ -29,29 +30,50 @@ internal sealed class AdapterRecordingMarker : IAdapterRecordingMarker;
 
 public static class AdapterServiceConfiguration
 {
-    public static IWarpBuilder AddAdapters(this IWarpBuilder builder)
+    public static IWarpBuilder AddAdapters(this IWarpBuilder builder, Action<WarpAdapterOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
 
+        // The recording channel/recorder is a SINGLE per-process singleton, so the sink is a process-level
+        // choice: build a throwaway options bag, apply the caller's config, and read Sink to select the
+        // recorder wiring. Other WarpAdapterOptions fields are per-adapter (set via AddAdapter) and ignored here.
+        var options = new WarpAdapterOptions();
+        configure?.Invoke(options);
+        var sink = options.Sink;
+
         // Presence marker for the dashboard "adapters" flag (AddWarp now always registers IWarpAdapters for
-        // unconditional telemetry, so it can no longer gate the flag — this can).
+        // unconditional telemetry, so it can no longer gate the flag — this can). Registered regardless of
+        // sink so the nav flag reports "recording enabled" even under Otel-only.
         builder.Services.TryAddSingleton<IAdapterRecordingMarker, AdapterRecordingMarker>();
 
-        // Singletons so per-adapter cardinality state + the bounded recording channel persist across
-        // calls. TryAdd throughout so a second AddAdapters() is a no-op. The DB-backed recorder owns
-        // the channel; IAdapterCallRecorder resolves to the same instance.
+        // Process-level recording settings for WarpAdapters (optional-marker pattern §2.9). Under Otel/Both
+        // the captured call detail is attached to the adapter Client span instead of a DB row (§8.24); under
+        // Database-only the span carries identity/outcome only and the detail goes to AdapterCallLog.
+        builder.Services.AddSingleton(new AdapterRecordingSettings(sink is RecordingSink.Otel or RecordingSink.Both));
+
+        // Singletons so per-adapter cardinality state persists across calls. TryAdd throughout so a second
+        // AddAdapters() is a no-op.
         builder.Services.TryAddSingleton<AdapterRegistry>();
-        builder.Services.TryAddSingleton(x => new DbAdapterCallRecorder(
-            x.GetRequiredService<IOptions<WarpConfiguration>>().Value.CallLogBufferCapacity));
-        builder.Services.TryAddSingleton<IAdapterCallRecorder>(x => x.GetRequiredService<DbAdapterCallRecorder>());
         builder.Services.TryAddSingleton<IWarpAdapters, WarpAdapters>();
 
-        // The flusher drains the recorder channel onto the user's TContext (§0.5 scope). AddAdapters is
-        // non-generic, but the concrete builder is always an IWarpBuilder<TContext>; recover TContext
-        // from it and register the closed generic flusher. TryAddEnumerable dedups on the closed type.
+        // AddAdapters is non-generic, but the concrete builder is always an IWarpBuilder<TContext>; recover
+        // TContext from it (used by the flusher and the rate limiter closed generics).
         var contextType = ResolveContextType(builder);
-        var flusherType = typeof(AdapterCallFlusher<>).MakeGenericType(contextType);
-        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IHostedService), flusherType));
+
+        // Database / Both: the DB-backed recorder owns the bounded channel + the flusher drains it onto the
+        // user's TContext (§0.5 scope). TryAddEnumerable dedups the flusher on the closed type. Under
+        // Otel-only NEITHER is registered — no DB rows and no Counter-aggregate writes for this surface
+        // (the call detail rides the adapter Client span and aggregates come from the OTel meters instead,
+        // §8.24). IAdapterCallRecorder falls back to Core's NullAdapterCallRecorder in that case.
+        if (sink is RecordingSink.Database or RecordingSink.Both)
+        {
+            builder.Services.TryAddSingleton(x => new DbAdapterCallRecorder(
+                x.GetRequiredService<IOptions<WarpConfiguration>>().Value.CallLogBufferCapacity));
+            builder.Services.TryAddSingleton<IAdapterCallRecorder>(x => x.GetRequiredService<DbAdapterCallRecorder>());
+
+            var flusherType = typeof(AdapterCallFlusher<>).MakeGenericType(contextType);
+            builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IHostedService), flusherType));
+        }
 
         // The shared rate limiter is keyed on TContext (row-locked leasing on RateLimitBucket). Registered
         // unconditionally but resolved lazily — only a rate-limited HTTP adapter's innermost handler pulls

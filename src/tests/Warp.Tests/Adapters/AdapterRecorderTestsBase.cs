@@ -293,7 +293,7 @@ public abstract class AdapterRecorderTestsBase : IAsyncLifetime
         var registry = new AdapterRegistry();
         registry.Register("vendor", new WarpAdapterOptions { GroupLabel = "Endpoint" }, configSummary: "caps=Always");
         var recorder = new DbAdapterCallRecorder();
-        var adapters = new WarpAdapters(registry, recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance);
+        var adapters = new WarpAdapters(registry, recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance, []);
 
         adapters.BeginCall("vendor", "GetOrders").Succeed();
 
@@ -387,7 +387,7 @@ public abstract class AdapterRecorderTestsBase : IAsyncLifetime
 
         var registry = new AdapterRegistry();
         var recorder = new DbAdapterCallRecorder();
-        var adapters = new WarpAdapters(registry, recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance);
+        var adapters = new WarpAdapters(registry, recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance, []);
 
         adapters.BeginCall("vendor-a", "GetOrders").Succeed();
         adapters.BeginCall("vendor-b", "GetOrders").Succeed();
@@ -521,7 +521,7 @@ public abstract class AdapterRecorderTestsBase : IAsyncLifetime
         }
 
         var recorder = new DbAdapterCallRecorder();
-        var adapters = new WarpAdapters(registry, recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance);
+        var adapters = new WarpAdapters(registry, recorder, TimeProvider.System, NullLogger<WarpAdapters>.Instance, []);
 
         return (adapters, recorder, registry);
     }
