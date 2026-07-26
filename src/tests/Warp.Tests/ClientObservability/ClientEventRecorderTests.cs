@@ -72,4 +72,21 @@ public class ClientEventRecorderTests
         time.Advance(TimeSpan.FromMinutes(1));
         limiter.TryAcquire("ip", 1).ShouldBeTrue();       // window rolled over ⇒ admitted again
     }
+
+    [Fact]
+    public void RateLimiter_BoundsTrackingTable_FailsClosedWhenFull_ThenPrunesExpired()
+    {
+        var time = new FakeTimeProvider();
+        var limiter = new ClientIngestRateLimiter(perMinute: 10, time, maxTrackedKeys: 2);
+
+        limiter.TryAcquire("a", 1).ShouldBeTrue();
+        limiter.TryAcquire("b", 1).ShouldBeTrue();
+
+        // Table full and nothing expired ⇒ a new IP fails closed (bounds memory) rather than adding an entry.
+        limiter.TryAcquire("c", 1).ShouldBeFalse();
+
+        // Once the earlier windows age out, the new IP is admitted (their entries are pruned to make room).
+        time.Advance(TimeSpan.FromMinutes(1));
+        limiter.TryAcquire("c", 1).ShouldBeTrue();
+    }
 }
