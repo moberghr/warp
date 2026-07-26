@@ -42,8 +42,8 @@ export default function ClientPage() {
         cell: ({ row }) => (
           <div className="min-w-0">
             {row.original.name && <span className="font-mono text-xs">{row.original.name}</span>}
+            {row.original.value != null && <span className="ml-2 text-xs tabular-nums text-muted-foreground">{row.original.value}</span>}
             {row.original.message && <span className="block truncate text-sm text-muted-foreground">{row.original.message}</span>}
-            {row.original.value != null && <span className="text-sm tabular-nums">{row.original.value}</span>}
           </div>
         ),
       },

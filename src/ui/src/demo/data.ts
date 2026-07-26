@@ -1332,3 +1332,85 @@ export const demoSagaActivity = [
     ],
   },
 ];
+
+// === Queue metrics (§8.26) — the Queues page ===
+export function getQueueMetricsDemo() {
+  return {
+    queues: [
+      { queue: 'a-critical', claimedCount: 48213, avgWaitMs: 42, p95WaitMs: 180, p99WaitMs: 420, backlogDepth: 3, oldestAgeSeconds: 8 },
+      { queue: 'b-default', claimedCount: 129004, avgWaitMs: 310, p95WaitMs: 1250, p99WaitMs: 2600, backlogDepth: 27, oldestAgeSeconds: 74 },
+      { queue: 'c-low', claimedCount: 15622, avgWaitMs: 1450, p95WaitMs: 5200, p99WaitMs: 9800, backlogDepth: 141, oldestAgeSeconds: 612 },
+    ],
+  };
+}
+
+// === Client (browser) observability (§8.27) ===
+export function getClientSummaryDemo() {
+  const now = Date.now();
+  const hours = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date(now - (11 - i) * 3600_000);
+    const hour = d.toISOString().slice(0, 13).replace('T', '-');
+
+    return { hour, errors: Math.round(3 + Math.random() * 12), logs: Math.round(20 + Math.random() * 40), events: Math.round(10 + Math.random() * 30), vitals: Math.round(40 + Math.random() * 60) };
+  });
+
+  return {
+    application: null,
+    errorCount: 1284,
+    logCount: 8213,
+    eventCount: 4021,
+    vitalCount: 15903,
+    errorRate: 0.043,
+    topErrors: [
+      { name: 'TypeError', count: 612 },
+      { name: 'ChunkLoadError', count: 288 },
+      { name: 'NetworkError', count: 201 },
+      { name: 'UnhandledRejection', count: 122 },
+      { name: '{other}', count: 61 },
+    ],
+    topEvents: [
+      { name: 'checkout_started', count: 1893 },
+      { name: 'add_to_cart', count: 1204 },
+      { name: 'search', count: 924 },
+    ],
+    vitals: [
+      { name: 'LCP', sampleCount: 4210, avgValue: 2100, p75Value: 2450 },
+      { name: 'INP', sampleCount: 4210, avgValue: 160, p75Value: 190 },
+      { name: 'CLS', sampleCount: 4210, avgValue: 0.06, p75Value: 0.09 },
+      { name: 'FCP', sampleCount: 4210, avgValue: 1400, p75Value: 1750 },
+      { name: 'TTFB', sampleCount: 4210, avgValue: 520, p75Value: 780 },
+    ],
+    history: hours,
+  };
+}
+
+export function getClientEventsDemo() {
+  const now = Date.now();
+  const iso = (offset: number) => new Date(now - offset).toISOString();
+  const items = [
+    { id: 'ce-1', application: 'warp-demo-spa', type: 1, name: 'TypeError', level: null, message: "Cannot read properties of undefined (reading 'total')", value: null, url: '/checkout', traceId: '0af7651916cd43dd8448eb211c80319c', sessionId: 'sess-8f3a2b1c', timestamp: iso(4000) },
+    { id: 'ce-2', application: 'warp-demo-spa', type: 5, name: 'POST', level: null, message: null, value: 240, url: '/api/checkout', traceId: '0af7651916cd43dd8448eb211c80319c', sessionId: 'sess-8f3a2b1c', timestamp: iso(9000) },
+    { id: 'ce-3', application: 'warp-demo-spa', type: 2, name: 'LCP', level: null, message: null, value: 2380, url: '/', traceId: null, sessionId: 'sess-8f3a2b1c', timestamp: iso(15000) },
+    { id: 'ce-4', application: 'warp-demo-spa', type: 4, name: 'add_to_cart', level: null, message: null, value: null, url: '/product/42', traceId: null, sessionId: 'sess-1a2b3c4d', timestamp: iso(22000) },
+    { id: 'ce-5', application: 'warp-demo-spa', type: 3, name: 'warn', level: 'warn', message: 'Retrying image load (attempt 2)', value: null, url: '/product/42', traceId: null, sessionId: 'sess-1a2b3c4d', timestamp: iso(30000) },
+  ];
+
+  return { items, total: items.length };
+}
+
+export function getClientSessionDemo(sessionId: string) {
+  const now = Date.now();
+  const iso = (offset: number) => new Date(now - offset).toISOString();
+  const trace = '0af7651916cd43dd8448eb211c80319c';
+
+  return {
+    sessionId,
+    application: 'warp-demo-spa',
+    entries: [
+      { kind: 'client', timestamp: iso(32000), traceId: null, eventId: 'e1', type: 4, name: 'page_view', level: null, message: null, value: null, url: '/checkout', method: null, route: null, statusCode: null, durationMs: null, outcome: null },
+      { kind: 'client', timestamp: iso(30000), traceId: trace, eventId: 'e2', type: 5, name: 'POST', level: null, message: null, value: 240, url: '/api/checkout', method: null, route: null, statusCode: null, durationMs: null, outcome: null },
+      { kind: 'endpoint', timestamp: iso(29800), traceId: trace, eventId: null, type: null, name: null, level: null, message: null, value: null, url: null, method: 'POST', route: '/api/checkout', statusCode: 500, durationMs: 212, outcome: 'Failed' },
+      { kind: 'client', timestamp: iso(29500), traceId: trace, eventId: 'e3', type: 1, name: 'TypeError', level: null, message: "Cannot read properties of undefined (reading 'total')", value: null, url: '/checkout', method: null, route: null, statusCode: null, durationMs: null, outcome: null },
+    ],
+  };
+}

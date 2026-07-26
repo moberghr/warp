@@ -654,7 +654,27 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, webhooks: true, applications: true };
+    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true };
+  }
+
+  // Queue metrics (§8.26) — the Queues page (always-on nav).
+  if (url === '/queues/metrics') {
+    return data.getQueueMetricsDemo();
+  }
+
+  // Client (browser) observability (§8.27).
+  if (url === '/client/summary') {
+    return data.getClientSummaryDemo();
+  }
+  if (url === '/client/applications') {
+    return ['warp-demo-spa'];
+  }
+  if (url.startsWith('/client/events')) {
+    return data.getClientEventsDemo();
+  }
+  const clientSessionMatch = url.match(/^\/client\/sessions\/([^/?]+)$/);
+  if (clientSessionMatch) {
+    return data.getClientSessionDemo(decodeURIComponent(clientSessionMatch[1]));
   }
 
   // Dashboard
