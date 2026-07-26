@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { Card, CardContent } from '@/components/ui/card';
@@ -51,6 +52,19 @@ export default function ClientPage() {
         header: 'Page',
         cell: ({ row }) => <span className="text-xs text-muted-foreground">{row.original.url ?? '—'}</span>,
         meta: { headerClassName: 'w-[180px]' },
+      },
+      {
+        accessorKey: 'sessionId',
+        header: 'Session',
+        cell: ({ row }) =>
+          row.original.sessionId ? (
+            <Link to={`/client/sessions/${encodeURIComponent(row.original.sessionId)}`} className="font-mono text-xs text-primary hover:underline">
+              {row.original.sessionId.slice(0, 8)}
+            </Link>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+        meta: { headerClassName: 'w-[100px]' },
       },
       {
         accessorKey: 'timestamp',
@@ -120,6 +134,7 @@ export default function ClientPage() {
           <FilterButton active={type === ClientEventType.Error} onClick={() => setType(ClientEventType.Error)}>Errors</FilterButton>
           <FilterButton active={type === ClientEventType.Log} onClick={() => setType(ClientEventType.Log)}>Logs</FilterButton>
           <FilterButton active={type === ClientEventType.Event} onClick={() => setType(ClientEventType.Event)}>Events</FilterButton>
+          <FilterButton active={type === ClientEventType.Request} onClick={() => setType(ClientEventType.Request)}>Requests</FilterButton>
           <FilterButton active={type === ClientEventType.Vital} onClick={() => setType(ClientEventType.Vital)}>Vitals</FilterButton>
         </div>
       </div>
@@ -188,6 +203,7 @@ function TypeBadge({ type }: { type: ClientEventType }) {
     [ClientEventType.Vital]: { label: 'Vital', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300' },
     [ClientEventType.Log]: { label: 'Log', cls: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300' },
     [ClientEventType.Event]: { label: 'Event', cls: 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300' },
+    [ClientEventType.Request]: { label: 'Request', cls: 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' },
   };
   const b = map[type] ?? { label: 'Unknown', cls: 'bg-gray-100 text-gray-700' };
 

@@ -220,6 +220,7 @@ public sealed class ClientEventFlusher<TContext> : BackgroundService
                 Stack = record.Stack,
                 Value = record.Value,
                 Url = record.Url,
+                TraceId = record.TraceId,
                 SessionId = record.SessionId,
                 Release = record.Release,
                 UserAgent = record.UserAgent,
@@ -231,9 +232,15 @@ public sealed class ClientEventFlusher<TContext> : BackgroundService
                 ExpireAt = expireAt,
             });
 
-            // The per-name aggregate dimension is the level for logs (§8.27 "logs count per level"), the name
-            // otherwise; it is cardinality-collapsed while the stored row above keeps the real value.
-            var dimension = record.Type == ClientEventType.Log ? record.Level : record.Name;
+            // The per-name aggregate dimension is the level for logs (§8.27 "logs count per level"), null for
+            // requests (their value is the TraceId correlation, not an aggregate), the name otherwise; it is
+            // cardinality-collapsed while the stored row above keeps the real value.
+            var dimension = record.Type switch
+            {
+                ClientEventType.Log => record.Level,
+                ClientEventType.Request => null,
+                _ => record.Name,
+            };
             var name = cardinality.Resolve(record.Type, dimension);
             foreach (var counter in ClientEventKeys.Build(record.Type, name, record.Value, record.Application, ClientEventKeys.HourBucket(record.Timestamp)))
             {

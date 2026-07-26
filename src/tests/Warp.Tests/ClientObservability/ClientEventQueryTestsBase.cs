@@ -164,6 +164,57 @@ public abstract class ClientEventQueryTestsBase : IAsyncLifetime
         detail.Properties.ShouldBe("{\"a\":1}");
     }
 
+    [TimedFact]
+    public async Task GetSession_MergesClientEventsWithServerCallsByTraceId()
+    {
+        var trace = Guid.NewGuid();
+        var ctx = _fixture.CreateContext();
+
+        // A client request event carrying a trace id, plus a plain client log, both in session s1.
+        var request = Row(ClientEventType.Request, "shop");
+        request.SessionId = "s1";
+        request.TraceId = trace;
+        request.Name = "GET";
+        request.Timestamp = new DateTime(2026, 7, 26, 8, 0, 0, DateTimeKind.Utc);
+        var log = Row(ClientEventType.Log, "shop");
+        log.SessionId = "s1";
+        log.Timestamp = new DateTime(2026, 7, 26, 8, 0, 1, DateTimeKind.Utc);
+        ctx.Set<ClientEventLog>().AddRange(request, log);
+
+        // The server endpoint call that request triggered — same trace id (the join key).
+        ctx.Set<EndpointCallLog>().Add(new EndpointCallLog
+        {
+            Method = "GET",
+            RouteTemplate = "/api/orders",
+            Operation = "GetOrders",
+            Timestamp = new DateTime(2026, 7, 26, 8, 0, 0, 500, DateTimeKind.Utc),
+            DurationMs = 12,
+            Outcome = Warp.Core.Enums.AdapterCallOutcome.Success,
+            StatusCode = 200,
+            MachineName = "srv",
+            TraceId = trace,
+        });
+        await ctx.SaveChangesAsync(Ct);
+
+        var session = await Service().GetSession("s1", Ct);
+
+        session.ShouldNotBeNull();
+        session!.Entries.Count.ShouldBe(3);                                  // 2 client + 1 server
+        session.Entries.Count(x => string.Equals(x.Kind, "endpoint", StringComparison.Ordinal)).ShouldBe(1);
+        session.Entries.ShouldContain(x => string.Equals(x.Kind, "endpoint", StringComparison.Ordinal) && x.TraceId == trace && x.Route == "/api/orders");
+
+        // Merged in timestamp order: request (08:00:00) → server call (08:00:00.5) → log (08:00:01).
+        session.Entries[0].Type.ShouldBe(ClientEventType.Request);
+        session.Entries[1].Kind.ShouldBe("endpoint");
+        session.Entries[2].Type.ShouldBe(ClientEventType.Log);
+    }
+
+    [TimedFact]
+    public async Task GetSession_UnknownSession_ReturnsNull()
+    {
+        (await Service().GetSession("nope", Ct)).ShouldBeNull();
+    }
+
     private static ClientEventLog Row(ClientEventType type, string application) => new()
     {
         Application = application,

@@ -36,6 +36,9 @@ public sealed class ClientIngestEvent
 
     public string? Url { get; set; }
 
+    /// <summary>W3C trace id (32-hex, no hyphens) the browser propagated for a request event; parsed to a Guid server-side to join the server trace.</summary>
+    public string? TraceId { get; set; }
+
     public long? Ts { get; set; }
 
     public JsonElement? Props { get; set; }

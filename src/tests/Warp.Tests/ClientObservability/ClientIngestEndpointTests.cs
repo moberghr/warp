@@ -216,6 +216,29 @@ public sealed class ClientIngestEndpointTests : IAsyncLifetime
         response.Headers.GetValues("Access-Control-Allow-Methods").ShouldContain(v => v.Contains("POST", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task Post_RequestEvent_ParsesTraceIdToGuid()
+    {
+        var traceHex = "0af7651916cd43dd8448eb211c80319c";   // valid W3C trace id (32 hex)
+
+        await PostAsync("pk_test", Origin, new
+        {
+            events = new[] { new { type = "request", name = "GET", url = "/api/orders", value = 42, traceId = traceHex } },
+        });
+
+        var record = _recorder.Records.ShouldHaveSingleItem();
+        record.Type.ShouldBe(ClientEventType.Request);
+        record.TraceId.ShouldBe(Guid.ParseExact(traceHex, "N"));   // joins EndpointCallLog.TraceId
+    }
+
+    [Fact]
+    public async Task Post_InvalidTraceId_DegradesToNull()
+    {
+        await PostAsync("pk_test", Origin, new { events = new[] { new { type = "request", name = "GET", traceId = "not-a-trace" } } });
+
+        _recorder.Records.ShouldHaveSingleItem().TraceId.ShouldBeNull();
+    }
+
     private static object OneLog() => new { events = new[] { new { type = "log", message = "x" } } };
 
     [Fact]

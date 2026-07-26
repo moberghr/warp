@@ -19,4 +19,7 @@ public enum ClientEventType
 
     /// <summary>A custom named event: <c>track(name, props)</c>.</summary>
     Event = 4,
+
+    /// <summary>An API call the browser made (method/url/status/duration), carrying the W3C trace id it propagated — the client end of the unified client↔server timeline (§8.27).</summary>
+    Request = 5,
 }

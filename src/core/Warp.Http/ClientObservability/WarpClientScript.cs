@@ -76,6 +76,40 @@ public static class WarpClientScript
   var pushState = history.pushState;
   history.pushState = function () { crumb('navigation', arguments[2]); return pushState.apply(this, arguments); };
 
+  // Distributed tracing: on same-origin API calls, inject a W3C traceparent and emit a 'request' event carrying
+  // the trace id. The server adopts that trace id (its endpoint/job telemetry keys on it), so a session's
+  // client requests stitch to the server work they triggered — the unified client<->server timeline.
+  function hex(n) { var s = ''; for (var i = 0; i < n; i++) { s += Math.floor(Math.random() * 16).toString(16); } return s; }
+  function sameOrigin(u) { try { return new URL(u, location.href).origin === location.origin; } catch (e) { return false; } }
+  if (typeof fetch === 'function') {
+    var nativeFetch = fetch;
+    window.fetch = function (input, init) {
+      init = init || {};
+      var reqUrl = typeof input === 'string' ? input : (input && input.url) || '';
+      var method = (init.method || (typeof input !== 'string' && input.method) || 'GET').toUpperCase();
+      var traceId = null;
+      if (sameOrigin(reqUrl)) {
+        traceId = hex(32);
+        try {
+          var headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || undefined);
+          if (!headers.has('traceparent')) { headers.set('traceparent', '00-' + traceId + '-' + hex(16) + '-01'); }
+          init.headers = headers;
+        } catch (e) { traceId = null; }
+      }
+      var start = (window.performance && performance.now) ? performance.now() : Date.now();
+      function done(status) {
+        var dur = ((window.performance && performance.now) ? performance.now() : Date.now()) - start;
+        crumb('fetch', method + ' ' + reqUrl + ' -> ' + status);
+        // Never record posts to the ingest endpoint itself (feedback loop).
+        if (reqUrl.indexOf(endpoint) === -1) {
+          var pathOnly = reqUrl; try { pathOnly = new URL(reqUrl, location.href).pathname; } catch (e) { }
+          enqueue({ type: 'request', name: method, value: Math.round(dur), url: pathOnly, traceId: traceId || undefined, props: { status: status } });
+        }
+      }
+      return nativeFetch.call(this, input, init).then(function (resp) { done(resp.status); return resp; }, function (err) { done(0); throw err; });
+    };
+  }
+
   // Core Web Vitals via PerformanceObserver; reported once on page hide.
   var vitals = {};
   function observe(type, cb) { try { var po = new PerformanceObserver(cb); po.observe({ type: type, buffered: true }); return po; } catch (e) { return null; } }

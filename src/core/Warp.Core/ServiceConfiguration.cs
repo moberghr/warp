@@ -1010,6 +1010,7 @@ public static class ServiceConfiguration
         log.Property(p => p.Stack);
         log.Property(p => p.Value);
         log.Property(p => p.Url).HasMaxLength(2048);
+        log.Property(p => p.TraceId);
         log.Property(p => p.SessionId).HasMaxLength(128);
         log.Property(p => p.Release).HasMaxLength(128);
         log.Property(p => p.UserAgent).HasMaxLength(1024);
@@ -1025,6 +1026,9 @@ public static class ServiceConfiguration
 
         // Filter the event stream by kind.
         log.HasIndex(p => new { p.Type, p.Timestamp });
+
+        // Session-timeline query (all events for one browser session, chronological).
+        log.HasIndex(p => new { p.SessionId, p.Timestamp });
 
         // ExpirationCleanup range scan on expiry.
         log.HasIndex(p => p.ExpireAt);

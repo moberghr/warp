@@ -10,7 +10,7 @@ import type {
   QueueMetricsModel,
 } from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
-import type { ClientObservabilitySummary, ClientEventPage, ClientEventDetail } from '@/types/client';
+import type { ClientObservabilitySummary, ClientEventPage, ClientEventDetail, ClientSession } from '@/types/client';
 import type {
   WebhookDeliveryListItem,
   WebhookDeliveryDetail,
@@ -67,6 +67,9 @@ export const getClientEvents = (params: { application?: string; type?: number; s
 
 export const getClientEvent = (id: string) =>
   api.get<ClientEventDetail>(`/client/events/${id}`).then(r => r.data);
+
+export const getClientSession = (sessionId: string) =>
+  api.get<ClientSession>(`/client/sessions/${encodeURIComponent(sessionId)}`).then(r => r.data);
 
 export const deleteFailedJobsByType = (type: string) =>
   api.post<BulkResult>('/jobs/failed/delete-by-type', null, { params: { type } }).then(r => r.data);

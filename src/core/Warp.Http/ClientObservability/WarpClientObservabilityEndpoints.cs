@@ -188,6 +188,7 @@ public static class WarpClientObservabilityEndpoints
             Stack = Truncate(evt.Stack, max),
             Value = evt.Value,
             Url = Truncate(evt.Url, 2048),
+            TraceId = ParseTraceId(evt.TraceId),
             SessionId = Truncate(batch.Session, 128),
             Release = Truncate(batch.Release, 128),
             UserAgent = userAgent,
@@ -198,6 +199,19 @@ public static class WarpClientObservabilityEndpoints
         };
     }
 
+    // The browser sends a W3C trace id as 32 lowercase hex chars; the server stores/joins it as a Guid in the
+    // same "N" form used by EndpointCallLog.TraceId / Job.TraceId. Bad/short values (or the all-zero invalid
+    // trace id) degrade to null rather than fault the request.
+    private static Guid? ParseTraceId(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw) || !Guid.TryParseExact(raw, "N", out var traceId) || traceId == Guid.Empty)
+        {
+            return null;
+        }
+
+        return traceId;
+    }
+
     private static bool TryParseType(string? raw, out ClientEventType type)
     {
         switch (raw?.ToUpperInvariant())
@@ -206,6 +220,7 @@ public static class WarpClientObservabilityEndpoints
             case "VITAL": type = ClientEventType.Vital; return true;
             case "LOG": type = ClientEventType.Log; return true;
             case "EVENT": type = ClientEventType.Event; return true;
+            case "REQUEST": type = ClientEventType.Request; return true;
             default: type = default; return false;
         }
     }

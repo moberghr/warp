@@ -600,6 +600,13 @@ public static class WarpEndpoints
             return detail is null ? Results.NotFound() : Results.Ok(detail);
         });
 
+        apiGroup.MapGet("client/sessions/{sessionId}", async ([FromServices] IClientEventQueryService svc, string sessionId, CancellationToken ct) =>
+        {
+            var session = await svc.GetSession(sessionId, ct);
+
+            return session is null ? Results.NotFound() : Results.Ok(session);
+        });
+
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
         // registered by AddWarp (dashboard-only processes resolve them), so these data routes are
         // non-nullable; the sidebar nav is gated on the addons flag (IWebhookRedeliveryEnqueuer presence),

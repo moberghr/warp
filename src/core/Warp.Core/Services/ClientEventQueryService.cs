@@ -153,6 +153,7 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
                     Message = x.Message,
                     Value = x.Value,
                     Url = x.Url,
+                    TraceId = x.TraceId,
                     SessionId = x.SessionId,
                     Timestamp = x.Timestamp,
                 })
@@ -178,6 +179,7 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
                     Stack = x.Stack,
                     Value = x.Value,
                     Url = x.Url,
+                    TraceId = x.TraceId,
                     SessionId = x.SessionId,
                     Release = x.Release,
                     UserAgent = x.UserAgent,
@@ -202,6 +204,75 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
         }
 
         return [.. apps];
+    }
+
+    public async Task<ClientSessionModel?> GetSession(string sessionId, CancellationToken ct)
+    {
+        var events = await _context.Set<ClientEventLog>()
+            .AsNoTracking()
+            .Where(x => x.SessionId == sessionId)
+            .OrderBy(x => x.Timestamp)
+            .Select(x =>
+                new ClientSessionEntryModel
+                {
+                    Kind = "client",
+                    Timestamp = x.Timestamp,
+                    TraceId = x.TraceId,
+                    EventId = x.Id,
+                    Type = x.Type,
+                    Name = x.Name,
+                    Level = x.Level,
+                    Message = x.Message,
+                    Value = x.Value,
+                    Url = x.Url,
+                })
+            .ToListAsync(ct);
+
+        if (events.Count == 0)
+        {
+            return null;
+        }
+
+        var traceIds = events
+            .Where(x => x.TraceId.HasValue)
+            .Select(x => x.TraceId!.Value)
+            .Distinct()
+            .ToList();
+
+        var serverCalls = new List<ClientSessionEntryModel>();
+        if (traceIds.Count > 0)
+        {
+            serverCalls = await _context.Set<EndpointCallLog>()
+                .AsNoTracking()
+                .Where(x => x.TraceId.HasValue)
+                .Where(x => traceIds.Contains(x.TraceId!.Value))
+                .Select(x =>
+                    new ClientSessionEntryModel
+                    {
+                        Kind = "endpoint",
+                        Timestamp = x.Timestamp,
+                        TraceId = x.TraceId,
+                        Method = x.Method,
+                        Route = x.RouteTemplate,
+                        StatusCode = x.StatusCode,
+                        DurationMs = x.DurationMs,
+                        Outcome = x.Outcome.ToString(),
+                    })
+                .ToListAsync(ct);
+        }
+
+        var application = await _context.Set<ClientEventLog>()
+            .AsNoTracking()
+            .Where(x => x.SessionId == sessionId)
+            .Select(x => x.Application)
+            .FirstOrDefaultAsync(ct);
+
+        return new ClientSessionModel
+        {
+            SessionId = sessionId,
+            Application = application,
+            Entries = [.. events.Concat(serverCalls).OrderBy(x => x.Timestamp)],
+        };
     }
 
     private async Task<IReadOnlyList<KeyValuePair<string, long>>> LoadMergedAsync(string prefix, CancellationToken ct)

@@ -27,6 +27,9 @@ public sealed record ClientEventRecord
 
     public string? Url { get; init; }
 
+    /// <summary>W3C trace id (Guid form) the browser propagated for a <see cref="ClientEventType.Request"/>; joins to <c>EndpointCallLog.TraceId</c>.</summary>
+    public Guid? TraceId { get; init; }
+
     public string? SessionId { get; init; }
 
     public string? Release { get; init; }

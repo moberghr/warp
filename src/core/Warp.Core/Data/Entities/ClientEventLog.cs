@@ -37,6 +37,14 @@ public class ClientEventLog
     /// <summary>The page URL/path the event fired on. Kept raw for context; never used as an aggregate dimension (unbounded).</summary>
     public string? Url { get; set; }
 
+    /// <summary>
+    /// W3C trace id the browser propagated on the API call this event represents (a <see cref="ClientEventType.Request"/>),
+    /// stored as a <see cref="Guid"/> in the SAME form the server uses (<c>new Guid(traceId.ToString("N"))</c>) so it joins
+    /// directly to <c>EndpointCallLog.TraceId</c> / <c>Job.TraceId</c> — the client end of the unified session timeline.
+    /// Null for events not tied to a request.
+    /// </summary>
+    public Guid? TraceId { get; set; }
+
     public string? SessionId { get; set; }
 
     public string? Release { get; set; }
