@@ -425,6 +425,7 @@ public static class ServiceConfiguration
         AddAdapterCallLogEntity(modelBuilder, schema);
         AddWebhookDeliveryEntity(modelBuilder, schema);
         AddEndpointCallLogEntity(modelBuilder, schema);
+        AddClientEventLogEntity(modelBuilder, schema);
         AddApplicationInstanceEntity(modelBuilder, schema);
         AddApplicationInstanceLogEntity(modelBuilder, schema);
     }
@@ -981,6 +982,43 @@ public static class ServiceConfiguration
 
         // Request→jobs drill-down joins jobs on the shared trace id.
         log.HasIndex(p => p.TraceId);
+
+        // ExpirationCleanup range scan on expiry.
+        log.HasIndex(p => p.ExpireAt);
+
+        log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddClientEventLogEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var log = modelBuilder.Entity<ClientEventLog>();
+
+        log.Property(p => p.Id);
+        log.HasKey(p => p.Id);
+
+        log.Property(p => p.Application).HasMaxLength(200);
+        log.Property(p => p.Type).HasConversion<int>();
+        log.Property(p => p.Name).HasMaxLength(512);
+        log.Property(p => p.Level).HasMaxLength(32);
+        log.Property(p => p.Message).HasMaxLength(4096);
+        log.Property(p => p.Stack);
+        log.Property(p => p.Value);
+        log.Property(p => p.Url).HasMaxLength(2048);
+        log.Property(p => p.SessionId).HasMaxLength(128);
+        log.Property(p => p.Release).HasMaxLength(128);
+        log.Property(p => p.UserAgent).HasMaxLength(1024);
+        log.Property(p => p.RemoteIp).HasMaxLength(64);
+        log.Property(p => p.Properties);
+        log.Property(p => p.Breadcrumbs);
+        log.Property(p => p.Timestamp);
+        log.Property(p => p.ReceivedAt);
+        log.Property(p => p.ExpireAt);
+
+        // Per-application recent-events listing.
+        log.HasIndex(p => new { p.Application, p.Timestamp });
+
+        // Filter the event stream by kind.
+        log.HasIndex(p => new { p.Type, p.Timestamp });
 
         // ExpirationCleanup range scan on expiry.
         log.HasIndex(p => p.ExpireAt);
