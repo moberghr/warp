@@ -62,6 +62,8 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupWebhookDeliveriesByCountAsync(ct);
         await CleanupExpiredEndpointCallLogsAsync(ct);
         await CleanupEndpointCallLogsByCountAsync(ct);
+        await CleanupExpiredClientEventLogsAsync(ct);
+        await CleanupClientEventLogsByCountAsync(ct);
         await CleanupStaleApplicationInstancesAsync(ct);
         await CleanupExpiredApplicationInstanceLogsAsync(ct);
         await CleanupApplicationInstanceLogsByCountAsync(ct);
@@ -497,6 +499,101 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 }
 
                 total += await _context.Set<EndpointCallLog>()
+                    .Where(x => ids.Contains(x.Id))
+                    .ExecuteDeleteAsync(ct);
+            }
+        }
+
+        return total;
+    }
+
+    // Deletes ClientEventLog rows past their stamped ExpireAt (client/browser observability, §8.27). Same
+    // batched, MaxSweepBatchesPerTick-capped shape as the endpoint call-log sweep.
+    internal async Task<int> CleanupExpiredClientEventLogsAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var ids = await _context.Set<ClientEventLog>()
+                .Where(x => x.ExpireAt != null)
+                .Where(x => x.ExpireAt < now)
+                .Select(x => x.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<ClientEventLog>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+
+            if (ids.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // Global count cap for ClientEventLog: keep at most N rows per application, deleting the oldest by
+    // Timestamp beyond the cap — bounds the browser firehose between age ticks. Distinct applications come
+    // from the log itself (no client-definition table). Per-app batched delete, capped by MaxSweepBatchesPerTick.
+    internal async Task<int> CleanupClientEventLogsByCountAsync(CancellationToken ct)
+    {
+        var cap = _configuration.ClientEventLogRetentionCount;
+        if (cap is null or <= 0)
+        {
+            return 0;
+        }
+
+        var batchSize = _configuration.ExpirationBatchSize;
+        var total = 0;
+
+        var applications = await _context.Set<ClientEventLog>()
+            .Select(x => x.Application)
+            .Distinct()
+            .ToListAsync(ct);
+
+        foreach (var application in applications)
+        {
+            var batches = 0;
+
+            while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+            {
+                batches++;
+                var count = await _context.Set<ClientEventLog>()
+                    .Where(x => x.Application == application)
+                    .CountAsync(ct);
+
+                if (count <= cap.Value)
+                {
+                    break;
+                }
+
+                var toDelete = Math.Min(count - cap.Value, batchSize);
+                var ids = await _context.Set<ClientEventLog>()
+                    .Where(x => x.Application == application)
+                    .OrderBy(x => x.Timestamp)
+                    .ThenBy(x => x.Id)
+                    .Select(x => x.Id)
+                    .Take(toDelete)
+                    .ToListAsync(ct);
+
+                if (ids.Count == 0)
+                {
+                    break;
+                }
+
+                total += await _context.Set<ClientEventLog>()
                     .Where(x => ids.Contains(x.Id))
                     .ExecuteDeleteAsync(ct);
             }
