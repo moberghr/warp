@@ -462,11 +462,11 @@ public static class WarpTelemetry
     /// type token (error/vital/log/event); names/levels stay off the meter tags (§1.2). The application tag is
     /// added only when <paramref name="application"/> is set.
     /// </summary>
-    public static void RecordClientEvent(string type, string? application)
+    public static void RecordClientEvent(Warp.Core.Enums.ClientEventType type, string? application)
     {
         var tags = new TagList
         {
-            { WarpTelemetryAttributes.ClientMeterType, type },
+            { WarpTelemetryAttributes.ClientMeterType, Warp.Core.ClientObservability.ClientEventKeys.TypeToken(type) },
         };
 
         if (application is not null)

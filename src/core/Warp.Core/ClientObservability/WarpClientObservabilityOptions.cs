@@ -14,6 +14,9 @@ public sealed class WarpClientObservabilityOptions
     /// <summary>Where completed events are routed (§8.24). <c>Otel</c> skips the DB recorder/flusher; the meters still fire.</summary>
     public RecordingSink Sink { get; set; } = RecordingSink.Database;
 
+    /// <summary>The path the ingest endpoint + browser script are mapped at by <c>MapWarpClientObservability()</c>. The script is served at <c>{IngestPath}/client.js</c>.</summary>
+    public string IngestPath { get; set; } = "/warp/ingest";
+
     /// <summary>Public write-only ingest keys → the TRUSTED application name they authorize (a DSN). Empty ⇒ ingest disabled (endpoint 404s).</summary>
     public IDictionary<string, string> IngestKeys { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
 

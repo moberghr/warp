@@ -31,6 +31,15 @@ public static class ClientObservabilityServiceConfiguration
         // Presence marker for the dashboard "client" flag, registered regardless of sink.
         builder.Services.TryAddSingleton<IClientObservabilityMarker, ClientObservabilityMarker>();
 
+        // The in-memory ingest rate limiter applies under every sink (it guards the public endpoint, not the
+        // DB write). Reads the per-minute cap from options at resolve time.
+        builder.Services.TryAddSingleton(x =>
+        {
+            var o = x.GetRequiredService<IOptions<WarpClientObservabilityOptions>>().Value;
+
+            return new ClientIngestRateLimiter(o.RateLimitPerMinute, x.GetRequiredService<TimeProvider>());
+        });
+
         // The cardinality guard is a process-level singleton (holds the distinct-name sets); needed under any
         // sink that writes counters. Registered with the DB pipeline only (Otel writes no counters).
         if (sink is RecordingSink.Database or RecordingSink.Both)

@@ -1,0 +1,288 @@
+using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using Warp.Core.ClientObservability;
+using Warp.Core.Enums;
+using Warp.Core.Logging;
+
+namespace Warp.Http.ClientObservability;
+
+/// <summary>
+/// Maps the public browser ingest endpoint (§8.27): <c>POST {IngestPath}</c> accepts a batch of client events,
+/// <c>GET {IngestPath}/client.js</c> serves the shipped browser script. Auth is a public write-only DSN key
+/// (<c>x-warp-key</c> → the trusted application name); a CORS origin allowlist, an in-memory per-key rate
+/// limit, and hard size/batch caps guard the public surface. Recording is lossy — a full buffer drops
+/// (<c>warp.client.events.dropped</c>); the browser is never blocked or failed. Requires
+/// <c>AddClientObservability()</c> in the <c>AddWarp</c> lambda.
+/// </summary>
+public static class WarpClientObservabilityEndpoints
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public static IEndpointRouteBuilder MapWarpClientObservability(this IEndpointRouteBuilder app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+
+        var options = app.ServiceProvider.GetService<IOptions<WarpClientObservabilityOptions>>()?.Value
+            ?? throw new InvalidOperationException(
+                "MapWarpClientObservability() requires AddClientObservability() to have been called inside the "
+                + "AddWarp<TContext>() configuration lambda.");
+
+        var path = options.IngestPath;
+
+        app.MapPost(path, (Delegate)IngestAsync).AllowAnonymous();
+        app.MapMethods(path, ["OPTIONS"], (Delegate)Preflight).AllowAnonymous();
+        app.MapGet(path + "/client.js", (Delegate)ServeScript).AllowAnonymous();
+
+        return app;
+    }
+
+    private static IResult ServeScript() => Results.Text(WarpClientScript.Content, "text/javascript; charset=utf-8");
+
+    private static IResult Preflight(HttpContext ctx)
+    {
+        var options = ctx.RequestServices.GetRequiredService<IOptions<WarpClientObservabilityOptions>>().Value;
+        ApplyCors(ctx, options);
+        ctx.Response.Headers.AccessControlAllowMethods = "POST, OPTIONS";
+        ctx.Response.Headers.AccessControlAllowHeaders = "content-type, x-warp-key";
+
+        return Results.NoContent();
+    }
+
+    private static async Task<IResult> IngestAsync(HttpContext ctx)
+    {
+        var options = ctx.RequestServices.GetRequiredService<IOptions<WarpClientObservabilityOptions>>().Value;
+
+        // Ingest disabled unless at least one DSN key is configured (safe default).
+        if (options.IngestKeys.Count == 0)
+        {
+            return Results.NotFound();
+        }
+
+        // Origin allowlist (browsers send Origin; a missing Origin is a non-browser/same-origin caller).
+        var origin = ctx.Request.Headers.Origin.ToString();
+        if (!string.IsNullOrEmpty(origin) && !options.AllowedOrigins.Contains(origin))
+        {
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+        }
+
+        ApplyCors(ctx, options);
+
+        if (ctx.Request.ContentLength is long declared && declared > options.MaxIngestBytes)
+        {
+            return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+        }
+
+        var body = await ReadCappedAsync(ctx.Request.Body, options.MaxIngestBytes, ctx.RequestAborted);
+        if (body is null)
+        {
+            return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+        }
+
+        ClientIngestBatch? batch;
+        try
+        {
+            batch = JsonSerializer.Deserialize<ClientIngestBatch>(body, JsonOptions);
+        }
+        catch (JsonException)
+        {
+            return Results.BadRequest();
+        }
+
+        // DSN key → trusted application (never client-declared). Header wins; body is the sendBeacon fallback.
+        var key = ctx.Request.Headers["x-warp-key"].ToString();
+        if (string.IsNullOrEmpty(key))
+        {
+            key = batch?.Key ?? string.Empty;
+        }
+
+        if (string.IsNullOrEmpty(key) || !options.IngestKeys.TryGetValue(key, out var application))
+        {
+            return Results.Unauthorized();
+        }
+
+        var events = batch?.Events;
+        if (events is null || events.Count == 0)
+        {
+            return Results.NoContent();
+        }
+
+        var limiter = ctx.RequestServices.GetRequiredService<ClientIngestRateLimiter>();
+        if (!limiter.TryAcquire(key, events.Count))
+        {
+            return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+        }
+
+        var recorder = ctx.RequestServices.GetService<IClientEventRecorder>();
+        var time = ctx.RequestServices.GetRequiredService<TimeProvider>();
+        var now = time.GetUtcNow().UtcDateTime;
+
+        var remoteIp = options.CaptureRemoteIp ? ctx.Connection.RemoteIpAddress?.ToString() : null;
+        var userAgent = options.CaptureUserAgent ? Truncate(ctx.Request.Headers.UserAgent.ToString(), 1024) : null;
+
+        var accepted = Math.Min(events.Count, options.MaxEventsPerBatch);
+        for (var i = 0; i < accepted; i++)
+        {
+            var record = BuildRecord(events[i], batch!, application, remoteIp, userAgent, options, now);
+            if (record is null)
+            {
+                continue;
+            }
+
+            // Meters are always-on (independent of sink §8.24); recorder is absent under Otel-only.
+            WarpTelemetry.RecordClientEvent(record.Type, application);
+            if (record.Type == ClientEventType.Vital && record.Name is not null && record.Value.HasValue)
+            {
+                WarpTelemetry.RecordClientVital(record.Name, record.Value.Value, application);
+            }
+
+            if (recorder is not null && !recorder.Record(record))
+            {
+                WarpTelemetry.ClientEventsDropped.Add(1);
+            }
+        }
+
+        return Results.NoContent();
+    }
+
+    private static ClientEventRecord? BuildRecord(
+        ClientIngestEvent evt,
+        ClientIngestBatch batch,
+        string application,
+        string? remoteIp,
+        string? userAgent,
+        WarpClientObservabilityOptions options,
+        DateTime now)
+    {
+        if (!TryParseType(evt.Type, out var type))
+        {
+            return null;
+        }
+
+        var max = options.MaxCapturedBodySize;
+
+        return new ClientEventRecord
+        {
+            Application = application,
+            Type = type,
+            Name = Truncate(evt.Name, 512),
+            Level = Truncate(evt.Level, 32),
+            Message = Truncate(evt.Message, max),
+            Stack = Truncate(evt.Stack, max),
+            Value = evt.Value,
+            Url = Truncate(evt.Url, 2048),
+            SessionId = Truncate(batch.Session, 128),
+            Release = Truncate(batch.Release, 128),
+            UserAgent = userAgent,
+            RemoteIp = remoteIp,
+            Properties = RedactAndSerialize(evt.Props, options.RedactedKeys, max),
+            Breadcrumbs = Truncate(Serialize(evt.Breadcrumbs), max),
+            Timestamp = ClampTimestamp(evt.Ts, now),
+        };
+    }
+
+    private static bool TryParseType(string? raw, out ClientEventType type)
+    {
+        switch (raw?.ToUpperInvariant())
+        {
+            case "ERROR": type = ClientEventType.Error; return true;
+            case "VITAL": type = ClientEventType.Vital; return true;
+            case "LOG": type = ClientEventType.Log; return true;
+            case "EVENT": type = ClientEventType.Event; return true;
+            default: type = default; return false;
+        }
+    }
+
+    private static void ApplyCors(HttpContext ctx, WarpClientObservabilityOptions options)
+    {
+        var origin = ctx.Request.Headers.Origin.ToString();
+        if (!string.IsNullOrEmpty(origin) && options.AllowedOrigins.Contains(origin))
+        {
+            ctx.Response.Headers.AccessControlAllowOrigin = origin;
+            ctx.Response.Headers.Vary = "Origin";
+        }
+    }
+
+    private static async Task<byte[]?> ReadCappedAsync(Stream body, int max, CancellationToken ct)
+    {
+        await using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int read;
+        while ((read = await body.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + read > max)
+            {
+                return null;
+            }
+
+            await buffer.WriteAsync(chunk.AsMemory(0, read), ct);
+        }
+
+        return buffer.ToArray();
+    }
+
+    private static string? RedactAndSerialize(JsonElement? props, ISet<string> denylist, int maxBytes)
+    {
+        if (props is null || props.Value.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var map = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in props.Value.EnumerateObject())
+        {
+            map[property.Name] = denylist.Contains(property.Name) ? "[redacted]" : property.Value;
+        }
+
+        return Truncate(JsonSerializer.Serialize(map, JsonOptions), maxBytes);
+    }
+
+    private static string? Serialize(JsonElement? element)
+        => element is null || element.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
+            ? null
+            : element.Value.GetRawText();
+
+    private static DateTime ClampTimestamp(long? unixMs, DateTime now)
+    {
+        if (unixMs is null)
+        {
+            return now;
+        }
+
+        var ts = DateTimeOffset.FromUnixTimeMilliseconds(unixMs.Value).UtcDateTime;
+
+        // Reject nonsense client clocks: no further back than a day, no further ahead than 5 minutes.
+        if (ts < now.AddDays(-1) || ts > now.AddMinutes(5))
+        {
+            return now;
+        }
+
+        return ts;
+    }
+
+    private static string? Truncate(string? value, int maxBytes)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return value;
+        }
+
+        if (Encoding.UTF8.GetByteCount(value) <= maxBytes)
+        {
+            return value;
+        }
+
+        // Trim to a char boundary that fits the byte budget.
+        var count = value.Length;
+        while (count > 0 && Encoding.UTF8.GetByteCount(value.AsSpan(0, count)) > maxBytes)
+        {
+            count--;
+        }
+
+        return value[..count];
+    }
+}
