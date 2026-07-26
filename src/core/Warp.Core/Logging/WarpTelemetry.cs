@@ -144,6 +144,20 @@ public static class WarpTelemetry
         unit: "ms",
         description: "Duration of an observed inbound Warp HTTP endpoint call. Emitted unconditionally by the observability middleware (independent of the recording Sink). Tags: route, outcome (and application when ApplicationName is set).");
 
+    public static readonly Counter<long> ClientEventsDropped = Meter.CreateCounter<long>(
+        "warp.client.events.dropped",
+        unit: "{event}",
+        description: "Total client (browser) events dropped because the recording channel was full. Recording is lossy by design; the browser is never blocked or failed.");
+
+    public static readonly Counter<long> ClientEvents = Meter.CreateCounter<long>(
+        "warp.client.events",
+        unit: "{event}",
+        description: "Total client (browser) events ingested. Emitted unconditionally by the ingest endpoint (independent of the recording Sink). Tags: type (and application when set).");
+
+    public static readonly Histogram<double> ClientVitals = Meter.CreateHistogram<double>(
+        "warp.client.vitals",
+        description: "A Core Web Vital sample reported by a browser (ms; CLS is unitless). Emitted unconditionally by the ingest endpoint. Tags: vital (and application when set).");
+
     public static readonly Histogram<double> JobExecutionDuration = Meter.CreateHistogram<double>(
         "warp.job.execution.duration",
         unit: "ms",
@@ -440,6 +454,46 @@ public static class WarpTelemetry
 
         EndpointCalls.Add(1, tags);
         EndpointDuration.Record(durationMs, tags);
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.client.events</c> meter for one ingested browser event (§8.27), emitted by
+    /// the ingest endpoint independent of the recording <c>Sink</c>. <paramref name="type"/> is the low-cardinality
+    /// type token (error/vital/log/event); names/levels stay off the meter tags (§1.2). The application tag is
+    /// added only when <paramref name="application"/> is set.
+    /// </summary>
+    public static void RecordClientEvent(string type, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.ClientMeterType, type },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        ClientEvents.Add(1, tags);
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.client.vitals</c> histogram for one Core Web Vital sample (§8.27). The
+    /// vital name (LCP/CLS/…) is bounded so it is safe as a tag; the application tag is added only when set.
+    /// </summary>
+    public static void RecordClientVital(string vital, double value, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.ClientMeterVital, vital },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        ClientVitals.Record(value, tags);
     }
 
     /// <summary>

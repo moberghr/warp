@@ -153,6 +153,21 @@ public class WarpConfiguration
     public int? EndpointCallLogRetentionCount { get; set; }
 
     /// <summary>
+    /// Global default retention for <c>ClientEventLog</c> rows (client/browser observability, §8.27). The
+    /// flusher stamps each row's <c>ExpireAt</c> at <c>ReceivedAt + retention</c>; <c>ExpirationCleanup</c>
+    /// deletes rows past <c>ExpireAt</c>. Diagnostics, not an audit trail — trend data survives via the
+    /// <c>clientevent:</c> Counter fold.
+    /// </summary>
+    public TimeSpan ClientEventLogRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// Global <b>count</b> cap for <c>ClientEventLog</c> rows — keep at most this many rows per application,
+    /// deleting the oldest beyond the cap. Complements the age cap (<see cref="ClientEventLogRetention"/>): a
+    /// row is removed once it exceeds <b>either</b> limit. Default keeps the browser firehose bounded.
+    /// </summary>
+    public int? ClientEventLogRetentionCount { get; set; } = 100_000;
+
+    /// <summary>
     /// Where per-job-TYPE / per-HANDLER execution aggregate <b>metrics</b> are written. The OTel
     /// <c>warp.job.execution.*</c> meters (§2.15) emit <b>unconditionally</b> regardless of this setting
     /// (null-listener ⇒ zero cost); this knob only gates the write-optimised <c>jobstat</c> <c>Counter</c>

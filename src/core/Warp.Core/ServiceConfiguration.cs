@@ -167,6 +167,12 @@ public static class ServiceConfiguration
         // AddEndpointObservability() gates only the recorder/flusher/middleware plus the addons flag.
         services.TryAddScoped<IEndpointQueryService, EndpointQueryService<TContext>>();
 
+        // Client (browser) observability read service — registered by AddWarp (like IEndpointQueryService) so
+        // dashboard-only / publisher-only processes serve /api/client without running the ingest endpoint. The
+        // ClientEventLog table is always in the schema (§2.11); AddClientObservability() gates only the
+        // recorder/flusher/ingest endpoint plus the addons flag (§8.27).
+        services.TryAddScoped<IClientEventQueryService, ClientEventQueryService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the

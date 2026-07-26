@@ -1,0 +1,140 @@
+using Microsoft.EntityFrameworkCore;
+using Shouldly;
+using Warp.Core.Data.Entities;
+using Warp.Core.Enums;
+using Warp.Core.Services;
+using Warp.Tests.Fixtures;
+
+namespace Warp.Tests.ClientObservability;
+
+/// <summary>
+/// Read side of client observability (§8.27): <see cref="ClientEventQueryService{TContext}"/> folds the durable
+/// <c>clientevent:</c> aggregates into a summary (counts, error rate, vital p75, top errors) and reads the raw
+/// event stream. The summary tests seed only <see cref="Statistic"/> rows (no <see cref="ClientEventLog"/>) —
+/// proving the metrics survive raw-row cleanup — and pin the CLS ÷1000 unscale. Both providers.
+/// </summary>
+[GenerateDatabaseTests]
+public abstract class ClientEventQueryTestsBase : IAsyncLifetime
+{
+    private readonly IDatabaseFixture _fixture;
+
+    protected ClientEventQueryTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
+
+    public async ValueTask InitializeAsync() => await _fixture.ResetAsync();
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
+
+    private ClientEventQueryService<TestContext> Service() => new(_fixture.CreateContext());
+
+    [TimedFact]
+    public async Task GetSummary_FoldsCountsErrorRateAndVitalP75_FromAggregatesOnly()
+    {
+        await SeedStatsAsync(
+            ("clientevent:total:error:count", 3),
+            ("clientevent:total:log:count", 5),
+            ("clientevent:total:event:count", 2),
+            ("clientevent:name:error:TypeError:count", 3),
+            ("clientevent:vital:LCP:count", 4),
+            ("clientevent:vital:LCP:dur", 8000),        // avg = 2000
+            ("clientevent:vital:LCP:pct:2500", 4));     // all samples ≤ 2500 ⇒ p75 = 2500
+
+        var summary = await Service().GetSummary(application: null, Ct);
+
+        summary.ErrorCount.ShouldBe(3);
+        summary.LogCount.ShouldBe(5);
+        summary.EventCount.ShouldBe(2);
+        summary.ErrorRate.ShouldBe(3.0 / 10, tolerance: 0.001);   // 3 errors / 10 total
+        summary.TopErrors.ShouldContain(x => x.Name == "TypeError" && x.Count == 3);
+
+        var lcp = summary.Vitals.Single(x => string.Equals(x.Name, "LCP", StringComparison.Ordinal));
+        lcp.AvgValue.ShouldBe(2000);
+        lcp.P75Value.ShouldBe(2500);
+    }
+
+    [TimedFact]
+    public async Task GetSummary_ClsVital_UnscaledBackToUnitless()
+    {
+        await SeedStatsAsync(
+            ("clientevent:vital:CLS:count", 2),
+            ("clientevent:vital:CLS:dur", 300),        // scaled sum 300 / 2 = 150 → ÷1000 = 0.15
+            ("clientevent:vital:CLS:pct:200", 2));     // bucket 200 → ÷1000 = 0.2
+
+        var summary = await Service().GetSummary(application: null, Ct);
+
+        var cls = summary.Vitals.Single(x => string.Equals(x.Name, "CLS", StringComparison.Ordinal));
+        cls.AvgValue.ShouldBe(0.15, tolerance: 0.001);
+        cls.P75Value.ShouldBe(0.2, tolerance: 0.001);
+    }
+
+    [TimedFact]
+    public async Task GetSummary_PerApplication_ReadsDisjointAppSlice()
+    {
+        await SeedStatsAsync(
+            ("clientevent:total:error:count", 100),                  // global — must NOT bleed into the app view
+            ("clientevent-app:shop:total:error:count", 4),
+            ("clientevent-app:shop:total:log:count", 1));
+
+        var summary = await Service().GetSummary(application: "shop", Ct);
+
+        summary.Application.ShouldBe("shop");
+        summary.ErrorCount.ShouldBe(4);
+        summary.LogCount.ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task GetEvents_FiltersByTypeAndPages()
+    {
+        var ctx = _fixture.CreateContext();
+        for (var i = 0; i < 3; i++)
+        {
+            ctx.Set<ClientEventLog>().Add(Row(ClientEventType.Error, "shop"));
+        }
+
+        ctx.Set<ClientEventLog>().Add(Row(ClientEventType.Log, "shop"));
+        await ctx.SaveChangesAsync(Ct);
+
+        var page = await Service().GetEvents(new ClientEventFilter { Type = ClientEventType.Error, PageSize = 2 }, Ct);
+
+        page.Total.ShouldBe(3);          // total matching the filter
+        page.Items.Count.ShouldBe(2);    // first page
+        page.Items.ShouldAllBe(x => x.Type == ClientEventType.Error);
+    }
+
+    [TimedFact]
+    public async Task GetEvent_ReturnsFullDetail()
+    {
+        var ctx = _fixture.CreateContext();
+        var row = Row(ClientEventType.Error, "shop");
+        row.Stack = "at foo";
+        row.Properties = "{\"a\":1}";
+        ctx.Set<ClientEventLog>().Add(row);
+        await ctx.SaveChangesAsync(Ct);
+
+        var detail = await Service().GetEvent(row.Id, Ct);
+
+        detail.ShouldNotBeNull();
+        detail!.Stack.ShouldBe("at foo");
+        detail.Properties.ShouldBe("{\"a\":1}");
+    }
+
+    private static ClientEventLog Row(ClientEventType type, string application) => new()
+    {
+        Application = application,
+        Type = type,
+        Timestamp = DateTime.UtcNow,
+        ReceivedAt = DateTime.UtcNow,
+    };
+
+    private async Task SeedStatsAsync(params (string Key, long Value)[] rows)
+    {
+        var ctx = _fixture.CreateContext();
+        foreach (var (key, value) in rows)
+        {
+            ctx.Set<Statistic>().Add(new Statistic { Key = key, Value = value });
+        }
+
+        await ctx.SaveChangesAsync(Ct);
+    }
+}

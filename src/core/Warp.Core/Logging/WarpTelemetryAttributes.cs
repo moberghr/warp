@@ -106,6 +106,11 @@ public static class WarpTelemetryAttributes
     public const string EndpointMeterRoute = "route";
     public const string EndpointMeterOutcome = "outcome";
 
+    // Meter tag keys for warp.client.* instruments (§8.27). Bounded dimensions only: the event type token
+    // and the (bounded) Core-Web-Vital name. Names/levels/URLs and any PII stay off the meter tags (§1.2).
+    public const string ClientMeterType = "type";
+    public const string ClientMeterVital = "vital";
+
     // Detail span attributes attached to the ambient ASP.NET request span under the Otel/Both recording
     // sink. Caller metadata (IP / user-agent / user) is captured-by-design PII (§1.2) — it rides the trace
     // exporter only (never the ILogger provider chain), and is set only when the span is being recorded so
