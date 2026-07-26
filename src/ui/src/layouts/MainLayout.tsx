@@ -14,6 +14,7 @@ import {
   LogOut,
   Puzzle,
   Gauge,
+  ListOrdered,
   KeyRound,
   Timer,
   GitBranch,
@@ -41,6 +42,7 @@ const builtInNavItems = [
   { to: '/batches/processing', label: 'Batches', icon: Layers },
   { to: '/recurring', label: 'Recurring', icon: RefreshCw },
   { to: '/applications', label: 'Applications', icon: Server },
+  { to: '/queues', label: 'Queues', icon: ListOrdered },
   { to: '/counters', label: 'Counters', icon: Gauge },
 ];
 

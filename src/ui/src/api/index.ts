@@ -7,6 +7,7 @@ import type {
   ApplicationDetailModel,
   ApplicationInstanceDetailModel,
   JobExecutionMetricsModel,
+  QueueMetricsModel,
 } from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
 import type {
@@ -50,6 +51,9 @@ export const getJobsByType = (type: string, page = 0, pageSize = 20, state?: str
 // Optional application filter narrows to a single executor application (percentiles are 0 for that slice).
 export const getJobMetrics = (application?: string) =>
   api.get<JobExecutionMetricsModel>('/jobs/metrics', { params: application ? { application } : undefined }).then(r => r.data);
+
+export const getQueueMetrics = (application?: string) =>
+  api.get<QueueMetricsModel>('/queues/metrics', { params: application ? { application } : undefined }).then(r => r.data);
 
 export const deleteFailedJobsByType = (type: string) =>
   api.post<BulkResult>('/jobs/failed/delete-by-type', null, { params: { type } }).then(r => r.data);

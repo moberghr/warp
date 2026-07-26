@@ -4,6 +4,30 @@ sidebar_position: 6
 
 # Releases
 
+## 3.7.0
+
+*2026-07-26*
+
+Additive minor release — no breaking API changes, no schema change. Warp now tracks **queue-wait latency** and **backlog depth** — the two health signals a job system needs beyond per-job execution time.
+
+### Queue metrics — queue-wait & backlog
+
+Warp already tracked how long jobs *run*; it now tracks how long they *wait*. **Queue-wait latency** is measured at the worker claim site (`claim − ScheduleTime`) as a single Counter write batched into the "Processing" `JobLog` save — the hot path gains no query and no extra round-trip. **Backlog depth + oldest-age** per queue are sampled off the hot path by a new `BacklogSampler` server task (one grouped query, served by the existing `(Kind, CurrentState, Queue, ScheduleTime)` index — no new index). Both are **always on**, no addon opt-in.
+
+New always-on meters `warp.job.queue.wait` (histogram), `warp.job.queue.depth` and `warp.job.queue.oldest_age_seconds` (observable gauges), tagged `queue` + `application` (when set). Queue-wait folds a Counter→Statistic duration-sum + latency histogram, so **avg / p95 / p99 survive raw-row cleanup**. Respects `JobMetricsSink` (`Otel` skips the Counter writes; the meter still carries the data). Sliced by executor application under a disjoint counter-key namespace when `ApplicationName` is set.
+
+A new always-shown **Queues** dashboard page surfaces per-queue backlog depth, oldest-age, and queue-wait percentiles; `GET {prefix}/api/queues/metrics` serves the same data in any `AddWarp` process.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.BacklogSampleInterval = TimeSpan.FromSeconds(15);   // default; the only knob
+});
+```
+
+See **[Queue metrics](./features/queue-metrics.md)**.
+
 ## 3.6.0
 
 *2026-07-26*

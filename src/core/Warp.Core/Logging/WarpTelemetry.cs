@@ -169,6 +169,31 @@ public static class WarpTelemetry
         unit: "{redelivery}",
         description: "Total manual redeliveries triggered on a settled (Delivered | Exhausted) delivery.");
 
+    public static readonly Histogram<double> JobQueueWait = Meter.CreateHistogram<double>(
+        "warp.job.queue.wait",
+        unit: "ms",
+        description: "Time a job spent eligible-but-unclaimed (claim time − ScheduleTime), recorded once per claim. Emitted unconditionally (independent of JobMetricsSink). Tags: queue, application (executor app when set).");
+
+    // Backlog is a point-in-time gauge sampled periodically by the BacklogSampler server task, so it uses
+    // ObservableGauges over a snapshot the sampler replaces each tick (SetBacklogSnapshot) — the callbacks
+    // report the last sample on the exporter's collection schedule. Empty snapshot ⇒ no measurements.
+    private static volatile IReadOnlyList<BacklogSample> _backlogSnapshot = [];
+
+    public static readonly ObservableGauge<long> JobQueueDepth = Meter.CreateObservableGauge(
+        "warp.job.queue.depth",
+        static () => _backlogSnapshot.Select(x => new Measurement<long>(x.Depth, x.Tags())),
+        unit: "{job}",
+        description: "Count of Enqueued (eligible) jobs per queue, sampled by the BacklogSampler. Tags: queue, application (when set).");
+
+    public static readonly ObservableGauge<double> JobQueueOldestAge = Meter.CreateObservableGauge(
+        "warp.job.queue.oldest_age_seconds",
+        static () => _backlogSnapshot.Select(x => new Measurement<double>(x.OldestAgeSeconds, x.Tags())),
+        unit: "s",
+        description: "Age (seconds) of the oldest Enqueued job per queue, sampled by the BacklogSampler. Tags: queue, application (when set).");
+
+    /// <summary>Replaces the per-queue backlog snapshot the ObservableGauges report. Called each sample tick.</summary>
+    public static void SetBacklogSnapshot(IReadOnlyList<BacklogSample> snapshot) => _backlogSnapshot = snapshot;
+
     /// <summary>
     /// Starts the consumer activity for handler execution when an <see cref="ActivityListener"/>
     /// is attached to the Warp source. Returns null when no listener is registered — workers
@@ -371,6 +396,26 @@ public static class WarpTelemetry
         {
             JobExecutionDuration.Record(durationMs.Value, tags);
         }
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.job.queue.wait</c> histogram for one claim. Emitted unconditionally
+    /// (independent of JobMetricsSink); the DB Counter fold is separate and sink-gated. Application tag only
+    /// when the executor app is set. Negative waits (clock skew on a just-activated job) clamp to 0.
+    /// </summary>
+    public static void RecordQueueWait(string queue, double waitMs, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.QueueMeterQueue, queue },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        JobQueueWait.Record(Math.Max(0, waitMs), tags);
     }
 
     /// <summary>

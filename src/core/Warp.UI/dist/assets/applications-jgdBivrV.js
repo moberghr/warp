@@ -1,0 +1,1 @@
+var e={Registered:1,HeartbeatLost:2,Recovered:3,Stopped:4,StaleSwept:5};function t(e){let t=new TextEncoder().encode(e),n=``;for(let e of t)n+=String.fromCharCode(e);return btoa(n).replace(/\+/g,`-`).replace(/\//g,`_`).replace(/=+$/,``)}export{t as n,e as t};

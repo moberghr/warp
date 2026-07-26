@@ -102,3 +102,19 @@ export function encodeAppId(name: string): string {
 
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
+
+/** Per-queue SLIs (§8.26): queue-wait latency + latest backlog gauge. */
+export interface QueueMetricModel {
+  queue: string;
+  claimedCount: number;
+  avgWaitMs: number;
+  /** Populated for the app-agnostic read; 0 for a per-application slice. */
+  p95WaitMs: number;
+  p99WaitMs: number;
+  backlogDepth: number;
+  oldestAgeSeconds: number;
+}
+
+export interface QueueMetricsModel {
+  queues: QueueMetricModel[];
+}
