@@ -10,6 +10,7 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Helper;
+using Warp.Core.Notifiers;
 using Warp.Core.Webhooks;
 using Warp.Tests.Fixtures;
 
@@ -183,6 +184,46 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
             ct: Ct);
 
         recorder.CountFor(deliveryId).ShouldBe(1);
+        await AssertNoFailedJobsAsync(server);
+    }
+
+    [TimedFact]
+    public async Task Send_ScheduleExhausted_DispatchesOperationalNotifier()
+    {
+        // The generic operational notifier fires post-commit alongside the webhook-specific exhausted handler
+        // (§8.25) — same redaction-safe snapshot, carrying the delivery id + attempt count.
+        var recorder = new NotifierEventRecorder();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg =>
+            {
+                cfg.Queues = ["default"];
+                cfg.AddWebhooks();
+            },
+            configureServices: services =>
+            {
+                services.AddSingleton(recorder);
+                services.AddSingleton<IWarpNotifier>(sp => new RecordingNotifier(sp.GetRequiredService<NotifierEventRecorder>()));
+                services.AddHttpClient("warp-webhooks")
+                    .ConfigurePrimaryHttpMessageHandler(() => new StubWebhookHandler(HttpStatusCode.InternalServerError));
+            });
+
+        var deliveryId = await SendAsync(server, new WebhookSend
+        {
+            Url = "https://example.test/hook",
+            EventType = "order.created",
+            RetrySchedule = [],
+        });
+
+        await WaitForDeliveryStatusAsync(server, deliveryId, WebhookDeliveryStatus.Exhausted);
+        await WarpTestServer.WaitUntil(
+            () => Task.FromResult(recorder.Events.Count > 0),
+            timeout: TimeSpan.FromSeconds(5),
+            ct: Ct);
+
+        var evt = recorder.Events.ShouldHaveSingleItem();
+        evt.DeliveryId.ShouldBe(deliveryId);
+        evt.AttemptCount.ShouldBe(1);
         await AssertNoFailedJobsAsync(server);
     }
 
@@ -724,6 +765,60 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
+    public async Task Execute_ExhaustedCallbackRecovery_ReEmitsOperationalNotifier()
+    {
+        // The operational notifier (§8.25) is dispatched from the SAME InvokeExhaustedHandlersAsync that the
+        // crash-recovery re-run invokes — so a recovered exhaustion must re-emit the WebhookDeliveryExhausted
+        // event, matching the documented "webhook exhaustion is re-emitted on the executor re-run" guarantee.
+        var recorder = new NotifierEventRecorder();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg =>
+            {
+                cfg.Queues = ["default"];
+                cfg.AddWebhooks();
+            },
+            configureServices: services =>
+            {
+                services.AddSingleton(recorder);
+                services.AddSingleton<IWarpNotifier>(sp => new RecordingNotifier(sp.GetRequiredService<NotifierEventRecorder>()));
+                services.AddHttpClient("warp-webhooks")
+                    .ConfigurePrimaryHttpMessageHandler(() => new StubWebhookHandler(HttpStatusCode.OK));
+            });
+
+        var deliveryId = Guid.NewGuid();
+        var ctx = server.CreateContext();
+        ctx.Set<WebhookDelivery>().Add(new WebhookDelivery
+        {
+            Id = deliveryId,
+            EventType = "order.created",
+            EventId = Guid.NewGuid().ToString(),
+            Url = "https://example.test/hook",
+            PayloadJson = "{}",
+            SigningMode = WebhookSigning.None,
+            RetrySchedule = [],
+            Status = WebhookDeliveryStatus.Exhausted,
+            AttemptCount = 1,
+            ExhaustedCallbackPending = true,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync(Ct);
+
+        // The executor job a crash-recovery re-run would pick up for the already-settled, callback-pending row.
+        var publisher = server.CreatePublisher();
+        await publisher.Enqueue(new ExecuteWebhookDelivery { DeliveryId = deliveryId }, "warp:webhooks");
+        await publisher.SaveChangesAsync(Ct);
+
+        await WarpTestServer.WaitUntil(
+            () => Task.FromResult(recorder.Events.Any(x => x.DeliveryId == deliveryId)),
+            timeout: TimeSpan.FromSeconds(8),
+            ct: Ct);
+
+        recorder.Events.ShouldContain(x => x.DeliveryId == deliveryId && x.AttemptCount == 1);
+        await AssertNoFailedJobsAsync(server);
+    }
+
+    [TimedFact]
     public async Task Execute_PendingWithCallbackPending_FiresRecoveredCallbackThenProceedsWithAttempt()
     {
         // BUG-B: a Redeliver can flip an Exhausted row back to Pending BEFORE the crash-recovery re-run
@@ -940,6 +1035,7 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
             customSigners: [],
             scope.ServiceProvider.GetRequiredService<IWarpAdapters>(),
             scope.ServiceProvider.GetRequiredService<AdapterRegistry>(),
+            scope.ServiceProvider.GetRequiredService<WarpNotifierDispatcher>(),
             NullLogger<ExecuteWebhookDeliveryHandler<TestContext>>.Instance);
 
         // The executor still completes (no-failed-jobs invariant) even though the outcome commit faulted.
@@ -1093,6 +1189,50 @@ internal sealed class ExhaustedCallRecorder
         {
             return _counts.TryGetValue(deliveryId, out var current) ? current : 0;
         }
+    }
+}
+
+/// <summary>Captures the operational events an <see cref="IWarpNotifier"/> receives, for assertions.</summary>
+internal sealed class NotifierEventRecorder
+{
+    private readonly List<WebhookDeliveryExhaustedEvent> _events = [];
+    private readonly Lock _gate = new();
+
+    public IReadOnlyList<WebhookDeliveryExhaustedEvent> Events
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _events];
+            }
+        }
+    }
+
+    public void Record(WebhookDeliveryExhaustedEvent evt)
+    {
+        lock (_gate)
+        {
+            _events.Add(evt);
+        }
+    }
+}
+
+/// <summary>Notifier that records webhook-exhaustion operational events against the shared recorder.</summary>
+internal sealed class RecordingNotifier : IWarpNotifier
+{
+    private readonly NotifierEventRecorder _recorder;
+
+    public RecordingNotifier(NotifierEventRecorder recorder) => _recorder = recorder;
+
+    public Task NotifyAsync(WarpOperationalEvent evt, CancellationToken ct)
+    {
+        if (evt is WebhookDeliveryExhaustedEvent webhookEvent)
+        {
+            _recorder.Record(webhookEvent);
+        }
+
+        return Task.CompletedTask;
     }
 }
 

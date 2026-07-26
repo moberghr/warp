@@ -298,6 +298,15 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                 async (_, innerCt) => await task.ExecuteAsync(innerCt),
                 ct);
 
+            // Post-commit hook: RunUnderTransactionLockAsync has committed the task's transaction, so the task
+            // may now act on its committed work (e.g. dispatch operational notifications, §8.25). Only when the
+            // lock was actually held (else the task didn't run); skipped on a throw (the transaction rolled back
+            // and the exception already propagated).
+            if (outcome.LockHeld)
+            {
+                await task.OnCommittedAsync(ct);
+            }
+
             return (outcome.LockHeld, outcome.Result);
         }
 
@@ -320,7 +329,14 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                 .GetServices<IServerTask>()
                 .First(x => x.GetType() == _taskType);
 
-            return (true, await task.ExecuteAsync(ct));
+            var message = await task.ExecuteAsync(ct);
+
+            // Post-execute hook: the session-lock task manages its own transactions, so its work is committed
+            // by the time ExecuteAsync returns. A throw skips this (propagates), so the hook never runs for
+            // work that didn't complete.
+            await task.OnCommittedAsync(ct);
+
+            return (true, message);
         }
         finally
         {

@@ -243,7 +243,8 @@ public abstract class AdapterCleanupTestsBase : IAsyncLifetime
         return new ExpirationCleanup<TestContext>(
             new TestServerContext(_fixture.CreateContext()),
             TimeProvider.System,
-            Options.Create(configuration));
+            Options.Create(configuration),
+            TestNotifiers.EmptyDispatcher());
     }
 
     private async Task InsertCallLogAsync(string adapterName, DateTime? expireAt, DateTime? timestamp = null, string operation = "GetOrders")

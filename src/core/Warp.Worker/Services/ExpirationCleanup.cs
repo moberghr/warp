@@ -5,6 +5,8 @@ using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Logging;
+using Warp.Core.Notifiers;
 
 namespace Warp.Worker.Services;
 
@@ -19,17 +21,21 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
     private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly WarpServerConfiguration _configuration;
+    private readonly WarpNotifierDispatcher _notifier;
     private readonly IEnumerable<WarpBackgroundService> _backgroundServices;
+    private readonly List<WarpOperationalEvent> _pendingEvents = [];
 
     public ExpirationCleanup(
         IWarpServerContext serverContext,
         TimeProvider time,
         IOptions<WarpServerConfiguration> configuration,
+        WarpNotifierDispatcher notifier,
         IEnumerable<WarpBackgroundService>? backgroundServices = null)
     {
         _context = serverContext.Context;
         _time = time;
         _configuration = configuration.Value;
+        _notifier = notifier;
         _backgroundServices = backgroundServices ?? [];
     }
 
@@ -69,6 +75,19 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         return countCleaned > 0
             ? $"Cleaned up {timeExpired} expired + {countCleaned} over-threshold jobs"
             : $"Cleaned up {timeExpired} expired jobs";
+    }
+
+    // Post-commit (§8.25): the stale sweeps ran inside the host's lock transaction; the host calls this only
+    // after that transaction commits. Dispatch the buffered InstanceDown events now. CancellationToken.None
+    // so a host shutdown doesn't abandon an alert for an already-committed removal.
+    public async Task OnCommittedAsync(CancellationToken ct)
+    {
+        foreach (var evt in _pendingEvents)
+        {
+            await _notifier.DispatchAsync(evt, CancellationToken.None);
+        }
+
+        _pendingEvents.Clear();
     }
 
     internal async Task<int> RunCleanupAsync(CancellationToken ct)
@@ -604,6 +623,27 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
             _context.Set<ApplicationInstance>().RemoveRange(stale);
             await _context.SaveChangesAsync(ct);
+
+            // Buffer one InstanceDown per reaped non-server instance (§8.25). This method runs INSIDE the
+            // server-task host's lock transaction — the SaveChangesAsync above only flushes; the commit happens
+            // after ExecuteAsync returns. So the events are buffered here and dispatched from OnCommittedAsync
+            // (called by the host POST-COMMIT). IsServer=false — stale servers are reported by ServerCleanup.
+            foreach (var instance in stale)
+            {
+                _pendingEvents.Add(new InstanceDownEvent
+                {
+                    Type = WarpEventType.InstanceDown,
+                    Severity = WarpEventSeverity.Warning,
+                    TimestampUtc = now,
+                    MachineName = Environment.MachineName,
+                    Application = WarpTelemetry.ApplicationName,
+                    Message = $"Application instance {instance.Id} ({instance.ApplicationName}) went down (heartbeat lapsed, last seen {instance.LastHeartbeatAt:o}).",
+                    InstanceId = instance.Id,
+                    ApplicationName = instance.ApplicationName,
+                    LastSeenAt = instance.LastHeartbeatAt,
+                    IsServer = false,
+                });
+            }
 
             total += stale.Count;
 

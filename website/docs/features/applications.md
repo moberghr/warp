@@ -48,7 +48,7 @@ Each process writes exactly **one** physical row — no double-writes. To make n
 `AddWarp` has historically been passive — it registers services and never starts a background loop. When `ApplicationName` is set, it now runs this one lightweight heartbeat host. This is intentional and narrowly scoped: gated on `ApplicationName`, no provider or lock required, and it deregisters cleanly on shutdown. With `ApplicationName == null` (the default) nothing starts and `AddWarp` stays passive exactly as before.
 :::
 
-Stale instances (a process that crashed without deregistering) are swept by `ExpirationCleanup` once their last heartbeat is older than `ApplicationInstanceStaleGrace`.
+Stale instances (a process that crashed without deregistering) are swept by `ExpirationCleanup` once their last heartbeat is older than `ApplicationInstanceStaleGrace`. Each reaped instance — and each stale server removed by `ServerCleanup` — emits an `InstanceDown` [operational notification](./operational-notifications.md) to any registered `IWarpNotifier`, so a host can alert on a process going down.
 
 ### Provenance on everything produced
 

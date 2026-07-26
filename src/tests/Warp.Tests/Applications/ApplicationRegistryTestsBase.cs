@@ -303,7 +303,8 @@ public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
         return new ExpirationCleanup<TestContext>(
             new TestServerContext(_fixture.CreateContext()),
             TimeProvider.System,
-            Options.Create(configuration));
+            Options.Create(configuration),
+            TestNotifiers.EmptyDispatcher());
     }
 
     private WarpServerRegistration<TestContext> CreateServerRegistration(

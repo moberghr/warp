@@ -20,6 +20,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Interceptors;
 using Warp.Core.Logging;
 using Warp.Core.Notifications;
+using Warp.Core.Notifiers;
 using Warp.Core.Services;
 using Warp.Core.Webhooks;
 
@@ -182,6 +183,14 @@ public static class ServiceConfiguration
         services.TryAddScoped<IWebhookRedeliveryEnqueuer, WebhookRedeliveryEnqueuer>();
         services.TryAddSingleton<StandardWebhooksSigner>();
 
+        // The webhook executor resolves IHttpClientFactory (the warp-webhooks named client) — and the handler
+        // above is registered unconditionally, so Core MUST supply the factory. Without this, a plain AddWarp
+        // process (no AddAdapters) has an unresolvable handler that fails ValidateOnBuild — breaking `dotnet ef`
+        // and ASP.NET Core startup in Development (both build the provider with validation on). AddHttpClient is
+        // additive/idempotent: a host that configures its own "warp-webhooks" client (resilience, proxy) keeps
+        // that config; this only guarantees the factory + named client exist.
+        services.AddHttpClient(WebhookConstants.AdapterName);
+
         // Recording config for the warp-webhooks adapter every attempt is logged under (§8.20): response
         // bodies always captured (diagnosis), request bodies never (payload is on the row), call-log
         // retention aligned to the delivery retention, grouped by endpoint. Folded into AdapterRegistry so
@@ -212,6 +221,12 @@ public static class ServiceConfiguration
         // server-task loops and the dashboard broadcaster subscribe to its channels at host
         // construction; with no subscribers the SignalXxx calls are cheap no-ops.
         services.TryAddSingleton<ServerTaskSignals<TContext>>();
+
+        // Operational-event notifier fan-out. Registered by AddWarp (not AddWarpServer) so every dispatch
+        // site — the webhook executor, the saga command service, the server-side stale sweep — resolves it,
+        // and so it works in any AddWarp process. Non-generic + guarded: with no IWarpNotifier registered
+        // (opt.AddNotifier<T>()), DispatchAsync is a cheap no-op. See Warp.Core.Notifiers.
+        services.TryAddSingleton<WarpNotifierDispatcher>();
 
         // Fail-fast model validation at host startup (plain IHostedService → awaited to completion
         // before the app starts). AddHostedService dedups via TryAddEnumerable, so the second AddWarp

@@ -236,12 +236,17 @@ public abstract class WebhookCommandServiceTestsBase : IntegrationTestBase
             {
                 cfg.AddWebhooks();
 
-                // AddWebhooks appends "warp:webhooks" to the worker's queue list, so set the poll list
-                // AFTER it: the worker then polls only "default" and the redelivered executor job lands on
-                // "warp:webhooks" and is never consumed, staying Enqueued for the assertion. (Setting Queues
-                // before AddWebhooks left "warp:webhooks" in the list, so under load the worker picked up and
-                // re-ran the job — flipping AttemptCount off 0 and the webhooks-queue job count off 1.)
-                cfg.Queues = ["default"];
+                // These tests assert a redelivered executor job is ENQUEUED on warp:webhooks (and the delivery
+                // row's reset state) — they never execute it. The default worker group force-appends
+                // warp:webhooks to its queue list unconditionally (WarpServerConfiguration, §8.20), so
+                // cfg.Queues cannot exclude it — a running worker WILL drain warp:webhooks and execute the
+                // redelivered job under load (flipping AttemptCount off 0 / the queue count off 1). Disable the
+                // worker entirely: the redelivery enqueuer + command service still stage the job (they're
+                // registered regardless of the worker), and with no worker the job stays Enqueued for a
+                // deterministic assertion. (Before the webhook executor's IHttpClientFactory was registered by
+                // AddWarp, this raced only when the executor happened to fail to construct — now it constructs
+                // and would deterministically drain, so worker isolation must be explicit.)
+                cfg.DisableWorker();
 
                 // These tests hand-seed delivery rows (Redeliver_SettledDelivery_RefreshesExpireAt seeds one
                 // already past ExpireAt) and assert exact row/job state. Disable the maintenance tasks that

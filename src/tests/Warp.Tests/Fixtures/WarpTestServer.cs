@@ -97,6 +97,23 @@ public class WarpTestServer : IAsyncDisposable
     }
 
     /// <summary>
+    /// Runs a server task once THROUGH the production <see cref="Warp.Worker.Services.ServerTaskHost{TContext}"/>
+    /// loop — the lock + transaction wrapper — rather than calling <c>ExecuteAsync</c> directly. Use this when
+    /// the behaviour under test depends on the wrapper (e.g. post-commit operational-event dispatch, which the
+    /// loop performs only after the task's transaction commits).
+    /// </summary>
+    public Task<string?> RunServerTaskThroughLoopAsync<TTask>(CancellationToken ct = default)
+        where TTask : Warp.Worker.Services.IServerTask
+    {
+        var host = _host.Services
+            .GetServices<Microsoft.Extensions.Hosting.IHostedService>()
+            .OfType<Warp.Worker.Services.ServerTaskHost<TestContext>>()
+            .Single();
+
+        return host.RunOnceAsync<TTask>(ct);
+    }
+
+    /// <summary>
     /// Runs the Heartbeat task once — refreshing <see cref="PauseStateHolder"/> from the DB. Use
     /// after a Pause/Resume DB write when the test config has disabled the auto Heartbeat
     /// (HealthCheckInterval = null), so pause propagation is deterministic. Heartbeat takes no

@@ -131,6 +131,74 @@ public abstract class ServerTaskLoopRoutingTestsBase : IAsyncLifetime
         await holderTask;
     }
 
+    [TimedFact]
+    public async Task RunOnceAsync_TaskSucceeds_CallsOnCommittedAsync_AfterCommittedWork()
+    {
+        // The post-commit hook (§8.25) must fire after the xact-lock transaction commits, and by then the
+        // task's own work is durable. Assert the hook ran AND that at hook time the committed Job is visible
+        // in a fresh connection (i.e. genuinely post-commit).
+        var lockKey = "warp:test:routing-oncommitted-" + Guid.NewGuid().ToString("N");
+        var jobId = Guid.NewGuid();
+        var visibleAtHook = false;
+
+        var stub = new StubTask
+        {
+            LockKey = lockKey,
+            LocksWithTransaction = true,
+            Body = (ctx, ct) =>
+            {
+                ctx.Set<Job>().Add(new Job
+                {
+                    Id = jobId,
+                    Kind = JobKind.Job,
+                    CurrentState = State.Enqueued,
+                    Queue = "default",
+                    Type = "TestType",
+                    Message = "{}",
+                    CreateTime = DateTime.UtcNow,
+                    ScheduleTime = DateTime.UtcNow,
+                });
+
+                return ctx.SaveChangesAsync(ct);
+            },
+            OnCommitted = () =>
+            {
+                using var probe = _fixture.CreateContext();
+                visibleAtHook = probe.Set<Job>().AsNoTracking().Any(j => j.Id == jobId);
+            },
+        };
+
+        var loop = BuildLoop(stub);
+        await loop.RunOnceAsync(CancellationToken.None);
+
+        visibleAtHook.ShouldBeTrue("OnCommittedAsync must run after the task's work is committed and visible");
+    }
+
+    [TimedFact]
+    public async Task RunOnceAsync_TaskThrows_DoesNotCallOnCommittedAsync()
+    {
+        // The core post-commit guarantee: if ExecuteAsync throws, the transaction rolls back and the host must
+        // NOT invoke the post-commit hook — so a task that buffers an operational event and dispatches it in
+        // OnCommittedAsync never alerts for a change that rolled back. Guards the regression the notifier fix
+        // addressed.
+        var lockKey = "warp:test:routing-throw-" + Guid.NewGuid().ToString("N");
+        var hookCalled = false;
+
+        var stub = new StubTask
+        {
+            LockKey = lockKey,
+            LocksWithTransaction = true,
+            Body = (_, _) => throw new InvalidOperationException("boom"),
+            OnCommitted = () => hookCalled = true,
+        };
+
+        var loop = BuildLoop(stub);
+
+        await Should.ThrowAsync<InvalidOperationException>(() => loop.RunOnceAsync(CancellationToken.None));
+
+        hookCalled.ShouldBeFalse("a rolled-back iteration must not run the post-commit hook");
+    }
+
     private ServerTaskLoop<TestContext> BuildLoop(StubTask stub)
     {
         return new ServerTaskLoop<TestContext>(
@@ -157,6 +225,8 @@ public abstract class ServerTaskLoopRoutingTestsBase : IAsyncLifetime
 
         public required Func<TestContext, CancellationToken, Task> Body { get; init; }
 
+        public Action? OnCommitted { get; init; }
+
         public async Task<string?> ExecuteAsync(CancellationToken ct)
         {
             // The body closure can't reach the scoped context directly — ServerTaskLoop
@@ -168,6 +238,13 @@ public abstract class ServerTaskLoopRoutingTestsBase : IAsyncLifetime
             await Body(ctx, ct);
 
             return "ok";
+        }
+
+        public Task OnCommittedAsync(CancellationToken ct)
+        {
+            OnCommitted?.Invoke();
+
+            return Task.CompletedTask;
         }
     }
 

@@ -60,6 +60,32 @@ public class UsePostgreSqlDataSourceWiringTests
     }
 
     [Fact]
+    public void UsePostgreSql_WhenDataSourceOnlyRegisteredInDI_FactoryUsesDataSourcePath()
+    {
+        // The DbContext carries only a connection string (e.g. UseNpgsql(connString), or UseNpgsql() with the
+        // data source resolved from DI at runtime), but an NpgsqlDataSource is registered in DI — the
+        // Aspire AddNpgsqlDataSource / AddAzureNpgsqlDataSource shape. Warp must prefer that DI data source so
+        // its connections inherit the source's auth + SSL (RDS IAM, Cloud SQL, client certs), not open from a
+        // raw string. Before the fix the DI data source was silently ignored.
+        var services = new ServiceCollection();
+        using var dataSource = NpgsqlDataSource.Create(DummyConnectionString);
+        services.AddSingleton(dataSource);
+        services.AddDbContext<TestContext>(o => o.UseNpgsql(DummyConnectionString));
+
+        services.AddWarpServer<TestContext>(opt => opt.UsePostgreSql());
+
+        using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var factory = sp.GetRequiredService<IWarpNotificationTransportFactory>();
+
+        var transport = factory.Create(
+            "ignored — DI data source should win",
+            new WarpDatabasePushConfiguration { ChannelName = "x" },
+            NullLoggerFactory.Instance);
+
+        ReadDataSource(transport).ShouldBeSameAs(dataSource);
+    }
+
+    [Fact]
     public void UseDatabasePush_WithDataSource_ResolvedTransportUsesDataSourcePath()
     {
         // The actual consumer of IWarpNotificationTransportFactory is

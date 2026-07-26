@@ -47,7 +47,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 });
 ```
 
-`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner` and the `OnDeliveryExhausted` callback. It is not an enable switch; delivery runs without it. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
+`AddWebhooks(...)` is **optional configuration only** — a custom `IWebhookSigner` and the `OnDeliveryExhausted` callback. It is not an enable switch; delivery runs without it. When a delivery exhausts, Warp also emits a `WebhookDeliveryExhausted` [operational notification](./operational-notifications.md) to any registered `IWarpNotifier` — the generic operator-alerting channel, alongside the webhook-specific `OnDeliveryExhausted` callback. `AddAdapters()` is also optional: with it, every attempt is recorded as a `warp-webhooks` `AdapterCallLog` row (response bodies always captured, request bodies never — the payload already lives on the delivery row) and the per-attempt timeline is populated; without it, the delivery state machine, retries, exhaustion, and dashboard still work fully from the `WebhookDelivery` row — only the granular per-attempt HTTP call log is absent (same telemetry-vs-recording split as adapters).
 
 ### Requires a Warp server somewhere
 
