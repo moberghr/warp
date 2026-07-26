@@ -16,6 +16,8 @@ public sealed class WarpAddonsInfo
 
     public bool Endpoints { get; init; }
 
+    public bool Client { get; init; }
+
     public bool Webhooks { get; init; }
 
     // Multi-app observability (§8.19). The dashboard's Applications page IS the renamed Servers page and is

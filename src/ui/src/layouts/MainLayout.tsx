@@ -21,6 +21,7 @@ import {
   Activity,
   Cable,
   ArrowDownToLine,
+  MonitorSmartphone,
   Webhook,
   Menu,
   X,
@@ -51,6 +52,7 @@ const rateLimitsNavItem = { to: '/ratelimits', label: 'Rate Limits', icon: Timer
 const sagasNavItem = { to: '/sagas', label: 'Sagas', icon: GitBranch };
 const adaptersNavItem = { to: '/adapters', label: 'Adapters', icon: Cable };
 const endpointsNavItem = { to: '/endpoints', label: 'Endpoints', icon: ArrowDownToLine };
+const clientNavItem = { to: '/client', label: 'Client', icon: MonitorSmartphone };
 const webhooksNavItem = { to: '/webhooks', label: 'Webhooks', icon: Webhook };
 const servicesNavItem = { to: '/services', label: 'Services', icon: Activity };
 
@@ -80,6 +82,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   const [sagasAvailable, setSagasAvailable] = useState(false);
   const [adaptersAvailable, setAdaptersAvailable] = useState(false);
   const [endpointsAvailable, setEndpointsAvailable] = useState(false);
+  const [clientAvailable, setClientAvailable] = useState(false);
   const [webhooksAvailable, setWebhooksAvailable] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -141,6 +144,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         setSagasAvailable(addons.sagas);
         setAdaptersAvailable(addons.adapters);
         setEndpointsAvailable(addons.endpoints);
+        setClientAvailable(addons.client);
         setWebhooksAvailable(addons.webhooks);
         void useRealtimeStore.getState().connectIfEnabled(addons.push);
       })
@@ -151,6 +155,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         setSagasAvailable(false);
         setAdaptersAvailable(false);
         setEndpointsAvailable(false);
+        setClientAvailable(false);
         setWebhooksAvailable(false);
         void useRealtimeStore.getState().connectIfEnabled(false);
       });
@@ -171,6 +176,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
     ...(sagasAvailable ? [sagasNavItem] : []),
     ...(adaptersAvailable ? [adaptersNavItem] : []),
     ...(endpointsAvailable ? [endpointsNavItem] : []),
+    ...(clientAvailable ? [clientNavItem] : []),
     ...(webhooksAvailable ? [webhooksNavItem] : []),
     servicesNavItem,
     ...extensions.flatMap((ext) =>

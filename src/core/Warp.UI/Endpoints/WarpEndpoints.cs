@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.BackgroundServices;
+using Warp.Core.ClientObservability;
 using Warp.Core.Concurrency;
 using Warp.Core.Endpoints;
 using Warp.Core.Enums;
@@ -150,6 +151,7 @@ public static class WarpEndpoints
             [FromServices] ISagaQueryService? sagas,
             [FromServices] IAdapterRecordingMarker? adapters,
             [FromServices] IEndpointObservabilityMarker? endpoints,
+            [FromServices] IClientObservabilityMarker? client,
             [FromServices] IWebhookRedeliveryEnqueuer? webhooks,
             [FromServices] IOptions<WarpConfiguration> configuration) =>
             Results.Ok(new WarpAddonsInfo
@@ -167,6 +169,10 @@ public static class WarpEndpoints
                 // sink); IEndpointQueryService (always registered by AddWarp for dashboard-only processes)
                 // can't gate the flag. The endpoints nav shows wherever inbound requests are being observed.
                 Endpoints = endpoints is not null,
+
+                // IClientObservabilityMarker is registered only by AddClientObservability() (regardless of
+                // sink); IClientEventQueryService (always registered by AddWarp) can't gate the flag.
+                Client = client is not null,
 
                 // IWebhookRedeliveryEnqueuer is registered only by AddWebhooks(); IWebhookQueryService /
                 // IWebhookCommandService (always registered by AddWarp for dashboard-only processes) can't
@@ -553,6 +559,43 @@ public static class WarpEndpoints
             }
 
             var detail = await svc.GetCallDetail(id, callId, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        // Client (browser) observability (§8.27). IClientEventQueryService is always registered by AddWarp, so
+        // these resolve in dashboard-only / publisher-only processes without the ingest endpoint.
+        apiGroup.MapGet("client/summary", async ([FromServices] IClientEventQueryService svc, [FromQuery] string? application, CancellationToken ct) =>
+            Results.Ok(await svc.GetSummary(application, ct)));
+
+        apiGroup.MapGet("client/applications", async ([FromServices] IClientEventQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetApplications(ct)));
+
+        apiGroup.MapGet("client/events", async (
+            [FromServices] IClientEventQueryService svc,
+            [FromQuery] string? application,
+            [FromQuery] string? type,
+            [FromQuery] string? session,
+            [FromQuery] int page,
+            [FromQuery] int pageSize,
+            CancellationToken ct) =>
+        {
+            var parsedType = Enum.TryParse<ClientEventType>(type, ignoreCase: true, out var t) ? t : (ClientEventType?)null;
+            var filter = new ClientEventFilter
+            {
+                Application = application,
+                Type = parsedType,
+                SessionId = session,
+                Page = page,
+                PageSize = pageSize,
+            };
+
+            return Results.Ok(await svc.GetEvents(filter, ct));
+        });
+
+        apiGroup.MapGet("client/events/{id}", async ([FromServices] IClientEventQueryService svc, Guid id, CancellationToken ct) =>
+        {
+            var detail = await svc.GetEvent(id, ct);
 
             return detail is null ? Results.NotFound() : Results.Ok(detail);
         });

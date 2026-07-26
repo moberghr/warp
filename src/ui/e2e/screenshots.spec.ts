@@ -28,6 +28,7 @@ const pages = [
   { name: '15-server-detail', path: `/servers/${DEMO_IDS.server1}` },
   { name: '17-counters', path: '/counters' },
   { name: '25-queues', path: '/queues' },
+  { name: '26-client', path: '/client' },
   { name: '18-concurrency-limits', path: '/concurrency' },
   { name: '19-services-list', path: '/services' },
   { name: '20-services-detail-singleton', path: '/services/JobStatsLoggerService' },
