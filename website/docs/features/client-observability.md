@@ -64,7 +64,7 @@ The ingest endpoint is browser-facing, so it's guarded accordingly:
 
 - **Auth is a public DSN key.** You can't hide a secret in a bundle, so the key is *write-only*: it identifies the app and authorizes writes, never reads. The endpoint maps the key to a **trusted** application name server-side — the browser can't spoof another app's identity. Unknown key → 401.
 - **CORS allowlist** — only configured origins may post; others get 403.
-- **In-memory rate limit** per key (never DB-backed — a browser beacon must not touch the database on the request path), plus hard payload-size and batch-size caps. Over-limit is dropped, never queued.
+- **In-memory rate limit** per caller **IP** (the DSN key is public, so IP is the meaningful abuse dimension), checked before the body is read; never DB-backed — a browser beacon must not touch the database on the request path — plus hard payload-size and batch-size caps. Over-limit is dropped, never queued.
 - **Lossy** — a full ingest buffer drops the event (and increments `warp.client.events.dropped`); the browser is never blocked or failed.
 
 ## Storage: bounded rows, durable trends
@@ -72,7 +72,7 @@ The ingest endpoint is browser-facing, so it's guarded accordingly:
 Two tiers, so the database never grows unbounded:
 
 - **Raw `ClientEventLog` rows** are diagnostics, trimmed on **both** an age cap (`ClientEventLogRetention`, default 7d) and a row-count cap (`ClientEventLogRetentionCount`, default 100 000 per app), whichever hits first.
-- **Aggregate trends** fold into `Counter → Statistic` (event counts by type, error rate, top error/event names, and web-vital **p75** via a duration-sum + histogram) so the numbers on the dashboard **survive raw-row cleanup**. Browser-controlled names (error types, event names) are collapsed to `{other}` beyond a per-type cap so they can't explode the metric key space; the raw row always keeps the real name.
+- **Aggregate trends** fold into `Counter → Statistic` (event counts by type, error rate, top error/event names, log counts by level, and web-vital **p75** via a duration-sum + histogram) so the numbers on the dashboard **survive raw-row cleanup**. Because the endpoint is public, *no* client-sent name is trusted to be bounded: error/event names and log levels collapse to `{other}` beyond a per-type cap, and vital names are matched against a fixed allowlist (the 5 Core Web Vitals) — so a hostile client can't explode the metric key space or the meter-tag cardinality. The raw row always keeps the real name.
 
 ## PII
 

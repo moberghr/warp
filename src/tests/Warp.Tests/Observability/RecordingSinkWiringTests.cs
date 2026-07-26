@@ -5,6 +5,7 @@ using Moq;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Adapters;
+using Warp.Core.ClientObservability;
 using Warp.Core.Data.Queries;
 using Warp.Core.Endpoints;
 using Warp.Core.Observability;
@@ -103,6 +104,42 @@ public class RecordingSinkWiringTests
         using var sp = services.BuildServiceProvider();
         sp.GetRequiredService<IEndpointCallRecorder>().ShouldBeOfType<DbEndpointCallRecorder>();
         sp.GetService<IEndpointObservabilityMarker>().ShouldNotBeNull();
+    }
+
+    [TimedFact]
+    public void AddClientObservability_DatabaseSink_WiresRecorderFlusherCardinalityAndMarker()
+    {
+        var services = BuildServices(opt => opt.AddClientObservability(o => o.AddIngestKey("app", "pk")));
+
+        services.ShouldContain(d => d.ImplementationType == typeof(ClientEventFlusher<TestContext>));
+
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<IClientEventRecorder>().ShouldBeOfType<DbClientEventRecorder>();
+        sp.GetService<ClientEventCardinality>().ShouldNotBeNull();
+        sp.GetService<IClientObservabilityMarker>().ShouldNotBeNull();
+    }
+
+    [TimedFact]
+    public void AddClientObservability_OtelSink_NoRecorderNoFlusher_MarkerStillPresent()
+    {
+        var services = BuildServices(opt => opt.AddClientObservability(o =>
+        {
+            o.Sink = RecordingSink.Otel;
+            o.AddIngestKey("app", "pk");
+        }));
+
+        services.ShouldNotContain(d => d.ImplementationType == typeof(ClientEventFlusher<TestContext>));
+        services.ShouldNotContain(d => d.ServiceType == typeof(DbClientEventRecorder));
+
+        using var sp = services.BuildServiceProvider();
+
+        // No recorder registered under Otel-only; the meters carry the data. Marker still present so the
+        // dashboard "client" nav flag stays true.
+        sp.GetService<IClientEventRecorder>().ShouldBeNull();
+        sp.GetService<IClientObservabilityMarker>().ShouldNotBeNull();
+
+        // The rate limiter is registered regardless of sink (it guards the public endpoint, not the DB write).
+        sp.GetService<ClientIngestRateLimiter>().ShouldNotBeNull();
     }
 
     private static ServiceCollection BuildServices(Action<WarpBuilder<TestContext>> configure)

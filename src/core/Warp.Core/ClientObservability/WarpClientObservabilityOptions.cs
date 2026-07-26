@@ -37,13 +37,16 @@ public sealed class WarpClientObservabilityOptions
     /// <summary>Max events accepted in one batch; the rest are dropped.</summary>
     public int MaxEventsPerBatch { get; set; } = 100;
 
-    /// <summary>Per-key in-memory rate cap (events/minute) — a public endpoint spam guard. Never DB-backed (the ingest path must not touch the DB).</summary>
+    /// <summary>Per-caller-IP in-memory request cap (requests/minute) — a public endpoint spam guard, checked before the body is read. Keyed on IP (not the public DSN key) and never DB-backed (the ingest path must not touch the DB).</summary>
     public int RateLimitPerMinute { get; set; } = 6_000;
 
     /// <summary>Cardinality caps for the per-name aggregate dimension (§8.19); names beyond the cap fold to <c>{other}</c>.</summary>
     public int MaxDistinctErrorNames { get; set; } = 200;
 
     public int MaxDistinctEventNames { get; set; } = 200;
+
+    /// <summary>Cap on distinct log levels folded into aggregates; beyond it, levels collapse to <c>{other}</c> (a hostile client can send arbitrary level strings).</summary>
+    public int MaxDistinctLogNames { get; set; } = 50;
 
     /// <summary>Property keys whose values are redacted before storage (case-insensitive, §1.2). Prepopulated with common secrets; fully overridable.</summary>
     public ISet<string> RedactedKeys { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)

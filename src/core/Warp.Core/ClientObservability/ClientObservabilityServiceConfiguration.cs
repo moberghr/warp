@@ -48,7 +48,7 @@ public static class ClientObservabilityServiceConfiguration
             {
                 var o = x.GetRequiredService<IOptions<WarpClientObservabilityOptions>>().Value;
 
-                return new ClientEventCardinality(o.MaxDistinctErrorNames, o.MaxDistinctEventNames);
+                return new ClientEventCardinality(o.MaxDistinctErrorNames, o.MaxDistinctEventNames, o.MaxDistinctLogNames);
             });
 
             builder.Services.TryAddSingleton(x => new DbClientEventRecorder(

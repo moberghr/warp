@@ -129,10 +129,94 @@ public sealed class ClientIngestEndpointTests : IAsyncLifetime
     [Fact]
     public async Task Post_ExceedsRateLimit_ReturnsTooManyRequests()
     {
-        // RateLimitPerMinute = 5: first batch of 3 ok (3 total), second batch of 3 would be 6 > 5 ⇒ 429.
-        (await PostAsync("pk_test", Origin, new { events = Enumerable.Range(0, 3).Select(i => new { type = "log", message = i.ToString() }).ToArray() })).StatusCode.ShouldBe(HttpStatusCode.NoContent);
-        (await PostAsync("pk_test", Origin, new { events = Enumerable.Range(0, 3).Select(i => new { type = "log", message = i.ToString() }).ToArray() })).StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+        // Rate limit is per-request per caller IP (RateLimitPerMinute = 5): the 6th request in the window is 429.
+        for (var i = 0; i < 5; i++)
+        {
+            (await PostAsync("pk_test", Origin, OneLog())).StatusCode.ShouldBe(HttpStatusCode.NoContent);
+        }
+
+        (await PostAsync("pk_test", Origin, OneLog())).StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
     }
+
+    [Fact]
+    public async Task Post_SameOrigin_AllowedWithoutAllowlistEntry()
+    {
+        // Origin == the server's own scheme://host is same-origin — accepted even though it isn't allowlisted.
+        var sameOrigin = $"{_client.BaseAddress!.Scheme}://{_client.BaseAddress.Authority}";
+
+        var response = await PostAsync("pk_test", sameOrigin, OneLog());
+
+        response.StatusCode.ShouldBe(HttpStatusCode.NoContent);
+        _recorder.Records.ShouldHaveSingleItem();
+    }
+
+    [Fact]
+    public async Task Post_KeyInBody_AuthorizesWhenHeaderAbsent()
+    {
+        // sendBeacon can't set the x-warp-key header, so the key may travel in the body.
+        var response = await PostAsync(key: null, Origin, new { key = "pk_test", events = new[] { new { type = "log", message = "beacon" } } });
+
+        response.StatusCode.ShouldBe(HttpStatusCode.NoContent);
+        _recorder.Records.ShouldHaveSingleItem().Application.ShouldBe("shop");
+    }
+
+    [Fact]
+    public async Task Post_UnrecognizedType_IsDroppedNotRecorded()
+    {
+        var response = await PostAsync("pk_test", Origin, new { events = new[] { new { type = "warning", message = "unknown type" } } });
+
+        // Accepted (never fails the caller) but the unparseable-type event is dropped, not recorded.
+        response.StatusCode.ShouldBe(HttpStatusCode.NoContent);
+        _recorder.Records.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Post_CraftedOutOfRangeTimestamp_DoesNotFail()
+    {
+        var response = await PostAsync("pk_test", Origin, new { events = new[] { new { type = "log", message = "x", ts = long.MaxValue } } });
+
+        // A crafted ts must never fault the request; the event is still recorded with a sane timestamp.
+        response.StatusCode.ShouldBe(HttpStatusCode.NoContent);
+        _recorder.Records.ShouldHaveSingleItem().Timestamp.ShouldBeLessThanOrEqualTo(DateTime.UtcNow.AddMinutes(1));
+    }
+
+    [Fact]
+    public async Task Post_OversizedMessage_IsTruncated()
+    {
+        var huge = new string('x', 20_000);   // exceeds MaxCapturedBodySize (8 KB)
+
+        await PostAsync("pk_test", Origin, new { events = new[] { new { type = "log", message = huge } } });
+
+        var record = _recorder.Records.ShouldHaveSingleItem();
+        record.Message!.Length.ShouldBeLessThan(huge.Length);
+    }
+
+    [Fact]
+    public async Task Post_OversizedBody_ReturnsPayloadTooLarge()
+    {
+        var huge = new string('y', 200_000);   // exceeds MaxIngestBytes (64 KB)
+        var request = new HttpRequestMessage(HttpMethod.Post, Path) { Content = JsonContent.Create(new { events = new[] { new { type = "log", message = huge } } }) };
+        request.Headers.Add("x-warp-key", "pk_test");
+
+        var response = await _client.SendAsync(request, Xunit.TestContext.Current.CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.RequestEntityTooLarge);
+    }
+
+    [Fact]
+    public async Task Options_Preflight_SetsCorsHeaders()
+    {
+        var request = new HttpRequestMessage(HttpMethod.Options, Path);
+        request.Headers.Add("Origin", Origin);
+
+        var response = await _client.SendAsync(request, Xunit.TestContext.Current.CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.NoContent);
+        response.Headers.GetValues("Access-Control-Allow-Origin").ShouldContain(Origin);
+        response.Headers.GetValues("Access-Control-Allow-Methods").ShouldContain(v => v.Contains("POST", StringComparison.Ordinal));
+    }
+
+    private static object OneLog() => new { events = new[] { new { type = "log", message = "x" } } };
 
     [Fact]
     public async Task Get_ClientScript_IsServed()
@@ -145,10 +229,14 @@ public sealed class ClientIngestEndpointTests : IAsyncLifetime
         body.ShouldContain("window.warp");
     }
 
-    private async Task<HttpResponseMessage> PostAsync(string key, string origin, object payload)
+    private async Task<HttpResponseMessage> PostAsync(string? key, string origin, object payload)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, Path) { Content = JsonContent.Create(payload) };
-        request.Headers.Add("x-warp-key", key);
+        if (key is not null)
+        {
+            request.Headers.Add("x-warp-key", key);
+        }
+
         request.Headers.Add("Origin", origin);
 
         return await _client.SendAsync(request, Xunit.TestContext.Current.CancellationToken);

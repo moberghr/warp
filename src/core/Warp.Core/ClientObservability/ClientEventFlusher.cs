@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
+using Warp.Core.Enums;
 
 namespace Warp.Core.ClientObservability;
 
@@ -159,6 +160,11 @@ public sealed class ClientEventFlusher<TContext> : BackgroundService
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            // The shutdown drain budget elapsed mid-persist — the remaining tail is dropped (diagnostics, not
+            // an audit trail). Log it so the data loss around a deploy is not silent (the one lossy path here
+            // that would otherwise leave no trace).
+            logger.LogWarning("Client-event flush cancelled at shutdown; dropped {Count} buffered record(s).", batch.Count);
+
             return;
         }
         catch (Exception ex)
@@ -225,8 +231,10 @@ public sealed class ClientEventFlusher<TContext> : BackgroundService
                 ExpireAt = expireAt,
             });
 
-            // The counter name is cardinality-collapsed; the stored row above keeps the real name.
-            var name = cardinality.Resolve(record.Type, record.Name);
+            // The per-name aggregate dimension is the level for logs (§8.27 "logs count per level"), the name
+            // otherwise; it is cardinality-collapsed while the stored row above keeps the real value.
+            var dimension = record.Type == ClientEventType.Log ? record.Level : record.Name;
+            var name = cardinality.Resolve(record.Type, dimension);
             foreach (var counter in ClientEventKeys.Build(record.Type, name, record.Value, record.Application, ClientEventKeys.HourBucket(record.Timestamp)))
             {
                 context.Set<Counter>().Add(counter);

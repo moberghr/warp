@@ -65,11 +65,11 @@ public static class WarpClientScript
   window.warp = warp;
 
   window.addEventListener('error', function (e) {
-    enqueue({ type: 'error', name: (e.error && e.error.name) || 'Error', message: (e.message || (e.error && e.error.message)), stack: e.error && e.error.stack, props: { breadcrumbs: crumbs.slice() } });
+    enqueue({ type: 'error', name: (e.error && e.error.name) || 'Error', message: (e.message || (e.error && e.error.message)), stack: e.error && e.error.stack, breadcrumbs: crumbs.slice() });
   });
   window.addEventListener('unhandledrejection', function (e) {
     var r = e.reason || {};
-    enqueue({ type: 'error', name: r.name || 'UnhandledRejection', message: String(r.message || r), stack: r.stack, props: { breadcrumbs: crumbs.slice() } });
+    enqueue({ type: 'error', name: r.name || 'UnhandledRejection', message: String(r.message || r), stack: r.stack, breadcrumbs: crumbs.slice() });
   });
 
   document.addEventListener('click', function (e) { var t = e.target; crumb('click', t && t.tagName ? (t.tagName + (t.id ? '#' + t.id : '')) : 'node'); }, true);

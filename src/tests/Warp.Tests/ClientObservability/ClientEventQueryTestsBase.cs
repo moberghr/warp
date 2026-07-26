@@ -54,6 +54,51 @@ public abstract class ClientEventQueryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetSummary_P75_PicksBucketByCumulativeWalk_NotMax()
+    {
+        // 10 samples: 8 at/below 500ms, 2 up at 5000ms. p75 = the 7.5th sample ⇒ still in the 500 bucket.
+        await SeedStatsAsync(
+            ("clientevent:vital:LCP:count", 10),
+            ("clientevent:vital:LCP:dur", 20000),
+            ("clientevent:vital:LCP:pct:500", 8),
+            ("clientevent:vital:LCP:pct:5000", 2));
+
+        var summary = await Service().GetSummary(application: null, Ct);
+
+        var lcp = summary.Vitals.Single(x => string.Equals(x.Name, "LCP", StringComparison.Ordinal));
+        lcp.P75Value.ShouldBe(500);   // the cumulative walk stops at 500, not the max bucket 5000
+    }
+
+    [TimedFact]
+    public async Task GetApplications_ReturnsDistinctSortedFromAppSlice()
+    {
+        await SeedStatsAsync(
+            ("clientevent-app:shop:total:error:count", 1),
+            ("clientevent-app:admin:total:log:count", 1),
+            ("clientevent-app:shop:total:event:count", 1));
+
+        (await Service().GetApplications(Ct)).ShouldBe(["admin", "shop"]);
+    }
+
+    [TimedFact]
+    public async Task GetEvents_FiltersByApplicationAndSession()
+    {
+        var ctx = _fixture.CreateContext();
+        var a = Row(ClientEventType.Log, "shop");
+        a.SessionId = "s1";
+        var b = Row(ClientEventType.Log, "shop");
+        b.SessionId = "s2";
+        var c = Row(ClientEventType.Log, "other");
+        c.SessionId = "s1";
+        ctx.Set<ClientEventLog>().AddRange(a, b, c);
+        await ctx.SaveChangesAsync(Ct);
+
+        (await Service().GetEvents(new ClientEventFilter { Application = "shop" }, Ct)).Total.ShouldBe(2);
+        (await Service().GetEvents(new ClientEventFilter { SessionId = "s1" }, Ct)).Total.ShouldBe(2);
+        (await Service().GetEvents(new ClientEventFilter { Application = "shop", SessionId = "s1" }, Ct)).Total.ShouldBe(1);
+    }
+
+    [TimedFact]
     public async Task GetSummary_ClsVital_UnscaledBackToUnitless()
     {
         await SeedStatsAsync(

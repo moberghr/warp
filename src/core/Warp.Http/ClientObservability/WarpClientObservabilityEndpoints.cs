@@ -75,6 +75,16 @@ public static class WarpClientObservabilityEndpoints
 
         ApplyCors(ctx, options);
 
+        // Rate-limit per CALLER IP, BEFORE the body read/parse — the DSN key is public (shipped in the bundle),
+        // so keying on it lets any holder exhaust the shared budget; the IP is the meaningful abuse dimension.
+        // Checking here (one token per request) bounds floods of bad-key / empty / oversized posts cheaply.
+        var limiter = ctx.RequestServices.GetRequiredService<ClientIngestRateLimiter>();
+        var rateKey = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        if (!limiter.TryAcquire(rateKey, 1))
+        {
+            return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+        }
+
         if (ctx.Request.ContentLength is long declared && declared > options.MaxIngestBytes)
         {
             return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
@@ -114,12 +124,6 @@ public static class WarpClientObservabilityEndpoints
             return Results.NoContent();
         }
 
-        var limiter = ctx.RequestServices.GetRequiredService<ClientIngestRateLimiter>();
-        if (!limiter.TryAcquire(key, events.Count))
-        {
-            return Results.StatusCode(StatusCodes.Status429TooManyRequests);
-        }
-
         var recorder = ctx.RequestServices.GetService<IClientEventRecorder>();
         var time = ctx.RequestServices.GetRequiredService<TimeProvider>();
         var now = time.GetUtcNow().UtcDateTime;
@@ -133,14 +137,20 @@ public static class WarpClientObservabilityEndpoints
             var record = BuildRecord(events[i], batch!, application, remoteIp, userAgent, options, now);
             if (record is null)
             {
+                // Unrecognized event type — dropped, but counted so it isn't silent (mirrors the buffer-full drop).
+                WarpTelemetry.ClientEventsDropped.Add(1);
+
                 continue;
             }
 
             // Meters are always-on (independent of sink §8.24); recorder is absent under Otel-only.
             WarpTelemetry.RecordClientEvent(record.Type, application);
-            if (record.Type == ClientEventType.Vital && record.Name is not null && record.Value.HasValue)
+
+            // Only allowlisted Core Web Vitals become a meter tag — an arbitrary browser-sent vital name must
+            // never explode meter cardinality on this public endpoint (§1.2 / §8.19).
+            if (record.Type == ClientEventType.Vital && record.Value.HasValue && record.Name is not null && ClientEventCardinality.KnownVitals.Contains(record.Name))
             {
-                WarpTelemetry.RecordClientVital(record.Name, record.Value.Value, application);
+                WarpTelemetry.RecordClientVital(record.Name.ToUpperInvariant(), record.Value.Value, application);
             }
 
             if (recorder is not null && !recorder.Record(record))
@@ -256,7 +266,17 @@ public static class WarpClientObservabilityEndpoints
             return now;
         }
 
-        var ts = DateTimeOffset.FromUnixTimeMilliseconds(unixMs.Value).UtcDateTime;
+        // A crafted out-of-range value (e.g. long.MaxValue) throws — never let it fault the request (the
+        // ingest path must not fail the caller, §8.27); fall back to now.
+        DateTime ts;
+        try
+        {
+            ts = DateTimeOffset.FromUnixTimeMilliseconds(unixMs.Value).UtcDateTime;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return now;
+        }
 
         // Reject nonsense client clocks: no further back than a day, no further ahead than 5 minutes.
         if (ts < now.AddDays(-1) || ts > now.AddMinutes(5))

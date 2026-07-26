@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core.ClientObservability;
 using Warp.Core.Enums;
@@ -28,28 +29,47 @@ public class ClientEventRecorderTests
     }
 
     [Fact]
-    public void Cardinality_CollapsesBeyondCap_ButKeepsSeenNames()
+    public void Cardinality_CollapsesErrorEventAndLogNamesBeyondCap()
     {
-        var guard = new ClientEventCardinality(maxErrorNames: 2, maxEventNames: 100);
+        var guard = new ClientEventCardinality(maxErrorNames: 2, maxEventNames: 100, maxLogNames: 1);
 
         guard.Resolve(ClientEventType.Error, "TypeError").ShouldBe("TypeError");
         guard.Resolve(ClientEventType.Error, "RangeError").ShouldBe("RangeError");
         guard.Resolve(ClientEventType.Error, "TypeError").ShouldBe("TypeError");     // already seen ⇒ kept
         guard.Resolve(ClientEventType.Error, "SyntaxError").ShouldBe("{other}");     // over cap ⇒ collapsed
+
+        // Logs collapse too (their dimension is the level, which a hostile client can forge).
+        guard.Resolve(ClientEventType.Log, "warn").ShouldBe("warn");
+        guard.Resolve(ClientEventType.Log, "error").ShouldBe("{other}");             // over cap of 1
     }
 
     [Fact]
-    public void Cardinality_NeverCollapsesVitalsOrLevels_AndPassesNullThrough()
+    public void Cardinality_VitalsFollowAllowlistNotACap()
     {
-        var guard = new ClientEventCardinality(maxErrorNames: 1, maxEventNames: 1);
+        var guard = new ClientEventCardinality(maxErrorNames: 1, maxEventNames: 1, maxLogNames: 1);
 
-        // Vitals + log levels are inherently bounded — never collapsed regardless of cap.
+        // Known Core Web Vitals keep their (canonical, upper-cased) name regardless of cap...
         guard.Resolve(ClientEventType.Vital, "LCP").ShouldBe("LCP");
-        guard.Resolve(ClientEventType.Vital, "CLS").ShouldBe("CLS");
-        guard.Resolve(ClientEventType.Log, "warn").ShouldBe("warn");
-        guard.Resolve(ClientEventType.Log, "error").ShouldBe("error");
+        guard.Resolve(ClientEventType.Vital, "cls").ShouldBe("CLS");   // case-normalized
+
+        // ...an unknown/hostile vital name collapses to {other}, so it can't explode the keyspace.
+        guard.Resolve(ClientEventType.Vital, "totally-made-up").ShouldBe("{other}");
 
         // Null name ⇒ null (no per-name key).
         guard.Resolve(ClientEventType.Log, null).ShouldBeNull();
+    }
+
+    [Fact]
+    public void RateLimiter_TripsWithinWindow_ThenResetsAfterAMinute()
+    {
+        var time = new FakeTimeProvider();
+        var limiter = new ClientIngestRateLimiter(perMinute: 2, time);
+
+        limiter.TryAcquire("ip", 1).ShouldBeTrue();
+        limiter.TryAcquire("ip", 1).ShouldBeTrue();
+        limiter.TryAcquire("ip", 1).ShouldBeFalse();     // cap reached inside the window
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        limiter.TryAcquire("ip", 1).ShouldBeTrue();       // window rolled over ⇒ admitted again
     }
 }

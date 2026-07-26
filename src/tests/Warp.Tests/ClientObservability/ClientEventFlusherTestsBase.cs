@@ -27,7 +27,7 @@ public abstract class ClientEventFlusherTestsBase : IAsyncLifetime
 
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
-    private static ClientEventCardinality Guard(int cap = 200) => new(cap, cap);
+    private static ClientEventCardinality Guard(int cap = 200) => new(cap, cap, cap);
 
     [TimedFact]
     public async Task Persist_Error_WritesRowAndCounters()
