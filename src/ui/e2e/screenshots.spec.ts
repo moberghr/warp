@@ -27,6 +27,7 @@ const pages = [
   { name: '14-recurring-detail', path: '/recurring/1' },
   { name: '15-server-detail', path: `/servers/${DEMO_IDS.server1}` },
   { name: '17-counters', path: '/counters' },
+  { name: '25-queues', path: '/queues' },
   { name: '18-concurrency-limits', path: '/concurrency' },
   { name: '19-services-list', path: '/services' },
   { name: '20-services-detail-singleton', path: '/services/JobStatsLoggerService' },

@@ -47,7 +47,7 @@ For framework-specific guidance, see `.claude/skills/tech-stack-dotnet/SKILL.md`
 - **Solution:** `src/Warp.slnx` — 19 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
 - **Data layer:** EF Core 10 (Postgres via Npgsql, SQL Server via Microsoft.EntityFrameworkCore.SqlServer); EFCore.NamingConventions for snake_case
 - **Distributed locking:** Medallion `DistributedLock.Postgres` + `DistributedLock.SqlServer` behind `IWarpLockProvider`
-- **Patterns:** Custom mediator (Warp's own, source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (Retry, Timeout, Concurrency, RateLimit, CircuitBreaker, NoRestart, Sagas, DatabasePush, DashboardPush, Adapters, Webhooks, Notifiers — `AddNotifier<T>` operational-event seam §8.25); `WarpBackgroundService` is a first-class base feature (not an addon)
+- **Patterns:** Custom mediator (Warp's own, source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (Retry, Timeout, Concurrency, RateLimit, CircuitBreaker, NoRestart, Sagas, DatabasePush, DashboardPush, Adapters, Webhooks, Notifiers — `AddNotifier<T>` operational-event seam §8.25); `WarpBackgroundService` and queue metrics (queue-wait + backlog SLIs, always-on, §8.26) are first-class base features (not addons)
 - **Test stack:** xUnit v3 (`xunit.v3.mtp-v2`), Shouldly, Moq, Respawn, Testcontainers (Postgres + MSSQL), `Microsoft.AspNetCore.TestHost` for dashboard auth
 - **Frontend:** Vite + React 19 + TypeScript, Tailwind + shadcn/ui, Zustand, TanStack Query (React Query) + TanStack Table, Axios
 - **Analyzers (enforced as errors):** StyleCop, Roslynator, SonarAnalyzer, Meziantou (`TreatWarningsAsErrors=true` in `src/Directory.Build.props`)

@@ -458,15 +458,30 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         // entry would remain). Writing it on receipt by the actual worker keeps the audit
         // trail truthful and lets us tag the entry with the specific WorkerId, matching
         // single-worker-mode semantics.
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
         context.Set<JobLog>().Add(new JobLog
         {
             JobId = job.Id,
             EventType = "Processing",
-            Timestamp = _timeProvider.GetUtcNow().UtcDateTime,
+            Timestamp = now,
             Level = "Information",
             Message = $"The job {job.Id} is being processed",
             WorkerId = _workerId,
         });
+
+        // Queue-wait SLI (§8.26): always-on meter + (sink-gated) Counter rows batched into the ownership-mark
+        // SaveChanges below — no extra round-trip (§0.2/§6.1). Measured at ownership (the per-worker receipt
+        // point); a sub-second skew vs the group claim is acceptable for a wait SLI.
+        var waitMs = Math.Max(0, (now - job.ScheduleTime).TotalMilliseconds);
+        WarpTelemetry.RecordQueueWait(job.Queue, waitMs, _configuration.ApplicationName);
+        if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
+        {
+            foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, QueueWaitKeys.HourBucket(now)))
+            {
+                context.Set<Counter>().Add(counter);
+            }
+        }
+
         await context.SaveChangesAsync(cancellationToken);
     }
 

@@ -23,6 +23,7 @@ const ApplicationDetailPage = lazy(() => import('@/pages/applications/Applicatio
 const ApplicationInstanceDetailPage = lazy(() => import('@/pages/applications/ApplicationInstanceDetailPage'));
 const ServerDetailPage = lazy(() => import('@/pages/servers/ServerDetailPage'));
 const CountersPage = lazy(() => import('@/pages/counters/CountersPage'));
+const QueuesPage = lazy(() => import('@/pages/queues/QueuesPage'));
 const ConcurrencyLimitsPage = lazy(() => import('@/pages/concurrency/ConcurrencyLimitsPage'));
 const RateLimitsPage = lazy(() => import('@/pages/ratelimits/RateLimitsPage'));
 const SagasListPage = lazy(() => import('@/pages/sagas/SagasListPage'));
@@ -139,6 +140,7 @@ function App() {
             <Route path="/applications/:id" element={<ApplicationDetailPage />} />
             <Route path="/applications" element={<ApplicationsPage />} />
             <Route path="/counters" element={<CountersPage />} />
+            <Route path="/queues" element={<QueuesPage />} />
             <Route path="/concurrency" element={<ConcurrencyLimitsPage />} />
             <Route path="/ratelimits" element={<RateLimitsPage />} />
             <Route path="/sagas/:id" element={<SagaDetailPage />} />

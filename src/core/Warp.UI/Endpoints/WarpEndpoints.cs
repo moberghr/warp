@@ -714,6 +714,12 @@ public static class WarpEndpoints
         apiGroup.MapGet("jobs/metrics", async ([FromServices] IJobQueryService svc, [FromQuery] string? application) =>
             Results.Ok(await svc.GetJobExecutionMetrics(application)));
 
+        // Per-queue SLIs: queue-wait latency (avg + p95/p99, from the durable qwait fold) + latest backlog
+        // depth/oldest-age (§8.26). Optional ?application= narrows to a single executor application. Always
+        // registered (IJobQueryService is always registered by AddWarp), like jobs/metrics.
+        apiGroup.MapGet("queues/metrics", async ([FromServices] IJobQueryService svc, [FromQuery] string? application) =>
+            Results.Ok(await svc.GetQueueMetrics(application)));
+
         // Per-app job execution metrics (by-type / by-handler, from the durable Statistic aggregates).
         apiGroup.MapGet("applications/{id}/jobstats", async ([FromServices] IJobQueryService svc, string id) =>
         {

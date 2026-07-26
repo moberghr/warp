@@ -127,4 +127,8 @@ public static class WarpTelemetryAttributes
     public const string JobMeterType = "job.type";
     public const string JobMeterHandler = "job.handler";
     public const string JobMeterOutcome = "outcome";
+
+    // Meter tag key for warp.job.queue.* instruments (queue-wait histogram + backlog gauges). Bounded, low
+    // cardinality; application (executor app) joins via the shared MeterApplication tag when set (§8.23).
+    public const string QueueMeterQueue = "queue";
 }

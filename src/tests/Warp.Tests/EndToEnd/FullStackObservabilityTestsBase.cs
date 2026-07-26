@@ -408,6 +408,15 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         var loopbackStat = jobMetrics.ByType.Single(x => x.Identifier.Contains(nameof(LoopbackCallerJob), StringComparison.Ordinal));
         loopbackStat.ExecutedCount.ShouldBeGreaterThanOrEqualTo(1);
 
+        // Queue metrics (§8.26): the executed jobs were claimed, so queue-wait is recorded per queue, and the
+        // endpoint resolves and merges it. The application filter reads this app's executor-attributed wait.
+        var queueMetrics = await client.GetFromJsonAsync<QueueMetricsModel>("/warp/api/queues/metrics", Ct);
+        queueMetrics!.Queues.ShouldNotBeEmpty();
+        queueMetrics.Queues.Sum(x => x.ClaimedCount).ShouldBeGreaterThanOrEqualTo(1);
+
+        var appQueueMetrics = await client.GetFromJsonAsync<QueueMetricsModel>($"/warp/api/queues/metrics?application={AppName}", Ct);
+        appQueueMetrics!.Queues.Sum(x => x.ClaimedCount).ShouldBeGreaterThanOrEqualTo(1);
+
         await app.StopAsync(Ct);
     }
 

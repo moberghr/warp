@@ -119,6 +119,15 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan? CounterAggregationInterval { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
+    /// How often <c>BacklogSampler</c> samples per-queue backlog depth + oldest-job
+    /// age (§8.26) — one grouped read of Enqueued jobs, off the worker hot path. Feeds the
+    /// <c>warp.job.queue.depth</c> / <c>oldest_age_seconds</c> gauges and (under a DB-writing
+    /// <see cref="WarpConfiguration.JobMetricsSink"/>) the per-queue backlog <c>Statistic</c> the dashboard
+    /// reads. Set to <c>null</c> to disable.
+    /// </summary>
+    public TimeSpan? BacklogSampleInterval { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
     /// How often <see cref="Services.ServerCleanup{TContext}"/> removes Server rows whose
     /// heartbeat is past <see cref="HealthCheckTimeout"/>. Set to <c>null</c> to disable.
     /// </summary>

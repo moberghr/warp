@@ -91,6 +91,7 @@ public static class ServiceConfiguration
         // Deliberately NOT part of AddServerHostCore: a service-only server has no jobs to drive.
         services.AddScoped<IServerTask, StaleJobRecovery<TContext>>();
         services.AddScoped<IServerTask, CounterAggregator<TContext>>();
+        services.AddScoped<IServerTask, BacklogSampler<TContext>>();
         services.AddScoped<IServerTask, RecurringJobScheduler<TContext>>();
         services.AddScoped<IServerTask, ScheduledJobActivation<TContext>>();
         services.AddScoped<IServerTask, Orchestrator<TContext>>();

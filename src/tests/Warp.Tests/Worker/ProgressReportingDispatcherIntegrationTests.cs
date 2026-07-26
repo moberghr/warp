@@ -45,4 +45,26 @@ public abstract class ProgressReportingDispatcherIntegrationTestsBase : Integrat
         progressRows.Single(x => string.Equals(x.Name, "process", StringComparison.Ordinal)).Value.ShouldBe((short)50);
         progressRows.Single(x => string.Equals(x.Name, "upload", StringComparison.Ordinal)).Value.ShouldBe((short)10);
     }
+
+    [TimedFact]
+    public async Task GivenDispatcherMode_WhenJobClaimed_ThenQueueWaitCounterIsWritten()
+    {
+        await using var server = await WarpTestServer.StartAsync(Fixture, ConfigureDispatcher);
+        var publisher = server.CreatePublisher();
+        await publisher.Enqueue(new MultiBarProgressRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForCompletion(TimeSpan.FromSeconds(20));
+
+        // The dispatcher claims via WarpDispatcherWorker.MarkWorkerOwnership — a separate hot-path copy of the
+        // queue-wait write from WarpWorkerService. Assert it fired end-to-end in dispatcher mode (§8.26).
+        var ctx = Fixture.CreateContext();
+        var waitCount = await ctx.Set<Counter>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith("qwait:"))
+            .Where(x => x.Key.EndsWith(":count"))
+            .SumAsync(x => x.Value, Xunit.TestContext.Current.CancellationToken);
+
+        waitCount.ShouldBeGreaterThanOrEqualTo(1);
+    }
 }

@@ -35,6 +35,8 @@ public interface IJobQueryService
     Task<PagedList<JobModel>> GetJobsByType(BaseListRequest request, string type, State? state, string? application = null);
 
     Task<JobExecutionMetricsModel> GetJobExecutionMetrics(string? application = null);
+
+    Task<QueueMetricsModel> GetQueueMetrics(string? application = null);
 }
 
 public class JobQueryService<TContext> : IJobQueryService
@@ -541,6 +543,102 @@ public class JobQueryService<TContext> : IJobQueryService
             ByType = Project(byType),
             ByHandler = Project(byHandler),
         };
+    }
+
+    // Per-queue queue-wait (avg + p95/p99 from the qwait: Counter→Statistic fold, reusing the same
+    // ExecutionAccumulator/percentile walk as job-execution metrics) merged with the latest backlog gauge
+    // (qbacklog: Statistic, upserted by BacklogSampler). Like job-execution metrics these survive Job-row
+    // cleanup. A null application reads the app-agnostic families (percentiles populated); a supplied
+    // application reads the disjoint per-app slice (no histogram → percentiles 0). §8.26.
+    public async Task<QueueMetricsModel> GetQueueMetrics(string? application = null)
+    {
+        var wait = new Dictionary<string, ExecutionAccumulator>(StringComparer.Ordinal);
+        var depth = new Dictionary<string, long>(StringComparer.Ordinal);
+        var oldest = new Dictionary<string, long>(StringComparer.Ordinal);
+
+        ExecutionAccumulator WaitFor(string queue)
+        {
+            if (!wait.TryGetValue(queue, out var acc))
+            {
+                acc = new ExecutionAccumulator();
+                wait[queue] = acc;
+            }
+
+            return acc;
+        }
+
+        // Queue-wait is executor-attributed, so it reads the app-agnostic or the per-app slice.
+        if (application is null)
+        {
+            foreach (var row in await LoadMergedStatsAsync(QueueWaitKeys.Prefix + ":"))
+            {
+                if (QueueWaitKeys.TryParsePct(row.Key, out var pctQueue, out var upperMs))
+                {
+                    WaitFor(pctQueue).AddBucket(upperMs, row.Value);
+                }
+                else if (QueueWaitKeys.TryParseTotal(row.Key, out var queue, out var token))
+                {
+                    WaitFor(queue).Add(token, row.Value);
+                }
+            }
+        }
+        else
+        {
+            var app = QueueWaitKeys.Sanitize(application);
+            foreach (var row in await LoadMergedStatsAsync(QueueWaitKeys.AppPrefix + ":" + app + ":"))
+            {
+                if (QueueWaitKeys.TryParseApp(row.Key, out _, out var queue, out var token))
+                {
+                    WaitFor(queue).Add(token, row.Value);
+                }
+            }
+        }
+
+        // Backlog is a queue-global signal (not application-attributable, §8.23), so it's always read from the
+        // global qbacklog: family — the app-filtered view shows the queue's overall backlog alongside that
+        // app's own wait latency.
+        foreach (var row in await LoadMergedStatsAsync(QueueBacklogKeys.Prefix + ":"))
+        {
+            if (QueueBacklogKeys.TryParseTotal(row.Key, out var queue, out var token))
+            {
+                AddBacklog(depth, oldest, queue, token, row.Value);
+            }
+        }
+
+        var queues = wait.Keys
+            .Union(depth.Keys, StringComparer.Ordinal)
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .Select(queue =>
+            {
+                var acc = wait.GetValueOrDefault(queue) ?? new ExecutionAccumulator();
+                var (p95, p99) = acc.Percentiles();
+
+                return new QueueMetricModel
+                {
+                    Queue = queue,
+                    ClaimedCount = acc.ExecutedCount,
+                    AvgWaitMs = acc.AvgDurationMs,
+                    P95WaitMs = p95,
+                    P99WaitMs = p99,
+                    BacklogDepth = depth.GetValueOrDefault(queue),
+                    OldestAgeSeconds = oldest.GetValueOrDefault(queue),
+                };
+            })
+            .ToList();
+
+        return new QueueMetricsModel { Queues = queues };
+    }
+
+    private static void AddBacklog(Dictionary<string, long> depth, Dictionary<string, long> oldest, string queue, string token, long value)
+    {
+        if (string.Equals(token, QueueBacklogKeys.DepthToken, StringComparison.Ordinal))
+        {
+            depth[queue] = value;
+        }
+        else if (string.Equals(token, QueueBacklogKeys.OldestAgeToken, StringComparison.Ordinal))
+        {
+            oldest[queue] = value;
+        }
     }
 
     private async Task<IEnumerable<KeyValueRow>> LoadMergedStatsAsync(string prefix)

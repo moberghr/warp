@@ -103,6 +103,19 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 WorkerId = _workerId,
             });
 
+            // Queue-wait SLI (§8.26): time the job spent eligible-but-unclaimed. Always-on meter + (sink-gated)
+            // Counter rows added to workerContext so they ride the SaveChanges below — no extra round-trip
+            // (§0.2/§6.1), mirroring the jobstat finalization triad (§8.23/§8.24).
+            var waitMs = Math.Max(0, (now - job.ScheduleTime).TotalMilliseconds);
+            WarpTelemetry.RecordQueueWait(job.Queue, waitMs, _configuration.ApplicationName);
+            if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
+            {
+                foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, QueueWaitKeys.HourBucket(now)))
+                {
+                    workerContext.Set<Counter>().Add(counter);
+                }
+            }
+
             PerfTrace.Mark(PerfTrace.SaveProcessing);
             await workerContext.SaveChangesAsync(cancellationToken);
             PerfTrace.Mark(PerfTrace.CommitTransaction1);

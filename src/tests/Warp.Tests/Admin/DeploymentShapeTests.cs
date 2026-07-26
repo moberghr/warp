@@ -236,13 +236,14 @@ public class DeploymentShapeTests
         taskTypes.ShouldContain(typeof(ServerCleanup<TestContext>));
         taskTypes.ShouldContain(typeof(ExpirationCleanup<TestContext>));
 
-        // None of the six job-only tasks.
+        // None of the seven job-only tasks.
         taskTypes.ShouldNotContain(typeof(Orchestrator<TestContext>));
         taskTypes.ShouldNotContain(typeof(MessageRouter<TestContext>));
         taskTypes.ShouldNotContain(typeof(ScheduledJobActivation<TestContext>));
         taskTypes.ShouldNotContain(typeof(RecurringJobScheduler<TestContext>));
         taskTypes.ShouldNotContain(typeof(StaleJobRecovery<TestContext>));
         taskTypes.ShouldNotContain(typeof(CounterAggregator<TestContext>));
+        taskTypes.ShouldNotContain(typeof(BacklogSampler<TestContext>));
     }
 
     // Regression guard: a service-only server with UseDatabasePush() still hosts
