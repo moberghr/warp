@@ -33,7 +33,7 @@ Queue-wait folds into `Counter` → `Statistic` rows the same way execution and 
 
 ## Queue-wait on the hot path
 
-Queue-wait is measured where a worker flips a job `Enqueued → Processing`. The wait is `claimTime − Job.ScheduleTime` (`ScheduleTime` advances on requeue, so a requeued job's wait is measured from its requeue, not its original enqueue). The Counter rows are added to the **same `SaveChanges` that already writes the "Processing" `JobLog`** — the hot path gains a Counter write, never a query or a round-trip ([§0.2 / §6.1](../../CLAUDE.md)).
+Queue-wait is measured where a worker flips a job `Enqueued → Processing`. The wait is `claimTime − Job.ScheduleTime` (`ScheduleTime` advances on requeue, so a requeued job's wait is measured from its requeue, not its original enqueue). The Counter rows are added to the **same `SaveChanges` that already writes the "Processing" `JobLog`** — the hot path gains a Counter write, never a query or a round-trip (the worker fetch/execute path stays sacred).
 
 ## Backlog sampling (off the hot path)
 
