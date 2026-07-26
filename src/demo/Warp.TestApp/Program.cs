@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core;
+using Warp.Core.ClientObservability;
 using Warp.Core.Concurrency;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -12,12 +13,14 @@ using Warp.Core.Retry;
 using Warp.Core.Webhooks;
 using Warp.Demo.ServiceDefaults;
 using Warp.Http;
+using Warp.Http.ClientObservability;
 using Warp.Http.Observability;
 using Warp.Provider.PostgreSql;
 using Warp.Test.Shared;
 using Warp.Test.Shared.Entities;
 using Warp.Test.Shared.Handlers.Sagas;
 using Warp.Test.Shared.Shop;
+using Warp.TestApp;
 using Warp.TestApp.Authentication;
 using Warp.UI;
 using Warp.UI.DashboardPush;
@@ -139,6 +142,16 @@ builder.Services.AddWarp<TestContext>(options =>
             tags["scheme"] = ctx.Request.Scheme;
         };
     });
+
+    // === Client (frontend) observability — errors / logs / web-vitals / custom events from the demo SPA ===
+    // The demo page at /client-demo loads the shipped client.js with this DSN key; the key maps to its own
+    // application ("warp-demo-spa"), so the browser shows as a third app on the Applications + Client pages.
+    // The page is served same-origin, so no AllowedOrigins entry is needed.
+    options.AddClientObservability(o =>
+    {
+        o.AddIngestKey("warp-demo-spa", "pk_demo_spa");
+        o.CaptureRemoteIp = true;   // demo: surface the caller IP in the event drawer (PII — opt-in, §1.2)
+    });
 });
 
 var app = builder.Build();
@@ -162,6 +175,11 @@ app.UseAuthorization();
 app.UseWarpUI(options => options.UseBuiltInLogin<DemoCredentialValidator>());
 app.MapControllers();
 app.MapWarpHttp();
+
+// Client (browser) observability: the public ingest endpoint + the shipped script, and a tiny demo SPA that
+// exercises all four event types so the dashboard Client page shows real browser data end-to-end.
+app.MapWarpClientObservability();
+app.MapGet("/client-demo", () => Results.Content(ClientDemoPage.Html, "text/html; charset=utf-8"));
 
 // Seed endpoint — creates a realistic demo workload
 var seedQueues = new[] { "a-critical", "b-default", "c-low" };

@@ -4,6 +4,40 @@ sidebar_position: 6
 
 # Releases
 
+## 3.8.0
+
+*2026-07-26*
+
+Additive minor release — no breaking API changes. One new table (`client_event_log`), picked up by a standard `dotnet ef migrations add` / `database update`. No behavior change unless you opt in.
+
+### Client (frontend) observability
+
+The browser-side complement to Warp's server-side observability (adapters, endpoints, jobs): a public **ingest endpoint** your frontend posts to, so unhandled **errors**, **Core Web Vitals**, explicit **logs**, and custom **events** land in Warp attributed to an application — Sentry-lite, on the same lossy-ingest → flusher → rows + durable `Counter` fold pipeline as everything else.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddClientObservability(o =>
+    {
+        o.AddIngestKey("shop-web", "pk_live_abc123");   // public write-only DSN key -> trusted app name
+        o.AllowedOrigins.Add("https://shop.example.com");
+    });
+});
+
+app.UseRouting();
+app.MapWarpClientObservability();   // POST /warp/ingest  +  GET /warp/ingest/client.js (shipped script)
+```
+
+Warp ships the browser script (served at `{ingestPath}/client.js`): include it with a `data-key` and it auto-captures errors + web vitals, keeps a breadcrumb trail, and exposes `window.warp.log(...)` / `window.warp.track(...)`, batching via `fetch(keepalive)` / `sendBeacon`.
+
+- **Public endpoint, guarded**: a public write-only **DSN key** maps to a trusted application name (unknown → 401), a CORS **origin allowlist** (else 403), an **in-memory** per-key rate limit (never touches the DB on the request path), and hard size/batch caps. Recording is lossy — the browser is never blocked.
+- **Never inflates the DB**: raw rows are trimmed on **age and count**; error/vital/event **trends** fold into `Counter → Statistic` and **survive raw-row cleanup**, with browser-controlled names collapsed to `{other}` beyond a cardinality cap. Web vitals report **p75** (Google's Core-Web-Vitals percentile).
+- **PII-aware** (§1.2): caller IP off by default; property maps redacted + truncated; consent is the host's responsibility.
+- **Sink-respecting**: `Database` (default) / `Both` write rows; `Otel` skips the DB, the `warp.client.*` meters carry it.
+
+A new always-shown-when-enabled **Client** dashboard page surfaces error rate, Core Web Vitals (colored by Google good/needs-improvement/poor), top errors, and a filterable event stream. See **[Client observability](./features/client-observability.md)**.
+
 ## 3.7.0
 
 *2026-07-26*

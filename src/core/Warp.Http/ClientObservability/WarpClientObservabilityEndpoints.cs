@@ -63,9 +63,12 @@ public static class WarpClientObservabilityEndpoints
             return Results.NotFound();
         }
 
-        // Origin allowlist (browsers send Origin; a missing Origin is a non-browser/same-origin caller).
+        // Origin allowlist. A missing Origin is a non-browser/same-origin caller; a same-origin request
+        // (Origin == this server's scheme://host) needs no CORS grant. Cross-origin must be allowlisted.
         var origin = ctx.Request.Headers.Origin.ToString();
-        if (!string.IsNullOrEmpty(origin) && !options.AllowedOrigins.Contains(origin))
+        if (!string.IsNullOrEmpty(origin)
+            && !string.Equals(origin, $"{ctx.Request.Scheme}://{ctx.Request.Host}", StringComparison.OrdinalIgnoreCase)
+            && !options.AllowedOrigins.Contains(origin))
         {
             return Results.StatusCode(StatusCodes.Status403Forbidden);
         }
