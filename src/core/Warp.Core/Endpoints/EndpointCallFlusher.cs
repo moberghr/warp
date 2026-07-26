@@ -258,6 +258,7 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
                     Outcome = record.Outcome,
                     StatusCode = record.StatusCode,
                     RemoteIp = record.RemoteIp,
+                    Session = record.Session,
                     UserAgent = record.UserAgent,
                     User = record.User,
                     ExceptionType = record.ExceptionType,

@@ -37,6 +37,9 @@ public class EndpointCallLog
 
     public string? RemoteIp { get; set; }
 
+    /// <summary>Client session id (OTel <c>session.id</c>) read from the incoming W3C baggage, when the caller propagated one — joins this request to the browser session that made it (§8.27).</summary>
+    public string? Session { get; set; }
+
     public string? UserAgent { get; set; }
 
     public string? User { get; set; }

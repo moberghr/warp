@@ -181,7 +181,8 @@ public abstract class ClientEventQueryTestsBase : IAsyncLifetime
         log.Timestamp = new DateTime(2026, 7, 26, 8, 0, 1, DateTimeKind.Utc);
         ctx.Set<ClientEventLog>().AddRange(request, log);
 
-        // The server endpoint call that request triggered — same trace id (the join key).
+        // The server endpoint call that request triggered — stamped with the session id (from baggage) and the
+        // shared trace id (for the job-waterfall drill-down).
         ctx.Set<EndpointCallLog>().Add(new EndpointCallLog
         {
             Method = "GET",
@@ -193,6 +194,7 @@ public abstract class ClientEventQueryTestsBase : IAsyncLifetime
             StatusCode = 200,
             MachineName = "srv",
             TraceId = trace,
+            Session = "s1",
         });
         await ctx.SaveChangesAsync(Ct);
 

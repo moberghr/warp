@@ -233,33 +233,25 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
             return null;
         }
 
-        var traceIds = events
-            .Where(x => x.TraceId.HasValue)
-            .Select(x => x.TraceId!.Value)
-            .Distinct()
-            .ToList();
-
-        var serverCalls = new List<ClientSessionEntryModel>();
-        if (traceIds.Count > 0)
-        {
-            serverCalls = await _context.Set<EndpointCallLog>()
-                .AsNoTracking()
-                .Where(x => x.TraceId.HasValue)
-                .Where(x => traceIds.Contains(x.TraceId!.Value))
-                .Select(x =>
-                    new ClientSessionEntryModel
-                    {
-                        Kind = "endpoint",
-                        Timestamp = x.Timestamp,
-                        TraceId = x.TraceId,
-                        Method = x.Method,
-                        Route = x.RouteTemplate,
-                        StatusCode = x.StatusCode,
-                        DurationMs = x.DurationMs,
-                        Outcome = x.Outcome.ToString(),
-                    })
-                .ToListAsync(ct);
-        }
+        // Server half: read the endpoint calls stamped with this session id (from the propagated baggage) —
+        // a direct column join, so it captures the session's server activity even for a request the client
+        // didn't record. Each carries its trace id for the job-waterfall drill-down.
+        var serverCalls = await _context.Set<EndpointCallLog>()
+            .AsNoTracking()
+            .Where(x => x.Session == sessionId)
+            .Select(x =>
+                new ClientSessionEntryModel
+                {
+                    Kind = "endpoint",
+                    Timestamp = x.Timestamp,
+                    TraceId = x.TraceId,
+                    Method = x.Method,
+                    Route = x.RouteTemplate,
+                    StatusCode = x.StatusCode,
+                    DurationMs = x.DurationMs,
+                    Outcome = x.Outcome.ToString(),
+                })
+            .ToListAsync(ct);
 
         var application = await _context.Set<ClientEventLog>()
             .AsNoTracking()

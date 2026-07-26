@@ -480,6 +480,7 @@ public static class ServiceConfiguration
         job.Property(p => p.Metadata);
 
         job.Property(p => p.Application).HasMaxLength(200);
+        job.Property(p => p.Session).HasMaxLength(128);
 
         job.Metadata.SetSchema(schema);
     }
@@ -969,6 +970,7 @@ public static class ServiceConfiguration
         log.Property(p => p.Outcome).HasConversion<int>();
         log.Property(p => p.StatusCode);
         log.Property(p => p.RemoteIp).HasMaxLength(64);
+        log.Property(p => p.Session).HasMaxLength(128);
         log.Property(p => p.UserAgent).HasMaxLength(1024);
         log.Property(p => p.User).HasMaxLength(256);
         log.Property(p => p.ExceptionType).HasMaxLength(512);
@@ -988,6 +990,9 @@ public static class ServiceConfiguration
 
         // Request→jobs drill-down joins jobs on the shared trace id.
         log.HasIndex(p => p.TraceId);
+
+        // Session-timeline query (all server calls a browser session made).
+        log.HasIndex(p => new { p.Session, p.Timestamp });
 
         // ExpirationCleanup range scan on expiry.
         log.HasIndex(p => p.ExpireAt);

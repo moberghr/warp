@@ -30,6 +30,9 @@ internal static class ClientDemoPage
   <button onclick="Promise.reject(new Error('demo unhandled rejection'))">Reject a promise</button>
   <button onclick="window.warp.log('warn', 'demo warning from button', { via: 'button' })">warp.log a warning</button>
   <button onclick="window.warp.track('demo_clicked', { via: 'button' })">warp.track an event</button>
+  <button onclick="fetch('/http/orders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })">Call a Warp API endpoint</button>
+
+  <p style="color:#666">The last button makes a same-origin API call — the client script propagates a traceparent + session baggage, so the server observes the request under the same trace and session. Open the session on the dashboard Client page to see the client and server sides stitched together.</p>
 
   <script>
     // Fire one of each on load so the demo shows data without any interaction. Core Web Vitals are captured

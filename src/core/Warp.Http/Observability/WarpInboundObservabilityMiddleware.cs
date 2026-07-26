@@ -163,6 +163,10 @@ internal sealed class WarpInboundObservabilityMiddleware
             // (Database/Both) draw from the same already-redacted/truncated values.
             var group = ResolveGroup(context);
             var remoteIp = ResolveRemoteIp(context);
+
+            // Client session id from the incoming W3C baggage (ASP.NET extracts the baggage header into the
+            // request Activity) — threads this request to the browser session that made it (§8.27).
+            var session = NullIfEmpty(Activity.Current?.GetBaggageItem(WarpTelemetryAttributes.SessionId));
             var userAgent = NullIfEmpty(context.Request.Headers.UserAgent.ToString());
             var user = context.User.Identity?.Name;
             var requestHeaders = captureHeaders ? HttpCaptureHelpers.RedactHeaders(context.Request.Headers, _options.RedactedHeaders, _options.MaxCapturedHeaderSize) : null;
@@ -177,6 +181,13 @@ internal sealed class WarpInboundObservabilityMiddleware
             if (_enrichSpan && Activity.Current is { IsAllDataRequested: true } activity)
             {
                 EnrichSpan(activity, identity, statusCode, outcome, group, remoteIp, userAgent, user, requestHeaders, responseHeaders, requestBody, responseBody);
+            }
+
+            // session.id (OTel semantic convention) rides the request span whenever present — independent of
+            // the recording sink, so any OTel backend can slice the whole trace by the browser session (§8.27).
+            if (session is not null && Activity.Current is { IsAllDataRequested: true } sessionSpan)
+            {
+                sessionSpan.SetTag(WarpTelemetryAttributes.SessionId, session);
             }
 
             // Database/Both: hand the record to the DB recorder. Under Otel-only there is none — the span
@@ -208,6 +219,7 @@ internal sealed class WarpInboundObservabilityMiddleware
                 Outcome = outcome,
                 StatusCode = statusCode,
                 RemoteIp = remoteIp,
+                Session = session,
                 UserAgent = userAgent,
                 User = user,
                 ExceptionType = exceptionType,

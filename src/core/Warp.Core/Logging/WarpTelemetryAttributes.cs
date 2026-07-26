@@ -111,6 +111,11 @@ public static class WarpTelemetryAttributes
     public const string ClientMeterType = "type";
     public const string ClientMeterVital = "vital";
 
+    // OTel session semantic-convention key (§8.27) — used both as the W3C baggage key propagated browser →
+    // API → jobs AND as the span attribute stamped on the endpoint request span and the job execution span,
+    // so a frontend session threads through the whole system and lights up in any OTel backend.
+    public const string SessionId = "session.id";
+
     // Detail span attributes attached to the ambient ASP.NET request span under the Otel/Both recording
     // sink. Caller metadata (IP / user-agent / user) is captured-by-design PII (§1.2) — it rides the trace
     // exporter only (never the ILogger provider chain), and is set only when the span is being recorded so

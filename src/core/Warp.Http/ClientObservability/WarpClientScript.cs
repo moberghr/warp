@@ -93,6 +93,9 @@ public static class WarpClientScript
         try {
           var headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || undefined);
           if (!headers.has('traceparent')) { headers.set('traceparent', '00-' + traceId + '-' + hex(16) + '-01'); }
+          // Propagate the session id as W3C baggage (OTel session.id) so the server stamps it on the request
+          // and on every job it spawns — the session threads all the way down.
+          if (!headers.has('baggage')) { headers.set('baggage', 'session.id=' + encodeURIComponent(session)); }
           init.headers = headers;
         } catch (e) { traceId = null; }
       }

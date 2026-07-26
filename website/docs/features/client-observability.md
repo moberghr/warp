@@ -86,6 +86,17 @@ Browser payloads are PII-dense, so capture is tiered and host-owned (§1.2): cal
 
 Each ingest key maps to an application name, so a frontend app appears on the [Applications](./applications.md) roster like any server process. Per-type event counts are sliced per app; vital percentiles and top-error lists are global in v1.
 
+## Session correlation (client ↔ server)
+
+The shipped script propagates two W3C headers on same-origin API calls, so a frontend session threads through the whole system:
+
+- **`traceparent`** — a per-request **trace id**. The server adopts it into its request/job telemetry (`EndpointCallLog.TraceId`, `Job.TraceId`), so a single action's client request → endpoint → jobs share one trace and drill into the [job trace waterfall](./tracing.md).
+- **`baggage: session.id=…`** — the [OTel `session.id`](https://opentelemetry.io/docs/specs/semconv/general/session/) for the whole browser session. The API stamps it onto `EndpointCallLog.Session`, and the publisher threads it onto every `Job.Session` it spawns (inherited by child jobs). It's also set as the `session.id` span attribute on the request and job spans, so any OTel backend can slice a trace by session.
+
+The **Client → session timeline** page uses this: it merges the session's client events (errors, logs, vitals, custom events, and the API **requests** it made) with the **server endpoint calls** stamped with that session id, in one chronological view — then each request/server row links into the job trace waterfall. One session, client and server, on one page.
+
+A trace id identifies *one action* end-to-end; a session id groups *all the actions* in a visit — they're complementary, and Warp propagates both.
+
 ## API
 
 - `GET {prefix}/api/client/summary` (`?application=`) — counts, error rate, vital p75s, top errors/events, hourly history.

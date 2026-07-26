@@ -48,6 +48,9 @@ public sealed record EndpointCallRecord
 
     public string? RemoteIp { get; init; }
 
+    /// <summary>Client session id (OTel <c>session.id</c>) read from the incoming W3C baggage (§8.27).</summary>
+    public string? Session { get; init; }
+
     public string? UserAgent { get; init; }
 
     public string? User { get; init; }

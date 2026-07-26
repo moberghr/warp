@@ -11,6 +11,9 @@ public class Job
     /// <summary>Opt-in provenance: the application that PUBLISHED this job (<c>WarpConfiguration.ApplicationName</c>), stamped at publish and preserved on requeue. Filter/display only — execution happens on a worker app, so this is not a metrics dimension. Null ⇒ feature off / legacy row.</summary>
     public string? Application { get; set; }
 
+    /// <summary>Client session id (OTel <c>session.id</c>) propagated via W3C baggage from the browser through the API to this job, stamped at publish and inherited by spawned jobs (§8.27). Ties a job to the frontend session that ultimately caused it. Null when no session baggage was in scope.</summary>
+    public string? Session { get; set; }
+
     public string? Type { get; set; }
 
     public string? Message { get; set; }
