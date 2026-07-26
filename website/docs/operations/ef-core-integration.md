@@ -186,7 +186,9 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 ## Connection string vs `NpgsqlDataSource`
 
-Both work. If your runtime uses `UseNpgsql(dataSource)` (Aspire's `AddAzureNpgsqlDataSource`, Managed Identity, custom SSL/password providers), Warp's notification transport and lock provider thread the same data source through — connections inherit auth and encryption settings. If you pass a connection string instead, Warp uses that for its own connections.
+Both work. If a runtime uses an `NpgsqlDataSource` (Aspire's `AddAzureNpgsqlDataSource` / `AddNpgsqlDataSource`, AWS RDS IAM auth, Cloud SQL, Managed Identity, custom SSL / password providers), Warp's notification transport, lock, semaphore, and server-context connections thread that same data source through — so they inherit its auth and encryption settings instead of opening from a bare connection string that would drop them. If you pass a connection string instead, Warp uses that.
+
+Warp picks up the data source whether it's attached to the `DbContext` (`UseNpgsql(dataSource)`) **or** registered in DI (`AddNpgsqlDataSource()` / Aspire, with `UseNpgsql()` resolving it from the container). The options-attached one wins when both are present. *(Prior to 3.6.0 only the `DbContext`-attached data source was consulted; a DI-only registration was silently ignored and Warp fell back to the connection string.)*
 
 ## What lives in the database, what lives in DI
 
