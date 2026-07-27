@@ -75,6 +75,15 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("trace/{traceId}", async ([FromServices] IJobQueryService jobQueryService, Guid traceId) => await jobQueryService.GetTraceTree(traceId));
 
+        // Unified trace view (§8.28): everything for a trace id — client request + endpoint call + jobs +
+        // outbound adapter calls — unioned from existing rows. Superset of the job-only GetTraceTree above.
+        apiGroup.MapGet("traces/{traceId}", async ([FromServices] ITraceQueryService svc, Guid traceId, CancellationToken ct) =>
+        {
+            var trace = await svc.GetTrace(traceId, ct);
+
+            return trace is null ? Results.NotFound() : Results.Ok(trace);
+        });
+
         apiGroup.MapGet("detail/{id}", async ([FromServices] IJobQueryService jobQueryService, Guid id) =>
         {
             var result = await jobQueryService.GetJobDetailById(id);

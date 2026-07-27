@@ -173,6 +173,11 @@ public static class ServiceConfiguration
         // recorder/flusher/ingest endpoint plus the addons flag (§8.27).
         services.TryAddScoped<IClientEventQueryService, ClientEventQueryService<TContext>>();
 
+        // Unified trace view (§8.28) — one screen for a trace id, unioned from the rows Warp already persists
+        // (client request + endpoint call + jobs + adapter calls). Registered by AddWarp so dashboard-only
+        // processes resolve it; no new storage or span collector.
+        services.TryAddScoped<ITraceQueryService, TraceQueryService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
