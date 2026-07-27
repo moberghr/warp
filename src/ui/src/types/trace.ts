@@ -22,4 +22,5 @@ export interface TraceOverview {
   adapterCount: number;
   clientCount: number;
   errorCount: number;
+  isTruncated: boolean;
 }

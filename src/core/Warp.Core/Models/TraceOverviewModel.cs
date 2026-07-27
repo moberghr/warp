@@ -22,6 +22,9 @@ public class TraceOverviewModel
     public int ClientCount { get; init; }
 
     public int ErrorCount { get; init; }
+
+    /// <summary>True when any source hit the per-source span cap and the trace is only partially shown.</summary>
+    public bool IsTruncated { get; init; }
 }
 
 /// <summary>

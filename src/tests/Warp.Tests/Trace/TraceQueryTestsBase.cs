@@ -76,4 +76,29 @@ public abstract class TraceQueryTestsBase : IAsyncLifetime
     {
         (await new TraceQueryService<TestContext>(_fixture.CreateContext()).GetTrace(Guid.NewGuid(), Ct)).ShouldBeNull();
     }
+
+    [TimedFact]
+    public async Task GetTrace_LargeFanOut_CapsPerSourceAndFlagsTruncated()
+    {
+        var trace = Guid.NewGuid();
+        var basis = new DateTime(2026, 7, 27, 9, 0, 0, DateTimeKind.Utc);
+        var ctx = _fixture.CreateContext();
+
+        // A batch/message that fans out to more than the per-source cap (500) — all children share the trace id.
+        for (var i = 0; i < 600; i++)
+        {
+            var job = JobHelper.CreateJob(message: "{}", type: "FanOut", scheduleTime: null, queue: "default", parentId: null, state: State.Completed, now: basis.AddMilliseconds(i));
+            job.TraceId = trace;
+            ctx.Set<Job>().Add(job);
+        }
+
+        await ctx.SaveChangesAsync(Ct);
+
+        var result = await new TraceQueryService<TestContext>(_fixture.CreateContext()).GetTrace(trace, Ct);
+
+        result.ShouldNotBeNull();
+        result!.JobCount.ShouldBe(500);           // capped, not all 600 loaded
+        result.Spans.Count.ShouldBe(500);
+        result.IsTruncated.ShouldBeTrue();
+    }
 }

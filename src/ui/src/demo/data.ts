@@ -1452,6 +1452,7 @@ export function getTraceOverviewDemo() {
     jobCount: 3,
     adapterCount: 1,
     errorCount: 0,
+    isTruncated: false,
     spans: [
       { source: 'client', id: 'a1b2c3d4-0000-0000-0000-000000000001', name: 'POST /api/checkout', startTime: iso(0), durationMs: 240, status: 'Request', isError: false, parentId: null },
       { source: 'endpoint', id: 'a1b2c3d4-0000-0000-0000-000000000002', name: 'POST /api/checkout', startTime: iso(5), durationMs: 212, status: 'Success', isError: false, parentId: null },

@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { isAxiosError } from 'axios';
 import { Card, CardContent } from '@/components/ui/card';
 import * as api from '@/api';
 import type { TraceSpan, TraceSpanSource } from '@/types/trace';
@@ -9,7 +10,7 @@ import type { TraceSpan, TraceSpanSource } from '@/types/trace';
 // jobs it spawned, and the outbound calls those jobs made — on one time axis. Built from the rows Warp already
 // persists (no span store); each row links to its own detail where one exists.
 export default function TraceWaterfall({ traceId }: { traceId: string }) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['trace', 'overview', traceId] as const,
     queryFn: () => api.getTrace(traceId),
     retry: false,
@@ -19,6 +20,15 @@ export default function TraceWaterfall({ traceId }: { traceId: string }) {
 
   if (isLoading) {
     return <div className="text-sm text-muted-foreground mb-4">Loading trace…</div>;
+  }
+  // A 404 is the expected "no unified spans for this id" case — render nothing so the job graph below still
+  // shows. Any other failure (500 / network) must be visible, not a blank section on a diagnostics screen.
+  if (isError && !(isAxiosError(error) && error.response?.status === 404)) {
+    return (
+      <div className="mb-4 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        Couldn't load the trace waterfall.
+      </div>
+    );
   }
   if (!data || data.spans.length === 0) {
     return null;
@@ -31,6 +41,7 @@ export default function TraceWaterfall({ traceId }: { traceId: string }) {
         <span className="text-xs text-muted-foreground">
           {data.clientCount} client · {data.endpointCount} endpoint · {data.jobCount} job · {data.adapterCount} outbound
           {data.errorCount > 0 && <span className="text-destructive"> · {data.errorCount} error</span>}
+          {data.isTruncated && <span className="text-amber-600 dark:text-amber-400"> · showing first {data.spans.length} (truncated)</span>}
         </span>
       </div>
       <Card>
