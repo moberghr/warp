@@ -178,10 +178,6 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
             msg.TraceId = msg.Id;
         }
 
-        // Client session (OTel session.id, §8.27): inherit from the spawning job, else the incoming request's
-        // W3C baggage, so the frontend session threads down through everything this publish creates.
-        msg.Session = executionContext?.Session ?? Activity.Current?.GetBaggageItem(WarpTelemetryAttributes.SessionId);
-
         if (callerSpanId is { } msgSpanId && msgSpanId != default)
         {
             msg.ParentSpanId = msgSpanId.ToHexString();
@@ -296,9 +292,6 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
         {
             newJob.TraceId = newJob.Id; // Root of a new trace
         }
-
-        // Client session (OTel session.id, §8.27): inherit from the spawning job, else the request baggage.
-        newJob.Session = executionContext?.Session ?? Activity.Current?.GetBaggageItem(WarpTelemetryAttributes.SessionId);
 
         if (callerSpanId is { } jobSpanId && jobSpanId != default)
         {

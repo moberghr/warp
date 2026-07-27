@@ -193,10 +193,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         activity?.SetTag(WarpTelemetryAttributes.WarpJobType, jobTypeName);
         activity?.SetTag(WarpTelemetryAttributes.WarpJobKind, job.Kind.ToString());
         activity?.SetTag(WarpTelemetryAttributes.WarpWorkerId, _workerId.ToString());
-        if (job.Session is not null)
-        {
-            activity?.SetTag(WarpTelemetryAttributes.SessionId, job.Session);
-        }
 
         // Note: dispatcher fetches only Kind=Job rows (see PostgresWarpSqlQueries.cs /
         // SqlServerWarpSqlQueries.cs); the messaging.batch.message_count tag belongs on the
@@ -219,7 +215,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             {
                 JobId = job.Id,
                 TraceId = job.TraceId ?? job.Id,
-                Session = job.Session,
             };
 
             // Handler scope — isolated DbContext for handler + pipeline behaviors.

@@ -480,7 +480,6 @@ public static class ServiceConfiguration
         job.Property(p => p.Metadata);
 
         job.Property(p => p.Application).HasMaxLength(200);
-        job.Property(p => p.Session).HasMaxLength(128);
 
         job.Metadata.SetSchema(schema);
     }

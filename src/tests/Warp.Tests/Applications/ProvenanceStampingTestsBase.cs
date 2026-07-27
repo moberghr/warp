@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -52,28 +51,6 @@ public abstract class ProvenanceStampingTestsBase : IAsyncLifetime
 
         var job = await _fixture.CreateContext().Set<Job>().SingleAsync(x => x.Id == id, Ct);
         job.Application.ShouldBeNull();
-    }
-
-    [TimedFact]
-    public async Task Enqueue_SessionBaggageInScope_StampsJobSession()
-    {
-        // The client's session.id arrives as W3C baggage on the request Activity; the Publisher threads it
-        // onto the job so a frontend session reaches the work it caused (§8.27).
-        using var activity = new Activity("test-request").AddBaggage("session.id", "sess-abc123").Start();
-
-        var id = await PublishJobAsync(application: null);
-
-        var job = await _fixture.CreateContext().Set<Job>().SingleAsync(x => x.Id == id, Ct);
-        job.Session.ShouldBe("sess-abc123");
-    }
-
-    [TimedFact]
-    public async Task Enqueue_NoSessionBaggage_LeavesJobSessionNull()
-    {
-        var id = await PublishJobAsync(application: null);
-
-        var job = await _fixture.CreateContext().Set<Job>().SingleAsync(x => x.Id == id, Ct);
-        job.Session.ShouldBeNull();
     }
 
     [TimedFact]

@@ -129,9 +129,6 @@ public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
         batchJob.TraceId = traceId ?? batchJob.Id;
         batchJob.SpawnedByJobId = spawnedBy;
 
-        // Client session (OTel session.id, §8.27): from the spawning job, else the request baggage.
-        batchJob.Session = JobExecutionContext.Current?.Session ?? Activity.Current?.GetBaggageItem(WarpTelemetryAttributes.SessionId);
-
         string? parentSpanId = null;
         if (callerSpanId is { } batchSpanId && batchSpanId != default)
         {
@@ -152,7 +149,6 @@ public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
         foreach (var childJob in batchChildJobs)
         {
             childJob.TraceId = batchJob.TraceId;
-            childJob.Session = batchJob.Session;
             childJob.SpawnedByJobId = spawnedBy;
             childJob.ParentSpanId = parentSpanId;
         }

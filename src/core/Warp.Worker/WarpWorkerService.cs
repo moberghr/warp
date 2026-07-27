@@ -133,10 +133,6 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         activity?.SetTag(WarpTelemetryAttributes.WarpJobType, jobTypeName);
         activity?.SetTag(WarpTelemetryAttributes.WarpJobKind, job.Kind.ToString());
         activity?.SetTag(WarpTelemetryAttributes.WarpWorkerId, _workerId.ToString());
-        if (job.Session is not null)
-        {
-            activity?.SetTag(WarpTelemetryAttributes.SessionId, job.Session);
-        }
 
         // Note: the worker-fetch SQL filters Kind = JobKind.Job (see PostgresWarpSqlQueries.cs /
         // SqlServerWarpSqlQueries.cs). Batch / Message jobs never reach this code path —
@@ -160,7 +156,6 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             {
                 JobId = job.Id,
                 TraceId = job.TraceId ?? job.Id,
-                Session = job.Session,
             };
 
             // Handler scope — isolated DbContext for handler + pipeline behaviors.
