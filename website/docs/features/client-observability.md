@@ -23,6 +23,10 @@ One primitive — a `ClientEvent` — with four types:
 
 `log()` and `track()` are thin sugar over the same row; auto-captured errors and vitals are the same row with a reserved type. There is no second subsystem to learn.
 
+Each event on the stream opens to a full detail view — message, stack, redacted properties, breadcrumb trail, and the caller/session/trace context — with the trace id linking straight into the [unified trace view](./tracing.md):
+
+<Screenshot light="/img/screenshots/27-client-event.png" dark="/img/screenshots/27-client-event-dark.png" alt="Client event detail showing an error's message, stack trace, redacted properties, and breadcrumbs" />
+
 > **Not** in scope: this is observability ("is the frontend broken/slow?"), not a product-analytics suite — no funnels, cohorts, retention curves, or session replay. For those, point a dedicated analytics SDK at your own backend.
 
 ## Setup

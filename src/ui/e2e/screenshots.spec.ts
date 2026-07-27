@@ -29,6 +29,7 @@ const pages = [
   { name: '17-counters', path: '/counters' },
   { name: '25-queues', path: '/queues' },
   { name: '26-client', path: '/client' },
+  { name: '27-client-event', path: '/client/events/evt-typeerror' },
   { name: '29-client-session', path: '/client/sessions/sess-8f3a2b1c' },
   { name: '18-concurrency-limits', path: '/concurrency' },
   { name: '19-services-list', path: '/services' },
