@@ -91,9 +91,9 @@ Each ingest key maps to an application name, so a frontend app appears on the [A
 The shipped script propagates two W3C headers on same-origin API calls, so a frontend session threads through the whole system:
 
 - **`traceparent`** — a per-request **trace id**. The server adopts it into its request/job telemetry (`EndpointCallLog.TraceId`, `Job.TraceId`), so a single action's client request → endpoint → jobs share one trace and drill into the [job trace waterfall](./tracing.md).
-- **`baggage: session.id=…`** — the [OTel `session.id`](https://opentelemetry.io/docs/specs/semconv/general/session/) for the whole browser session. The API stamps it onto `EndpointCallLog.Session`, and the publisher threads it onto every `Job.Session` it spawns (inherited by child jobs). It's also set as the `session.id` span attribute on the request and job spans, so any OTel backend can slice a trace by session.
+- **`baggage: session.id=…`** — the [OTel `session.id`](https://opentelemetry.io/docs/specs/semconv/general/session/) for the whole browser session. The API stamps it onto `EndpointCallLog.Session` and sets it as the `session.id` span attribute on the request span, so any OTel backend can slice by session. Jobs aren't stamped with the session — a job already carries the trace id, which ties it back to the request that carries the session, so session stays a request-level dimension and the trace id is the job↔request join.
 
-The **Client → session timeline** page uses this: it merges the session's client events (errors, logs, vitals, custom events, and the API **requests** it made) with the **server endpoint calls** stamped with that session id, in one chronological view — then each request/server row links into the job trace waterfall. One session, client and server, on one page.
+The **Client → session timeline** page uses this: it merges the session's client events (errors, logs, vitals, custom events, and the API **requests** it made) with the **server endpoint calls** stamped with that session id, in one chronological view — then each request/server row links into the [unified trace view](./tracing.md). One session, client and server, on one page.
 
 A trace id identifies *one action* end-to-end; a session id groups *all the actions* in a visit — they're complementary, and Warp propagates both.
 

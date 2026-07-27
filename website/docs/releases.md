@@ -35,11 +35,17 @@ Warp ships the browser script (served at `{ingestPath}/client.js`): include it w
 - **Never inflates the DB**: raw rows are trimmed on **age and count**; error/vital/event **trends** fold into `Counter → Statistic` and **survive raw-row cleanup**, with browser-controlled names collapsed to `{other}` beyond a cardinality cap. Web vitals report **p75** (Google's Core-Web-Vitals percentile).
 - **PII-aware** (§1.2): caller IP off by default; property maps redacted + truncated; consent is the host's responsibility.
 - **Sink-respecting**: `Database` (default) / `Both` write rows; `Otel` skips the DB, the `warp.client.*` meters carry it.
-- **Unified client↔server session timeline**: the shipped script propagates a W3C `traceparent` (per-request trace id) *and* `baggage: session.id=…` (the OTel session id) on same-origin calls. The API stamps the session onto `EndpointCallLog`, and the publisher threads it down onto every `Job` it spawns (inherited by children) — plus a `session.id` span attribute on the request and job spans. The dashboard's **session timeline** merges a browser session's client events with the server endpoint calls they triggered, in order, with drill-down into the job trace waterfall. One session, client and server, on one page — and it lights up in any OTel backend too.
+- **Unified client↔server session timeline**: the shipped script propagates a W3C `traceparent` (per-request trace id) *and* `baggage: session.id=…` (the OTel session id) on same-origin calls. The API stamps the session onto `EndpointCallLog` plus a `session.id` span attribute on the request span. The dashboard's **session timeline** merges a browser session's client events with the server endpoint calls they triggered, in order, with drill-down into the unified trace view. One session, client and server, on one page — and it lights up in any OTel backend too.
 
 A new always-shown-when-enabled **Client** dashboard page surfaces error rate, Core Web Vitals (colored by Google good/needs-improvement/poor), top errors, and a filterable event stream. See **[Client observability](./features/client-observability.md)**.
 
-> Migration note: 3.8.0 adds `client_event_log` plus two nullable columns (`Job.Session`, `EndpointCallLog.Session`) — additive, picked up by a standard `dotnet ef migrations add` / `database update`.
+### Unified trace view
+
+A single screen showing **everything that happened for one trace** — the browser request, the server endpoint it hit, the jobs that endpoint spawned, and the outbound adapter calls those jobs made — built entirely from rows Warp **already** persists. The insight: a `Job`, an `EndpointCallLog`, an `AdapterCallLog`, and a client `Request` event are each already a span (they all carry a trace id, a timestamp, and a duration). So the trace view **unions those existing rows on their shared trace id** — no new span table, no collector, nothing added to the worker hot path.
+
+The `/trace/{traceId}` page now renders a time-ordered **waterfall** (client → server → jobs → outbound, on one shared axis, with source badges, error highlighting, and per-span drill-down) **above** the existing job-DAG graph. It's reachable from the session timeline and from any job / endpoint / adapter detail. Save the whole picture locally for a near-Jaeger experience on your own database; switch to an external collector once your data outgrows it (Warp's OTel spans are always emitting). Served by `GET {prefix}/api/traces/{traceId}`.
+
+> Migration note: 3.8.0 adds `client_event_log` plus one nullable column (`EndpointCallLog.Session`) — additive, picked up by a standard `dotnet ef migrations add` / `database update`.
 
 ## 3.7.0
 
