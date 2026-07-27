@@ -847,7 +847,12 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
     return { ...data.jobDetailCompleted, id };
   }
 
-  // Trace
+  // Unified trace overview (waterfall) — matched before /trace/ (distinct path).
+  if (/^\/traces\/[^/]+$/.test(url)) {
+    return data.getTraceOverviewDemo();
+  }
+
+  // Trace (job DAG)
   if (/^\/trace\/[^/]+$/.test(url)) {
     return data.traceJobs;
   }

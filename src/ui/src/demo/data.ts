@@ -1440,3 +1440,24 @@ export function getClientEventDetailDemo(id: string) {
     receivedAt: iso(3800),
   };
 }
+
+export function getTraceOverviewDemo() {
+  const base = Date.parse('2026-05-25T12:59:30.000Z');
+  const iso = (offsetMs: number) => new Date(base + offsetMs).toISOString();
+
+  return {
+    traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+    clientCount: 1,
+    endpointCount: 1,
+    jobCount: 3,
+    adapterCount: 1,
+    errorCount: 0,
+    spans: [
+      { source: 'client', id: 'a1b2c3d4-0000-0000-0000-000000000001', name: 'POST /api/checkout', startTime: iso(0), durationMs: 240, status: 'Request', isError: false, parentId: null },
+      { source: 'endpoint', id: 'a1b2c3d4-0000-0000-0000-000000000002', name: 'POST /api/checkout', startTime: iso(5), durationMs: 212, status: 'Success', isError: false, parentId: null },
+      { source: 'job', id: 'a1b2c3d4-0000-0000-0000-000000000010', name: 'Acme.Orders.ProcessOrderRequest', startTime: iso(60), durationMs: null, status: 'Completed', isError: false, parentId: null },
+      { source: 'adapter', id: 'a1b2c3d4-0000-0000-0000-000000000020', name: 'payments.Charge', startTime: iso(80), durationMs: 90, status: 'Success', isError: false, parentId: null },
+      { source: 'job', id: 'a1b2c3d4-0000-0000-0000-000000000011', name: 'Acme.Orders.SendConfirmationRequest', startTime: iso(200), durationMs: null, status: 'Completed', isError: false, parentId: 'a1b2c3d4-0000-0000-0000-000000000010' },
+    ],
+  };
+}

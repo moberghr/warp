@@ -11,6 +11,7 @@ import type {
 } from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
 import type { ClientObservabilitySummary, ClientEventPage, ClientEventDetail, ClientSession } from '@/types/client';
+import type { TraceOverview } from '@/types/trace';
 import type {
   WebhookDeliveryListItem,
   WebhookDeliveryDetail,
@@ -101,6 +102,9 @@ export const getTraceJobs = (jobId: string, page = 0, pageSize = 20) =>
 
 export const getTraceTree = (traceId: string) =>
   api.get<TraceJobModel[]>(`/trace/${traceId}`).then(r => r.data);
+
+export const getTrace = (traceId: string) =>
+  api.get<TraceOverview>(`/traces/${traceId}`).then(r => r.data);
 
 export const getDetail = (id: string) =>
   api.get<UnifiedJobDetailModel>(`/detail/${id}`).then(r => r.data);
