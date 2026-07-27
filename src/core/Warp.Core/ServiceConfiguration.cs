@@ -432,6 +432,7 @@ public static class ServiceConfiguration
         AddWebhookDeliveryEntity(modelBuilder, schema);
         AddEndpointCallLogEntity(modelBuilder, schema);
         AddClientEventLogEntity(modelBuilder, schema);
+        AddSpanEntity(modelBuilder, schema);
         AddApplicationInstanceEntity(modelBuilder, schema);
         AddApplicationInstanceLogEntity(modelBuilder, schema);
     }
@@ -1038,6 +1039,34 @@ public static class ServiceConfiguration
         log.HasIndex(p => p.ExpireAt);
 
         log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddSpanEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var span = modelBuilder.Entity<Span>();
+
+        span.Property(p => p.Id);
+        span.HasKey(p => p.Id);
+
+        span.Property(p => p.TraceId);
+        span.Property(p => p.SpanId).HasMaxLength(32).IsRequired();
+        span.Property(p => p.ParentSpanId).HasMaxLength(32);
+        span.Property(p => p.Name).HasMaxLength(512).IsRequired();
+        span.Property(p => p.Kind).HasConversion<int>();
+        span.Property(p => p.Status).HasConversion<int>();
+        span.Property(p => p.StartTime);
+        span.Property(p => p.DurationMs);
+        span.Property(p => p.Application).HasMaxLength(200);
+        span.Property(p => p.Attributes);
+        span.Property(p => p.ExpireAt);
+
+        // All spans for one trace (the waterfall query).
+        span.HasIndex(p => p.TraceId);
+
+        // ExpirationCleanup range scan on expiry.
+        span.HasIndex(p => p.ExpireAt);
+
+        span.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)
