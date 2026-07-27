@@ -69,6 +69,11 @@ public abstract class TraceQueryTestsBase : IAsyncLifetime
         result.Spans[1].Source.ShouldBe("endpoint");
         result.Spans.ShouldContain(x => string.Equals(x.Source, "adapter", StringComparison.Ordinal) && string.Equals(x.Name, "payments.Charge", StringComparison.Ordinal));
         result.Spans.Single(x => string.Equals(x.Source, "job", StringComparison.Ordinal) && string.Equals(x.Name, "SendEmail", StringComparison.Ordinal)).ParentId.ShouldBe(parentJob.Id);
+
+        // Per section 8.28 a job span has no clean execution duration, only a create time, so its bar is a
+        // placeholder with a null duration, whereas the other sources all carry precise timing.
+        result.Spans.Where(x => string.Equals(x.Source, "job", StringComparison.Ordinal)).ShouldAllBe(x => x.DurationMs == null);
+        result.Spans.Single(x => string.Equals(x.Source, "adapter", StringComparison.Ordinal)).DurationMs.ShouldNotBeNull();
     }
 
     [TimedFact]

@@ -132,6 +132,13 @@ public static class WarpClientObservabilityEndpoints
         var userAgent = options.CaptureUserAgent ? Truncate(ctx.Request.Headers.UserAgent.ToString(), 1024) : null;
 
         var accepted = Math.Min(events.Count, options.MaxEventsPerBatch);
+        if (events.Count > accepted)
+        {
+            // Batch-cap truncation is a drop too — count it so it isn't silent (mirrors the buffer-full and
+            // unrecognized-type drops below).
+            WarpTelemetry.ClientEventsDropped.Add(events.Count - accepted);
+        }
+
         for (var i = 0; i < accepted; i++)
         {
             var record = BuildRecord(events[i], batch!, application, remoteIp, userAgent, options, now);
@@ -260,13 +267,31 @@ public static class WarpClientObservabilityEndpoints
             return null;
         }
 
-        var map = new Dictionary<string, object?>(StringComparer.Ordinal);
-        foreach (var property in props.Value.EnumerateObject())
+        return Truncate(JsonSerializer.Serialize(Redact(props.Value, denylist), JsonOptions), maxBytes);
+    }
+
+    // Apply the denylist at EVERY nesting level — a secret named `password`/`authorization` nested one or more
+    // levels deep (warp.track('x', { user: { password: '…' } })) must redact too, not just top-level keys (§1.2).
+    // Depth is bounded by System.Text.Json's parse-time max depth, so the recursion can't be driven unbounded.
+    private static object? Redact(JsonElement element, ISet<string> denylist)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
         {
-            map[property.Name] = denylist.Contains(property.Name) ? "[redacted]" : property.Value;
+            var map = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                map[property.Name] = denylist.Contains(property.Name) ? "[redacted]" : Redact(property.Value, denylist);
+            }
+
+            return map;
         }
 
-        return Truncate(JsonSerializer.Serialize(map, JsonOptions), maxBytes);
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            return element.EnumerateArray().Select(x => Redact(x, denylist)).ToList();
+        }
+
+        return element;
     }
 
     private static string? Serialize(JsonElement? element)

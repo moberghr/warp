@@ -110,6 +110,27 @@ public sealed class ClientIngestEndpointTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Post_RedactsDenylistedProperties_NestedNotJustTopLevel()
+    {
+        await PostAsync("pk_test", Origin, new
+        {
+            events = new[]
+            {
+                new { type = "event", name = "signup", props = new { user = new { name = "amy", password = "hunter2" }, tokens = new[] { new { authorization = "Bearer abc" } } } },
+            },
+        });
+
+        var record = _recorder.Records.ShouldHaveSingleItem();
+        var props = record.Properties.ShouldNotBeNull();
+
+        // A secret nested one (object) or two (array of objects) levels deep must still be redacted (§1.2).
+        props.ShouldNotContain("hunter2");
+        props.ShouldNotContain("Bearer abc");
+        props.ShouldContain("[redacted]");
+        props.ShouldContain("amy");     // a non-denylisted nested value is preserved
+    }
+
+    [Fact]
     public async Task Post_BeyondBatchCap_DropsExtraEvents()
     {
         await PostAsync("pk_test", Origin, new
@@ -237,6 +258,59 @@ public sealed class ClientIngestEndpointTests : IAsyncLifetime
         await PostAsync("pk_test", Origin, new { events = new[] { new { type = "request", name = "GET", traceId = "not-a-trace" } } });
 
         _recorder.Records.ShouldHaveSingleItem().TraceId.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Post_MalformedJson_ReturnsBadRequest()
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, Path)
+        {
+            Content = new StringContent("{ this is not json ", System.Text.Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add("x-warp-key", "pk_test");
+        request.Headers.Add("Origin", Origin);
+
+        var response = await _client.SendAsync(request, Xunit.TestContext.Current.CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        _recorder.Records.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Post_EmptyEvents_IsAcceptedNoOp()
+    {
+        var response = await PostAsync("pk_test", Origin, new { events = Array.Empty<object>() });
+
+        // An empty batch is a valid no-op (the beacon fired with nothing to send) — accepted, nothing recorded.
+        response.StatusCode.ShouldBe(HttpStatusCode.NoContent);
+        _recorder.Records.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Post_WhenNoIngestKeysConfigured_ReturnsNotFound()
+    {
+        // A host that enabled the endpoint but configured no DSN key must not silently accept writes.
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddRouting();
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.Configure<WarpClientObservabilityOptions>(o => o.AllowedOrigins.Add(Origin));
+        builder.Services.AddSingleton(x => new ClientIngestRateLimiter(
+            x.GetRequiredService<IOptions<WarpClientObservabilityOptions>>().Value.RateLimitPerMinute,
+            x.GetRequiredService<TimeProvider>()));
+
+        await using var app = builder.Build();
+        app.MapWarpClientObservability();
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+
+        var request = new HttpRequestMessage(HttpMethod.Post, Path) { Content = JsonContent.Create(OneLog()) };
+        request.Headers.Add("x-warp-key", "pk_test");
+        request.Headers.Add("Origin", Origin);
+
+        var response = await client.SendAsync(request, Xunit.TestContext.Current.CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 
     private static object OneLog() => new { events = new[] { new { type = "log", message = "x" } } };
