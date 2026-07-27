@@ -669,6 +669,11 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   if (url === '/client/applications') {
     return ['warp-demo-spa'];
   }
+  // Detail must be matched before the list — both start with /client/events.
+  const clientEventMatch = url.match(/^\/client\/events\/([^/?]+)$/);
+  if (clientEventMatch) {
+    return data.getClientEventDetailDemo(decodeURIComponent(clientEventMatch[1]));
+  }
   if (url.startsWith('/client/events')) {
     return data.getClientEventsDemo();
   }

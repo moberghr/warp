@@ -1414,3 +1414,29 @@ export function getClientSessionDemo(sessionId: string) {
     ],
   };
 }
+
+export function getClientEventDetailDemo(id: string) {
+  const now = Date.now();
+  const iso = (offset: number) => new Date(now - offset).toISOString();
+
+  return {
+    id,
+    application: 'warp-demo-spa',
+    type: 1,
+    name: 'TypeError',
+    level: null,
+    message: "Cannot read properties of undefined (reading 'total')",
+    stack: "TypeError: Cannot read properties of undefined (reading 'total')\n    at Checkout.tsx:42:18\n    at onClick (Button.tsx:11:5)",
+    value: null,
+    url: '/checkout',
+    traceId: '0af7651916cd43dd8448eb211c80319c',
+    sessionId: 'sess-8f3a2b1c',
+    release: '1.4.2',
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+    remoteIp: null,
+    properties: '{"cartId":"c-9931","items":3}',
+    breadcrumbs: '[{"type":"navigation","data":"/cart"},{"type":"click","data":"BUTTON#pay"}]',
+    timestamp: iso(4000),
+    receivedAt: iso(3800),
+  };
+}
