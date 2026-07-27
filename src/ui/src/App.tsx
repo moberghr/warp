@@ -38,6 +38,7 @@ const EndpointDetailPage = lazy(() => import('@/pages/endpoints/EndpointDetailPa
 const EndpointCallDetailPage = lazy(() => import('@/pages/endpoints/EndpointCallDetailPage'));
 const ClientPage = lazy(() => import('@/pages/client/ClientPage'));
 const ClientSessionPage = lazy(() => import('@/pages/client/ClientSessionPage'));
+const ClientEventDetailPage = lazy(() => import('@/pages/client/ClientEventDetailPage'));
 const WebhooksPage = lazy(() => import('@/pages/webhooks/WebhooksPage'));
 const WebhookGroupDetailPage = lazy(() => import('@/pages/webhooks/WebhookGroupDetailPage'));
 const WebhookDetailPage = lazy(() => import('@/pages/webhooks/WebhookDetailPage'));
@@ -157,6 +158,7 @@ function App() {
             <Route path="/endpoints" element={<EndpointsPage />} />
             <Route path="/client" element={<ClientPage />} />
             <Route path="/client/sessions/:id" element={<ClientSessionPage />} />
+            <Route path="/client/events/:id" element={<ClientEventDetailPage />} />
             <Route path="/webhooks/group/:dim/:key" element={<WebhookGroupDetailPage />} />
             <Route path="/webhooks/:id" element={<WebhookDetailPage />} />
             <Route path="/webhooks" element={<WebhooksPage />} />

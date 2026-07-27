@@ -40,11 +40,12 @@ export default function ClientPage() {
         accessorKey: 'name',
         header: 'Name / message',
         cell: ({ row }) => (
-          <div className="min-w-0">
-            {row.original.name && <span className="font-mono text-xs">{row.original.name}</span>}
+          <Link to={`/client/events/${row.original.id}`} className="block min-w-0 hover:underline">
+            {row.original.name && <span className="font-mono text-xs text-primary">{row.original.name}</span>}
             {row.original.value != null && <span className="ml-2 text-xs tabular-nums text-muted-foreground">{row.original.value}</span>}
             {row.original.message && <span className="block truncate text-sm text-muted-foreground">{row.original.message}</span>}
-          </div>
+            {!row.original.name && !row.original.message && <span className="text-xs text-primary">(details)</span>}
+          </Link>
         ),
       },
       {
