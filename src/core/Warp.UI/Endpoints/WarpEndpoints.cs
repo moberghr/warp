@@ -576,18 +576,20 @@ public static class WarpEndpoints
             [FromQuery] string? application,
             [FromQuery] string? type,
             [FromQuery] string? session,
-            [FromQuery] int page,
-            [FromQuery] int pageSize,
+            [FromQuery] int? page,
+            [FromQuery] int? pageSize,
             CancellationToken ct) =>
         {
+            // page/pageSize are NULLABLE so the SPA can omit them for the first page — a non-nullable int
+            // query param would 400 when absent (matches the webhooks route pattern).
             var parsedType = Enum.TryParse<ClientEventType>(type, ignoreCase: true, out var t) ? t : (ClientEventType?)null;
             var filter = new ClientEventFilter
             {
                 Application = application,
                 Type = parsedType,
                 SessionId = session,
-                Page = page,
-                PageSize = pageSize,
+                Page = page ?? 0,
+                PageSize = pageSize ?? 50,
             };
 
             return Results.Ok(await svc.GetEvents(filter, ct));

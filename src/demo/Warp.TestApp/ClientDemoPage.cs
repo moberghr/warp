@@ -30,9 +30,9 @@ internal static class ClientDemoPage
   <button onclick="Promise.reject(new Error('demo unhandled rejection'))">Reject a promise</button>
   <button onclick="window.warp.log('warn', 'demo warning from button', { via: 'button' })">warp.log a warning</button>
   <button onclick="window.warp.track('demo_clicked', { via: 'button' })">warp.track an event</button>
-  <button onclick="fetch('/http/orders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })">Call a Warp API endpoint</button>
+  <button onclick="fetch('/http/queue-email', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ emailLogId: 1 }) })">Call a Warp API endpoint (enqueues a job)</button>
 
-  <p style="color:#666">The last button makes a same-origin API call — the client script propagates a traceparent + session baggage, so the server observes the request under the same trace and session. Open the session on the dashboard Client page to see the client and server sides stitched together.</p>
+  <p style="color:#666">The last button makes a same-origin API call that <em>enqueues a job</em> — the client script propagates a traceparent + session baggage, so the server observes the request AND the job it spawns under the same trace and session. Open the session on the dashboard Client page: the client request, the server endpoint call, and the job it triggered all share one trace, and the trace waterfall shows the job.</p>
 
   <script>
     // Fire one of each on load so the demo shows data without any interaction. Core Web Vitals are captured
