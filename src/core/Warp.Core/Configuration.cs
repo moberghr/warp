@@ -168,19 +168,6 @@ public class WarpConfiguration
     public int? ClientEventLogRetentionCount { get; set; } = 100_000;
 
     /// <summary>
-    /// Global default retention for <c>Span</c> rows (local tracing, §8.28). Spans are the highest-volume
-    /// signal, so this defaults short (3 days); <c>ExpirationCleanup</c> deletes rows past <c>ExpireAt</c>.
-    /// Lower it, lower the sample rate, or flip the tracing sink to an external OTLP collector at scale.
-    /// </summary>
-    public TimeSpan SpanRetention { get; set; } = TimeSpan.FromDays(3);
-
-    /// <summary>
-    /// Global <b>count</b> cap for <c>Span</c> rows — keep at most this many, deleting the oldest beyond the
-    /// cap. Complements the age cap (<see cref="SpanRetention"/>). Default bounds the local store.
-    /// </summary>
-    public int? SpanRetentionCount { get; set; } = 1_000_000;
-
-    /// <summary>
     /// Where per-job-TYPE / per-HANDLER execution aggregate <b>metrics</b> are written. The OTel
     /// <c>warp.job.execution.*</c> meters (§2.15) emit <b>unconditionally</b> regardless of this setting
     /// (null-listener ⇒ zero cost); this knob only gates the write-optimised <c>jobstat</c> <c>Counter</c>
