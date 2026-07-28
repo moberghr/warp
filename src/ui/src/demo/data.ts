@@ -1456,9 +1456,9 @@ export function getTraceOverviewDemo() {
     spans: [
       { source: 'client', id: 'a1b2c3d4-0000-0000-0000-000000000001', name: 'POST /api/checkout', startTime: iso(0), durationMs: 240, status: 'Request', isError: false, parentId: null },
       { source: 'endpoint', id: 'a1b2c3d4-0000-0000-0000-000000000002', name: 'POST /api/checkout', startTime: iso(5), durationMs: 212, status: 'Success', isError: false, parentId: null },
-      { source: 'job', id: 'a1b2c3d4-0000-0000-0000-000000000010', name: 'Acme.Orders.ProcessOrderRequest', startTime: iso(60), durationMs: null, status: 'Completed', isError: false, parentId: null },
+      { source: 'job', id: 'a1b2c3d4-0000-0000-0000-000000000010', name: 'Acme.Orders.ProcessOrderRequest', startTime: iso(60), durationMs: 130, status: 'Completed', isError: false, parentId: null },
       { source: 'adapter', id: 'a1b2c3d4-0000-0000-0000-000000000020', name: 'payments.Charge', startTime: iso(80), durationMs: 90, status: 'Success', isError: false, parentId: null },
-      { source: 'job', id: 'a1b2c3d4-0000-0000-0000-000000000011', name: 'Acme.Orders.SendConfirmationRequest', startTime: iso(200), durationMs: null, status: 'Completed', isError: false, parentId: 'a1b2c3d4-0000-0000-0000-000000000010' },
+      { source: 'job', id: 'a1b2c3d4-0000-0000-0000-000000000011', name: 'Acme.Orders.SendConfirmationRequest', startTime: iso(200), durationMs: 40, status: 'Completed', isError: false, parentId: 'a1b2c3d4-0000-0000-0000-000000000010' },
     ],
   };
 }

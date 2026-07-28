@@ -30,8 +30,8 @@ public class TraceOverviewModel
 /// <summary>
 /// One span on the unified trace view. <see cref="Source"/> discriminates the origin row
 /// (<c>client</c>/<c>endpoint</c>/<c>job</c>/<c>adapter</c>); <see cref="ParentId"/> links a job to its
-/// spawning job (<c>SpawnedByJobId</c>) for the DAG. <see cref="DurationMs"/> is null when the source row
-/// doesn't record execution duration (jobs — see spec).
+/// spawning job (<c>SpawnedByJobId</c>) for the DAG. <see cref="DurationMs"/> is null only when timing is
+/// unavailable (a job whose terminal <c>JobLog</c> has aged out or that hasn't finished — see spec).
 /// </summary>
 public class TraceSpanModel
 {

@@ -77,6 +77,32 @@ public abstract class TraceQueryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetTrace_JobSpan_UsesTerminalJobLogExecutionTiming()
+    {
+        var trace = Guid.NewGuid();
+        var basis = new DateTime(2026, 7, 28, 9, 0, 0, DateTimeKind.Utc);
+        var ctx = _fixture.CreateContext();
+
+        var job = JobHelper.CreateJob(message: "{}", type: "ProcessOrder", scheduleTime: null, queue: "default", parentId: null, state: State.Completed, now: basis);
+        job.TraceId = trace;
+        ctx.Set<Job>().Add(job);
+
+        // The worker stamps the handler's execution duration onto the terminal JobLog at completion time — the
+        // trace view derives the bar from it (duration = DurationMs, start = terminal timestamp − duration).
+        var completedAt = basis.AddSeconds(5);
+        ctx.Set<JobLog>().Add(new JobLog { JobId = job.Id, EventType = "Completed", Timestamp = completedAt, Level = "Information", Message = "done", DurationMs = 1500 });
+
+        await ctx.SaveChangesAsync(Ct);
+
+        var result = await new TraceQueryService<TestContext>(_fixture.CreateContext()).GetTrace(trace, Ct);
+
+        result.ShouldNotBeNull();
+        var jobSpan = result!.Spans.Single(x => string.Equals(x.Source, "job", StringComparison.Ordinal));
+        jobSpan.DurationMs.ShouldBe(1500);
+        jobSpan.StartTime.ShouldBe(completedAt.AddMilliseconds(-1500), TimeSpan.FromMilliseconds(2));
+    }
+
+    [TimedFact]
     public async Task GetTrace_UnknownTrace_ReturnsNull()
     {
         (await new TraceQueryService<TestContext>(_fixture.CreateContext()).GetTrace(Guid.NewGuid(), Ct)).ShouldBeNull();

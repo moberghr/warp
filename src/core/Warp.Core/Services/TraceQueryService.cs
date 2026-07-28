@@ -87,15 +87,35 @@ public sealed class TraceQueryService<TContext> : ITraceQueryService
             .Select(x => new { x.Id, x.Type, x.CurrentState, x.SpawnedByJobId, x.CreateTime })
             .ToListAsync(ct);
         truncated |= Trim(jobs);
+
+        // The Job row has no execution-duration column, but the worker already persists it: each terminal JobLog
+        // (Completed/Failed/Cancelled) carries the handler's DurationMs at its Timestamp. Two-step fetch (job ids
+        // → their duration-bearing logs, §5.2) gives a real bar per job — start = terminal timestamp − duration
+        // — so a job nests correctly over the adapter calls it made. Falls back to the CreateTime marker when the
+        // logs have aged out (retention) or the job hasn't finished. Retries: the latest execution wins.
+        var jobIds = jobs.ConvertAll(x => x.Id);
+        var executions = await _context.Set<JobLog>()
+            .AsNoTracking()
+            .Where(x => jobIds.Contains(x.JobId))
+            .Where(x => x.DurationMs != null)
+            .Select(x => new { x.JobId, x.Timestamp, x.DurationMs })
+            .ToListAsync(ct);
+        var latestExecutionByJob = executions
+            .GroupBy(x => x.JobId)
+            .ToDictionary(x => x.Key, x => x.MaxBy(y => y.Timestamp)!);
+
         foreach (var j in jobs)
         {
+            var execution = latestExecutionByJob.GetValueOrDefault(j.Id);
+            var duration = execution?.DurationMs;
+
             spans.Add(new TraceSpanModel
             {
                 Source = "job",
                 Id = j.Id,
                 Name = j.Type ?? "job",
-                StartTime = j.CreateTime,
-                DurationMs = null,
+                StartTime = execution is null ? j.CreateTime : execution.Timestamp.AddMilliseconds(-execution.DurationMs!.Value),
+                DurationMs = duration,
                 Status = j.CurrentState.ToString(),
                 IsError = j.CurrentState == State.Failed,
                 ParentId = j.SpawnedByJobId,

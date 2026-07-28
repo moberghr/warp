@@ -77,7 +77,7 @@ The page renders two complementary things:
 - A **waterfall** (Gantt) across all four sources on one shared time axis — client (green) → server (slate) → jobs (blue) → outbound (purple) — with error bars highlighted and each span linking to its own detail page. This is the new cross-source timeline.
 - The existing **job graph** (the parent/child DAG below the waterfall), which shows how jobs spawned each other.
 
-Job bars currently show a placeholder duration (`—`): the `Job` row records when a job was created but not a clean execution duration, so only endpoint / adapter / client spans have precise bar widths today. The waterfall is reachable from the [session timeline](./client-observability.md) and from any job, endpoint, or adapter detail page.
+Job bars get their execution window from the job's terminal log (the worker records the handler's duration on completion), so a job nests over the outbound calls it made. A job whose logs have aged out under retention, or that hasn't finished yet, falls back to a placeholder marker (`—`). The waterfall is reachable from the [session timeline](./client-observability.md) and from any job, endpoint, or adapter detail page.
 
 Served by `GET {prefix}/api/traces/{traceId}` (distinct from the job-DAG endpoint that backs the graph). Because it reads local rows, it gives you a near-Jaeger experience on your own database; when your data outgrows the DB, point an external collector at Warp's always-on OTel spans (below) instead.
 
