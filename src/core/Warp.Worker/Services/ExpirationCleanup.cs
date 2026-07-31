@@ -67,6 +67,9 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupStaleApplicationInstancesAsync(ct);
         await CleanupExpiredApplicationInstanceLogsAsync(ct);
         await CleanupApplicationInstanceLogsByCountAsync(ct);
+        await CleanupExpiredErrorGroupsAsync(ct);
+        await CleanupErrorGroupsByCountAsync(ct);
+        await CleanupOrphanErrorOccurrencesAsync(ct);
 
         var total = timeExpired + countCleaned;
         if (total == 0)
@@ -596,6 +599,127 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 total += await _context.Set<ClientEventLog>()
                     .Where(x => ids.Contains(x.Id))
                     .ExecuteDeleteAsync(ct);
+            }
+        }
+
+        return total;
+    }
+
+    // Deletes ErrorGroup issues past their stamped ExpireAt (error grouping, §8.29). The durable errorgroup:
+    // trend Counter/Statistic survives this (§8.22). Same batched, MaxSweepBatchesPerTick-capped shape as the
+    // other call-log sweeps.
+    internal async Task<int> CleanupExpiredErrorGroupsAsync(CancellationToken ct)
+    {
+        var now = _time.GetUtcNow().UtcDateTime;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var ids = await _context.Set<ErrorGroup>()
+                .Where(x => x.ExpireAt != null)
+                .Where(x => x.ExpireAt <= now)
+                .Select(x => x.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<ErrorGroup>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+
+            if (ids.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // Global count cap for ErrorGroup: keep at most N issues (newest by LastSeenAt), deleting the oldest beyond
+    // the cap — bounds the issue table between age ticks. Global (not per-app), unlike the client-event cap.
+    // Batched delete, capped by MaxSweepBatchesPerTick.
+    internal async Task<int> CleanupErrorGroupsByCountAsync(CancellationToken ct)
+    {
+        var cap = _configuration.ErrorGroupRetentionCount;
+        if (cap is null or <= 0)
+        {
+            return 0;
+        }
+
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var count = await _context.Set<ErrorGroup>().CountAsync(ct);
+
+            if (count <= cap.Value)
+            {
+                break;
+            }
+
+            var toDelete = Math.Min(count - cap.Value, batchSize);
+            var ids = await _context.Set<ErrorGroup>()
+                .OrderBy(x => x.LastSeenAt)
+                .ThenBy(x => x.Id)
+                .Select(x => x.Id)
+                .Take(toDelete)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<ErrorGroup>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+        }
+
+        return total;
+    }
+
+    // Defensive sweep of the ErrorOccurrence inbox (§8.29): the ErrorGroupAggregator drains-and-deletes these
+    // every tick, so any row older than an hour means the aggregator is disabled/lagging — delete it so a stuck
+    // inbox can't grow unbounded. Batched, MaxSweepBatchesPerTick-capped.
+    internal async Task<int> CleanupOrphanErrorOccurrencesAsync(CancellationToken ct)
+    {
+        var cutoff = _time.GetUtcNow().UtcDateTime.AddHours(-1);
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var ids = await _context.Set<ErrorOccurrence>()
+                .Where(x => x.Timestamp < cutoff)
+                .Select(x => x.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<ErrorOccurrence>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+
+            if (ids.Count < batchSize)
+            {
+                break;
             }
         }
 

@@ -618,6 +618,41 @@ public static class WarpEndpoints
             return session is null ? Results.NotFound() : Results.Ok(session);
         });
 
+        // Error grouping / Issues per §8.29. The query + command services are always registered by AddWarp, so
+        // dashboard-only processes resolve them and these data routes are non-nullable. The sidebar Issues nav is
+        // always shown as a Core feature with no addons flag. Enum filters bind as nullable strings parsed
+        // case-insensitively so the SPA can omit them — a nullable int query param would reject a bad value.
+        apiGroup.MapGet("issues", async (
+            [FromServices] IErrorGroupQueryService svc,
+            [FromQuery] string? source,
+            [FromQuery] string? status,
+            [FromQuery] string? application,
+            [FromQuery] string? kind,
+            [FromQuery] int? page,
+            [FromQuery] int? pageSize,
+            CancellationToken ct) =>
+        {
+            var parsedSource = Enum.TryParse<ErrorSource>(source, ignoreCase: true, out var s) ? s : (ErrorSource?)null;
+            var parsedStatus = Enum.TryParse<ErrorGroupStatus>(status, ignoreCase: true, out var st) ? st : (ErrorGroupStatus?)null;
+            var parsedKind = Enum.TryParse<ErrorKind>(kind, ignoreCase: true, out var k) ? k : (ErrorKind?)null;
+
+            return Results.Ok(await svc.GetGroups(parsedSource, parsedStatus, application, parsedKind, page ?? 0, pageSize ?? 50, ct));
+        });
+
+        apiGroup.MapGet("issues/{fingerprint}", async ([FromServices] IErrorGroupQueryService svc, string fingerprint, CancellationToken ct) =>
+        {
+            var detail = await svc.GetGroup(fingerprint, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        apiGroup.MapPost("issues/{fingerprint}/status", async ([FromServices] IErrorGroupCommandService svc, string fingerprint, [FromBody] ErrorGroupStatusRequest body, CancellationToken ct) =>
+        {
+            var updated = await svc.SetStatus(fingerprint, body.Status, ct);
+
+            return updated ? Results.NoContent() : Results.NotFound();
+        });
+
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
         // registered by AddWarp (dashboard-only processes resolve them), so these data routes are
         // non-nullable; the sidebar nav is gated on the addons flag (IWebhookRedeliveryEnqueuer presence),
@@ -803,6 +838,8 @@ public static class WarpEndpoints
         }
     }
 }
+
+public sealed record ErrorGroupStatusRequest(ErrorGroupStatus Status);
 
 public sealed record UpsertConcurrencyLimitRequest(string Name, int Limit);
 

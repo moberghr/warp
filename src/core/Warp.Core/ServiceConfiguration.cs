@@ -178,6 +178,15 @@ public static class ServiceConfiguration
         // processes resolve it; no new storage or span collector.
         services.TryAddScoped<ITraceQueryService, TraceQueryService<TContext>>();
 
+        // Error grouping / Issues read + command services (§8.29). Registered by AddWarp (like the other
+        // observability read services) so dashboard-only / publisher-only processes serve /api/issues without
+        // running a server. The ErrorGroup table is always in the schema (§2.11); the aggregator server task
+        // (which does the folding) runs only on a server.
+        services.TryAddScoped<IErrorGroupQueryService>(x => new ErrorGroupQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<TimeProvider>()));
+        services.TryAddScoped<IErrorGroupCommandService, ErrorGroupCommandService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
