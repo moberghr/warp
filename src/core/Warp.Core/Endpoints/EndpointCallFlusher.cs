@@ -5,6 +5,8 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
+using Warp.Core.Enums;
+using Warp.Core.ErrorGrouping;
 
 namespace Warp.Core.Endpoints;
 
@@ -276,6 +278,35 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
             }
 
             AddCounters(context, record, configuration.ApplicationName);
+
+            // Error-grouping inbox append (§8.29): 5xx/unhandled are exception signals, 4xx are status-code
+            // signals — both group even when SuppressLog skipped the call-log row above (a FailuresOnly 4xx is
+            // a suppressed row but must still group). Gated on the grouping disable switch, folded into the
+            // same SaveChanges.
+            if (configuration.ErrorGroupingInterval is not null)
+            {
+                if (record.Outcome == AdapterCallOutcome.Failed)
+                {
+                    context.Set<ErrorOccurrence>().Add(ErrorOccurrenceFactory.FromError(
+                        ErrorSource.Endpoint,
+                        record.ExceptionType,
+                        record.ExceptionMessage,
+                        null,
+                        $"{record.Method} {record.RouteTemplate}",
+                        record.TraceId,
+                        configuration.ApplicationName,
+                        record.Timestamp));
+                }
+                else if (record.StatusCode is >= 400 and < 500)
+                {
+                    context.Set<ErrorOccurrence>().Add(ErrorOccurrenceFactory.FromStatusCode(
+                        record.StatusCode.Value,
+                        $"{record.Method} {record.RouteTemplate}",
+                        record.TraceId,
+                        configuration.ApplicationName,
+                        record.Timestamp));
+                }
+            }
         }
 
         await context.SaveChangesAsync(ct);

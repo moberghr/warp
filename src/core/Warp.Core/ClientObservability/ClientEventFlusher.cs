@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.ErrorGrouping;
 
 namespace Warp.Core.ClientObservability;
 
@@ -245,6 +246,21 @@ public sealed class ClientEventFlusher<TContext> : BackgroundService
             foreach (var counter in ClientEventKeys.Build(record.Type, name, record.Value, record.Application, ClientEventKeys.HourBucket(record.Timestamp)))
             {
                 context.Set<Counter>().Add(counter);
+            }
+
+            // Error-grouping inbox append (§8.29): a browser Error event is an error signal. Gated on the
+            // grouping disable switch and folded into the same SaveChanges as the client-event row above.
+            if (configuration.ErrorGroupingInterval is not null && record.Type == ClientEventType.Error)
+            {
+                context.Set<ErrorOccurrence>().Add(ErrorOccurrenceFactory.FromError(
+                    ErrorSource.Client,
+                    record.Name,
+                    record.Message,
+                    record.Stack,
+                    record.Url ?? string.Empty,
+                    record.TraceId,
+                    record.Application,
+                    record.Timestamp));
             }
         }
 
