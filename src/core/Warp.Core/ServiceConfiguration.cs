@@ -439,6 +439,8 @@ public static class ServiceConfiguration
         AddClientEventLogEntity(modelBuilder, schema);
         AddApplicationInstanceEntity(modelBuilder, schema);
         AddApplicationInstanceLogEntity(modelBuilder, schema);
+        AddErrorGroupEntity(modelBuilder, schema);
+        AddErrorOccurrenceEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -1043,6 +1045,66 @@ public static class ServiceConfiguration
         log.HasIndex(p => p.ExpireAt);
 
         log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddErrorGroupEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var group = modelBuilder.Entity<ErrorGroup>();
+
+        group.Property(p => p.Id);
+        group.HasKey(p => p.Id);
+
+        group.Property(p => p.Fingerprint).HasMaxLength(64);
+        group.Property(p => p.Source).HasConversion<int>();
+        group.Property(p => p.Kind).HasConversion<int>();
+        group.Property(p => p.ExceptionType).HasMaxLength(512);
+        group.Property(p => p.Title).HasMaxLength(512);
+        group.Property(p => p.Culprit).HasMaxLength(512);
+        group.Property(p => p.StatusCode);
+        group.Property(p => p.Application).HasMaxLength(200);
+        group.Property(p => p.FirstSeenAt);
+        group.Property(p => p.LastSeenAt);
+        group.Property(p => p.Count);
+        group.Property(p => p.LastSample);
+        group.Property(p => p.SampleTraceId);
+        group.Property(p => p.Status).HasConversion<int>();
+        group.Property(p => p.StatusChangedAt);
+        group.Property(p => p.ExpireAt);
+
+        // One row per fingerprint — the upsert lookup key and the URL id.
+        group.HasIndex(p => p.Fingerprint).IsUnique();
+
+        // Issues list: filter by source/status, order by recency.
+        group.HasIndex(p => new { p.Source, p.Status, p.LastSeenAt });
+
+        // ExpirationCleanup range scan on expiry.
+        group.HasIndex(p => p.ExpireAt);
+
+        group.Metadata.SetSchema(schema);
+    }
+
+    public static void AddErrorOccurrenceEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var occurrence = modelBuilder.Entity<ErrorOccurrence>();
+
+        occurrence.Property(p => p.Id);
+        occurrence.HasKey(p => p.Id);
+
+        occurrence.Property(p => p.Source).HasConversion<int>();
+        occurrence.Property(p => p.Kind).HasConversion<int>();
+        occurrence.Property(p => p.ExceptionType).HasMaxLength(512);
+        occurrence.Property(p => p.Message).HasMaxLength(4096);
+        occurrence.Property(p => p.Stack);
+        occurrence.Property(p => p.Culprit).HasMaxLength(512);
+        occurrence.Property(p => p.StatusCode);
+        occurrence.Property(p => p.TraceId);
+        occurrence.Property(p => p.Application).HasMaxLength(200);
+        occurrence.Property(p => p.Timestamp);
+
+        // The aggregator drains oldest-first; the orphan sweep ranges on the same column.
+        occurrence.HasIndex(p => p.Timestamp);
+
+        occurrence.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)
