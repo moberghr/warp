@@ -88,6 +88,9 @@ builder.Services.AddWarpServer<TestContext>(options =>
     // Shop cluster-singleton service — logs SKUs below the reorder threshold as orders deplete stock.
     options.AddBackgroundService<LowStockMonitor>();
 
+    // Demo-only: stages a mix of failing jobs so the Issues page (§8.29 error grouping) has live errors to diagnose.
+    options.AddBackgroundService<FaultInjectorService>();
+
     // === Outbound adapters — one adapter per external VENDOR (its own health + rate-limit boundary) ===
     // Each payment provider and each shipping carrier is a genuinely different dependency, so each is
     // its own adapter (stripe/paypal/adyen; ups/fedex/dhl). The GROUP axis is the storefront CHANNEL

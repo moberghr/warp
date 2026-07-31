@@ -6,6 +6,7 @@ using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.ErrorGrouping;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Worker;
@@ -160,6 +161,41 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             .CountAsync(Xunit.TestContext.Current.CancellationToken);
         logs.ShouldBe(3);
 
+        batch.Count.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task FlushAsync_PersistsErrorOccurrence_ForFailedCompletion()
+    {
+        // Regression: dispatcher-mode failures must feed the error-grouping inbox (§8.29). The single-worker
+        // path writes the ErrorOccurrence in FinalizeJobState; the dispatcher carries it on PendingCompletion
+        // and CompletionBatch persists it in the completion transaction. This was missed initially (only the
+        // single-worker path was wired) and surfaced in the demo (UseDispatcher = true → zero issues).
+        var scopeFactory = CreateScopeFactory();
+        var batch = new CompletionBatch<TestContext>(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10));
+
+        var job = await InsertProcessingJob();
+        job.CurrentState = State.Failed;
+        job.CurrentWorkerId = null;
+        job.LastKeepAlive = null;
+
+        var occurrence = ErrorOccurrenceFactory.FromException(
+            ErrorSource.Job,
+            new InvalidOperationException("boom on order 42"),
+            "TestRequest",
+            job.TraceId,
+            application: null,
+            _time.GetUtcNow().UtcDateTime);
+
+        batch.Add(new PendingCompletion(job, [], [], occurrence));
+
+        await batch.FlushAsync();
+
+        var ctx = _fixture.CreateContext();
+        var persisted = (await ctx.Set<ErrorOccurrence>().AsNoTracking().ToListAsync(Xunit.TestContext.Current.CancellationToken)).ShouldHaveSingleItem();
+        persisted.Source.ShouldBe(ErrorSource.Job);
+        persisted.ExceptionType.ShouldBe("System.InvalidOperationException");
+        persisted.Culprit.ShouldBe("TestRequest");
         batch.Count.ShouldBe(0);
     }
 

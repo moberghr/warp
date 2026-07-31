@@ -15,9 +15,31 @@ public static class ErrorOccurrenceFactory
     private const int CulpritMax = 512;
     private const int StackMax = 8192;
 
-    /// <summary>From a live <see cref="Exception"/> (the job worker path).</summary>
+    /// <summary>
+    /// From a live <see cref="Exception"/> (the job worker path). Groups on the REAL cause: reflection-invoked
+    /// handlers (and aggregate/collate paths) wrap the true exception, so the identity type + message come from
+    /// the unwrapped inner exception — otherwise every handler error masquerades as one
+    /// <c>TargetInvocationException</c> issue. The full wrapper <see cref="Exception.ToString"/> is kept as the
+    /// sample stack (it contains the inner exception and the real handler frame, which the fingerprint's top
+    /// in-app frame is extracted from).
+    /// </summary>
     public static ErrorOccurrence FromException(ErrorSource source, Exception error, string culprit, Guid? traceId, string? application, DateTime timestamp)
-        => FromError(source, error.GetType().FullName ?? error.GetType().Name, error.Message, error.ToString(), culprit, traceId, application, timestamp);
+    {
+        var cause = Unwrap(error);
+
+        return FromError(source, cause.GetType().FullName ?? cause.GetType().Name, cause.Message, error.ToString(), culprit, traceId, application, timestamp);
+    }
+
+    private static Exception Unwrap(Exception error)
+    {
+        var current = error;
+        while (current is System.Reflection.TargetInvocationException or AggregateException && current.InnerException is { } inner)
+        {
+            current = inner;
+        }
+
+        return current;
+    }
 
     /// <summary>From already-captured strings (endpoint 5xx / adapter / client, where the row holds type+message+stack).</summary>
     public static ErrorOccurrence FromError(ErrorSource source, string? exceptionType, string? message, string? stack, string culprit, Guid? traceId, string? application, DateTime timestamp)

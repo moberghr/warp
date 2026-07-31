@@ -12,6 +12,7 @@ using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.ErrorGrouping;
 using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
@@ -423,7 +424,14 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
             var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
-            _batch.Add(new PendingCompletion(job, counters, logs));
+
+            // Every caught exception (retry or terminal) feeds the error-grouping inbox — no fingerprint on the
+            // hot path (§8.29). Persisted in the same batch completion as the counters/logs.
+            var occurrence = _configuration.ErrorGroupingInterval != null
+                ? ErrorOccurrenceFactory.FromException(ErrorSource.Job, e, job.Type ?? "job", job.TraceId, _configuration.ApplicationName, _timeProvider.GetUtcNow().UtcDateTime)
+                : null;
+
+            _batch.Add(new PendingCompletion(job, counters, logs, occurrence));
         }
         finally
         {

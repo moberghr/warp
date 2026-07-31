@@ -86,6 +86,26 @@ public sealed class ErrorFingerprintTests
     }
 
     [Fact]
+    public void FromException_UnwrapsReflectionAndAggregateWrappersToTheRealCause()
+    {
+        // Reflection-invoked handlers surface a TargetInvocationException wrapping the real exception — group on
+        // the real cause so a TimeoutException doesn't masquerade as one big TargetInvocationException issue.
+        var real = new TimeoutException("Payment gateway did not respond for order 42");
+        var wrapped = new System.Reflection.TargetInvocationException("plumbing", real);
+
+        var occ = ErrorOccurrenceFactory.FromException(ErrorSource.Job, wrapped, "ChargeOrderRequest", null, null, new DateTime(2026, 7, 31, 0, 0, 0, DateTimeKind.Utc));
+
+        occ.ExceptionType.ShouldBe("System.TimeoutException");
+        occ.Message.ShouldBe("Payment gateway did not respond for order 42");
+        occ.Stack.ShouldNotBeNull().ShouldContain("TargetInvocationException");   // full wrapper kept as the sample
+
+        // AggregateException unwraps too.
+        ErrorOccurrenceFactory
+            .FromException(ErrorSource.Job, new AggregateException(new InvalidOperationException("boom")), "X", null, null, new DateTime(2026, 7, 31, 0, 0, 0, DateTimeKind.Utc))
+            .ExceptionType.ShouldBe("System.InvalidOperationException");
+    }
+
+    [Fact]
     public void ComputeForStatusCode_GroupsByStatusAndRoute()
     {
         var a = ErrorFingerprint.ComputeForStatusCode(422, "POST /api/checkout");
