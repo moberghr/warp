@@ -168,6 +168,35 @@ public class WarpConfiguration
     public int? ClientEventLogRetentionCount { get; set; } = 100_000;
 
     /// <summary>
+    /// How often the <c>ErrorGroupAggregator</c> server task drains the <c>ErrorOccurrence</c> inbox into
+    /// <c>ErrorGroup</c> issues (§8.29). Set to <c>null</c> to disable error grouping entirely (no aggregator
+    /// runs; the inbox is never written). Off the worker hot path (§0.2/§6.1).
+    /// </summary>
+    public TimeSpan? ErrorGroupingInterval { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>Age cap for <c>ErrorGroup</c> issues — removed once <c>LastSeenAt</c> exceeds this (§8.22). Trend aggregates persist.</summary>
+    public TimeSpan ErrorGroupRetention { get; set; } = TimeSpan.FromDays(30);
+
+    /// <summary>Optional count cap for <c>ErrorGroup</c> issues (keep the most-recently-seen N). Null ⇒ off. Complements the age cap.</summary>
+    public int? ErrorGroupRetentionCount { get; set; }
+
+    /// <summary>
+    /// Cardinality guard (§8.29): the max distinct <c>ErrorGroup</c>s per source (per source+application when
+    /// app-sliced). Beyond this, new fingerprints collapse into a per-source <c>{other}</c> group — critical for
+    /// the client source, fed from the public ingest endpoint (§8.27).
+    /// </summary>
+    public int MaxDistinctErrorGroups { get; set; } = 2000;
+
+    /// <summary>Store a raw, truncated sample (message + top frames) on each <c>ErrorGroup</c> for debugging (§1.2). Off ⇒ Title (normalized) only.</summary>
+    public bool CaptureErrorSamples { get; set; } = true;
+
+    /// <summary>
+    /// Namespace prefixes treated as framework/plumbing when picking an error's top "in-app" stack frame (§8.29).
+    /// Defaults to <c>ErrorFingerprint.DefaultInAppDenylist</c>; editable so a host's own framework layers can be skipped too.
+    /// </summary>
+    public IList<string> InAppNamespaceDenylist { get; set; } = [.. Warp.Core.ErrorGrouping.ErrorFingerprint.DefaultInAppDenylist];
+
+    /// <summary>
     /// Where per-job-TYPE / per-HANDLER execution aggregate <b>metrics</b> are written. The OTel
     /// <c>warp.job.execution.*</c> meters (§2.15) emit <b>unconditionally</b> regardless of this setting
     /// (null-listener ⇒ zero cost); this knob only gates the write-optimised <c>jobstat</c> <c>Counter</c>
