@@ -50,10 +50,8 @@ Sentry-lite, deliberately minimal:
 
 ## Navigation
 
-You can move between an issue and the events behind it in both directions:
-
-- **Issue → occurrence → trace.** The issue detail lists recent occurrences by trace id, each linking into the [unified trace view](./tracing.md); the issue also stores a `SampleTraceId` for a one-click jump.
-- **Occurrence → issue.** A job / endpoint / adapter / client detail page recomputes the fingerprint on-read (a pure function of the row it already loaded — no stored column, no hot-path cost) and shows a **"Part of issue → N events"** chip linking to `/issues/{fingerprint}`.
+- **Issue → trace → everywhere.** The issue detail stores the `SampleTraceId` of its most recent occurrence, so one click jumps into the [unified trace view](./tracing.md) — where the browser request, the endpoint call, the jobs, and the outbound calls of that trace each link to their own detail page. So an issue reaches all of its related surfaces through the trace.
+- **Reverse (a source detail page → its issue)** — showing a "Part of issue" chip on a job/endpoint/adapter/client detail — is a planned follow-up. Because the fingerprint is a pure function of the row a detail page already loads, it can be recomputed on-read with no stored column and no hot-path cost; it is not part of the 3.9 slice.
 
 ## Config
 
