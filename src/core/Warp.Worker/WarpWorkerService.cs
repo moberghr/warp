@@ -9,6 +9,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.ErrorGrouping;
 using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
@@ -551,6 +552,15 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var hourSuffix = now.ToString("yyyy-MM-dd-HH");
+
+        // Every caught exception (retry attempt or terminal) appends one row to the error-grouping inbox in
+        // THIS existing save — no fingerprint computed here (that's the aggregator, off the hot path §8.29).
+        if (error != null && _configuration.ErrorGroupingInterval != null)
+        {
+            context.Set<ErrorOccurrence>().Add(
+                ErrorOccurrenceFactory.FromException(ErrorSource.Job, error, job.Type ?? "job", job.TraceId, _configuration.ApplicationName, now));
+        }
+
         if (state == State.Completed)
         {
             job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
