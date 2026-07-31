@@ -31,6 +31,8 @@ const pages = [
   { name: '26-client', path: '/client' },
   { name: '27-client-event', path: '/client/events/evt-typeerror' },
   { name: '29-client-session', path: '/client/sessions/sess-8f3a2b1c' },
+  { name: '31-issues', path: '/issues' },
+  { name: '32-issue-detail', path: '/issues/job-nullref-processorder' },
   { name: '18-concurrency-limits', path: '/concurrency' },
   { name: '19-services-list', path: '/services' },
   { name: '20-services-detail-singleton', path: '/services/JobStatsLoggerService' },
