@@ -4,6 +4,37 @@ sidebar_position: 6
 
 # Releases
 
+## 3.9.0
+
+*2026-07-28*
+
+Additive minor release — no breaking API changes. Two new tables (`error_group`, `error_occurrence`), picked up by a standard `dotnet ef migrations add` / `database update`. Always on unless you disable it.
+
+### Error grouping — Issues
+
+Warp already persists every error signal it produces — failed-job exceptions in `JobLog`, 5xx in `EndpointCallLog`, failed outbound calls in `AdapterCallLog`, browser errors in `ClientEventLog`. This release folds all four into **issues**: one durable row per real problem, not per occurrence, with a count, first/last-seen, a trend, a sample, and an `Unresolved / Resolved / Ignored` lifecycle. Sentry-lite, on the same lossy-fold → durable `Counter` pipeline as everything else — so the trends **survive raw-row cleanup**.
+
+It's an **always-on Core feature** (no addon to enable). Set `ErrorGroupingInterval = null` to turn it off.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.ErrorGroupingInterval = TimeSpan.FromSeconds(15);   // default; null disables grouping
+});
+```
+
+- **Zero hot-path cost**: instead of scanning (and indexing) the hot log tables, each source appends one `ErrorOccurrence` inbox row — jobs inside the finalization save they were already doing, endpoint/adapter/client in their existing paths — and a new `ErrorGroupAggregator` server task **drains-and-deletes** the inbox off the hot path, computes the fingerprint, and upserts the group. No fingerprint CPU on the worker, no new index.
+- **Fingerprint**: `hash(source + exception-type + locus)`, with the message **normalized out of identity** (digits/GUIDs/hex/quotes → placeholders) so message-varying errors group and the normalized message is a PII-safe title. Fine-grained — stack-bearing sources group on the **top in-app stack frame**, so two bugs in one handler are two issues.
+- **Broader than exceptions**: jobs count **every** attempt (retry + terminal), so flaky handlers show up; endpoint **4xx** become `status + route` groups (default-filtered, kept off the reliability SLI); adapters count `Failed` only.
+- **Lifecycle**: a new issue gets a UI badge (not an alert); Resolve/Ignore via `IErrorGroupCommandService.SetStatus`; a resolved issue re-opens only on a genuinely new occurrence and fires a `WarpEventType.IssueRegressed` operational event through the notifier seam. Ignored never auto-re-opens.
+- **Bounded + durable**: raw groups are trimmed on age and count; the hourly trend folds into `Counter → Statistic` and survives. A `MaxDistinctErrorGroups` cap (2000/source) collapses overflow into `{other}` — important for the public client ingest source.
+- **Sink- and app-aware**: `Otel`-only sources write no rows (so no issues from them, jobs excepted); issues are attributed to the **executor** application under a disjoint `errorgroup` counter namespace.
+
+A new always-shown **Issues** dashboard page (`/issues` + `/issues/:fingerprint`) surfaces the grouped list with source badges, trend sparklines, and Resolve/Ignore, with bidirectional navigation between an issue and the unified trace view. `GET {prefix}/api/issues`, `GET .../issues/{fingerprint}`, `POST .../issues/{fingerprint}/status` serve the same data in any `AddWarp` process. See **[Error grouping / Issues](./features/error-grouping.md)**.
+
+> Migration note: 3.9.0 is **additive** — two new tables (`error_group`, `error_occurrence`), picked up by a standard `dotnet ef migrations add` / `database update`. Set `ErrorGroupingInterval = null` to disable the feature entirely.
+
 ## 3.8.0
 
 *2026-07-26*
