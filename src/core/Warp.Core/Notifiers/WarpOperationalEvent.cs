@@ -79,3 +79,20 @@ public sealed record InstanceDownEvent : WarpOperationalEvent
     /// <summary>True if the instance was a worker server; false for a non-server (publisher/dashboard) process.</summary>
     public required bool IsServer { get; init; }
 }
+
+/// <summary>
+/// A resolved error group recurred — a bug thought fixed came back (§8.29). The one genuinely-actionable issue
+/// signal; new issues are surfaced on the dashboard only, not alerted.
+/// </summary>
+public sealed record IssueRegressedEvent : WarpOperationalEvent
+{
+    public required string Fingerprint { get; init; }
+
+    public required ErrorSource Source { get; init; }
+
+    /// <summary>The exception type or status label of the regressed group.</summary>
+    public required string ExceptionType { get; init; }
+
+    /// <summary>Where it happens — handler / route / operation / file.</summary>
+    public required string Culprit { get; init; }
+}
