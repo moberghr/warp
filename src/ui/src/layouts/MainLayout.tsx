@@ -23,6 +23,7 @@ import {
   ArrowDownToLine,
   MonitorSmartphone,
   Webhook,
+  Bug,
   Menu,
   X,
   ExternalLink,
@@ -45,6 +46,8 @@ const builtInNavItems = [
   { to: '/applications', label: 'Applications', icon: Server },
   { to: '/queues', label: 'Queues', icon: ListOrdered },
   { to: '/counters', label: 'Counters', icon: Gauge },
+  // Issues (error grouping §8.29) is a Core feature — always shown, not gated on an addon flag.
+  { to: '/issues', label: 'Issues', icon: Bug },
 ];
 
 const concurrencyNavItem = { to: '/concurrency', label: 'Concurrency', icon: KeyRound };

@@ -12,6 +12,7 @@ import type {
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
 import type { ClientObservabilitySummary, ClientEventPage, ClientEventDetail, ClientSession } from '@/types/client';
 import type { TraceOverview } from '@/types/trace';
+import type { ErrorGroupList, ErrorGroupDetail } from '@/types/issues';
 import type {
   WebhookDeliveryListItem,
   WebhookDeliveryDetail,
@@ -350,6 +351,18 @@ export const redeliverWebhook = async (id: string): Promise<RedeliverOutcome> =>
     return 'error';
   }
 };
+
+// Issues — error grouping (§8.29). Fingerprints group errors across all four sources (jobs,
+// endpoints, adapters, client). Registered by AddWarp itself (like IAdapterQueryService), so
+// these resolve in dashboard-only processes; the Issues nav is always shown (Core feature).
+export const getIssues = (params: { source?: number; status?: number; application?: string; kind?: number; page?: number; pageSize?: number } = {}) =>
+  api.get<ErrorGroupList>('/issues', { params }).then(r => r.data);
+
+export const getIssue = (fingerprint: string) =>
+  api.get<ErrorGroupDetail>(`/issues/${encodeURIComponent(fingerprint)}`).then(r => r.data);
+
+export const setIssueStatus = (fingerprint: string, status: number) =>
+  api.post(`/issues/${encodeURIComponent(fingerprint)}/status`, { status });
 
 // Extensions
 export const getExtensions = () =>

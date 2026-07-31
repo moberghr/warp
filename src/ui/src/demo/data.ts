@@ -1441,6 +1441,121 @@ export function getClientEventDetailDemo(id: string) {
   };
 }
 
+// ============================================================
+// Issues — error grouping (§8.29)
+// ============================================================
+
+// ErrorSource { Job=1, Endpoint=2, Adapter=3, Client=4 }; ErrorGroupKind { Exception=1, StatusCode=2 };
+// ErrorGroupStatus { Unresolved=1, Resolved=2, Ignored=3 } — numeric on the wire (§8.11).
+const demoIssues = [
+  {
+    fingerprint: 'job-nullref-processorder',
+    source: 1, kind: 1,
+    exceptionType: 'System.NullReferenceException',
+    title: 'Object reference not set to an instance of an object',
+    culprit: 'Acme.Orders.ProcessOrderHandler.HandleAsync',
+    statusCode: null, application: 'orders-api',
+    firstSeenAt: ago(60 * 60 * 26), lastSeenAt: ago(90), count: 4212,
+    status: 1, isNew: false, isRegressed: false,
+  },
+  {
+    fingerprint: 'client-typeerror-checkout',
+    source: 4, kind: 1,
+    exceptionType: 'TypeError',
+    title: "Cannot read properties of undefined (reading 'total')",
+    culprit: 'Checkout.tsx:42',
+    statusCode: null, application: 'warp-demo-spa',
+    firstSeenAt: ago(60 * 40), lastSeenAt: ago(120), count: 63,
+    status: 1, isNew: true, isRegressed: false,
+  },
+  {
+    fingerprint: 'adapter-payments-502',
+    source: 3, kind: 1,
+    exceptionType: 'HttpRequestException',
+    title: 'Response status code 502 (Bad Gateway) from payments.Charge',
+    culprit: 'payments.Charge',
+    statusCode: 502, application: 'orders-api',
+    firstSeenAt: ago(60 * 60 * 6), lastSeenAt: ago(45), count: 318,
+    status: 1, isNew: false, isRegressed: true,
+  },
+  {
+    fingerprint: 'job-timeout-report',
+    source: 1, kind: 1,
+    exceptionType: 'System.TimeoutException',
+    title: 'The operation has timed out',
+    culprit: 'Acme.Reports.GenerateReportHandler.HandleAsync',
+    statusCode: null, application: 'reports-worker',
+    firstSeenAt: ago(60 * 60 * 48), lastSeenAt: ago(60 * 60 * 5), count: 91,
+    status: 2, isNew: false, isRegressed: false,
+  },
+  {
+    fingerprint: 'endpoint-422-orders',
+    source: 2, kind: 2,
+    exceptionType: 'HTTP 422',
+    title: 'POST /orders returned 422 Unprocessable Entity',
+    culprit: 'POST /orders',
+    statusCode: 422, application: 'orders-api',
+    firstSeenAt: ago(60 * 60 * 12), lastSeenAt: ago(300), count: 1507,
+    status: 1, isNew: false, isRegressed: false,
+  },
+  {
+    fingerprint: 'job-postgres-deadlock',
+    source: 1, kind: 1,
+    exceptionType: 'Npgsql.PostgresException',
+    title: '40P01: deadlock detected',
+    culprit: 'Acme.Inventory.SyncInventoryHandler.HandleAsync',
+    statusCode: null, application: 'inventory-worker',
+    firstSeenAt: ago(60 * 60 * 18), lastSeenAt: ago(600), count: 204,
+    status: 1, isNew: false, isRegressed: false,
+  },
+];
+
+export function getIssuesDemo() {
+  return { items: demoIssues, total: demoIssues.length };
+}
+
+const demoIssueSamples: Record<string, string> = {
+  'job-nullref-processorder': [
+    'System.NullReferenceException: Object reference not set to an instance of an object.',
+    '   at Acme.Orders.ProcessOrderHandler.HandleAsync(ProcessOrderRequest request, CancellationToken ct) in ProcessOrderHandler.cs:line 88',
+    '   at Warp.Worker.WarpWorkerService.ExecuteJobAsync(Job job, CancellationToken ct)',
+  ].join('\n'),
+  'client-typeerror-checkout': [
+    "TypeError: Cannot read properties of undefined (reading 'total')",
+    '    at Checkout.tsx:42:18',
+    '    at onClick (Button.tsx:11:5)',
+  ].join('\n'),
+  'adapter-payments-502': [
+    'System.Net.Http.HttpRequestException: Response status code does not indicate success: 502 (Bad Gateway).',
+    '   at Acme.Payments.PaymentsClient.ChargeAsync(ChargeRequest request, CancellationToken ct)',
+  ].join('\n'),
+  'job-postgres-deadlock': [
+    'Npgsql.PostgresException (0x80004005): 40P01: deadlock detected',
+    '   at Npgsql.Internal.NpgsqlConnector.<ReadMessage>',
+    '   at Acme.Inventory.SyncInventoryHandler.HandleAsync(SyncInventoryRequest request, CancellationToken ct)',
+  ].join('\n'),
+};
+
+export function getIssueDetailDemo(fingerprint: string) {
+  const summary = demoIssues.find((x) => x.fingerprint === fingerprint) ?? demoIssues[0];
+  const now = new Date(NOW);
+  now.setMinutes(0, 0, 0);
+  const trend = Array.from({ length: 24 }, (_, i) => {
+    const hourDate = new Date(now.getTime() - (23 - i) * 3600000);
+    const h = hourDate.getHours();
+    const base = h >= 9 && h <= 17 ? 8 + seeded(i + 3) * 30 : 1 + seeded(i + 9) * 6;
+
+    return { hour: hourDate.toISOString(), count: Math.round(base) };
+  });
+
+  return {
+    ...summary,
+    lastSample: demoIssueSamples[summary.fingerprint] ?? `${summary.exceptionType}: ${summary.title}`,
+    sampleTraceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+    trend,
+  };
+}
+
 export function getTraceOverviewDemo() {
   const base = Date.parse('2026-05-25T12:59:30.000Z');
   const iso = (offsetMs: number) => new Date(base + offsetMs).toISOString();
