@@ -64,7 +64,12 @@ public abstract class ErrorGroupDispatcherIntegrationTestsBase : IntegrationTest
                 .Where(x => x.Source == ErrorSource.Job)
                 .ToListAsync(Xunit.TestContext.Current.CancellationToken))
             .ShouldHaveSingleItem();
-        group.Count.ShouldBeGreaterThanOrEqualTo(1);
+
+        // MaxRetries=1 ⇒ the job runs twice (attempt + one retry) before terminal Failed, and §8.29 counts
+        // EVERY caught attempt (retry + terminal), so exactly 2 occurrences fold into this one issue. Both are
+        // committed by the time WaitForJobState(Failed) returns (terminal state and its inbox rows commit
+        // together), so the drive above sees both — assert the exact retry+terminal semantics, not >= 1.
+        group.Count.ShouldBe(2);
         group.ExceptionType.ShouldBe("System.NotImplementedException");
 
         var inboxRemaining = await ctx.Set<ErrorOccurrence>()
