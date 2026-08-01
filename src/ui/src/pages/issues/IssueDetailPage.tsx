@@ -5,8 +5,8 @@ import { Card, CardContent } from '@/components/ui/card';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { RelativeTime } from '@/components/RelativeTime';
 import * as api from '@/api';
-import { ErrorGroupStatus } from '@/types/issues';
-import type { ErrorGroupTrendPoint } from '@/types/issues';
+import { ErrorGroupStatus, ErrorSource } from '@/types/issues';
+import type { ErrorGroupTrendPoint, ErrorSample } from '@/types/issues';
 import { SourceBadge, StatusChip, IssueFlags } from './shared';
 
 // Detail for one issue (error group, §8.29): the grouped identity, the most recent captured sample,
@@ -75,6 +75,14 @@ export default function IssueDetailPage() {
             Reopen
           </button>
         )}
+        {data.source === ErrorSource.Job && (
+          <Link
+            to={`/jobs/by-type/${encodeURIComponent(data.culprit)}`}
+            className="inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium text-primary hover:bg-accent"
+          >
+            View affected jobs →
+          </Link>
+        )}
         {data.sampleTraceId && (
           <Link
             to={`/trace/${data.sampleTraceId}`}
@@ -93,6 +101,15 @@ export default function IssueDetailPage() {
           <Field label="Status code" value={data.statusCode != null ? String(data.statusCode) : null} />
           <Field label="Culprit" value={data.culprit} />
           <Field label="Application" value={data.application} />
+          {data.environment && <Field label="Environment" value={data.environment} />}
+          {data.firstSeenVersion && data.lastSeenVersion && data.firstSeenVersion === data.lastSeenVersion ? (
+            <Field label="Version" value={data.firstSeenVersion} />
+          ) : (
+            <>
+              {data.firstSeenVersion && <Field label="First seen version" value={data.firstSeenVersion} />}
+              {data.lastSeenVersion && <Field label="Last seen version" value={data.lastSeenVersion} />}
+            </>
+          )}
           <div className="flex gap-2 md:col-span-2">
             <span className="text-muted-foreground w-28 shrink-0">Fingerprint</span>
             <span className="font-mono break-all">{data.fingerprint}</span>
@@ -111,6 +128,21 @@ export default function IssueDetailPage() {
         </div>
       )}
 
+      <div className="mb-4">
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase mb-2">Recent occurrences</h2>
+        {data.recentSamples.length > 0 ? (
+          <Card>
+            <CardContent className="p-0 divide-y">
+              {data.recentSamples.map((sample, i) => (
+                <SampleRow key={`${sample.timestamp}-${i}`} sample={sample} />
+              ))}
+            </CardContent>
+          </Card>
+        ) : (
+          <p className="text-sm text-muted-foreground">No recent samples retained.</p>
+        )}
+      </div>
+
       {data.lastSample && (
         <div className="mb-4">
           <h2 className="text-sm font-semibold text-muted-foreground uppercase mb-2">Latest sample</h2>
@@ -120,6 +152,29 @@ export default function IssueDetailPage() {
             </CardContent>
           </Card>
         </div>
+      )}
+    </div>
+  );
+}
+
+// One concrete occurrence in the recent-occurrences timeline: when it fired, the raw message, the
+// build it hit, and (when the row carries one) a jump to the full cross-source trace.
+function SampleRow({ sample }: { sample: ErrorSample }) {
+  return (
+    <div className="flex items-start gap-3 p-3 text-sm">
+      <span className="text-xs text-muted-foreground shrink-0 w-28">
+        <RelativeTime date={sample.timestamp} />
+      </span>
+      <span className="font-mono text-xs break-all min-w-0 flex-1">{sample.message ?? '—'}</span>
+      {sample.version && (
+        <span className="inline-flex items-center rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground shrink-0">
+          {sample.version}
+        </span>
+      )}
+      {sample.traceId && (
+        <Link to={`/trace/${sample.traceId}`} className="text-xs text-primary hover:underline shrink-0">
+          trace →
+        </Link>
       )}
     </div>
   );

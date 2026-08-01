@@ -55,4 +55,23 @@ describe('issues dashboard navigation', () => {
     expect((await screen.findAllByText(/Object reference not set/)).length).toBeGreaterThan(0);
     expect(await screen.findByRole('button', { name: 'Resolve' })).toBeTruthy();
   });
+
+  it('issue detail shows the recent-occurrences timeline with trace links and build/environment', async () => {
+    renderAt('/issues/job-nullref-processorder');
+
+    // The recent-occurrences timeline turns one sample into a walkable list of concrete failures.
+    expect(await screen.findByRole('heading', { name: 'Recent occurrences' })).toBeTruthy();
+    expect((await screen.findAllByText(/did not respond for order/)).length).toBeGreaterThan(0);
+
+    // At least one occurrence links to the unified trace view.
+    const traceLinks = (await screen.findAllByRole('link')).filter((a) => a.getAttribute('href')?.includes('/trace/'));
+    expect(traceLinks.length).toBeGreaterThan(0);
+
+    // Deploy-provenance signals surface in the metadata grid.
+    expect(await screen.findByText('production')).toBeTruthy();
+    expect((await screen.findAllByText(/1\.5\.0/)).length).toBeGreaterThan(0);
+
+    // Job-source issues expose a jump to the affected jobs of that type.
+    expect(await screen.findByRole('link', { name: /View affected jobs/ })).toBeTruthy();
+  });
 });

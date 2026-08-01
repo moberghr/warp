@@ -1553,6 +1553,16 @@ export function getIssueDetailDemo(fingerprint: string) {
     lastSample: demoIssueSamples[summary.fingerprint] ?? `${summary.exceptionType}: ${summary.title}`,
     sampleTraceId: '4bf92f3577b34da6a3ce929d0e0e4736',
     trend,
+    firstSeenVersion: '1.4.2',
+    lastSeenVersion: '1.5.0',
+    environment: 'production',
+    recentSamples: [
+      { traceId: '4bf92f3577b34da6a3ce929d0e0e4736', timestamp: ago(90), message: 'Payment gateway did not respond for order 1017 within 30s', version: '1.5.0' },
+      { traceId: null, timestamp: ago(240), message: 'Payment gateway did not respond for order 1014 within 30s', version: '1.5.0' },
+      { traceId: 'a1b2c3d4e5f60718293a4b5c6d7e8f90', timestamp: ago(430), message: 'Payment gateway did not respond for order 1009 within 30s', version: '1.5.0' },
+      { traceId: null, timestamp: ago(620), message: 'Payment gateway did not respond for order 1003 within 30s', version: '1.4.2' },
+      { traceId: null, timestamp: ago(910), message: 'Payment gateway did not respond for order 998 within 30s', version: '1.4.2' },
+    ],
   };
 }
 

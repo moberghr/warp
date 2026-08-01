@@ -45,10 +45,21 @@ export interface ErrorGroupTrendPoint {
   count: number;
 }
 
+export interface ErrorSample {
+  traceId: string | null;
+  timestamp: string;
+  message: string | null;
+  version: string | null;
+}
+
 export interface ErrorGroupDetail extends ErrorGroupSummary {
   lastSample: string | null;
   sampleTraceId: string | null;
   trend: ErrorGroupTrendPoint[];
+  firstSeenVersion: string | null;
+  lastSeenVersion: string | null;
+  environment: string | null;
+  recentSamples: ErrorSample[];
 }
 
 export interface ErrorGroupList {
