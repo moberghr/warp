@@ -96,3 +96,39 @@ public sealed record IssueRegressedEvent : WarpOperationalEvent
     /// <summary>Where it happens — handler / route / operation / file.</summary>
     public required string Culprit { get; init; }
 }
+
+/// <summary>
+/// An SLO objective's error budget is burning (or exhausted) — raised by the <c>SloEvaluator</c> on a
+/// healthy→breaching edge (§8.30). Carries the objective identity and the computed budget/burn so a host
+/// notifier can route by severity (slow vs fast burn) and format an actionable message. <see cref="Type"/> is
+/// <c>SloBreached</c> for latency/rate/deadline objectives and <c>BacklogBreached</c> for a backlog-depth
+/// objective (the previously-reserved value, now wired). Never carries a payload body (§1.2).
+/// </summary>
+public sealed record SloBreachedEvent : WarpOperationalEvent
+{
+    /// <summary>The objective's human label.</summary>
+    public required string Name { get; init; }
+
+    public required SloKind Kind { get; init; }
+
+    /// <summary>Queue / job-type the objective is scoped to (or <c>*</c> for all).</summary>
+    public required string Dimension { get; init; }
+
+    /// <summary>Measured value: a ratio for rate/attainment kinds, observed ms / depth for threshold kinds.</summary>
+    public required double Attainment { get; init; }
+
+    /// <summary>The objective target (ratio, ms, or depth).</summary>
+    public required double TargetValue { get; init; }
+
+    /// <summary>Fraction of error budget remaining; negative when the objective is being missed.</summary>
+    public required double BudgetRemaining { get; init; }
+
+    /// <summary>Burn over the short (recent-hour) window — the fast-burn signal.</summary>
+    public required double BurnRateShort { get; init; }
+
+    /// <summary>Burn over the full evaluation window — the slow-burn signal.</summary>
+    public required double BurnRateLong { get; init; }
+
+    /// <summary>The objective's rolling window in seconds.</summary>
+    public required int WindowSeconds { get; init; }
+}

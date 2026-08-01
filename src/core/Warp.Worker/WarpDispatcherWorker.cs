@@ -19,6 +19,7 @@ using Warp.Core.Logging;
 using Warp.Core.Notifications;
 using Warp.Core.Observability;
 using Warp.Core.Services;
+using Warp.Core.Timeout;
 using Warp.Worker.Logging;
 using Warp.Worker.Services;
 
@@ -202,6 +203,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         Stopwatch? handlerStopwatch = null;
         IServiceScope? handlerScope = null;
         JobContext? jobContext = null;
+        DateTime? totalDeadlineUtc = null;
         try
         {
             PerfTrace.Mark(PerfTrace.ExecuteHandler);
@@ -226,6 +228,18 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             jobContext.TraceId = job.TraceId ?? job.Id;
             jobContext.Metadata = MetadataSerializer.Deserialize(job.Metadata);
             jobContext.ProgressCollector = progressCollector;
+
+            // Deadline attainment (§8.30): capture the Total-scope timeout deadline (§8.7) while the metadata
+            // dict is deserialized (see WarpWorkerService for the rationale) so both the success and failure
+            // finalization paths can emit the attainment counter. Cheap key probe ⇒ non-timeout jobs pay nothing.
+            if (jobContext.Metadata.ContainsKey(nameof(ITimeoutMetadata.TimeoutDeadlineUtc)))
+            {
+                var timeoutMeta = jobContext.GetMetadata<ITimeoutMetadata>();
+                if (timeoutMeta.TimeoutScope == TimeoutScope.Total && timeoutMeta.TimeoutDeadlineUtc is { } deadlineUtc)
+                {
+                    totalDeadlineUtc = deadlineUtc;
+                }
+            }
 
             // Tag the consumer span with the retry attempt (1-based). Read directly from the
             // metadata dict — Warp.Worker does not depend on Warp.Core.Retry. Numbers come
@@ -318,7 +332,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 job.CurrentState = State.Completed;
             }
 
-            var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome);
+            var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
             _batch.Add(new PendingCompletion(job, counters, logs));
         }
@@ -422,7 +436,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             await jobCts.CancelAsync();
             await monitorTask;
 
-            var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome);
+            var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome, totalDeadlineUtc);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
 
             // Every caught exception (retry or terminal) feeds the error-grouping inbox — no fingerprint on the
@@ -622,7 +636,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     /// and a Scheduled/Enqueued log (with the next attempt time). All other transitions emit one.
     /// State must be set on the job before calling this method.
     /// </summary>
-    private (List<Counter> Counters, List<JobLog> FinalLogs) BuildFinalization(Job job, Exception? error, double? durationMs, JobOutcome? outcome)
+    private (List<Counter> Counters, List<JobLog> FinalLogs) BuildFinalization(Job job, Exception? error, double? durationMs, JobOutcome? outcome, DateTime? totalDeadlineUtc = null)
     {
         var state = job.CurrentState;
         job.CancellationMode = CancellationMode.None;
@@ -672,6 +686,23 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // Covers retry backoff and Mutex Wait — anything that puts the job back on the queue.
             counters.Add(new Counter { Key = "stats:requeued", Value = 1 });
             counters.Add(new Counter { Key = $"stats:requeued:{hourSuffix}", Value = 1 });
+        }
+
+        // Deadline attainment (§8.30): mirror FinalizeJobState — attainment denominator on every terminal
+        // outcome, a miss when a Total-scope deadline (§8.7) was exceeded. Meter always-on; DB fold sink-gated.
+        if (totalDeadlineUtc is { } deadline && state is State.Completed or State.Failed or State.Deleted)
+        {
+            var missed = state != State.Completed && now >= deadline;
+            if (missed)
+            {
+                WarpTelemetry.RecordDeadlineMiss(job.Type, job.Queue, _configuration.ApplicationName);
+            }
+
+            if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
+            {
+                var type = string.IsNullOrEmpty(job.Type) ? "job" : job.Type;
+                counters.AddRange(DeadlineKeys.Build(type, missed, _configuration.ApplicationName, hourSuffix));
+            }
         }
 
         // Event-type, level, and split-on-retry are shared with WarpWorkerService via

@@ -197,6 +197,14 @@ public class WarpConfiguration
     public IList<string> InAppNamespaceDenylist { get; set; } = [.. Warp.Core.ErrorGrouping.ErrorFingerprint.DefaultInAppDenylist];
 
     /// <summary>
+    /// How often the <c>SloEvaluator</c> server task evaluates SLO objectives against the durable
+    /// <c>Statistic</c>/<c>Counter</c> aggregates and upserts their rolling status (§8.30). Set to <c>null</c>
+    /// to disable SLO evaluation entirely (no evaluator runs). Objectives also require <c>AddSlo(...)</c> to be
+    /// registered. Off the worker hot path (§0.2/§6.1) — a periodic aggregate read, no per-job cost.
+    /// </summary>
+    public TimeSpan? SloEvaluationInterval { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
     /// Where per-job-TYPE / per-HANDLER execution aggregate <b>metrics</b> are written. The OTel
     /// <c>warp.job.execution.*</c> meters (§2.15) emit <b>unconditionally</b> regardless of this setting
     /// (null-listener ⇒ zero cost); this knob only gates the write-optimised <c>jobstat</c> <c>Counter</c>

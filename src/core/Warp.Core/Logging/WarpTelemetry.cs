@@ -188,6 +188,11 @@ public static class WarpTelemetry
         unit: "ms",
         description: "Time a job spent eligible-but-unclaimed (claim time − ScheduleTime), recorded once per claim. Emitted unconditionally (independent of JobMetricsSink). Tags: queue, application (executor app when set).");
 
+    public static readonly Counter<long> JobDeadlineMiss = Meter.CreateCounter<long>(
+        "warp.job.deadline.miss",
+        unit: "{miss}",
+        description: "A Total-scope timeout deadline (§8.7) was missed by a terminated job. Emitted unconditionally at finalization (independent of JobMetricsSink); the deadline-attainment DB Counter fold is separate and sink-gated. Tags: job.type, queue, application (executor app when set).");
+
     // Backlog is a point-in-time gauge sampled periodically by the BacklogSampler server task, so it uses
     // ObservableGauges over a snapshot the sampler replaces each tick (SetBacklogSnapshot) — the callbacks
     // report the last sample on the exporter's collection schedule. Empty snapshot ⇒ no measurements.
@@ -430,6 +435,28 @@ public static class WarpTelemetry
         }
 
         JobQueueWait.Record(Math.Max(0, waitMs), tags);
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.job.deadline.miss</c> counter for one Total-scope job that missed its
+    /// deadline (§8.30). Emitted unconditionally at finalization (independent of JobMetricsSink); the
+    /// deadline-attainment DB Counter fold is separate and sink-gated. Application tag only when the executor
+    /// app is set.
+    /// </summary>
+    public static void RecordDeadlineMiss(string? jobType, string queue, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.JobMeterType, jobType },
+            { WarpTelemetryAttributes.QueueMeterQueue, queue },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        JobDeadlineMiss.Add(1, tags);
     }
 
     /// <summary>
