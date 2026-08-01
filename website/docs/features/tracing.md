@@ -57,6 +57,30 @@ await publisher.Publish(new OrderNotification()); // Routes to EmailHandler + Sl
 // Both jobs get the same TraceId
 ```
 
+## Unified trace view
+
+The dashboard's `/trace/{traceId}` page shows **everything that happened for one trace** on a single screen — not just the jobs, but the browser request, the server endpoint it hit, the jobs that endpoint spawned, and the outbound adapter calls those jobs made.
+
+The insight is that **Warp already stores spans**. Each of these rows carries a trace id, a start time, and (mostly) a duration:
+
+| Source | Row | Is a span because… |
+|---|---|---|
+| Client | `ClientEventLog` (`Type = Request`) | trace id + timestamp + client-measured duration |
+| Server | `EndpointCallLog` | trace id + timestamp + duration + outcome |
+| Job | `Job` | trace id + create time + terminal state (parent = `SpawnedByJobId`) |
+| Outbound | `AdapterCallLog` | trace id + timestamp + duration + outcome |
+
+So the unified trace view is built by **unioning those existing rows on their shared trace id** — there is no separate span table, no trace collector, and nothing added to the worker hot path. It's a local, DB-backed view over data Warp persists anyway.
+
+The page renders two complementary things:
+
+- A **waterfall** (Gantt) across all four sources on one shared time axis — client (green) → server (slate) → jobs (blue) → outbound (purple) — with error bars highlighted and each span linking to its own detail page. This is the new cross-source timeline.
+- The existing **job graph** (the parent/child DAG below the waterfall), which shows how jobs spawned each other.
+
+Job bars get their execution window from the job's terminal log (the worker records the handler's duration on completion), so a job nests over the outbound calls it made. A job whose logs have aged out under retention, or that hasn't finished yet, falls back to a placeholder marker (`—`). The waterfall is reachable from the [session timeline](./client-observability.md) and from any job, endpoint, or adapter detail page.
+
+Served by `GET {prefix}/api/traces/{traceId}` (distinct from the job-DAG endpoint that backs the graph). Because it reads local rows, it gives you a near-Jaeger experience on your own database; when your data outgrows the DB, point an external collector at Warp's always-on OTel spans (below) instead.
+
 ## OpenTelemetry Integration
 
 Warp produces OTel-standard distributed traces and metrics using `System.Diagnostics`. Everything is on by default with zero configuration.

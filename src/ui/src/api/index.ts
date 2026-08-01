@@ -10,6 +10,9 @@ import type {
   QueueMetricsModel,
 } from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
+import type { ClientObservabilitySummary, ClientEventPage, ClientEventDetail, ClientSession } from '@/types/client';
+import type { TraceOverview } from '@/types/trace';
+import type { ErrorGroupList, ErrorGroupDetail } from '@/types/issues';
 import type {
   WebhookDeliveryListItem,
   WebhookDeliveryDetail,
@@ -55,6 +58,21 @@ export const getJobMetrics = (application?: string) =>
 export const getQueueMetrics = (application?: string) =>
   api.get<QueueMetricsModel>('/queues/metrics', { params: application ? { application } : undefined }).then(r => r.data);
 
+export const getClientSummary = (application?: string) =>
+  api.get<ClientObservabilitySummary>('/client/summary', { params: application ? { application } : undefined }).then(r => r.data);
+
+export const getClientApplications = () =>
+  api.get<string[]>('/client/applications').then(r => r.data);
+
+export const getClientEvents = (params: { application?: string; type?: number; session?: string; page?: number; pageSize?: number }) =>
+  api.get<ClientEventPage>('/client/events', { params }).then(r => r.data);
+
+export const getClientEvent = (id: string) =>
+  api.get<ClientEventDetail>(`/client/events/${id}`).then(r => r.data);
+
+export const getClientSession = (sessionId: string) =>
+  api.get<ClientSession>(`/client/sessions/${encodeURIComponent(sessionId)}`).then(r => r.data);
+
 export const deleteFailedJobsByType = (type: string) =>
   api.post<BulkResult>('/jobs/failed/delete-by-type', null, { params: { type } }).then(r => r.data);
 
@@ -85,6 +103,9 @@ export const getTraceJobs = (jobId: string, page = 0, pageSize = 20) =>
 
 export const getTraceTree = (traceId: string) =>
   api.get<TraceJobModel[]>(`/trace/${traceId}`).then(r => r.data);
+
+export const getTrace = (traceId: string) =>
+  api.get<TraceOverview>(`/traces/${traceId}`).then(r => r.data);
 
 export const getDetail = (id: string) =>
   api.get<UnifiedJobDetailModel>(`/detail/${id}`).then(r => r.data);
@@ -330,6 +351,18 @@ export const redeliverWebhook = async (id: string): Promise<RedeliverOutcome> =>
     return 'error';
   }
 };
+
+// Issues — error grouping (§8.29). Fingerprints group errors across all four sources (jobs,
+// endpoints, adapters, client). Registered by AddWarp itself (like IAdapterQueryService), so
+// these resolve in dashboard-only processes; the Issues nav is always shown (Core feature).
+export const getIssues = (params: { source?: number; status?: number; application?: string; kind?: number; page?: number; pageSize?: number } = {}) =>
+  api.get<ErrorGroupList>('/issues', { params }).then(r => r.data);
+
+export const getIssue = (fingerprint: string) =>
+  api.get<ErrorGroupDetail>(`/issues/${encodeURIComponent(fingerprint)}`).then(r => r.data);
+
+export const setIssueStatus = (fingerprint: string, status: number) =>
+  api.post(`/issues/${encodeURIComponent(fingerprint)}/status`, { status });
 
 // Extensions
 export const getExtensions = () =>

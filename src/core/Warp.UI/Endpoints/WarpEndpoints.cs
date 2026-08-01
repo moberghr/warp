@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.BackgroundServices;
+using Warp.Core.ClientObservability;
 using Warp.Core.Concurrency;
 using Warp.Core.Endpoints;
 using Warp.Core.Enums;
@@ -73,6 +74,15 @@ public static class WarpEndpoints
         apiGroup.MapGet("jobs/{jobId}/trace", async ([FromServices] IJobQueryService jobQueryService, Guid jobId, [AsParameters] BaseListRequest request) => await jobQueryService.GetTraceJobs(jobId, request));
 
         apiGroup.MapGet("trace/{traceId}", async ([FromServices] IJobQueryService jobQueryService, Guid traceId) => await jobQueryService.GetTraceTree(traceId));
+
+        // Unified trace view (§8.28): everything for a trace id — client request + endpoint call + jobs +
+        // outbound adapter calls — unioned from existing rows. Superset of the job-only GetTraceTree above.
+        apiGroup.MapGet("traces/{traceId}", async ([FromServices] ITraceQueryService svc, Guid traceId, CancellationToken ct) =>
+        {
+            var trace = await svc.GetTrace(traceId, ct);
+
+            return trace is null ? Results.NotFound() : Results.Ok(trace);
+        });
 
         apiGroup.MapGet("detail/{id}", async ([FromServices] IJobQueryService jobQueryService, Guid id) =>
         {
@@ -150,6 +160,7 @@ public static class WarpEndpoints
             [FromServices] ISagaQueryService? sagas,
             [FromServices] IAdapterRecordingMarker? adapters,
             [FromServices] IEndpointObservabilityMarker? endpoints,
+            [FromServices] IClientObservabilityMarker? client,
             [FromServices] IWebhookRedeliveryEnqueuer? webhooks,
             [FromServices] IOptions<WarpConfiguration> configuration) =>
             Results.Ok(new WarpAddonsInfo
@@ -167,6 +178,10 @@ public static class WarpEndpoints
                 // sink); IEndpointQueryService (always registered by AddWarp for dashboard-only processes)
                 // can't gate the flag. The endpoints nav shows wherever inbound requests are being observed.
                 Endpoints = endpoints is not null,
+
+                // IClientObservabilityMarker is registered only by AddClientObservability() (regardless of
+                // sink); IClientEventQueryService (always registered by AddWarp) can't gate the flag.
+                Client = client is not null,
 
                 // IWebhookRedeliveryEnqueuer is registered only by AddWebhooks(); IWebhookQueryService /
                 // IWebhookCommandService (always registered by AddWarp for dashboard-only processes) can't
@@ -557,6 +572,87 @@ public static class WarpEndpoints
             return detail is null ? Results.NotFound() : Results.Ok(detail);
         });
 
+        // Client (browser) observability (§8.27). IClientEventQueryService is always registered by AddWarp, so
+        // these resolve in dashboard-only / publisher-only processes without the ingest endpoint.
+        apiGroup.MapGet("client/summary", async ([FromServices] IClientEventQueryService svc, [FromQuery] string? application, CancellationToken ct) =>
+            Results.Ok(await svc.GetSummary(application, ct)));
+
+        apiGroup.MapGet("client/applications", async ([FromServices] IClientEventQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetApplications(ct)));
+
+        apiGroup.MapGet("client/events", async (
+            [FromServices] IClientEventQueryService svc,
+            [FromQuery] string? application,
+            [FromQuery] string? type,
+            [FromQuery] string? session,
+            [FromQuery] int? page,
+            [FromQuery] int? pageSize,
+            CancellationToken ct) =>
+        {
+            // page/pageSize are NULLABLE so the SPA can omit them for the first page — a non-nullable int
+            // query param would 400 when absent (matches the webhooks route pattern).
+            var parsedType = Enum.TryParse<ClientEventType>(type, ignoreCase: true, out var t) ? t : (ClientEventType?)null;
+            var filter = new ClientEventFilter
+            {
+                Application = application,
+                Type = parsedType,
+                SessionId = session,
+                Page = page ?? 0,
+                PageSize = pageSize ?? 50,
+            };
+
+            return Results.Ok(await svc.GetEvents(filter, ct));
+        });
+
+        apiGroup.MapGet("client/events/{id}", async ([FromServices] IClientEventQueryService svc, Guid id, CancellationToken ct) =>
+        {
+            var detail = await svc.GetEvent(id, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        apiGroup.MapGet("client/sessions/{sessionId}", async ([FromServices] IClientEventQueryService svc, string sessionId, CancellationToken ct) =>
+        {
+            var session = await svc.GetSession(sessionId, ct);
+
+            return session is null ? Results.NotFound() : Results.Ok(session);
+        });
+
+        // Error grouping / Issues per §8.29. The query + command services are always registered by AddWarp, so
+        // dashboard-only processes resolve them and these data routes are non-nullable. The sidebar Issues nav is
+        // always shown as a Core feature with no addons flag. Enum filters bind as nullable strings parsed
+        // case-insensitively so the SPA can omit them — a nullable int query param would reject a bad value.
+        apiGroup.MapGet("issues", async (
+            [FromServices] IErrorGroupQueryService svc,
+            [FromQuery] string? source,
+            [FromQuery] string? status,
+            [FromQuery] string? application,
+            [FromQuery] string? kind,
+            [FromQuery] int? page,
+            [FromQuery] int? pageSize,
+            CancellationToken ct) =>
+        {
+            var parsedSource = Enum.TryParse<ErrorSource>(source, ignoreCase: true, out var s) ? s : (ErrorSource?)null;
+            var parsedStatus = Enum.TryParse<ErrorGroupStatus>(status, ignoreCase: true, out var st) ? st : (ErrorGroupStatus?)null;
+            var parsedKind = Enum.TryParse<ErrorKind>(kind, ignoreCase: true, out var k) ? k : (ErrorKind?)null;
+
+            return Results.Ok(await svc.GetGroups(parsedSource, parsedStatus, application, parsedKind, page ?? 0, pageSize ?? 50, ct));
+        });
+
+        apiGroup.MapGet("issues/{fingerprint}", async ([FromServices] IErrorGroupQueryService svc, string fingerprint, CancellationToken ct) =>
+        {
+            var detail = await svc.GetGroup(fingerprint, ct);
+
+            return detail is null ? Results.NotFound() : Results.Ok(detail);
+        });
+
+        apiGroup.MapPost("issues/{fingerprint}/status", async ([FromServices] IErrorGroupCommandService svc, string fingerprint, [FromBody] ErrorGroupStatusRequest body, CancellationToken ct) =>
+        {
+            var updated = await svc.SetStatus(fingerprint, body.Status, ct);
+
+            return updated ? Results.NoContent() : Results.NotFound();
+        });
+
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
         // registered by AddWarp (dashboard-only processes resolve them), so these data routes are
         // non-nullable; the sidebar nav is gated on the addons flag (IWebhookRedeliveryEnqueuer presence),
@@ -742,6 +838,8 @@ public static class WarpEndpoints
         }
     }
 }
+
+public sealed record ErrorGroupStatusRequest(ErrorGroupStatus Status);
 
 public sealed record UpsertConcurrencyLimitRequest(string Name, int Limit);
 

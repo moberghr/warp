@@ -4,6 +4,81 @@ sidebar_position: 6
 
 # Releases
 
+## 3.9.0
+
+*2026-07-28*
+
+Additive minor release — no breaking API changes. Two new tables (`error_group`, `error_occurrence`), picked up by a standard `dotnet ef migrations add` / `database update`. Always on unless you disable it.
+
+### Error grouping — Issues
+
+Warp already persists every error signal it produces — failed-job exceptions in `JobLog`, 5xx in `EndpointCallLog`, failed outbound calls in `AdapterCallLog`, browser errors in `ClientEventLog`. This release folds all four into **issues**: one durable row per real problem, not per occurrence, with a count, first/last-seen, a trend, a sample, and an `Unresolved / Resolved / Ignored` lifecycle. Sentry-lite, on the same lossy-fold → durable `Counter` pipeline as everything else — so the trends **survive raw-row cleanup**.
+
+It's an **always-on Core feature** (no addon to enable). Set `ErrorGroupingInterval = null` to turn it off.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.ErrorGroupingInterval = TimeSpan.FromSeconds(15);   // default; null disables grouping
+});
+```
+
+- **Zero hot-path cost**: instead of scanning (and indexing) the hot log tables, each source appends one `ErrorOccurrence` inbox row — jobs inside the finalization save they were already doing, endpoint/adapter/client in their existing paths — and a new `ErrorGroupAggregator` server task **drains-and-deletes** the inbox off the hot path, computes the fingerprint, and upserts the group. No fingerprint CPU on the worker, no new index.
+- **Fingerprint**: `hash(source + exception-type + locus)`, with the message **normalized out of identity** (digits/GUIDs/hex/quotes → placeholders) so message-varying errors group and the normalized message is a PII-safe title. Fine-grained — stack-bearing sources group on the **top in-app stack frame**, so two bugs in one handler are two issues.
+- **Broader than exceptions**: jobs count **every** attempt (retry + terminal), so flaky handlers show up; endpoint **4xx** become `status + route` groups (default-filtered, kept off the reliability SLI); adapters count `Failed` only.
+- **Lifecycle**: a new issue gets a UI badge (not an alert); Resolve/Ignore via `IErrorGroupCommandService.SetStatus`; a resolved issue re-opens only on a genuinely new occurrence and fires a `WarpEventType.IssueRegressed` operational event through the notifier seam. Ignored never auto-re-opens.
+- **Bounded + durable**: raw groups are trimmed on age and count; the hourly trend folds into `Counter → Statistic` and survives. A `MaxDistinctErrorGroups` cap (2000/source) collapses overflow into `{other}` — important for the public client ingest source.
+- **Sink- and app-aware**: `Otel`-only sources write no rows (so no issues from them, jobs excepted); issues are attributed to the **executor** application under a disjoint `errorgroup` counter namespace.
+- **Built to diagnose**: the fingerprint **unwraps** reflection/aggregate wrappers, so the title shows the real `TimeoutException`, not the `TargetInvocationException` the mediator throws — and skips JIT reflection stubs so one handler stays one issue. Each group records the **version it was first seen in and the latest still producing it** (plus environment) to tie an issue to a deploy, and keeps a rolling **recent-occurrences timeline** (message + version + a per-occurrence trace link) so one issue becomes a walkable list of concrete failures. Culprits are the short type name, not the assembly-qualified string.
+
+A new always-shown **Issues** dashboard page (`/issues` + `/issues/:fingerprint`) surfaces the grouped list with source badges, trend sparklines, and Resolve/Ignore, and the detail links out to the unified trace view (per occurrence) and to the failed jobs behind a job issue. `GET {prefix}/api/issues`, `GET .../issues/{fingerprint}`, `POST .../issues/{fingerprint}/status` serve the same data in any `AddWarp` process. See **[Error grouping / Issues](./features/error-grouping.md)**.
+
+> Migration note: 3.9.0 is **additive** — two new tables (`error_group`, `error_occurrence`), picked up by a standard `dotnet ef migrations add` / `database update`. Set `ErrorGroupingInterval = null` to disable the feature entirely.
+
+## 3.8.0
+
+*2026-07-26*
+
+Additive minor release — no breaking API changes. One new table (`client_event_log`), picked up by a standard `dotnet ef migrations add` / `database update`. No behavior change unless you opt in.
+
+### Client (frontend) observability
+
+The browser-side complement to Warp's server-side observability (adapters, endpoints, jobs): a public **ingest endpoint** your frontend posts to, so unhandled **errors**, **Core Web Vitals**, explicit **logs**, and custom **events** land in Warp attributed to an application — Sentry-lite, on the same lossy-ingest → flusher → rows + durable `Counter` fold pipeline as everything else.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddClientObservability(o =>
+    {
+        o.AddIngestKey("shop-web", "pk_live_abc123");   // public write-only DSN key -> trusted app name
+        o.AllowedOrigins.Add("https://shop.example.com");
+    });
+});
+
+app.UseRouting();
+app.MapWarpClientObservability();   // POST /warp/ingest  +  GET /warp/ingest/client.js (shipped script)
+```
+
+Warp ships the browser script (served at `{ingestPath}/client.js`): include it with a `data-key` and it auto-captures errors + web vitals, keeps a breadcrumb trail, and exposes `window.warp.log(...)` / `window.warp.track(...)`, batching via `fetch(keepalive)` / `sendBeacon`.
+
+- **Public endpoint, guarded**: a public write-only **DSN key** maps to a trusted application name (unknown → 401), a CORS **origin allowlist** (else 403), an **in-memory** per-key rate limit (never touches the DB on the request path), and hard size/batch caps. Recording is lossy — the browser is never blocked.
+- **Never inflates the DB**: raw rows are trimmed on **age and count**; error/vital/event **trends** fold into `Counter → Statistic` and **survive raw-row cleanup**, with browser-controlled names collapsed to `{other}` beyond a cardinality cap. Web vitals report **p75** (Google's Core-Web-Vitals percentile).
+- **PII-aware** (§1.2): caller IP off by default; property maps redacted + truncated; consent is the host's responsibility.
+- **Sink-respecting**: `Database` (default) / `Both` write rows; `Otel` skips the DB, the `warp.client.*` meters carry it.
+- **Unified client↔server session timeline**: the shipped script propagates a W3C `traceparent` (per-request trace id) *and* `baggage: session.id=…` (the OTel session id) on same-origin calls. The API stamps the session onto `EndpointCallLog` plus a `session.id` span attribute on the request span. The dashboard's **session timeline** merges a browser session's client events with the server endpoint calls they triggered, in order, with drill-down into the unified trace view. One session, client and server, on one page — and it lights up in any OTel backend too.
+
+A new always-shown-when-enabled **Client** dashboard page surfaces error rate, Core Web Vitals (colored by Google good/needs-improvement/poor), top errors, and a filterable event stream. See **[Client observability](./features/client-observability.md)**.
+
+### Unified trace view
+
+A single screen showing **everything that happened for one trace** — the browser request, the server endpoint it hit, the jobs that endpoint spawned, and the outbound adapter calls those jobs made — built entirely from rows Warp **already** persists. The insight: a `Job`, an `EndpointCallLog`, an `AdapterCallLog`, and a client `Request` event are each already a span (they all carry a trace id, a timestamp, and a duration). So the trace view **unions those existing rows on their shared trace id** — no new span table, no collector, nothing added to the worker hot path.
+
+The `/trace/{traceId}` page now renders a time-ordered **waterfall** (client → server → jobs → outbound, on one shared axis, with source badges, error highlighting, and per-span drill-down) **above** the existing job-DAG graph. It's reachable from the session timeline and from any job / endpoint / adapter detail. Save the whole picture locally for a near-Jaeger experience on your own database; switch to an external collector once your data outgrows it (Warp's OTel spans are always emitting). Served by `GET {prefix}/api/traces/{traceId}`.
+
+> Migration note: 3.8.0 adds `client_event_log` plus one nullable column (`EndpointCallLog.Session`) — additive, picked up by a standard `dotnet ef migrations add` / `database update`.
+
 ## 3.7.0
 
 *2026-07-26*

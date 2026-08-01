@@ -22,6 +22,7 @@ import { Briefcase, Mail, Layers } from 'lucide-react';
 import type { State } from '@/types';
 import type { TraceJobModel } from '@/types';
 import * as api from '@/api';
+import TraceWaterfall from './TraceWaterfall';
 
 const NODE_WIDTH = 220;
 const NODE_HEIGHT = 72;
@@ -405,6 +406,8 @@ export default function TracePage() {
         <h1 className="text-2xl font-bold">Trace <span className="font-mono text-lg">{traceIdDisplay}</span></h1>
         <span className="text-sm text-muted-foreground">{jobs.length} jobs</span>
       </div>
+      {traceId && <TraceWaterfall traceId={traceId} />}
+      <h2 className="text-sm font-semibold text-muted-foreground uppercase mb-2">Job graph</h2>
       <div className="rounded-md border bg-card" style={{ height: 'calc(100vh - 12rem)' }}>
         <ReactFlow
           nodes={styledNodes}

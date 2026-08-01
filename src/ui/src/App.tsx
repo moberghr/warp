@@ -36,6 +36,11 @@ const AdapterCallDetailPage = lazy(() => import('@/pages/adapters/AdapterCallDet
 const EndpointsPage = lazy(() => import('@/pages/endpoints/EndpointsPage'));
 const EndpointDetailPage = lazy(() => import('@/pages/endpoints/EndpointDetailPage'));
 const EndpointCallDetailPage = lazy(() => import('@/pages/endpoints/EndpointCallDetailPage'));
+const ClientPage = lazy(() => import('@/pages/client/ClientPage'));
+const ClientSessionPage = lazy(() => import('@/pages/client/ClientSessionPage'));
+const ClientEventDetailPage = lazy(() => import('@/pages/client/ClientEventDetailPage'));
+const IssuesPage = lazy(() => import('@/pages/issues/IssuesPage'));
+const IssueDetailPage = lazy(() => import('@/pages/issues/IssueDetailPage'));
 const WebhooksPage = lazy(() => import('@/pages/webhooks/WebhooksPage'));
 const WebhookGroupDetailPage = lazy(() => import('@/pages/webhooks/WebhookGroupDetailPage'));
 const WebhookDetailPage = lazy(() => import('@/pages/webhooks/WebhookDetailPage'));
@@ -153,6 +158,11 @@ function App() {
             <Route path="/endpoints/:id/calls/:callId" element={<EndpointCallDetailPage />} />
             <Route path="/endpoints/:id" element={<EndpointDetailPage />} />
             <Route path="/endpoints" element={<EndpointsPage />} />
+            <Route path="/client" element={<ClientPage />} />
+            <Route path="/client/sessions/:id" element={<ClientSessionPage />} />
+            <Route path="/client/events/:id" element={<ClientEventDetailPage />} />
+            <Route path="/issues/:fingerprint" element={<IssueDetailPage />} />
+            <Route path="/issues" element={<IssuesPage />} />
             <Route path="/webhooks/group/:dim/:key" element={<WebhookGroupDetailPage />} />
             <Route path="/webhooks/:id" element={<WebhookDetailPage />} />
             <Route path="/webhooks" element={<WebhooksPage />} />

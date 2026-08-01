@@ -1332,3 +1332,258 @@ export const demoSagaActivity = [
     ],
   },
 ];
+
+// === Queue metrics (§8.26) — the Queues page ===
+export function getQueueMetricsDemo() {
+  return {
+    queues: [
+      { queue: 'a-critical', claimedCount: 48213, avgWaitMs: 42, p95WaitMs: 180, p99WaitMs: 420, backlogDepth: 3, oldestAgeSeconds: 8 },
+      { queue: 'b-default', claimedCount: 129004, avgWaitMs: 310, p95WaitMs: 1250, p99WaitMs: 2600, backlogDepth: 27, oldestAgeSeconds: 74 },
+      { queue: 'c-low', claimedCount: 15622, avgWaitMs: 1450, p95WaitMs: 5200, p99WaitMs: 9800, backlogDepth: 141, oldestAgeSeconds: 612 },
+    ],
+  };
+}
+
+// === Client (browser) observability (§8.27) ===
+export function getClientSummaryDemo() {
+  const now = Date.now();
+  const hours = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date(now - (11 - i) * 3600_000);
+    const hour = d.toISOString().slice(0, 13).replace('T', '-');
+
+    return { hour, errors: Math.round(3 + Math.random() * 12), logs: Math.round(20 + Math.random() * 40), events: Math.round(10 + Math.random() * 30), vitals: Math.round(40 + Math.random() * 60) };
+  });
+
+  return {
+    application: null,
+    errorCount: 1284,
+    logCount: 8213,
+    eventCount: 4021,
+    vitalCount: 15903,
+    errorRate: 0.043,
+    topErrors: [
+      { name: 'TypeError', count: 612 },
+      { name: 'ChunkLoadError', count: 288 },
+      { name: 'NetworkError', count: 201 },
+      { name: 'UnhandledRejection', count: 122 },
+      { name: '{other}', count: 61 },
+    ],
+    topEvents: [
+      { name: 'checkout_started', count: 1893 },
+      { name: 'add_to_cart', count: 1204 },
+      { name: 'search', count: 924 },
+    ],
+    vitals: [
+      { name: 'LCP', sampleCount: 4210, avgValue: 2100, p75Value: 2450 },
+      { name: 'INP', sampleCount: 4210, avgValue: 160, p75Value: 190 },
+      { name: 'CLS', sampleCount: 4210, avgValue: 0.06, p75Value: 0.09 },
+      { name: 'FCP', sampleCount: 4210, avgValue: 1400, p75Value: 1750 },
+      { name: 'TTFB', sampleCount: 4210, avgValue: 520, p75Value: 780 },
+    ],
+    history: hours,
+  };
+}
+
+export function getClientEventsDemo() {
+  const now = Date.now();
+  const iso = (offset: number) => new Date(now - offset).toISOString();
+  const items = [
+    { id: 'ce-1', application: 'warp-demo-spa', type: 1, name: 'TypeError', level: null, message: "Cannot read properties of undefined (reading 'total')", value: null, url: '/checkout', traceId: '0af7651916cd43dd8448eb211c80319c', sessionId: 'sess-8f3a2b1c', timestamp: iso(4000) },
+    { id: 'ce-2', application: 'warp-demo-spa', type: 5, name: 'POST', level: null, message: null, value: 240, url: '/api/checkout', traceId: '0af7651916cd43dd8448eb211c80319c', sessionId: 'sess-8f3a2b1c', timestamp: iso(9000) },
+    { id: 'ce-3', application: 'warp-demo-spa', type: 2, name: 'LCP', level: null, message: null, value: 2380, url: '/', traceId: null, sessionId: 'sess-8f3a2b1c', timestamp: iso(15000) },
+    { id: 'ce-4', application: 'warp-demo-spa', type: 4, name: 'add_to_cart', level: null, message: null, value: null, url: '/product/42', traceId: null, sessionId: 'sess-1a2b3c4d', timestamp: iso(22000) },
+    { id: 'ce-5', application: 'warp-demo-spa', type: 3, name: 'warn', level: 'warn', message: 'Retrying image load (attempt 2)', value: null, url: '/product/42', traceId: null, sessionId: 'sess-1a2b3c4d', timestamp: iso(30000) },
+  ];
+
+  return { items, total: items.length };
+}
+
+export function getClientSessionDemo(sessionId: string) {
+  const now = Date.now();
+  const iso = (offset: number) => new Date(now - offset).toISOString();
+  const trace = '0af7651916cd43dd8448eb211c80319c';
+
+  return {
+    sessionId,
+    application: 'warp-demo-spa',
+    entries: [
+      { kind: 'client', timestamp: iso(32000), traceId: null, eventId: 'e1', type: 4, name: 'page_view', level: null, message: null, value: null, url: '/checkout', method: null, route: null, statusCode: null, durationMs: null, outcome: null },
+      { kind: 'client', timestamp: iso(30000), traceId: trace, eventId: 'e2', type: 5, name: 'POST', level: null, message: null, value: 240, url: '/api/checkout', method: null, route: null, statusCode: null, durationMs: null, outcome: null },
+      { kind: 'endpoint', timestamp: iso(29800), traceId: trace, eventId: null, type: null, name: null, level: null, message: null, value: null, url: null, method: 'POST', route: '/api/checkout', statusCode: 500, durationMs: 212, outcome: 'Failed' },
+      { kind: 'client', timestamp: iso(29500), traceId: trace, eventId: 'e3', type: 1, name: 'TypeError', level: null, message: "Cannot read properties of undefined (reading 'total')", value: null, url: '/checkout', method: null, route: null, statusCode: null, durationMs: null, outcome: null },
+    ],
+  };
+}
+
+export function getClientEventDetailDemo(id: string) {
+  const now = Date.now();
+  const iso = (offset: number) => new Date(now - offset).toISOString();
+
+  return {
+    id,
+    application: 'warp-demo-spa',
+    type: 1,
+    name: 'TypeError',
+    level: null,
+    message: "Cannot read properties of undefined (reading 'total')",
+    stack: "TypeError: Cannot read properties of undefined (reading 'total')\n    at Checkout.tsx:42:18\n    at onClick (Button.tsx:11:5)",
+    value: null,
+    url: '/checkout',
+    traceId: '0af7651916cd43dd8448eb211c80319c',
+    sessionId: 'sess-8f3a2b1c',
+    release: '1.4.2',
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+    remoteIp: null,
+    properties: '{"cartId":"c-9931","items":3}',
+    breadcrumbs: '[{"type":"navigation","data":"/cart"},{"type":"click","data":"BUTTON#pay"}]',
+    timestamp: iso(4000),
+    receivedAt: iso(3800),
+  };
+}
+
+// ============================================================
+// Issues — error grouping (§8.29)
+// ============================================================
+
+// ErrorSource { Job=1, Endpoint=2, Adapter=3, Client=4 }; ErrorGroupKind { Exception=1, StatusCode=2 };
+// ErrorGroupStatus { Unresolved=1, Resolved=2, Ignored=3 } — numeric on the wire (§8.11).
+const demoIssues = [
+  {
+    fingerprint: 'job-nullref-processorder',
+    source: 1, kind: 1,
+    exceptionType: 'System.NullReferenceException',
+    title: 'Object reference not set to an instance of an object',
+    culprit: 'Acme.Orders.ProcessOrderHandler.HandleAsync',
+    statusCode: null, application: 'orders-api',
+    firstSeenAt: ago(60 * 60 * 26), lastSeenAt: ago(90), count: 4212,
+    status: 1, isNew: false, isRegressed: false,
+  },
+  {
+    fingerprint: 'client-typeerror-checkout',
+    source: 4, kind: 1,
+    exceptionType: 'TypeError',
+    title: "Cannot read properties of undefined (reading 'total')",
+    culprit: 'Checkout.tsx:42',
+    statusCode: null, application: 'warp-demo-spa',
+    firstSeenAt: ago(60 * 40), lastSeenAt: ago(120), count: 63,
+    status: 1, isNew: true, isRegressed: false,
+  },
+  {
+    fingerprint: 'adapter-payments-502',
+    source: 3, kind: 1,
+    exceptionType: 'HttpRequestException',
+    title: 'Response status code 502 (Bad Gateway) from payments.Charge',
+    culprit: 'payments.Charge',
+    statusCode: 502, application: 'orders-api',
+    firstSeenAt: ago(60 * 60 * 6), lastSeenAt: ago(45), count: 318,
+    status: 1, isNew: false, isRegressed: true,
+  },
+  {
+    fingerprint: 'job-timeout-report',
+    source: 1, kind: 1,
+    exceptionType: 'System.TimeoutException',
+    title: 'The operation has timed out',
+    culprit: 'Acme.Reports.GenerateReportHandler.HandleAsync',
+    statusCode: null, application: 'reports-worker',
+    firstSeenAt: ago(60 * 60 * 48), lastSeenAt: ago(60 * 60 * 5), count: 91,
+    status: 2, isNew: false, isRegressed: false,
+  },
+  {
+    fingerprint: 'endpoint-422-orders',
+    source: 2, kind: 2,
+    exceptionType: 'HTTP 422',
+    title: 'POST /orders returned 422 Unprocessable Entity',
+    culprit: 'POST /orders',
+    statusCode: 422, application: 'orders-api',
+    firstSeenAt: ago(60 * 60 * 12), lastSeenAt: ago(300), count: 1507,
+    status: 1, isNew: false, isRegressed: false,
+  },
+  {
+    fingerprint: 'job-postgres-deadlock',
+    source: 1, kind: 1,
+    exceptionType: 'Npgsql.PostgresException',
+    title: '40P01: deadlock detected',
+    culprit: 'Acme.Inventory.SyncInventoryHandler.HandleAsync',
+    statusCode: null, application: 'inventory-worker',
+    firstSeenAt: ago(60 * 60 * 18), lastSeenAt: ago(600), count: 204,
+    status: 1, isNew: false, isRegressed: false,
+  },
+];
+
+export function getIssuesDemo() {
+  return { items: demoIssues, total: demoIssues.length };
+}
+
+const demoIssueSamples: Record<string, string> = {
+  'job-nullref-processorder': [
+    'System.NullReferenceException: Object reference not set to an instance of an object.',
+    '   at Acme.Orders.ProcessOrderHandler.HandleAsync(ProcessOrderRequest request, CancellationToken ct) in ProcessOrderHandler.cs:line 88',
+    '   at Warp.Worker.WarpWorkerService.ExecuteJobAsync(Job job, CancellationToken ct)',
+  ].join('\n'),
+  'client-typeerror-checkout': [
+    "TypeError: Cannot read properties of undefined (reading 'total')",
+    '    at Checkout.tsx:42:18',
+    '    at onClick (Button.tsx:11:5)',
+  ].join('\n'),
+  'adapter-payments-502': [
+    'System.Net.Http.HttpRequestException: Response status code does not indicate success: 502 (Bad Gateway).',
+    '   at Acme.Payments.PaymentsClient.ChargeAsync(ChargeRequest request, CancellationToken ct)',
+  ].join('\n'),
+  'job-postgres-deadlock': [
+    'Npgsql.PostgresException (0x80004005): 40P01: deadlock detected',
+    '   at Npgsql.Internal.NpgsqlConnector.<ReadMessage>',
+    '   at Acme.Inventory.SyncInventoryHandler.HandleAsync(SyncInventoryRequest request, CancellationToken ct)',
+  ].join('\n'),
+};
+
+export function getIssueDetailDemo(fingerprint: string) {
+  const summary = demoIssues.find((x) => x.fingerprint === fingerprint) ?? demoIssues[0];
+  const now = new Date(NOW);
+  now.setMinutes(0, 0, 0);
+  const trend = Array.from({ length: 24 }, (_, i) => {
+    const hourDate = new Date(now.getTime() - (23 - i) * 3600000);
+    const h = hourDate.getHours();
+    const base = h >= 9 && h <= 17 ? 8 + seeded(i + 3) * 30 : 1 + seeded(i + 9) * 6;
+
+    return { hour: hourDate.toISOString(), count: Math.round(base) };
+  });
+
+  return {
+    ...summary,
+    lastSample: demoIssueSamples[summary.fingerprint] ?? `${summary.exceptionType}: ${summary.title}`,
+    sampleTraceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+    trend,
+    firstSeenVersion: '1.4.2',
+    lastSeenVersion: '1.5.0',
+    environment: 'production',
+    recentSamples: [
+      { traceId: '4bf92f3577b34da6a3ce929d0e0e4736', timestamp: ago(90), message: 'Payment gateway did not respond for order 1017 within 30s', version: '1.5.0' },
+      { traceId: null, timestamp: ago(240), message: 'Payment gateway did not respond for order 1014 within 30s', version: '1.5.0' },
+      { traceId: 'a1b2c3d4e5f60718293a4b5c6d7e8f90', timestamp: ago(430), message: 'Payment gateway did not respond for order 1009 within 30s', version: '1.5.0' },
+      { traceId: null, timestamp: ago(620), message: 'Payment gateway did not respond for order 1003 within 30s', version: '1.4.2' },
+      { traceId: null, timestamp: ago(910), message: 'Payment gateway did not respond for order 998 within 30s', version: '1.4.2' },
+    ],
+  };
+}
+
+export function getTraceOverviewDemo() {
+  const base = Date.parse('2026-05-25T12:59:30.000Z');
+  const iso = (offsetMs: number) => new Date(base + offsetMs).toISOString();
+
+  return {
+    traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+    clientCount: 1,
+    endpointCount: 1,
+    jobCount: 3,
+    adapterCount: 1,
+    errorCount: 0,
+    isTruncated: false,
+    spans: [
+      { source: 'client', id: 'a1b2c3d4-0000-0000-0000-000000000001', name: 'POST /api/checkout', startTime: iso(0), durationMs: 240, status: 'Request', isError: false, parentId: null },
+      { source: 'endpoint', id: 'a1b2c3d4-0000-0000-0000-000000000002', name: 'POST /api/checkout', startTime: iso(5), durationMs: 212, status: 'Success', isError: false, parentId: null },
+      { source: 'job', id: 'a1b2c3d4-0000-0000-0000-000000000010', name: 'Acme.Orders.ProcessOrderRequest', startTime: iso(60), durationMs: 130, status: 'Completed', isError: false, parentId: null },
+      { source: 'adapter', id: 'a1b2c3d4-0000-0000-0000-000000000020', name: 'payments.Charge', startTime: iso(80), durationMs: 90, status: 'Success', isError: false, parentId: null },
+      { source: 'job', id: 'a1b2c3d4-0000-0000-0000-000000000011', name: 'Acme.Orders.SendConfirmationRequest', startTime: iso(200), durationMs: 40, status: 'Completed', isError: false, parentId: 'a1b2c3d4-0000-0000-0000-000000000010' },
+    ],
+  };
+}

@@ -417,6 +417,14 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         var appQueueMetrics = await client.GetFromJsonAsync<QueueMetricsModel>($"/warp/api/queues/metrics?application={AppName}", Ct);
         appQueueMetrics!.Queues.Sum(x => x.ClaimedCount).ShouldBeGreaterThanOrEqualTo(1);
 
+        // Client observability read endpoints resolve through the real HTTP binding. /client/events is called
+        // by the SPA WITHOUT page/pageSize — a regression where those were required (non-nullable int) 400'd
+        // the request and broke the event/session list, so assert the no-query-param call succeeds.
+        var clientSummary = await client.GetFromJsonAsync<ClientObservabilitySummaryModel>("/warp/api/client/summary", Ct);
+        clientSummary.ShouldNotBeNull();
+        var clientEvents = await client.GetFromJsonAsync<ClientEventPageModel>("/warp/api/client/events", Ct);
+        clientEvents.ShouldNotBeNull();
+
         await app.StopAsync(Ct);
     }
 

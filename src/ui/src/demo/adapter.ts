@@ -87,6 +87,13 @@ export function createDemoAdapter(isLoginMode: boolean) {
       return applicationResult;
     }
 
+    // Issues: error grouping (§8.29) — always-on Core feature. The detail route (and its status
+    // POST) is matched before the list route since both start with /issues.
+    const issuesResult = routeIssues(method, url, config);
+    if (issuesResult !== undefined) {
+      return issuesResult;
+    }
+
     // All POST/DELETE routes return success
     if (method === 'post') {
       if (url.includes('/bulk/')) {
@@ -367,6 +374,35 @@ function routeWebhooks(
     }
 
     return resolve(detail, config);
+  }
+
+  return undefined;
+}
+
+function routeIssues(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (!url.startsWith('/issues')) {
+    return undefined;
+  }
+
+  // POST /issues/{fp}/status — resolve/ignore/reopen; the real endpoint returns 204.
+  const statusMatch = url.match(/^\/issues\/([^/?]+)\/status$/);
+  if (method === 'post' && statusMatch) {
+    return resolve({}, config);
+  }
+
+  // GET /issues/{fingerprint} — detail (matched before the list; both start with /issues).
+  const detailMatch = url.match(/^\/issues\/([^/?]+)$/);
+  if (method === 'get' && detailMatch) {
+    return resolve(data.getIssueDetailDemo(decodeURIComponent(detailMatch[1])), config);
+  }
+
+  // GET /issues — list.
+  if (method === 'get' && (url === '/issues' || url.startsWith('/issues?'))) {
+    return resolve(data.getIssuesDemo(), config);
   }
 
   return undefined;
@@ -654,7 +690,32 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, webhooks: true, applications: true };
+    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true };
+  }
+
+  // Queue metrics (§8.26) — the Queues page (always-on nav).
+  if (url === '/queues/metrics') {
+    return data.getQueueMetricsDemo();
+  }
+
+  // Client (browser) observability (§8.27).
+  if (url === '/client/summary') {
+    return data.getClientSummaryDemo();
+  }
+  if (url === '/client/applications') {
+    return ['warp-demo-spa'];
+  }
+  // Detail must be matched before the list — both start with /client/events.
+  const clientEventMatch = url.match(/^\/client\/events\/([^/?]+)$/);
+  if (clientEventMatch) {
+    return data.getClientEventDetailDemo(decodeURIComponent(clientEventMatch[1]));
+  }
+  if (url.startsWith('/client/events')) {
+    return data.getClientEventsDemo();
+  }
+  const clientSessionMatch = url.match(/^\/client\/sessions\/([^/?]+)$/);
+  if (clientSessionMatch) {
+    return data.getClientSessionDemo(decodeURIComponent(clientSessionMatch[1]));
   }
 
   // Dashboard
@@ -822,7 +883,12 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
     return { ...data.jobDetailCompleted, id };
   }
 
-  // Trace
+  // Unified trace overview (waterfall) — matched before /trace/ (distinct path).
+  if (/^\/traces\/[^/]+$/.test(url)) {
+    return data.getTraceOverviewDemo();
+  }
+
+  // Trace (job DAG)
   if (/^\/trace\/[^/]+$/.test(url)) {
     return data.traceJobs;
   }

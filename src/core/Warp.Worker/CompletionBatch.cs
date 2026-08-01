@@ -14,7 +14,8 @@ namespace Warp.Worker;
 internal readonly record struct PendingCompletion(
     Job Job,
     IReadOnlyList<Counter> Counters,
-    IReadOnlyList<JobLog> Logs);
+    IReadOnlyList<JobLog> Logs,
+    ErrorOccurrence? Occurrence = null);
 
 /// <summary>
 /// Per-worker buffer of pending completions for dispatcher mode. Flushes all buffered entries
@@ -141,6 +142,13 @@ internal sealed class CompletionBatch<TContext>
                     if (entry.Logs.Count > 0)
                     {
                         context.Set<JobLog>().AddRange(entry.Logs);
+                    }
+
+                    // Error-grouping inbox row for a failed attempt (§8.29) — written in the same completion
+                    // transaction, off the hot path. The single-worker path does the equivalent in FinalizeJobState.
+                    if (entry.Occurrence is { } occurrence)
+                    {
+                        context.Set<ErrorOccurrence>().Add(occurrence);
                     }
                 }
 

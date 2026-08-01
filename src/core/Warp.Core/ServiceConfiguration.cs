@@ -167,6 +167,26 @@ public static class ServiceConfiguration
         // AddEndpointObservability() gates only the recorder/flusher/middleware plus the addons flag.
         services.TryAddScoped<IEndpointQueryService, EndpointQueryService<TContext>>();
 
+        // Client (browser) observability read service — registered by AddWarp (like IEndpointQueryService) so
+        // dashboard-only / publisher-only processes serve /api/client without running the ingest endpoint. The
+        // ClientEventLog table is always in the schema (§2.11); AddClientObservability() gates only the
+        // recorder/flusher/ingest endpoint plus the addons flag (§8.27).
+        services.TryAddScoped<IClientEventQueryService, ClientEventQueryService<TContext>>();
+
+        // Unified trace view (§8.28) — one screen for a trace id, unioned from the rows Warp already persists
+        // (client request + endpoint call + jobs + adapter calls). Registered by AddWarp so dashboard-only
+        // processes resolve it; no new storage or span collector.
+        services.TryAddScoped<ITraceQueryService, TraceQueryService<TContext>>();
+
+        // Error grouping / Issues read + command services (§8.29). Registered by AddWarp (like the other
+        // observability read services) so dashboard-only / publisher-only processes serve /api/issues without
+        // running a server. The ErrorGroup table is always in the schema (§2.11); the aggregator server task
+        // (which does the folding) runs only on a server.
+        services.TryAddScoped<IErrorGroupQueryService>(x => new ErrorGroupQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<TimeProvider>()));
+        services.TryAddScoped<IErrorGroupCommandService, ErrorGroupCommandService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
@@ -425,8 +445,11 @@ public static class ServiceConfiguration
         AddAdapterCallLogEntity(modelBuilder, schema);
         AddWebhookDeliveryEntity(modelBuilder, schema);
         AddEndpointCallLogEntity(modelBuilder, schema);
+        AddClientEventLogEntity(modelBuilder, schema);
         AddApplicationInstanceEntity(modelBuilder, schema);
         AddApplicationInstanceLogEntity(modelBuilder, schema);
+        AddErrorGroupEntity(modelBuilder, schema);
+        AddErrorOccurrenceEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -962,6 +985,7 @@ public static class ServiceConfiguration
         log.Property(p => p.Outcome).HasConversion<int>();
         log.Property(p => p.StatusCode);
         log.Property(p => p.RemoteIp).HasMaxLength(64);
+        log.Property(p => p.Session).HasMaxLength(128);
         log.Property(p => p.UserAgent).HasMaxLength(1024);
         log.Property(p => p.User).HasMaxLength(256);
         log.Property(p => p.ExceptionType).HasMaxLength(512);
@@ -982,10 +1006,120 @@ public static class ServiceConfiguration
         // Request→jobs drill-down joins jobs on the shared trace id.
         log.HasIndex(p => p.TraceId);
 
+        // Session-timeline query (all server calls a browser session made).
+        log.HasIndex(p => new { p.Session, p.Timestamp });
+
         // ExpirationCleanup range scan on expiry.
         log.HasIndex(p => p.ExpireAt);
 
         log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddClientEventLogEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var log = modelBuilder.Entity<ClientEventLog>();
+
+        log.Property(p => p.Id);
+        log.HasKey(p => p.Id);
+
+        log.Property(p => p.Application).HasMaxLength(200);
+        log.Property(p => p.Type).HasConversion<int>();
+        log.Property(p => p.Name).HasMaxLength(512);
+        log.Property(p => p.Level).HasMaxLength(32);
+        log.Property(p => p.Message).HasMaxLength(4096);
+        log.Property(p => p.Stack);
+        log.Property(p => p.Value);
+        log.Property(p => p.Url).HasMaxLength(2048);
+        log.Property(p => p.TraceId);
+        log.Property(p => p.SessionId).HasMaxLength(128);
+        log.Property(p => p.Release).HasMaxLength(128);
+        log.Property(p => p.UserAgent).HasMaxLength(1024);
+        log.Property(p => p.RemoteIp).HasMaxLength(64);
+        log.Property(p => p.Properties);
+        log.Property(p => p.Breadcrumbs);
+        log.Property(p => p.Timestamp);
+        log.Property(p => p.ReceivedAt);
+        log.Property(p => p.ExpireAt);
+
+        // Per-application recent-events listing.
+        log.HasIndex(p => new { p.Application, p.Timestamp });
+
+        // Filter the event stream by kind.
+        log.HasIndex(p => new { p.Type, p.Timestamp });
+
+        // Session-timeline query (all events for one browser session, chronological).
+        log.HasIndex(p => new { p.SessionId, p.Timestamp });
+
+        // ExpirationCleanup range scan on expiry.
+        log.HasIndex(p => p.ExpireAt);
+
+        log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddErrorGroupEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var group = modelBuilder.Entity<ErrorGroup>();
+
+        group.Property(p => p.Id);
+        group.HasKey(p => p.Id);
+
+        group.Property(p => p.Fingerprint).HasMaxLength(64);
+        group.Property(p => p.Source).HasConversion<int>();
+        group.Property(p => p.Kind).HasConversion<int>();
+        group.Property(p => p.ExceptionType).HasMaxLength(512);
+        group.Property(p => p.Title).HasMaxLength(512);
+        group.Property(p => p.Culprit).HasMaxLength(512);
+        group.Property(p => p.StatusCode);
+        group.Property(p => p.Application).HasMaxLength(200);
+        group.Property(p => p.FirstSeenAt);
+        group.Property(p => p.LastSeenAt);
+        group.Property(p => p.Count);
+        group.Property(p => p.LastSample);
+        group.Property(p => p.SampleTraceId);
+        group.Property(p => p.FirstSeenVersion).HasMaxLength(200);
+        group.Property(p => p.LastSeenVersion).HasMaxLength(200);
+        group.Property(p => p.Environment).HasMaxLength(200);
+        group.Property(p => p.RecentSamples);
+        group.Property(p => p.Status).HasConversion<int>();
+        group.Property(p => p.StatusChangedAt);
+        group.Property(p => p.ExpireAt);
+
+        // One row per fingerprint — the upsert lookup key and the URL id.
+        group.HasIndex(p => p.Fingerprint).IsUnique();
+
+        // Issues list: filter by source/status, order by recency.
+        group.HasIndex(p => new { p.Source, p.Status, p.LastSeenAt });
+
+        // ExpirationCleanup range scan on expiry.
+        group.HasIndex(p => p.ExpireAt);
+
+        group.Metadata.SetSchema(schema);
+    }
+
+    public static void AddErrorOccurrenceEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var occurrence = modelBuilder.Entity<ErrorOccurrence>();
+
+        occurrence.Property(p => p.Id);
+        occurrence.HasKey(p => p.Id);
+
+        occurrence.Property(p => p.Source).HasConversion<int>();
+        occurrence.Property(p => p.Kind).HasConversion<int>();
+        occurrence.Property(p => p.ExceptionType).HasMaxLength(512);
+        occurrence.Property(p => p.Message).HasMaxLength(4096);
+        occurrence.Property(p => p.Stack);
+        occurrence.Property(p => p.Culprit).HasMaxLength(512);
+        occurrence.Property(p => p.StatusCode);
+        occurrence.Property(p => p.TraceId);
+        occurrence.Property(p => p.Application).HasMaxLength(200);
+        occurrence.Property(p => p.Version).HasMaxLength(200);
+        occurrence.Property(p => p.Environment).HasMaxLength(200);
+        occurrence.Property(p => p.Timestamp);
+
+        // The aggregator drains oldest-first; the orphan sweep ranges on the same column.
+        occurrence.HasIndex(p => p.Timestamp);
+
+        occurrence.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)

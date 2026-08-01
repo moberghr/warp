@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.ErrorGrouping;
 
 namespace Warp.Core.Adapters;
 
@@ -284,6 +285,25 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
             }
 
             AddCounters(context, record, configuration.ApplicationName);
+
+            // Error-grouping inbox append (§8.29): a failed adapter call is an error signal. Gated on the
+            // grouping disable switch and folded into the same SaveChanges as the call-log row above.
+            if (configuration.ErrorGroupingInterval is not null && record.Outcome == AdapterCallOutcome.Failed)
+            {
+                var traceId = Guid.TryParseExact(record.TraceId, "N", out var g) ? g : (Guid?)null;
+
+                context.Set<ErrorOccurrence>().Add(ErrorOccurrenceFactory.FromError(
+                    ErrorSource.Adapter,
+                    record.ExceptionType,
+                    record.ExceptionMessage,
+                    null,
+                    $"{record.AdapterName}.{record.Operation}",
+                    traceId,
+                    configuration.ApplicationName,
+                    record.Timestamp,
+                    configuration.ApplicationVersion,
+                    configuration.ApplicationEnvironment));
+            }
         }
 
         await UpsertDefinitionsAsync(context, batch, registry, now, ct);

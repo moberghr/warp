@@ -22,6 +22,9 @@ public enum WarpEventType
 
     /// <summary>A queue backlog / wait-time threshold was breached — RESERVED, not emitted yet.</summary>
     BacklogBreached = 5,
+
+    /// <summary>A resolved error group recurred (regression) — a bug thought fixed came back (§8.29).</summary>
+    IssueRegressed = 6,
 }
 
 /// <summary>
