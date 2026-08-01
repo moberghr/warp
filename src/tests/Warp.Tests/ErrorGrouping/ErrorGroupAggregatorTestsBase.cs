@@ -40,7 +40,8 @@ public abstract class ErrorGroupAggregatorTestsBase : IAsyncLifetime
             new TestServerContext(_fixture.CreateContext()),
             Options.Create(new WarpServerConfiguration { ErrorGroupingInterval = interval ?? TimeSpan.FromSeconds(15), CaptureErrorSamples = captureErrorSamples }),
             TimeProvider.System,
-            TestNotifiers.EmptyDispatcher());
+            TestNotifiers.EmptyDispatcher(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ErrorGroupAggregator<TestContext>>.Instance);
 
     private static ErrorOccurrence JobNre(string message, DateTime at, string? version = null, string? environment = null)
         => new()

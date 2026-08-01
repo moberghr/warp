@@ -14,6 +14,7 @@ public static class ErrorOccurrenceFactory
     private const int MessageMax = 4096;
     private const int CulpritMax = 512;
     private const int StackMax = 8192;
+    private const int SampleHeaderMax = 1000;
 
     /// <summary>
     /// From a live <see cref="Exception"/> (the job worker path). Groups on the REAL cause: reflection-invoked
@@ -27,7 +28,22 @@ public static class ErrorOccurrenceFactory
     {
         var cause = Unwrap(error);
 
-        return FromError(source, cause.GetType().FullName ?? cause.GetType().Name, cause.Message, error.ToString(), culprit, traceId, application, timestamp, version, environment);
+        return FromError(source, cause.GetType().FullName ?? cause.GetType().Name, cause.Message, BuildSampleStack(cause, error), culprit, traceId, application, timestamp, version, environment);
+    }
+
+    // Keep the real stack FRAMES from being crowded out of the truncation window by an oversized exception
+    // message — which would leave ExtractTopFrame with no frame and silently degrade the fingerprint to a
+    // culprit-only fallback (SF-2 / §8.29). A length-capped type+message header + the unwrapped cause's own
+    // stack trace guarantees the frames survive; falls back to the full ToString() when there's no stack trace
+    // (e.g. a never-thrown exception).
+    private static string BuildSampleStack(Exception cause, Exception original)
+    {
+        if (cause.StackTrace is { Length: > 0 } frames)
+        {
+            return $"{cause.GetType().FullName}: {Cap(cause.Message, SampleHeaderMax)}\n{frames}";
+        }
+
+        return original.ToString();
     }
 
     private static Exception Unwrap(Exception error)

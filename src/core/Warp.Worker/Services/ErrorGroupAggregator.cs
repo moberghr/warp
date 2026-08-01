@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -34,18 +35,22 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
     private readonly WarpNotifierDispatcher _notifierDispatcher;
+    private readonly ILogger<ErrorGroupAggregator<TContext>> _logger;
     private readonly List<IssueRegressedEvent> _pendingRegressions = [];
+    private readonly HashSet<ErrorSource> _cardinalityCappedWarned = [];
 
     public ErrorGroupAggregator(
         IWarpServerContext serverContext,
         IOptions<WarpServerConfiguration> configuration,
         TimeProvider timeProvider,
-        WarpNotifierDispatcher notifierDispatcher)
+        WarpNotifierDispatcher notifierDispatcher,
+        ILogger<ErrorGroupAggregator<TContext>> logger)
     {
         _context = serverContext.Context;
         _configuration = configuration.Value;
         _timeProvider = timeProvider;
         _notifierDispatcher = notifierDispatcher;
+        _logger = logger;
     }
 
     public string Name => "AggregateErrorGroups";
@@ -59,6 +64,7 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
         _pendingRegressions.Clear();
+        _cardinalityCappedWarned.Clear();
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
@@ -149,6 +155,16 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
         if (sourceCounts.GetValueOrDefault(source) < _configuration.MaxDistinctErrorGroups)
         {
             return item;
+        }
+
+        // Past the cap, a genuinely-new fingerprint collapses into {other} and stops surfacing as its own issue.
+        // Warn once per source per tick so this isn't silent (mirrors the adapter/endpoint CardinalityGuard).
+        if (_cardinalityCappedWarned.Add(source))
+        {
+            _logger.LogWarning(
+                "Error grouping hit the {Cap}-issue cap for source {Source}; new fingerprints are now folding into the {{other}} bucket and won't appear as distinct issues. Raise MaxDistinctErrorGroups or investigate the error diversity.",
+                _configuration.MaxDistinctErrorGroups,
+                source);
         }
 
         return item with

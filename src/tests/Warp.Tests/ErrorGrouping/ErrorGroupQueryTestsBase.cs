@@ -93,7 +93,7 @@ public abstract class ErrorGroupQueryTestsBase : IAsyncLifetime
         var ctx = _fixture.CreateContext();
         ctx.Set<ErrorGroup>().Add(Group(fingerprint, ErrorSource.Job, ErrorGroupStatus.Unresolved, "shop"));
 
-        // Durable hourly trend keys: errorgroup:{fp}:{yyyyMMddHH}. Three ascending buckets.
+        // Durable hourly trend keys: errorgroup:{fp}:{yyyy-MM-dd-HH}. Three ascending buckets.
         var hour0 = new DateTime(2026, 7, 28, 8, 0, 0, DateTimeKind.Utc);
         ctx.Set<Statistic>().AddRange(
             Stat(fingerprint, hour0, 2),
@@ -212,7 +212,7 @@ public abstract class ErrorGroupQueryTestsBase : IAsyncLifetime
 
     private static Statistic Stat(string fingerprint, DateTime hourUtc, long value) => new()
     {
-        Key = $"errorgroup:{fingerprint}:{hourUtc.ToUniversalTime().ToString("yyyyMMddHH", CultureInfo.InvariantCulture)}",
+        Key = $"errorgroup:{fingerprint}:{hourUtc.ToUniversalTime().ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture)}",
         Value = value,
     };
 }

@@ -14,7 +14,13 @@ internal static class ErrorGroupKeys
 
     public const string AppPrefix = "errorgroup-app";
 
-    /// <summary>Per-fingerprint hourly bucket: <c>errorgroup:{fp}:{yyyyMMddHH}</c>.</summary>
+    // The hour bucket is the dashed yyyy-MM-dd-HH form the WHOLE codebase uses for hourly trend suffixes
+    // (JobStatsKeys/ClientEventKeys/AdapterCallFlusher) — critically, it's the format ExpirationCleanup's generic
+    // hourly-Statistic prune parses, so these trend rows are actually reaped (§8.22). A dashless form would leak
+    // them forever. Dashes are safe inside a colon-delimited key segment.
+    private const string HourFormat = "yyyy-MM-dd-HH";
+
+    /// <summary>Per-fingerprint hourly bucket: <c>errorgroup:{fp}:{yyyy-MM-dd-HH}</c>.</summary>
     public static string HourlyKey(string fingerprint, DateTime hourUtc)
         => $"{Prefix}:{fingerprint}:{Hour(hourUtc)}";
 
@@ -27,8 +33,8 @@ internal static class ErrorGroupKeys
         => $"{Prefix}:{fingerprint}:";
 
     public static bool TryParseHour(string bucket, out DateTime hourUtc)
-        => DateTime.TryParseExact(bucket, "yyyyMMddHH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hourUtc);
+        => DateTime.TryParseExact(bucket, HourFormat, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hourUtc);
 
     private static string Hour(DateTime instant)
-        => instant.ToUniversalTime().ToString("yyyyMMddHH", CultureInfo.InvariantCulture);
+        => instant.ToUniversalTime().ToString(HourFormat, CultureInfo.InvariantCulture);
 }
