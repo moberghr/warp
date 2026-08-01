@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
@@ -133,8 +134,29 @@ public sealed class ErrorGroupQueryService<TContext> : IErrorGroupQueryService
             IsRegressed = IsRegressed(group.Status, group.StatusChangedAt),
             LastSample = group.LastSample,
             SampleTraceId = group.SampleTraceId,
+            FirstSeenVersion = group.FirstSeenVersion,
+            LastSeenVersion = group.LastSeenVersion,
+            Environment = group.Environment,
+            RecentSamples = ParseSamples(group.RecentSamples),
             Trend = await LoadTrendAsync(fingerprint, ct),
         };
+    }
+
+    private static List<ErrorSampleModel> ParseSamples(string? json)
+    {
+        if (string.IsNullOrEmpty(json))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<ErrorSampleModel>>(json, ErrorSampleJson.Options) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     private async Task<IReadOnlyList<ErrorGroupTrendPoint>> LoadTrendAsync(string fingerprint, CancellationToken ct)
@@ -170,4 +192,10 @@ public sealed class ErrorGroupQueryService<TContext> : IErrorGroupQueryService
 
     private static bool IsRegressed(ErrorGroupStatus status, DateTime? statusChangedAt)
         => status == ErrorGroupStatus.Unresolved && statusChangedAt is not null;
+}
+
+/// <summary>Shared camelCase options for the <c>RecentSamples</c> JSON (§8.29) — non-generic to avoid a static field in a generic type (S2743).</summary>
+internal static class ErrorSampleJson
+{
+    public static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 }

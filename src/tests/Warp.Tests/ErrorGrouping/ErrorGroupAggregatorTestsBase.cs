@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Shouldly;
@@ -34,14 +35,14 @@ public abstract class ErrorGroupAggregatorTestsBase : IAsyncLifetime
     private const string NreStack =
         "System.NullReferenceException: boom\n   at Acme.Orders.ProcessOrderHandler.Handle(Cmd c) in P.cs:line 42";
 
-    private ErrorGroupAggregator<TestContext> Aggregator(TimeSpan? interval = null)
+    private ErrorGroupAggregator<TestContext> Aggregator(TimeSpan? interval = null, bool captureErrorSamples = true)
         => new(
             new TestServerContext(_fixture.CreateContext()),
-            Options.Create(new WarpServerConfiguration { ErrorGroupingInterval = interval ?? TimeSpan.FromSeconds(15) }),
+            Options.Create(new WarpServerConfiguration { ErrorGroupingInterval = interval ?? TimeSpan.FromSeconds(15), CaptureErrorSamples = captureErrorSamples }),
             TimeProvider.System,
             TestNotifiers.EmptyDispatcher());
 
-    private static ErrorOccurrence JobNre(string message, DateTime at)
+    private static ErrorOccurrence JobNre(string message, DateTime at, string? version = null, string? environment = null)
         => new()
         {
             Source = ErrorSource.Job,
@@ -51,6 +52,8 @@ public abstract class ErrorGroupAggregatorTestsBase : IAsyncLifetime
             Stack = NreStack,
             Culprit = "Acme.Orders.ProcessOrderRequest",
             Application = "worker",
+            Version = version,
+            Environment = environment,
             Timestamp = at,
         };
 
@@ -140,5 +143,90 @@ public abstract class ErrorGroupAggregatorTestsBase : IAsyncLifetime
         var group = (await _fixture.CreateContext().Set<ErrorGroup>().AsNoTracking().ToListAsync(Ct)).ShouldHaveSingleItem();
         group.Status.ShouldBe(ErrorGroupStatus.Unresolved);    // re-opened
         group.Count.ShouldBe(6);
+    }
+
+    [TimedFact]
+    public async Task Aggregator_StampsVersionAndEnvironment_OnInsert()
+    {
+        var basis = new DateTime(2026, 7, 28, 10, 0, 0, DateTimeKind.Utc);
+        var ctx = _fixture.CreateContext();
+        ctx.Set<ErrorOccurrence>().Add(JobNre("boom", basis, version: "1.4.2", environment: "prod"));
+        await ctx.SaveChangesAsync(Ct);
+
+        await Aggregator().ExecuteAsync(Ct);
+
+        var group = (await _fixture.CreateContext().Set<ErrorGroup>().AsNoTracking().ToListAsync(Ct)).ShouldHaveSingleItem();
+        group.FirstSeenVersion.ShouldBe("1.4.2");
+        group.LastSeenVersion.ShouldBe("1.4.2");
+        group.Environment.ShouldBe("prod");
+        group.RecentSamples.ShouldNotBeNull();
+    }
+
+    [TimedFact]
+    public async Task Aggregator_LaterOccurrence_UpdatesLastSeenVersion_NotFirstSeen()
+    {
+        var basis = new DateTime(2026, 7, 28, 10, 0, 0, DateTimeKind.Utc);
+
+        var first = _fixture.CreateContext();
+        first.Set<ErrorOccurrence>().Add(JobNre("boom", basis, version: "1.4.2", environment: "prod"));
+        await first.SaveChangesAsync(Ct);
+        await Aggregator().ExecuteAsync(Ct);
+
+        var second = _fixture.CreateContext();
+        second.Set<ErrorOccurrence>().Add(JobNre("boom again", basis.AddMinutes(5), version: "1.5.0", environment: "prod"));
+        await second.SaveChangesAsync(Ct);
+        await Aggregator().ExecuteAsync(Ct);
+
+        var group = (await _fixture.CreateContext().Set<ErrorGroup>().AsNoTracking().ToListAsync(Ct)).ShouldHaveSingleItem();
+        group.FirstSeenVersion.ShouldBe("1.4.2");        // unchanged
+        group.LastSeenVersion.ShouldBe("1.5.0");         // advanced
+        group.Environment.ShouldBe("prod");
+    }
+
+    [TimedFact]
+    public async Task Aggregator_RecentSamples_NewestFirst_CappedAtTen_AcrossFolds()
+    {
+        var basis = new DateTime(2026, 7, 28, 10, 0, 0, DateTimeKind.Utc);
+
+        // Fold A: occurrences 0..5, then fold B: 6..11 — 12 total, prepended newest-first, re-capped to 10.
+        await FoldRange(basis, 0, 6);
+        await FoldRange(basis, 6, 12);
+
+        var group = (await _fixture.CreateContext().Set<ErrorGroup>().AsNoTracking().ToListAsync(Ct)).ShouldHaveSingleItem();
+        group.RecentSamples.ShouldNotBeNull();
+
+        using var doc = JsonDocument.Parse(group.RecentSamples!);
+        var arr = doc.RootElement;
+        arr.GetArrayLength().ShouldBe(10);                                   // capped
+        arr[0].GetProperty("message").GetString().ShouldBe("occ-11");        // newest first
+        arr[9].GetProperty("message").GetString().ShouldBe("occ-2");         // oldest retained
+    }
+
+    [TimedFact]
+    public async Task Aggregator_CaptureErrorSamplesOff_LeavesRecentSamplesNull()
+    {
+        var basis = new DateTime(2026, 7, 28, 10, 0, 0, DateTimeKind.Utc);
+        var ctx = _fixture.CreateContext();
+        ctx.Set<ErrorOccurrence>().Add(JobNre("boom", basis, version: "1.4.2", environment: "prod"));
+        await ctx.SaveChangesAsync(Ct);
+
+        await Aggregator(captureErrorSamples: false).ExecuteAsync(Ct);
+
+        var group = (await _fixture.CreateContext().Set<ErrorGroup>().AsNoTracking().ToListAsync(Ct)).ShouldHaveSingleItem();
+        group.RecentSamples.ShouldBeNull();
+        group.LastSample.ShouldBeNull();
+        group.FirstSeenVersion.ShouldBe("1.4.2");   // version stamping is independent of sample capture
+    }
+
+    private async Task FoldRange(DateTime basis, int startInclusive, int endExclusive)
+    {
+        var ctx = _fixture.CreateContext();
+        for (var i = startInclusive; i < endExclusive; i++)
+        {
+            ctx.Set<ErrorOccurrence>().Add(JobNre($"occ-{i}", basis.AddSeconds(i)));
+        }
+
+        await ctx.SaveChangesAsync(Ct);
+        await Aggregator().ExecuteAsync(Ct);
     }
 }

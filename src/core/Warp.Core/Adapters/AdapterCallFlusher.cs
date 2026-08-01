@@ -300,7 +300,9 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
                     $"{record.AdapterName}.{record.Operation}",
                     traceId,
                     configuration.ApplicationName,
-                    record.Timestamp));
+                    record.Timestamp,
+                    configuration.ApplicationVersion,
+                    configuration.ApplicationEnvironment));
             }
         }
 

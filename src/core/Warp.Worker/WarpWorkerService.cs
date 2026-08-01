@@ -557,8 +557,9 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         // THIS existing save — no fingerprint computed here (that's the aggregator, off the hot path §8.29).
         if (error != null && _configuration.ErrorGroupingInterval != null)
         {
+            var culprit = string.IsNullOrEmpty(job.Type) ? "job" : WarpTelemetry.GetShortTypeName(job.Type);
             context.Set<ErrorOccurrence>().Add(
-                ErrorOccurrenceFactory.FromException(ErrorSource.Job, error, job.Type ?? "job", job.TraceId, _configuration.ApplicationName, now));
+                ErrorOccurrenceFactory.FromException(ErrorSource.Job, error, culprit, job.TraceId, _configuration.ApplicationName, now, _configuration.ApplicationVersion, _configuration.ApplicationEnvironment));
         }
 
         if (state == State.Completed)

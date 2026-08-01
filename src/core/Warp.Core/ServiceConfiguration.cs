@@ -1076,6 +1076,10 @@ public static class ServiceConfiguration
         group.Property(p => p.Count);
         group.Property(p => p.LastSample);
         group.Property(p => p.SampleTraceId);
+        group.Property(p => p.FirstSeenVersion).HasMaxLength(200);
+        group.Property(p => p.LastSeenVersion).HasMaxLength(200);
+        group.Property(p => p.Environment).HasMaxLength(200);
+        group.Property(p => p.RecentSamples);
         group.Property(p => p.Status).HasConversion<int>();
         group.Property(p => p.StatusChangedAt);
         group.Property(p => p.ExpireAt);
@@ -1108,6 +1112,8 @@ public static class ServiceConfiguration
         occurrence.Property(p => p.StatusCode);
         occurrence.Property(p => p.TraceId);
         occurrence.Property(p => p.Application).HasMaxLength(200);
+        occurrence.Property(p => p.Version).HasMaxLength(200);
+        occurrence.Property(p => p.Environment).HasMaxLength(200);
         occurrence.Property(p => p.Timestamp);
 
         // The aggregator drains oldest-first; the orphan sweep ranges on the same column.

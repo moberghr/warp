@@ -427,8 +427,9 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
             // Every caught exception (retry or terminal) feeds the error-grouping inbox — no fingerprint on the
             // hot path (§8.29). Persisted in the same batch completion as the counters/logs.
+            var culprit = string.IsNullOrEmpty(job.Type) ? "job" : WarpTelemetry.GetShortTypeName(job.Type);
             var occurrence = _configuration.ErrorGroupingInterval != null
-                ? ErrorOccurrenceFactory.FromException(ErrorSource.Job, e, job.Type ?? "job", job.TraceId, _configuration.ApplicationName, _timeProvider.GetUtcNow().UtcDateTime)
+                ? ErrorOccurrenceFactory.FromException(ErrorSource.Job, e, culprit, job.TraceId, _configuration.ApplicationName, _timeProvider.GetUtcNow().UtcDateTime, _configuration.ApplicationVersion, _configuration.ApplicationEnvironment)
                 : null;
 
             _batch.Add(new PendingCompletion(job, counters, logs, occurrence));

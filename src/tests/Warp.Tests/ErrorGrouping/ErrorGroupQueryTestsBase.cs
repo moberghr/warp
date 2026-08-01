@@ -117,6 +117,51 @@ public abstract class ErrorGroupQueryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetGroup_ReturnsVersionEnvironmentAndParsedRecentSamples()
+    {
+        const string fingerprint = "fp-samples";
+        var group = Group(fingerprint, ErrorSource.Job, ErrorGroupStatus.Unresolved, "shop");
+        group.FirstSeenVersion = "1.4.2";
+        group.LastSeenVersion = "1.5.0";
+        group.Environment = "prod";
+        group.RecentSamples =
+            """[{"traceId":"3f2504e0-4f89-41d3-9a0c-0305e82c3301","timestamp":"2026-07-28T10:00:00Z","message":"boom","version":"1.5.0"}]""";
+
+        var ctx = _fixture.CreateContext();
+        ctx.Set<ErrorGroup>().Add(group);
+        await ctx.SaveChangesAsync(Ct);
+
+        var detail = await Service().GetGroup(fingerprint, Ct);
+
+        detail.ShouldNotBeNull();
+        detail!.FirstSeenVersion.ShouldBe("1.4.2");
+        detail.LastSeenVersion.ShouldBe("1.5.0");
+        detail.Environment.ShouldBe("prod");
+
+        var sample = detail.RecentSamples.ShouldHaveSingleItem();
+        sample.Message.ShouldBe("boom");
+        sample.Version.ShouldBe("1.5.0");
+        sample.TraceId.ShouldBe(Guid.ParseExact("3f2504e04f8941d39a0c0305e82c3301", "N"));
+    }
+
+    [TimedFact]
+    public async Task GetGroup_MalformedRecentSamples_ReturnsEmptyList_NoThrow()
+    {
+        const string fingerprint = "fp-badjson";
+        var group = Group(fingerprint, ErrorSource.Job, ErrorGroupStatus.Unresolved, "shop");
+        group.RecentSamples = "not json {[";
+
+        var ctx = _fixture.CreateContext();
+        ctx.Set<ErrorGroup>().Add(group);
+        await ctx.SaveChangesAsync(Ct);
+
+        var detail = await Service().GetGroup(fingerprint, Ct);
+
+        detail.ShouldNotBeNull();
+        detail!.RecentSamples.ShouldBeEmpty();
+    }
+
+    [TimedFact]
     public async Task GetGroups_ComputesIsNew_WhenFirstSeenWithin24h()
     {
         var ctx = _fixture.CreateContext();

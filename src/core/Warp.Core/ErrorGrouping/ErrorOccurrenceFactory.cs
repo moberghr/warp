@@ -23,11 +23,11 @@ public static class ErrorOccurrenceFactory
     /// sample stack (it contains the inner exception and the real handler frame, which the fingerprint's top
     /// in-app frame is extracted from).
     /// </summary>
-    public static ErrorOccurrence FromException(ErrorSource source, Exception error, string culprit, Guid? traceId, string? application, DateTime timestamp)
+    public static ErrorOccurrence FromException(ErrorSource source, Exception error, string culprit, Guid? traceId, string? application, DateTime timestamp, string? version = null, string? environment = null)
     {
         var cause = Unwrap(error);
 
-        return FromError(source, cause.GetType().FullName ?? cause.GetType().Name, cause.Message, error.ToString(), culprit, traceId, application, timestamp);
+        return FromError(source, cause.GetType().FullName ?? cause.GetType().Name, cause.Message, error.ToString(), culprit, traceId, application, timestamp, version, environment);
     }
 
     private static Exception Unwrap(Exception error)
@@ -42,7 +42,7 @@ public static class ErrorOccurrenceFactory
     }
 
     /// <summary>From already-captured strings (endpoint 5xx / adapter / client, where the row holds type+message+stack).</summary>
-    public static ErrorOccurrence FromError(ErrorSource source, string? exceptionType, string? message, string? stack, string culprit, Guid? traceId, string? application, DateTime timestamp)
+    public static ErrorOccurrence FromError(ErrorSource source, string? exceptionType, string? message, string? stack, string culprit, Guid? traceId, string? application, DateTime timestamp, string? version = null, string? environment = null)
         => new()
         {
             Source = source,
@@ -53,11 +53,13 @@ public static class ErrorOccurrenceFactory
             Culprit = Cap(culprit, CulpritMax) ?? string.Empty,
             TraceId = traceId,
             Application = application,
+            Version = version,
+            Environment = environment,
             Timestamp = timestamp,
         };
 
     /// <summary>An endpoint 4xx status-code signal — no exception, grouped by status + route.</summary>
-    public static ErrorOccurrence FromStatusCode(int statusCode, string route, Guid? traceId, string? application, DateTime timestamp)
+    public static ErrorOccurrence FromStatusCode(int statusCode, string route, Guid? traceId, string? application, DateTime timestamp, string? version = null, string? environment = null)
         => new()
         {
             Source = ErrorSource.Endpoint,
@@ -67,6 +69,8 @@ public static class ErrorOccurrenceFactory
             Culprit = Cap(route, CulpritMax) ?? string.Empty,
             TraceId = traceId,
             Application = application,
+            Version = version,
+            Environment = environment,
             Timestamp = timestamp,
         };
 

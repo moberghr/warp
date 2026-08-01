@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Warp.Core;
@@ -22,6 +23,12 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
     private const int DrainBatchSize = 1000;
 
     private const string OtherToken = "{other}";
+
+    private const int MaxSamples = 10;
+
+    private const int SampleMessageMax = 300;
+
+    private const int MaxSamplesJsonLength = 4000;
 
     private readonly DbContext _context;
     private readonly WarpServerConfiguration _configuration;
@@ -164,6 +171,11 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
         {
             group.Count += count;
 
+            if (latest.Version is not null)
+            {
+                group.LastSeenVersion = latest.Version;
+            }
+
             if (lastSeen > group.LastSeenAt)
             {
                 group.LastSeenAt = lastSeen;
@@ -172,6 +184,15 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
                 {
                     group.LastSample = BuildSample(latest);
                 }
+            }
+
+            // Rolling recent-occurrences window: prepend this batch (newest first), re-cap to 10. Parse the
+            // existing JSON defensively — a bad/foreign payload is treated as empty, never throws (§8.29).
+            if (_configuration.CaptureErrorSamples)
+            {
+                var merged = BuildSampleEntries(occurrences);
+                merged.AddRange(ParseSamples(group.RecentSamples));
+                group.RecentSamples = SerializeSamples(merged);
             }
 
             group.ExpireAt = now + _configuration.ErrorGroupRetention;
@@ -202,6 +223,10 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
             Count = count,
             LastSample = _configuration.CaptureErrorSamples ? BuildSample(latest) : null,
             SampleTraceId = latest.TraceId,
+            FirstSeenVersion = latest.Version,
+            LastSeenVersion = latest.Version,
+            Environment = latest.Environment,
+            RecentSamples = _configuration.CaptureErrorSamples ? SerializeSamples(BuildSampleEntries(occurrences)) : null,
             Status = ErrorGroupStatus.Unresolved,
             ExpireAt = now + _configuration.ErrorGroupRetention,
         };
@@ -267,5 +292,60 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
     private static string Trim(string value, int max)
         => value.Length <= max ? value : value[..max];
 
+    private static List<ErrorSampleEntry> BuildSampleEntries(List<ErrorOccurrence> occurrences)
+        => [.. occurrences
+            .OrderByDescending(x => x.Timestamp)
+            .Take(MaxSamples)
+            .Select(x =>
+                new ErrorSampleEntry(x.TraceId, x.Timestamp, TrimMessage(x.Message), x.Version)),];
+
+    private static List<ErrorSampleEntry> ParseSamples(string? json)
+    {
+        if (string.IsNullOrEmpty(json))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<ErrorSampleEntry>>(json, AggregatorSampleJson.Options) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static string? SerializeSamples(List<ErrorSampleEntry> entries)
+    {
+        if (entries.Count == 0)
+        {
+            return null;
+        }
+
+        var capped = entries.Count > MaxSamples ? entries.GetRange(0, MaxSamples) : entries;
+        var json = JsonSerializer.Serialize(capped, AggregatorSampleJson.Options);
+
+        // Drop the oldest entries until the payload fits the soft length budget (~4000 chars).
+        while (json.Length > MaxSamplesJsonLength && capped.Count > 1)
+        {
+            capped = capped.GetRange(0, capped.Count - 1);
+            json = JsonSerializer.Serialize(capped, AggregatorSampleJson.Options);
+        }
+
+        return json;
+    }
+
+    private static string? TrimMessage(string? message)
+        => message is null ? null : Trim(message, SampleMessageMax);
+
     private sealed record ResolvedOccurrence(ErrorOccurrence Occurrence, string Fingerprint, string ExceptionType, string Title, string Culprit);
+
+    private sealed record ErrorSampleEntry(Guid? TraceId, DateTime Timestamp, string? Message, string? Version);
+}
+
+/// <summary>Shared camelCase options for the <c>RecentSamples</c> JSON (§8.29) — non-generic to avoid a static field in a generic type (S2743).</summary>
+internal static class AggregatorSampleJson
+{
+    public static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 }

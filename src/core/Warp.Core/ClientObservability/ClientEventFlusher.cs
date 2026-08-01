@@ -260,7 +260,9 @@ public sealed class ClientEventFlusher<TContext> : BackgroundService
                     record.Url ?? string.Empty,
                     record.TraceId,
                     record.Application,
-                    record.Timestamp));
+                    record.Timestamp,
+                    configuration.ApplicationVersion,
+                    configuration.ApplicationEnvironment));
             }
         }
 

@@ -295,7 +295,9 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
                         $"{record.Method} {record.RouteTemplate}",
                         record.TraceId,
                         configuration.ApplicationName,
-                        record.Timestamp));
+                        record.Timestamp,
+                        configuration.ApplicationVersion,
+                        configuration.ApplicationEnvironment));
                 }
                 else if (record.StatusCode is >= 400 and < 500)
                 {
@@ -304,7 +306,9 @@ public sealed class EndpointCallFlusher<TContext> : BackgroundService
                         $"{record.Method} {record.RouteTemplate}",
                         record.TraceId,
                         configuration.ApplicationName,
-                        record.Timestamp));
+                        record.Timestamp,
+                        configuration.ApplicationVersion,
+                        configuration.ApplicationEnvironment));
                 }
             }
         }

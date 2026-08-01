@@ -47,6 +47,21 @@ public sealed class ErrorGroupTrendPoint
     public long Count { get; init; }
 }
 
+/// <summary>
+/// One recent occurrence in a group's rolling window (§8.29) — parsed from the group's <c>RecentSamples</c> JSON.
+/// Newest-first, capped at 10. Only populated when <c>CaptureErrorSamples</c> is on.
+/// </summary>
+public sealed class ErrorSampleModel
+{
+    public Guid? TraceId { get; init; }
+
+    public DateTime Timestamp { get; init; }
+
+    public string? Message { get; init; }
+
+    public string? Version { get; init; }
+}
+
 public sealed class ErrorGroupDetailModel
 {
     public string Fingerprint { get; init; } = string.Empty;
@@ -82,6 +97,18 @@ public sealed class ErrorGroupDetailModel
 
     /// <summary>Trace id of the most recent occurrence, for the "jump to trace" link. Null when unavailable.</summary>
     public Guid? SampleTraceId { get; init; }
+
+    /// <summary>App version at first sight of this issue (§8.23) — the "introduced in" hint. Null when unreported.</summary>
+    public string? FirstSeenVersion { get; init; }
+
+    /// <summary>App version of the most recent occurrence — a bump vs <see cref="FirstSeenVersion"/> flags a still-live issue across a deploy.</summary>
+    public string? LastSeenVersion { get; init; }
+
+    /// <summary>Deployment environment observed at first sight (§8.23). Null when unreported.</summary>
+    public string? Environment { get; init; }
+
+    /// <summary>The most-recent occurrences (newest first, capped 10) parsed from <c>RecentSamples</c>. Empty when unavailable.</summary>
+    public IReadOnlyList<ErrorSampleModel> RecentSamples { get; init; } = [];
 
     /// <summary>The last 24 hourly buckets, ascending — folded from the durable <c>errorgroup:</c> trend keys.</summary>
     public IReadOnlyList<ErrorGroupTrendPoint> Trend { get; init; } = [];

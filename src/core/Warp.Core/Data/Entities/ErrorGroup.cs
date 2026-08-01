@@ -48,6 +48,21 @@ public class ErrorGroup
     /// <summary>Trace id of the most recent occurrence, for the "jump to trace" link. Null when unavailable.</summary>
     public Guid? SampleTraceId { get; set; }
 
+    /// <summary>App version at first sight of this issue (§8.23) — the "introduced in" hint. Null when unreported.</summary>
+    public string? FirstSeenVersion { get; set; }
+
+    /// <summary>App version of the most recent occurrence — a version bump here vs <see cref="FirstSeenVersion"/> flags a still-live issue across a deploy.</summary>
+    public string? LastSeenVersion { get; set; }
+
+    /// <summary>Deployment environment observed at first sight (§8.23). Null when unreported.</summary>
+    public string? Environment { get; set; }
+
+    /// <summary>
+    /// JSON array of the most-recent occurrences (newest first, capped 10): trace id, timestamp, raw truncated
+    /// message, version. Only maintained when <c>CaptureErrorSamples</c> is on (§1.2). Null otherwise.
+    /// </summary>
+    public string? RecentSamples { get; set; }
+
     public ErrorGroupStatus Status { get; set; } = ErrorGroupStatus.Unresolved;
 
     /// <summary>When <see cref="Status"/> last changed — a regression only counts occurrences after this instant.</summary>

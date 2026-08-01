@@ -36,5 +36,11 @@ public class ErrorOccurrence
 
     public string? Application { get; set; }
 
+    /// <summary>Self-reported app version at the time of the error (§8.23) — carried onto the group for regression diagnosis.</summary>
+    public string? Version { get; set; }
+
+    /// <summary>Self-reported deployment environment (§8.23).</summary>
+    public string? Environment { get; set; }
+
     public DateTime Timestamp { get; set; }
 }
