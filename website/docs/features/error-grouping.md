@@ -48,6 +48,15 @@ Sentry-lite, deliberately minimal:
 - **Resolve / Ignore** — `IErrorGroupCommandService.SetStatus(fingerprint, status)` flips the status under a mutex with a structured audit log. An **Ignored** issue still counts occurrences but stays hidden from the default view.
 - **Regression** — a **Resolved** issue re-opens (→ Unresolved, "regressed" badge) **only** when a *new* occurrence arrives with a timestamp later than when you resolved it — so a backlog of pre-resolution occurrences can't falsely re-open it. That regression fires a `WarpEventType.IssueRegressed` [operational event](./operational-notifications.md), dispatched post-commit through the notifier seam (opt-in; inert if you've registered no notifier). **Ignored** issues never auto-re-open.
 
+## Diagnosing an issue
+
+The detail page is built to answer "what is this, is it new, and where do I look" at a glance:
+
+- **The real exception, not the wrapper.** Handlers run through a reflection-invoking mediator, so the raw exception is a `TargetInvocationException`. The fingerprint **unwraps** `TargetInvocationException`/`AggregateException` to the true inner cause, so the title reads `TimeoutException: payment gateway timed out`, not the plumbing — and the culprit is the **short** type name (`ChargeOrderHandler`), not an assembly-qualified string.
+- **First-seen / last-seen version + environment.** Occurrences are stamped with the executor's `ApplicationVersion` / `ApplicationEnvironment`; the group records the version it was **first** seen in and the **latest** version still producing it — the fastest way to tie an issue to a deploy.
+- **A recent-occurrences timeline.** The group keeps a rolling set of its last ~10 occurrences (message + version + trace id), so instead of one sample you get a walkable list — each with a **trace →** link into the [unified trace view](./tracing.md).
+- **Jump to the failing work.** A job issue links straight to the failed jobs of that type; every occurrence links to its trace, where the request → endpoint → jobs → outbound calls each open to their own detail.
+
 ## Navigation
 
 - **Issue → trace → everywhere.** The issue detail stores the `SampleTraceId` of its most recent occurrence, so one click jumps into the [unified trace view](./tracing.md) — where the browser request, the endpoint call, the jobs, and the outbound calls of that trace each link to their own detail page. So an issue reaches all of its related surfaces through the trace.
