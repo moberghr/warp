@@ -80,7 +80,14 @@ public static partial class ErrorFingerprint
                 continue;
             }
 
-            if (IsFrameworkFrame(symbol, inAppDenylist))
+            // Collapse async state-machine / lambda / local-function frames to their real method so async and
+            // sync throw sites group identically and the locus reads cleanly.
+            symbol = NormalizeFrame(symbol);
+
+            // Reflection/JIT plumbing (invoke stubs, dynamic call sites) must NEVER be a locus — the mediator
+            // invokes handlers by reflection, so an InvokeStub sits right under the handler; its JIT-generated
+            // name is unstable and would split one issue into many. Skip it regardless of the denylist.
+            if (IsPlumbingFrame(symbol) || IsFrameworkFrame(symbol, inAppDenylist))
             {
                 continue;
             }
@@ -183,6 +190,29 @@ public static partial class ErrorFingerprint
     private static bool IsFrameworkFrame(string symbol, IReadOnlyCollection<string> inAppDenylist)
         => inAppDenylist.Any(prefix => symbol.StartsWith(prefix, StringComparison.Ordinal));
 
+    private static bool IsPlumbingFrame(string symbol)
+        => symbol.StartsWith("InvokeStub_", StringComparison.Ordinal)
+            || symbol.StartsWith("System.Reflection.", StringComparison.Ordinal)
+            || symbol.Contains("lambda_method", StringComparison.Ordinal)
+            || symbol.Contains("CallSite", StringComparison.Ordinal);
+
+    // "Ns.Type+<HandleAsync>d__3.MoveNext" / "Ns.Type.<>c.<HandleAsync>b__0" → "Ns.Type.HandleAsync": strip the
+    // compiler-generated state-machine/lambda wrapping to the underlying method (stable + readable). Frames with
+    // no compiler markers pass through unchanged.
+    private static string NormalizeFrame(string symbol)
+    {
+        var match = CompilerFramePattern().Match(symbol);
+        if (!match.Success)
+        {
+            return symbol;
+        }
+
+        var type = match.Groups["type"].Value.TrimEnd('.', '+');
+        var method = match.Groups["method"].Value;
+
+        return type.Length > 0 ? $"{type}.{method}" : method;
+    }
+
     [GeneratedRegex(@"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", RegexOptions.ExplicitCapture, 250)]
     private static partial Regex GuidPattern();
 
@@ -197,4 +227,7 @@ public static partial class ErrorFingerprint
 
     [GeneratedRegex(@":\d+(?::\d+)?$", RegexOptions.ExplicitCapture, 250)]
     private static partial Regex FrameLineColPattern();
+
+    [GeneratedRegex(@"^(?<type>[^<+]*)[<+].*?<(?<method>[^>]+)>", RegexOptions.ExplicitCapture, 250)]
+    private static partial Regex CompilerFramePattern();
 }

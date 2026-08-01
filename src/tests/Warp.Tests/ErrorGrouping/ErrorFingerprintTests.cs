@@ -86,6 +86,40 @@ public sealed class ErrorFingerprintTests
     }
 
     [Fact]
+    public void ExtractTopFrame_SkipsReflectionInvokeStub_ReturnsHandlerFrame()
+    {
+        var stack =
+            "System.TimeoutException: boom\n" +
+            "   at Acme.Orders.ChargeOrderHandler.HandleAsync(Cmd c) in DemoFaults.cs:line 20\n" +
+            "   at InvokeStub_ChargeOrderHandler.HandleAsync(Object, Span`1)\n" +
+            "   at System.Reflection.RuntimeMethodInfo.Invoke(Object obj)";
+
+        ErrorFingerprint.ExtractTopFrame(stack, Denylist).ShouldBe("Acme.Orders.ChargeOrderHandler.HandleAsync");
+    }
+
+    [Fact]
+    public void ExtractTopFrame_WhenHandlerIsFramework_NeverLandsOnUnstableInvokeStub()
+    {
+        // A handler in a denylisted namespace is skipped — but the JIT-named reflection stub right below it must
+        // NOT become the locus (its name varies → splits one issue into many); fall through instead.
+        var stack =
+            "System.TimeoutException: boom\n" +
+            "   at Warp.Handlers.SomeHandler.HandleAsync(Cmd c)\n" +
+            "   at InvokeStub_SomeHandler.HandleAsync(Object, Span`1)\n" +
+            "   at System.Reflection.RuntimeMethodInfo.Invoke(Object obj)";
+
+        ErrorFingerprint.ExtractTopFrame(stack, Denylist).ShouldBeNull();
+    }
+
+    [Fact]
+    public void ExtractTopFrame_NormalizesAsyncStateMachineFrame()
+    {
+        var stack = "System.Exception: x\n   at Acme.Orders.ChargeOrderHandler+<HandleAsync>d__3.MoveNext()";
+
+        ErrorFingerprint.ExtractTopFrame(stack, Denylist).ShouldBe("Acme.Orders.ChargeOrderHandler.HandleAsync");
+    }
+
+    [Fact]
     public void FromException_UnwrapsReflectionAndAggregateWrappersToTheRealCause()
     {
         // Reflection-invoked handlers surface a TargetInvocationException wrapping the real exception — group on
