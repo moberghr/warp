@@ -658,6 +658,41 @@ public static class WarpEndpoints
             return updated ? Results.NoContent() : Results.NotFound();
         });
 
+        // SLO / error-budget objectives (§8.31). ISloQueryService / ISloCommandService are always registered by
+        // AddWarp (dashboard-only processes resolve them); the sidebar nav is gated on the addons `slo` flag
+        // (ISloMarker presence), not a 404.
+        apiGroup.MapGet("slo", async ([FromServices] ISloQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetObjectives(ct)));
+
+        apiGroup.MapGet("slo/{id:int}", async ([FromServices] ISloQueryService svc, int id, CancellationToken ct) =>
+        {
+            var objective = await svc.GetObjective(id, ct);
+
+            return objective is null ? Results.NotFound() : Results.Ok(objective);
+        });
+
+        apiGroup.MapPost("slo", async ([FromServices] ISloCommandService svc, [FromBody] SloUpsertRequest body, CancellationToken ct) =>
+        {
+            var id = await svc.Upsert(body.ToDefinition(), ct);
+
+            return Results.Ok(new { id });
+        });
+
+        apiGroup.MapDelete("slo/{id:int}", async ([FromServices] ISloCommandService svc, int id, CancellationToken ct) =>
+        {
+            var deleted = await svc.Delete(id, ct);
+
+            return deleted ? Results.NoContent() : Results.NotFound();
+        });
+
+        apiGroup.MapPost("slo/{id:int}/ack", async ([FromServices] ISloCommandService svc, int id, [FromBody] SloAckRequest body, CancellationToken ct) =>
+        {
+            var until = DateTime.UtcNow.AddMinutes(body.Minutes <= 0 ? 60 : body.Minutes);
+            var acked = await svc.Acknowledge(id, until, ct);
+
+            return acked ? Results.NoContent() : Results.NotFound();
+        });
+
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
         // registered by AddWarp (dashboard-only processes resolve them), so these data routes are
         // non-nullable; the sidebar nav is gated on the addons flag (IWebhookRedeliveryEnqueuer presence),
@@ -845,6 +880,24 @@ public static class WarpEndpoints
 }
 
 public sealed record ErrorGroupStatusRequest(ErrorGroupStatus Status);
+
+public sealed record SloUpsertRequest(int Id, string Name, SloKind Kind, string Dimension, string? Application, double TargetValue, int? Percentile, int WindowSeconds, bool Enabled)
+{
+    public Warp.Core.Data.Entities.SloDefinition ToDefinition() => new()
+    {
+        Id = Id,
+        Name = Name,
+        Kind = Kind,
+        Dimension = Dimension,
+        Application = Application,
+        TargetValue = TargetValue,
+        Percentile = Percentile,
+        WindowSeconds = WindowSeconds,
+        Enabled = Enabled,
+    };
+}
+
+public sealed record SloAckRequest(int Minutes);
 
 public sealed record UpsertConcurrencyLimitRequest(string Name, int Limit);
 

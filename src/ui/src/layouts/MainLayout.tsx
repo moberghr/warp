@@ -57,6 +57,7 @@ const adaptersNavItem = { to: '/adapters', label: 'Adapters', icon: Cable };
 const endpointsNavItem = { to: '/endpoints', label: 'Endpoints', icon: ArrowDownToLine };
 const clientNavItem = { to: '/client', label: 'Client', icon: MonitorSmartphone };
 const webhooksNavItem = { to: '/webhooks', label: 'Webhooks', icon: Webhook };
+const sloNavItem = { to: '/slo', label: 'SLOs', icon: Gauge };
 const servicesNavItem = { to: '/services', label: 'Services', icon: Activity };
 
 function resolveIcon(name?: string): React.ComponentType<{ className?: string }> {
@@ -87,6 +88,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   const [endpointsAvailable, setEndpointsAvailable] = useState(false);
   const [clientAvailable, setClientAvailable] = useState(false);
   const [webhooksAvailable, setWebhooksAvailable] = useState(false);
+  const [sloAvailable, setSloAvailable] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Close the mobile nav whenever the route changes so tapping an item dismisses it.
@@ -149,6 +151,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         setEndpointsAvailable(addons.endpoints);
         setClientAvailable(addons.client);
         setWebhooksAvailable(addons.webhooks);
+        setSloAvailable(addons.slo);
         void useRealtimeStore.getState().connectIfEnabled(addons.push);
       })
       .catch(() => {
@@ -160,6 +163,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         setEndpointsAvailable(false);
         setClientAvailable(false);
         setWebhooksAvailable(false);
+        setSloAvailable(false);
         void useRealtimeStore.getState().connectIfEnabled(false);
       });
 
@@ -181,6 +185,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
     ...(endpointsAvailable ? [endpointsNavItem] : []),
     ...(clientAvailable ? [clientNavItem] : []),
     ...(webhooksAvailable ? [webhooksNavItem] : []),
+    ...(sloAvailable ? [sloNavItem] : []),
     servicesNavItem,
     ...extensions.flatMap((ext) =>
       ext.pages.map((page) => ({

@@ -364,6 +364,19 @@ export const getIssue = (fingerprint: string) =>
 export const setIssueStatus = (fingerprint: string, status: number) =>
   api.post(`/issues/${encodeURIComponent(fingerprint)}/status`, { status });
 
+// SLO / error-budget (§8.31). ISloQueryService / ISloCommandService are registered by AddWarp, so these
+// resolve in dashboard-only processes; the SLO nav is gated on addons.slo.
+export const getSlos = () => api.get<import('@/types/slo').SloList>('/slo').then(r => r.data);
+
+export const getSlo = (id: number) => api.get<import('@/types/slo').SloObjective>(`/slo/${id}`).then(r => r.data);
+
+export const upsertSlo = (body: import('@/types/slo').SloUpsertRequest) =>
+  api.post<{ id: number }>('/slo', body).then(r => r.data);
+
+export const deleteSlo = (id: number) => api.delete(`/slo/${id}`);
+
+export const ackSlo = (id: number, minutes: number) => api.post(`/slo/${id}/ack`, { minutes });
+
 // Extensions
 export const getExtensions = () =>
   api.get<ExtensionManifest[]>('/extensions').then(r => r.data);
