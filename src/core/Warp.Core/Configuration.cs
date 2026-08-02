@@ -250,12 +250,34 @@ public class WarpConfiguration
     public int? ApplicationInstanceLogRetentionCount { get; set; }
 
     /// <summary>
-    /// How long hourly-bucketed <c>Statistic</c> rows (keys ending in <c>:yyyy-MM-dd-HH</c> — the job/saga
-    /// dashboard history and the adapter/endpoint performance-chart series) are retained before
-    /// <c>ExpirationCleanup</c>'s generic hourly sweep prunes them. Raise it to keep deeper chart history
-    /// (e.g. to match a longer <c>*CallLogRetention</c>); the buckets are small. Default 7 days.
+    /// Bucket width (minutes) of the finest metrics-retention tier (§8.30). Time-series <c>Statistic</c> keys
+    /// (jobstat / qwait / adapter / endpoint / clientevent / errorgroup hist + pcth) are emitted at this
+    /// resolution (marked <c>m5</c>) and rolled up to hourly then daily by <c>StatisticRollup</c>. Set to 60 to
+    /// emit hourly directly (effectively disabling the fine tier). Default 5.
+    /// </summary>
+    public int FineResolutionMinutes { get; set; } = 5;
+
+    /// <summary>
+    /// How long the fine (<see cref="FineResolutionMinutes"/>-minute) tier is kept before <c>StatisticRollup</c>
+    /// sums each complete bucket into its hourly (<c>h1</c>) parent and deletes the fine rows (§8.30). Only
+    /// buckets strictly older than this are rolled, so an in-progress window is never half-rolled. Default 6 hours.
+    /// </summary>
+    public TimeSpan FineResolutionRetention { get; set; } = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// How long hourly-bucketed <c>Statistic</c> rows are kept before <c>StatisticRollup</c> sums each into its
+    /// daily (<c>d1</c>) parent and deletes the hourly rows (§8.30). (Pre-3.10 this was a delete-only prune; it
+    /// is now the hourly→daily rollup age.) Legacy unmarked <c>:yyyy-MM-dd-HH</c> keys migrate under the same age.
+    /// Default 7 days.
     /// </summary>
     public TimeSpan HourlyStatisticsRetention { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// How long the daily (<c>d1</c>) tier is kept before <c>StatisticRollup</c> deletes it — the end of the
+    /// retention chain (§8.30). Set to <c>null</c> to keep daily buckets forever (coarse, cheap long history).
+    /// Default 90 days.
+    /// </summary>
+    public TimeSpan? DailyStatisticsRetention { get; set; } = TimeSpan.FromDays(90);
 
     /// <summary>
     /// Bounded in-memory buffer capacity for the outbound adapter and inbound endpoint call-log recorders

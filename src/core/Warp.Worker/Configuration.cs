@@ -119,6 +119,15 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan? CounterAggregationInterval { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
+    /// How often <c>StatisticRollup</c> downsamples time-bucketed <c>Statistic</c> rows — fine (5-min) → hourly
+    /// → daily — and deletes buckets past <see cref="WarpConfiguration.DailyStatisticsRetention"/> (§8.30). Off
+    /// the hot path; replaces the old delete-only hourly prune. Set to <c>null</c> to disable rollup (buckets
+    /// then accumulate — only do this if you also disable the fine tier via <c>FineResolutionMinutes = 60</c>).
+    /// Default 10 minutes.
+    /// </summary>
+    public TimeSpan? StatisticRollupInterval { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
     /// How often <c>BacklogSampler</c> samples per-queue backlog depth + oldest-job
     /// age (§8.26) — one grouped read of Enqueued jobs, off the worker hot path. Feeds the
     /// <c>warp.job.queue.depth</c> / <c>oldest_age_seconds</c> gauges and (under a DB-writing
