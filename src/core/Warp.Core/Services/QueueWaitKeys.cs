@@ -32,8 +32,12 @@ internal static class QueueWaitKeys
     // Latency-histogram bucket marker (qwait:{queue}:pct:{upperMs}) — length 4.
     public const string PctMarker = "pct";
 
-    // Hourly time-series marker (qwait:{queue}:hist:{token}:{yyyy-MM-dd-HH}).
+    // Tiered time-series marker (qwait:{queue}:hist:{token}:{tier}:{stamp}, §8.30).
     public const string HistoryMarker = "hist";
+
+    // Tiered latency-histogram marker (qwait:{queue}:pcth:{upperMs}:{tier}:{stamp}) — the windowed counterpart
+    // of the lifetime Pct histogram.
+    public const string PctHistoryMarker = "pcth";
 
     // Mirrors JobStatsKeys.Buckets so the percentile walk is identical across surfaces.
     public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, int.MaxValue];
@@ -42,11 +46,14 @@ internal static class QueueWaitKeys
 
     public static string Pct(string queue, int upperMs) => $"{Prefix}:{queue}:{PctMarker}:{upperMs.ToString(CultureInfo.InvariantCulture)}";
 
-    public static string History(string queue, string token, string hour) => $"{Prefix}:{queue}:{HistoryMarker}:{token}:{hour}";
+    // tierSuffix is MetricTiers.Suffix(...) — ":{marker}:{stamp}".
+    public static string History(string queue, string token, string tierSuffix) => $"{Prefix}:{queue}:{HistoryMarker}:{token}{tierSuffix}";
+
+    public static string PctHistory(string queue, int upperMs, string tierSuffix) => $"{Prefix}:{queue}:{PctHistoryMarker}:{upperMs.ToString(CultureInfo.InvariantCulture)}{tierSuffix}";
 
     public static string AppTotal(string application, string queue, string token) => $"{AppPrefix}:{application}:{queue}:{token}";
 
-    public static string AppHistory(string application, string queue, string token, string hour) => $"{AppPrefix}:{application}:{queue}:{HistoryMarker}:{token}:{hour}";
+    public static string AppHistory(string application, string queue, string token, string tierSuffix) => $"{AppPrefix}:{application}:{queue}:{HistoryMarker}:{token}{tierSuffix}";
 
     public static string HourBucket(DateTime timestampUtc) => timestampUtc.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
 
@@ -62,7 +69,7 @@ internal static class QueueWaitKeys
     /// latency-histogram bucket + hourly duration, and the same under the per-application slice (histogram
     /// omitted there to bound volume) when <paramref name="application"/> is set.
     /// </summary>
-    public static List<Counter> Build(string queue, double waitMs, string? application, string hourBucket)
+    public static List<Counter> Build(string queue, double waitMs, string? application, string tierSuffix)
     {
         var counters = new List<Counter>();
         var q = Sanitize(queue);
@@ -71,12 +78,16 @@ internal static class QueueWaitKeys
         // int.MaxValue ms (~24.8 days), and an unchecked cast would wrap to a negative value and poison the
         // durable avg (dur ÷ count). The always-on meter is a double and unaffected.
         var durMs = (int)Math.Min(int.MaxValue, Math.Round(Math.Max(0, waitMs), MidpointRounding.AwayFromZero));
+        var bucket = BucketFor(durMs);
 
         counters.Add(new Counter { Key = Total(q, CountToken), Value = 1 });
-        counters.Add(new Counter { Key = History(q, CountToken, hourBucket), Value = 1 });
+        counters.Add(new Counter { Key = History(q, CountToken, tierSuffix), Value = 1 });
         counters.Add(new Counter { Key = Total(q, DurationToken), Value = durMs });
-        counters.Add(new Counter { Key = History(q, DurationToken, hourBucket), Value = durMs });
-        counters.Add(new Counter { Key = Pct(q, BucketFor(durMs)), Value = 1 });
+        counters.Add(new Counter { Key = History(q, DurationToken, tierSuffix), Value = durMs });
+
+        // Lifetime pct (dashboard all-time percentiles) + tiered pcth (windowed percentiles, §8.30).
+        counters.Add(new Counter { Key = Pct(q, bucket), Value = 1 });
+        counters.Add(new Counter { Key = PctHistory(q, bucket, tierSuffix), Value = 1 });
 
         if (application is null)
         {
@@ -86,9 +97,9 @@ internal static class QueueWaitKeys
         var app = Sanitize(application);
 
         counters.Add(new Counter { Key = AppTotal(app, q, CountToken), Value = 1 });
-        counters.Add(new Counter { Key = AppHistory(app, q, CountToken, hourBucket), Value = 1 });
+        counters.Add(new Counter { Key = AppHistory(app, q, CountToken, tierSuffix), Value = 1 });
         counters.Add(new Counter { Key = AppTotal(app, q, DurationToken), Value = durMs });
-        counters.Add(new Counter { Key = AppHistory(app, q, DurationToken, hourBucket), Value = durMs });
+        counters.Add(new Counter { Key = AppHistory(app, q, DurationToken, tierSuffix), Value = durMs });
 
         return counters;
     }
@@ -150,6 +161,60 @@ internal static class QueueWaitKeys
         application = parts[1];
         queue = parts[2];
         token = parts[3];
+
+        return true;
+    }
+
+    // Parses a tiered history key (qwait:{queue}:hist:{token}:{tier}:{stamp}).
+    public static bool TryParseHistory(string key, out string queue, out string token, out MetricTier tier, out DateTime bucket)
+    {
+        queue = string.Empty;
+        token = string.Empty;
+        tier = default;
+        bucket = default;
+
+        var parts = key.Split(':');
+        if (parts.Length != 6 || !string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!MetricTiers.TryParse(parts[4], parts[5], out tier, out bucket))
+        {
+            return false;
+        }
+
+        queue = parts[1];
+        token = parts[3];
+
+        return true;
+    }
+
+    // Parses a tiered latency-histogram key (qwait:{queue}:pcth:{upperMs}:{tier}:{stamp}).
+    public static bool TryParsePctHistory(string key, out string queue, out int upperMs, out MetricTier tier, out DateTime bucket)
+    {
+        queue = string.Empty;
+        upperMs = 0;
+        tier = default;
+        bucket = default;
+
+        var parts = key.Split(':');
+        if (parts.Length != 6 || !string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[2], PctHistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out upperMs))
+        {
+            return false;
+        }
+
+        if (!MetricTiers.TryParse(parts[4], parts[5], out tier, out bucket))
+        {
+            return false;
+        }
+
+        queue = parts[1];
 
         return true;
     }

@@ -408,28 +408,20 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
     /// </summary>
     private static bool IsHourlyKey(string key) => TryParseHourlyKey(key, out _, out _);
 
+    // Recognizes any time-bucketed key across the retention tiers (§8.30) — fine/hourly/daily, marked or legacy
+    // unmarked — and reports its family base-key and the HOUR its bucket falls in (fine buckets down-bin to their
+    // hour so the chart stays hourly-resolution; a daily bucket reports midnight of its day). Non-bucket keys
+    // (lifetime totals, pct, qbacklog) return false, so they stay out of the chart and in the counters table.
     private static bool TryParseHourlyKey(string key, out string baseKey, out DateTime hour)
     {
-        baseKey = string.Empty;
         hour = default;
 
-        var lastColon = key.LastIndexOf(':');
-        if (lastColon < 0)
+        if (!MetricTiers.TryClassifyKey(key, out baseKey, out _, out var bucketStart))
         {
             return false;
         }
 
-        if (!DateTime.TryParseExact(
-            key.AsSpan(lastColon + 1),
-            "yyyy-MM-dd-HH",
-            CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-            out hour))
-        {
-            return false;
-        }
-
-        baseKey = key[..lastColon];
+        hour = new DateTime(bucketStart.Year, bucketStart.Month, bucketStart.Day, bucketStart.Hour, 0, 0, DateTimeKind.Utc);
 
         return true;
     }
@@ -455,7 +447,7 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .GroupBy(x => x.Key, StringComparer.Ordinal)
             .Select(g => new { Key = g.Key, Value = g.Sum(x => x.Value) });
 
-        var points = new List<CounterHistoryPoint>();
+        var buckets = new Dictionary<(string Key, DateTime Hour), long>();
         foreach (var row in merged)
         {
             if (!TryParseHourlyKey(row.Key, out var baseKey, out var hour) || hour < since)
@@ -463,15 +455,17 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
                 continue;
             }
 
-            points.Add(new CounterHistoryPoint
-            {
-                Hour = hour,
-                Key = baseKey,
-                Value = row.Value,
-            });
+            // Fine (5-min) buckets in the same hour collapse to one hourly chart point per base-key (§8.30).
+            buckets[(baseKey, hour)] = buckets.GetValueOrDefault((baseKey, hour)) + row.Value;
         }
 
-        return [.. points.OrderBy(p => p.Hour).ThenBy(p => p.Key, StringComparer.Ordinal)];
+        return
+        [
+            .. buckets
+                .Select(kv => new CounterHistoryPoint { Hour = kv.Key.Hour, Key = kv.Key.Key, Value = kv.Value })
+                .OrderBy(p => p.Hour)
+                .ThenBy(p => p.Key, StringComparer.Ordinal),
+        ];
     }
 
     /// <summary>

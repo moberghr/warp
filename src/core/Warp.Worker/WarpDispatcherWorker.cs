@@ -485,7 +485,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         WarpTelemetry.RecordQueueWait(job.Queue, waitMs, _configuration.ApplicationName);
         if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
         {
-            foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, QueueWaitKeys.HourBucket(now)))
+            foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes)))
             {
                 context.Set<Counter>().Add(counter);
             }

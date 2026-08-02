@@ -106,4 +106,45 @@ internal static class MetricTiers
     /// <summary>Recognizes a pre-tiering unmarked hourly stamp (<c>yyyy-MM-dd-HH</c>) for rollup migration.</summary>
     public static bool TryParseLegacyHourly(string stamp, out DateTime bucketStart)
         => DateTime.TryParseExact(stamp, HourlyFormat, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out bucketStart);
+
+    /// <summary>
+    /// Extracts the tier, bucket-start instant, and family base-key (everything before the tier suffix) from any
+    /// time-bucketed <c>Statistic</c> key — marked (<c>…:{m5|h1|d1}:{stamp}</c>) or legacy unmarked
+    /// (<c>…:{yyyy-MM-dd-HH}</c>, treated as hourly). Returns false for keys with no parseable tier suffix
+    /// (lifetime totals, lifetime <c>pct</c>, <c>qbacklog</c> gauge, any non-date suffix) so callers leave them
+    /// alone. Shared by <c>StatisticRollup</c> and the dashboard history readers.
+    /// </summary>
+    public static bool TryClassifyKey(string key, out string baseKey, out MetricTier tier, out DateTime bucketStart)
+    {
+        tier = default;
+        bucketStart = default;
+        baseKey = string.Empty;
+
+        var lastColon = key.LastIndexOf(':');
+        if (lastColon <= 0)
+        {
+            return false;
+        }
+
+        var stamp = key[(lastColon + 1)..];
+        var beforeStamp = key[..lastColon];
+
+        var prevColon = beforeStamp.LastIndexOf(':');
+        if (prevColon > 0 && TryParse(beforeStamp[(prevColon + 1)..], stamp, out tier, out bucketStart))
+        {
+            baseKey = beforeStamp[..prevColon];
+
+            return true;
+        }
+
+        if (TryParseLegacyHourly(stamp, out bucketStart))
+        {
+            tier = MetricTier.Hourly;
+            baseKey = beforeStamp;
+
+            return true;
+        }
+
+        return false;
+    }
 }

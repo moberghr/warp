@@ -66,7 +66,7 @@ public sealed class StatisticRollup<TContext> : IServerTask
 
         foreach (var row in rows)
         {
-            if (!TryClassify(row.Key, out var tier, out var bucketStart, out var baseKey))
+            if (!MetricTiers.TryClassifyKey(row.Key, out var baseKey, out var tier, out var bucketStart))
             {
                 continue;
             }
@@ -121,43 +121,5 @@ public sealed class StatisticRollup<TContext> : IServerTask
         await _context.SaveChangesAsync(ct);
 
         return $"Rolled {additions.Count} bucket(s), removed {deletions.Count} source row(s)";
-    }
-
-    // Extracts the tier, bucket-start, and family base-key (everything before the tier suffix) from a bucketed
-    // Statistic key. Marked keys end in ":{m5|h1|d1}:{stamp}"; legacy pre-3.10 keys end in an unmarked
-    // ":{yyyy-MM-dd-HH}" (treated as hourly for migration). Anything else (lifetime totals, pct, qbacklog,
-    // non-date suffixes) returns false and is left alone.
-    private static bool TryClassify(string key, out MetricTier tier, out DateTime bucketStart, out string baseKey)
-    {
-        tier = default;
-        bucketStart = default;
-        baseKey = string.Empty;
-
-        var lastColon = key.LastIndexOf(':');
-        if (lastColon <= 0)
-        {
-            return false;
-        }
-
-        var stamp = key[(lastColon + 1)..];
-        var beforeStamp = key[..lastColon];
-
-        var prevColon = beforeStamp.LastIndexOf(':');
-        if (prevColon > 0 && MetricTiers.TryParse(beforeStamp[(prevColon + 1)..], stamp, out tier, out bucketStart))
-        {
-            baseKey = beforeStamp[..prevColon];
-
-            return true;
-        }
-
-        if (MetricTiers.TryParseLegacyHourly(stamp, out bucketStart))
-        {
-            tier = MetricTier.Hourly;
-            baseKey = beforeStamp;
-
-            return true;
-        }
-
-        return false;
     }
 }
