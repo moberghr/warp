@@ -1,4 +1,3 @@
-using System.Globalization;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 
@@ -35,11 +34,13 @@ internal static class DeadlineKeys
 
     public static string Total(string type, string token) => $"{Prefix}:{type}:{token}";
 
-    public static string History(string type, string token, string hour) => $"{Prefix}:{type}:{HistoryMarker}:{token}:{hour}";
+    // tierSuffix is MetricTiers.Suffix(...) — ":{marker}:{stamp}" (§8.30), so deadline attainment gets the same
+    // fine→hourly→daily downsampling and 5-minute fast-burn resolution as jobstat/qwait.
+    public static string History(string type, string token, string tierSuffix) => $"{Prefix}:{type}:{HistoryMarker}:{token}{tierSuffix}";
 
     public static string AppTotal(string application, string type, string token) => $"{AppPrefix}:{application}:{type}:{token}";
 
-    public static string AppHistory(string application, string type, string token, string hour) => $"{AppPrefix}:{application}:{type}:{HistoryMarker}:{token}:{hour}";
+    public static string AppHistory(string application, string type, string token, string tierSuffix) => $"{AppPrefix}:{application}:{type}:{HistoryMarker}:{token}{tierSuffix}";
 
     public static string HourBucket(DateTime timestampUtc) => QueueWaitKeys.HourBucket(timestampUtc);
 
@@ -52,18 +53,18 @@ internal static class DeadlineKeys
     /// when <paramref name="missed"/>, additionally emits the miss. Both get an hourly slice, and the same under
     /// the per-application slice when <paramref name="application"/> is set.
     /// </summary>
-    public static List<Counter> Build(string type, bool missed, string? application, string hourBucket)
+    public static List<Counter> Build(string type, bool missed, string? application, string tierSuffix)
     {
         var counters = new List<Counter>();
         var t = Sanitize(type);
 
         counters.Add(new Counter { Key = Total(t, CountToken), Value = 1 });
-        counters.Add(new Counter { Key = History(t, CountToken, hourBucket), Value = 1 });
+        counters.Add(new Counter { Key = History(t, CountToken, tierSuffix), Value = 1 });
 
         if (missed)
         {
             counters.Add(new Counter { Key = Total(t, MissToken), Value = 1 });
-            counters.Add(new Counter { Key = History(t, MissToken, hourBucket), Value = 1 });
+            counters.Add(new Counter { Key = History(t, MissToken, tierSuffix), Value = 1 });
         }
 
         if (application is null)
@@ -74,12 +75,12 @@ internal static class DeadlineKeys
         var app = Sanitize(application);
 
         counters.Add(new Counter { Key = AppTotal(app, t, CountToken), Value = 1 });
-        counters.Add(new Counter { Key = AppHistory(app, t, CountToken, hourBucket), Value = 1 });
+        counters.Add(new Counter { Key = AppHistory(app, t, CountToken, tierSuffix), Value = 1 });
 
         if (missed)
         {
             counters.Add(new Counter { Key = AppTotal(app, t, MissToken), Value = 1 });
-            counters.Add(new Counter { Key = AppHistory(app, t, MissToken, hourBucket), Value = 1 });
+            counters.Add(new Counter { Key = AppHistory(app, t, MissToken, tierSuffix), Value = 1 });
         }
 
         return counters;
@@ -124,21 +125,22 @@ internal static class DeadlineKeys
         return true;
     }
 
-    // Parses an hourly history key (deadline:{type}:hist:{token}:{yyyy-MM-dd-HH}) — the windowed read the
-    // SloEvaluator sums for deadline-attainment over a rolling window. Disjoint from the length-3 lifetime key.
-    public static bool TryParseHistory(string key, out string type, out string token, out DateTime hour)
+    // Parses a tiered history key (deadline:{type}:hist:{token}:{tier}:{stamp}, §8.30) — the windowed read the
+    // SloEvaluator sums for deadline-attainment. Disjoint from the length-3 lifetime key.
+    public static bool TryParseHistory(string key, out string type, out string token, out MetricTier tier, out DateTime bucket)
     {
         type = string.Empty;
         token = string.Empty;
-        hour = default;
+        tier = default;
+        bucket = default;
 
         var parts = key.Split(':');
-        if (parts.Length != 5 || !string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
+        if (parts.Length != 6 || !string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (!DateTime.TryParseExact(parts[4], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
+        if (!MetricTiers.TryParse(parts[4], parts[5], out tier, out bucket))
         {
             return false;
         }
@@ -149,21 +151,22 @@ internal static class DeadlineKeys
         return true;
     }
 
-    // Parses a per-app hourly history key (deadline-app:{app}:{type}:hist:{token}:{yyyy-MM-dd-HH}).
-    public static bool TryParseAppHistory(string key, out string application, out string type, out string token, out DateTime hour)
+    // Parses a per-app tiered history key (deadline-app:{app}:{type}:hist:{token}:{tier}:{stamp}).
+    public static bool TryParseAppHistory(string key, out string application, out string type, out string token, out MetricTier tier, out DateTime bucket)
     {
         application = string.Empty;
         type = string.Empty;
         token = string.Empty;
-        hour = default;
+        tier = default;
+        bucket = default;
 
         var parts = key.Split(':');
-        if (parts.Length != 6 || !string.Equals(parts[0], AppPrefix, StringComparison.Ordinal) || !string.Equals(parts[3], HistoryMarker, StringComparison.Ordinal))
+        if (parts.Length != 7 || !string.Equals(parts[0], AppPrefix, StringComparison.Ordinal) || !string.Equals(parts[3], HistoryMarker, StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (!DateTime.TryParseExact(parts[5], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
+        if (!MetricTiers.TryParse(parts[5], parts[6], out tier, out bucket))
         {
             return false;
         }

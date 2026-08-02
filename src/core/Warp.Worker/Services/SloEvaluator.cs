@@ -120,8 +120,8 @@ public sealed class SloEvaluator<TContext> : IServerTask
         {
             SloKind.SuccessRate => ComputeSuccessRateAsync(def, now, cache, ct),
             SloKind.DeadlineAttainment => ComputeDeadlineAsync(def, now, cache, ct),
-            SloKind.ExecutionLatency => ComputeExecutionLatencyAsync(def, cache, ct),
-            SloKind.QueueWaitLatency => ComputeQueueWaitLatencyAsync(def, cache, ct),
+            SloKind.ExecutionLatency => ComputeExecutionLatencyAsync(def, now, cache, ct),
+            SloKind.QueueWaitLatency => ComputeQueueWaitLatencyAsync(def, now, cache, ct),
             SloKind.BacklogDepth => ComputeBacklogAsync(def, cache, ct),
             _ => Task.FromResult(new EvalResult(1.0, 1.0, 0.0, 0.0)),
         };
@@ -129,13 +129,13 @@ public sealed class SloEvaluator<TContext> : IServerTask
     private async Task<EvalResult> ComputeSuccessRateAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
     {
         var windowStart = now.AddSeconds(-def.WindowSeconds);
-        var shortStart = now.AddHours(-1);
+        var shortStart = ShortWindowStart(def, now);
         long succW = 0, failW = 0, succS = 0, failS = 0;
 
-        foreach (var (token, hour, value) in ReadJobstatHistory(def, await LoadMergedAsync(JobstatPrefix(def), cache, ct)))
+        foreach (var (token, bucket, value) in ReadJobstatHistory(def, await LoadMergedAsync(JobstatPrefix(def), cache, ct)))
         {
-            var inW = hour.AddHours(1) > windowStart;
-            var inS = hour.AddHours(1) > shortStart;
+            var inW = bucket >= windowStart;
+            var inS = bucket >= shortStart;
             if (string.Equals(token, JobStatsKeys.SucceededToken, StringComparison.Ordinal))
             {
                 succW += inW ? value : 0;
@@ -157,7 +157,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
     private async Task<EvalResult> ComputeDeadlineAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
     {
         var windowStart = now.AddSeconds(-def.WindowSeconds);
-        var shortStart = now.AddHours(-1);
+        var shortStart = ShortWindowStart(def, now);
         long cntW = 0, missW = 0, cntS = 0, missS = 0;
 
         var app = def.Application is null ? null : DeadlineKeys.Sanitize(def.Application);
@@ -166,24 +166,24 @@ public sealed class SloEvaluator<TContext> : IServerTask
         foreach (var row in await LoadMergedAsync(prefix, cache, ct))
         {
             string token;
-            DateTime hour;
+            DateTime bucket;
             if (app is null)
             {
-                if (!DeadlineKeys.TryParseHistory(row.Key, out var type, out token, out hour) || !string.Equals(type, def.Dimension, StringComparison.Ordinal))
+                if (!DeadlineKeys.TryParseHistory(row.Key, out var type, out token, out _, out bucket) || !string.Equals(type, def.Dimension, StringComparison.Ordinal))
                 {
                     continue;
                 }
             }
             else
             {
-                if (!DeadlineKeys.TryParseAppHistory(row.Key, out _, out var type, out token, out hour) || !string.Equals(type, def.Dimension, StringComparison.Ordinal))
+                if (!DeadlineKeys.TryParseAppHistory(row.Key, out _, out var type, out token, out _, out bucket) || !string.Equals(type, def.Dimension, StringComparison.Ordinal))
                 {
                     continue;
                 }
             }
 
-            var inW = hour.AddHours(1) > windowStart;
-            var inS = hour.AddHours(1) > shortStart;
+            var inW = bucket >= windowStart;
+            var inS = bucket >= shortStart;
             if (string.Equals(token, DeadlineKeys.CountToken, StringComparison.Ordinal))
             {
                 cntW += inW ? row.Value : 0;
@@ -202,35 +202,60 @@ public sealed class SloEvaluator<TContext> : IServerTask
         return new EvalResult(att, budget, burnShort, burnLong);
     }
 
-    private async Task<EvalResult> ComputeExecutionLatencyAsync(SloDefinition def, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
+    private async Task<EvalResult> ComputeExecutionLatencyAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
     {
-        var buckets = new Dictionary<int, long>();
+        var windowStart = now.AddSeconds(-def.WindowSeconds);
+        var shortStart = ShortWindowStart(def, now);
+        var wide = new Dictionary<int, long>();
+        var recent = new Dictionary<int, long>();
+
+        // Windowed percentile from the tiered pcth histogram (§8.30) — the recent (fine) buckets give fast-burn.
         foreach (var row in await LoadMergedAsync(JobStatsKeys.Prefix + ":", cache, ct))
         {
-            if (JobStatsKeys.TryParsePct(row.Key, out var dim, out var id, out var upperMs)
+            if (JobStatsKeys.TryParsePctHistory(row.Key, out var dim, out var id, out var upperMs, out _, out var bucket)
                 && string.Equals(dim, JobStatsKeys.TypeMarker, StringComparison.Ordinal)
                 && string.Equals(id, def.Dimension, StringComparison.Ordinal))
             {
-                buckets[upperMs] = buckets.GetValueOrDefault(upperMs) + row.Value;
+                if (bucket >= windowStart)
+                {
+                    wide[upperMs] = wide.GetValueOrDefault(upperMs) + row.Value;
+                }
+
+                if (bucket >= shortStart)
+                {
+                    recent[upperMs] = recent.GetValueOrDefault(upperMs) + row.Value;
+                }
             }
         }
 
-        return Threshold(buckets, def);
+        return ThresholdWindowed(wide, recent, def);
     }
 
-    private async Task<EvalResult> ComputeQueueWaitLatencyAsync(SloDefinition def, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
+    private async Task<EvalResult> ComputeQueueWaitLatencyAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
     {
-        var buckets = new Dictionary<int, long>();
+        var windowStart = now.AddSeconds(-def.WindowSeconds);
+        var shortStart = ShortWindowStart(def, now);
+        var wide = new Dictionary<int, long>();
+        var recent = new Dictionary<int, long>();
+
         foreach (var row in await LoadMergedAsync(QueueWaitKeys.Prefix + ":", cache, ct))
         {
-            if (QueueWaitKeys.TryParsePct(row.Key, out var queue, out var upperMs)
+            if (QueueWaitKeys.TryParsePctHistory(row.Key, out var queue, out var upperMs, out _, out var bucket)
                 && string.Equals(queue, def.Dimension, StringComparison.Ordinal))
             {
-                buckets[upperMs] = buckets.GetValueOrDefault(upperMs) + row.Value;
+                if (bucket >= windowStart)
+                {
+                    wide[upperMs] = wide.GetValueOrDefault(upperMs) + row.Value;
+                }
+
+                if (bucket >= shortStart)
+                {
+                    recent[upperMs] = recent.GetValueOrDefault(upperMs) + row.Value;
+                }
             }
         }
 
-        return Threshold(buckets, def);
+        return ThresholdWindowed(wide, recent, def);
     }
 
     private async Task<EvalResult> ComputeBacklogAsync(SloDefinition def, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
@@ -251,12 +276,16 @@ public sealed class SloEvaluator<TContext> : IServerTask
         return new EvalResult(att, budget, burn, burn);
     }
 
-    private static EvalResult Threshold(Dictionary<int, long> buckets, SloDefinition def)
+    // Windowed threshold latency: observed = percentile over the window's pcth buckets; burnShort = percentile
+    // over the recent (fine) buckets, so a latency spike in the fast-burn window is caught.
+    private static EvalResult ThresholdWindowed(Dictionary<int, long> wide, Dictionary<int, long> recent, SloDefinition def)
     {
-        var observed = SloMath.Percentile(buckets, def.Percentile ?? 95);
-        var (att, budget, burn) = SloMath.EvaluateThreshold(observed, def.TargetValue);
+        var percentile = def.Percentile ?? 95;
+        var observed = SloMath.Percentile(wide, percentile);
+        var (att, budget, burnLong) = SloMath.EvaluateThreshold(observed, def.TargetValue);
+        var (_, _, burnShort) = SloMath.EvaluateThreshold(SloMath.Percentile(recent, percentile), def.TargetValue);
 
-        return new EvalResult(att, budget, burn, burn);
+        return new EvalResult(att, budget, burnShort, burnLong);
     }
 
     // Success-rate reads the app-agnostic jobstat family, or the disjoint per-app slice when the objective is
@@ -265,6 +294,11 @@ public sealed class SloEvaluator<TContext> : IServerTask
         => def.Application is null
             ? JobStatsKeys.Prefix + ":"
             : JobStatsKeys.AppPrefix + ":" + JobStatsKeys.Sanitize(def.Application) + ":";
+
+    // Fast-burn short window = the objective window / 12, floored to 5 minutes — small enough to catch a fast
+    // burn and now populated by the fine (5-min) metrics tier (§8.30), which is what makes real fast-burn possible.
+    private static DateTime ShortWindowStart(SloDefinition def, DateTime now)
+        => now.AddSeconds(-Math.Max(300, def.WindowSeconds / 12.0));
 
     // Returns each matching jobstat history bucket as (token, bucket-start, value). Bucket-start is the tier's
     // bucket start (fine 5-min / hourly / daily, §8.30) — the caller sums buckets whose start falls in the

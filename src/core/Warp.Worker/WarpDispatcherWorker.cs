@@ -701,7 +701,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
                 var type = string.IsNullOrEmpty(job.Type) ? "job" : job.Type;
-                counters.AddRange(DeadlineKeys.Build(type, missed, _configuration.ApplicationName, hourSuffix));
+                counters.AddRange(DeadlineKeys.Build(type, missed, _configuration.ApplicationName, tierSuffix));
             }
         }
 

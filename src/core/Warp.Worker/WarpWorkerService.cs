@@ -631,7 +631,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
                 var type = string.IsNullOrEmpty(job.Type) ? "job" : job.Type;
-                foreach (var counter in DeadlineKeys.Build(type, missed, _configuration.ApplicationName, hourSuffix))
+                foreach (var counter in DeadlineKeys.Build(type, missed, _configuration.ApplicationName, tierSuffix))
                 {
                     context.Set<Counter>().Add(counter);
                 }
