@@ -63,7 +63,28 @@ public sealed class StatisticRollup<TContext> : IServerTask
 
         var additions = new Dictionary<string, long>(StringComparer.Ordinal);
         var deletions = new List<string>();
+        var fineTargets = new HashSet<string>(StringComparer.Ordinal);
 
+        // Pass 1 — fine → hourly. Sum each stale fine bucket into its hourly parent and record which hourly keys
+        // received a contribution this tick.
+        foreach (var row in rows)
+        {
+            if (MetricTiers.TryClassifyKey(row.Key, out var baseKey, out var tier, out var bucketStart)
+                && tier == MetricTier.Fine
+                && bucketStart < fineCutoff)
+            {
+                var target = baseKey + MetricTiers.Suffix(MetricTier.Hourly, bucketStart, fineMinutes);
+                additions[target] = additions.GetValueOrDefault(target) + row.Value;
+                fineTargets.Add(target);
+                deletions.Add(row.Key);
+            }
+        }
+
+        // The second pass rolls hourly buckets into daily and prunes daily. When an hourly bucket also received
+        // a fine contribution this tick, the rollup leaves it in place instead of rolling it, so the just-added
+        // fine value is never lost. That bucket rolls on the next tick with the full value included. The
+        // deferral only matters when rollup was disabled past the hourly window; otherwise the deferred set is
+        // empty. A naive guard that just dropped the colliding target here would silently discard the fine value.
         foreach (var row in rows)
         {
             if (!MetricTiers.TryClassifyKey(row.Key, out var baseKey, out var tier, out var bucketStart))
@@ -71,14 +92,13 @@ public sealed class StatisticRollup<TContext> : IServerTask
                 continue;
             }
 
-            if (tier == MetricTier.Fine && bucketStart < fineCutoff)
+            if (tier == MetricTier.Hourly && bucketStart < hourlyCutoff)
             {
-                var target = baseKey + MetricTiers.Suffix(MetricTier.Hourly, bucketStart, fineMinutes);
-                additions[target] = additions.GetValueOrDefault(target) + row.Value;
-                deletions.Add(row.Key);
-            }
-            else if (tier == MetricTier.Hourly && bucketStart < hourlyCutoff)
-            {
+                if (fineTargets.Contains(row.Key))
+                {
+                    continue;
+                }
+
                 var target = baseKey + MetricTiers.Suffix(MetricTier.Daily, bucketStart, fineMinutes);
                 additions[target] = additions.GetValueOrDefault(target) + row.Value;
                 deletions.Add(row.Key);
@@ -86,19 +106,6 @@ public sealed class StatisticRollup<TContext> : IServerTask
             else if (tier == MetricTier.Daily && dailyCutoff is { } dc && bucketStart < dc)
             {
                 deletions.Add(row.Key);
-            }
-        }
-
-        // Safety for the (normally-impossible) case where a bucket is both a roll TARGET and a roll SOURCE in
-        // the same pass — only reachable if rollup was disabled long enough for a fine bucket to outlive the
-        // hourly retention. Retention ordering (fine ≪ hourly ≪ daily) makes targets and sources disjoint in
-        // steady state; drop the colliding target so we never update-then-delete the same row.
-        if (deletions.Count > 0)
-        {
-            var deletedKeys = new HashSet<string>(deletions, StringComparer.Ordinal);
-            foreach (var target in additions.Keys.Where(deletedKeys.Contains).ToList())
-            {
-                additions.Remove(target);
             }
         }
 

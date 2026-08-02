@@ -131,6 +131,25 @@ public abstract class StatisticRollupTestsBase : IAsyncLifetime
         (await ValueAsync(hourKey)).ShouldBe(10);       // 4 + 6, not itself rolled (within the hourly window)
     }
 
+    [TimedFact]
+    public async Task Rollup_FineAndItsHourlyParentBothStale_NoValueLostAcrossTicks()
+    {
+        // The rollup-was-disabled case: a fine bucket AND its hourly parent are both past every window, in the
+        // same hour. A naive guard would drop the fine value; the defer must preserve it across two ticks.
+        await SeedAsync("jobstat:type:X:hist:succeeded:h1:2020-01-01-08", 4);
+        await SeedAsync("jobstat:type:X:hist:succeeded:m5:2020-01-01-08-00", 6);
+
+        await RunAsync(); // tick 1: fine → hourly; the hourly's own roll is deferred so nothing is lost
+
+        (await ValueAsync("jobstat:type:X:hist:succeeded:m5:2020-01-01-08-00")).ShouldBeNull();
+        (await ValueAsync("jobstat:type:X:hist:succeeded:h1:2020-01-01-08")).ShouldBe(10); // 4 + 6, still hourly
+
+        await RunAsync(); // tick 2: the now-complete hourly rolls to daily
+
+        (await ValueAsync("jobstat:type:X:hist:succeeded:h1:2020-01-01-08")).ShouldBeNull();
+        (await ValueAsync("jobstat:type:X:hist:succeeded:d1:2020-01-01")).ShouldBe(10); // full value preserved
+    }
+
     private async Task SeedAsync(string key, long value)
     {
         var ctx = _fixture.CreateContext();

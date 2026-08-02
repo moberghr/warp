@@ -317,48 +317,38 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(g => new { Key = g.Key, Value = g.Sum(x => x.Value) })
             .ToList();
 
-        // Parse keys like "stats:succeeded:2026-03-28-14" into date + metric
-        var points = new Dictionary<string, StatsHistoryPoint>(StringComparer.Ordinal);
+        // Parse tiered keys — "stats:succeeded:2026-03-28-14" (legacy hourly) or "stats:succeeded:d1:2026-03-28"
+        // (rolled to daily, §8.30) — into hour + metric. Fine/daily buckets down-bin to their hour and same-hour
+        // values accumulate, so a rolled-up window past the hourly retention still charts.
+        var points = new Dictionary<DateTime, StatsHistoryPoint>();
 
         foreach (var stat in hourlyStats)
         {
-            var parts = stat.Key.Split(':');
-            if (parts.Length != 3)
+            if (!MetricTiers.TryClassifyKey(stat.Key, out var baseKey, out _, out var bucketStart))
             {
                 continue;
             }
 
-            var metric = parts[1]; // "succeeded" or "failed"
-            var hourStr = parts[2]; // "2026-03-28-14"
-
-            if (!DateTime.TryParseExact(
-                hourStr,
-                "yyyy-MM-dd-HH",
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-                out var hour))
-            {
-                continue;
-            }
-
+            var hour = new DateTime(bucketStart.Year, bucketStart.Month, bucketStart.Day, bucketStart.Hour, 0, 0, DateTimeKind.Utc);
             if (hour < since)
             {
                 continue;
             }
 
-            if (!points.TryGetValue(hourStr, out var point))
+            if (!points.TryGetValue(hour, out var point))
             {
                 point = new StatsHistoryPoint { Hour = hour };
-                points[hourStr] = point;
+                points[hour] = point;
             }
 
-            if (string.Equals(metric, "succeeded", StringComparison.Ordinal))
+            // baseKey is "stats:succeeded" or "stats:failed".
+            if (baseKey.EndsWith(":succeeded", StringComparison.Ordinal))
             {
-                point.Succeeded = stat.Value;
+                point.Succeeded += stat.Value;
             }
-            else if (string.Equals(metric, "failed", StringComparison.Ordinal))
+            else if (baseKey.EndsWith(":failed", StringComparison.Ordinal))
             {
-                point.Failed = stat.Value;
+                point.Failed += stat.Value;
             }
         }
 
