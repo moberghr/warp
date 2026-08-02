@@ -4,6 +4,36 @@ sidebar_position: 6
 
 # Releases
 
+## 3.10.0
+
+*2026-08-02*
+
+Additive minor release — **no breaking API changes and no schema migration**. Every tier lives in the existing `Statistic` / `Counter` tables, so there's nothing to `ef migrations add`.
+
+### Metrics retention tiers
+
+Warp's time-series metrics — per-type/handler execution, queue-wait, adapter/endpoint call stats, browser events, error-group trends — used to be kept at a single hourly resolution and then **deleted** after 7 days. This release turns that into a real multi-resolution store: recent data at **5-minute** resolution, rolled up to **hourly** then **daily** as it ages, with old buckets **summed into the coarser tier before deletion** instead of dropped.
+
+- **Fine → hourly → daily rollup.** The write path emits at the fine (5-min) tier — the same number of counter rows, just a finer stamp. A new `StatisticRollup` server task sums 5-min buckets into their hour (after 6h), hourly into their day (after 7d), and prunes daily (after 90d). It sums-then-deletes inside its lock transaction, so a crash can't double-count, and it **replaces** the old delete-only hourly prune.
+- **Explicit tiers.** Keys carry an `m5` / `h1` / `d1` marker (`…:hist:{token}:m5:{stamp}`), with a matching `pcth` latency-histogram so windowed percentiles are possible. Lifetime totals and the all-time `pct` histogram are untouched.
+- **Bounded storage, coarse long history.** Each dimension keeps a fixed number of buckets instead of accumulating — and old history is *retained* at daily resolution rather than lost. `DailyStatisticsRetention = null` keeps daily forever.
+- **One family-agnostic implementation.** The rollup keys purely on the trailing tier suffix, so it downsamples `jobstat`, `qwait`, adapter, endpoint, client-event, and error-group trends alike — and **migrates every pre-existing hourly row** to the new scheme automatically. The dashboard's counters/stats-history graphs read across the tiers unchanged.
+
+```csharp
+services.AddWarp<AppDb>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.FineResolutionMinutes = 5;                          // fine bucket width; 60 disables the fine tier
+    opt.FineResolutionRetention = TimeSpan.FromHours(6);    // fine → hourly age
+    opt.HourlyStatisticsRetention = TimeSpan.FromDays(7);   // hourly → daily age (was a delete age pre-3.10)
+    opt.DailyStatisticsRetention = TimeSpan.FromDays(90);   // daily prune; null keeps daily forever
+});
+```
+
+This is the storage foundation the upcoming **SLO / error-budget** work builds on — 5-minute resolution is what fast-burn alerting needs. See **[Metrics retention tiers](./features/metrics-retention.md)**.
+
+> Migration note: 3.10.0 is **additive with no migration** — all tiers are new rows in the existing `Statistic`/`Counter` tables, and legacy hourly keys migrate to the tiered scheme automatically on the rollup's normal schedule.
+
 ## 3.9.0
 
 *2026-07-28*
