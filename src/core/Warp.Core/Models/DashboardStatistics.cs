@@ -32,6 +32,15 @@ public class DashboardStatistics
 
     public long TotalCreated { get; set; }
 
+    /// <summary>Records dropped by the outbound adapter recording pipeline in the last 24h (§8.19); a health signal.</summary>
+    public long AdapterRecordsDropped { get; set; }
+
+    /// <summary>Records dropped by the inbound endpoint recording pipeline in the last 24h (§8.21).</summary>
+    public long EndpointRecordsDropped { get; set; }
+
+    /// <summary>Client (browser) events dropped by the ingest pipeline in the last 24h (§8.27).</summary>
+    public long ClientRecordsDropped { get; set; }
+
     public int Batches { get; set; }
 
     public int BatchesProcessing { get; set; }

@@ -232,6 +232,9 @@ export function getDashboardStats(): DashboardStatistics {
     totalFailed: 47,
     totalDeleted: 62,
     totalCreated: 15847,
+    adapterRecordsDropped: 0,
+    endpointRecordsDropped: 0,
+    clientRecordsDropped: 0,
     batches: 34,
     databaseConnection: 'PostgreSQL',
   };

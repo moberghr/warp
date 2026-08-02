@@ -259,6 +259,12 @@ public static class ServiceConfiguration
         // BatchPublisher constructor guard backstops non-hosted (raw ServiceProvider) usage.
         services.AddHostedService<WarpModelValidationService<TContext>>();
 
+        // Per-process reporter that folds dropped-record counts (adapter/endpoint/client, §8.19/§8.21/§8.27) to
+        // the durable warpsys:records-dropped stat and raises a throttled RecordsDropped event, so a saturated
+        // lossy pipeline is visible in Warp's own dashboard + alertable without an OTel backend. AddHostedService
+        // dedups via TryAddEnumerable; it is idle (no DB work) when nothing has been dropped.
+        services.AddHostedService<DroppedRecordReporter<TContext>>();
+
         // IWarpSqlQueries<TContext> is registered by the provider package (Warp.PostgreSql /
         // Warp.SqlServer) via their UsePostgreSql / UseSqlServer builder extensions.
         return services;

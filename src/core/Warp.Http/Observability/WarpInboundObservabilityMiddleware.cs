@@ -240,6 +240,7 @@ internal sealed class WarpInboundObservabilityMiddleware
             if (!_recorder.Record(record))
             {
                 WarpTelemetry.EndpointRecordsDropped.Add(1);
+                DroppedRecordCounters.Track(DropPipeline.Endpoint, 1);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

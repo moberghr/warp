@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Logging;
 using Warp.Core.Models;
 
 namespace Warp.Core.Services;
@@ -97,6 +98,15 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
         var totalSucceeded = await GetCombinedStatValue("stats:succeeded");
         var totalFailed = await GetCombinedStatValue("stats:failed");
         var totalDeleted = await GetCombinedStatValue("stats:deleted");
+
+        // Records dropped by the lossy pipelines in the last 24h (§8.19/§8.21/§8.27) — a health signal so a
+        // saturated recording path is visible in-box, not only on the OTel meter. Windowed (not lifetime) so the
+        // tile returns to zero as buckets age out.
+        var droppedSince = _timeProvider.GetUtcNow().UtcDateTime.AddHours(-24);
+        var adapterDropped = await GetDroppedInWindow(DropPipeline.Adapter, droppedSince);
+        var endpointDropped = await GetDroppedInWindow(DropPipeline.Endpoint, droppedSince);
+        var clientDropped = await GetDroppedInWindow(DropPipeline.Client, droppedSince);
+
         var model = new DashboardStatistics
         {
             Total = total,
@@ -124,6 +134,9 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             TotalFailed = totalFailed,
             TotalDeleted = totalDeleted,
             TotalCreated = 0,
+            AdapterRecordsDropped = adapterDropped,
+            EndpointRecordsDropped = endpointDropped,
+            ClientRecordsDropped = clientDropped,
             DatabaseConnection = GetSafeDatabaseConnection(),
         };
 
@@ -367,6 +380,44 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .SumAsync(x => x.Value);
 
         return aggregated + pending;
+    }
+
+    // Sums the tiered warpsys:records-dropped:{pipeline} history buckets whose bucket-start falls on/after
+    // <paramref name="since"/>, across both folded Statistic rows and not-yet-folded Counter rows (§8.30 tier
+    // parse via MetricTiers). Windowed so a transient old drop ages out of the dashboard tile.
+    private async Task<long> GetDroppedInWindow(DropPipeline pipeline, DateTime since)
+    {
+        var prefix = DroppedRecordKeys.Base(pipeline) + ":";
+
+        var stats = await _context.Set<Statistic>()
+            .Where(x => x.Key.StartsWith(prefix))
+            .Select(x => new { x.Key, x.Value })
+            .ToListAsync();
+
+        var pending = await _context.Set<Counter>()
+            .Where(x => x.Key.StartsWith(prefix))
+            .GroupBy(x => x.Key)
+            .Select(g => new { Key = g.Key, Value = g.Sum(c => c.Value) })
+            .ToListAsync();
+
+        long total = 0;
+        foreach (var row in stats)
+        {
+            if (MetricTiers.TryClassifyKey(row.Key, out _, out _, out var bucketStart) && bucketStart >= since)
+            {
+                total += row.Value;
+            }
+        }
+
+        foreach (var row in pending)
+        {
+            if (MetricTiers.TryClassifyKey(row.Key, out _, out _, out var bucketStart) && bucketStart >= since)
+            {
+                total += row.Value;
+            }
+        }
+
+        return total;
     }
 
     public async Task<List<CounterModel>> GetCounters()

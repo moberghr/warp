@@ -137,6 +137,7 @@ public static class WarpClientObservabilityEndpoints
             // Batch-cap truncation is a drop too — count it so it isn't silent (mirrors the buffer-full and
             // unrecognized-type drops below).
             WarpTelemetry.ClientEventsDropped.Add(events.Count - accepted);
+            DroppedRecordCounters.Track(DropPipeline.Client, events.Count - accepted);
         }
 
         for (var i = 0; i < accepted; i++)
@@ -146,6 +147,7 @@ public static class WarpClientObservabilityEndpoints
             {
                 // Unrecognized event type — dropped, but counted so it isn't silent (mirrors the buffer-full drop).
                 WarpTelemetry.ClientEventsDropped.Add(1);
+                DroppedRecordCounters.Track(DropPipeline.Client, 1);
 
                 continue;
             }
@@ -163,6 +165,7 @@ public static class WarpClientObservabilityEndpoints
             if (recorder is not null && !recorder.Record(record))
             {
                 WarpTelemetry.ClientEventsDropped.Add(1);
+                DroppedRecordCounters.Track(DropPipeline.Client, 1);
             }
         }
 

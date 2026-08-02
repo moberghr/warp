@@ -28,6 +28,9 @@ public enum WarpEventType
 
     /// <summary>An SLO objective's error budget is burning (or exhausted) — emitted by the <c>SloEvaluator</c> on a healthy→breaching edge (§8.30).</summary>
     SloBreached = 7,
+
+    /// <summary>A lossy recording pipeline (adapter/endpoint/client) is dropping records because its channel is saturated — emitted per-process by the <c>DroppedRecordReporter</c>, throttled.</summary>
+    RecordsDropped = 8,
 }
 
 /// <summary>
