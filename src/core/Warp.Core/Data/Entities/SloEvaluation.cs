@@ -3,7 +3,7 @@ using Warp.Core.Enums;
 namespace Warp.Core.Data.Entities;
 
 /// <summary>
-/// The rolling computed status of one <see cref="SloDefinition"/> (§8.30), one row per objective (1:1 on
+/// The rolling computed status of one <see cref="SloDefinition"/> (§8.31), one row per objective (1:1 on
 /// <see cref="SloDefinitionId"/>). Upserted every tick by the <c>SloEvaluator</c> off already-folded
 /// <c>Statistic</c>/<c>Counter</c> aggregates — zero hot-path cost. The dashboard reads this directly; because
 /// it is a single bounded row per objective there is no retention sweep. Always-in-schema (§2.11), mirrored by

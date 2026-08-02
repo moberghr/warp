@@ -3,7 +3,7 @@ using Warp.Core.Enums;
 namespace Warp.Core.Services;
 
 /// <summary>
-/// Pure error-budget arithmetic for SLO evaluation (§8.30) — no I/O, so it is unit-tested directly. Two
+/// Pure error-budget arithmetic for SLO evaluation (§8.31) — no I/O, so it is unit-tested directly. Two
 /// families: RATE objectives (success-rate, deadline-attainment) use the standard error-budget model
 /// (budget = 1 − burn, burn = observed error rate ÷ allowed error rate), while THRESHOLD objectives
 /// (latency percentile, backlog depth — lower is better) use a headroom fraction against the target. Both

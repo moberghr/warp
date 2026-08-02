@@ -3,7 +3,7 @@ using Warp.Core.Enums;
 namespace Warp.Core.Data.Entities;
 
 /// <summary>
-/// One durable Service-Level Objective (§8.30): a promise about a slice of Warp's traffic — a success-rate,
+/// One durable Service-Level Objective (§8.31): a promise about a slice of Warp's traffic — a success-rate,
 /// a queue-wait/execution latency percentile, a backlog depth, or a deadline-attainment ratio — scoped to a
 /// queue / job-type (<see cref="Dimension"/>) and optionally an executor <see cref="Application"/> (§8.23).
 /// Objectives are seeded from config (<c>AddSlo</c>) and editable in the dashboard; the DB row is the source of

@@ -10,7 +10,7 @@ using Warp.Core.Services;
 namespace Warp.Worker.Services;
 
 /// <summary>
-/// Evaluates SLO objectives (§8.30) against the durable <c>Statistic</c>/<c>Counter</c> aggregates and upserts
+/// Evaluates SLO objectives (§8.31) against the durable <c>Statistic</c>/<c>Counter</c> aggregates and upserts
 /// their rolling <see cref="SloEvaluation"/> status — the actionable layer over the metrics jobstat / queue-wait /
 /// backlog / deadline already fold. Runs off the worker hot path as a periodic <see cref="IServerTask"/> (the
 /// analogue of <c>CounterAggregator</c> / <c>ErrorGroupAggregator</c>); reads only, plus the one status row per

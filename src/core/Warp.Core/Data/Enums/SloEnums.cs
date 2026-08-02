@@ -1,7 +1,7 @@
 namespace Warp.Core.Enums;
 
 /// <summary>
-/// The kind of objective an <c>SloDefinition</c> measures (§8.30). Each maps to an existing durable aggregate
+/// The kind of objective an <c>SloDefinition</c> measures (§8.31). Each maps to an existing durable aggregate
 /// namespace the <c>SloEvaluator</c> reads (no new per-objective storage): success-rate/execution-latency read
 /// <c>jobstat</c>, wait-latency reads <c>qwait</c>, depth reads <c>qbacklog</c>, deadline-attainment reads
 /// <c>deadline</c>. Values start at 1 (§8.11).
@@ -25,7 +25,7 @@ public enum SloKind
 }
 
 /// <summary>
-/// The current health of an <c>SloEvaluation</c> against its objective (§8.30). Values start at 1 (§8.11).
+/// The current health of an <c>SloEvaluation</c> against its objective (§8.31). Values start at 1 (§8.11).
 /// The evaluator transitions between these each tick and fires a notifier event only on the healthy→breaching
 /// edge; <see cref="Acknowledged"/> suppresses further alerts until the ack window elapses.
 /// </summary>

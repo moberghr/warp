@@ -8,7 +8,7 @@ sidebar_position: 6
 
 *2026-08-02*
 
-Additive minor release — **no breaking API changes and no schema migration**. Every tier lives in the existing `Statistic` / `Counter` tables, so there's nothing to `ef migrations add`.
+Additive minor release — **no breaking API changes**. Two features: **metrics retention tiers** (no migration — new rows in the existing `Statistic`/`Counter` tables) and **SLO / error budget** (two new tables, `slo_definition` / `slo_evaluation`, via a standard `dotnet ef migrations add`).
 
 ### Metrics retention tiers
 
@@ -33,6 +33,32 @@ services.AddWarp<AppDb>(opt =>
 This is the storage foundation the upcoming **SLO / error-budget** work builds on — 5-minute resolution is what fast-burn alerting needs. See **[Metrics retention tiers](./features/metrics-retention.md)**.
 
 > Migration note: 3.10.0 is **additive with no migration** — all tiers are new rows in the existing `Statistic`/`Counter` tables, and legacy hourly keys migrate to the tiered scheme automatically on the rollup's normal schedule.
+
+### SLO / error budget
+
+Warp already folds every health signal it needs into durable aggregates — execution, queue-wait, backlog, deadline attainment. This release turns those into **promises**: declare an objective (a target over a rolling window) and Warp continuously computes attainment, the remaining **error budget**, and a multi-window **burn rate**, surfaces them on the dashboard, and alerts on a burn — all off the worker hot path.
+
+- **Five objective kinds** — success-rate and deadline-attainment (windowed error budget), execution/queue-wait latency percentiles (windowed via the new `pcth` histogram), and backlog depth (current gauge). Scoped per job-type / queue, optionally per executor application.
+- **Real fast-burn** — the short window is the objective's window ÷ 12 floored to 5 minutes, and it's genuinely populated because it reads the **5-minute fine tier** from the metrics retention tiers. Every objective reports a fast (recent) and a slow (full-window) burn rate.
+- **Off the hot path** — a periodic `SloEvaluator` reads the already-folded aggregates and upserts one status row per objective; the only new hot-path write is the deadline-miss counter (§8.7) at finalization.
+- **Alerting** — a healthy→breaching edge fires `WarpEventType.SloBreached` through the notifier seam (`BacklogBreached` for depth objectives), once per edge, suppressed while acknowledged. Warp raises the event; the host routes it.
+- **Seed + edit** — define objectives in code with `opt.AddSlo(o => o.AddObjective(...))` (insert-if-absent, DB wins) or manage them in the dashboard **SLOs** page; the read/command services are registered by `AddWarp`, so a dashboard-only host serves them.
+
+```csharp
+services.AddWarpServer<AppDb>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddSlo(o =>
+    {
+        o.AddObjective(SloKind.SuccessRate, "MyApp.Jobs.SendEmail", target: 0.995);
+        o.AddObjective(SloKind.QueueWaitLatency, "default", target: 30_000, percentile: 95);
+    });
+});
+```
+
+See **[SLO / error budget](./features/slo-error-budget.md)**.
+
+> Migration note: the SLO half adds two tables (`slo_definition`, `slo_evaluation`) — a standard `dotnet ef migrations add` / `database update`. Disable with `SloEvaluationInterval = null` or by not calling `AddSlo()`.
 
 ## 3.9.0
 
