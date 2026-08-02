@@ -53,11 +53,11 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task RunCleanup_OldHourlyStats_DeletedAcrossAllPrefixes()
+    public async Task RunCleanup_LeavesTimeBucketedStatsAlone_RollupOwnsTheirRetention()
     {
-        // Cleanup is generic: any key whose last colon-separated segment parses as
-        // yyyy-MM-dd-HH and is older than 7 days is deleted. Built-in stats:* prefixes and
-        // addon-defined keys all get pruned the same way.
+        // As of metrics retention tiers (§8.30), ExpirationCleanup no longer prunes time-bucketed Statistic
+        // rows — StatisticRollup downsamples and prunes them instead. Cleanup must leave every hourly key
+        // untouched; the rollup rolls these old keys to daily (and eventually prunes them) on its own schedule.
         var ctx = _fixture.CreateContext();
         await InsertExpiredJob(ctx);
 
@@ -91,7 +91,7 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
         foreach (var key in oldKeys)
         {
             var stat = await readCtx.Set<Statistic>().FirstOrDefaultAsync(s => s.Key == key, Xunit.TestContext.Current.CancellationToken);
-            stat.ShouldBeNull($"hourly key '{key}' should have been cleaned up");
+            stat.ShouldNotBeNull($"ExpirationCleanup must not prune time-bucketed stat '{key}' — StatisticRollup owns retention (§8.30)");
         }
 
         var rolledUp = await readCtx.Set<Statistic>().FirstOrDefaultAsync(s => s.Key == "stats:succeeded", Xunit.TestContext.Current.CancellationToken);
