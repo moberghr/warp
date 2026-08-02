@@ -20,6 +20,10 @@ public sealed class WarpAddonsInfo
 
     public bool Webhooks { get; init; }
 
+    // SLO / error-budget (§8.31). True when this process opted in via opt.AddSlo(...); the ISloQueryService /
+    // ISloCommandService are always registered by AddWarp, so this marker gates the nav, not the API.
+    public bool Slo { get; init; }
+
     // Multi-app observability (§8.19). The dashboard's Applications page IS the renamed Servers page and is
     // always available; this flag only toggles the app-grouping columns / app filter, and is true when this
     // process opted in by setting WarpConfiguration.ApplicationName.

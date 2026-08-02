@@ -162,6 +162,7 @@ public static class WarpEndpoints
             [FromServices] IEndpointObservabilityMarker? endpoints,
             [FromServices] IClientObservabilityMarker? client,
             [FromServices] IWebhookRedeliveryEnqueuer? webhooks,
+            [FromServices] Warp.Core.Slo.ISloMarker? slo,
             [FromServices] IOptions<WarpConfiguration> configuration) =>
             Results.Ok(new WarpAddonsInfo
             {
@@ -187,6 +188,10 @@ public static class WarpEndpoints
                 // IWebhookCommandService (always registered by AddWarp for dashboard-only processes) can't
                 // gate the flag. The webhooks nav shows only where a delivery can actually be executed.
                 Webhooks = webhooks is not null,
+
+                // ISloMarker is registered only by AddSlo(); the SLO query/command services are always
+                // registered by AddWarp, so this gates the nav, not the API.
+                Slo = slo is not null,
 
                 // Multi-app observability (§8.19). Unlike the other flags (which gate on a DI service), this
                 // reads config: the feature is on when this process set an ApplicationName. The Applications

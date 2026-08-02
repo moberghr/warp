@@ -187,6 +187,11 @@ public static class ServiceConfiguration
             x.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<IErrorGroupCommandService, ErrorGroupCommandService<TContext>>();
 
+        // SLO objectives read/command (§8.31). Registered in AddWarp so dashboard-only hosts resolve them; the
+        // SloDefinition/SloEvaluation tables are always in the schema (§2.11), the evaluator runs on a server.
+        services.TryAddScoped<ISloQueryService>(x => new SloQueryService<TContext>(x.GetRequiredService<TContext>()));
+        services.TryAddScoped<ISloCommandService, SloCommandService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
