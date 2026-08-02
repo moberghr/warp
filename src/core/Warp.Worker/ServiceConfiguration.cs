@@ -236,6 +236,7 @@ public static class ServiceConfiguration
         services.AddScoped<IServerTask, Heartbeat<TContext>>();
         services.AddScoped<IServerTask, ServerCleanup<TContext>>();
         services.AddScoped<IServerTask, ExpirationCleanup<TContext>>();
+        services.AddScoped<IServerTask, StatisticRollup<TContext>>();
 
         // WarpServerRegistration MUST be registered before ServerTaskHost / BackgroundServiceHost
         // (and, in worker mode, the worker hosts) so its StartAsync populates ServerRegistrationState
