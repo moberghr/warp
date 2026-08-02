@@ -51,9 +51,13 @@ internal static class JobStatsKeys
     // Marker for the latency-histogram buckets (jobstat:{dim}:{id}:pct:{upperMs}) — length 5, Total-only.
     public const string PctMarker = "pct";
 
-    // Marker for the hourly time-series buckets (…:hist:{token}:{yyyy-MM-dd-HH}) — the trailing date is what
-    // the generic hourly-stat sweep keys on.
+    // Marker for the tiered time-series buckets (…:hist:{token}:{tier}:{stamp}, §8.30). The trailing
+    // {tier}:{stamp} (m5/h1/d1 + date) is what StatisticRollup downsamples and prunes on.
     public const string HistoryMarker = "hist";
+
+    // Marker for the tiered latency-histogram buckets (…:pcth:{upperMs}:{tier}:{stamp}) — the windowed
+    // counterpart of the lifetime Pct histogram, so percentiles can be computed over a rolling window.
+    public const string PctHistoryMarker = "pcth";
 
     // Ascending latency-bucket upper bounds (ms); trailing int.MaxValue is the "> 10000 ms" catch-all. Mirrors
     // AdapterCounterKeys.Buckets so the percentile walk is identical across surfaces. One call increments the
@@ -64,11 +68,14 @@ internal static class JobStatsKeys
 
     public static string Pct(string dimension, string id, int upperMs) => $"{Prefix}:{dimension}:{id}:{PctMarker}:{upperMs.ToString(CultureInfo.InvariantCulture)}";
 
-    public static string History(string dimension, string id, string token, string hour) => $"{Prefix}:{dimension}:{id}:{HistoryMarker}:{token}:{hour}";
+    // tierSuffix is MetricTiers.Suffix(...) — ":{marker}:{stamp}" (e.g. ":m5:2026-08-02-14-25").
+    public static string History(string dimension, string id, string token, string tierSuffix) => $"{Prefix}:{dimension}:{id}:{HistoryMarker}:{token}{tierSuffix}";
+
+    public static string PctHistory(string dimension, string id, int upperMs, string tierSuffix) => $"{Prefix}:{dimension}:{id}:{PctHistoryMarker}:{upperMs.ToString(CultureInfo.InvariantCulture)}{tierSuffix}";
 
     public static string AppTotal(string application, string dimension, string id, string token) => $"{AppPrefix}:{application}:{dimension}:{id}:{token}";
 
-    public static string AppHistory(string application, string dimension, string id, string token, string hour) => $"{AppPrefix}:{application}:{dimension}:{id}:{HistoryMarker}:{token}:{hour}";
+    public static string AppHistory(string application, string dimension, string id, string token, string tierSuffix) => $"{AppPrefix}:{application}:{dimension}:{id}:{HistoryMarker}:{token}{tierSuffix}";
 
     // The hourly bucket label (UTC) a timestamp falls in — the trailing segment of a history key. Same
     // "yyyy-MM-dd-HH" format the existing job-stats history and the generic hourly-stat cleanup use.
@@ -92,12 +99,12 @@ internal static class JobStatsKeys
     /// <paramref name="application"/> is set (histogram omitted there to bound volume — application is a
     /// low-cardinality identity, so avg via dur-sum is the floor for that slice).
     /// </summary>
-    public static List<Counter> Build(Job job, string outcomeToken, double? durationMs, string? application, string hourBucket)
+    public static List<Counter> Build(Job job, string outcomeToken, double? durationMs, string? application, string tierSuffix)
     {
         var counters = new List<Counter>();
 
-        AppendDimension(counters, TypeMarker, job.Type, outcomeToken, durationMs, application, hourBucket);
-        AppendDimension(counters, HandlerMarker, job.HandlerType, outcomeToken, durationMs, application, hourBucket);
+        AppendDimension(counters, TypeMarker, job.Type, outcomeToken, durationMs, application, tierSuffix);
+        AppendDimension(counters, HandlerMarker, job.HandlerType, outcomeToken, durationMs, application, tierSuffix);
 
         return counters;
     }
@@ -163,32 +170,23 @@ internal static class JobStatsKeys
         return true;
     }
 
-    // Parses an hourly history key (jobstat:{dim}:{id}:hist:{token}:{yyyy-MM-dd-HH}). Disjoint from the
-    // lifetime parsers, which reject the "hist" marker / extra segment.
-    public static bool TryParseHistory(string key, out string dimension, out string id, out string token, out DateTime hour)
+    // Parses a tiered history key (jobstat:{dim}:{id}:hist:{token}:{tier}:{stamp}). Disjoint from the lifetime
+    // parsers (length + marker) and from TryParsePctHistory (marker hist vs pcth).
+    public static bool TryParseHistory(string key, out string dimension, out string id, out string token, out MetricTier tier, out DateTime bucket)
     {
         dimension = string.Empty;
         id = string.Empty;
         token = string.Empty;
-        hour = default;
+        tier = default;
+        bucket = default;
 
         var parts = key.Split(':');
-        if (parts.Length != 6)
+        if (parts.Length != 7 || !string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[3], HistoryMarker, StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (!string.Equals(parts[0], Prefix, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (!string.Equals(parts[3], HistoryMarker, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (!DateTime.TryParseExact(parts[5], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
+        if (!MetricTiers.TryParse(parts[5], parts[6], out tier, out bucket))
         {
             return false;
         }
@@ -196,6 +194,37 @@ internal static class JobStatsKeys
         dimension = parts[1];
         id = parts[2];
         token = parts[4];
+
+        return true;
+    }
+
+    // Parses a tiered latency-histogram key (jobstat:{dim}:{id}:pcth:{upperMs}:{tier}:{stamp}).
+    public static bool TryParsePctHistory(string key, out string dimension, out string id, out int upperMs, out MetricTier tier, out DateTime bucket)
+    {
+        dimension = string.Empty;
+        id = string.Empty;
+        upperMs = 0;
+        tier = default;
+        bucket = default;
+
+        var parts = key.Split(':');
+        if (parts.Length != 7 || !string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[3], PctHistoryMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out upperMs))
+        {
+            return false;
+        }
+
+        if (!MetricTiers.TryParse(parts[5], parts[6], out tier, out bucket))
+        {
+            return false;
+        }
+
+        dimension = parts[1];
+        id = parts[2];
 
         return true;
     }
@@ -228,33 +257,24 @@ internal static class JobStatsKeys
         return true;
     }
 
-    // Parses a per-app hourly history key (jobstat-app:{app}:{dim}:{id}:hist:{token}:{yyyy-MM-dd-HH}).
+    // Parses a per-app tiered history key (jobstat-app:{app}:{dim}:{id}:hist:{token}:{tier}:{stamp}).
     // Disjoint counterpart to TryParseApp.
-    public static bool TryParseAppHistory(string key, out string application, out string dimension, out string id, out string token, out DateTime hour)
+    public static bool TryParseAppHistory(string key, out string application, out string dimension, out string id, out string token, out MetricTier tier, out DateTime bucket)
     {
         application = string.Empty;
         dimension = string.Empty;
         id = string.Empty;
         token = string.Empty;
-        hour = default;
+        tier = default;
+        bucket = default;
 
         var parts = key.Split(':');
-        if (parts.Length != 7)
+        if (parts.Length != 8 || !string.Equals(parts[0], AppPrefix, StringComparison.Ordinal) || !string.Equals(parts[4], HistoryMarker, StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (!string.Equals(parts[0], AppPrefix, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (!string.Equals(parts[4], HistoryMarker, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (!DateTime.TryParseExact(parts[6], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
+        if (!MetricTiers.TryParse(parts[6], parts[7], out tier, out bucket))
         {
             return false;
         }
@@ -267,7 +287,7 @@ internal static class JobStatsKeys
         return true;
     }
 
-    private static void AppendDimension(List<Counter> counters, string dimension, string? rawId, string outcomeToken, double? durationMs, string? application, string hourBucket)
+    private static void AppendDimension(List<Counter> counters, string dimension, string? rawId, string outcomeToken, double? durationMs, string? application, string tierSuffix)
     {
         if (rawId is null)
         {
@@ -277,15 +297,19 @@ internal static class JobStatsKeys
         var id = Sanitize(rawId);
 
         counters.Add(new Counter { Key = Total(dimension, id, outcomeToken), Value = 1 });
-        counters.Add(new Counter { Key = History(dimension, id, outcomeToken, hourBucket), Value = 1 });
+        counters.Add(new Counter { Key = History(dimension, id, outcomeToken, tierSuffix), Value = 1 });
 
         if (durationMs.HasValue)
         {
             var durMs = (int)Math.Round(durationMs.Value, MidpointRounding.AwayFromZero);
+            var bucket = BucketFor(durMs);
 
             counters.Add(new Counter { Key = Total(dimension, id, DurationToken), Value = durMs });
-            counters.Add(new Counter { Key = History(dimension, id, DurationToken, hourBucket), Value = durMs });
-            counters.Add(new Counter { Key = Pct(dimension, id, BucketFor(durMs)), Value = 1 });
+            counters.Add(new Counter { Key = History(dimension, id, DurationToken, tierSuffix), Value = durMs });
+
+            // Lifetime pct (dashboard's all-time percentiles) + the tiered pcth bucket (windowed percentiles).
+            counters.Add(new Counter { Key = Pct(dimension, id, bucket), Value = 1 });
+            counters.Add(new Counter { Key = PctHistory(dimension, id, bucket, tierSuffix), Value = 1 });
         }
 
         if (application is null)
@@ -296,14 +320,14 @@ internal static class JobStatsKeys
         var app = Sanitize(application);
 
         counters.Add(new Counter { Key = AppTotal(app, dimension, id, outcomeToken), Value = 1 });
-        counters.Add(new Counter { Key = AppHistory(app, dimension, id, outcomeToken, hourBucket), Value = 1 });
+        counters.Add(new Counter { Key = AppHistory(app, dimension, id, outcomeToken, tierSuffix), Value = 1 });
 
         if (durationMs.HasValue)
         {
             var durMs = (int)Math.Round(durationMs.Value, MidpointRounding.AwayFromZero);
 
             counters.Add(new Counter { Key = AppTotal(app, dimension, id, DurationToken), Value = durMs });
-            counters.Add(new Counter { Key = AppHistory(app, dimension, id, DurationToken, hourBucket), Value = durMs });
+            counters.Add(new Counter { Key = AppHistory(app, dimension, id, DurationToken, tierSuffix), Value = durMs });
         }
     }
 }

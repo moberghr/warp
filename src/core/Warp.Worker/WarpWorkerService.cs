@@ -552,6 +552,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var hourSuffix = now.ToString("yyyy-MM-dd-HH");
+        var tierSuffix = MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes);
 
         // Every caught exception (retry attempt or terminal) appends one row to the error-grouping inbox in
         // THIS existing save — no fingerprint computed here (that's the aggregator, off the hot path §8.29).
@@ -574,7 +575,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             // Otel sink (the meters carry the data) — the finalization-path perf win. Counter writes only.
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
-                AddJobStatsCounters(context, job, JobStatsKeys.SucceededToken, durationMs, hourSuffix);
+                AddJobStatsCounters(context, job, JobStatsKeys.SucceededToken, durationMs, tierSuffix);
             }
         }
         else if (state == State.Failed)
@@ -585,7 +586,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
-                AddJobStatsCounters(context, job, JobStatsKeys.FailedToken, durationMs, hourSuffix);
+                AddJobStatsCounters(context, job, JobStatsKeys.FailedToken, durationMs, tierSuffix);
             }
         }
         else if (state == State.Deleted)
@@ -637,10 +638,11 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
     // Per-job-TYPE + per-HANDLER execution counters (§8.19 multi-app observability), sliced by this worker
     // process's executor ApplicationName. Counter writes only — no reads/orchestration — so the fetch/execute
-    // hot path stays sacred (§0.2/§6.1). Rides the standard Counter→Statistic fold; hourly keys auto-prune.
-    private void AddJobStatsCounters(DbContext context, Job job, string outcomeToken, double? durationMs, string hourSuffix)
+    // hot path stays sacred (§0.2/§6.1). Rides the standard Counter→Statistic fold; the fine (5-min) tier is
+    // downsampled to hourly then daily by StatisticRollup (§8.30).
+    private void AddJobStatsCounters(DbContext context, Job job, string outcomeToken, double? durationMs, string tierSuffix)
     {
-        foreach (var counter in JobStatsKeys.Build(job, outcomeToken, durationMs, _configuration.ApplicationName, hourSuffix))
+        foreach (var counter in JobStatsKeys.Build(job, outcomeToken, durationMs, _configuration.ApplicationName, tierSuffix))
         {
             context.Set<Counter>().Add(counter);
         }
