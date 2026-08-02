@@ -180,26 +180,22 @@ internal static partial class EndpointCounterKeys
         hour = default;
 
         var parts = key.Split(':');
-        if (parts.Length != 5)
+        if (parts.Length is not (5 or 6) || !string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (!string.Equals(parts[0], Prefix, StringComparison.Ordinal))
+        // Legacy unmarked hourly OR a tiered key rolled by StatisticRollup (…:{tier}:{stamp}, §8.30). Fine/daily
+        // buckets down-bin to their hour so the rolled-up window past the hourly retention still charts.
+        DateTime bucket;
+        if (parts.Length == 6
+            ? !Warp.Core.Services.MetricTiers.TryParse(parts[4], parts[5], out _, out bucket)
+            : !Warp.Core.Services.MetricTiers.TryParseLegacyHourly(parts[4], out bucket))
         {
             return false;
         }
 
-        if (!string.Equals(parts[2], HistoryMarker, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (!DateTime.TryParseExact(parts[4], "yyyy-MM-dd-HH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out hour))
-        {
-            return false;
-        }
-
+        hour = new DateTime(bucket.Year, bucket.Month, bucket.Day, bucket.Hour, 0, 0, DateTimeKind.Utc);
         route = parts[1];
         outcome = parts[3];
 

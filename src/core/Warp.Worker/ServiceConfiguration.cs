@@ -58,6 +58,25 @@ public static class ServiceConfiguration
                 + "server that runs background services without processing jobs.");
         }
 
+        // Fail fast on invalid metrics-retention-tier config (§8.30). A zero/negative fine width divides by
+        // zero on the hot path (MetricTiers.BucketStart), and out-of-order retentions make StatisticRollup roll
+        // a bucket into a coarser parent that is already past its own retention (a same-pass update-then-delete).
+        if (builder.FineResolutionMinutes < 1)
+        {
+            throw new InvalidOperationException(
+                $"FineResolutionMinutes must be >= 1 (was {builder.FineResolutionMinutes}). It is the width of "
+                + "the finest metrics-retention tier and is used as a divisor when bucketing on the hot path.");
+        }
+
+        if (builder.FineResolutionRetention >= builder.HourlyStatisticsRetention
+            || (builder.DailyStatisticsRetention is { } dailyRetention && builder.HourlyStatisticsRetention >= dailyRetention))
+        {
+            throw new InvalidOperationException(
+                "Metrics retention tiers must widen with each tier: FineResolutionRetention < "
+                + "HourlyStatisticsRetention < DailyStatisticsRetention (§8.30). Out-of-order retentions make "
+                + "StatisticRollup roll a bucket into a coarser parent that is already past its own retention.");
+        }
+
         // The builder IS the configuration. TryAdd: if AddWarp was called separately first, its
         // builder wins for the Core-level IOptions — addons from that lambda are preserved.
         services.TryAddSingleton<IOptions<WarpServerConfiguration>>(Options.Create<WarpServerConfiguration>(builder));
@@ -236,6 +255,7 @@ public static class ServiceConfiguration
         services.AddScoped<IServerTask, Heartbeat<TContext>>();
         services.AddScoped<IServerTask, ServerCleanup<TContext>>();
         services.AddScoped<IServerTask, ExpirationCleanup<TContext>>();
+        services.AddScoped<IServerTask, StatisticRollup<TContext>>();
 
         // WarpServerRegistration MUST be registered before ServerTaskHost / BackgroundServiceHost
         // (and, in worker mode, the worker hosts) so its StartAsync populates ServerRegistrationState

@@ -170,12 +170,14 @@ public sealed class ErrorGroupQueryService<TContext> : IErrorGroupQueryService
             .Select(x => new { x.Key, x.Value })
             .ToListAsync(ct);
 
+        // Tier-aware (§8.30): the trend key is a legacy unmarked hourly bucket, or one StatisticRollup rolled to
+        // hourly/daily — classify via MetricTiers and down-bin to the hour so rolled buckets still read.
         var byHour = new Dictionary<DateTime, long>();
         foreach (var row in rows)
         {
-            var bucket = row.Key[(row.Key.LastIndexOf(':') + 1)..];
-            if (ErrorGroupKeys.TryParseHour(bucket, out var hour))
+            if (MetricTiers.TryClassifyKey(row.Key, out _, out _, out var bucket))
             {
+                var hour = new DateTime(bucket.Year, bucket.Month, bucket.Day, bucket.Hour, 0, 0, DateTimeKind.Utc);
                 byHour[hour] = byHour.GetValueOrDefault(hour) + row.Value;
             }
         }

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core.Data.Entities;
@@ -8,6 +9,8 @@ using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
+using Warp.Worker;
+using Warp.Worker.Services;
 
 namespace Warp.Tests.Applications;
 
@@ -17,7 +20,7 @@ namespace Warp.Tests.Applications;
 /// <c>ApplicationName</c> set), lets them finalize, folds the counters via <c>CounterAggregator</c>, and
 /// reads back per-type / per-handler count + error-rate + duration from <see cref="IJobQueryService"/>. The
 /// metrics come from the durable <see cref="Statistic"/> aggregates, NOT the <see cref="Job"/> rows, so they
-/// persist after the jobs are cleaned up; the hourly-history keys ride the generic hourly-stat prune. Heavy
+/// persist after the jobs are cleaned up; the history keys are downsampled by StatisticRollup (§8.30). Heavy
 /// (boots a server) → serialized (§4.7.1). Fresh context per phase (§4.8).
 /// </summary>
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
@@ -145,23 +148,27 @@ public abstract class JobExecutionMetricsTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
-    public async Task HourlyHistoryKeys_ArePrunedByExpirationCleanup_LifetimeTotalsPersist()
+    public async Task HistoryKeys_DownsampledByRollup_LifetimeTotalsAndMetricsPersist()
     {
         await SeedAndWaitAsync();
         await AggregateAsync();
 
-        // Hourly history keys exist after the fold ...
+        // Hourly (now fine, §8.30) history keys exist after the fold ...
         (await CountStatisticsWithHistMarkerAsync()).ShouldBeGreaterThan(0);
         var lifetimeBefore = await CountLifetimeJobStatStatisticsAsync();
         lifetimeBefore.ShouldBeGreaterThan(0);
 
-        // ... run ExpirationCleanup at a time 8 days ahead: the generic hourly-stat sweep (retention 7 d)
-        // deletes any key ending in a yyyy-MM-dd-HH bucket older than the cutoff.
+        // ... run StatisticRollup 8 days ahead. As of §8.30 the history detail is DOWNSAMPLED (fine→hourly→daily),
+        // not deleted — so the history rows are retained at a coarser tier, and the lifetime totals (no date
+        // suffix) are untouched. (ExpirationCleanup no longer prunes time-bucketed stats.)
         var future = new FakeTimeProvider(DateTimeOffset.UtcNow.AddDays(8));
-        await TestTasks.CreateExpirationCleanup(Fixture.CreateContext(), future).ExecuteAsync(Ct);
+        await new StatisticRollup<TestContext>(
+            new TestServerContext(Fixture.CreateContext()),
+            Options.Create(new WarpServerConfiguration()),
+            future).ExecuteAsync(Ct);
 
-        // Hourly jobstat keys pruned; lifetime totals (no date suffix) persist.
-        (await CountStatisticsWithHistMarkerAsync()).ShouldBe(0);
+        // History rows persist (rolled to a coarser tier, not pruned); lifetime totals persist unchanged.
+        (await CountStatisticsWithHistMarkerAsync()).ShouldBeGreaterThan(0);
         (await CountLifetimeJobStatStatisticsAsync()).ShouldBe(lifetimeBefore);
 
         // And the metrics still read (from the surviving lifetime totals).

@@ -152,18 +152,28 @@ internal static class ClientEventKeys
         hour = string.Empty;
 
         var parts = key.Split(':');
-        if (parts.Length != 5)
+        if (parts.Length is not (5 or 6) || !string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[1], TotalMarker, StringComparison.Ordinal) || !string.Equals(parts[3], HistoryMarker, StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (!string.Equals(parts[0], Prefix, StringComparison.Ordinal) || !string.Equals(parts[1], TotalMarker, StringComparison.Ordinal) || !string.Equals(parts[3], HistoryMarker, StringComparison.Ordinal))
+        if (parts.Length == 6)
         {
-            return false;
+            // Tiered key rolled by StatisticRollup (clientevent:total:{type}:hist:{tier}:{stamp}, §8.30) —
+            // down-bin to the hour string the read side already parses (a daily bucket reports its midnight).
+            if (!Warp.Core.Services.MetricTiers.TryParse(parts[4], parts[5], out _, out var bucket))
+            {
+                return false;
+            }
+
+            hour = bucket.ToString("yyyy-MM-dd-HH", System.Globalization.CultureInfo.InvariantCulture);
+        }
+        else
+        {
+            hour = parts[4]; // legacy unmarked yyyy-MM-dd-HH
         }
 
         typeToken = parts[2];
-        hour = parts[4];
 
         return true;
     }

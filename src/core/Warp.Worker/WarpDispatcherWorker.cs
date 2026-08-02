@@ -485,7 +485,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         WarpTelemetry.RecordQueueWait(job.Queue, waitMs, _configuration.ApplicationName);
         if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
         {
-            foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, QueueWaitKeys.HourBucket(now)))
+            foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes)))
             {
                 context.Set<Counter>().Add(counter);
             }
@@ -631,6 +631,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var hourSuffix = now.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
+        var tierSuffix = MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes);
         var counters = new List<Counter>();
         if (state == State.Completed)
         {
@@ -645,7 +646,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // Otel sink (the meters carry the data) — the finalization-path perf win. Counter writes only.
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
-                counters.AddRange(JobStatsKeys.Build(job, JobStatsKeys.SucceededToken, durationMs, _configuration.ApplicationName, hourSuffix));
+                counters.AddRange(JobStatsKeys.Build(job, JobStatsKeys.SucceededToken, durationMs, _configuration.ApplicationName, tierSuffix));
             }
         }
         else if (state == State.Failed)
@@ -657,7 +658,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
-                counters.AddRange(JobStatsKeys.Build(job, JobStatsKeys.FailedToken, durationMs, _configuration.ApplicationName, hourSuffix));
+                counters.AddRange(JobStatsKeys.Build(job, JobStatsKeys.FailedToken, durationMs, _configuration.ApplicationName, tierSuffix));
             }
         }
         else if (state == State.Deleted)

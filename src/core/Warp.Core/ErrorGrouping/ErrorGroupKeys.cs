@@ -15,9 +15,10 @@ internal static class ErrorGroupKeys
     public const string AppPrefix = "errorgroup-app";
 
     // The hour bucket is the dashed yyyy-MM-dd-HH form the WHOLE codebase uses for hourly trend suffixes
-    // (JobStatsKeys/ClientEventKeys/AdapterCallFlusher) — critically, it's the format ExpirationCleanup's generic
-    // hourly-Statistic prune parses, so these trend rows are actually reaped (§8.22). A dashless form would leak
-    // them forever. Dashes are safe inside a colon-delimited key segment.
+    // (JobStatsKeys/ClientEventKeys/AdapterCallFlusher) — critically, it's the legacy-hourly shape
+    // StatisticRollup recognizes (§8.30), so these trend rows are downsampled fine→hourly→daily and pruned like
+    // every other family (the trend reader classifies them tier-aware). A dashless form would leak them forever.
+    // Dashes are safe inside a colon-delimited key segment.
     private const string HourFormat = "yyyy-MM-dd-HH";
 
     /// <summary>Per-fingerprint hourly bucket: <c>errorgroup:{fp}:{yyyy-MM-dd-HH}</c>.</summary>

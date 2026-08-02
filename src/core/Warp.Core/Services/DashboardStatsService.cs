@@ -317,48 +317,38 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(g => new { Key = g.Key, Value = g.Sum(x => x.Value) })
             .ToList();
 
-        // Parse keys like "stats:succeeded:2026-03-28-14" into date + metric
-        var points = new Dictionary<string, StatsHistoryPoint>(StringComparer.Ordinal);
+        // Parse tiered keys — "stats:succeeded:2026-03-28-14" (legacy hourly) or "stats:succeeded:d1:2026-03-28"
+        // (rolled to daily, §8.30) — into hour + metric. Fine/daily buckets down-bin to their hour and same-hour
+        // values accumulate, so a rolled-up window past the hourly retention still charts.
+        var points = new Dictionary<DateTime, StatsHistoryPoint>();
 
         foreach (var stat in hourlyStats)
         {
-            var parts = stat.Key.Split(':');
-            if (parts.Length != 3)
+            if (!MetricTiers.TryClassifyKey(stat.Key, out var baseKey, out _, out var bucketStart))
             {
                 continue;
             }
 
-            var metric = parts[1]; // "succeeded" or "failed"
-            var hourStr = parts[2]; // "2026-03-28-14"
-
-            if (!DateTime.TryParseExact(
-                hourStr,
-                "yyyy-MM-dd-HH",
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-                out var hour))
-            {
-                continue;
-            }
-
+            var hour = new DateTime(bucketStart.Year, bucketStart.Month, bucketStart.Day, bucketStart.Hour, 0, 0, DateTimeKind.Utc);
             if (hour < since)
             {
                 continue;
             }
 
-            if (!points.TryGetValue(hourStr, out var point))
+            if (!points.TryGetValue(hour, out var point))
             {
                 point = new StatsHistoryPoint { Hour = hour };
-                points[hourStr] = point;
+                points[hour] = point;
             }
 
-            if (string.Equals(metric, "succeeded", StringComparison.Ordinal))
+            // baseKey is "stats:succeeded" or "stats:failed".
+            if (baseKey.EndsWith(":succeeded", StringComparison.Ordinal))
             {
-                point.Succeeded = stat.Value;
+                point.Succeeded += stat.Value;
             }
-            else if (string.Equals(metric, "failed", StringComparison.Ordinal))
+            else if (baseKey.EndsWith(":failed", StringComparison.Ordinal))
             {
-                point.Failed = stat.Value;
+                point.Failed += stat.Value;
             }
         }
 
@@ -408,28 +398,20 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
     /// </summary>
     private static bool IsHourlyKey(string key) => TryParseHourlyKey(key, out _, out _);
 
+    // Recognizes any time-bucketed key across the retention tiers (§8.30) — fine/hourly/daily, marked or legacy
+    // unmarked — and reports its family base-key and the HOUR its bucket falls in (fine buckets down-bin to their
+    // hour so the chart stays hourly-resolution; a daily bucket reports midnight of its day). Non-bucket keys
+    // (lifetime totals, pct, qbacklog) return false, so they stay out of the chart and in the counters table.
     private static bool TryParseHourlyKey(string key, out string baseKey, out DateTime hour)
     {
-        baseKey = string.Empty;
         hour = default;
 
-        var lastColon = key.LastIndexOf(':');
-        if (lastColon < 0)
+        if (!MetricTiers.TryClassifyKey(key, out baseKey, out _, out var bucketStart))
         {
             return false;
         }
 
-        if (!DateTime.TryParseExact(
-            key.AsSpan(lastColon + 1),
-            "yyyy-MM-dd-HH",
-            CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-            out hour))
-        {
-            return false;
-        }
-
-        baseKey = key[..lastColon];
+        hour = new DateTime(bucketStart.Year, bucketStart.Month, bucketStart.Day, bucketStart.Hour, 0, 0, DateTimeKind.Utc);
 
         return true;
     }
@@ -455,23 +437,28 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .GroupBy(x => x.Key, StringComparer.Ordinal)
             .Select(g => new { Key = g.Key, Value = g.Sum(x => x.Value) });
 
-        var points = new List<CounterHistoryPoint>();
+        var buckets = new Dictionary<(string Key, DateTime Hour), long>();
         foreach (var row in merged)
         {
-            if (!TryParseHourlyKey(row.Key, out var baseKey, out var hour) || hour < since)
+            if (!TryParseHourlyKey(row.Key, out var baseKey, out var hour)
+                || hour < since
+                || baseKey.Contains(":pcth:", StringComparison.Ordinal))
             {
+                // pcth latency-histogram buckets are internal (like lifetime pct) — kept out of the counter chart.
                 continue;
             }
 
-            points.Add(new CounterHistoryPoint
-            {
-                Hour = hour,
-                Key = baseKey,
-                Value = row.Value,
-            });
+            // Fine (5-min) buckets in the same hour collapse to one hourly chart point per base-key (§8.30).
+            buckets[(baseKey, hour)] = buckets.GetValueOrDefault((baseKey, hour)) + row.Value;
         }
 
-        return [.. points.OrderBy(p => p.Hour).ThenBy(p => p.Key, StringComparer.Ordinal)];
+        return
+        [
+            .. buckets
+                .Select(kv => new CounterHistoryPoint { Hour = kv.Key.Hour, Key = kv.Key.Key, Value = kv.Value })
+                .OrderBy(p => p.Hour)
+                .ThenBy(p => p.Key, StringComparer.Ordinal),
+        ];
     }
 
     /// <summary>
