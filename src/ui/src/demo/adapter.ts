@@ -10,6 +10,7 @@ import {
   demoJobMetrics,
   decodeAppId,
 } from './data/applications';
+import { demoSlos, demoSloDetail } from './data/slo';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
@@ -92,6 +93,13 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const issuesResult = routeIssues(method, url, config);
     if (issuesResult !== undefined) {
       return issuesResult;
+    }
+
+    // SLOs: /addons reports slo:true in demo mode (see routeGet), so the nav is visible
+    // and these routes serve the static objective fixtures for the screenshots.
+    const sloResult = routeSlo(method, url, config);
+    if (sloResult !== undefined) {
+      return sloResult;
     }
 
     // All POST/DELETE routes return success
@@ -408,6 +416,46 @@ function routeIssues(
   return undefined;
 }
 
+function routeSlo(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (!url.startsWith('/slo')) {
+    return undefined;
+  }
+
+  // POST /slo/{id}/ack — acknowledge a breach; the real endpoint returns 204.
+  if (method === 'post' && /^\/slo\/[^/?]+\/ack$/.test(url)) {
+    return resolve({}, config);
+  }
+
+  // GET /slo/{id} — detail (matched before the list; both start with /slo).
+  const detailMatch = url.match(/^\/slo\/([^/?]+)$/);
+  if (method === 'get' && detailMatch) {
+    const found = demoSloDetail(Number(detailMatch[1]));
+    if (found) {
+      return resolve(found, config);
+    }
+
+    return Promise.reject({
+      response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config },
+    });
+  }
+
+  // GET /slo — list.
+  if (method === 'get' && (url === '/slo' || url.startsWith('/slo?'))) {
+    return resolve(demoSlos(), config);
+  }
+
+  // POST /slo (upsert) and DELETE /slo/{id} — mutations succeed without persisting in demo mode.
+  if (method === 'post' || method === 'delete') {
+    return resolve({}, config);
+  }
+
+  return undefined;
+}
+
 function routeApplications(
   method: string,
   url: string,
@@ -690,7 +738,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true };
+    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true };
   }
 
   // Queue metrics (§8.26) — the Queues page (always-on nav).
