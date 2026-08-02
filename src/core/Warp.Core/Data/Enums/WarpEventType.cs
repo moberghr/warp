@@ -3,8 +3,8 @@ namespace Warp.Core.Enums;
 /// <summary>
 /// The kind of operational event Warp reports to host <c>IWarpNotifier</c> sinks. Values start at 1 (§8.11).
 /// The taxonomy is fixed up front for stability; not every value is emitted in every release —
-/// <see cref="JobDeadLettered"/> and <see cref="BacklogBreached"/> are reserved for later slices and are not
-/// emitted yet (a host can switch on them safely; they simply never arrive until wired).
+/// <see cref="JobDeadLettered"/> is reserved for a later slice (retry-exhaustion, 3.11) and is not emitted yet
+/// (a host can switch on it safely; it simply never arrives until wired).
 /// </summary>
 public enum WarpEventType
 {
@@ -20,11 +20,14 @@ public enum WarpEventType
     /// <summary>An application instance (server or non-server) went away — sourced from the stale sweep.</summary>
     InstanceDown = 4,
 
-    /// <summary>A queue backlog / wait-time threshold was breached — RESERVED, not emitted yet.</summary>
+    /// <summary>A backlog-depth SLO objective was breached — emitted by the <c>SloEvaluator</c> for <c>BacklogDepth</c> objectives (§8.30).</summary>
     BacklogBreached = 5,
 
     /// <summary>A resolved error group recurred (regression) — a bug thought fixed came back (§8.29).</summary>
     IssueRegressed = 6,
+
+    /// <summary>An SLO objective's error budget is burning (or exhausted) — emitted by the <c>SloEvaluator</c> on a healthy→breaching edge (§8.30).</summary>
+    SloBreached = 7,
 }
 
 /// <summary>

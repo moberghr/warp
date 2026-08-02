@@ -7,6 +7,7 @@ using Warp.Core.Concurrency;
 using Warp.Core.Enums;
 using Warp.Core.Retry;
 using Warp.Core.Sagas;
+using Warp.Core.Slo;
 using Warp.Core.Webhooks;
 using Warp.Demo.ServiceDefaults;
 using Warp.Provider.PostgreSql;
@@ -65,6 +66,14 @@ builder.Services.AddWarpServer<TestContext>(options =>
     options.AddRetry(o => o.MaxRetries = 3);
     options.AddConcurrency();
     options.AddSagas();
+
+    // SLO objectives (§8.31) — seeded from config, editable in the dashboard SLOs page. Queue-scoped so they
+    // populate from the demo's job traffic without needing an assembly-qualified job type.
+    options.AddSlo(o =>
+    {
+        o.AddObjective(SloKind.QueueWaitLatency, "default", target: 30_000, percentile: 95, name: "Default queue-wait p95 < 30s");
+        o.AddObjective(SloKind.BacklogDepth, "default", target: 100, name: "Default backlog < 100");
+    });
 
     // Push finalize/enqueue notifications so the dashboard (running in the non-server TestApp)
     // sees this worker's job lifecycle events. The DB-push listener lives in Warp.Core, so

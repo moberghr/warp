@@ -342,6 +342,7 @@ export interface WarpAddonsInfo {
   client: boolean;
   webhooks: boolean;
   applications: boolean;
+  slo: boolean;
 }
 
 export type {

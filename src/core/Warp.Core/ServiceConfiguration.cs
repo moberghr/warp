@@ -187,6 +187,11 @@ public static class ServiceConfiguration
             x.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<IErrorGroupCommandService, ErrorGroupCommandService<TContext>>();
 
+        // SLO objectives read/command (§8.31). Registered in AddWarp so dashboard-only hosts resolve them; the
+        // SloDefinition/SloEvaluation tables are always in the schema (§2.11), the evaluator runs on a server.
+        services.TryAddScoped<ISloQueryService>(x => new SloQueryService<TContext>(x.GetRequiredService<TContext>()));
+        services.TryAddScoped<ISloCommandService, SloCommandService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
@@ -450,6 +455,8 @@ public static class ServiceConfiguration
         AddApplicationInstanceLogEntity(modelBuilder, schema);
         AddErrorGroupEntity(modelBuilder, schema);
         AddErrorOccurrenceEntity(modelBuilder, schema);
+        AddSloDefinitionEntity(modelBuilder, schema);
+        AddSloEvaluationEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -1120,6 +1127,53 @@ public static class ServiceConfiguration
         occurrence.HasIndex(p => p.Timestamp);
 
         occurrence.Metadata.SetSchema(schema);
+    }
+
+    public static void AddSloDefinitionEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var slo = modelBuilder.Entity<SloDefinition>();
+
+        slo.Property(p => p.Id);
+        slo.HasKey(p => p.Id);
+
+        slo.Property(p => p.Name).HasMaxLength(200);
+        slo.Property(p => p.Kind).HasConversion<int>();
+        slo.Property(p => p.Dimension).HasMaxLength(200);
+        slo.Property(p => p.Application).HasMaxLength(200);
+        slo.Property(p => p.TargetValue);
+        slo.Property(p => p.Percentile);
+        slo.Property(p => p.WindowSeconds);
+        slo.Property(p => p.Enabled);
+        slo.Property(p => p.CreatedAt);
+        slo.Property(p => p.UpdatedAt);
+
+        // Lookup for the config-seed / command upsert existence check. Not unique at the DB level —
+        // nullable Application/Percentile make NULL-uniqueness diverge across providers (Postgres treats
+        // NULLs as distinct, SqlServer as equal), so uniqueness is enforced in the seed/command layer
+        // (query-by-key then upsert), mirroring the ErrorGroupAggregator's fingerprint upsert.
+        slo.HasIndex(p => new { p.Kind, p.Dimension, p.Application });
+
+        slo.Metadata.SetSchema(schema);
+    }
+
+    public static void AddSloEvaluationEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var eval = modelBuilder.Entity<SloEvaluation>();
+
+        // PK is the owning definition id — one rolling-status row per objective (1:1), upserted each tick. It is
+        // the FK (caller-supplied), NOT auto-generated, so it must not be a SqlServer IDENTITY column.
+        eval.Property(p => p.SloDefinitionId).ValueGeneratedNever();
+        eval.HasKey(p => p.SloDefinitionId);
+
+        eval.Property(p => p.Attainment);
+        eval.Property(p => p.BudgetRemaining);
+        eval.Property(p => p.BurnRateShort);
+        eval.Property(p => p.BurnRateLong);
+        eval.Property(p => p.State).HasConversion<int>();
+        eval.Property(p => p.AcknowledgedUntil);
+        eval.Property(p => p.LastEvaluatedAt);
+
+        eval.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)

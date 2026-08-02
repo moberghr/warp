@@ -112,6 +112,7 @@ public static class ServiceConfiguration
         services.AddScoped<IServerTask, CounterAggregator<TContext>>();
         services.AddScoped<IServerTask, ErrorGroupAggregator<TContext>>();
         services.AddScoped<IServerTask, BacklogSampler<TContext>>();
+        services.AddScoped<IServerTask, SloEvaluator<TContext>>();
         services.AddScoped<IServerTask, RecurringJobScheduler<TContext>>();
         services.AddScoped<IServerTask, ScheduledJobActivation<TContext>>();
         services.AddScoped<IServerTask, Orchestrator<TContext>>();
