@@ -283,6 +283,19 @@ public class WarpTestServer : IAsyncDisposable
                     // Leaving it on creates a 5s race against any test that reads Counter rows.
                     config.CounterAggregationInterval = null;
 
+                    // Same rationale for the other periodic metrics loops (§8.26/§8.30/§8.31): no ordinary
+                    // integration test needs them firing, and every extra server-task loop borrows a pooled
+                    // SqlConnection against the shared SQL Server instance. Under load a command cancelled by
+                    // the 5s CommandTimeout returns its connection to the pool in a busy/attention-sent state,
+                    // so the next borrower hits SqlException 3980 ("another request is running in the same
+                    // session" — MARS is off in the test connection string) and the worker/save fails
+                    // transiently. Their feature tests drive the task directly (StatisticRollupTestsBase,
+                    // BacklogSamplerTestsBase, SloEvaluatorTestsBase), so disabling the loops here costs no
+                    // coverage; a test that needs one re-enables it via the configure callback (which runs next).
+                    config.StatisticRollupInterval = null;
+                    config.BacklogSampleInterval = null;
+                    config.SloEvaluationInterval = null;
+
                     configure?.Invoke(config);
 
                     config.AddRetry(o =>
