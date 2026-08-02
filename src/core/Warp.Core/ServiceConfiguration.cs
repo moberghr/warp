@@ -1160,8 +1160,9 @@ public static class ServiceConfiguration
     {
         var eval = modelBuilder.Entity<SloEvaluation>();
 
-        // PK is the owning definition id — one rolling-status row per objective (1:1), upserted each tick.
-        eval.Property(p => p.SloDefinitionId);
+        // PK is the owning definition id — one rolling-status row per objective (1:1), upserted each tick. It is
+        // the FK (caller-supplied), NOT auto-generated, so it must not be a SqlServer IDENTITY column.
+        eval.Property(p => p.SloDefinitionId).ValueGeneratedNever();
         eval.HasKey(p => p.SloDefinitionId);
 
         eval.Property(p => p.Attainment);
