@@ -89,6 +89,19 @@ public sealed class StatisticRollup<TContext> : IServerTask
             }
         }
 
+        // Safety for the (normally-impossible) case where a bucket is both a roll TARGET and a roll SOURCE in
+        // the same pass — only reachable if rollup was disabled long enough for a fine bucket to outlive the
+        // hourly retention. Retention ordering (fine ≪ hourly ≪ daily) makes targets and sources disjoint in
+        // steady state; drop the colliding target so we never update-then-delete the same row.
+        if (deletions.Count > 0)
+        {
+            var deletedKeys = new HashSet<string>(deletions, StringComparer.Ordinal);
+            foreach (var target in additions.Keys.Where(deletedKeys.Contains).ToList())
+            {
+                additions.Remove(target);
+            }
+        }
+
         if (additions.Count == 0 && deletions.Count == 0)
         {
             return null;
