@@ -42,4 +42,11 @@ public enum SloState
 
     /// <summary>Breaching but silenced by an operator until <c>AcknowledgedUntil</c>.</summary>
     Acknowledged = 4,
+
+    /// <summary>
+    /// No observations matched the objective's dimension in the window — the evaluator ran but found nothing to
+    /// measure. Distinct from <see cref="Healthy"/> so a typo'd dimension (or a job type that never ran) reads as
+    /// "no data" instead of a false green; never alerts.
+    /// </summary>
+    NoData = 5,
 }

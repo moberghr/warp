@@ -79,7 +79,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
 
             existing.TryGetValue(def.Id, out var eval);
             var ackActive = eval?.AcknowledgedUntil is { } until && until > now;
-            var state = SloMath.Classify(result.Budget, ackActive);
+            var state = result.HasData ? SloMath.Classify(result.Budget, ackActive) : SloState.NoData;
             var previous = eval?.State ?? SloState.Healthy;
 
             if (eval is null)
@@ -123,8 +123,22 @@ public sealed class SloEvaluator<TContext> : IServerTask
             SloKind.ExecutionLatency => ComputeExecutionLatencyAsync(def, now, cache, ct),
             SloKind.QueueWaitLatency => ComputeQueueWaitLatencyAsync(def, now, cache, ct),
             SloKind.BacklogDepth => ComputeBacklogAsync(def, cache, ct),
-            _ => Task.FromResult(new EvalResult(1.0, 1.0, 0.0, 0.0)),
+            _ => UnsupportedKindAsync(def),
         };
+
+    // An out-of-range Kind reaching here means corrupt/version-skewed data (the column is a plain int with no DB
+    // check constraint) — the API and config-seed paths validate Kind, so this is defense-in-depth. Report it as
+    // NoData (HasData: false) rather than a false-green Healthy, and log it loudly so the bad row is visible.
+    private Task<EvalResult> UnsupportedKindAsync(SloDefinition def)
+    {
+        _logger.LogError(
+            "SLO objective {Id} '{Name}' has an unsupported Kind value {Kind} — evaluation skipped (reported as NoData).",
+            def.Id,
+            def.Name,
+            (int)def.Kind);
+
+        return Task.FromResult(new EvalResult(1.0, 1.0, 0.0, 0.0, HasData: false));
+    }
 
     private async Task<EvalResult> ComputeSuccessRateAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
     {
@@ -151,7 +165,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
         var (att, budget, burnLong) = SloMath.EvaluateRate(succW, succW + failW, def.TargetValue);
         var (_, _, burnShort) = SloMath.EvaluateRate(succS, succS + failS, def.TargetValue);
 
-        return new EvalResult(att, budget, burnShort, burnLong);
+        return new EvalResult(att, budget, burnShort, burnLong, HasData: succW + failW > 0);
     }
 
     private async Task<EvalResult> ComputeDeadlineAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
@@ -199,7 +213,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
         var (att, budget, burnLong) = SloMath.EvaluateRate(cntW - missW, cntW, def.TargetValue);
         var (_, _, burnShort) = SloMath.EvaluateRate(cntS - missS, cntS, def.TargetValue);
 
-        return new EvalResult(att, budget, burnShort, burnLong);
+        return new EvalResult(att, budget, burnShort, burnLong, HasData: cntW > 0);
     }
 
     private async Task<EvalResult> ComputeExecutionLatencyAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
@@ -261,6 +275,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
     private async Task<EvalResult> ComputeBacklogAsync(SloDefinition def, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
     {
         long depth = 0;
+        var found = false;
         foreach (var row in await LoadMergedAsync(QueueBacklogKeys.Prefix + ":", cache, ct))
         {
             if (QueueBacklogKeys.TryParseTotal(row.Key, out var queue, out var token)
@@ -268,12 +283,15 @@ public sealed class SloEvaluator<TContext> : IServerTask
                 && string.Equals(token, QueueBacklogKeys.DepthToken, StringComparison.Ordinal))
             {
                 depth = row.Value;
+                found = true;
             }
         }
 
         var (att, budget, burn) = SloMath.EvaluateThreshold(depth, def.TargetValue);
 
-        return new EvalResult(att, budget, burn, burn);
+        // A depth of 0 is legitimately healthy (empty queue), but no matching gauge at all means the objective's
+        // queue name never emitted metrics — a misconfigured dimension, surfaced as NoData rather than green.
+        return new EvalResult(att, budget, burn, burn, HasData: found);
     }
 
     // Windowed threshold latency: observed = percentile over the window's pcth buckets; burnShort = percentile
@@ -285,7 +303,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
         var (att, budget, burnLong) = SloMath.EvaluateThreshold(observed, def.TargetValue);
         var (_, _, burnShort) = SloMath.EvaluateThreshold(SloMath.Percentile(recent, percentile), def.TargetValue);
 
-        return new EvalResult(att, budget, burnShort, burnLong);
+        return new EvalResult(att, budget, burnShort, burnLong, HasData: wide.Values.Sum() > 0);
     }
 
     // Success-rate reads the app-agnostic jobstat family, or the disjoint per-app slice when the objective is
@@ -394,5 +412,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
 
     private readonly record struct KeyVal(string Key, long Value);
 
-    private sealed record EvalResult(double Attainment, double Budget, double BurnShort, double BurnLong);
+    // HasData is false when no observation matched the objective's dimension in the window — the caller maps that
+    // to SloState.NoData so a misconfigured dimension is visible instead of a false-green Healthy.
+    private sealed record EvalResult(double Attainment, double Budget, double BurnShort, double BurnLong, bool HasData = true);
 }

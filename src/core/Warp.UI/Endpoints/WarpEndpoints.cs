@@ -673,7 +673,13 @@ public static class WarpEndpoints
 
         apiGroup.MapPost("slo", async ([FromServices] ISloCommandService svc, [FromBody] SloUpsertRequest body, CancellationToken ct) =>
         {
-            var id = await svc.Upsert(body.ToDefinition(), ct);
+            var definition = body.ToDefinition();
+            if (!Warp.Core.Slo.SloValidation.TryValidate(definition, out var error))
+            {
+                return Results.BadRequest(error);
+            }
+
+            var id = await svc.Upsert(definition, ct);
 
             return Results.Ok(new { id });
         });

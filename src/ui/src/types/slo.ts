@@ -23,6 +23,7 @@ export const SloState = {
   Warning: 2,
   Breaching: 3,
   Acknowledged: 4,
+  NoData: 5,
 } as const;
 export type SloState = (typeof SloState)[keyof typeof SloState];
 
@@ -31,6 +32,7 @@ export const SloStateLabel: Record<SloState, string> = {
   [SloState.Warning]: 'Warning',
   [SloState.Breaching]: 'Breaching',
   [SloState.Acknowledged]: 'Acknowledged',
+  [SloState.NoData]: 'No data',
 };
 
 export interface SloObjective {

@@ -67,7 +67,11 @@ public class JobStatsKeysTests
         JobStatsKeys.BucketFor(42).ShouldBe(50);
         JobStatsKeys.BucketFor(50).ShouldBe(50);
         JobStatsKeys.BucketFor(0).ShouldBe(5);
-        JobStatsKeys.BucketFor(20_000).ShouldBe(int.MaxValue);
+
+        // Job-domain ladder extends past 10s (§8.31 #1): 20s lands in the 30s rung, only >5min overflows.
+        JobStatsKeys.BucketFor(20_000).ShouldBe(30_000);
+        JobStatsKeys.BucketFor(90_000).ShouldBe(300_000);
+        JobStatsKeys.BucketFor(400_000).ShouldBe(int.MaxValue);
     }
 
     [TimedFact]

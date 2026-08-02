@@ -39,8 +39,9 @@ internal static class QueueWaitKeys
     // of the lifetime Pct histogram.
     public const string PctHistoryMarker = "pcth";
 
-    // Mirrors JobStatsKeys.Buckets so the percentile walk is identical across surfaces.
-    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, int.MaxValue];
+    // Mirrors JobStatsKeys.Buckets exactly (job-domain scale, up to 5 min) so the percentile walk is identical
+    // across the jobstat and qwait surfaces.
+    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000, int.MaxValue];
 
     public static string Total(string queue, string token) => $"{Prefix}:{queue}:{token}";
 

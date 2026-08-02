@@ -82,4 +82,24 @@ public class SloMathTests
         SloMath.Percentile(buckets, 50).ShouldBe(50);
         SloMath.Percentile(new Dictionary<int, long>(), 95).ShouldBe(0); // no data
     }
+
+    [Fact]
+    public void Percentile_WidenedJobBuckets_ResolvesPastTenSeconds()
+    {
+        // The job-domain histogram extends to 5 min (§8.31 #1). A p95 that lands in the 60s bucket must report
+        // 60000, not saturate at the old 10s top — otherwise a "p95 < 30s" latency SLO could never breach.
+        var buckets = new Dictionary<int, long> { [5_000] = 4, [60_000] = 96 };
+
+        SloMath.Percentile(buckets, 95).ShouldBe(60_000);
+    }
+
+    [Fact]
+    public void Percentile_OverflowBucket_ReportsLastFiniteBound()
+    {
+        // Beyond the top finite rung (300s) the open-ended overflow bucket has no bound, so the walk reports the
+        // last finite bound as a floor — the documented display convention shared across every percentile surface.
+        var buckets = new Dictionary<int, long> { [int.MaxValue] = 100 };
+
+        SloMath.Percentile(buckets, 95).ShouldBe(300_000);
+    }
 }

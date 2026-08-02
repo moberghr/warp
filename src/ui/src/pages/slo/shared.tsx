@@ -32,6 +32,7 @@ export function SloStatePill({ state, enabled }: { state: SloState; enabled: boo
     [SloState.Warning]: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
     [SloState.Breaching]: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
     [SloState.Acknowledged]: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300',
+    [SloState.NoData]: 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400',
   };
 
   return (

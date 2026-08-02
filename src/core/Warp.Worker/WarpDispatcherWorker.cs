@@ -689,10 +689,11 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         }
 
         // Deadline attainment (§8.30): mirror FinalizeJobState — attainment denominator on every terminal
-        // outcome, a miss when a Total-scope deadline (§8.7) was exceeded. Meter always-on; DB fold sink-gated.
+        // outcome, a miss whenever the wall clock is past the Total-scope deadline (§8.7) at finalization,
+        // including a late Completed (a token-ignoring handler, §8.5). Meter always-on; DB fold sink-gated.
         if (totalDeadlineUtc is { } deadline && state is State.Completed or State.Failed or State.Deleted)
         {
-            var missed = state != State.Completed && now >= deadline;
+            var missed = now >= deadline;
             if (missed)
             {
                 WarpTelemetry.RecordDeadlineMiss(job.Type, job.Queue, _configuration.ApplicationName);

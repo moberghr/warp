@@ -616,13 +616,14 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
 
         // Deadline attainment (§8.30): this job carried a Total-scope timeout deadline (§8.7). Emit the
-        // attainment denominator on every terminal outcome and a miss when the deadline was exceeded — a
-        // terminal-but-not-completed state with the wall clock past the deadline (covers Fail-mode failures and
-        // Delete-mode deletions; a job that failed early for another reason keeps now < deadline ⇒ not a miss).
-        // Meter is always-on; the DeadlineKeys Counter fold is sink-gated (§8.24), mirroring jobstat.
+        // attainment denominator on every terminal outcome and a miss whenever the wall clock is past the
+        // deadline at finalization — a Total-scope deadline is a time bound, so completing LATE is a miss just
+        // as failing/deleting late is (a handler that ignores its cancellation token can reach Completed past
+        // the deadline, §8.5). A job that reached a terminal state before the deadline keeps now < deadline ⇒
+        // not a miss. Meter is always-on; the DeadlineKeys Counter fold is sink-gated (§8.24), mirroring jobstat.
         if (totalDeadlineUtc is { } deadline && state is State.Completed or State.Failed or State.Deleted)
         {
-            var missed = state != State.Completed && now >= deadline;
+            var missed = now >= deadline;
             if (missed)
             {
                 WarpTelemetry.RecordDeadlineMiss(job.Type, job.Queue, _configuration.ApplicationName);

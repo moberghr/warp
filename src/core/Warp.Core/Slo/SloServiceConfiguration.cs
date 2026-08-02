@@ -33,7 +33,7 @@ public sealed class SloOptions
         string? name = null,
         bool enabled = true)
     {
-        Seeded.Add(new SloDefinition
+        var definition = new SloDefinition
         {
             Name = name ?? $"{kind} {dimension}",
             Kind = kind,
@@ -43,7 +43,14 @@ public sealed class SloOptions
             Percentile = percentile,
             Application = application,
             Enabled = enabled,
-        });
+        };
+
+        if (!SloValidation.TryValidate(definition, out var error))
+        {
+            throw new ArgumentException($"Invalid SLO objective ({kind} {dimension}): {error}", nameof(target));
+        }
+
+        Seeded.Add(definition);
 
         return this;
     }
@@ -91,8 +98,11 @@ public static class SloServiceConfiguration
 
 /// <summary>
 /// Startup seeder for config-defined SLO objectives (§8.31). Insert-if-absent by (kind, dimension, application,
-/// percentile) so it never clobbers a dashboard edit. Runs once at boot after the schema is present (§ migrator
-/// gating). A best-effort seed — a transient DB error is logged, not fatal.
+/// percentile) so it never clobbers a dashboard edit. Runs once at boot; the schema is expected present because
+/// web/worker are gated on a dedicated migrator running to completion first (§ migrator gating), so a failure here
+/// is not a transient not-yet-migrated race but a real error — logged at <c>Error</c> (alertable) rather than
+/// swallowed to a Warning nobody watches. It stays non-fatal (objectives can still be authored in the dashboard),
+/// but the loud log means "objectives were NOT seeded" is visible instead of a silent half-configured feature.
 /// </summary>
 internal sealed class SloSeeder<TContext> : IHostedService
     where TContext : DbContext
@@ -144,7 +154,7 @@ internal sealed class SloSeeder<TContext> : IHostedService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "SLO objective seeding failed; objectives can still be created in the dashboard");
+            _logger.LogError(ex, "SLO objective seeding failed — {Count} config-declared objective(s) were NOT seeded and will be missing until created in the dashboard. The schema is expected present (migrator gating), so this is a real error, not a startup race.", _options.Seeded.Count);
         }
     }
 

@@ -100,6 +100,101 @@ public abstract class SloEvaluatorTestsBase : IAsyncLifetime
         spy.Received.ShouldBeEmpty();
     }
 
+    [TimedFact]
+    public async Task Evaluate_ExecutionLatencyOverTarget_AtWidenedBucket_Breaches()
+    {
+        // Objective p95 < 30s, with samples in the 60s bucket. Only measurable because the job-domain histogram
+        // now extends past 10s (§8.31 #1) — before widening, p95 saturated at 10s and this could never breach.
+        var id = await SeedObjectiveAsync(SloKind.ExecutionLatency, "SlowJob", 30_000);
+        await SeedExecPctAsync("SlowJob", upperMs: 60_000, count: 100);
+
+        var spy = new SpyNotifier();
+        await RunAsync(spy);
+
+        var eval = await EvalAsync(id);
+        eval.ShouldNotBeNull();
+        eval.Attainment.ShouldBe(60_000d); // observed p95 = the 60s bucket bound, not capped at 10s
+        eval.State.ShouldBe(SloState.Breaching);
+        spy.Received.ShouldContain(e => e.Type == WarpEventType.SloBreached);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_ExecutionLatencyUnderTarget_Healthy()
+    {
+        var id = await SeedObjectiveAsync(SloKind.ExecutionLatency, "FastJob", 30_000);
+        await SeedExecPctAsync("FastJob", upperMs: 5_000, count: 100);
+
+        var spy = new SpyNotifier();
+        await RunAsync(spy);
+
+        var eval = await EvalAsync(id);
+        eval.ShouldNotBeNull();
+        eval.State.ShouldBe(SloState.Healthy);
+        spy.Received.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task Evaluate_QueueWaitLatencyOverTarget_Breaches()
+    {
+        var id = await SeedObjectiveAsync(SloKind.QueueWaitLatency, "default", 30_000);
+        await SeedQueueWaitPctAsync("default", upperMs: 60_000, count: 100);
+
+        var spy = new SpyNotifier();
+        await RunAsync(spy);
+
+        var eval = await EvalAsync(id);
+        eval.ShouldNotBeNull();
+        eval.State.ShouldBe(SloState.Breaching);
+        spy.Received.ShouldContain(e => e.Type == WarpEventType.SloBreached);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_DeadlineAttainmentBelowTarget_Breaches()
+    {
+        var id = await SeedObjectiveAsync(SloKind.DeadlineAttainment, "ChargeJob", 0.99);
+        await SeedDeadlineAsync("ChargeJob", count: 100, miss: 10); // 90% attainment vs 99% target
+
+        var spy = new SpyNotifier();
+        await RunAsync(spy);
+
+        var eval = await EvalAsync(id);
+        eval.ShouldNotBeNull();
+        eval.Attainment.ShouldBe(0.9, 0.0001);
+        eval.State.ShouldBe(SloState.Breaching);
+        spy.Received.ShouldContain(e => e.Type == WarpEventType.SloBreached);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_DeadlineAttainmentAllMet_Healthy()
+    {
+        var id = await SeedObjectiveAsync(SloKind.DeadlineAttainment, "ChargeJob", 0.99);
+        await SeedDeadlineAsync("ChargeJob", count: 100, miss: 0);
+
+        var spy = new SpyNotifier();
+        await RunAsync(spy);
+
+        var eval = await EvalAsync(id);
+        eval.ShouldNotBeNull();
+        eval.State.ShouldBe(SloState.Healthy);
+        spy.Received.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task Evaluate_NoMatchingData_IsNoData_NoAlert()
+    {
+        // A typo'd dimension: the objective watches a job type that never emitted metrics. Must read as NoData,
+        // not a false-green Healthy (§8.31 SF-3), and must never alert.
+        var id = await SeedObjectiveAsync(SloKind.SuccessRate, "GhostJob", 0.99);
+
+        var spy = new SpyNotifier();
+        await RunAsync(spy);
+
+        var eval = await EvalAsync(id);
+        eval.ShouldNotBeNull();
+        eval.State.ShouldBe(SloState.NoData);
+        spy.Received.ShouldBeEmpty();
+    }
+
     private async Task<int> SeedObjectiveAsync(SloKind kind, string dimension, double target)
     {
         var ctx = _fixture.CreateContext();
@@ -116,6 +211,35 @@ public abstract class SloEvaluatorTestsBase : IAsyncLifetime
         var ctx = _fixture.CreateContext();
         ctx.Set<Counter>().Add(new Counter { Key = JobStatsKeys.History(JobStatsKeys.TypeMarker, dimension, JobStatsKeys.SucceededToken, suffix), Value = (int)succeeded });
         ctx.Set<Counter>().Add(new Counter { Key = JobStatsKeys.History(JobStatsKeys.TypeMarker, dimension, JobStatsKeys.FailedToken, suffix), Value = (int)failed });
+        await ctx.SaveChangesAsync(Ct);
+    }
+
+    private async Task SeedExecPctAsync(string jobType, int upperMs, long count)
+    {
+        var suffix = MetricTiers.Suffix(MetricTier.Fine, DateTime.UtcNow, 5);
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Counter>().Add(new Counter { Key = JobStatsKeys.PctHistory(JobStatsKeys.TypeMarker, jobType, upperMs, suffix), Value = (int)count });
+        await ctx.SaveChangesAsync(Ct);
+    }
+
+    private async Task SeedQueueWaitPctAsync(string queue, int upperMs, long count)
+    {
+        var suffix = MetricTiers.Suffix(MetricTier.Fine, DateTime.UtcNow, 5);
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Counter>().Add(new Counter { Key = QueueWaitKeys.PctHistory(queue, upperMs, suffix), Value = (int)count });
+        await ctx.SaveChangesAsync(Ct);
+    }
+
+    private async Task SeedDeadlineAsync(string type, long count, long miss)
+    {
+        var suffix = MetricTiers.Suffix(MetricTier.Fine, DateTime.UtcNow, 5);
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Counter>().Add(new Counter { Key = DeadlineKeys.History(type, DeadlineKeys.CountToken, suffix), Value = (int)count });
+        if (miss > 0)
+        {
+            ctx.Set<Counter>().Add(new Counter { Key = DeadlineKeys.History(type, DeadlineKeys.MissToken, suffix), Value = (int)miss });
+        }
+
         await ctx.SaveChangesAsync(Ct);
     }
 

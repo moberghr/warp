@@ -59,10 +59,13 @@ internal static class JobStatsKeys
     // counterpart of the lifetime Pct histogram, so percentiles can be computed over a rolling window.
     public const string PctHistoryMarker = "pcth";
 
-    // Ascending latency-bucket upper bounds (ms); trailing int.MaxValue is the "> 10000 ms" catch-all. Mirrors
-    // AdapterCounterKeys.Buckets so the percentile walk is identical across surfaces. One call increments the
-    // ONE bucket whose bound is the smallest >= its rounded ms (BucketFor).
-    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, int.MaxValue];
+    // Ascending latency-bucket upper bounds (ms); trailing int.MaxValue is the "> 300000 ms" catch-all. The job
+    // domain (jobstat + qwait) extends past the 10 s top of the HTTP-scale ladders (AdapterCounterKeys etc.) up to
+    // 5 min, because job execution and queue-wait routinely run tens of seconds to minutes — a latency SLO with a
+    // 30 s/60 s target must be able to observe (and breach) at that scale, not saturate at 10 s (§8.31). One call
+    // increments the ONE bucket whose bound is the smallest >= its rounded ms (BucketFor); the extra rungs add no
+    // hot-path cost. QueueWaitKeys.Buckets mirrors this array exactly.
+    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000, int.MaxValue];
 
     public static string Total(string dimension, string id, string token) => $"{Prefix}:{dimension}:{id}:{token}";
 

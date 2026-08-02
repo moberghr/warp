@@ -14,7 +14,9 @@ It's an opt-in feature: call `AddSlo(...)` to turn evaluation on. The objective/
 | `BacklogDepth` | current backlog depth, per queue | job count | current gauge |
 | `DeadlineAttainment` | fraction of `Total`-scope jobs that met their deadline (§8.7) | ratio | ✓ |
 
-Rate/attainment kinds use the standard error-budget model (`budget = 1 − burn`, where `burn = observed error rate ÷ allowed error rate`); latency/depth kinds compare the observed value to the target (lower is better). A retried-then-succeeded job counts as a success.
+Rate/attainment kinds use the standard error-budget model (`budget = 1 − burn`, where `burn = observed error rate ÷ allowed error rate`); latency/depth kinds compare the observed value to the target (lower is better). A retried-then-succeeded job counts as a success. For `DeadlineAttainment`, a job that reaches a terminal state *after* its Total-scope deadline counts as a miss — including a late `Completed`, since the deadline is a time bound, not just a failure signal.
+
+Latency objectives read a bucketed histogram, and the job-domain ladder (execution + queue-wait) extends to **5 minutes** — job timescales run well past the 10 s top of the HTTP-scale surfaces — so a "p95 < 30s" objective observes and breaches at real job latencies rather than saturating at 10 s.
 
 ## Fast-burn
 
@@ -48,7 +50,7 @@ On a healthy→breaching edge the evaluator fires a `WarpEventType.SloBreached` 
 
 ## Dashboard
 
-The **SLOs** page (`/slo`, gated on the `slo` addon flag) lists every objective with its state (Healthy / Warning / Breaching / Acknowledged), error-budget bar, and fast/slow burn, and lets you create/edit/delete objectives and acknowledge a breach. The detail page (`/slo/:id`) shows the budget gauge, burn stats, and the window/fast-burn breakdown. `GET/POST/DELETE {prefix}/api/slo*` serve the same data in any `AddWarp` process.
+The **SLOs** page (`/slo`, gated on the `slo` addon flag) lists every objective with its state (Healthy / Warning / Breaching / Acknowledged / No data), error-budget bar, and fast/slow burn, and lets you create/edit/delete objectives and acknowledge a breach. **No data** is distinct from Healthy: an objective whose dimension never matched any metric (a typo'd job type or queue) reads as No data instead of a false green, and never alerts. Objectives are validated on save — a rate target must be a 0–1 ratio, a window must be positive — so a malformed objective can't silently disable its own evaluation. The detail page (`/slo/:id`) shows the budget gauge, burn stats, and the window/fast-burn breakdown. `GET/POST/DELETE {prefix}/api/slo*` serve the same data in any `AddWarp` process.
 
 ## Migration
 
