@@ -266,24 +266,27 @@ public sealed class SloEvaluator<TContext> : IServerTask
             ? JobStatsKeys.Prefix + ":"
             : JobStatsKeys.AppPrefix + ":" + JobStatsKeys.Sanitize(def.Application) + ":";
 
-    private static IEnumerable<(string Token, DateTime Hour, long Value)> ReadJobstatHistory(SloDefinition def, IReadOnlyList<KeyVal> rows)
+    // Returns each matching jobstat history bucket as (token, bucket-start, value). Bucket-start is the tier's
+    // bucket start (fine 5-min / hourly / daily, §8.30) — the caller sums buckets whose start falls in the
+    // window, and the recent (fine) buckets populate the short fast-burn window.
+    private static IEnumerable<(string Token, DateTime Bucket, long Value)> ReadJobstatHistory(SloDefinition def, IReadOnlyList<KeyVal> rows)
     {
         foreach (var row in rows)
         {
             if (def.Application is null)
             {
-                if (JobStatsKeys.TryParseHistory(row.Key, out var dim, out var id, out var token, out var hour)
+                if (JobStatsKeys.TryParseHistory(row.Key, out var dim, out var id, out var token, out _, out var bucket)
                     && string.Equals(dim, JobStatsKeys.TypeMarker, StringComparison.Ordinal)
                     && string.Equals(id, def.Dimension, StringComparison.Ordinal))
                 {
-                    yield return (token, hour, row.Value);
+                    yield return (token, bucket, row.Value);
                 }
             }
-            else if (JobStatsKeys.TryParseAppHistory(row.Key, out _, out var dim, out var id, out var token, out var hour)
+            else if (JobStatsKeys.TryParseAppHistory(row.Key, out _, out var dim, out var id, out var token, out _, out var bucket)
                 && string.Equals(dim, JobStatsKeys.TypeMarker, StringComparison.Ordinal)
                 && string.Equals(id, def.Dimension, StringComparison.Ordinal))
             {
-                yield return (token, hour, row.Value);
+                yield return (token, bucket, row.Value);
             }
         }
     }
