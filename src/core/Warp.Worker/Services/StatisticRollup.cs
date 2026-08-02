@@ -99,9 +99,21 @@ public sealed class StatisticRollup<TContext> : IServerTask
                     continue;
                 }
 
-                var target = baseKey + MetricTiers.Suffix(MetricTier.Daily, bucketStart, fineMinutes);
-                additions[target] = additions.GetValueOrDefault(target) + row.Value;
-                deletions.Add(row.Key);
+                // If the daily parent is itself already past the daily retention, prune the hourly directly
+                // rather than roll it into a daily row that is being deleted this same pass — that would put the
+                // daily key in both additions and deletions (update-then-delete → DbUpdateConcurrencyException,
+                // and the hourly value is past daily retention anyway, so pruning it is correct).
+                var dayStart = MetricTiers.BucketStart(MetricTier.Daily, bucketStart, fineMinutes);
+                if (dailyCutoff is { } hourlyDailyCutoff && dayStart < hourlyDailyCutoff)
+                {
+                    deletions.Add(row.Key);
+                }
+                else
+                {
+                    var target = baseKey + MetricTiers.Suffix(MetricTier.Daily, bucketStart, fineMinutes);
+                    additions[target] = additions.GetValueOrDefault(target) + row.Value;
+                    deletions.Add(row.Key);
+                }
             }
             else if (tier == MetricTier.Daily && dailyCutoff is { } dc && bucketStart < dc)
             {

@@ -440,8 +440,11 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
         var buckets = new Dictionary<(string Key, DateTime Hour), long>();
         foreach (var row in merged)
         {
-            if (!TryParseHourlyKey(row.Key, out var baseKey, out var hour) || hour < since)
+            if (!TryParseHourlyKey(row.Key, out var baseKey, out var hour)
+                || hour < since
+                || baseKey.Contains(":pcth:", StringComparison.Ordinal))
             {
+                // pcth latency-histogram buckets are internal (like lifetime pct) — kept out of the counter chart.
                 continue;
             }
 

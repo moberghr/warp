@@ -23,7 +23,7 @@ Warp's time-series metrics — per-type/handler execution, queue-wait, adapter/e
 services.AddWarp<AppDb>(opt =>
 {
     opt.UsePostgreSql();
-    opt.FineResolutionMinutes = 5;                          // fine bucket width; 60 disables the fine tier
+    opt.FineResolutionMinutes = 5;                          // fine bucket width (must be >= 1)
     opt.FineResolutionRetention = TimeSpan.FromHours(6);    // fine → hourly age
     opt.HourlyStatisticsRetention = TimeSpan.FromDays(7);   // hourly → daily age (was a delete age pre-3.10)
     opt.DailyStatisticsRetention = TimeSpan.FromDays(90);   // daily prune; null keeps daily forever

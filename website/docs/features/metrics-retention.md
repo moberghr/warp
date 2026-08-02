@@ -43,7 +43,7 @@ services.AddWarp<AppDb>(opt =>
 });
 ```
 
-Setting `FineResolutionMinutes = 60` makes the write path emit hourly buckets directly, effectively turning the fine tier off; the rollup then only does hourly → daily. Leaving `DailyStatisticsRetention = null` keeps the coarse daily history indefinitely.
+`FineResolutionMinutes` must be `>= 1` (it's a divisor when bucketing; the server fails fast at startup otherwise), and the retentions must widen — `FineResolutionRetention < HourlyStatisticsRetention < DailyStatisticsRetention`. Larger `FineResolutionMinutes` coarsens the fine tier but doesn't turn it off — the tier is always emitted (marked `m5`) and downsampled. Leaving `DailyStatisticsRetention = null` keeps the coarse daily history indefinitely. **`StatisticRollup` is the only pruner of time-bucketed rows**, so disabling it (`StatisticRollupInterval = null`) lets those buckets accumulate unbounded unless you prune the `Statistic` table by other means.
 
 ## Migration
 

@@ -121,9 +121,10 @@ public class WarpServerConfiguration : WarpConfiguration
     /// <summary>
     /// How often <c>StatisticRollup</c> downsamples time-bucketed <c>Statistic</c> rows — fine (5-min) → hourly
     /// → daily — and deletes buckets past <see cref="WarpConfiguration.DailyStatisticsRetention"/> (§8.30). Off
-    /// the hot path; replaces the old delete-only hourly prune. Set to <c>null</c> to disable rollup (buckets
-    /// then accumulate — only do this if you also disable the fine tier via <c>FineResolutionMinutes = 60</c>).
-    /// Default 10 minutes.
+    /// the hot path; replaces the old delete-only hourly prune. <b>The rollup is now the ONLY pruner of
+    /// time-bucketed <c>Statistic</c> rows</b>, so setting this to <c>null</c> disables all such pruning and the
+    /// fine/hourly/daily buckets accumulate unbounded — only do so if you prune the <c>Statistic</c> table by
+    /// other means. Default 10 minutes.
     /// </summary>
     public TimeSpan? StatisticRollupInterval { get; set; } = TimeSpan.FromMinutes(10);
 

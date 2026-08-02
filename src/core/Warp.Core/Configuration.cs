@@ -251,9 +251,10 @@ public class WarpConfiguration
 
     /// <summary>
     /// Bucket width (minutes) of the finest metrics-retention tier (§8.30). Time-series <c>Statistic</c> keys
-    /// (jobstat / qwait / adapter / endpoint / clientevent / errorgroup hist + pcth) are emitted at this
-    /// resolution (marked <c>m5</c>) and rolled up to hourly then daily by <c>StatisticRollup</c>. Set to 60 to
-    /// emit hourly directly (effectively disabling the fine tier). Default 5.
+    /// (jobstat / qwait hist + pcth; other families emit hourly and are rolled) are emitted at this resolution
+    /// (marked <c>m5</c>) and rolled up to hourly then daily by <c>StatisticRollup</c>. Larger values coarsen the
+    /// fine tier; the tier is always emitted and downsampled — there is no separate "off". <b>Must be &gt;= 1</b>
+    /// (it is a divisor when bucketing on the hot path; validated at server startup). Default 5.
     /// </summary>
     public int FineResolutionMinutes { get; set; } = 5;
 
