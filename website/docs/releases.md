@@ -4,11 +4,11 @@ sidebar_position: 6
 
 # Releases
 
-## 3.10.1
+## 3.9.0
 
 *2026-08-03*
 
-Additive patch — no migration, no breaking API changes.
+Additive minor release — no breaking API changes. Bundles in-box **dropped-record visibility**, a multi-resolution **metrics retention** store, **SLO / error budget**, and error grouping (**Issues**). Migration is additive — four new tables (`error_group`, `error_occurrence`, `slo_definition`, `slo_evaluation`) picked up by a standard `dotnet ef migrations add` / `database update`; the retention tiers and dropped-record visibility need no migration.
 
 ### Dropped-record visibility
 
@@ -18,12 +18,6 @@ Warp's lossy recording pipelines (outbound adapters, inbound endpoints, client e
 - A throttled **`RecordsDropped`** operational event fires through the notifier seam (Slack/email/PagerDuty) when a pipeline is dropping, at most once per pipeline per 5-minute window, so you're alerted rather than having to go looking.
 
 Per-process by design (each process reports the records it itself dropped), and idle — no database work when nothing has been dropped.
-
-## 3.10.0
-
-*2026-08-02*
-
-Additive minor release — **no breaking API changes**. Two features: **metrics retention tiers** (no migration — new rows in the existing `Statistic`/`Counter` tables) and **SLO / error budget** (two new tables, `slo_definition` / `slo_evaluation`, via a standard `dotnet ef migrations add`).
 
 ### Metrics retention tiers
 
@@ -40,14 +34,14 @@ services.AddWarp<AppDb>(opt =>
     opt.UsePostgreSql();
     opt.FineResolutionMinutes = 5;                          // fine bucket width (must be >= 1)
     opt.FineResolutionRetention = TimeSpan.FromHours(6);    // fine → hourly age
-    opt.HourlyStatisticsRetention = TimeSpan.FromDays(7);   // hourly → daily age (was a delete age pre-3.10)
+    opt.HourlyStatisticsRetention = TimeSpan.FromDays(7);   // hourly → daily age (was a delete age pre-3.9)
     opt.DailyStatisticsRetention = TimeSpan.FromDays(90);   // daily prune; null keeps daily forever
 });
 ```
 
-This is the storage foundation the upcoming **SLO / error-budget** work builds on — 5-minute resolution is what fast-burn alerting needs. See **[Metrics retention tiers](./features/metrics-retention.md)**.
+This is the storage foundation the **SLO / error-budget** work in this release builds on — 5-minute resolution is what fast-burn alerting needs. See **[Metrics retention tiers](./features/metrics-retention.md)**.
 
-> Migration note: 3.10.0 is **additive with no migration** — all tiers are new rows in the existing `Statistic`/`Counter` tables, and legacy hourly keys migrate to the tiered scheme automatically on the rollup's normal schedule.
+> Migration note: the retention tiers are **additive with no migration** — all tiers are new rows in the existing `Statistic`/`Counter` tables, and legacy hourly keys migrate to the tiered scheme automatically on the rollup's normal schedule.
 
 ### SLO / error budget
 
@@ -75,12 +69,6 @@ See **[SLO / error budget](./features/slo-error-budget.md)**.
 
 > Migration note: the SLO half adds two tables (`slo_definition`, `slo_evaluation`) — a standard `dotnet ef migrations add` / `database update`. Disable with `SloEvaluationInterval = null` or by not calling `AddSlo()`.
 
-## 3.9.0
-
-*2026-07-28*
-
-Additive minor release — no breaking API changes. Two new tables (`error_group`, `error_occurrence`), picked up by a standard `dotnet ef migrations add` / `database update`. Always on unless you disable it.
-
 ### Error grouping — Issues
 
 Warp already persists every error signal it produces — failed-job exceptions in `JobLog`, 5xx in `EndpointCallLog`, failed outbound calls in `AdapterCallLog`, browser errors in `ClientEventLog`. This release folds all four into **issues**: one durable row per real problem, not per occurrence, with a count, first/last-seen, a trend, a sample, and an `Unresolved / Resolved / Ignored` lifecycle. Sentry-lite, on the same lossy-fold → durable `Counter` pipeline as everything else — so the trends **survive raw-row cleanup**.
@@ -105,7 +93,7 @@ services.AddWarp<AppDb>(opt =>
 
 A new always-shown **Issues** dashboard page (`/issues` + `/issues/:fingerprint`) surfaces the grouped list with source badges, trend sparklines, and Resolve/Ignore, and the detail links out to the unified trace view (per occurrence) and to the failed jobs behind a job issue. `GET {prefix}/api/issues`, `GET .../issues/{fingerprint}`, `POST .../issues/{fingerprint}/status` serve the same data in any `AddWarp` process. See **[Error grouping / Issues](./features/error-grouping.md)**.
 
-> Migration note: 3.9.0 is **additive** — two new tables (`error_group`, `error_occurrence`), picked up by a standard `dotnet ef migrations add` / `database update`. Set `ErrorGroupingInterval = null` to disable the feature entirely.
+> Migration note: the Issues half is **additive** — two new tables (`error_group`, `error_occurrence`), picked up by a standard `dotnet ef migrations add` / `database update`. Set `ErrorGroupingInterval = null` to disable the feature entirely.
 
 ## 3.8.0
 
