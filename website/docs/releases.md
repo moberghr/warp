@@ -4,11 +4,11 @@ sidebar_position: 6
 
 # Releases
 
-## 3.11.0
+## 3.10.1
 
-*Unreleased*
+*2026-08-03*
 
-Additive — no migration, no breaking API changes.
+Additive patch — no migration, no breaking API changes.
 
 ### Dropped-record visibility
 
