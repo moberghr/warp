@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 3.10.0
 
-*Unreleased*
+*2026-08-03*
 
 Additive minor release — no breaking API changes. Three features: in-box **dropped-record visibility** and **metrics retention tiers** (both no migration — new rows in the existing `Statistic`/`Counter` tables) and **SLO / error budget** (two new tables, `slo_definition` / `slo_evaluation`, via a standard `dotnet ef migrations add`).
 
