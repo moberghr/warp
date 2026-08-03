@@ -47,4 +47,4 @@ services.AddWarp<AppDb>(opt =>
 
 ## Migration
 
-**No schema change and no migration** — every tier lives in the existing `Statistic` / `Counter` tables as new key-prefixed rows. Pre-3.10 keys (bare `…:yyyy-MM-dd-HH`) are recognized as hourly and migrated to daily by the rollup on their normal schedule, so upgrading is transparent. The dashboard's counters and stats-history graphs read across the tiers unchanged.
+**No schema change and no migration** — every tier lives in the existing `Statistic` / `Counter` tables as new key-prefixed rows. Pre-3.9 keys (bare `…:yyyy-MM-dd-HH`) are recognized as hourly and migrated to daily by the rollup on their normal schedule, so upgrading is transparent. The dashboard's counters and stats-history graphs read across the tiers unchanged.
