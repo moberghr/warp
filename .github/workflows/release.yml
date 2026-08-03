@@ -11,6 +11,9 @@ env:
 jobs:
   publish:
     name: Pack and Publish
+    # Never publish for a draft release. The `published` event can fire for a draft in some flows;
+    # this guard guarantees packages reach NuGet only when the release is actually published.
+    if: ${{ github.event.release.draft == false }}
     runs-on: ubuntu-latest
     environment: production
     permissions:
