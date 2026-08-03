@@ -65,6 +65,20 @@ public sealed record SagaForceCompletedEvent : WarpOperationalEvent
 }
 
 /// <summary>
+/// A lossy recording pipeline is dropping records because its bounded channel is saturated (§8.19/§8.21/§8.27).
+/// Raised per-process by the <c>DroppedRecordReporter</c>, throttled per pipeline, so a saturated recording path
+/// is alertable in-box (Slack/email) rather than visible only on the OTel meter. Diagnostics only — no payload.
+/// </summary>
+public sealed record RecordsDroppedEvent : WarpOperationalEvent
+{
+    /// <summary>The pipeline that dropped records: <c>adapter</c>, <c>endpoint</c>, or <c>client</c>.</summary>
+    public required string Pipeline { get; init; }
+
+    /// <summary>How many records were dropped in the reporting interval that triggered this event.</summary>
+    public required long Count { get; init; }
+}
+
+/// <summary>
 /// An application instance (server or non-server) went away — raised from the stale sweep that reaps a
 /// heartbeat-lapsed instance.
 /// </summary>

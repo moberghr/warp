@@ -373,6 +373,7 @@ public sealed class AdapterCallScope : IDisposable
             WarpTelemetry.AdapterRecordsDropped.Add(
                 1,
                 new KeyValuePair<string, object?>(WarpTelemetryAttributes.AdapterMeterAdapter, _adapter));
+            DroppedRecordCounters.Track(DropPipeline.Adapter, 1);
         }
     }
 

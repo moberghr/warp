@@ -13,6 +13,7 @@ import {
   Mail,
   Loader,
   Layers,
+  AlertTriangle,
 } from 'lucide-react';
 
 function padHistory(data: StatsHistoryPoint[], hours: number) {
@@ -97,6 +98,12 @@ export default function DashboardPage() {
         <MetricCard label="Failed" value={stats.failed} icon={<XCircle className="h-5 w-5" />} color={stats.failed > 0 ? "text-red-600" : undefined} href="/jobs/failed" />
         <MetricCard label="Messages" value={stats.messages} icon={<Mail className="h-5 w-5" />} href="/messages" />
         <MetricCard label="Batches" value={stats.batchesProcessing} icon={<Layers className="h-5 w-5" />} href="/batches/processing" />
+        <MetricCard
+          label="Dropped (24h)"
+          value={stats.adapterRecordsDropped + stats.endpointRecordsDropped + stats.clientRecordsDropped}
+          icon={<AlertTriangle className="h-5 w-5" />}
+          color={stats.adapterRecordsDropped + stats.endpointRecordsDropped + stats.clientRecordsDropped > 0 ? "text-red-600" : undefined}
+        />
       </div>
 
       {/* Realtime Graph */}

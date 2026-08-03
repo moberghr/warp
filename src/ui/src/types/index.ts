@@ -40,6 +40,9 @@ export interface DashboardStatistics {
   totalFailed: number;
   totalDeleted: number;
   totalCreated: number;
+  adapterRecordsDropped: number;
+  endpointRecordsDropped: number;
+  clientRecordsDropped: number;
   batches: number;
   databaseConnection: string | null;
 }

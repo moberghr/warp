@@ -4,6 +4,21 @@ sidebar_position: 6
 
 # Releases
 
+## 3.10.1
+
+*2026-08-03*
+
+Additive patch — no migration, no breaking API changes.
+
+### Dropped-record visibility
+
+Warp's lossy recording pipelines (outbound adapters, inbound endpoints, client events) drop records when their bounded channel saturates. Until now that was counted only on an OpenTelemetry meter — invisible unless you'd wired up an OTel backend, which defeats the point of the in-box dashboard. Now a saturated pipeline is visible and alertable **without OTel**:
+
+- A **Dropped (24h)** tile on the dashboard turns red when any pipeline has dropped records recently (windowed, so it clears itself once drops stop). The count is folded into the durable `warpsys:records-dropped` stat via the same retention tiers as every other metric — bounded storage, no per-drop database write on the failure path.
+- A throttled **`RecordsDropped`** operational event fires through the notifier seam (Slack/email/PagerDuty) when a pipeline is dropping, at most once per pipeline per 5-minute window, so you're alerted rather than having to go looking.
+
+Per-process by design (each process reports the records it itself dropped), and idle — no database work when nothing has been dropped.
+
 ## 3.10.0
 
 *2026-08-02*
