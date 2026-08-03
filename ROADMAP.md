@@ -36,9 +36,7 @@ Little's Law on arrival vs. service rate → "at the current rate this queue gro
 
 Don't enqueue if an identical job is already pending (Enqueued/Processing). Dedup by type + serialized payload hash, with an optional dedup window.
 
-### Job Priority
-
-Explicit priority levels within a queue; higher-priority jobs fetched first (not just queue ordering). Touches the sacred worker fetch path (§0.2/§6.1) — needs a matching `(Queue, CurrentState, Priority, ScheduleTime)` index so it stays a single indexed read.
+> Note: **job priority** was considered and dropped — named queues + worker-group ordering already express priority (route important work to its own queue and drain it first), and a per-job `Priority` column would only add cost to the sacred fetch path (a new `ORDER BY` + composite index) for a benefit queues already cover.
 
 ## Performance & Compilation
 
