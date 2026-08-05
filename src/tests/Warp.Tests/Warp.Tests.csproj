@@ -63,6 +63,7 @@
 		<ProjectReference Include="..\Warp.Tests.Contracts\Warp.Tests.Contracts.csproj" />
 		<ProjectReference Include="..\..\core\Warp.Core\Warp.Core.csproj" />
 		<ProjectReference Include="..\..\core\Warp.Adapters.Http\Warp.Adapters.Http.csproj" />
+		<ProjectReference Include="..\..\core\Warp.Metrics.Prometheus\Warp.Metrics.Prometheus.csproj" />
 		<ProjectReference Include="..\..\core\Warp.Adapters.Refit\Warp.Adapters.Refit.csproj" />
 		<ProjectReference Include="..\..\core\Warp.Http\Warp.Http.csproj" />
 		<ProjectReference Include="..\..\core\providers\Warp.Provider.PostgreSql\Warp.Provider.PostgreSql.csproj" />
