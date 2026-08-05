@@ -41,7 +41,7 @@ internal static class QueueWaitKeys
 
     // Mirrors JobStatsKeys.Buckets exactly (job-domain scale, up to 5 min) so the percentile walk is identical
     // across the jobstat and qwait surfaces.
-    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000, int.MaxValue];
+    public static readonly int[] Buckets = Warp.Core.Metrics.WarpHistogramBuckets.WithOverflow(Warp.Core.Metrics.WarpHistogramBuckets.JobScale);
 
     public static string Total(string queue, string token) => $"{Prefix}:{queue}:{token}";
 

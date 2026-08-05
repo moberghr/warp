@@ -69,23 +69,20 @@ public static class Extensions
         return builder;
     }
 
-    // Explicit histogram bucket boundaries for the Warp latency meters, matching the DB :pct(h): ladders so a
-    // Prometheus histogram_quantile can observe job/queue latency up to 5 min (not saturate at the OTel-default
-    // ~10 s) — the prerequisite for reading the 30 s/60 s latency SLOs back from Prometheus (§8.30/§8.31). The
-    // trailing int.MaxValue overflow rung is implicit (+Inf), so it is omitted from the finite boundaries.
-    private static readonly double[] JobScaleBoundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000];
-    private static readonly double[] HttpScaleBoundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
-
+    // Explicit histogram bucket boundaries for the Warp latency meters, taken from the single canonical source
+    // (WarpHistogramBuckets) that the DB :pct(h): ladders also use — so a Prometheus histogram_quantile reads the
+    // same distribution as the local dashboard (§8.30/§8.31/§8.33), instead of a hand-copied ladder that can drift
+    // (e.g. client vitals use a vitals-tuned ladder, not the generic HTTP one). The int.MaxValue overflow rung is
+    // implicit (+Inf) in OTel, so the finite bounds map straight to the View boundaries.
     public static MeterProviderBuilder AddWarpHistogramViews(this MeterProviderBuilder metrics)
     {
-        // Job-scale latency (execution + queue-wait) needs the full ladder to 5 min.
-        metrics.AddView("warp.job.execution.duration", new ExplicitBucketHistogramConfiguration { Boundaries = JobScaleBoundaries });
-        metrics.AddView("warp.job.queue.wait", new ExplicitBucketHistogramConfiguration { Boundaries = JobScaleBoundaries });
-
-        // HTTP-scale latency (adapters / endpoints / client vitals) caps at 10 s.
-        metrics.AddView("warp.adapter.duration", new ExplicitBucketHistogramConfiguration { Boundaries = HttpScaleBoundaries });
-        metrics.AddView("warp.endpoint.duration", new ExplicitBucketHistogramConfiguration { Boundaries = HttpScaleBoundaries });
-        metrics.AddView("warp.client.vitals", new ExplicitBucketHistogramConfiguration { Boundaries = HttpScaleBoundaries });
+        foreach (var (instrument, bounds) in Warp.Core.Metrics.WarpHistogramBuckets.Views)
+        {
+            metrics.AddView(instrument, new ExplicitBucketHistogramConfiguration
+            {
+                Boundaries = Array.ConvertAll(bounds, b => (double)b),
+            });
+        }
 
         return metrics;
     }
