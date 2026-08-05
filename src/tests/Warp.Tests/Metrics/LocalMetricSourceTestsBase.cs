@@ -98,6 +98,28 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetPercentile_AllSamplesOverCap_ReportsLadderOverflowBound_NotZero()
+    {
+        // Every claim waited past the 5-min ladder cap, so the only populated pcth bucket is the int.MaxValue
+        // overflow. The percentile must report the ladder's largest finite bound (300000), NOT 0 — otherwise a
+        // genuinely-breaching latency SLO reads observed==0 → NoData and renders grey instead of Breaching.
+        await SeedStatistic(QueueWaitKeys.PctHistory("default", int.MaxValue, Suffix(T)), 50);
+
+        (await Source().GetPercentileAsync(QueueWait("default"), 95, Window(1), Ct)).ShouldBe(QueueWaitKeys.Buckets[^2]);
+    }
+
+    [TimedFact]
+    public async Task GetPercentile_PartialOverflow_CrossesToOverflowBound_NotLastPresentFinite()
+    {
+        // p95 crosses into the overflow bucket: 4 samples ≤60s, 96 over the cap. The result is the ladder cap
+        // (300000), not the last present finite bound (60000) — matching SloMath / the lifetime walk.
+        await SeedStatistic(QueueWaitKeys.PctHistory("default", 60000, Suffix(T)), 4);
+        await SeedStatistic(QueueWaitKeys.PctHistory("default", int.MaxValue, Suffix(T)), 96);
+
+        (await Source().GetPercentileAsync(QueueWait("default"), 95, Window(1), Ct)).ShouldBe(QueueWaitKeys.Buckets[^2]);
+    }
+
+    [TimedFact]
     public async Task GetBreakdown_AdapterCalls_ByAdapterAndOutcome()
     {
         await SeedStatistic(AdapterCounterKeys.Total("stripe", "success"), 8);

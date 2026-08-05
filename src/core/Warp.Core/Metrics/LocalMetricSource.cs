@@ -131,19 +131,23 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
             return 0;
         }
 
+        // A percentile landing in the overflow bucket reports the family's largest FINITE ladder bound (the fixed
+        // display floor) — NOT the largest bound that happens to be present. When every sample is over the ladder
+        // cap the only populated bucket is int.MaxValue, and "largest present finite" would be 0 → the caller reads
+        // NoData and a genuinely-breaching latency SLO renders grey. Matches WalkPercentile / SloMath.Percentile.
+        var overflowBound = OverflowBound(metric.Name);
         var threshold = (long)Math.Ceiling(Math.Clamp(percentile, 0, 100) / 100.0 * total);
         long cumulative = 0;
-        var lastFinite = buckets.Keys.LastOrDefault(b => b != int.MaxValue);
         foreach (var (bound, count) in buckets)
         {
             cumulative += count;
             if (cumulative >= threshold)
             {
-                return bound == int.MaxValue ? lastFinite : bound;
+                return bound == int.MaxValue ? overflowBound : bound;
             }
         }
 
-        return lastFinite;
+        return overflowBound;
 
         void Collect(IEnumerable<(string Key, long Value)> rows)
         {
