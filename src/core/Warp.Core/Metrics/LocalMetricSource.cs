@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Adapters;
+using Warp.Core.ClientObservability;
 using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
 using Warp.Core.Services;
@@ -58,6 +59,11 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         if (query.Metric.Name is WarpMetricCatalog.Names.EndpointCalls or WarpMetricCatalog.Names.EndpointDuration)
         {
             return await HttpHistorySeriesAsync(query, WarpMetricCatalog.Tags.Route, ct);
+        }
+
+        if (query.Metric.Name is WarpMetricCatalog.Names.ClientEvents)
+        {
+            return await ClientEventsSeriesAsync(query, ct);
         }
 
         var prefix = ResolveBaseKey(query.Metric) + ":";
@@ -207,6 +213,7 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     {
         WarpMetricCatalog.Names.AdapterDuration => AdapterCounterKeys.Buckets[^2],
         WarpMetricCatalog.Names.EndpointDuration => EndpointCounterKeys.Buckets[^2],
+        WarpMetricCatalog.Names.ClientVitalsValue => ClientEventKeys.Buckets[^2],
         _ => throw new NotSupportedException($"No overflow bound for '{metricName}'."),
     };
 
@@ -276,6 +283,21 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     // per-app family (adapter-app) is scanned instead of the app-agnostic one.
     private static string ScanPrefix(MetricRef metric, IReadOnlyList<string> involved)
     {
+        if (IsClientFamily(metric.Name))
+        {
+            // Only the per-type event counts have a per-app slice; name / vital families are global.
+            var clientApp = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
+            if (metric.Name is WarpMetricCatalog.Names.ClientEvents
+                && (clientApp is not null || involved.Contains(WarpMetricCatalog.Tags.Application)))
+            {
+                return clientApp is not null
+                    ? $"{ClientEventKeys.AppPrefix}:{ClientEventKeys.Sanitize(clientApp)}:"
+                    : $"{ClientEventKeys.AppPrefix}:";
+            }
+
+            return $"{ClientEventKeys.Prefix}:";
+        }
+
         var (prefix, appPrefix, idTag) = HttpFamily(metric.Name);
         var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
 
@@ -308,8 +330,53 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         WarpMetricCatalog.Names.AdapterDuration => ParseAdapterRow(key, wantDuration: true),
         WarpMetricCatalog.Names.EndpointCalls => ParseEndpointRow(key, wantDuration: false),
         WarpMetricCatalog.Names.EndpointDuration => ParseEndpointRow(key, wantDuration: true),
+        WarpMetricCatalog.Names.ClientEvents => ParseClientEventsRow(key),
+        WarpMetricCatalog.Names.ClientEventsNamed => ParseClientNamedRow(key),
+        WarpMetricCatalog.Names.ClientVitals => ParseClientVitalRow(key, ClientEventKeys.CountToken),
+        WarpMetricCatalog.Names.ClientVitalsValue => ParseClientVitalRow(key, ClientEventKeys.DurationToken),
         _ => throw new NotSupportedException($"No reverse parse for '{metricName}'."),
     };
+
+    private static bool IsClientFamily(string metricName) => metricName is
+        WarpMetricCatalog.Names.ClientEvents or WarpMetricCatalog.Names.ClientEventsNamed
+        or WarpMetricCatalog.Names.ClientVitals or WarpMetricCatalog.Names.ClientVitalsValue;
+
+    // client.events: per-type count (clientevent:total:{type}:count) or the per-app slice
+    // (clientevent-app:{app}:total:{type}:count).
+    private static Dictionary<string, string>? ParseClientEventsRow(string key)
+    {
+        if (ClientEventKeys.TryParseTypeTotal(key, out var type))
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Type] = type };
+        }
+
+        if (ClientEventKeys.TryParseAppTypeTotal(key, out var application, out var appType))
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [WarpMetricCatalog.Tags.Application] = application,
+                [WarpMetricCatalog.Tags.Type] = appType,
+            };
+        }
+
+        return null;
+    }
+
+    // client.events.named: per-(type, name) count (clientevent:name:{type}:{name}:count).
+    private static Dictionary<string, string>? ParseClientNamedRow(string key)
+        => ClientEventKeys.TryParseNameTotal(key, out var type, out var name)
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [WarpMetricCatalog.Tags.Type] = type,
+                [WarpMetricCatalog.Tags.Name] = name,
+            }
+            : null;
+
+    // client.vitals(.value): the per-vital count or duration-sum token (clientevent:vital:{vital}:{token}).
+    private static Dictionary<string, string>? ParseClientVitalRow(string key, string wantToken)
+        => ClientEventKeys.TryParseVital(key, out var vital, out var token) && string.Equals(token, wantToken, StringComparison.Ordinal)
+            ? new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Vital] = vital }
+            : null;
 
     private static (Dictionary<string, string> Tags, int UpperMs)? ParseHistogramRow(string metricName, string key) => metricName switch
     {
@@ -319,6 +386,9 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         WarpMetricCatalog.Names.EndpointDuration when EndpointCounterKeys.TryParsePct(key, out var route, out var upperMs)
             => (new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Route] = route }, upperMs),
         WarpMetricCatalog.Names.EndpointDuration => null,
+        WarpMetricCatalog.Names.ClientVitalsValue when ClientEventKeys.TryParseVitalPct(key, out var vital, out var upperMs)
+            => (new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Vital] = vital }, upperMs),
+        WarpMetricCatalog.Names.ClientVitalsValue => null,
         _ => throw new NotSupportedException($"No histogram parse for '{metricName}'."),
     };
 
@@ -466,6 +536,46 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
                 _ => (string?)null,
             };
 
+            var bucket = Truncate(query.Resolution, bucketStart);
+            var accKey = (bucket, tagValue);
+            acc[accKey] = query.Aggregation == MetricAggregation.Last ? value : acc.GetValueOrDefault(accKey) + value;
+        }
+
+        return
+        [
+            .. acc
+                .OrderBy(kv => kv.Key.Bucket)
+                .ThenBy(kv => kv.Key.Tag, StringComparer.Ordinal)
+                .Select(kv => new SeriesBucket(kv.Key.Bucket, kv.Key.Tag, kv.Value)),
+        ];
+    }
+
+    // client.events hourly history (clientevent:total:{type}:hist:{bucket}), optionally split by type. Global only
+    // (the per-app slice carries type totals, not history), down-binned to the query resolution over its window.
+    private async Task<IReadOnlyList<SeriesBucket>> ClientEventsSeriesAsync(SeriesQuery query, CancellationToken ct)
+    {
+        var merged = await MergedAsync($"{ClientEventKeys.Prefix}:", ct);
+
+        var acc = new Dictionary<(DateTime Bucket, string? Tag), long>();
+        foreach (var (key, value) in merged)
+        {
+            if (!MetricTiers.TryClassifyKey(key, out var baseKey, out _, out var bucketStart)
+                || bucketStart < query.Window.FromUtc || bucketStart >= query.Window.ToUtc)
+            {
+                continue;
+            }
+
+            // baseKey is clientevent:total:{type}:hist (tier/date suffix stripped by TryClassifyKey).
+            var parts = baseKey.Split(':');
+            if (parts.Length != 4
+                || !string.Equals(parts[1], ClientEventKeys.TotalMarker, StringComparison.Ordinal)
+                || !string.Equals(parts[3], ClientEventKeys.HistoryMarker, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var type = parts[2];
+            var tagValue = string.Equals(query.BreakdownBy, WarpMetricCatalog.Tags.Type, StringComparison.Ordinal) ? type : null;
             var bucket = Truncate(query.Resolution, bucketStart);
             var accKey = (bucket, tagValue);
             acc[accKey] = query.Aggregation == MetricAggregation.Last ? value : acc.GetValueOrDefault(accKey) + value;

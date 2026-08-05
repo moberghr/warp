@@ -43,10 +43,13 @@ public static class WarpMetricCatalog
         public const string EndpointCalls = "endpoint.calls";
         public const string EndpointDuration = "endpoint.duration";
 
-        // Client (browser) observability (mirrors warp.client.*).
+        // Client (browser) observability mirroring the warp client meters, where the vitals count is a sample
+        // tally and the vitals value metric carries summed values plus a distribution histogram for average and
+        // percentile readouts.
         public const string ClientEvents = "client.events";
         public const string ClientEventsNamed = "client.events.named";
         public const string ClientVitals = "client.vitals";
+        public const string ClientVitalsValue = "client.vitals.value";
 
         // Error grouping occurrences, tagged by fingerprint.
         public const string ErrorGroupOccurrences = "errorgroup.occurrences";
