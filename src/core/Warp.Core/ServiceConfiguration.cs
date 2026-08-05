@@ -185,7 +185,8 @@ public static class ServiceConfiguration
         // (which does the folding) runs only on a server.
         services.TryAddScoped<IErrorGroupQueryService>(x => new ErrorGroupQueryService<TContext>(
             x.GetRequiredService<TContext>(),
-            x.GetRequiredService<TimeProvider>()));
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<Warp.Core.Metrics.IMetricSource>()));
         services.TryAddScoped<IErrorGroupCommandService, ErrorGroupCommandService<TContext>>();
 
         // SLO objectives read/command (§8.31). Registered in AddWarp so dashboard-only hosts resolve them; the

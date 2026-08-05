@@ -4,6 +4,7 @@ using Warp.Core.Adapters;
 using Warp.Core.ClientObservability;
 using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
+using Warp.Core.ErrorGrouping;
 using Warp.Core.Services;
 
 namespace Warp.Core.Metrics;
@@ -822,6 +823,7 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
             WarpMetricCatalog.Names.JobExecutionDuration => JobExecutionDurationBase(metric),
             WarpMetricCatalog.Names.Deadline => DeadlineHistoryBase(metric, DeadlineKeys.CountToken),
             WarpMetricCatalog.Names.DeadlineMiss => DeadlineHistoryBase(metric, DeadlineKeys.MissToken),
+            WarpMetricCatalog.Names.ErrorGroupOccurrences => $"{ErrorGroupKeys.Prefix}:{Tag(metric, WarpMetricCatalog.Tags.Fingerprint)}",
             _ => throw NotRoutedYet(metric, nameof(ResolveBaseKey)),
         };
 

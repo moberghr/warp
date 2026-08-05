@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 
@@ -27,7 +28,7 @@ public abstract class ErrorGroupQueryTestsBase : IAsyncLifetime
 
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
-    private ErrorGroupQueryService<TestContext> Service() => new(_fixture.CreateContext(), TimeProvider.System);
+    private ErrorGroupQueryService<TestContext> Service() => new(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 
     [TimedFact]
     public async Task GetGroups_FiltersBySourceStatusAndApplication_WithTotal()
