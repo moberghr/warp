@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
+using Warp.Core.Endpoints;
 using Warp.Core.Services;
 
 namespace Warp.Core.Metrics;
@@ -51,7 +52,12 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     {
         if (query.Metric.Name is WarpMetricCatalog.Names.AdapterCalls or WarpMetricCatalog.Names.AdapterDuration)
         {
-            return await AdapterSeriesAsync(query, ct);
+            return await HttpHistorySeriesAsync(query, WarpMetricCatalog.Tags.Adapter, ct);
+        }
+
+        if (query.Metric.Name is WarpMetricCatalog.Names.EndpointCalls or WarpMetricCatalog.Names.EndpointDuration)
+        {
+            return await HttpHistorySeriesAsync(query, WarpMetricCatalog.Tags.Route, ct);
         }
 
         var prefix = ResolveBaseKey(query.Metric) + ":";
@@ -200,6 +206,7 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     private static int OverflowBound(string metricName) => metricName switch
     {
         WarpMetricCatalog.Names.AdapterDuration => AdapterCounterKeys.Buckets[^2],
+        WarpMetricCatalog.Names.EndpointDuration => EndpointCounterKeys.Buckets[^2],
         _ => throw new NotSupportedException($"No overflow bound for '{metricName}'."),
     };
 
@@ -269,25 +276,29 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     // per-app family (adapter-app) is scanned instead of the app-agnostic one.
     private static string ScanPrefix(MetricRef metric, IReadOnlyList<string> involved)
     {
-        switch (metric.Name)
-        {
-            case WarpMetricCatalog.Names.AdapterCalls:
-            case WarpMetricCatalog.Names.AdapterDuration:
-                var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
-                if (app is not null || involved.Contains(WarpMetricCatalog.Tags.Application))
-                {
-                    return app is not null
-                        ? $"{AdapterCounterKeys.AppPrefix}:{AdapterCounterKeys.SanitizeApplication(app)}:"
-                        : $"{AdapterCounterKeys.AppPrefix}:";
-                }
+        var (prefix, appPrefix, idTag) = HttpFamily(metric.Name);
+        var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
 
-                return TagOrNull(metric, WarpMetricCatalog.Tags.Adapter) is { } a
-                    ? $"{AdapterCounterKeys.Prefix}:{a}:"
-                    : $"{AdapterCounterKeys.Prefix}:";
-            default:
-                throw NotRoutedYet(metric, nameof(ScanPrefix));
+        if (app is not null || involved.Contains(WarpMetricCatalog.Tags.Application))
+        {
+            return app is not null ? $"{appPrefix}:{SanitizeSegment(app)}:" : $"{appPrefix}:";
         }
+
+        return TagOrNull(metric, idTag) is { } id ? $"{prefix}:{id}:" : $"{prefix}:";
     }
+
+    // The colon prefixes + identity-tag for an HTTP-shaped family (adapter / endpoint). Both share the layout
+    // {prefix}:{id}[:op|grp:{v}]:{outcome} plus a disjoint per-app family, so their reads are parameterized here.
+    private static (string Prefix, string AppPrefix, string IdTag) HttpFamily(string metricName) => metricName switch
+    {
+        WarpMetricCatalog.Names.AdapterCalls or WarpMetricCatalog.Names.AdapterDuration
+            => (AdapterCounterKeys.Prefix, AdapterCounterKeys.AppPrefix, WarpMetricCatalog.Tags.Adapter),
+        WarpMetricCatalog.Names.EndpointCalls or WarpMetricCatalog.Names.EndpointDuration
+            => (EndpointCounterKeys.Prefix, EndpointCounterKeys.AppPrefix, WarpMetricCatalog.Tags.Route),
+        _ => throw new NotSupportedException($"'{metricName}' is not an HTTP-shaped metric family."),
+    };
+
+    private static string SanitizeSegment(string value) => value.Replace(':', '-');
 
     // Parses one colon count/sum key into its logical tags for the given metric, or null when the key is not a
     // countable row of that metric (e.g. a pct histogram bucket, or the dur-sum row when reading calls).
@@ -295,6 +306,8 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     {
         WarpMetricCatalog.Names.AdapterCalls => ParseAdapterRow(key, wantDuration: false),
         WarpMetricCatalog.Names.AdapterDuration => ParseAdapterRow(key, wantDuration: true),
+        WarpMetricCatalog.Names.EndpointCalls => ParseEndpointRow(key, wantDuration: false),
+        WarpMetricCatalog.Names.EndpointDuration => ParseEndpointRow(key, wantDuration: true),
         _ => throw new NotSupportedException($"No reverse parse for '{metricName}'."),
     };
 
@@ -303,6 +316,9 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         WarpMetricCatalog.Names.AdapterDuration when AdapterCounterKeys.TryParsePct(key, out var adapter, out var upperMs)
             => (new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Adapter] = adapter }, upperMs),
         WarpMetricCatalog.Names.AdapterDuration => null,
+        WarpMetricCatalog.Names.EndpointDuration when EndpointCounterKeys.TryParsePct(key, out var route, out var upperMs)
+            => (new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Route] = route }, upperMs),
+        WarpMetricCatalog.Names.EndpointDuration => null,
         _ => throw new NotSupportedException($"No histogram parse for '{metricName}'."),
     };
 
@@ -358,14 +374,60 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         return tags;
     }
 
-    // Adapter hourly history (adapter:{a}:hist:{outcome}:{bucket}, legacy-hourly or rolled tiers). Reads the
-    // count-outcome rows for adapter.calls (optionally split by outcome) or the dur-sum rows for adapter.duration,
-    // down-binned to the query resolution over its window. Adapter history is app-agnostic.
-    private async Task<IReadOnlyList<SeriesBucket>> AdapterSeriesAsync(SeriesQuery query, CancellationToken ct)
+    // endpoint:{route}:{outcome} / :grp:{group}:{outcome}, or the per-app endpoint-app:{app}:{route}:{outcome}
+    // (no group materialization there). Mirrors ParseAdapterRow; endpoints have no per-operation dimension.
+    private static Dictionary<string, string>? ParseEndpointRow(string key, bool wantDuration)
+    {
+        Dictionary<string, string> tags;
+        string outcome;
+
+        if (EndpointCounterKeys.TryParse(key, out var parsed))
+        {
+            tags = new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Route] = parsed.Route };
+            if (parsed.Dimension == EndpointStatDimension.Group)
+            {
+                tags[WarpMetricCatalog.Tags.Group] = parsed.Group;
+            }
+
+            outcome = parsed.Outcome;
+        }
+        else if (EndpointCounterKeys.TryParseApp(key, out var application, out var appRoute, out var appOutcome))
+        {
+            tags = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [WarpMetricCatalog.Tags.Application] = application,
+                [WarpMetricCatalog.Tags.Route] = appRoute,
+            };
+            outcome = appOutcome;
+        }
+        else
+        {
+            return null;
+        }
+
+        var isDuration = string.Equals(outcome, EndpointCounterKeys.DurationToken, StringComparison.Ordinal);
+        if (isDuration != wantDuration)
+        {
+            return null;
+        }
+
+        if (!wantDuration)
+        {
+            tags[WarpMetricCatalog.Tags.Outcome] = outcome;
+        }
+
+        return tags;
+    }
+
+    // HTTP-family hourly history ({prefix}:{id}:hist:{outcome}:{bucket}, legacy-hourly or rolled tiers). Reads the
+    // count-outcome rows for the calls metric (optionally split by outcome) or the dur-sum rows for the duration
+    // metric, down-binned to the query resolution over its window. History is app-agnostic. <paramref name="idTag"/>
+    // is the family's identity tag (adapter | route).
+    private async Task<IReadOnlyList<SeriesBucket>> HttpHistorySeriesAsync(SeriesQuery query, string idTag, CancellationToken ct)
     {
         var metric = query.Metric;
-        var wantDuration = string.Equals(metric.Name, WarpMetricCatalog.Names.AdapterDuration, StringComparison.Ordinal);
-        var adapterFilter = TagOrNull(metric, WarpMetricCatalog.Tags.Adapter);
+        var wantDuration = metric.Name is WarpMetricCatalog.Names.AdapterDuration or WarpMetricCatalog.Names.EndpointDuration;
+        var idFilter = TagOrNull(metric, idTag);
         var merged = await MergedAsync(ScanPrefix(metric, []), ct);
 
         var acc = new Dictionary<(DateTime Bucket, string? Tag), long>();
@@ -377,21 +439,22 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
                 continue;
             }
 
-            // baseKey is adapter:{a}:hist:{outcome} (tier/date suffix stripped by TryClassifyKey).
+            // baseKey is {prefix}:{id}:hist:{outcome} (tier/date suffix stripped by TryClassifyKey). Both HTTP
+            // families share the "hist" marker and "dur" duration token.
             var parts = baseKey.Split(':');
             if (parts.Length != 4 || !string.Equals(parts[2], AdapterCounterKeys.HistoryMarker, StringComparison.Ordinal))
             {
                 continue;
             }
 
-            var adapter = parts[1];
+            var id = parts[1];
             var outcome = parts[3];
             if (string.Equals(outcome, AdapterCounterKeys.DurationToken, StringComparison.Ordinal) != wantDuration)
             {
                 continue;
             }
 
-            if (adapterFilter is not null && !string.Equals(adapter, adapterFilter, StringComparison.Ordinal))
+            if (idFilter is not null && !string.Equals(id, idFilter, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -399,7 +462,7 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
             var tagValue = query.BreakdownBy switch
             {
                 WarpMetricCatalog.Tags.Outcome => outcome,
-                WarpMetricCatalog.Tags.Adapter => adapter,
+                _ when string.Equals(query.BreakdownBy, idTag, StringComparison.Ordinal) => id,
                 _ => (string?)null,
             };
 

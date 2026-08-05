@@ -161,7 +161,7 @@ public abstract class MultiAppEndToEndTestsBase : IntegrationTestBase
         adapterB.Calls.ShouldBe(1);
 
         // ---- endpoints: same route, application is part of identity → two distinct aggregates ----
-        var endpointQuery = new EndpointQueryService<TestContext>(Fixture.CreateContext());
+        var endpointQuery = new EndpointQueryService<TestContext>(Fixture.CreateContext(), new LocalMetricSource<TestContext>(Fixture.CreateContext()));
         (await endpointQuery.GetApplications(Ct)).ShouldBe([AppA, AppB]);
 
         var endpointA = (await endpointQuery.GetEndpointStatsByApplication(AppA, Ct)).ShouldHaveSingleItem();

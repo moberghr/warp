@@ -128,13 +128,15 @@ internal sealed class PrometheusMetricSource : IMetricSource
     {
         Names.AdapterCalls => "warp_adapter_calls_total",
         Names.AdapterDuration => "warp_adapter_duration_milliseconds",
+        Names.EndpointCalls => "warp_endpoint_calls_total",
+        Names.EndpointDuration => "warp_endpoint_duration_milliseconds",
         _ => throw new NotSupportedException($"PrometheusMetricSource has no translation for logical metric '{metricName}' yet."),
     };
 
     private static bool IsHistogram(string metricName) => metricName switch
     {
-        Names.AdapterDuration => true,
-        Names.AdapterCalls => false,
+        Names.AdapterDuration or Names.EndpointDuration => true,
+        Names.AdapterCalls or Names.EndpointCalls => false,
         _ => throw new NotSupportedException($"PrometheusMetricSource has no translation for logical metric '{metricName}' yet."),
     };
 

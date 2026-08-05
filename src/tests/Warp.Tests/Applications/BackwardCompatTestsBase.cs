@@ -165,7 +165,7 @@ public abstract class BackwardCompatTestsBase : IAsyncLifetime
         await arrange.SaveChangesAsync(Ct);
 
         (await new AdapterQueryService<TestContext>(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext())).GetApplications(Ct)).ShouldBeEmpty();
-        (await new EndpointQueryService<TestContext>(_fixture.CreateContext()).GetApplications(Ct)).ShouldBeEmpty();
+        (await new EndpointQueryService<TestContext>(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext())).GetApplications(Ct)).ShouldBeEmpty();
     }
 
     [TimedFact]

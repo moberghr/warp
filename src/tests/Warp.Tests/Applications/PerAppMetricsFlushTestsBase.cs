@@ -166,7 +166,7 @@ public abstract class PerAppMetricsFlushTestsBase : IAsyncLifetime
 
         await TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(Ct);
 
-        var service = new EndpointQueryService<TestContext>(_fixture.CreateContext());
+        var service = new EndpointQueryService<TestContext>(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 
         (await service.GetApplications(Ct)).ShouldBe([AppName]);
 
@@ -221,7 +221,7 @@ public abstract class PerAppMetricsFlushTestsBase : IAsyncLifetime
 
         await TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(Ct);
 
-        var service = new EndpointQueryService<TestContext>(_fixture.CreateContext());
+        var service = new EndpointQueryService<TestContext>(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 
         var stats = await service.GetEndpointStatsByApplication("team:orders", Ct);
 
