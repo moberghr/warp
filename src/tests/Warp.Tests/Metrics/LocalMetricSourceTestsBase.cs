@@ -30,6 +30,15 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
 
     private static MetricWindow Window(int hours) => new(T, T.AddHours(hours));
 
+    // Logical refs (the storage keys they seed are qbacklog:{queue}:depth / qwait:{queue} / stats:succeeded).
+    private static readonly MetricRef Succeeded = new(WarpMetricCatalog.Names.LifecycleSucceeded);
+
+    private static MetricRef Depth(string queue)
+        => new(WarpMetricCatalog.Names.QueueDepth, new Dictionary<string, string> { [WarpMetricCatalog.Tags.Queue] = queue });
+
+    private static MetricRef QueueWait(string queue)
+        => new(WarpMetricCatalog.Names.QueueWait, new Dictionary<string, string> { [WarpMetricCatalog.Tags.Queue] = queue });
+
     private LocalMetricSource<TestContext> Source() => new(_fixture.CreateContext());
 
     [TimedFact]
@@ -38,7 +47,7 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
         await SeedStatistic("stats:succeeded", 100);
         await SeedCounter("stats:succeeded", 5); // not yet folded
 
-        (await Source().GetTotalAsync(new MetricRef("stats:succeeded"), null, Ct)).ShouldBe(105);
+        (await Source().GetTotalAsync(Succeeded, null, Ct)).ShouldBe(105);
     }
 
     [TimedFact]
@@ -48,7 +57,7 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
         await SeedHistory("stats:succeeded", T.AddHours(1), 20);
         await SeedHistory("stats:succeeded", T.AddHours(10), 99); // outside the 2h window
 
-        (await Source().GetTotalAsync(new MetricRef("stats:succeeded"), Window(2), Ct)).ShouldBe(30);
+        (await Source().GetTotalAsync(Succeeded, Window(2), Ct)).ShouldBe(30);
     }
 
     [TimedFact]
@@ -59,7 +68,7 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
         await SeedHistory("stats:succeeded", T.AddHours(1), 5);     // next hour
 
         var series = await Source().GetSeriesAsync(
-            new SeriesQuery(new MetricRef("stats:succeeded"), Window(2), MetricResolution.Hourly, MetricAggregation.Sum), Ct);
+            new SeriesQuery(Succeeded, Window(2), MetricResolution.Hourly, MetricAggregation.Sum), Ct);
 
         series.Count.ShouldBe(2);
         series[0].BucketStart.ShouldBe(T);
@@ -73,8 +82,8 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
     {
         await SeedStatistic("qbacklog:default:depth", 250);
 
-        (await Source().GetGaugeAsync(new MetricRef("qbacklog:default:depth"), Ct)).ShouldBe(250);
-        (await Source().GetGaugeAsync(new MetricRef("qbacklog:missing:depth"), Ct)).ShouldBeNull();
+        (await Source().GetGaugeAsync(Depth("default"), Ct)).ShouldBe(250);
+        (await Source().GetGaugeAsync(Depth("missing"), Ct)).ShouldBeNull();
     }
 
     [TimedFact]
@@ -84,7 +93,7 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
         await SeedStatistic(QueueWaitKeys.PctHistory("default", 100, Suffix(T)), 4);
         await SeedStatistic(QueueWaitKeys.PctHistory("default", 250, Suffix(T)), 96);
 
-        (await Source().GetPercentileAsync(new MetricRef("qwait:default"), 95, Window(1), Ct)).ShouldBe(250);
+        (await Source().GetPercentileAsync(QueueWait("default"), 95, Window(1), Ct)).ShouldBe(250);
     }
 
     private static string Suffix(DateTime ts) => MetricTiers.Suffix(MetricTier.Fine, ts, 5);

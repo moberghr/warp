@@ -120,8 +120,8 @@ public sealed class SloEvaluator<TContext> : IServerTask
         {
             SloKind.SuccessRate => ComputeSuccessRateAsync(def, now, ct),
             SloKind.DeadlineAttainment => ComputeDeadlineAsync(def, now, ct),
-            SloKind.ExecutionLatency => ComputeLatencyAsync(def, now, $"{JobStatsKeys.Prefix}:{JobStatsKeys.TypeMarker}:{def.Dimension}", ct),
-            SloKind.QueueWaitLatency => ComputeLatencyAsync(def, now, $"{QueueWaitKeys.Prefix}:{def.Dimension}", ct),
+            SloKind.ExecutionLatency => ComputeLatencyAsync(def, now, ExecutionLatencyRef(def), ct),
+            SloKind.QueueWaitLatency => ComputeLatencyAsync(def, now, QueueWaitRef(def), ct),
             SloKind.BacklogDepth => ComputeBacklogAsync(def, ct),
             _ => UnsupportedKindAsync(def),
         };
@@ -145,8 +145,8 @@ public sealed class SloEvaluator<TContext> : IServerTask
         var windowStart = now.AddSeconds(-def.WindowSeconds);
         var shortStart = ShortWindowStart(def, now);
 
-        var (succW, succS) = await WindowedSumAsync(JobstatHistoryBase(def, JobStatsKeys.SucceededToken), windowStart, shortStart, ct);
-        var (failW, failS) = await WindowedSumAsync(JobstatHistoryBase(def, JobStatsKeys.FailedToken), windowStart, shortStart, ct);
+        var (succW, succS) = await WindowedSumAsync(JobExecutionRef(def, JobStatsKeys.SucceededToken), windowStart, shortStart, ct);
+        var (failW, failS) = await WindowedSumAsync(JobExecutionRef(def, JobStatsKeys.FailedToken), windowStart, shortStart, ct);
 
         var (att, budget, burnLong) = SloMath.EvaluateRate(succW, succW + failW, def.TargetValue);
         var (_, _, burnShort) = SloMath.EvaluateRate(succS, succS + failS, def.TargetValue);
@@ -159,8 +159,8 @@ public sealed class SloEvaluator<TContext> : IServerTask
         var windowStart = now.AddSeconds(-def.WindowSeconds);
         var shortStart = ShortWindowStart(def, now);
 
-        var (cntW, cntS) = await WindowedSumAsync(DeadlineHistoryBase(def, DeadlineKeys.CountToken), windowStart, shortStart, ct);
-        var (missW, missS) = await WindowedSumAsync(DeadlineHistoryBase(def, DeadlineKeys.MissToken), windowStart, shortStart, ct);
+        var (cntW, cntS) = await WindowedSumAsync(DeadlineRef(def, WarpMetricCatalog.Names.Deadline), windowStart, shortStart, ct);
+        var (missW, missS) = await WindowedSumAsync(DeadlineRef(def, WarpMetricCatalog.Names.DeadlineMiss), windowStart, shortStart, ct);
 
         var (att, budget, burnLong) = SloMath.EvaluateRate(cntW - missW, cntW, def.TargetValue);
         var (_, _, burnShort) = SloMath.EvaluateRate(cntS - missS, cntS, def.TargetValue);
@@ -168,12 +168,11 @@ public sealed class SloEvaluator<TContext> : IServerTask
         return new EvalResult(att, budget, burnShort, burnLong, HasData: cntW > 0);
     }
 
-    private async Task<EvalResult> ComputeLatencyAsync(SloDefinition def, DateTime now, string pctBase, CancellationToken ct)
+    private async Task<EvalResult> ComputeLatencyAsync(SloDefinition def, DateTime now, MetricRef metric, CancellationToken ct)
     {
         var windowStart = now.AddSeconds(-def.WindowSeconds);
         var shortStart = ShortWindowStart(def, now);
         var percentile = def.Percentile ?? 95;
-        var metric = new MetricRef(pctBase);
 
         // Windowed percentile from the tiered pcth histogram (§8.30); the recent (short) window gives fast-burn.
         var observed = await _metrics.GetPercentileAsync(metric, percentile, new MetricWindow(windowStart, DateTime.MaxValue), ct);
@@ -189,7 +188,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
 
     private async Task<EvalResult> ComputeBacklogAsync(SloDefinition def, CancellationToken ct)
     {
-        var depth = await _metrics.GetGaugeAsync(new MetricRef(QueueBacklogKeys.Total(def.Dimension, QueueBacklogKeys.DepthToken)), ct);
+        var depth = await _metrics.GetGaugeAsync(BacklogRef(def), ct);
         var (att, budget, burn) = SloMath.EvaluateThreshold(depth ?? 0, def.TargetValue);
 
         // A depth of 0 is legitimately healthy (empty queue); a missing gauge (null) means the objective's queue
@@ -199,10 +198,10 @@ public sealed class SloEvaluator<TContext> : IServerTask
 
     // Sums a windowed history metric (via the metric seam) into (window-total, short-window-total). The seam
     // returns fine-resolution buckets over [windowStart, ∞); the short fast-burn window is the subset on/after shortStart.
-    private async Task<(long Window, long Short)> WindowedSumAsync(string baseKey, DateTime windowStart, DateTime shortStart, CancellationToken ct)
+    private async Task<(long Window, long Short)> WindowedSumAsync(MetricRef metric, DateTime windowStart, DateTime shortStart, CancellationToken ct)
     {
         var series = await _metrics.GetSeriesAsync(
-            new SeriesQuery(new MetricRef(baseKey), new MetricWindow(windowStart, DateTime.MaxValue), MetricResolution.Fine, MetricAggregation.Sum), ct);
+            new SeriesQuery(metric, new MetricWindow(windowStart, DateTime.MaxValue), MetricResolution.Fine, MetricAggregation.Sum), ct);
 
         long window = 0, shortWindow = 0;
         foreach (var bucket in series)
@@ -217,18 +216,40 @@ public sealed class SloEvaluator<TContext> : IServerTask
         return (window, shortWindow);
     }
 
-    // The success-rate history base key (before the tier suffix) for a token, app-agnostic or the disjoint per-app
-    // slice (§8.23) — built via the real key builder so format/sanitization matches how it was written.
-    private static string JobstatHistoryBase(SloDefinition def, string token)
-        => def.Application is null
-            ? JobStatsKeys.History(JobStatsKeys.TypeMarker, def.Dimension, token, string.Empty)
-            : JobStatsKeys.AppHistory(JobStatsKeys.Sanitize(def.Application), JobStatsKeys.TypeMarker, def.Dimension, token, string.Empty);
+    // Success-rate counts the per-type job.execution metric for one outcome, app-agnostic or the disjoint per-app
+    // slice (§8.23) — the backend resolves the storage key from the logical name + tags.
+    private static MetricRef JobExecutionRef(SloDefinition def, string outcome)
+        => new(WarpMetricCatalog.Names.JobExecution, WithApp(def, (WarpMetricCatalog.Tags.Type, def.Dimension), (WarpMetricCatalog.Tags.Outcome, outcome)));
 
-    // The deadline-attainment history base key for a token, app-agnostic or per-app.
-    private static string DeadlineHistoryBase(SloDefinition def, string token)
-        => def.Application is null
-            ? DeadlineKeys.History(def.Dimension, token, string.Empty)
-            : DeadlineKeys.AppHistory(DeadlineKeys.Sanitize(def.Application), def.Dimension, token, string.Empty);
+    // Deadline attainment (count denominator or miss numerator) for the objective's job type, app-agnostic or per-app.
+    private static MetricRef DeadlineRef(SloDefinition def, string metricName)
+        => new(metricName, WithApp(def, (WarpMetricCatalog.Tags.Type, def.Dimension)));
+
+    // Execution / queue-wait latency read the app-AGNOSTIC histogram even for an app-scoped objective: the per-app
+    // jobstat/qwait slices omit the pcth histogram to bound volume (§8.19), so the application tag is left off.
+    private static MetricRef ExecutionLatencyRef(SloDefinition def)
+        => new(WarpMetricCatalog.Names.JobExecutionDuration, new Dictionary<string, string> { [WarpMetricCatalog.Tags.Type] = def.Dimension });
+
+    private static MetricRef QueueWaitRef(SloDefinition def)
+        => new(WarpMetricCatalog.Names.QueueWait, new Dictionary<string, string> { [WarpMetricCatalog.Tags.Queue] = def.Dimension });
+
+    // Backlog is a queue-global gauge (never app-sliced, §8.26).
+    private static MetricRef BacklogRef(SloDefinition def)
+        => new(WarpMetricCatalog.Names.QueueDepth, new Dictionary<string, string> { [WarpMetricCatalog.Tags.Queue] = def.Dimension });
+
+    // Builds a tag set for the objective's dimension, adding the application slice tag only when the objective is
+    // application-scoped.
+    private static Dictionary<string, string> WithApp(SloDefinition def, params (string Key, string Value)[] tags)
+    {
+        var result = tags.ToDictionary(t => t.Key, t => t.Value, StringComparer.Ordinal);
+
+        if (def.Application is not null)
+        {
+            result[WarpMetricCatalog.Tags.Application] = def.Application;
+        }
+
+        return result;
+    }
 
     // Fast-burn short window = the objective window / 12, floored to 5 minutes — small enough to catch a fast
     // burn and now populated by the fine (5-min) metrics tier (§8.30), which is what makes real fast-burn possible.

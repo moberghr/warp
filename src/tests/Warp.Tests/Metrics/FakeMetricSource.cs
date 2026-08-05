@@ -93,6 +93,70 @@ internal sealed class FakeMetricSource : IMetricSource
     public Task<double?> GetGaugeAsync(MetricRef metric, CancellationToken ct)
         => Task.FromResult(_gauges.TryGetValue(metric.Name, out var v) ? v : (double?)null);
 
+    public Task<IReadOnlyList<BreakdownRow>> GetBreakdownAsync(MetricRef metric, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
+    {
+        var rows = Samples(metric)
+            .Where(s => window is not { } w || (s.Ts >= w.FromUtc && s.Ts < w.ToUtc))
+            .GroupBy(s => GroupKey(s.Tags, groupBy), StringComparer.Ordinal)
+            .Select(g => new BreakdownRow(GroupTags(g.First().Tags, groupBy), g.Sum(s => s.Value)))
+            .OrderBy(r => GroupKey(r.Tags, groupBy), StringComparer.Ordinal)
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<BreakdownRow>>(rows);
+    }
+
+    public Task<IReadOnlyList<PercentileRow>> GetPercentileBreakdownAsync(MetricRef metric, int percentile, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
+    {
+        var rows = (_latencies.TryGetValue(metric.Name, out var list) ? list : [])
+            .Where(l => Matches(l.Tags, metric.Tags))
+            .GroupBy(l => GroupKey(l.Tags, groupBy), StringComparer.Ordinal)
+            .Select(g => new PercentileRow(GroupTags(g.First().Tags, groupBy), NearestRank(g.Select(l => l.Ms), percentile)))
+            .OrderBy(r => GroupKey(r.Tags, groupBy), StringComparer.Ordinal)
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<PercentileRow>>(rows);
+    }
+
+    public Task<IReadOnlyList<string>> GetTagValuesAsync(MetricRef metric, string tag, MetricWindow? window, CancellationToken ct)
+    {
+        var fromCounters = Samples(metric)
+            .Where(s => window is not { } w || (s.Ts >= w.FromUtc && s.Ts < w.ToUtc))
+            .Select(s => Tag(s.Tags, tag));
+
+        var fromLatencies = (_latencies.TryGetValue(metric.Name, out var list) ? list : [])
+            .Where(l => Matches(l.Tags, metric.Tags))
+            .Select(l => Tag(l.Tags, tag));
+
+        var values = fromCounters
+            .Concat(fromLatencies)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(v => v, StringComparer.Ordinal)
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<string>>(values);
+    }
+
+    private static double NearestRank(IEnumerable<int> values, int percentile)
+    {
+        var sorted = values.Order().ToList();
+        if (sorted.Count == 0)
+        {
+            return 0;
+        }
+
+        var rank = (int)Math.Ceiling(Math.Clamp(percentile, 0, 100) / 100.0 * sorted.Count);
+
+        return sorted[Math.Clamp(rank - 1, 0, sorted.Count - 1)];
+    }
+
+    // A stable, value-based grouping key (GroupBy on a Dictionary would use reference equality). The Unit
+    // Separator between tag values keeps distinct combinations from colliding.
+    private static string GroupKey(IReadOnlyDictionary<string, string> tags, IReadOnlyList<string> groupBy)
+        => string.Join("", groupBy.Select(t => Tag(tags, t)));
+
+    private static Dictionary<string, string> GroupTags(IReadOnlyDictionary<string, string> tags, IReadOnlyList<string> groupBy)
+        => groupBy.ToDictionary(t => t, t => Tag(tags, t), StringComparer.Ordinal);
+
     private IEnumerable<Sample> Samples(MetricRef metric)
         => (_counters.TryGetValue(metric.Name, out var list) ? list : []).Where(s => Matches(s.Tags, metric.Tags));
 

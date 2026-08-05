@@ -109,6 +109,66 @@ public class MetricSourceContractTests
     }
 
     [Fact]
+    public async Task GetBreakdown_GroupsTotalsByTags_OverWindow()
+    {
+        var src = new FakeMetricSource()
+            .Add("calls", T0, 3, ("adapter", "stripe"), ("outcome", "ok"))
+            .Add("calls", T0.AddHours(1), 2, ("adapter", "stripe"), ("outcome", "ok"))
+            .Add("calls", T0, 1, ("adapter", "stripe"), ("outcome", "failed"))
+            .Add("calls", T0, 4, ("adapter", "twilio"), ("outcome", "ok"))
+            .Add("calls", T0.AddHours(5), 9, ("adapter", "stripe"), ("outcome", "ok")); // outside 2h window
+
+        var rows = await src.GetBreakdownAsync(new MetricRef("calls"), ["adapter", "outcome"], Window(2), Ct);
+
+        rows.Count.ShouldBe(3);
+        rows.ShouldContain(r => r.Tags["adapter"] == "stripe" && r.Tags["outcome"] == "ok" && r.Value == 5);
+        rows.ShouldContain(r => r.Tags["adapter"] == "stripe" && r.Tags["outcome"] == "failed" && r.Value == 1);
+        rows.ShouldContain(r => r.Tags["adapter"] == "twilio" && r.Tags["outcome"] == "ok" && r.Value == 4);
+    }
+
+    [Fact]
+    public async Task GetBreakdown_TagFilterNarrowsBeforeGrouping()
+    {
+        var src = new FakeMetricSource()
+            .Add("calls", T0, 3, ("adapter", "stripe"), ("outcome", "ok"))
+            .Add("calls", T0, 4, ("adapter", "twilio"), ("outcome", "ok"));
+
+        var rows = await src.GetBreakdownAsync(new MetricRef("calls", Tags(("adapter", "stripe"))), ["outcome"], null, Ct);
+
+        rows.ShouldHaveSingleItem().Value.ShouldBe(3);
+    }
+
+    [Fact]
+    public async Task GetPercentileBreakdown_PerGroupNearestRank()
+    {
+        var src = new FakeMetricSource();
+        for (var i = 1; i <= 100; i++)
+        {
+            src.AddLatency("lat", i, ("route", "a"));
+            src.AddLatency("lat", i * 2, ("route", "b"));
+        }
+
+        var rows = await src.GetPercentileBreakdownAsync(new MetricRef("lat"), 95, ["route"], Window(1), Ct);
+
+        rows.Count.ShouldBe(2);
+        rows.Single(r => string.Equals(r.Tags["route"], "a", StringComparison.Ordinal)).Value.ShouldBe(95);
+        rows.Single(r => string.Equals(r.Tags["route"], "b", StringComparison.Ordinal)).Value.ShouldBe(190);
+    }
+
+    [Fact]
+    public async Task GetTagValues_DistinctSortedValues()
+    {
+        var src = new FakeMetricSource()
+            .Add("calls", T0, 1, ("adapter", "stripe"))
+            .Add("calls", T0, 1, ("adapter", "twilio"))
+            .Add("calls", T0, 1, ("adapter", "stripe")); // duplicate
+
+        var values = await src.GetTagValuesAsync(new MetricRef("calls"), "adapter", null, Ct);
+
+        values.ShouldBe(["stripe", "twilio"]);
+    }
+
+    [Fact]
     public async Task Empty_ReturnsZeroesAndEmpties()
     {
         var src = new FakeMetricSource();
@@ -117,6 +177,9 @@ public class MetricSourceContractTests
         (await src.GetSeriesAsync(new SeriesQuery(new MetricRef("x"), Window(1), MetricResolution.Hourly, MetricAggregation.Sum), Ct)).ShouldBeEmpty();
         (await src.GetPercentileAsync(new MetricRef("x"), 95, Window(1), Ct)).ShouldBe(0);
         (await src.GetGaugeAsync(new MetricRef("x"), Ct)).ShouldBeNull();
+        (await src.GetBreakdownAsync(new MetricRef("x"), ["adapter"], null, Ct)).ShouldBeEmpty();
+        (await src.GetPercentileBreakdownAsync(new MetricRef("x"), 95, ["route"], Window(1), Ct)).ShouldBeEmpty();
+        (await src.GetTagValuesAsync(new MetricRef("x"), "adapter", null, Ct)).ShouldBeEmpty();
     }
 
     private static Dictionary<string, string> Tags(params (string Key, string Value)[] tags)

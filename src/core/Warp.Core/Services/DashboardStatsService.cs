@@ -98,9 +98,9 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
         var messagesCompleted = messageStateCounts.Where(x => x.State == State.Completed).Sum(x => x.Count);
         var messagesFailed = messageStateCounts.Where(x => x.State == State.Failed).Sum(x => x.Count);
 
-        var totalSucceeded = await GetCombinedStatValue("stats:succeeded");
-        var totalFailed = await GetCombinedStatValue("stats:failed");
-        var totalDeleted = await GetCombinedStatValue("stats:deleted");
+        var totalSucceeded = await GetCombinedStatValue(WarpMetricCatalog.Names.LifecycleSucceeded);
+        var totalFailed = await GetCombinedStatValue(WarpMetricCatalog.Names.LifecycleFailed);
+        var totalDeleted = await GetCombinedStatValue(WarpMetricCatalog.Names.LifecycleDeleted);
 
         // Records dropped by the lossy pipelines in the last 24h (§8.19/§8.21/§8.27) — a health signal so a
         // saturated recording path is visible in-box, not only on the OTel meter. Windowed (not lifetime) so the
@@ -371,15 +371,19 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
         return [.. points.Values.OrderBy(p => p.Hour)];
     }
 
-    // Lifetime total for a single key (folded Statistic + not-yet-folded Counter), via the metric seam (§8.3x).
-    private Task<long> GetCombinedStatValue(string key)
-        => _metrics.GetTotalAsync(new MetricRef(key), null, CancellationToken.None);
+    // Lifetime total for a dashboard summary counter (folded Statistic + not-yet-folded Counter), via the metric
+    // seam (§8.3x). Takes a logical WarpMetricCatalog name; the backend resolves the storage key.
+    private Task<long> GetCombinedStatValue(string logicalName)
+        => _metrics.GetTotalAsync(new MetricRef(logicalName), null, CancellationToken.None);
 
-    // Sums the tiered warpsys:records-dropped:{pipeline} history from <paramref name="since"/> onward (open-ended
-    // window), across folded Statistic + not-yet-folded Counter rows, via the metric seam (§8.3x) — the local
-    // backend reproduces the tier-classified merged read this used to inline.
+    // Sums the records-dropped history for a pipeline from <paramref name="since"/> onward (open-ended window),
+    // across folded Statistic + not-yet-folded Counter rows, via the metric seam (§8.3x) — the local backend
+    // reproduces the tier-classified merged read this used to inline.
     private Task<long> GetDroppedInWindow(DropPipeline pipeline, DateTime since)
-        => _metrics.GetTotalAsync(new MetricRef(DroppedRecordKeys.Base(pipeline)), new MetricWindow(since, DateTime.MaxValue), CancellationToken.None);
+        => _metrics.GetTotalAsync(
+            new MetricRef(WarpMetricCatalog.Names.RecordsDropped, new Dictionary<string, string> { [WarpMetricCatalog.Tags.Pipeline] = DroppedRecordKeys.Token(pipeline) }),
+            new MetricWindow(since, DateTime.MaxValue),
+            CancellationToken.None);
 
     public async Task<List<CounterModel>> GetCounters()
     {

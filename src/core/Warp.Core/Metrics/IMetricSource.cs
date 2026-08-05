@@ -50,6 +50,12 @@ public sealed record SeriesQuery(
 /// <summary>One point of a series. <paramref name="TagValue"/> is the split value when the query set <c>BreakdownBy</c>, else null.</summary>
 public sealed record SeriesBucket(DateTime BucketStart, string? TagValue, long Value);
 
+/// <summary>One row of a grouped total: the <paramref name="Tags"/> values that identify the group and the summed <paramref name="Value"/>.</summary>
+public sealed record BreakdownRow(IReadOnlyDictionary<string, string> Tags, long Value);
+
+/// <summary>One row of a grouped percentile: the <paramref name="Tags"/> values that identify the group and the percentile <paramref name="Value"/>.</summary>
+public sealed record PercentileRow(IReadOnlyDictionary<string, string> Tags, double Value);
+
 /// <summary>
 /// The read seam for Warp's own metrics (§8.3x). Every dashboard / SLO-evaluator metric read reduces to these four
 /// operations, so the backing store is pluggable: the default <c>LocalMetricSource</c> reads the durable
@@ -71,4 +77,27 @@ public interface IMetricSource
 
     /// <summary>The current value of a gauge metric, or null when it has never been reported. Local → the latest <c>Statistic</c> value; Prometheus → an instant query.</summary>
     Task<double?> GetGaugeAsync(MetricRef metric, CancellationToken ct);
+
+    /// <summary>
+    /// Grouped total for a metric, split by one or more <paramref name="groupBy"/> tags, over the window (null =
+    /// lifetime). One <see cref="BreakdownRow"/> per distinct tag-combination. An empty <paramref name="groupBy"/> is
+    /// a single overall total. Local → a merged read grouped by the parsed tag tokens; Prometheus →
+    /// <c>sum by (groupBy)(increase(name{tags}[range]))</c>.
+    /// </summary>
+    Task<IReadOnlyList<BreakdownRow>> GetBreakdownAsync(MetricRef metric, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct);
+
+    /// <summary>
+    /// Grouped percentile of a latency-histogram metric, split by one or more <paramref name="groupBy"/> tags, over
+    /// the window (null = lifetime). One <see cref="PercentileRow"/> per group. Local → a per-group percentile walk
+    /// over the tiered/lifetime histogram buckets; Prometheus →
+    /// <c>histogram_quantile(p, sum by (groupBy, le)(rate(name_bucket{tags}[range])))</c>.
+    /// </summary>
+    Task<IReadOnlyList<PercentileRow>> GetPercentileBreakdownAsync(MetricRef metric, int percentile, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct);
+
+    /// <summary>
+    /// The distinct values a <paramref name="tag"/> takes for a metric over the window (null = lifetime) — the entity
+    /// list a dashboard page enumerates (adapters, routes, queues, job types, …). Local → the distinct parsed token
+    /// from the key scan; Prometheus → a label-values / series query.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetTagValuesAsync(MetricRef metric, string tag, MetricWindow? window, CancellationToken ct);
 }

@@ -7,14 +7,12 @@ namespace Warp.Core.Metrics;
 
 /// <summary>
 /// The default <see cref="IMetricSource"/> — reads Warp's own metrics from the durable <c>Statistic</c>/<c>Counter</c>
-/// fold. It owns the translation from an abstract <see cref="MetricRef"/> to the colon-delimited storage keys
-/// (§8.6/§8.19) and reproduces the existing merged Statistic+Counter read + <see cref="MetricTiers"/> down-bin
-/// semantics exactly, so routing a reader through the seam changes no numbers. A later Prometheus backend owns its
-/// own <see cref="MetricRef"/>→OTel-name translation independently — no shared mapping table.
-///
-/// Phase 1: <see cref="MetricRef.Name"/> is the colon base key (e.g. <c>stats:succeeded</c>,
-/// <c>warpsys:records-dropped:adapter</c>); the per-family logical→colon mapping is filled in as jobstat/qwait/SLO
-/// reads are routed. Read-side only, off the worker hot path (§0.2/§6.1).
+/// fold. It owns the translation from a logical <see cref="MetricRef"/> (a <see cref="WarpMetricCatalog"/> name +
+/// tags) to the colon-delimited storage keys (§8.6/§8.19) and reproduces the existing merged Statistic+Counter read
+/// + <see cref="MetricTiers"/> down-bin semantics exactly, so routing a reader through the seam changes no numbers.
+/// A later Prometheus backend owns its own <see cref="MetricRef"/>→OTel-name translation independently — no shared
+/// mapping table; <see cref="ResolveBaseKey"/> is the local half only. Read-side only, off the worker hot path
+/// (§0.2/§6.1).
 /// </summary>
 internal sealed class LocalMetricSource<TContext> : IMetricSource
     where TContext : DbContext
@@ -30,12 +28,13 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         if (window is null)
         {
             // Lifetime total — the exact key (§ combined Statistic + not-yet-folded Counter, as GetCombinedStatValue).
+            var key = ResolveBaseKey(metric);
             var aggregated = await _context.Set<Statistic>()
-                .Where(x => x.Key == metric.Name)
+                .Where(x => x.Key == key)
                 .Select(x => x.Value)
                 .FirstOrDefaultAsync(ct);
             var pending = await _context.Set<Counter>()
-                .Where(x => x.Key == metric.Name)
+                .Where(x => x.Key == key)
                 .SumAsync(x => (long)x.Value, ct);
 
             return aggregated + pending;
@@ -49,7 +48,7 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
 
     public async Task<IReadOnlyList<SeriesBucket>> GetSeriesAsync(SeriesQuery query, CancellationToken ct)
     {
-        var prefix = query.Metric.Name + ":";
+        var prefix = ResolveBaseKey(query.Metric) + ":";
 
         var stats = await _context.Set<Statistic>()
             .Where(x => x.Key.StartsWith(prefix))
@@ -91,7 +90,7 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         // The tiered latency histogram: keys …:pcth:{upperMs}:{tier}:{stamp}. Sum bucket counts across the window,
         // then walk to the requested percentile (overflow bucket reports the last finite bound — the shared
         // display convention, mirroring SloMath.Percentile / the per-surface readers).
-        var prefix = metric.Name + PctHistoryMarker;
+        var prefix = ResolveBaseKey(metric) + PctHistoryMarker;
 
         var stats = await _context.Set<Statistic>()
             .Where(x => x.Key.StartsWith(prefix))
@@ -143,13 +142,102 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
 
     public async Task<double?> GetGaugeAsync(MetricRef metric, CancellationToken ct)
     {
+        var key = ResolveBaseKey(metric);
         var value = await _context.Set<Statistic>()
-            .Where(x => x.Key == metric.Name)
+            .Where(x => x.Key == key)
             .Select(x => (long?)x.Value)
             .FirstOrDefaultAsync(ct);
 
         return value;
     }
+
+    // The grouped/enumeration reads back the fan-out dashboard tables (per-adapter, per-route, per-queue, …). Each
+    // family's reverse parse (colon key → tag values) is wired as that family's reader is routed through the seam
+    // (Batch C of the metric-source plan). Until then these throw loudly rather than silently returning empty.
+    public Task<IReadOnlyList<BreakdownRow>> GetBreakdownAsync(MetricRef metric, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
+        => throw NotRoutedYet(metric, nameof(GetBreakdownAsync));
+
+    public Task<IReadOnlyList<PercentileRow>> GetPercentileBreakdownAsync(MetricRef metric, int percentile, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
+        => throw NotRoutedYet(metric, nameof(GetPercentileBreakdownAsync));
+
+    public Task<IReadOnlyList<string>> GetTagValuesAsync(MetricRef metric, string tag, MetricWindow? window, CancellationToken ct)
+        => throw NotRoutedYet(metric, nameof(GetTagValuesAsync));
+
+    private static NotSupportedException NotRoutedYet(MetricRef metric, string method)
+        => new($"LocalMetricSource.{method} has no translation for logical metric '{metric.Name}' yet (routed per family in Batch C).");
+
+    // Translates a logical MetricRef (a WarpMetricCatalog name + tags) to its colon storage base key — the exact
+    // key for a gauge/lifetime total, or the prefix that the tiered scan / pcth walk extends. Mirrors how the
+    // matching *Keys.Build wrote the family, so the seam reads exactly what was written. Application is sanitized
+    // (as the writers do); the dimension/queue/type is passed through unchanged to match the current SLO/dashboard
+    // readers bit-for-bit.
+    private static string ResolveBaseKey(MetricRef metric)
+        => metric.Name switch
+        {
+            WarpMetricCatalog.Names.LifecycleSucceeded => "stats:succeeded",
+            WarpMetricCatalog.Names.LifecycleFailed => "stats:failed",
+            WarpMetricCatalog.Names.LifecycleDeleted => "stats:deleted",
+            WarpMetricCatalog.Names.RecordsDropped => $"{DroppedRecordKeys.Prefix}:{Tag(metric, WarpMetricCatalog.Tags.Pipeline)}",
+            WarpMetricCatalog.Names.QueueDepth => QueueBacklogKeys.Total(Tag(metric, WarpMetricCatalog.Tags.Queue), QueueBacklogKeys.DepthToken),
+            WarpMetricCatalog.Names.QueueOldestAge => QueueBacklogKeys.Total(Tag(metric, WarpMetricCatalog.Tags.Queue), QueueBacklogKeys.OldestAgeToken),
+            WarpMetricCatalog.Names.QueueWait => QueueWaitBase(metric),
+            WarpMetricCatalog.Names.JobExecution => JobExecutionHistoryBase(metric),
+            WarpMetricCatalog.Names.JobExecutionDuration => JobExecutionDurationBase(metric),
+            WarpMetricCatalog.Names.Deadline => DeadlineHistoryBase(metric, DeadlineKeys.CountToken),
+            WarpMetricCatalog.Names.DeadlineMiss => DeadlineHistoryBase(metric, DeadlineKeys.MissToken),
+            _ => throw NotRoutedYet(metric, nameof(ResolveBaseKey)),
+        };
+
+    // qwait:{queue} / qwait-app:{app}:{queue} — the base the pcth percentile walk (and count/dur reads) extend.
+    private static string QueueWaitBase(MetricRef metric)
+    {
+        var queue = Tag(metric, WarpMetricCatalog.Tags.Queue);
+        var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
+
+        return app is null
+            ? $"{QueueWaitKeys.Prefix}:{queue}"
+            : $"{QueueWaitKeys.AppPrefix}:{QueueWaitKeys.Sanitize(app)}:{queue}";
+    }
+
+    // jobstat[-app]:type:{id}:hist:{outcome} — the history base the windowed series sums (per SloEvaluator).
+    private static string JobExecutionHistoryBase(MetricRef metric)
+    {
+        var type = Tag(metric, WarpMetricCatalog.Tags.Type);
+        var outcome = Tag(metric, WarpMetricCatalog.Tags.Outcome);
+        var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
+
+        return app is null
+            ? JobStatsKeys.History(JobStatsKeys.TypeMarker, type, outcome, string.Empty)
+            : JobStatsKeys.AppHistory(JobStatsKeys.Sanitize(app), JobStatsKeys.TypeMarker, type, outcome, string.Empty);
+    }
+
+    // jobstat:type:{id} — the base the pcth percentile walk extends for execution latency.
+    private static string JobExecutionDurationBase(MetricRef metric)
+    {
+        var type = Tag(metric, WarpMetricCatalog.Tags.Type);
+        var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
+
+        return app is null
+            ? $"{JobStatsKeys.Prefix}:{JobStatsKeys.TypeMarker}:{type}"
+            : $"{JobStatsKeys.AppPrefix}:{JobStatsKeys.Sanitize(app)}:{JobStatsKeys.TypeMarker}:{type}";
+    }
+
+    // deadline[-app]:{type}:hist:{token} — the history base the windowed attainment sums.
+    private static string DeadlineHistoryBase(MetricRef metric, string token)
+    {
+        var type = Tag(metric, WarpMetricCatalog.Tags.Type);
+        var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
+
+        return app is null
+            ? DeadlineKeys.History(type, token, string.Empty)
+            : DeadlineKeys.AppHistory(DeadlineKeys.Sanitize(app), type, token, string.Empty);
+    }
+
+    private static string Tag(MetricRef metric, string key)
+        => TagOrNull(metric, key) ?? throw new InvalidOperationException($"Metric '{metric.Name}' requires tag '{key}'.");
+
+    private static string? TagOrNull(MetricRef metric, string key)
+        => metric.Tags is { } tags && tags.TryGetValue(key, out var value) ? value : null;
 
     private static DateTime Truncate(MetricResolution resolution, DateTime ts) => resolution switch
     {
