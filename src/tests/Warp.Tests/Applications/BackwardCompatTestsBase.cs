@@ -184,14 +184,14 @@ public abstract class BackwardCompatTestsBase : IAsyncLifetime
         });
         await arrange.SaveChangesAsync(Ct);
 
-        var query = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var query = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 
         // App-agnostic listing (no filter) surfaces the null-app job — it is NOT hidden.
         var unfiltered = await query.GetJobsList(new BaseListRequest(), State.Completed, application: null);
         unfiltered.Items.ShouldHaveSingleItem().Id.ShouldBe(jobId);
 
         // Filtering by a real application excludes the null-app (unassigned) job.
-        var filtered = await new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System)
+        var filtered = await new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()))
             .GetJobsList(new BaseListRequest(), State.Completed, "some-app");
         filtered.Items.ShouldBeEmpty();
     }

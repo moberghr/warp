@@ -292,5 +292,5 @@ public abstract class MultiAppEndToEndTestsBase : IntegrationTestBase
             Options.Create(new WarpConfiguration { ApplicationInstanceStaleGrace = StaleGrace }));
 
     private JobQueryService<TestContext> CreateJobQuery()
-        => new(Fixture.CreateContext(), TimeProvider.System);
+        => new(Fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(Fixture.CreateContext()));
 }

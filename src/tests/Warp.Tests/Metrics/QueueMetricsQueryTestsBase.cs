@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Data.Entities;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 
@@ -36,7 +37,7 @@ public abstract class QueueMetricsQueryTestsBase : IAsyncLifetime
             ("qbacklog:default:depth", 3),
             ("qbacklog:default:oldest_age_seconds", 42));
 
-        var result = await new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System).GetQueueMetrics();
+        var result = await new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext())).GetQueueMetrics();
 
         var q = result.Queues.ShouldHaveSingleItem();
         q.Queue.ShouldBe("default");
@@ -57,7 +58,7 @@ public abstract class QueueMetricsQueryTestsBase : IAsyncLifetime
             ("qwait-app:orders:default:dur", 1000),             // avg = 500ms
             ("qbacklog:default:depth", 7));                     // backlog is queue-GLOBAL (no qbacklog-app family)
 
-        var result = await new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System).GetQueueMetrics("orders");
+        var result = await new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext())).GetQueueMetrics("orders");
 
         var q = result.Queues.ShouldHaveSingleItem();
         q.ClaimedCount.ShouldBe(2);         // the app's own wait, not the app-agnostic 100

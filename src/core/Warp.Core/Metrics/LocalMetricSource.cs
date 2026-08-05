@@ -214,6 +214,8 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         WarpMetricCatalog.Names.AdapterDuration => AdapterCounterKeys.Buckets[^2],
         WarpMetricCatalog.Names.EndpointDuration => EndpointCounterKeys.Buckets[^2],
         WarpMetricCatalog.Names.ClientVitalsValue => ClientEventKeys.Buckets[^2],
+        WarpMetricCatalog.Names.JobExecutionDuration => JobStatsKeys.Buckets[^2],
+        WarpMetricCatalog.Names.QueueWait => QueueWaitKeys.Buckets[^2],
         _ => throw new NotSupportedException($"No overflow bound for '{metricName}'."),
     };
 
@@ -298,6 +300,21 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
             return $"{ClientEventKeys.Prefix}:";
         }
 
+        if (metric.Name is WarpMetricCatalog.Names.JobExecution or WarpMetricCatalog.Names.JobExecutionDuration)
+        {
+            return AppScopedPrefix(metric, involved, JobStatsKeys.Prefix, JobStatsKeys.AppPrefix, JobStatsKeys.Sanitize);
+        }
+
+        if (metric.Name is WarpMetricCatalog.Names.QueueWait or WarpMetricCatalog.Names.QueueWaitCount)
+        {
+            return AppScopedPrefix(metric, involved, QueueWaitKeys.Prefix, QueueWaitKeys.AppPrefix, QueueWaitKeys.Sanitize);
+        }
+
+        if (metric.Name is WarpMetricCatalog.Names.QueueDepth or WarpMetricCatalog.Names.QueueOldestAge)
+        {
+            return $"{QueueBacklogKeys.Prefix}:"; // backlog is queue-global (never app-sliced, §8.23)
+        }
+
         var (prefix, appPrefix, idTag) = HttpFamily(metric.Name);
         var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
 
@@ -322,6 +339,18 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
 
     private static string SanitizeSegment(string value) => value.Replace(':', '-');
 
+    // Scans a family's app-agnostic prefix, or its disjoint per-app prefix when the query concerns application.
+    private static string AppScopedPrefix(MetricRef metric, IReadOnlyList<string> involved, string prefix, string appPrefix, Func<string, string> sanitize)
+    {
+        var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
+        if (app is not null || involved.Contains(WarpMetricCatalog.Tags.Application))
+        {
+            return app is not null ? $"{appPrefix}:{sanitize(app)}:" : $"{appPrefix}:";
+        }
+
+        return $"{prefix}:";
+    }
+
     // Parses one colon count/sum key into its logical tags for the given metric, or null when the key is not a
     // countable row of that metric (e.g. a pct histogram bucket, or the dur-sum row when reading calls).
     private static Dictionary<string, string>? ParseRow(string metricName, string key) => metricName switch
@@ -334,8 +363,101 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         WarpMetricCatalog.Names.ClientEventsNamed => ParseClientNamedRow(key),
         WarpMetricCatalog.Names.ClientVitals => ParseClientVitalRow(key, ClientEventKeys.CountToken),
         WarpMetricCatalog.Names.ClientVitalsValue => ParseClientVitalRow(key, ClientEventKeys.DurationToken),
+        WarpMetricCatalog.Names.JobExecution => ParseJobstatRow(key, wantDuration: false),
+        WarpMetricCatalog.Names.JobExecutionDuration => ParseJobstatRow(key, wantDuration: true),
+        WarpMetricCatalog.Names.QueueWaitCount => ParseQwaitRow(key, QueueWaitKeys.CountToken),
+        WarpMetricCatalog.Names.QueueWait => ParseQwaitRow(key, QueueWaitKeys.DurationToken),
+        WarpMetricCatalog.Names.QueueDepth => ParseBacklogRow(key, QueueBacklogKeys.DepthToken),
+        WarpMetricCatalog.Names.QueueOldestAge => ParseBacklogRow(key, QueueBacklogKeys.OldestAgeToken),
         _ => throw new NotSupportedException($"No reverse parse for '{metricName}'."),
     };
+
+    // jobstat:{dim}:{id}:{token} or jobstat-app:{app}:{dim}:{id}:{token}, where dim is the type/handler marker
+    // and token is an outcome (succeeded/failed) or the dur sum. The dim marker maps to the type or handler tag.
+    private static Dictionary<string, string>? ParseJobstatRow(string key, bool wantDuration)
+    {
+        Dictionary<string, string> tags;
+        string dimension;
+        string id;
+        string token;
+
+        if (JobStatsKeys.TryParseTotal(key, out var dim, out var jid, out var jtoken))
+        {
+            tags = new Dictionary<string, string>(StringComparer.Ordinal);
+            (dimension, id, token) = (dim, jid, jtoken);
+        }
+        else if (JobStatsKeys.TryParseApp(key, out var app, out var adim, out var aid, out var atoken))
+        {
+            tags = new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Application] = app };
+            (dimension, id, token) = (adim, aid, atoken);
+        }
+        else
+        {
+            return null;
+        }
+
+        if (string.Equals(token, JobStatsKeys.DurationToken, StringComparison.Ordinal) != wantDuration)
+        {
+            return null;
+        }
+
+        if (!TrySetJobstatId(tags, dimension, id))
+        {
+            return null;
+        }
+
+        if (!wantDuration)
+        {
+            tags[WarpMetricCatalog.Tags.Outcome] = token;
+        }
+
+        return tags;
+    }
+
+    // Maps the jobstat dimension marker (type | handler) to the corresponding logical tag; returns false for any
+    // other marker so an unknown dimension is dropped rather than mis-attributed.
+    private static bool TrySetJobstatId(Dictionary<string, string> tags, string dimension, string id)
+    {
+        if (string.Equals(dimension, JobStatsKeys.TypeMarker, StringComparison.Ordinal))
+        {
+            tags[WarpMetricCatalog.Tags.Type] = id;
+            return true;
+        }
+
+        if (string.Equals(dimension, JobStatsKeys.HandlerMarker, StringComparison.Ordinal))
+        {
+            tags[WarpMetricCatalog.Tags.Handler] = id;
+            return true;
+        }
+
+        return false;
+    }
+
+    // qwait:{queue}:{token} or qwait-app:{app}:{queue}:{token}; keeps only the requested count/dur token.
+    private static Dictionary<string, string>? ParseQwaitRow(string key, string wantToken)
+    {
+        if (QueueWaitKeys.TryParseTotal(key, out var queue, out var token) && string.Equals(token, wantToken, StringComparison.Ordinal))
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Queue] = queue };
+        }
+
+        if (QueueWaitKeys.TryParseApp(key, out var app, out var appQueue, out var appToken) && string.Equals(appToken, wantToken, StringComparison.Ordinal))
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [WarpMetricCatalog.Tags.Application] = app,
+                [WarpMetricCatalog.Tags.Queue] = appQueue,
+            };
+        }
+
+        return null;
+    }
+
+    // qbacklog:{queue}:{token}; keeps only the requested depth/oldest-age gauge (one UPSERT row per key).
+    private static Dictionary<string, string>? ParseBacklogRow(string key, string wantToken)
+        => QueueBacklogKeys.TryParseTotal(key, out var queue, out var token) && string.Equals(token, wantToken, StringComparison.Ordinal)
+            ? new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Queue] = queue }
+            : null;
 
     private static bool IsClientFamily(string metricName) => metricName is
         WarpMetricCatalog.Names.ClientEvents or WarpMetricCatalog.Names.ClientEventsNamed
@@ -389,8 +511,23 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         WarpMetricCatalog.Names.ClientVitalsValue when ClientEventKeys.TryParseVitalPct(key, out var vital, out var upperMs)
             => (new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Vital] = vital }, upperMs),
         WarpMetricCatalog.Names.ClientVitalsValue => null,
+        WarpMetricCatalog.Names.JobExecutionDuration when JobStatsKeys.TryParsePct(key, out var dim, out var id, out var upperMs) && TrySetJobstatId(new Dictionary<string, string>(StringComparer.Ordinal), dim, id)
+            => (JobstatIdTags(dim, id), upperMs),
+        WarpMetricCatalog.Names.JobExecutionDuration => null,
+        WarpMetricCatalog.Names.QueueWait when QueueWaitKeys.TryParsePct(key, out var queue, out var upperMs)
+            => (new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Queue] = queue }, upperMs),
+        WarpMetricCatalog.Names.QueueWait => null,
         _ => throw new NotSupportedException($"No histogram parse for '{metricName}'."),
     };
+
+    // The type/handler identity tag for a jobstat pct histogram bucket.
+    private static Dictionary<string, string> JobstatIdTags(string dimension, string id)
+    {
+        var tags = new Dictionary<string, string>(StringComparer.Ordinal);
+        TrySetJobstatId(tags, dimension, id);
+
+        return tags;
+    }
 
     // App-agnostic adapter:{a}:{outcome} / :op:{op}:{outcome} / :grp:{grp}:{outcome}, or the per-app
     // adapter-app:{app}:{a}:{outcome} (no op/grp materialization there). The key's own first segment disambiguates

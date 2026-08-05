@@ -4,6 +4,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 
@@ -54,7 +55,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetJobsList(new BaseListRequest { Page = 0, PageSize = 20 }, State.Completed);
 
         // Assert
@@ -92,7 +93,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetScheduledJobs(new BaseListRequest { Page = 0, PageSize = 20 });
 
         // Assert
@@ -125,7 +126,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetAwaitingJobs(new BaseListRequest { Page = 0, PageSize = 20 });
 
         // Assert
@@ -177,7 +178,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetSiblingJobs(child1Id, new BaseListRequest { Page = 0, PageSize = 20 });
 
         // Assert
@@ -217,7 +218,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetChildJobs(parentId, new BaseListRequest { Page = 0, PageSize = 20 });
 
         // Assert
@@ -260,7 +261,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetTraceJobs(job1Id, new BaseListRequest { Page = 0, PageSize = 20 });
 
         // Assert
@@ -290,7 +291,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetJobsList(new BaseListRequest { Page = 0, PageSize = 20 }, State.Completed);
 
         // Assert
@@ -320,7 +321,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         ctx.Set<JobLog>().Add(new JobLog { Id = Guid.NewGuid(), JobId = oldJobLatestFinish, EventType = "Completed", Timestamp = now.AddHours(3), Level = "Information" });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetJobsList(new BaseListRequest { Page = 0, PageSize = 20 }, State.Completed);
 
         result.Items.Count.ShouldBe(3);
@@ -350,7 +351,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
 
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetJobsList(new BaseListRequest { Page = 0, PageSize = 20 }, State.Enqueued);
 
         result.Items.Count.ShouldBe(3);
@@ -377,7 +378,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         ctx.Set<Job>().Add(new Job { Id = newest, Kind = JobKind.Job, CurrentState = State.Processing, CreateTime = now.AddMinutes(2), ScheduleTime = now.AddMinutes(2), Queue = "default" });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetJobStatesInProcess(new BaseListRequest { Page = 0, PageSize = 20 });
 
         result.Items.Count.ShouldBe(3);
@@ -409,7 +410,7 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         ctx.Set<JobLog>().Add(new JobLog { Id = Guid.NewGuid(), JobId = oldJobLatestFailure, EventType = "Failed", Timestamp = now.AddHours(3), Level = "Error" });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetFailedJobsByType(new BaseListRequest { Page = 0, PageSize = 20 }, typeName);
 
         result.Items.Count.ShouldBe(3);

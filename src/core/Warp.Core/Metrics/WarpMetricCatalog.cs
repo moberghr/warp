@@ -26,8 +26,10 @@ public static class WarpMetricCatalog
         public const string JobExecution = "job.execution";
         public const string JobExecutionDuration = "job.execution.duration";
 
-        // Queue metrics (mirrors warp.job.queue.*).
+        // Queue metrics mirroring the warp job queue meters, where the wait metric carries the wait-time value
+        // sum and histogram while the wait count metric is the per-queue claim tally used as the denominator.
         public const string QueueWait = "job.queue.wait";
+        public const string QueueWaitCount = "job.queue.wait.count";
         public const string QueueDepth = "job.queue.depth";
         public const string QueueOldestAge = "job.queue.oldest_age";
 

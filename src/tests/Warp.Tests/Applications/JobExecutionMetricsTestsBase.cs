@@ -4,6 +4,7 @@ using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
+using Warp.Core.Metrics;
 using Warp.Core.Models;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
@@ -201,7 +202,7 @@ public abstract class JobExecutionMetricsTestsBase : IntegrationTestBase
     private static JobExecutionStatModel ByHandler(JobExecutionMetricsModel metrics, string identifier)
         => metrics.ByHandler.Where(x => string.Equals(x.Identifier, identifier, StringComparison.Ordinal)).ShouldHaveSingleItem();
 
-    private JobQueryService<TestContext> Reader() => new(Fixture.CreateContext(), TimeProvider.System);
+    private JobQueryService<TestContext> Reader() => new(Fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(Fixture.CreateContext()));
 
     private async Task AggregateAsync()
         => await TestTasks.CreateCounterAggregator(Fixture.CreateContext()).AggregateCountersAsync(Ct);
