@@ -30,10 +30,13 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         if (window is null)
         {
             // Lifetime total — the exact key (§ combined Statistic + not-yet-folded Counter, as GetCombinedStatValue).
-            var aggregated = await _context.Set<Statistic>().AsNoTracking()
-                .Where(x => x.Key == metric.Name).Select(x => x.Value).FirstOrDefaultAsync(ct);
-            var pending = await _context.Set<Counter>().AsNoTracking()
-                .Where(x => x.Key == metric.Name).SumAsync(x => (long)x.Value, ct);
+            var aggregated = await _context.Set<Statistic>()
+                .Where(x => x.Key == metric.Name)
+                .Select(x => x.Value)
+                .FirstOrDefaultAsync(ct);
+            var pending = await _context.Set<Counter>()
+                .Where(x => x.Key == metric.Name)
+                .SumAsync(x => (long)x.Value, ct);
 
             return aggregated + pending;
         }
@@ -48,12 +51,12 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     {
         var prefix = query.Metric.Name + ":";
 
-        var stats = await _context.Set<Statistic>().AsNoTracking()
+        var stats = await _context.Set<Statistic>()
             .Where(x => x.Key.StartsWith(prefix))
             .Select(x => new { x.Key, x.Value })
             .ToListAsync(ct);
 
-        var pending = await _context.Set<Counter>().AsNoTracking()
+        var pending = await _context.Set<Counter>()
             .Where(x => x.Key.StartsWith(prefix))
             .GroupBy(x => x.Key)
             .Select(g => new { Key = g.Key, Value = (long)g.Sum(c => c.Value) })
@@ -90,11 +93,15 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         // display convention, mirroring SloMath.Percentile / the per-surface readers).
         var prefix = metric.Name + PctHistoryMarker;
 
-        var stats = await _context.Set<Statistic>().AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix)).Select(x => new { x.Key, x.Value }).ToListAsync(ct);
-        var pending = await _context.Set<Counter>().AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix)).GroupBy(x => x.Key)
-            .Select(g => new { Key = g.Key, Value = (long)g.Sum(c => c.Value) }).ToListAsync(ct);
+        var stats = await _context.Set<Statistic>()
+            .Where(x => x.Key.StartsWith(prefix))
+            .Select(x => new { x.Key, x.Value })
+            .ToListAsync(ct);
+        var pending = await _context.Set<Counter>()
+            .Where(x => x.Key.StartsWith(prefix))
+            .GroupBy(x => x.Key)
+            .Select(g => new { Key = g.Key, Value = (long)g.Sum(c => c.Value) })
+            .ToListAsync(ct);
 
         var buckets = new SortedDictionary<int, long>();
         Collect(stats.Select(s => (s.Key, s.Value)));
@@ -136,7 +143,7 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
 
     public async Task<double?> GetGaugeAsync(MetricRef metric, CancellationToken ct)
     {
-        var value = await _context.Set<Statistic>().AsNoTracking()
+        var value = await _context.Set<Statistic>()
             .Where(x => x.Key == metric.Name)
             .Select(x => (long?)x.Value)
             .FirstOrDefaultAsync(ct);
