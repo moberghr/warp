@@ -4,6 +4,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Logging;
+using Warp.Core.Metrics;
 using Warp.Core.Models;
 
 namespace Warp.Core.Services;
@@ -38,11 +39,13 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 {
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
+    private readonly IMetricSource _metrics;
 
-    public DashboardStatsService(TContext context, TimeProvider timeProvider)
+    public DashboardStatsService(TContext context, TimeProvider timeProvider, IMetricSource metrics)
     {
         _context = context;
         _timeProvider = timeProvider;
+        _metrics = metrics;
     }
 
     public async Task<DashboardStatistics> GetWarpStatus()
@@ -368,57 +371,15 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
         return [.. points.Values.OrderBy(p => p.Hour)];
     }
 
-    private async Task<long> GetCombinedStatValue(string key)
-    {
-        var aggregated = await _context.Set<Statistic>()
-            .Where(x => x.Key == key)
-            .Select(x => x.Value)
-            .FirstOrDefaultAsync();
+    // Lifetime total for a single key (folded Statistic + not-yet-folded Counter), via the metric seam (§8.3x).
+    private Task<long> GetCombinedStatValue(string key)
+        => _metrics.GetTotalAsync(new MetricRef(key), null, CancellationToken.None);
 
-        var pending = await _context.Set<Counter>()
-            .Where(x => x.Key == key)
-            .SumAsync(x => x.Value);
-
-        return aggregated + pending;
-    }
-
-    // Sums the tiered warpsys:records-dropped:{pipeline} history buckets whose bucket-start falls on/after
-    // <paramref name="since"/>, across both folded Statistic rows and not-yet-folded Counter rows (§8.30 tier
-    // parse via MetricTiers). Windowed so a transient old drop ages out of the dashboard tile.
-    private async Task<long> GetDroppedInWindow(DropPipeline pipeline, DateTime since)
-    {
-        var prefix = DroppedRecordKeys.Base(pipeline) + ":";
-
-        var stats = await _context.Set<Statistic>()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Select(x => new { x.Key, x.Value })
-            .ToListAsync();
-
-        var pending = await _context.Set<Counter>()
-            .Where(x => x.Key.StartsWith(prefix))
-            .GroupBy(x => x.Key)
-            .Select(g => new { Key = g.Key, Value = g.Sum(c => c.Value) })
-            .ToListAsync();
-
-        long total = 0;
-        foreach (var row in stats)
-        {
-            if (MetricTiers.TryClassifyKey(row.Key, out _, out _, out var bucketStart) && bucketStart >= since)
-            {
-                total += row.Value;
-            }
-        }
-
-        foreach (var row in pending)
-        {
-            if (MetricTiers.TryClassifyKey(row.Key, out _, out _, out var bucketStart) && bucketStart >= since)
-            {
-                total += row.Value;
-            }
-        }
-
-        return total;
-    }
+    // Sums the tiered warpsys:records-dropped:{pipeline} history from <paramref name="since"/> onward (open-ended
+    // window), across folded Statistic + not-yet-folded Counter rows, via the metric seam (§8.3x) — the local
+    // backend reproduces the tier-classified merged read this used to inline.
+    private Task<long> GetDroppedInWindow(DropPipeline pipeline, DateTime since)
+        => _metrics.GetTotalAsync(new MetricRef(DroppedRecordKeys.Base(pipeline)), new MetricWindow(since, DateTime.MaxValue), CancellationToken.None);
 
     public async Task<List<CounterModel>> GetCounters()
     {

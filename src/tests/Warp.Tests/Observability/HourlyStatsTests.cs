@@ -216,7 +216,7 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var status = await svc.GetWarpStatus();
 
         // Assert
@@ -245,7 +245,7 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var counters = await svc.GetCounters();
 
         // Assert — merged + sorted alphabetically
@@ -296,7 +296,7 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var history = await svc.GetCountersHistory(24);
 
         // Assert — out-of-window and rolled-up rows are excluded
