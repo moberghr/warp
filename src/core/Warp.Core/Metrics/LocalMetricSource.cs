@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
+using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Services;
 
@@ -151,20 +152,239 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         return value;
     }
 
-    // The grouped/enumeration reads back the fan-out dashboard tables (per-adapter, per-route, per-queue, …). Each
-    // family's reverse parse (colon key → tag values) is wired as that family's reader is routed through the seam
-    // (Batch C of the metric-source plan). Until then these throw loudly rather than silently returning empty.
-    public Task<IReadOnlyList<BreakdownRow>> GetBreakdownAsync(MetricRef metric, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
-        => throw NotRoutedYet(metric, nameof(GetBreakdownAsync));
+    // The grouped/enumeration reads back the fan-out dashboard tables (per-adapter, per-route, per-queue, …).
+    // Each family's reverse parse (colon key → tag values) is wired as that family's reader is routed through the
+    // seam (Batch C of the metric-source plan). Families not yet routed throw loudly rather than silently empty.
+    public async Task<IReadOnlyList<BreakdownRow>> GetBreakdownAsync(MetricRef metric, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
+    {
+        var rows = await ParsedRowsAsync(metric, ct);
 
-    public Task<IReadOnlyList<PercentileRow>> GetPercentileBreakdownAsync(MetricRef metric, int percentile, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
-        => throw NotRoutedYet(metric, nameof(GetPercentileBreakdownAsync));
+        // Dimension exclusivity: keep only rows whose tag set is EXACTLY the fixed filter tags plus the groupBy
+        // tags — so an adapter's Total-dimension rows never mix with its per-Operation or per-Group rows (which
+        // carry an extra tag), and summing a marginal never double-counts a finer one.
+        var wanted = WantedKeys(metric, groupBy);
 
-    public Task<IReadOnlyList<string>> GetTagValuesAsync(MetricRef metric, string tag, MetricWindow? window, CancellationToken ct)
-        => throw NotRoutedYet(metric, nameof(GetTagValuesAsync));
+        return
+        [
+            .. rows
+                .Where(r => r.Tags.Count == wanted.Count && r.Tags.Keys.All(wanted.Contains))
+                .GroupBy(r => GroupKey(r.Tags, groupBy), StringComparer.Ordinal)
+                .Select(g => new BreakdownRow(SubTags(g.First().Tags, groupBy), g.Sum(r => r.Value))),
+        ];
+    }
+
+    public async Task<IReadOnlyList<PercentileRow>> GetPercentileBreakdownAsync(MetricRef metric, int percentile, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
+    {
+        // Lifetime latency-histogram buckets, grouped. Adapter's pct is Total-only (per adapter), so groupBy is
+        // [] or [adapter]; a request for a finer group returns no rows (no such histogram was written).
+        var buckets = await ParsedHistogramAsync(metric, ct);
+        var wanted = WantedKeys(metric, groupBy);
+
+        return
+        [
+            .. buckets
+                .Where(b => b.Tags.Count == wanted.Count && b.Tags.Keys.All(wanted.Contains))
+                .GroupBy(b => GroupKey(b.Tags, groupBy), StringComparer.Ordinal)
+                .Select(g => new PercentileRow(SubTags(g.First().Tags, groupBy), WalkPercentile(g.Select(b => (b.UpperMs, b.Count)), percentile))),
+        ];
+    }
+
+    public async Task<IReadOnlyList<string>> GetTagValuesAsync(MetricRef metric, string tag, MetricWindow? window, CancellationToken ct)
+    {
+        var rows = await ParsedRowsAsync(metric, ct);
+
+        return
+        [
+            .. rows
+                .Where(r => r.Tags.ContainsKey(tag))
+                .Select(r => r.Tags[tag])
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(v => v, StringComparer.Ordinal),
+        ];
+    }
 
     private static NotSupportedException NotRoutedYet(MetricRef metric, string method)
         => new($"LocalMetricSource.{method} has no translation for logical metric '{metric.Name}' yet (routed per family in Batch C).");
+
+    // ---- Per-family reverse parse (colon key → logical tags) --------------------------------------------------
+    private readonly record struct TaggedRow(Dictionary<string, string> Tags, long Value);
+
+    private readonly record struct HistogramRow(Dictionary<string, string> Tags, int UpperMs, long Count);
+
+    // Scans a family's lifetime count/sum rows under its colon prefix, merges Statistic + not-yet-folded Counter,
+    // parses each key into its logical tags, and applies the ref's exact-match tag filter.
+    private async Task<List<TaggedRow>> ParsedRowsAsync(MetricRef metric, CancellationToken ct)
+    {
+        var prefix = ScanPrefix(metric);
+        var merged = await MergedAsync(prefix, ct);
+
+        var rows = new List<TaggedRow>();
+        foreach (var (key, value) in merged)
+        {
+            if (ParseRow(metric.Name, key) is { } tags && MatchesFilter(tags, metric.Tags))
+            {
+                rows.Add(new TaggedRow(tags, value));
+            }
+        }
+
+        return rows;
+    }
+
+    private async Task<List<HistogramRow>> ParsedHistogramAsync(MetricRef metric, CancellationToken ct)
+    {
+        var prefix = ScanPrefix(metric);
+        var merged = await MergedAsync(prefix, ct);
+
+        var rows = new List<HistogramRow>();
+        foreach (var (key, value) in merged)
+        {
+            if (ParseHistogramRow(metric.Name, key) is { } row && MatchesFilter(row.Tags, metric.Tags))
+            {
+                rows.Add(new HistogramRow(row.Tags, row.UpperMs, value));
+            }
+        }
+
+        return rows;
+    }
+
+    // The colon prefix to scan for a family's rows, narrowed by any fixed identity tag (e.g. a specific adapter)
+    // so a detail page never materializes every entity's rows.
+    private static string ScanPrefix(MetricRef metric) => metric.Name switch
+    {
+        WarpMetricCatalog.Names.AdapterCalls or WarpMetricCatalog.Names.AdapterDuration
+            => TagOrNull(metric, WarpMetricCatalog.Tags.Adapter) is { } a
+                ? $"{AdapterCounterKeys.Prefix}:{a}:"
+                : $"{AdapterCounterKeys.Prefix}:",
+        _ => throw NotRoutedYet(metric, nameof(ScanPrefix)),
+    };
+
+    // Parses one colon count/sum key into its logical tags for the given metric, or null when the key is not a
+    // countable row of that metric (e.g. a pct histogram bucket, or the dur-sum row when reading calls).
+    private static Dictionary<string, string>? ParseRow(string metricName, string key) => metricName switch
+    {
+        WarpMetricCatalog.Names.AdapterCalls => ParseAdapterRow(key, wantDuration: false),
+        WarpMetricCatalog.Names.AdapterDuration => ParseAdapterRow(key, wantDuration: true),
+        _ => throw new NotSupportedException($"No reverse parse for '{metricName}'."),
+    };
+
+    private static (Dictionary<string, string> Tags, int UpperMs)? ParseHistogramRow(string metricName, string key) => metricName switch
+    {
+        WarpMetricCatalog.Names.AdapterDuration when AdapterCounterKeys.TryParsePct(key, out var adapter, out var upperMs)
+            => (new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Adapter] = adapter }, upperMs),
+        WarpMetricCatalog.Names.AdapterDuration => null,
+        _ => throw new NotSupportedException($"No histogram parse for '{metricName}'."),
+    };
+
+    // adapter:{a}:{outcome} / :op:{op}:{outcome} / :grp:{grp}:{outcome}. The dur-sum token rides the same keys
+    // as the counts; it belongs to adapter.duration (tags without outcome), the outcome counts to adapter.calls.
+    private static Dictionary<string, string>? ParseAdapterRow(string key, bool wantDuration)
+    {
+        if (!AdapterCounterKeys.TryParse(key, out var parsed))
+        {
+            return null;
+        }
+
+        var isDuration = string.Equals(parsed.Outcome, AdapterCounterKeys.DurationToken, StringComparison.Ordinal);
+        if (isDuration != wantDuration)
+        {
+            return null;
+        }
+
+        var tags = new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Adapter] = parsed.Adapter };
+
+        switch (parsed.Dimension)
+        {
+            case AdapterStatDimension.Operation:
+                tags[WarpMetricCatalog.Tags.Operation] = parsed.Value;
+                break;
+            case AdapterStatDimension.Group:
+                tags[WarpMetricCatalog.Tags.Group] = parsed.Value;
+                break;
+        }
+
+        if (!wantDuration)
+        {
+            tags[WarpMetricCatalog.Tags.Outcome] = parsed.Outcome;
+        }
+
+        return tags;
+    }
+
+    private static HashSet<string> WantedKeys(MetricRef metric, IReadOnlyList<string> groupBy)
+    {
+        var wanted = new HashSet<string>(groupBy, StringComparer.Ordinal);
+        if (metric.Tags is { } tags)
+        {
+            foreach (var key in tags.Keys)
+            {
+                wanted.Add(key);
+            }
+        }
+
+        return wanted;
+    }
+
+    private static bool MatchesFilter(Dictionary<string, string> tags, IReadOnlyDictionary<string, string>? filter)
+        => filter is null || filter.All(f => tags.TryGetValue(f.Key, out var v) && string.Equals(v, f.Value, StringComparison.Ordinal));
+
+    private static string GroupKey(Dictionary<string, string> tags, IReadOnlyList<string> groupBy)
+        => string.Join("\u001F", groupBy.Select(g => tags[g]));
+
+    private static Dictionary<string, string> SubTags(Dictionary<string, string> tags, IReadOnlyList<string> groupBy)
+        => groupBy.ToDictionary(g => g, g => tags[g], StringComparer.Ordinal);
+
+    // Cumulative percentile walk over ascending latency buckets (overflow bucket → last finite bound), matching
+    // SloMath.Percentile and the per-surface readers.
+    private static double WalkPercentile(IEnumerable<(int UpperMs, long Count)> buckets, int percentile)
+    {
+        var sorted = new SortedDictionary<int, long>();
+        foreach (var (upperMs, count) in buckets)
+        {
+            sorted[upperMs] = sorted.GetValueOrDefault(upperMs) + count;
+        }
+
+        var total = sorted.Values.Sum();
+        if (total == 0)
+        {
+            return 0;
+        }
+
+        var threshold = (long)Math.Ceiling(Math.Clamp(percentile, 0, 100) / 100.0 * total);
+        var lastFinite = sorted.Keys.LastOrDefault(b => b != int.MaxValue);
+        long cumulative = 0;
+        foreach (var (bound, count) in sorted)
+        {
+            cumulative += count;
+            if (cumulative >= threshold)
+            {
+                return bound == int.MaxValue ? lastFinite : bound;
+            }
+        }
+
+        return lastFinite;
+    }
+
+    private async Task<List<(string Key, long Value)>> MergedAsync(string prefix, CancellationToken ct)
+    {
+        var stats = await _context.Set<Statistic>()
+            .Where(x => x.Key.StartsWith(prefix))
+            .Select(x => new { x.Key, x.Value })
+            .ToListAsync(ct);
+
+        var pending = await _context.Set<Counter>()
+            .Where(x => x.Key.StartsWith(prefix))
+            .GroupBy(x => x.Key)
+            .Select(g => new { Key = g.Key, Value = (long)g.Sum(c => c.Value) })
+            .ToListAsync(ct);
+
+        return
+        [
+            .. stats
+                .Concat(pending)
+                .GroupBy(x => x.Key, StringComparer.Ordinal)
+                .Select(g => (g.Key, g.Sum(x => x.Value))),
+        ];
+    }
 
     // Translates a logical MetricRef (a WarpMetricCatalog name + tags) to its colon storage base key — the exact
     // key for a gauge/lifetime total, or the prefix that the tiered scan / pcth walk extends. Mirrors how the

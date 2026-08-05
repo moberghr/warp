@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
+using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Metrics;
 using Warp.Core.Services;
@@ -95,6 +96,79 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
 
         (await Source().GetPercentileAsync(QueueWait("default"), 95, Window(1), Ct)).ShouldBe(250);
     }
+
+    [TimedFact]
+    public async Task GetBreakdown_AdapterCalls_ByAdapterAndOutcome()
+    {
+        await SeedStatistic(AdapterCounterKeys.Total("stripe", "success"), 8);
+        await SeedStatistic(AdapterCounterKeys.Total("stripe", "failed"), 2);
+        await SeedStatistic(AdapterCounterKeys.Total("twilio", "success"), 5);
+        await SeedCounter(AdapterCounterKeys.Total("stripe", "success"), 1); // not-yet-folded, merges to 9
+
+        var rows = await Source().GetBreakdownAsync(Calls(), ["adapter", "outcome"], null, Ct);
+
+        rows.Count.ShouldBe(3);
+        rows.Single(r => TagIs(r.Tags, "adapter", "stripe") && TagIs(r.Tags, "outcome", "success")).Value.ShouldBe(9);
+        rows.Single(r => TagIs(r.Tags, "adapter", "stripe") && TagIs(r.Tags, "outcome", "failed")).Value.ShouldBe(2);
+        rows.Single(r => TagIs(r.Tags, "adapter", "twilio") && TagIs(r.Tags, "outcome", "success")).Value.ShouldBe(5);
+    }
+
+    [TimedFact]
+    public async Task GetBreakdown_AdapterCalls_DimensionExclusivity()
+    {
+        // Total and per-Operation rows both carry adapter+outcome; a [outcome] breakdown scoped to the adapter
+        // must return ONLY the Total-dimension rows (the Operation row carries an extra 'operation' tag).
+        await SeedStatistic(AdapterCounterKeys.Total("stripe", "success"), 10);
+        await SeedStatistic(AdapterCounterKeys.Operation("stripe", "charge", "success"), 4);
+
+        var byOutcome = await Source().GetBreakdownAsync(Calls("stripe"), ["outcome"], null, Ct);
+        byOutcome.Single().Value.ShouldBe(10); // Total only — the op row's 4 is excluded
+
+        var byOp = await Source().GetBreakdownAsync(Calls("stripe"), ["operation", "outcome"], null, Ct);
+        byOp.Single(r => TagIs(r.Tags, "operation", "charge")).Value.ShouldBe(4);
+    }
+
+    [TimedFact]
+    public async Task GetBreakdown_AdapterDuration_SumsDurTokenNotCounts()
+    {
+        await SeedStatistic(AdapterCounterKeys.Total("stripe", "success"), 3);      // a count, not duration
+        await SeedStatistic(AdapterCounterKeys.Total("stripe", AdapterCounterKeys.DurationToken), 450);
+
+        var rows = await Source().GetBreakdownAsync(Duration(), ["adapter"], null, Ct);
+
+        rows.Single(r => TagIs(r.Tags, "adapter", "stripe")).Value.ShouldBe(450);
+    }
+
+    [TimedFact]
+    public async Task GetPercentileBreakdown_AdapterDuration_WalksLifetimePct()
+    {
+        // 4 samples ≤100ms, 96 ≤250ms → p95 lands in the 250 bucket.
+        await SeedStatistic(AdapterCounterKeys.Pct("stripe", 100), 4);
+        await SeedStatistic(AdapterCounterKeys.Pct("stripe", 250), 96);
+
+        var rows = await Source().GetPercentileBreakdownAsync(Duration(), 95, ["adapter"], null, Ct);
+
+        rows.Single(r => TagIs(r.Tags, "adapter", "stripe")).Value.ShouldBe(250);
+    }
+
+    [TimedFact]
+    public async Task GetTagValues_AdapterCalls_DistinctAdapters()
+    {
+        await SeedStatistic(AdapterCounterKeys.Total("stripe", "success"), 1);
+        await SeedStatistic(AdapterCounterKeys.Total("twilio", "success"), 1);
+        await SeedStatistic(AdapterCounterKeys.Total("stripe", "failed"), 1);
+
+        (await Source().GetTagValuesAsync(Calls(), "adapter", null, Ct)).ShouldBe(["stripe", "twilio"]);
+    }
+
+    private static bool TagIs(IReadOnlyDictionary<string, string> tags, string key, string value)
+        => tags.TryGetValue(key, out var v) && string.Equals(v, value, StringComparison.Ordinal);
+
+    private static MetricRef Calls(string? adapter = null)
+        => new(WarpMetricCatalog.Names.AdapterCalls, adapter is null ? null : new Dictionary<string, string> { [WarpMetricCatalog.Tags.Adapter] = adapter });
+
+    private static MetricRef Duration(string? adapter = null)
+        => new(WarpMetricCatalog.Names.AdapterDuration, adapter is null ? null : new Dictionary<string, string> { [WarpMetricCatalog.Tags.Adapter] = adapter });
 
     private static string Suffix(DateTime ts) => MetricTiers.Suffix(MetricTier.Fine, ts, 5);
 
