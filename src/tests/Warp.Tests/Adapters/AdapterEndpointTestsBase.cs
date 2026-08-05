@@ -11,6 +11,7 @@ using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.UI.Endpoints;
@@ -509,7 +510,7 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
         // Back the always-registered query service with the fixture database so the real route templates,
         // binding, and JSON serialization in WarpEndpoints are exercised end-to-end (not the service alone).
         var fixture = _fixture;
-        builder.Services.AddScoped<IAdapterQueryService>(_ => new AdapterQueryService<TestContext>(fixture.CreateContext()));
+        builder.Services.AddScoped<IAdapterQueryService>(_ => new AdapterQueryService<TestContext>(fixture.CreateContext(), new LocalMetricSource<TestContext>(fixture.CreateContext())));
 
         var app = builder.Build();
         app.MapWarpApiEndpoints(new WarpUIOptions(), []);
@@ -592,5 +593,5 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
         context.Set<Counter>().Add(new Counter { Key = key, Value = count });
     }
 
-    private AdapterQueryService<TestContext> CreateService() => new(_fixture.CreateContext());
+    private AdapterQueryService<TestContext> CreateService() => new(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 }

@@ -5,6 +5,7 @@ using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
@@ -103,7 +104,7 @@ public abstract class PerAppMetricsFlushTestsBase : IAsyncLifetime
 
         await TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(Ct);
 
-        var service = new AdapterQueryService<TestContext>(_fixture.CreateContext());
+        var service = new AdapterQueryService<TestContext>(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 
         (await service.GetApplications(Ct)).ShouldBe([AppName]);
 
@@ -197,7 +198,7 @@ public abstract class PerAppMetricsFlushTestsBase : IAsyncLifetime
 
         await TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(Ct);
 
-        var service = new AdapterQueryService<TestContext>(_fixture.CreateContext());
+        var service = new AdapterQueryService<TestContext>(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 
         var stats = await service.GetAdapterStatsByApplication("team:orders", Ct);
 

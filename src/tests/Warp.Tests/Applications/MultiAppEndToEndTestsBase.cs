@@ -8,6 +8,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
@@ -146,7 +147,7 @@ public abstract class MultiAppEndToEndTestsBase : IntegrationTestBase
         await AggregateAsync();
 
         // ---- adapters: distinct applications, each with its own call count ----
-        var adapterQuery = new AdapterQueryService<TestContext>(Fixture.CreateContext());
+        var adapterQuery = new AdapterQueryService<TestContext>(Fixture.CreateContext(), new LocalMetricSource<TestContext>(Fixture.CreateContext()));
         (await adapterQuery.GetApplications(Ct)).ShouldBe([AppA, AppB]);
 
         var adapterA = (await adapterQuery.GetAdapterStatsByApplication(AppA, Ct)).ShouldHaveSingleItem();

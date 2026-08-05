@@ -5,6 +5,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 
@@ -163,7 +164,7 @@ public abstract class BackwardCompatTestsBase : IAsyncLifetime
         });
         await arrange.SaveChangesAsync(Ct);
 
-        (await new AdapterQueryService<TestContext>(_fixture.CreateContext()).GetApplications(Ct)).ShouldBeEmpty();
+        (await new AdapterQueryService<TestContext>(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext())).GetApplications(Ct)).ShouldBeEmpty();
         (await new EndpointQueryService<TestContext>(_fixture.CreateContext()).GetApplications(Ct)).ShouldBeEmpty();
     }
 

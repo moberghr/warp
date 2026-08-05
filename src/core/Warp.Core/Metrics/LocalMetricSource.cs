@@ -49,6 +49,11 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
 
     public async Task<IReadOnlyList<SeriesBucket>> GetSeriesAsync(SeriesQuery query, CancellationToken ct)
     {
+        if (query.Metric.Name is WarpMetricCatalog.Names.AdapterCalls or WarpMetricCatalog.Names.AdapterDuration)
+        {
+            return await AdapterSeriesAsync(query, ct);
+        }
+
         var prefix = ResolveBaseKey(query.Metric) + ":";
 
         var stats = await _context.Set<Statistic>()
@@ -157,7 +162,7 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     // seam (Batch C of the metric-source plan). Families not yet routed throw loudly rather than silently empty.
     public async Task<IReadOnlyList<BreakdownRow>> GetBreakdownAsync(MetricRef metric, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
     {
-        var rows = await ParsedRowsAsync(metric, ct);
+        var rows = await ParsedRowsAsync(metric, groupBy, ct);
 
         // Dimension exclusivity: keep only rows whose tag set is EXACTLY the fixed filter tags plus the groupBy
         // tags — so an adapter's Total-dimension rows never mix with its per-Operation or per-Group rows (which
@@ -179,19 +184,28 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         // [] or [adapter]; a request for a finer group returns no rows (no such histogram was written).
         var buckets = await ParsedHistogramAsync(metric, ct);
         var wanted = WantedKeys(metric, groupBy);
+        var overflowBound = OverflowBound(metric.Name);
 
         return
         [
             .. buckets
                 .Where(b => b.Tags.Count == wanted.Count && b.Tags.Keys.All(wanted.Contains))
                 .GroupBy(b => GroupKey(b.Tags, groupBy), StringComparer.Ordinal)
-                .Select(g => new PercentileRow(SubTags(g.First().Tags, groupBy), WalkPercentile(g.Select(b => (b.UpperMs, b.Count)), percentile))),
+                .Select(g => new PercentileRow(SubTags(g.First().Tags, groupBy), WalkPercentile(g.Select(b => (b.UpperMs, b.Count)), percentile, overflowBound))),
         ];
     }
 
+    // The value a percentile landing in the overflow bucket displays — the family's largest FINITE ladder bound
+    // (adapter caps at 10 s), matching each per-surface reader's convention.
+    private static int OverflowBound(string metricName) => metricName switch
+    {
+        WarpMetricCatalog.Names.AdapterDuration => AdapterCounterKeys.Buckets[^2],
+        _ => throw new NotSupportedException($"No overflow bound for '{metricName}'."),
+    };
+
     public async Task<IReadOnlyList<string>> GetTagValuesAsync(MetricRef metric, string tag, MetricWindow? window, CancellationToken ct)
     {
-        var rows = await ParsedRowsAsync(metric, ct);
+        var rows = await ParsedRowsAsync(metric, [tag], ct);
 
         return
         [
@@ -212,10 +226,12 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     private readonly record struct HistogramRow(Dictionary<string, string> Tags, int UpperMs, long Count);
 
     // Scans a family's lifetime count/sum rows under its colon prefix, merges Statistic + not-yet-folded Counter,
-    // parses each key into its logical tags, and applies the ref's exact-match tag filter.
-    private async Task<List<TaggedRow>> ParsedRowsAsync(MetricRef metric, CancellationToken ct)
+    // parses each key into its logical tags, and applies the ref's exact-match tag filter. <paramref name="involved"/>
+    // is the query's grouping/enumeration dimensions — when it (or a fixed tag) mentions application, the scan
+    // targets the disjoint per-app key family (§8.23) instead of the app-agnostic one.
+    private async Task<List<TaggedRow>> ParsedRowsAsync(MetricRef metric, IReadOnlyList<string> involved, CancellationToken ct)
     {
-        var prefix = ScanPrefix(metric);
+        var prefix = ScanPrefix(metric, involved);
         var merged = await MergedAsync(prefix, ct);
 
         var rows = new List<TaggedRow>();
@@ -232,7 +248,8 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
 
     private async Task<List<HistogramRow>> ParsedHistogramAsync(MetricRef metric, CancellationToken ct)
     {
-        var prefix = ScanPrefix(metric);
+        // Latency histograms are app-agnostic only (the per-app slice omits them, §8.19), so never app-scoped.
+        var prefix = ScanPrefix(metric, []);
         var merged = await MergedAsync(prefix, ct);
 
         var rows = new List<HistogramRow>();
@@ -248,15 +265,29 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     }
 
     // The colon prefix to scan for a family's rows, narrowed by any fixed identity tag (e.g. a specific adapter)
-    // so a detail page never materializes every entity's rows.
-    private static string ScanPrefix(MetricRef metric) => metric.Name switch
+    // so a detail page never materializes every entity's rows. When the query concerns application, the disjoint
+    // per-app family (adapter-app) is scanned instead of the app-agnostic one.
+    private static string ScanPrefix(MetricRef metric, IReadOnlyList<string> involved)
     {
-        WarpMetricCatalog.Names.AdapterCalls or WarpMetricCatalog.Names.AdapterDuration
-            => TagOrNull(metric, WarpMetricCatalog.Tags.Adapter) is { } a
-                ? $"{AdapterCounterKeys.Prefix}:{a}:"
-                : $"{AdapterCounterKeys.Prefix}:",
-        _ => throw NotRoutedYet(metric, nameof(ScanPrefix)),
-    };
+        switch (metric.Name)
+        {
+            case WarpMetricCatalog.Names.AdapterCalls:
+            case WarpMetricCatalog.Names.AdapterDuration:
+                var app = TagOrNull(metric, WarpMetricCatalog.Tags.Application);
+                if (app is not null || involved.Contains(WarpMetricCatalog.Tags.Application))
+                {
+                    return app is not null
+                        ? $"{AdapterCounterKeys.AppPrefix}:{AdapterCounterKeys.SanitizeApplication(app)}:"
+                        : $"{AdapterCounterKeys.AppPrefix}:";
+                }
+
+                return TagOrNull(metric, WarpMetricCatalog.Tags.Adapter) is { } a
+                    ? $"{AdapterCounterKeys.Prefix}:{a}:"
+                    : $"{AdapterCounterKeys.Prefix}:";
+            default:
+                throw NotRoutedYet(metric, nameof(ScanPrefix));
+        }
+    }
 
     // Parses one colon count/sum key into its logical tags for the given metric, or null when the key is not a
     // countable row of that metric (e.g. a pct histogram bucket, or the dur-sum row when reading calls).
@@ -275,39 +306,115 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         _ => throw new NotSupportedException($"No histogram parse for '{metricName}'."),
     };
 
-    // adapter:{a}:{outcome} / :op:{op}:{outcome} / :grp:{grp}:{outcome}. The dur-sum token rides the same keys
-    // as the counts; it belongs to adapter.duration (tags without outcome), the outcome counts to adapter.calls.
+    // App-agnostic adapter:{a}:{outcome} / :op:{op}:{outcome} / :grp:{grp}:{outcome}, or the per-app
+    // adapter-app:{app}:{a}:{outcome} (no op/grp materialization there). The key's own first segment disambiguates
+    // the two families. The dur-sum token rides the same keys as the counts; it belongs to adapter.duration (tags
+    // without outcome), the outcome counts to adapter.calls.
     private static Dictionary<string, string>? ParseAdapterRow(string key, bool wantDuration)
     {
-        if (!AdapterCounterKeys.TryParse(key, out var parsed))
+        Dictionary<string, string> tags;
+        string outcome;
+
+        if (AdapterCounterKeys.TryParse(key, out var parsed))
+        {
+            tags = new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Adapter] = parsed.Adapter };
+            switch (parsed.Dimension)
+            {
+                case AdapterStatDimension.Operation:
+                    tags[WarpMetricCatalog.Tags.Operation] = parsed.Value;
+                    break;
+                case AdapterStatDimension.Group:
+                    tags[WarpMetricCatalog.Tags.Group] = parsed.Value;
+                    break;
+            }
+
+            outcome = parsed.Outcome;
+        }
+        else if (AdapterCounterKeys.TryParseApp(key, out var application, out var appAdapter, out var appOutcome))
+        {
+            tags = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [WarpMetricCatalog.Tags.Application] = application,
+                [WarpMetricCatalog.Tags.Adapter] = appAdapter,
+            };
+            outcome = appOutcome;
+        }
+        else
         {
             return null;
         }
 
-        var isDuration = string.Equals(parsed.Outcome, AdapterCounterKeys.DurationToken, StringComparison.Ordinal);
+        var isDuration = string.Equals(outcome, AdapterCounterKeys.DurationToken, StringComparison.Ordinal);
         if (isDuration != wantDuration)
         {
             return null;
         }
 
-        var tags = new Dictionary<string, string>(StringComparer.Ordinal) { [WarpMetricCatalog.Tags.Adapter] = parsed.Adapter };
-
-        switch (parsed.Dimension)
-        {
-            case AdapterStatDimension.Operation:
-                tags[WarpMetricCatalog.Tags.Operation] = parsed.Value;
-                break;
-            case AdapterStatDimension.Group:
-                tags[WarpMetricCatalog.Tags.Group] = parsed.Value;
-                break;
-        }
-
         if (!wantDuration)
         {
-            tags[WarpMetricCatalog.Tags.Outcome] = parsed.Outcome;
+            tags[WarpMetricCatalog.Tags.Outcome] = outcome;
         }
 
         return tags;
+    }
+
+    // Adapter hourly history (adapter:{a}:hist:{outcome}:{bucket}, legacy-hourly or rolled tiers). Reads the
+    // count-outcome rows for adapter.calls (optionally split by outcome) or the dur-sum rows for adapter.duration,
+    // down-binned to the query resolution over its window. Adapter history is app-agnostic.
+    private async Task<IReadOnlyList<SeriesBucket>> AdapterSeriesAsync(SeriesQuery query, CancellationToken ct)
+    {
+        var metric = query.Metric;
+        var wantDuration = string.Equals(metric.Name, WarpMetricCatalog.Names.AdapterDuration, StringComparison.Ordinal);
+        var adapterFilter = TagOrNull(metric, WarpMetricCatalog.Tags.Adapter);
+        var merged = await MergedAsync(ScanPrefix(metric, []), ct);
+
+        var acc = new Dictionary<(DateTime Bucket, string? Tag), long>();
+        foreach (var (key, value) in merged)
+        {
+            if (!MetricTiers.TryClassifyKey(key, out var baseKey, out _, out var bucketStart)
+                || bucketStart < query.Window.FromUtc || bucketStart >= query.Window.ToUtc)
+            {
+                continue;
+            }
+
+            // baseKey is adapter:{a}:hist:{outcome} (tier/date suffix stripped by TryClassifyKey).
+            var parts = baseKey.Split(':');
+            if (parts.Length != 4 || !string.Equals(parts[2], AdapterCounterKeys.HistoryMarker, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var adapter = parts[1];
+            var outcome = parts[3];
+            if (string.Equals(outcome, AdapterCounterKeys.DurationToken, StringComparison.Ordinal) != wantDuration)
+            {
+                continue;
+            }
+
+            if (adapterFilter is not null && !string.Equals(adapter, adapterFilter, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var tagValue = query.BreakdownBy switch
+            {
+                WarpMetricCatalog.Tags.Outcome => outcome,
+                WarpMetricCatalog.Tags.Adapter => adapter,
+                _ => (string?)null,
+            };
+
+            var bucket = Truncate(query.Resolution, bucketStart);
+            var accKey = (bucket, tagValue);
+            acc[accKey] = query.Aggregation == MetricAggregation.Last ? value : acc.GetValueOrDefault(accKey) + value;
+        }
+
+        return
+        [
+            .. acc
+                .OrderBy(kv => kv.Key.Bucket)
+                .ThenBy(kv => kv.Key.Tag, StringComparer.Ordinal)
+                .Select(kv => new SeriesBucket(kv.Key.Bucket, kv.Key.Tag, kv.Value)),
+        ];
     }
 
     private static HashSet<string> WantedKeys(MetricRef metric, IReadOnlyList<string> groupBy)
@@ -333,9 +440,10 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
     private static Dictionary<string, string> SubTags(Dictionary<string, string> tags, IReadOnlyList<string> groupBy)
         => groupBy.ToDictionary(g => g, g => tags[g], StringComparer.Ordinal);
 
-    // Cumulative percentile walk over ascending latency buckets (overflow bucket → last finite bound), matching
-    // SloMath.Percentile and the per-surface readers.
-    private static double WalkPercentile(IEnumerable<(int UpperMs, long Count)> buckets, int percentile)
+    // Cumulative percentile walk over ascending latency buckets. A percentile landing in the overflow bucket
+    // (int.MaxValue) reports <paramref name="overflowBound"/> — the family's largest finite ladder bound — as the
+    // displayable floor, matching the per-surface readers (e.g. AdapterQueryService.Quantile).
+    private static double WalkPercentile(IEnumerable<(int UpperMs, long Count)> buckets, int percentile, int overflowBound)
     {
         var sorted = new SortedDictionary<int, long>();
         foreach (var (upperMs, count) in buckets)
@@ -350,18 +458,17 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
         }
 
         var threshold = (long)Math.Ceiling(Math.Clamp(percentile, 0, 100) / 100.0 * total);
-        var lastFinite = sorted.Keys.LastOrDefault(b => b != int.MaxValue);
         long cumulative = 0;
         foreach (var (bound, count) in sorted)
         {
             cumulative += count;
             if (cumulative >= threshold)
             {
-                return bound == int.MaxValue ? lastFinite : bound;
+                return bound == int.MaxValue ? overflowBound : bound;
             }
         }
 
-        return lastFinite;
+        return overflowBound;
     }
 
     private async Task<List<(string Key, long Value)>> MergedAsync(string prefix, CancellationToken ct)
