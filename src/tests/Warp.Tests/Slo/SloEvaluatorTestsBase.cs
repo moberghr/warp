@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Notifiers;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
@@ -255,8 +256,10 @@ public abstract class SloEvaluatorTestsBase : IAsyncLifetime
 
     private async Task RunAsync(SpyNotifier spy)
     {
+        var context = _fixture.CreateContext();
         var evaluator = new SloEvaluator<TestContext>(
-            new TestServerContext(_fixture.CreateContext()),
+            new TestServerContext(context),
+            new LocalMetricSource<TestContext>(context),
             Options.Create(new WarpServerConfiguration()),
             TimeProvider.System,
             TestNotifiers.SpyDispatcher(spy),
