@@ -193,6 +193,21 @@ public static class WarpTelemetry
         unit: "{miss}",
         description: "A Total-scope timeout deadline (§8.7) was missed by a terminated job. Emitted unconditionally at finalization (independent of JobMetricsSink); the deadline-attainment DB Counter fold is separate and sink-gated. Tags: job.type, queue, application (executor app when set).");
 
+    public static readonly Counter<long> JobDeadlineTotal = Meter.CreateCounter<long>(
+        "warp.job.deadline.total",
+        unit: "{termination}",
+        description: "Every Total-scope termination — the deadline-attainment denominator, so attainment = 1 − deadline.miss ÷ deadline.total. Emitted unconditionally at finalization (independent of JobMetricsSink). Tags: job.type, queue, application (executor app when set).");
+
+    public static readonly Counter<long> ClientEventsNamed = Meter.CreateCounter<long>(
+        "warp.client.events.named",
+        unit: "{event}",
+        description: "Client (browser) events tallied by their name — error type / event name / log level — so the top-N name breakdowns render from an external TSDB. Higher cardinality than warp.client.events (name is unbounded), so it is a separate instrument a deployment can drop. Tags: type, name, application (when set).");
+
+    public static readonly Counter<long> ErrorGroupOccurrences = Meter.CreateCounter<long>(
+        "warp.errorgroup.occurrences",
+        unit: "{occurrence}",
+        description: "Occurrences of a grouped error, tallied by fingerprint (§8.29), so the per-group occurrence trend renders from an external TSDB. High cardinality (fingerprint is a content hash), so it is a separate instrument a deployment can drop. Tags: fingerprint, application (when set).");
+
     // Backlog is a point-in-time gauge sampled periodically by the BacklogSampler server task, so it uses
     // ObservableGauges over a snapshot the sampler replaces each tick (SetBacklogSnapshot) — the callbacks
     // report the last sample on the exporter's collection schedule. Empty snapshot ⇒ no measurements.
@@ -457,6 +472,66 @@ public static class WarpTelemetry
         }
 
         JobDeadlineMiss.Add(1, tags);
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.job.deadline.total</c> denominator for one terminated Total-scope job (§8.30).
+    /// Emitted on every terminal outcome (independent of JobMetricsSink), so deadline attainment is computable from
+    /// the meters alone (<c>1 − deadline.miss ÷ deadline.total</c>). Application tag only when the executor app is set.
+    /// </summary>
+    public static void RecordDeadlineTotal(string? jobType, string queue, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.JobMeterType, jobType },
+            { WarpTelemetryAttributes.QueueMeterQueue, queue },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        JobDeadlineTotal.Add(1, tags);
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.client.events.named</c> tally for one browser event carrying a name (error
+    /// type / event name / log level). Higher cardinality than the per-type meter, so a deployment can drop it.
+    /// </summary>
+    public static void RecordClientEventNamed(string type, string name, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.ClientMeterType, type },
+            { WarpTelemetryAttributes.ClientMeterName, name },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        ClientEventsNamed.Add(1, tags);
+    }
+
+    /// <summary>
+    /// Records the always-on <c>warp.errorgroup.occurrences</c> tally for one grouped-error occurrence (§8.29),
+    /// keyed by fingerprint. High cardinality (fingerprint is a content hash), so a deployment can drop it.
+    /// </summary>
+    public static void RecordErrorGroupOccurrence(string fingerprint, string? application, long count)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.ErrorGroupMeterFingerprint, fingerprint },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        ErrorGroupOccurrences.Add(count, tags);
     }
 
     /// <summary>

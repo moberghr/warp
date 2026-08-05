@@ -106,10 +106,16 @@ public static class WarpTelemetryAttributes
     public const string EndpointMeterRoute = "route";
     public const string EndpointMeterOutcome = "outcome";
 
-    // Meter tag keys for warp.client.* instruments (§8.27). Bounded dimensions only: the event type token
-    // and the (bounded) Core-Web-Vital name. Names/levels/URLs and any PII stay off the meter tags (§1.2).
+    // Meter tag keys for warp.client.* instruments (§8.27). Bounded dimensions only on the base instruments: the
+    // event type token and the (bounded) Core-Web-Vital name. The event NAME (error type / event name / log level)
+    // rides only the separate, higher-cardinality warp.client.events.named instrument; URLs and PII stay off (§1.2).
     public const string ClientMeterType = "type";
     public const string ClientMeterVital = "vital";
+    public const string ClientMeterName = "name";
+
+    // Meter tag key for warp.errorgroup.occurrences — the content-hash fingerprint (§8.29). High cardinality, so
+    // it rides only that opt-out instrument, never a base one.
+    public const string ErrorGroupMeterFingerprint = "fingerprint";
 
     // OTel session semantic-convention key (§8.27) — used both as the W3C baggage key propagated browser →
     // API → jobs AND as the span attribute stamped on the endpoint request span and the job execution span,

@@ -694,6 +694,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         if (totalDeadlineUtc is { } deadline && state is State.Completed or State.Failed or State.Deleted)
         {
             var missed = now >= deadline;
+            WarpTelemetry.RecordDeadlineTotal(job.Type, job.Queue, _configuration.ApplicationName);
             if (missed)
             {
                 WarpTelemetry.RecordDeadlineMiss(job.Type, job.Queue, _configuration.ApplicationName);

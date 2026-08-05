@@ -248,6 +248,15 @@ public sealed class ClientEventFlusher<TContext> : BackgroundService
                 context.Set<Counter>().Add(counter);
             }
 
+            // Always-on meter for the name breakdown, tallied only after the cardinality guard has bounded the
+            // name — the guard lives on this recording path, so (unlike the per-type/vital meters at ingest) an
+            // Otel-only deployment reconstructs the top-N name breakdown only when recording is enabled. Emitting
+            // the raw browser-sent name at the public ingest endpoint would be an unbounded-cardinality vector (§1.2).
+            if (name is not null)
+            {
+                Logging.WarpTelemetry.RecordClientEventNamed(ClientEventKeys.TypeToken(record.Type), name, record.Application);
+            }
+
             // Error-grouping inbox append (§8.29): a browser Error event is an error signal. Gated on the
             // grouping disable switch and folded into the same SaveChanges as the client-event row above.
             if (configuration.ErrorGroupingInterval is not null && record.Type == ClientEventType.Error)

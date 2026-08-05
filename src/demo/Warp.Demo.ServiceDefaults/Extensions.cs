@@ -56,7 +56,8 @@ public static class Extensions
                     .AddAspNetCoreInstrumentation()
                     .AddHttpClientInstrumentation()
                     .AddRuntimeInstrumentation()
-                    .AddMeter("Warp"))
+                    .AddMeter("Warp")
+                    .AddWarpHistogramViews())
             .WithTracing(tracing =>
                 tracing
                     .AddAspNetCoreInstrumentation()
@@ -66,6 +67,27 @@ public static class Extensions
         builder.AddOpenTelemetryExporters();
 
         return builder;
+    }
+
+    // Explicit histogram bucket boundaries for the Warp latency meters, matching the DB :pct(h): ladders so a
+    // Prometheus histogram_quantile can observe job/queue latency up to 5 min (not saturate at the OTel-default
+    // ~10 s) — the prerequisite for reading the 30 s/60 s latency SLOs back from Prometheus (§8.30/§8.31). The
+    // trailing int.MaxValue overflow rung is implicit (+Inf), so it is omitted from the finite boundaries.
+    private static readonly double[] JobScaleBoundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000];
+    private static readonly double[] HttpScaleBoundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
+
+    public static MeterProviderBuilder AddWarpHistogramViews(this MeterProviderBuilder metrics)
+    {
+        // Job-scale latency (execution + queue-wait) needs the full ladder to 5 min.
+        metrics.AddView("warp.job.execution.duration", new ExplicitBucketHistogramConfiguration { Boundaries = JobScaleBoundaries });
+        metrics.AddView("warp.job.queue.wait", new ExplicitBucketHistogramConfiguration { Boundaries = JobScaleBoundaries });
+
+        // HTTP-scale latency (adapters / endpoints / client vitals) caps at 10 s.
+        metrics.AddView("warp.adapter.duration", new ExplicitBucketHistogramConfiguration { Boundaries = HttpScaleBoundaries });
+        metrics.AddView("warp.endpoint.duration", new ExplicitBucketHistogramConfiguration { Boundaries = HttpScaleBoundaries });
+        metrics.AddView("warp.client.vitals", new ExplicitBucketHistogramConfiguration { Boundaries = HttpScaleBoundaries });
+
+        return metrics;
     }
 
     public static TBuilder AddDefaultHealthChecks<TBuilder>(this TBuilder builder)
