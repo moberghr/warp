@@ -18,7 +18,11 @@ Additive minor release — no breaking API changes, no migration. Introduces a *
 
 - **Export gaps closed.** New always-on meters make the previously DB-only families readable from an external TSDB: `warp.job.deadline.total` (the attainment denominator), `warp.client.events.named` (top-N name breakdown, cardinality-bounded on the recording path), and `warp.errorgroup.occurrences` (per-fingerprint trend).
 
-- **Histogram Views.** `AddWarpHistogramViews()` configures OpenTelemetry bucket boundaries matching Warp's internal ladders (job-scale to 5 min, HTTP-scale to 10 s) so a Prometheus `histogram_quantile` can observe the 30 s/60 s latency SLO targets instead of saturating at ~10 s.
+- **Histogram Views.** `AddWarpHistogramViews()` configures OpenTelemetry bucket boundaries matching Warp's internal ladders (job-scale to 5 min, HTTP-scale to 10 s) so a Prometheus `histogram_quantile` can observe the 30 s/60 s latency SLO targets instead of saturating at ~10 s. Both the DB percentile ladders and these Views now come from one canonical source (`WarpHistogramBuckets`), so they can't drift.
+
+:::caution Meter-label change
+The `outcome` label on the **`warp.adapter.*`** and **`warp.endpoint.*`** meters (and the matching `warp.adapter.outcome` / `warp.endpoint.outcome` span tags) now emits **lowercase** tokens (`success`, `failed`, `throttled`, `circuit_open`) instead of the enum's PascalCase (`Success`, `Failed`, …). This makes them consistent with every other Warp meter (job execution, webhooks) and with the DB aggregate keys — one outcome vocabulary everywhere — and is required for the Prometheus read-back to compute error rates correctly. If you have existing OTel dashboards filtering these meters on `outcome="Failed"`, update them to `outcome="failed"`.
+:::
 
 See **Pluggable metric source** for the full guide. Raw per-call detail (recent-calls lists, request/response bodies, trace joins) is unchanged — it is not a metric and always reads from the retained rows.
 

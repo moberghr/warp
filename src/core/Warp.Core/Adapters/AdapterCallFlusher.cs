@@ -662,14 +662,7 @@ internal static class AdapterCounterKeys
         return true;
     }
 
-    public static string OutcomeToken(AdapterCallOutcome outcome) => outcome switch
-    {
-        AdapterCallOutcome.Success => "success",
-        AdapterCallOutcome.Failed => "failed",
-        AdapterCallOutcome.Throttled => "throttled",
-        AdapterCallOutcome.CircuitOpen => "circuit_open",
-        _ => "unknown",
-    };
+    public static string OutcomeToken(AdapterCallOutcome outcome) => Warp.Core.Metrics.WarpMetricCatalog.OutcomeToken(outcome);
 
     // ---------------------------------------------------------------------------------------------------
     // Per-application key family (§8.19 multi-app observability). A DISJOINT namespace under its OWN

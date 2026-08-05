@@ -1,3 +1,5 @@
+using Warp.Core.Enums;
+
 namespace Warp.Core.Metrics;
 
 /// <summary>
@@ -81,4 +83,19 @@ public static class WarpMetricCatalog
         public const string Kind = "kind";
         public const string Dimension = "dimension";
     }
+
+    /// <summary>
+    /// The single canonical outcome vocabulary (§8.33). Every emitter — the DB counter keys, the OTel meters, and
+    /// the trace spans — renders an <see cref="AdapterCallOutcome"/> through this one lowercase mapping, so the
+    /// local dashboard and a Prometheus read-back agree on the <c>outcome</c> label instead of one side emitting
+    /// <c>Failed</c> and the other <c>failed</c>.
+    /// </summary>
+    public static string OutcomeToken(AdapterCallOutcome outcome) => outcome switch
+    {
+        AdapterCallOutcome.Success => "success",
+        AdapterCallOutcome.Failed => "failed",
+        AdapterCallOutcome.Throttled => "throttled",
+        AdapterCallOutcome.CircuitOpen => "circuit_open",
+        _ => "unknown",
+    };
 }

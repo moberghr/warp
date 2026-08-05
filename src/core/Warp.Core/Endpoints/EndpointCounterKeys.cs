@@ -59,12 +59,7 @@ internal static partial class EndpointCounterKeys
     // entry is int.MaxValue, so First always matches (the final entry is the "> 10000 ms" catch-all).
     public static int BucketFor(int durationMs) => Buckets.First(bound => durationMs <= bound);
 
-    public static string OutcomeToken(AdapterCallOutcome outcome) => outcome switch
-    {
-        AdapterCallOutcome.Success => "success",
-        AdapterCallOutcome.Failed => "failed",
-        _ => "unknown",
-    };
+    public static string OutcomeToken(AdapterCallOutcome outcome) => Warp.Core.Metrics.WarpMetricCatalog.OutcomeToken(outcome);
 
     // Produces the stable "{METHOD} {template}" route identity used as the key's route segment. Inline
     // route constraints ({name:int}, {name:int=5}, {*name:...}) are stripped so the route is colon-free

@@ -2,6 +2,7 @@ using Shouldly;
 using Warp.Core.Adapters;
 using Warp.Core.ClientObservability;
 using Warp.Core.Endpoints;
+using Warp.Core.Enums;
 using Warp.Core.Metrics;
 using Warp.Core.Services;
 
@@ -55,5 +56,21 @@ public class MetricBucketContractTests
         // No stray / missing View entries either way.
         views.Keys.OrderBy(x => x, StringComparer.Ordinal)
             .ShouldBe(Families.Select(f => f.Instrument).OrderBy(x => x, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void OutcomeToken_IsOneLowercaseVocabulary_AcrossEveryEmitter()
+    {
+        // The DB counter keys, the OTel meters, and the trace spans must all render an outcome through the single
+        // canonical lowercase token (§8.33) — so a Prometheus read-back agrees with the local dashboard instead of
+        // the two sides disagreeing on casing. The key builders delegate to the canonical map here; the meter and
+        // span emission is pinned lowercase by AdapterTelemetryTests / OTelAggregateMetricsTests.
+        foreach (var outcome in Enum.GetValues<AdapterCallOutcome>())
+        {
+            var canonical = WarpMetricCatalog.OutcomeToken(outcome);
+            canonical.ShouldBe(canonical.ToLowerInvariant());
+            AdapterCounterKeys.OutcomeToken(outcome).ShouldBe(canonical);
+            EndpointCounterKeys.OutcomeToken(outcome).ShouldBe(canonical);
+        }
     }
 }
