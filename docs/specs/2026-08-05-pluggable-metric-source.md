@@ -43,6 +43,8 @@ public interface IMetricSource
 // SeriesAgg      = Sum | Last                 (Sum for counters, Last for gauges)
 ```
 
+**Naming lives inside each backend — no shared mapping table.** `MetricRef.Name` is an **abstract logical name**, never a storage key. Each `IMetricSource` implementation privately translates it to its own store's naming: `LocalMetricSource` → colon keys (wrapping the existing `*Keys` builders), a later `PrometheusMetricSource` → OTel metric name + label matchers. So a new backend is a genuine drop-in with its own translator — no persisted-format change, no OTel-name change, no lookup table anyone has to keep in sync. (In Phase 1, where the local names and the logical names largely coincide, `Name` may be the colon base directly; the per-family logical→colon mapping is filled in as SLO/jobstat reads are routed.)
+
 - The **local backend** (`LocalMetricSource`) translates each method to the current merged `Statistic`+`Counter` reads and `MetricTiers` classification — i.e. it *is* the existing read logic, moved behind the interface, with the down-bin/tier semantics preserved bit-for-bit.
 - The **Prometheus backend** (Phase 2) translates each method to PromQL over Warp's OTel-exported metric names (`GetSeriesAsync` → `sum by (<breakdownBy>)(increase(<name>[<step>]))`, `GetPercentileAsync` → `histogram_quantile(...)`, `GetGaugeAsync` → an instant query). It reads through a Refit `IPrometheusQueryApi`.
 
