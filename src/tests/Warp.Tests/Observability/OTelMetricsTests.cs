@@ -1,4 +1,4 @@
-using System.Diagnostics.Metrics;
+﻿using System.Diagnostics.Metrics;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -55,7 +55,7 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    private WarpWorkerService<TestContext> CreateWorker(string queue, BarrierSignal? barrier = null)
+    private WarpWorkerService<TestContext> CreateWorker(string queue, BarrierSignal? barrier = null, int[]? retryDelays = null)
     {
         var queues = new[] { queue };
         var services = new ServiceCollection();
@@ -73,7 +73,10 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
         new Warp.Core.WarpBuilder<TestContext>(services).AddRetry(o =>
         {
             o.MaxRetries = 3;
-            o.Delays = [];
+
+            // Empty by default so a retry lands in Enqueued (immediate). Pass retryDelays to exercise the
+            // PRODUCTION default shape, where a delay puts the retry in Scheduled instead.
+            o.Delays = retryDelays ?? [];
         });
 
         var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
@@ -467,6 +470,80 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
 
         // Assert
         retriedCount.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// The PRODUCTION default: <c>RetryOptions.Delays</c> is <c>[15,60,300]</c>, so a retry is scheduled into
+    /// the future and <c>JobOutcome.RescheduledState</c> returns <see cref="State.Scheduled"/>, not
+    /// <see cref="State.Enqueued"/>. The worker's status label used to test Enqueued alone, so every
+    /// default-configured retry was emitted as <c>status=failed</c> — disagreeing with the DB, which correctly
+    /// wrote <c>stats:requeued</c> for the same attempt. The sibling test above passes only because it
+    /// configures <c>Delays = []</c>, the one shape that lands in Enqueued.
+    /// </summary>
+    [TimedFact]
+    public async Task GetAndProcessJob_FailedWithDefaultDelays_RecordsRetriedStatus()
+    {
+        // Arrange
+        var queue = $"metrics-retry-delayed-{Guid.NewGuid():N}";
+        var jobId = Guid.NewGuid();
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(ThrowExceptionRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new ThrowExceptionRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = queue,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker(queue, retryDelays: [15, 60, 300]);
+        long retriedCount = 0;
+        long failedCount = 0;
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (string.Equals(instrument.Meter.Name, "Warp", StringComparison.Ordinal)
+                && string.Equals(instrument.Name, "warp.job.completed", StringComparison.Ordinal))
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+        {
+            if (!HasTag(tags, "queue", queue))
+            {
+                return;
+            }
+
+            if (HasTag(tags, "status", "retried"))
+            {
+                retriedCount += value;
+            }
+            else if (HasTag(tags, "status", "failed"))
+            {
+                failedCount += value;
+            }
+        });
+        listener.Start();
+
+        // Act
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert — the job took the DELAYED path (this is the discriminator: without it a future change to the
+        // delay defaults would silently turn this back into the Enqueued case and the test would still pass).
+        var job = await _fixture.CreateContext()
+            .Set<Job>()
+            .AsNoTracking()
+            .FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Scheduled);
+
+        retriedCount.ShouldBe(1);
+        failedCount.ShouldBe(0);
     }
 
     [TimedFact]

@@ -362,7 +362,11 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             handlerScope?.Dispose();
             handlerScope = null;
 
-            var willRetry = job.CurrentState == State.Enqueued;
+            // Scheduled counts as a retry: JobOutcome.RescheduledState returns Scheduled whenever the
+            // target time is in the future, and RetryOptions.Delays defaults to [15,60,300] — so testing
+            // Enqueued alone labelled every DEFAULT retry as "failed". Must stay in step with the
+            // Enqueued-or-Scheduled branch in FinalizeJobState that writes stats:requeued.
+            var willRetry = job.CurrentState is State.Enqueued or State.Scheduled;
             var errorStatus = willRetry ? "retried" : "failed";
             activity?.SetStatus(ActivityStatusCode.Error, WarpTelemetry.TruncateMessage(e.Message, 256));
             activity?.SetTag(WarpTelemetryAttributes.WarpJobStatus, errorStatus);
