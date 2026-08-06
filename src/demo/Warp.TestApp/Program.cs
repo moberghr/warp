@@ -9,7 +9,9 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Helper;
+using Warp.Core.RateLimit;
 using Warp.Core.Retry;
+using Warp.Core.Timeout;
 using Warp.Core.Webhooks;
 using Warp.Demo.ServiceDefaults;
 using Warp.Http;
@@ -80,6 +82,14 @@ builder.Services.AddSingleton<IWarpUIExtension, RetryUIExtension>();
 builder.Services.AddWarp<TestContext>(options =>
 {
     options.UsePostgreSql();
+
+    // Timeout and rate limit must be registered on the PUBLISHER, not just the worker: each addon's
+    // *PublishBehavior stamps the job's metadata from the request-type attribute at publish time (§8.8).
+    // Without them here, [Timeout] and [RateLimit] parse but nothing is stamped, so the worker-side pipeline
+    // sees no configuration and both addons are silently inert. Ordering per §2.12 (concurrency before
+    // ratelimit; retry before timeout — neither of those two runs here, so only the pair order matters).
+    options.AddRateLimit();
+    options.AddTimeout();
 
     // Multi-application observability (§8.23): this is a NON-server process — publisher + dashboard host +
     // inbound HTTP endpoints, with NO worker. It shares the one TestContext database with the TestWorker,
@@ -519,6 +529,49 @@ app.MapPost("/seed/mutex", async (IPublisher publisher) =>
     var id2 = await publisher.Enqueue(new OrderConfirmationRequest { EmailLogId = 1 }, new JobParameters { Queue = "a-critical", }.WithMutex("test-mutex"));
     await publisher.SaveChangesAsync();
     return Results.Ok(new { holder = $"/warp/detail/{id1}", cancelled = $"/warp/detail/{id2}" });
+});
+
+// Semaphore in Wait mode — the counterpart to /seed/mutex. Where a Skip-mode mutex DELETES the surplus,
+// a Wait-mode semaphore REQUEUES it, so this is the seed that produces stats:requeued-concurrency.
+// Three jobs against a limit of one: two of them bounce and come back.
+app.MapPost("/seed/semaphore", async (IPublisher publisher) =>
+{
+    var ids = new List<Guid>();
+    for (var i = 0; i < 3; i++)
+    {
+        ids.Add(await publisher.Enqueue(
+            new SlowRequest(),
+            new JobParameters { Queue = "a-critical" }.WithSemaphore("demo-semaphore", 1)));
+    }
+
+    await publisher.SaveChangesAsync();
+
+    return Results.Ok(new { jobs = ids.ConvertAll(x => $"/warp/detail/{x}") });
+});
+
+// Timeout in Delete mode — the handler sleeps 10s against a 1s budget, so the pipeline marks it Deleted
+// with reason Timeout and AddRetry deliberately does not retry it (§8.7). Produces stats:deleted-timeout.
+app.MapPost("/seed/timeout", async (IPublisher publisher) =>
+{
+    var id = await publisher.Enqueue(new TimeoutDemoRequest(), new JobParameters { Queue = "a-critical" });
+    await publisher.SaveChangesAsync();
+
+    return Results.Ok(new { detail = $"/warp/detail/{id}" });
+});
+
+// Rate limit in Wait mode — one start per minute, so the surplus is rescheduled rather than dropped.
+// Produces stats:requeued-ratelimit.
+app.MapPost("/seed/ratelimit", async (IPublisher publisher) =>
+{
+    var ids = new List<Guid>();
+    for (var i = 0; i < 3; i++)
+    {
+        ids.Add(await publisher.Enqueue(new RateLimitDemoRequest(), new JobParameters { Queue = "a-critical" }));
+    }
+
+    await publisher.SaveChangesAsync();
+
+    return Results.Ok(new { jobs = ids.ConvertAll(x => $"/warp/detail/{x}") });
 });
 
 // === Shop demo — checkout drives the full order flow through the vendor adapters + both webhooks ===

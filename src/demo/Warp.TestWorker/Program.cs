@@ -5,9 +5,11 @@ using Warp.Core;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Concurrency;
 using Warp.Core.Enums;
+using Warp.Core.RateLimit;
 using Warp.Core.Retry;
 using Warp.Core.Sagas;
 using Warp.Core.Slo;
+using Warp.Core.Timeout;
 using Warp.Core.Webhooks;
 using Warp.Demo.ServiceDefaults;
 using Warp.Provider.PostgreSql;
@@ -65,6 +67,13 @@ builder.Services.AddWarpServer<TestContext>(options =>
     // Execution-side addons — these apply where handlers actually run, which is here.
     options.AddRetry(o => o.MaxRetries = 3);
     options.AddConcurrency();
+
+    // Ordering is load-bearing (§2.12): AddRetry BEFORE AddTimeout so retry's catch can see the
+    // TimeoutException that Fail mode throws, and AddConcurrency BEFORE AddRateLimit so a mutex reject does
+    // not burn a rate-limit token. Both were missing entirely until now, which meant [Timeout] and
+    // [RateLimit] were silently inert in the demo — the attributes parsed, the addons never ran.
+    options.AddRateLimit();
+    options.AddTimeout();
     options.AddSagas();
 
     // SLO objectives (§8.31) — seeded from config, editable in the dashboard SLOs page. Queue-scoped so they
