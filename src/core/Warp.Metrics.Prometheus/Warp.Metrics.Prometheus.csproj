@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<PackageId>Moberg.Warp.Metrics.Prometheus</PackageId>
+		<Description>Reads Warp's own metrics back from Prometheus (a TSDB Warp exported to via OTel) through the Warp.Core IMetricSource seam, so the dashboard and SLO evaluator render from Prometheus instead of the local Statistic/Counter fold. Generates the PromQL itself from the logical WarpMetricCatalog — no user-facing query language. Uses a Refit IPrometheusQueryApi.</Description>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Refit" Version="11.0.1" />
+		<PackageReference Include="Refit.HttpClientFactory" Version="11.0.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Warp.Core\Warp.Core.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="Warp.Tests" />
+	</ItemGroup>
+
+</Project>

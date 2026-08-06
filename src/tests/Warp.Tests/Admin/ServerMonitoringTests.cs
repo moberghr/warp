@@ -47,7 +47,7 @@ public abstract class ServerMonitoringTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var servers = await svc.GetServers();
 
         // Assert
@@ -81,7 +81,7 @@ public abstract class ServerMonitoringTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var server = await svc.GetServerById(serverId);
 
         // Assert
@@ -96,7 +96,7 @@ public abstract class ServerMonitoringTestsBase : IAsyncLifetime
     public async Task GetServerById_NonExistent_ReturnsNull()
     {
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var server = await svc.GetServerById(Guid.NewGuid());
 
         // Assert

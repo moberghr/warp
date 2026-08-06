@@ -40,7 +40,7 @@ public class AdapterTelemetryTests
         span.ShouldNotBeNull();
         span.GetTagItem("warp.adapter.name").ShouldBe("tel-tags");
         span.GetTagItem("warp.adapter.operation").ShouldBe("GetOrders");
-        span.GetTagItem("warp.adapter.outcome").ShouldBe("Success");
+        span.GetTagItem("warp.adapter.outcome").ShouldBe("success");
     }
 
     [TimedFact]
@@ -54,7 +54,7 @@ public class AdapterTelemetryTests
         var span = harness.FirstByName("tel-fail.GetOrders");
         span.ShouldNotBeNull();
         span.Status.ShouldBe(ActivityStatusCode.Error);
-        span.GetTagItem("warp.adapter.outcome").ShouldBe("Failed");
+        span.GetTagItem("warp.adapter.outcome").ShouldBe("failed");
         span.GetTagItem("error.type").ShouldBe(typeof(InvalidOperationException).FullName);
     }
 
@@ -70,7 +70,7 @@ public class AdapterTelemetryTests
 
         var tags = measurements.ShouldHaveSingleItem();
         tags["operation"].ShouldBe("GetOrders");
-        tags["outcome"].ShouldBe("Success");
+        tags["outcome"].ShouldBe("success");
     }
 
     [TimedFact]

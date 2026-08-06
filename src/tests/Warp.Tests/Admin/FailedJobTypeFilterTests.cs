@@ -5,6 +5,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Models;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
@@ -68,7 +69,7 @@ public abstract class FailedJobTypeFilterTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetFailedJobTypeCounts();
 
         // Assert
@@ -123,7 +124,7 @@ public abstract class FailedJobTypeFilterTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetFailedJobTypeCounts();
 
         // Assert
@@ -168,7 +169,7 @@ public abstract class FailedJobTypeFilterTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetFailedJobsByType(new BaseListRequest { Page = 0, PageSize = 100 }, "TypeA");
 
         // Assert
@@ -282,7 +283,7 @@ public abstract class FailedJobTypeFilterTestsBase : IAsyncLifetime
         ctx.Set<Job>().Add(TypedJob("OtherJob", State.Completed));
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetJobsByType(new BaseListRequest { Page = 0, PageSize = 100 }, "SyncBooking", null);
 
         result.TotalCount.ShouldBe(3);
@@ -298,7 +299,7 @@ public abstract class FailedJobTypeFilterTestsBase : IAsyncLifetime
         ctx.Set<Job>().Add(TypedJob("SyncBooking", State.Failed));
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var result = await svc.GetJobsByType(new BaseListRequest { Page = 0, PageSize = 100 }, "SyncBooking", State.Failed);
 
         result.TotalCount.ShouldBe(2);

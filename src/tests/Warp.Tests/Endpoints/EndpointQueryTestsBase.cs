@@ -4,6 +4,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 
@@ -349,5 +350,5 @@ public abstract class EndpointQueryTestsBase : IAsyncLifetime
         context.Set<Counter>().Add(new Counter { Key = key, Value = count });
     }
 
-    private EndpointQueryService<TestContext> CreateService() => new(_fixture.CreateContext());
+    private EndpointQueryService<TestContext> CreateService() => new(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 }

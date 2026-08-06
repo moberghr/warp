@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.ErrorGrouping;
+using Warp.Core.Metrics;
 using Warp.Core.Models;
 
 namespace Warp.Core.Services;
@@ -20,11 +21,13 @@ public sealed class ErrorGroupQueryService<TContext> : IErrorGroupQueryService
 
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
+    private readonly IMetricSource _metrics;
 
-    public ErrorGroupQueryService(TContext context, TimeProvider timeProvider)
+    public ErrorGroupQueryService(TContext context, TimeProvider timeProvider, IMetricSource metrics)
     {
         _context = context;
         _timeProvider = timeProvider;
+        _metrics = metrics;
     }
 
     public async Task<ErrorGroupListModel> GetGroups(ErrorSource? source, ErrorGroupStatus? status, string? application, ErrorKind? kind, int page, int pageSize, CancellationToken ct)
@@ -161,32 +164,16 @@ public sealed class ErrorGroupQueryService<TContext> : IErrorGroupQueryService
 
     private async Task<IReadOnlyList<ErrorGroupTrendPoint>> LoadTrendAsync(string fingerprint, CancellationToken ct)
     {
-        var prefix = ErrorGroupKeys.HourlyScanPrefix(fingerprint);
+        // Hourly occurrence trend via the metric seam (§8.3x): the local backend reproduces the tier-classified
+        // hourly down-bin this used to inline. Open-ended window (all buckets); the last TrendHours are shown.
+        var metric = new MetricRef(WarpMetricCatalog.Names.ErrorGroupOccurrences, new Dictionary<string, string> { [WarpMetricCatalog.Tags.Fingerprint] = fingerprint });
+        var series = await _metrics.GetSeriesAsync(
+            new SeriesQuery(metric, new MetricWindow(DateTime.MinValue, DateTime.MaxValue), MetricResolution.Hourly, MetricAggregation.Sum), ct);
 
-        // Plain StartsWith translates to SQL LIKE (codebase convention, cf. ClientEventQueryService).
-        var rows = await _context.Set<Statistic>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Select(x => new { x.Key, x.Value })
-            .ToListAsync(ct);
-
-        // Tier-aware (§8.30): the trend key is a legacy unmarked hourly bucket, or one StatisticRollup rolled to
-        // hourly/daily — classify via MetricTiers and down-bin to the hour so rolled buckets still read.
-        var byHour = new Dictionary<DateTime, long>();
-        foreach (var row in rows)
-        {
-            if (MetricTiers.TryClassifyKey(row.Key, out _, out _, out var bucket))
-            {
-                var hour = new DateTime(bucket.Year, bucket.Month, bucket.Day, bucket.Hour, 0, 0, DateTimeKind.Utc);
-                byHour[hour] = byHour.GetValueOrDefault(hour) + row.Value;
-            }
-        }
-
-        return [.. byHour
-            .OrderBy(x => x.Key)
+        return [.. series
+            .OrderBy(x => x.BucketStart)
             .TakeLast(TrendHours)
-            .Select(x =>
-                new ErrorGroupTrendPoint { Hour = x.Key, Count = x.Value }),];
+            .Select(x => new ErrorGroupTrendPoint { Hour = x.BucketStart, Count = x.Value }),];
     }
 
     private static bool IsNew(DateTime firstSeenAt, DateTime now)

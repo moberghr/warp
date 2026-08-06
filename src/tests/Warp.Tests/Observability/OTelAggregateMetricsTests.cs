@@ -42,7 +42,7 @@ public class OTelAggregateMetricsTests
 
             var tags = measurements.ShouldHaveSingleItem();
             tags[WarpTelemetryAttributes.AdapterMeterOperation].ShouldBe("GetOrders");
-            tags[WarpTelemetryAttributes.AdapterMeterOutcome].ShouldBe("Success");
+            tags[WarpTelemetryAttributes.AdapterMeterOutcome].ShouldBe("success");
             tags[WarpTelemetryAttributes.MeterApplication].ShouldBe("orders-api");
         }
         finally
@@ -91,7 +91,7 @@ public class OTelAggregateMetricsTests
 
         var total = totals.ShouldHaveSingleItem();
         total[WarpTelemetryAttributes.EndpointMeterRoute].ShouldBe(expectedRouteTag);
-        total[WarpTelemetryAttributes.EndpointMeterOutcome].ShouldBe("Success");
+        total[WarpTelemetryAttributes.EndpointMeterOutcome].ShouldBe("success");
         total[WarpTelemetryAttributes.MeterApplication].ShouldBe("orders-api");
 
         durations.ShouldHaveSingleItem()[WarpTelemetryAttributes.EndpointMeterRoute].ShouldBe(expectedRouteTag);
@@ -119,7 +119,7 @@ public class OTelAggregateMetricsTests
         }
 
         var total = totals.ShouldHaveSingleItem();
-        total[WarpTelemetryAttributes.EndpointMeterOutcome].ShouldBe("Failed");
+        total[WarpTelemetryAttributes.EndpointMeterOutcome].ShouldBe("failed");
 
         // ApplicationName unset ⇒ no application tag on the meter.
         total.ContainsKey(WarpTelemetryAttributes.MeterApplication).ShouldBeFalse();

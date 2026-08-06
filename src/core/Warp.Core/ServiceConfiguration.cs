@@ -19,6 +19,7 @@ using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Interceptors;
 using Warp.Core.Logging;
+using Warp.Core.Metrics;
 using Warp.Core.Notifications;
 using Warp.Core.Notifiers;
 using Warp.Core.Services;
@@ -115,11 +116,11 @@ public static class ServiceConfiguration
 
         services.AddScoped<IRecurringJobPublisher>(x =>
             new RecurringJobPublisher<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpLockProvider>()));
-        services.AddScoped<IJobQueryService>(x => new JobQueryService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>()));
+        services.AddScoped<IJobQueryService>(x => new JobQueryService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<Warp.Core.Metrics.IMetricSource>()));
         services.AddScoped<IJobCommandService>(x => new JobCommandService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IOptions<WarpConfiguration>>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<IWarpSqlQueries<TContext>>(), x.GetRequiredService<ServerTaskSignals<TContext>>()));
         services.AddScoped<IJobGroupQueryService>(x => new JobGroupQueryService<TContext>(x.GetRequiredService<TContext>()));
         services.AddScoped<IRecurringJobService>(x => new RecurringJobService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpNotificationTransport>(), x.GetRequiredService<ServerTaskSignals<TContext>>()));
-        services.AddScoped<IDashboardStatsService>(x => new DashboardStatsService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>()));
+        services.AddScoped<IDashboardStatsService>(x => new DashboardStatsService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IMetricSource>()));
         services.AddScoped<IServerCommandService>(x => new ServerCommandService<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>()));
         services.AddScoped<IBatchPublisher>(x => new BatchPublisher<TContext>(
             x.GetRequiredService<TContext>(),
@@ -184,7 +185,8 @@ public static class ServiceConfiguration
         // (which does the folding) runs only on a server.
         services.TryAddScoped<IErrorGroupQueryService>(x => new ErrorGroupQueryService<TContext>(
             x.GetRequiredService<TContext>(),
-            x.GetRequiredService<TimeProvider>()));
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<Warp.Core.Metrics.IMetricSource>()));
         services.TryAddScoped<IErrorGroupCommandService, ErrorGroupCommandService<TContext>>();
 
         // SLO objectives read/command (§8.31). Registered in AddWarp so dashboard-only hosts resolve them; the
@@ -258,6 +260,11 @@ public static class ServiceConfiguration
         // call from AddWarpServer's AddServerHostCore doesn't double-register. The Publisher /
         // BatchPublisher constructor guard backstops non-hosted (raw ServiceProvider) usage.
         services.AddHostedService<WarpModelValidationService<TContext>>();
+
+        // Pluggable metric-read seam. The default backend reads the durable Statistic and Counter fold, and a later
+        // external-TSDB backend swaps in here. Scoped over the same context the dashboard and SLO readers use, and
+        // registered for any AddWarp process including a dashboard-only one.
+        services.TryAddScoped<IMetricSource, LocalMetricSource<TContext>>();
 
         // Per-process reporter that folds dropped-record counts (adapter/endpoint/client, §8.19/§8.21/§8.27) to
         // the durable warpsys:records-dropped stat and raises a throttled RecordsDropped event, so a saturated

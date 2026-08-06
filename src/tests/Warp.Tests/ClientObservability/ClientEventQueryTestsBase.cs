@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 
@@ -26,7 +27,7 @@ public abstract class ClientEventQueryTestsBase : IAsyncLifetime
 
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
-    private ClientEventQueryService<TestContext> Service() => new(_fixture.CreateContext());
+    private ClientEventQueryService<TestContext> Service() => new(_fixture.CreateContext(), new LocalMetricSource<TestContext>(_fixture.CreateContext()));
 
     [TimedFact]
     public async Task GetSummary_FoldsCountsErrorRateAndVitalP75_FromAggregatesOnly()

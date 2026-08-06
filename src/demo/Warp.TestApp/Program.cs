@@ -15,6 +15,7 @@ using Warp.Demo.ServiceDefaults;
 using Warp.Http;
 using Warp.Http.ClientObservability;
 using Warp.Http.Observability;
+using Warp.Metrics.Prometheus;
 using Warp.Provider.PostgreSql;
 using Warp.Test.Shared;
 using Warp.Test.Shared.Entities;
@@ -153,6 +154,17 @@ builder.Services.AddWarp<TestContext>(options =>
         o.CaptureRemoteIp = true;   // demo: surface the caller IP in the event drawer (PII — opt-in, §1.2)
     });
 });
+
+// Optional Prometheus read-back backend (§8.33). When WARP_METRICS_BACKEND=Prometheus (set by the AppHost when a
+// Prometheus resource is present), the dashboard/SLO reads route to Prometheus instead of the local Statistic/
+// Counter fold — proving the same metrics Warp exported via OTel render back in the Warp UI. The address comes
+// from the Prometheus resource's connection string.
+if (string.Equals(Environment.GetEnvironmentVariable("WARP_METRICS_BACKEND"), "Prometheus", StringComparison.OrdinalIgnoreCase))
+{
+    var prometheusUrl = builder.Configuration.GetConnectionString("prometheus")
+        ?? throw new InvalidOperationException("WARP_METRICS_BACKEND=Prometheus but no 'prometheus' connection string was provided (the AppHost wires it from the Prometheus resource).");
+    builder.Services.AddPrometheusMetricSource(o => o.BaseAddress = prometheusUrl);
+}
 
 var app = builder.Build();
 

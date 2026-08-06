@@ -8,6 +8,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
@@ -146,7 +147,7 @@ public abstract class MultiAppEndToEndTestsBase : IntegrationTestBase
         await AggregateAsync();
 
         // ---- adapters: distinct applications, each with its own call count ----
-        var adapterQuery = new AdapterQueryService<TestContext>(Fixture.CreateContext());
+        var adapterQuery = new AdapterQueryService<TestContext>(Fixture.CreateContext(), new LocalMetricSource<TestContext>(Fixture.CreateContext()));
         (await adapterQuery.GetApplications(Ct)).ShouldBe([AppA, AppB]);
 
         var adapterA = (await adapterQuery.GetAdapterStatsByApplication(AppA, Ct)).ShouldHaveSingleItem();
@@ -160,7 +161,7 @@ public abstract class MultiAppEndToEndTestsBase : IntegrationTestBase
         adapterB.Calls.ShouldBe(1);
 
         // ---- endpoints: same route, application is part of identity → two distinct aggregates ----
-        var endpointQuery = new EndpointQueryService<TestContext>(Fixture.CreateContext());
+        var endpointQuery = new EndpointQueryService<TestContext>(Fixture.CreateContext(), new LocalMetricSource<TestContext>(Fixture.CreateContext()));
         (await endpointQuery.GetApplications(Ct)).ShouldBe([AppA, AppB]);
 
         var endpointA = (await endpointQuery.GetEndpointStatsByApplication(AppA, Ct)).ShouldHaveSingleItem();
@@ -291,5 +292,5 @@ public abstract class MultiAppEndToEndTestsBase : IntegrationTestBase
             Options.Create(new WarpConfiguration { ApplicationInstanceStaleGrace = StaleGrace }));
 
     private JobQueryService<TestContext> CreateJobQuery()
-        => new(Fixture.CreateContext(), TimeProvider.System);
+        => new(Fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(Fixture.CreateContext()));
 }

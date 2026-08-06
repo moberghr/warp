@@ -149,7 +149,7 @@ internal sealed class WarpInboundObservabilityMiddleware
             // Always-on meters (independent of the recording Sink): an OTel-only user reconstructs
             // count / error-rate / latency (and per-app) from these even when no DB rows are written. Route is
             // the bounded {method} {template} identity; application is the process origin when set.
-            WarpTelemetry.RecordEndpointCall($"{identity.Method} {identity.RouteTemplate}", outcome.ToString(), durationMs, _applicationName);
+            WarpTelemetry.RecordEndpointCall($"{identity.Method} {identity.RouteTemplate}", Warp.Core.Metrics.WarpMetricCatalog.OutcomeToken(outcome), durationMs, _applicationName);
 
             // Capture tiers: full fidelity iff Always, OnFailure-and-failed, or forced. A forced request
             // captures bodies + headers even on success and even if the tier is None/OnFailure. Request
@@ -265,7 +265,7 @@ internal sealed class WarpInboundObservabilityMiddleware
     {
         activity.SetTag(WarpTelemetryAttributes.WarpEndpointRoute, $"{identity.Method} {identity.RouteTemplate}");
         activity.SetTag(WarpTelemetryAttributes.WarpEndpointStatusCode, statusCode);
-        activity.SetTag(WarpTelemetryAttributes.WarpEndpointOutcome, outcome.ToString());
+        activity.SetTag(WarpTelemetryAttributes.WarpEndpointOutcome, Warp.Core.Metrics.WarpMetricCatalog.OutcomeToken(outcome));
         SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointGroup, group);
         SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointClientIp, remoteIp);
         SetTagIfNotNull(activity, WarpTelemetryAttributes.WarpEndpointUserAgent, userAgent);

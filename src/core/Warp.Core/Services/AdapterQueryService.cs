@@ -2,6 +2,8 @@ using Microsoft.EntityFrameworkCore;
 using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
+using static Warp.Core.Metrics.WarpMetricCatalog;
 
 namespace Warp.Core.Services;
 
@@ -20,10 +22,12 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
     private const int RecentCallsLimit = 100;
 
     private readonly TContext _context;
+    private readonly IMetricSource _metrics;
 
-    public AdapterQueryService(TContext context)
+    public AdapterQueryService(TContext context, IMetricSource metrics)
     {
         _context = context;
+        _metrics = metrics;
     }
 
     public async Task<IReadOnlyList<AdapterListItemModel>> GetAdapters(CancellationToken ct = default)
@@ -98,7 +102,10 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
 
         var totals = stats.Totals.GetValueOrDefault(name);
 
-        var (p90, p95, p99) = Percentiles(stats.DurationBuckets.GetValueOrDefault(name));
+        var durationRef = new MetricRef(Names.AdapterDuration, new Dictionary<string, string> { [Tags.Adapter] = name });
+        var p90 = await PercentileAsync(durationRef, 90, ct);
+        var p95 = await PercentileAsync(durationRef, 95, ct);
+        var p99 = await PercentileAsync(durationRef, 99, ct);
 
         // Average latency comes from the duration-sum ÷ count aggregates (survives AdapterCallLog deletion),
         // not the raw rows. Last-failure timestamps and the recent-calls list below still read raw rows —
@@ -280,43 +287,19 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
     // lifetime aggregates).
     private async Task<Dictionary<AppAdapterKey, OutcomeCounts>> LoadAppStatsAsync(string? application, CancellationToken ct)
     {
-        var prefix = application is null
-            ? AdapterCounterKeys.AppPrefix + ":"
-            : AdapterCounterKeys.AppPrefix + ":" + application + ":";
-
-        var aggregated = await _context.Set<Statistic>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Select(x =>
-                new
-                {
-                    x.Key,
-                    x.Value,
-                })
-            .ToListAsync(ct);
-
-        var pending = await _context.Set<Counter>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .GroupBy(x => x.Key)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(c => (long)c.Value),
-                })
-            .ToListAsync(ct);
-
         var map = new Dictionary<AppAdapterKey, OutcomeCounts>();
+        var scope = application is null ? null : new Dictionary<string, string> { [Tags.Application] = application };
+        var calls = new MetricRef(Names.AdapterCalls, scope);
+        var duration = new MetricRef(Names.AdapterDuration, scope);
 
-        foreach (var row in aggregated.Concat(pending))
+        foreach (var row in await _metrics.GetBreakdownAsync(calls, [Tags.Application, Tags.Adapter, Tags.Outcome], null, ct))
         {
-            if (!AdapterCounterKeys.TryParseApp(row.Key, out var app, out var adapter, out var outcome))
-            {
-                continue;
-            }
+            Bucket(map, new AppAdapterKey(row.Tags[Tags.Application], row.Tags[Tags.Adapter])).Add(row.Tags[Tags.Outcome], row.Value);
+        }
 
-            Bucket(map, new AppAdapterKey(app, adapter)).Add(outcome, row.Value);
+        foreach (var row in await _metrics.GetBreakdownAsync(duration, [Tags.Application, Tags.Adapter], null, ct))
+        {
+            Bucket(map, new AppAdapterKey(row.Tags[Tags.Application], row.Tags[Tags.Adapter])).Add(AdapterCounterKeys.DurationToken, row.Value);
         }
 
         return map;
@@ -337,61 +320,37 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
     // read narrows to history keys via the reserved history marker.
     private async Task<Dictionary<DateTime, HistoryBucket>> LoadHistoryBucketsAsync(string? name, CancellationToken ct)
     {
-        var prefix = name is null
-            ? $"{AdapterCounterKeys.Prefix}:"
-            : $"{AdapterCounterKeys.Prefix}:{name}:{AdapterCounterKeys.HistoryMarker}:";
-
-        var histMarker = $":{AdapterCounterKeys.HistoryMarker}:";
-
-        var aggregated = await _context.Set<Statistic>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Where(x => x.Key.Contains(histMarker))
-            .Select(x =>
-                new
-                {
-                    x.Key,
-                    x.Value,
-                })
-            .ToListAsync(ct);
-
-        var pending = await _context.Set<Counter>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Where(x => x.Key.Contains(histMarker))
-            .GroupBy(x => x.Key)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(c => (long)c.Value),
-                })
-            .ToListAsync(ct);
-
         var buckets = new Dictionary<DateTime, HistoryBucket>();
+        var scope = name is null ? null : new Dictionary<string, string> { [Tags.Adapter] = name };
+        var calls = new MetricRef(Names.AdapterCalls, scope);
+        var duration = new MetricRef(Names.AdapterDuration, scope);
 
-        foreach (var row in aggregated.Concat(pending))
+        // Open-ended window — bounded by the 7-day hourly-stat retention. Count outcomes split by outcome so the
+        // HistoryBucket can tally calls + errors; the duration sum comes from the dur metric.
+        var window = new MetricWindow(DateTime.MinValue, DateTime.MaxValue);
+
+        foreach (var point in await _metrics.GetSeriesAsync(new SeriesQuery(calls, window, MetricResolution.Hourly, MetricAggregation.Sum, BreakdownBy: Tags.Outcome), ct))
         {
-            if (!AdapterCounterKeys.TryParseHistory(row.Key, out var keyName, out var outcome, out var hour))
-            {
-                continue;
-            }
+            HistoryBucketFor(buckets, point.BucketStart).Add(point.TagValue!, point.Value);
+        }
 
-            if (name is not null && !string.Equals(keyName, name, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            if (!buckets.TryGetValue(hour, out var bucket))
-            {
-                bucket = new HistoryBucket();
-                buckets[hour] = bucket;
-            }
-
-            bucket.Add(outcome, row.Value);
+        foreach (var point in await _metrics.GetSeriesAsync(new SeriesQuery(duration, window, MetricResolution.Hourly, MetricAggregation.Sum), ct))
+        {
+            HistoryBucketFor(buckets, point.BucketStart).Add(AdapterCounterKeys.DurationToken, point.Value);
         }
 
         return buckets;
+    }
+
+    private static HistoryBucket HistoryBucketFor(Dictionary<DateTime, HistoryBucket> buckets, DateTime hour)
+    {
+        if (!buckets.TryGetValue(hour, out var bucket))
+        {
+            bucket = new HistoryBucket();
+            buckets[hour] = bucket;
+        }
+
+        return bucket;
     }
 
     private static List<AdapterHistoryPointModel> ProjectHistory(Dictionary<DateTime, HistoryBucket> buckets)
@@ -412,86 +371,58 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
         ];
     }
 
-    // Loads adapter-namespaced Statistic + pending Counter rows once, merges them (aggregated
-    // Statistic value + un-collapsed Counter rows for the same key), and folds each into its
-    // adapter / operation / group outcome bucket. When <paramref name="name"/> is given the load is
-    // scoped to that adapter's keys ("adapter:{name}:") so a detail page never materialises every
-    // adapter's stat rows — adapter names are colon-free (the key delimiter), so the prefix is exact.
+    // Builds the lifetime stat set via the metric seam (§8.3x): per-adapter outcome counts + duration sum for
+    // the Totals, and — for a specific adapter's detail page — the per-operation and per-group breakdowns. When
+    // <paramref name="name"/> is null only the Totals are needed (the list page), so the finer breakdowns are
+    // skipped. The local backend reproduces the merged Statistic+Counter read the inline scan used to do.
     private async Task<StatSet> LoadStatsAsync(CancellationToken ct, string? name = null)
     {
-        var prefix = name is null
-            ? AdapterCounterKeys.Prefix + ":"
-            : AdapterCounterKeys.Prefix + ":" + name + ":";
-
-        var aggregated = await _context.Set<Statistic>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Select(x =>
-                new
-                {
-                    x.Key,
-                    x.Value,
-                })
-            .ToListAsync(ct);
-
-        var pending = await _context.Set<Counter>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .GroupBy(x => x.Key)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(c => (long)c.Value),
-                })
-            .ToListAsync(ct);
-
-        var merged = aggregated
-            .Concat(pending)
-            .GroupBy(x => x.Key, StringComparer.Ordinal)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(x => x.Value),
-                });
-
         var set = new StatSet();
+        var scope = name is null ? null : new Dictionary<string, string> { [Tags.Adapter] = name };
+        var calls = new MetricRef(Names.AdapterCalls, scope);
+        var duration = new MetricRef(Names.AdapterDuration, scope);
 
-        foreach (var row in merged)
+        foreach (var row in await _metrics.GetBreakdownAsync(calls, [Tags.Adapter, Tags.Outcome], null, ct))
         {
-            // Latency-histogram bucket rows ride the same "adapter:" prefix but are not count/error rows —
-            // accumulate them into the per-adapter bucket map for the percentile walk, never the StatSet.
-            if (AdapterCounterKeys.TryParsePct(row.Key, out var pctAdapter, out var upperMs))
-            {
-                if (!set.DurationBuckets.TryGetValue(pctAdapter, out var buckets))
-                {
-                    buckets = [];
-                    set.DurationBuckets[pctAdapter] = buckets;
-                }
-
-                buckets[upperMs] = buckets.GetValueOrDefault(upperMs) + row.Value;
-
-                continue;
-            }
-
-            if (!AdapterCounterKeys.TryParse(row.Key, out var parsed))
-            {
-                continue;
-            }
-
-            var bucket = parsed.Dimension switch
-            {
-                AdapterStatDimension.Total => Bucket(set.Totals, parsed.Adapter),
-                AdapterStatDimension.Operation => Bucket(set.Operations, new DimensionKey(parsed.Adapter, parsed.Value)),
-                AdapterStatDimension.Group => Bucket(set.Groups, new DimensionKey(parsed.Adapter, parsed.Value)),
-                _ => null,
-            };
-
-            bucket?.Add(parsed.Outcome, row.Value);
+            Bucket(set.Totals, row.Tags[Tags.Adapter]).Add(row.Tags[Tags.Outcome], row.Value);
         }
 
+        foreach (var row in await _metrics.GetBreakdownAsync(duration, [Tags.Adapter], null, ct))
+        {
+            Bucket(set.Totals, row.Tags[Tags.Adapter]).Add(AdapterCounterKeys.DurationToken, row.Value);
+        }
+
+        if (name is null)
+        {
+            return set;
+        }
+
+        await FoldDimensionAsync(calls, duration, Tags.Operation, set.Operations, ct);
+        await FoldDimensionAsync(calls, duration, Tags.Group, set.Groups, ct);
+
         return set;
+    }
+
+    // Folds one finer dimension (operation | group) of the calls + duration metrics into its (adapter, value)
+    // bucket map: outcome counts from calls, the duration sum from the dur metric.
+    private async Task FoldDimensionAsync(MetricRef calls, MetricRef duration, string dimension, Dictionary<DimensionKey, OutcomeCounts> map, CancellationToken ct)
+    {
+        foreach (var row in await _metrics.GetBreakdownAsync(calls, [Tags.Adapter, dimension, Tags.Outcome], null, ct))
+        {
+            Bucket(map, new DimensionKey(row.Tags[Tags.Adapter], row.Tags[dimension])).Add(row.Tags[Tags.Outcome], row.Value);
+        }
+
+        foreach (var row in await _metrics.GetBreakdownAsync(duration, [Tags.Adapter, dimension], null, ct))
+        {
+            Bucket(map, new DimensionKey(row.Tags[Tags.Adapter], row.Tags[dimension])).Add(AdapterCounterKeys.DurationToken, row.Value);
+        }
+    }
+
+    private async Task<double> PercentileAsync(MetricRef metric, int percentile, CancellationToken ct)
+    {
+        var rows = await _metrics.GetPercentileBreakdownAsync(metric, percentile, [], null, ct);
+
+        return rows.Count == 0 ? 0 : rows[0].Value;
     }
 
     private static OutcomeCounts Bucket<TKey>(Dictionary<TKey, OutcomeCounts> map, TKey key)
@@ -520,48 +451,6 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
 
     private readonly record struct AppAdapterKey(string Application, string Adapter);
 
-    // Walks the ascending latency buckets cumulatively: the percentile for quantile q over N samples is the
-    // upper bound of the smallest bucket whose cumulative count reaches ceil(q*N). The overflow bucket
-    // (int.MaxValue, "> 10000 ms") reports the last real bound (10000) as a displayable floor. Returns 0
-    // when there is no bucket data.
-    private static (double P90, double P95, double P99) Percentiles(Dictionary<int, long>? buckets)
-    {
-        if (buckets is null || buckets.Count == 0)
-        {
-            return (0, 0, 0);
-        }
-
-        var total = buckets.Values.Sum();
-        if (total == 0)
-        {
-            return (0, 0, 0);
-        }
-
-        return (
-            Quantile(buckets, total, 0.90),
-            Quantile(buckets, total, 0.95),
-            Quantile(buckets, total, 0.99));
-    }
-
-    private static double Quantile(Dictionary<int, long> buckets, long total, double q)
-    {
-        var threshold = (long)Math.Ceiling(q * total);
-        long cumulative = 0;
-
-        foreach (var bound in AdapterCounterKeys.Buckets)
-        {
-            cumulative += buckets.GetValueOrDefault(bound);
-
-            if (cumulative >= threshold)
-            {
-                // Overflow bucket → report the last real bound (10000) rather than int.MaxValue.
-                return bound == int.MaxValue ? AdapterCounterKeys.Buckets[^2] : bound;
-            }
-        }
-
-        return AdapterCounterKeys.Buckets[^2];
-    }
-
     private sealed class StatSet
     {
         public Dictionary<string, OutcomeCounts> Totals { get; } = new(StringComparer.Ordinal);
@@ -569,9 +458,6 @@ public class AdapterQueryService<TContext> : IAdapterQueryService
         public Dictionary<DimensionKey, OutcomeCounts> Operations { get; } = [];
 
         public Dictionary<DimensionKey, OutcomeCounts> Groups { get; } = [];
-
-        // Per-adapter latency histogram: adapter name → (bucket upper bound → count).
-        public Dictionary<string, Dictionary<int, long>> DurationBuckets { get; } = new(StringComparer.Ordinal);
     }
 
     private sealed class OutcomeCounts

@@ -45,7 +45,7 @@ public class SpanEnrichmentTests
         }
 
         var activity = harness.FirstByName("vendor.GetOrders").ShouldNotBeNull();
-        activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterOutcome).ShouldBe("Success");
+        activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterOutcome).ShouldBe("success");
         activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterStatusCode).ShouldBe(200);
         activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterCorrelationId).ShouldBe("delivery-42");
         activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterRequestSummary).ShouldBe("GET /orders/{id}");
@@ -72,7 +72,7 @@ public class SpanEnrichmentTests
         var activity = harness.FirstByName("vendor.GetOrders").ShouldNotBeNull();
 
         // Identity + outcome are always-on telemetry; the captured DETAIL is not attached under Database.
-        activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterOutcome).ShouldBe("Success");
+        activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterOutcome).ShouldBe("success");
         activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterRequestBody).ShouldBeNull();
         activity.GetTagItem(WarpTelemetryAttributes.WarpAdapterStatusCode).ShouldBeNull();
     }
@@ -91,7 +91,7 @@ public class SpanEnrichmentTests
 
         activity.GetTagItem(WarpTelemetryAttributes.WarpEndpointRoute).ShouldBe("GET /orders/{id}");
         activity.GetTagItem(WarpTelemetryAttributes.WarpEndpointStatusCode).ShouldBe(200);
-        activity.GetTagItem(WarpTelemetryAttributes.WarpEndpointOutcome).ShouldBe("Success");
+        activity.GetTagItem(WarpTelemetryAttributes.WarpEndpointOutcome).ShouldBe("success");
         activity.GetTagItem(WarpTelemetryAttributes.WarpEndpointClientIp).ShouldBe("203.0.113.4");
         activity.GetTagItem(WarpTelemetryAttributes.WarpEndpointUserAgent).ShouldBe("curl/8");
         activity.GetTagItem(WarpTelemetryAttributes.WarpEndpointRequestBody).ShouldBe("{\"x\":1}");

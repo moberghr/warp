@@ -56,7 +56,8 @@ public static class Extensions
                     .AddAspNetCoreInstrumentation()
                     .AddHttpClientInstrumentation()
                     .AddRuntimeInstrumentation()
-                    .AddMeter("Warp"))
+                    .AddMeter("Warp")
+                    .AddWarpHistogramViews())
             .WithTracing(tracing =>
                 tracing
                     .AddAspNetCoreInstrumentation()
@@ -66,6 +67,24 @@ public static class Extensions
         builder.AddOpenTelemetryExporters();
 
         return builder;
+    }
+
+    // Explicit histogram bucket boundaries for the Warp latency meters, taken from the single canonical source
+    // (WarpHistogramBuckets) that the DB :pct(h): ladders also use — so a Prometheus histogram_quantile reads the
+    // same distribution as the local dashboard (§8.30/§8.31/§8.33), instead of a hand-copied ladder that can drift
+    // (e.g. client vitals use a vitals-tuned ladder, not the generic HTTP one). The int.MaxValue overflow rung is
+    // implicit (+Inf) in OTel, so the finite bounds map straight to the View boundaries.
+    public static MeterProviderBuilder AddWarpHistogramViews(this MeterProviderBuilder metrics)
+    {
+        foreach (var (instrument, bounds) in Warp.Core.Metrics.WarpHistogramBuckets.Views)
+        {
+            metrics.AddView(instrument, new ExplicitBucketHistogramConfiguration
+            {
+                Boundaries = Array.ConvertAll(bounds, b => (double)b),
+            });
+        }
+
+        return metrics;
     }
 
     public static TBuilder AddDefaultHealthChecks<TBuilder>(this TBuilder builder)

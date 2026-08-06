@@ -2,6 +2,8 @@ using Microsoft.EntityFrameworkCore;
 using Warp.Core.ClientObservability;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
+using static Warp.Core.Metrics.WarpMetricCatalog;
 
 namespace Warp.Core.Services;
 
@@ -16,72 +18,56 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
     private const int TopNames = 10;
 
     private readonly TContext _context;
+    private readonly IMetricSource _metrics;
 
-    public ClientEventQueryService(TContext context) => _context = context;
+    public ClientEventQueryService(TContext context, IMetricSource metrics)
+    {
+        _context = context;
+        _metrics = metrics;
+    }
 
     public async Task<ClientObservabilitySummaryModel> GetSummary(string? application, CancellationToken ct)
     {
-        var global = await LoadMergedAsync(ClientEventKeys.Prefix + ":", ct);
+        // Per-type counts — global, or the per-app slice when the view is application-scoped (the per-app slice
+        // carries type totals only, §8.27; vitals + top names stay global).
+        var typeScope = application is null
+            ? new MetricRef(Names.ClientEvents)
+            : new MetricRef(Names.ClientEvents, new Dictionary<string, string> { [Tags.Application] = ClientEventKeys.Sanitize(application) });
+        var typeCounts = (await _metrics.GetBreakdownAsync(typeScope, [Tags.Type], null, ct))
+            .ToDictionary(r => r.Tags[Tags.Type], r => r.Value, StringComparer.Ordinal);
 
-        var typeCounts = new Dictionary<string, long>(StringComparer.Ordinal);
+        // Hourly history split by type (global), folded per hour into the errors/logs/events/vitals accumulator.
+        var window = new MetricWindow(DateTime.MinValue, DateTime.MaxValue);
+        var history = new Dictionary<string, ClientHistoryAccumulator>(StringComparer.Ordinal);
+        foreach (var point in await _metrics.GetSeriesAsync(new SeriesQuery(new MetricRef(Names.ClientEvents), window, MetricResolution.Hourly, MetricAggregation.Sum, BreakdownBy: Tags.Type), ct))
+        {
+            Hour(history, ClientEventKeys.HourBucket(point.BucketStart)).Add(point.TagValue!, point.Value);
+        }
+
+        // Top error / event names (global).
+        var errorType = ClientEventKeys.TypeToken(ClientEventType.Error);
+        var eventType = ClientEventKeys.TypeToken(ClientEventType.Event);
         var topErrors = new Dictionary<string, long>(StringComparer.Ordinal);
         var topEvents = new Dictionary<string, long>(StringComparer.Ordinal);
-        var vitalCount = new Dictionary<string, long>(StringComparer.Ordinal);
-        var vitalDur = new Dictionary<string, long>(StringComparer.Ordinal);
-        var vitalBuckets = new Dictionary<string, Dictionary<int, long>>(StringComparer.Ordinal);
-        var history = new Dictionary<string, ClientHistoryAccumulator>(StringComparer.Ordinal);
-
-        foreach (var (key, value) in global)
+        foreach (var row in await _metrics.GetBreakdownAsync(new MetricRef(Names.ClientEventsNamed), [Tags.Type, Tags.Name], null, ct))
         {
-            if (ClientEventKeys.TryParseTypeTotal(key, out var totalType))
+            if (string.Equals(row.Tags[Tags.Type], errorType, StringComparison.Ordinal))
             {
-                typeCounts[totalType] = value;
+                topErrors[row.Tags[Tags.Name]] = row.Value;
             }
-            else if (ClientEventKeys.TryParseTypeHistory(key, out var histType, out var hour))
+            else if (string.Equals(row.Tags[Tags.Type], eventType, StringComparison.Ordinal))
             {
-                Hour(history, hour).Add(histType, value);
-            }
-            else if (ClientEventKeys.TryParseNameTotal(key, out var nameType, out var name))
-            {
-                if (string.Equals(nameType, ClientEventKeys.TypeToken(ClientEventType.Error), StringComparison.Ordinal))
-                {
-                    topErrors[name] = value;
-                }
-                else if (string.Equals(nameType, ClientEventKeys.TypeToken(ClientEventType.Event), StringComparison.Ordinal))
-                {
-                    topEvents[name] = value;
-                }
-            }
-            else if (ClientEventKeys.TryParseVitalPct(key, out var pctVital, out var upperMs))
-            {
-                Bucket(vitalBuckets, pctVital)[upperMs] = value;
-            }
-            else if (ClientEventKeys.TryParseVital(key, out var vital, out var token))
-            {
-                if (string.Equals(token, ClientEventKeys.CountToken, StringComparison.Ordinal))
-                {
-                    vitalCount[vital] = value;
-                }
-                else
-                {
-                    vitalDur[vital] = value;
-                }
+                topEvents[row.Tags[Tags.Name]] = row.Value;
             }
         }
 
-        // A per-application view overrides only the per-type counts (the per-app slice carries type totals
-        // only, §8.27); vitals + top names stay global.
-        if (application is not null)
-        {
-            typeCounts.Clear();
-            foreach (var (key, value) in await LoadMergedAsync(ClientEventKeys.AppPrefix + ":" + ClientEventKeys.Sanitize(application) + ":", ct))
-            {
-                if (ClientEventKeys.TryParseAppTypeTotal(key, out _, out var appType))
-                {
-                    typeCounts[appType] = value;
-                }
-            }
-        }
+        // Vitals: per-vital sample count, value sum (for the average), and p75 (from the value histogram).
+        var vitalCount = (await _metrics.GetBreakdownAsync(new MetricRef(Names.ClientVitals), [Tags.Vital], null, ct))
+            .ToDictionary(r => r.Tags[Tags.Vital], r => r.Value, StringComparer.Ordinal);
+        var vitalDur = (await _metrics.GetBreakdownAsync(new MetricRef(Names.ClientVitalsValue), [Tags.Vital], null, ct))
+            .ToDictionary(r => r.Tags[Tags.Vital], r => r.Value, StringComparer.Ordinal);
+        var vitalP75 = (await _metrics.GetPercentileBreakdownAsync(new MetricRef(Names.ClientVitalsValue), 75, [Tags.Vital], null, ct))
+            .ToDictionary(r => r.Tags[Tags.Vital], r => r.Value, StringComparer.Ordinal);
 
         var errors = typeCounts.GetValueOrDefault(ClientEventKeys.TypeToken(ClientEventType.Error));
         var logs = typeCounts.GetValueOrDefault(ClientEventKeys.TypeToken(ClientEventType.Log));
@@ -99,7 +85,7 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
             ErrorRate = total > 0 ? (double)errors / total : 0,
             TopErrors = TopN(topErrors),
             TopEvents = TopN(topEvents),
-            Vitals = BuildVitals(vitalCount, vitalDur, vitalBuckets),
+            Vitals = BuildVitals(vitalCount, vitalDur, vitalP75),
             History = [.. history
                 .OrderBy(x => x.Key, StringComparer.Ordinal)
                 .Select(x =>
@@ -306,7 +292,7 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
     private static List<ClientVitalStatModel> BuildVitals(
         Dictionary<string, long> counts,
         Dictionary<string, long> durations,
-        Dictionary<string, Dictionary<int, long>> buckets)
+        Dictionary<string, double> p75)
     {
         return [.. counts
             .OrderBy(x => x.Key, StringComparer.Ordinal)
@@ -314,14 +300,13 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
             {
                 var count = x.Value;
                 var scaledAvg = count > 0 ? (double)durations.GetValueOrDefault(x.Key) / count : 0;
-                var scaledP75 = Quantile(buckets.GetValueOrDefault(x.Key), count, 0.75);
 
                 return new ClientVitalStatModel
                 {
                     Name = x.Key,
                     SampleCount = count,
                     AvgValue = Unscale(x.Key, scaledAvg),
-                    P75Value = Unscale(x.Key, scaledP75),
+                    P75Value = Unscale(x.Key, p75.GetValueOrDefault(x.Key)),
                 };
             }),];
     }
@@ -337,28 +322,6 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
         return value;
     }
 
-    private static double Quantile(Dictionary<int, long>? bucketCounts, long total, double q)
-    {
-        if (bucketCounts is null || total == 0)
-        {
-            return 0;
-        }
-
-        var target = q * total;
-        long cumulative = 0;
-        foreach (var bound in ClientEventKeys.Buckets)
-        {
-            cumulative += bucketCounts.GetValueOrDefault(bound);
-            if (cumulative >= target)
-            {
-                // The overflow bucket (int.MaxValue) reports the last real bound rather than a nonsense number.
-                return bound == int.MaxValue ? ClientEventKeys.Buckets[^2] : bound;
-            }
-        }
-
-        return ClientEventKeys.Buckets[^2];
-    }
-
     private static ClientHistoryAccumulator Hour(Dictionary<string, ClientHistoryAccumulator> history, string hour)
     {
         if (!history.TryGetValue(hour, out var acc))
@@ -368,17 +331,6 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
         }
 
         return acc;
-    }
-
-    private static Dictionary<int, long> Bucket(Dictionary<string, Dictionary<int, long>> buckets, string vital)
-    {
-        if (!buckets.TryGetValue(vital, out var set))
-        {
-            set = [];
-            buckets[vital] = set;
-        }
-
-        return set;
     }
 
     private sealed class ClientHistoryAccumulator

@@ -135,6 +135,10 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
             var hour = items.Max(x => x.Occurrence.Timestamp);
             _context.Set<Counter>().Add(new Counter { Key = ErrorGroupKeys.HourlyKey(effective.Fingerprint, hour), Value = items.Count });
 
+            // Always-on occurrence meter (§8.29) so the trend renders from an external TSDB. Fingerprint is
+            // already the cardinality-collapsed effective fingerprint (bounded by the distinct-group cap).
+            Warp.Core.Logging.WarpTelemetry.RecordErrorGroupOccurrence(effective.Fingerprint, sample.Occurrence.Application, items.Count);
+
             if (sample.Occurrence.Application is { } app)
             {
                 _context.Set<Counter>().Add(new Counter { Key = ErrorGroupKeys.HourlyAppKey(effective.Fingerprint, app, hour), Value = items.Count });

@@ -1,0 +1,15 @@
+# Minimal Prometheus config for the Warp demo's optional Prometheus read-back mode (§8.33).
+# Prometheus runs with --web.enable-otlp-receiver, so the Warp worker + app push their OTel metrics to
+# /api/v1/otlp/v1/metrics; the dashboard app reads them back via the /api/v1/query API. No scrape targets —
+# ingestion is push-only (OTLP) in this demo.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+# Keep OTel resource attributes (e.g. service.name) as labels, and tolerate slightly out-of-order OTLP samples.
+otlp:
+  keep_identifying_resource_attributes: true
+
+storage:
+  tsdb:
+    out_of_order_time_window: 5m

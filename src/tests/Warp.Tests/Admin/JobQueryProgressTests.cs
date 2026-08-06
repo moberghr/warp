@@ -2,6 +2,7 @@ using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 
@@ -45,7 +46,7 @@ public abstract class JobQueryProgressTestsBase : IAsyncLifetime
         });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var detail = await svc.GetJobDetailById(jobId);
 
         detail.ShouldNotBeNull();
@@ -85,7 +86,7 @@ public abstract class JobQueryProgressTestsBase : IAsyncLifetime
         });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var detail = await svc.GetJobDetailById(jobId);
 
         detail.ShouldNotBeNull();

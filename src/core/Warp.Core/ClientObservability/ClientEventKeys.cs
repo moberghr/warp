@@ -41,7 +41,7 @@ internal static class ClientEventKeys
 
     // Vital-oriented buckets (ms): fine at the low end so CLS (scaled ×1000 → 0..~500) and INP (0..~500) get
     // real resolution, coarse up top for LCP/FCP/TTFB. p75 is read off this histogram.
-    public static readonly int[] Buckets = [50, 100, 200, 300, 500, 800, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 7500, 10000, int.MaxValue];
+    public static readonly int[] Buckets = Warp.Core.Metrics.WarpHistogramBuckets.WithOverflow(Warp.Core.Metrics.WarpHistogramBuckets.ClientVitals);
 
     public static string TypeToken(ClientEventType type) => type switch
     {

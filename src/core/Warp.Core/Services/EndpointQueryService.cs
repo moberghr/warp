@@ -4,6 +4,8 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Endpoints;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
+using static Warp.Core.Metrics.WarpMetricCatalog;
 
 namespace Warp.Core.Services;
 
@@ -23,10 +25,12 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
     private const int RelatedJobsLimit = 100;
 
     private readonly TContext _context;
+    private readonly IMetricSource _metrics;
 
-    public EndpointQueryService(TContext context)
+    public EndpointQueryService(TContext context, IMetricSource metrics)
     {
         _context = context;
+        _metrics = metrics;
     }
 
     public async Task<IReadOnlyList<EndpointListItemModel>> GetEndpoints(CancellationToken ct = default)
@@ -123,43 +127,19 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
     // yields two distinct (application, route) buckets.
     private async Task<Dictionary<AppRouteKey, OutcomeCounts>> LoadAppStatsAsync(string? application, CancellationToken ct)
     {
-        var prefix = application is null
-            ? EndpointCounterKeys.AppPrefix + ":"
-            : EndpointCounterKeys.AppPrefix + ":" + application + ":";
-
-        var aggregated = await _context.Set<Statistic>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Select(x =>
-                new
-                {
-                    x.Key,
-                    x.Value,
-                })
-            .ToListAsync(ct);
-
-        var pending = await _context.Set<Counter>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .GroupBy(x => x.Key)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(c => (long)c.Value),
-                })
-            .ToListAsync(ct);
-
         var map = new Dictionary<AppRouteKey, OutcomeCounts>();
+        var scope = application is null ? null : new Dictionary<string, string> { [Tags.Application] = application };
+        var calls = new MetricRef(Names.EndpointCalls, scope);
+        var duration = new MetricRef(Names.EndpointDuration, scope);
 
-        foreach (var row in aggregated.Concat(pending))
+        foreach (var row in await _metrics.GetBreakdownAsync(calls, [Tags.Application, Tags.Route, Tags.Outcome], null, ct))
         {
-            if (!EndpointCounterKeys.TryParseApp(row.Key, out var app, out var route, out var outcome))
-            {
-                continue;
-            }
+            Bucket(map, new AppRouteKey(row.Tags[Tags.Application], row.Tags[Tags.Route])).Add(row.Tags[Tags.Outcome], row.Value);
+        }
 
-            Bucket(map, new AppRouteKey(app, route)).Add(outcome, row.Value);
+        foreach (var row in await _metrics.GetBreakdownAsync(duration, [Tags.Application, Tags.Route], null, ct))
+        {
+            Bucket(map, new AppRouteKey(row.Tags[Tags.Application], row.Tags[Tags.Route])).Add(EndpointCounterKeys.DurationToken, row.Value);
         }
 
         return map;
@@ -184,7 +164,10 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
         var method = SplitMethod(route);
         var template = SplitTemplate(route);
 
-        var (p90, p95, p99) = Percentiles(stats.DurationBuckets.GetValueOrDefault(route));
+        var durationRef = new MetricRef(Names.EndpointDuration, new Dictionary<string, string> { [Tags.Route] = route });
+        var p90 = await PercentileAsync(durationRef, 90, ct);
+        var p95 = await PercentileAsync(durationRef, 95, ct);
+        var p99 = await PercentileAsync(durationRef, 99, ct);
 
         var groupFailures = await _context.Set<EndpointCallLog>()
             .AsNoTracking()
@@ -403,137 +386,76 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
     // global read narrows to history keys via the reserved history marker.
     private async Task<Dictionary<DateTime, HistoryBucket>> LoadHistoryBucketsAsync(string? route, CancellationToken ct)
     {
-        var prefix = route is null
-            ? $"{EndpointCounterKeys.Prefix}:"
-            : $"{EndpointCounterKeys.Prefix}:{route}:{EndpointCounterKeys.HistoryMarker}:";
-
-        var histMarker = $":{EndpointCounterKeys.HistoryMarker}:";
-
-        var aggregated = await _context.Set<Statistic>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Where(x => x.Key.Contains(histMarker))
-            .Select(x =>
-                new
-                {
-                    x.Key,
-                    x.Value,
-                })
-            .ToListAsync(ct);
-
-        var pending = await _context.Set<Counter>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Where(x => x.Key.Contains(histMarker))
-            .GroupBy(x => x.Key)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(c => (long)c.Value),
-                })
-            .ToListAsync(ct);
-
         var buckets = new Dictionary<DateTime, HistoryBucket>();
+        var scope = route is null ? null : new Dictionary<string, string> { [Tags.Route] = route };
+        var calls = new MetricRef(Names.EndpointCalls, scope);
+        var duration = new MetricRef(Names.EndpointDuration, scope);
+        var window = new MetricWindow(DateTime.MinValue, DateTime.MaxValue);
 
-        foreach (var row in aggregated.Concat(pending))
+        foreach (var point in await _metrics.GetSeriesAsync(new SeriesQuery(calls, window, MetricResolution.Hourly, MetricAggregation.Sum, BreakdownBy: Tags.Outcome), ct))
         {
-            if (!EndpointCounterKeys.TryParseHistory(row.Key, out var keyRoute, out var outcome, out var hour))
-            {
-                continue;
-            }
+            HistoryBucketFor(buckets, point.BucketStart).Add(point.TagValue!, point.Value);
+        }
 
-            if (route is not null && !string.Equals(keyRoute, route, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            if (!buckets.TryGetValue(hour, out var bucket))
-            {
-                bucket = new HistoryBucket();
-                buckets[hour] = bucket;
-            }
-
-            bucket.Add(outcome, row.Value);
+        foreach (var point in await _metrics.GetSeriesAsync(new SeriesQuery(duration, window, MetricResolution.Hourly, MetricAggregation.Sum), ct))
+        {
+            HistoryBucketFor(buckets, point.BucketStart).Add(EndpointCounterKeys.DurationToken, point.Value);
         }
 
         return buckets;
     }
 
-    // When <paramref name="route"/> is given the load is scoped to that endpoint's keys
-    // ("endpoint:{route}:") so a detail page never materialises every endpoint's stat rows — the route
-    // ("{METHOD} {template}") is colon-free (NormalizeTemplate guarantees it), so the prefix is exact.
+    private static HistoryBucket HistoryBucketFor(Dictionary<DateTime, HistoryBucket> buckets, DateTime hour)
+    {
+        if (!buckets.TryGetValue(hour, out var bucket))
+        {
+            bucket = new HistoryBucket();
+            buckets[hour] = bucket;
+        }
+
+        return bucket;
+    }
+
+    private async Task<double> PercentileAsync(MetricRef metric, int percentile, CancellationToken ct)
+    {
+        var rows = await _metrics.GetPercentileBreakdownAsync(metric, percentile, [], null, ct);
+
+        return rows.Count == 0 ? 0 : rows[0].Value;
+    }
+
+    // Builds the lifetime stat set via the metric seam (§8.3x): per-route outcome counts + duration sum for the
+    // Totals, and — for a specific endpoint's detail page — the per-group (caller) breakdown. A null route needs
+    // only the Totals (the list page), so the group breakdown is skipped.
     private async Task<StatSet> LoadStatsAsync(CancellationToken ct, string? route = null)
     {
-        var prefix = route is null
-            ? EndpointCounterKeys.Prefix + ":"
-            : EndpointCounterKeys.Prefix + ":" + route + ":";
-
-        var aggregated = await _context.Set<Statistic>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Select(x =>
-                new
-                {
-                    x.Key,
-                    x.Value,
-                })
-            .ToListAsync(ct);
-
-        var pending = await _context.Set<Counter>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .GroupBy(x => x.Key)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(c => (long)c.Value),
-                })
-            .ToListAsync(ct);
-
-        var merged = aggregated
-            .Concat(pending)
-            .GroupBy(x => x.Key, StringComparer.Ordinal)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(x => x.Value),
-                });
-
         var set = new StatSet();
+        var scope = route is null ? null : new Dictionary<string, string> { [Tags.Route] = route };
+        var calls = new MetricRef(Names.EndpointCalls, scope);
+        var duration = new MetricRef(Names.EndpointDuration, scope);
 
-        foreach (var row in merged)
+        foreach (var row in await _metrics.GetBreakdownAsync(calls, [Tags.Route, Tags.Outcome], null, ct))
         {
-            // Latency-histogram bucket rows ride the same "endpoint:" prefix but are not count/error rows —
-            // accumulate them into the per-route bucket map for the percentile walk, never the StatSet.
-            if (EndpointCounterKeys.TryParsePct(row.Key, out var pctRoute, out var upperMs))
-            {
-                if (!set.DurationBuckets.TryGetValue(pctRoute, out var buckets))
-                {
-                    buckets = [];
-                    set.DurationBuckets[pctRoute] = buckets;
-                }
+            Bucket(set.Totals, row.Tags[Tags.Route]).Add(row.Tags[Tags.Outcome], row.Value);
+        }
 
-                buckets[upperMs] = buckets.GetValueOrDefault(upperMs) + row.Value;
+        foreach (var row in await _metrics.GetBreakdownAsync(duration, [Tags.Route], null, ct))
+        {
+            Bucket(set.Totals, row.Tags[Tags.Route]).Add(EndpointCounterKeys.DurationToken, row.Value);
+        }
 
-                continue;
-            }
+        if (route is null)
+        {
+            return set;
+        }
 
-            if (!EndpointCounterKeys.TryParse(row.Key, out var parsed))
-            {
-                continue;
-            }
+        foreach (var row in await _metrics.GetBreakdownAsync(calls, [Tags.Route, Tags.Group, Tags.Outcome], null, ct))
+        {
+            Bucket(set.Groups, new GroupKey(row.Tags[Tags.Route], row.Tags[Tags.Group])).Add(row.Tags[Tags.Outcome], row.Value);
+        }
 
-            var bucket = parsed.Dimension switch
-            {
-                EndpointStatDimension.Total => Bucket(set.Totals, parsed.Route),
-                EndpointStatDimension.Group => Bucket(set.Groups, new GroupKey(parsed.Route, parsed.Group)),
-                _ => null,
-            };
-
-            bucket?.Add(parsed.Outcome, row.Value);
+        foreach (var row in await _metrics.GetBreakdownAsync(duration, [Tags.Route, Tags.Group], null, ct))
+        {
+            Bucket(set.Groups, new GroupKey(row.Tags[Tags.Route], row.Tags[Tags.Group])).Add(EndpointCounterKeys.DurationToken, row.Value);
         }
 
         return set;
@@ -565,56 +487,11 @@ public class EndpointQueryService<TContext> : IEndpointQueryService
 
     private readonly record struct AppRouteKey(string Application, string Route);
 
-    // Walks the ascending latency buckets cumulatively: the percentile for quantile q over N samples is the
-    // upper bound of the smallest bucket whose cumulative count reaches ceil(q*N). The overflow bucket
-    // (int.MaxValue, "> 10000 ms") reports the last real bound (10000) as a displayable floor. Returns 0
-    // when there is no bucket data.
-    private static (double P90, double P95, double P99) Percentiles(Dictionary<int, long>? buckets)
-    {
-        if (buckets is null || buckets.Count == 0)
-        {
-            return (0, 0, 0);
-        }
-
-        var total = buckets.Values.Sum();
-        if (total == 0)
-        {
-            return (0, 0, 0);
-        }
-
-        return (
-            Quantile(buckets, total, 0.90),
-            Quantile(buckets, total, 0.95),
-            Quantile(buckets, total, 0.99));
-    }
-
-    private static double Quantile(Dictionary<int, long> buckets, long total, double q)
-    {
-        var threshold = (long)Math.Ceiling(q * total);
-        long cumulative = 0;
-
-        foreach (var bound in EndpointCounterKeys.Buckets)
-        {
-            cumulative += buckets.GetValueOrDefault(bound);
-
-            if (cumulative >= threshold)
-            {
-                // Overflow bucket → report the last real bound (10000) rather than int.MaxValue.
-                return bound == int.MaxValue ? EndpointCounterKeys.Buckets[^2] : bound;
-            }
-        }
-
-        return EndpointCounterKeys.Buckets[^2];
-    }
-
     private sealed class StatSet
     {
         public Dictionary<string, OutcomeCounts> Totals { get; } = new(StringComparer.Ordinal);
 
         public Dictionary<GroupKey, OutcomeCounts> Groups { get; } = [];
-
-        // Per-route latency histogram: route identity → (bucket upper bound → count).
-        public Dictionary<string, Dictionary<int, long>> DurationBuckets { get; } = new(StringComparer.Ordinal);
     }
 
     private sealed class OutcomeCounts

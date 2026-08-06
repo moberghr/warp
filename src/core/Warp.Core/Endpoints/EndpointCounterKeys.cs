@@ -41,7 +41,7 @@ internal static partial class EndpointCounterKeys
     // Ascending latency-bucket upper bounds (ms); the trailing int.MaxValue is the "> 10000 ms" catch-all
     // overflow bucket. A single call increments the ONE bucket whose bound is the smallest >= its rounded
     // ms (see BucketFor); the read side walks these cumulatively to derive p90/p95/p99.
-    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, int.MaxValue];
+    public static readonly int[] Buckets = Warp.Core.Metrics.WarpHistogramBuckets.WithOverflow(Warp.Core.Metrics.WarpHistogramBuckets.HttpScale);
 
     public static string Total(string route, string outcome) => $"{Prefix}:{route}:{outcome}";
 
@@ -59,12 +59,7 @@ internal static partial class EndpointCounterKeys
     // entry is int.MaxValue, so First always matches (the final entry is the "> 10000 ms" catch-all).
     public static int BucketFor(int durationMs) => Buckets.First(bound => durationMs <= bound);
 
-    public static string OutcomeToken(AdapterCallOutcome outcome) => outcome switch
-    {
-        AdapterCallOutcome.Success => "success",
-        AdapterCallOutcome.Failed => "failed",
-        _ => "unknown",
-    };
+    public static string OutcomeToken(AdapterCallOutcome outcome) => Warp.Core.Metrics.WarpMetricCatalog.OutcomeToken(outcome);
 
     // Produces the stable "{METHOD} {template}" route identity used as the key's route segment. Inline
     // route constraints ({name:int}, {name:int=5}, {*name:...}) are stripped so the route is colon-free

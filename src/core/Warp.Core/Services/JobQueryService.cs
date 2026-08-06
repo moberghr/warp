@@ -2,7 +2,9 @@ using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Models;
+using static Warp.Core.Metrics.WarpMetricCatalog;
 
 namespace Warp.Core.Services;
 
@@ -44,11 +46,13 @@ public class JobQueryService<TContext> : IJobQueryService
 {
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
+    private readonly IMetricSource _metrics;
 
-    public JobQueryService(TContext context, TimeProvider timeProvider)
+    public JobQueryService(TContext context, TimeProvider timeProvider, IMetricSource metrics)
     {
         _context = context;
         _timeProvider = timeProvider;
+        _metrics = metrics;
     }
 
     public async Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state, string? application = null)
@@ -493,56 +497,67 @@ public class JobQueryService<TContext> : IJobQueryService
     // rate; percentiles 0 — the app family carries no histogram, to bound counter volume).
     public async Task<JobExecutionMetricsModel> GetJobExecutionMetrics(string? application = null)
     {
+        var ct = CancellationToken.None;
+        var scope = application is null ? null : new Dictionary<string, string> { [Tags.Application] = application };
+        var exec = new MetricRef(Names.JobExecution, scope);
+        var dur = new MetricRef(Names.JobExecutionDuration, scope);
+
         var byType = new Dictionary<string, ExecutionAccumulator>(StringComparer.Ordinal);
         var byHandler = new Dictionary<string, ExecutionAccumulator>(StringComparer.Ordinal);
 
-        ExecutionAccumulator Bucket(string dimension, string id)
-        {
-            var map = string.Equals(dimension, JobStatsKeys.HandlerMarker, StringComparison.Ordinal) ? byHandler : byType;
-            if (!map.TryGetValue(id, out var acc))
-            {
-                acc = new ExecutionAccumulator();
-                map[id] = acc;
-            }
+        // Outcome counts + duration sum, per type and per handler dimension.
+        await FoldExecutionAsync(byType, exec, dur, Tags.Type, ct);
+        await FoldExecutionAsync(byHandler, exec, dur, Tags.Handler, ct);
 
-            return acc;
-        }
-
-        if (application is null)
-        {
-            const string prefix = JobStatsKeys.Prefix + ":";
-            foreach (var row in await LoadMergedStatsAsync(prefix))
-            {
-                if (JobStatsKeys.TryParsePct(row.Key, out var pctDim, out var pctId, out var upperMs))
-                {
-                    Bucket(pctDim, pctId).AddBucket(upperMs, row.Value);
-
-                    continue;
-                }
-
-                if (JobStatsKeys.TryParseTotal(row.Key, out var dim, out var id, out var token))
-                {
-                    Bucket(dim, id).Add(token, row.Value);
-                }
-            }
-        }
-        else
-        {
-            var prefix = JobStatsKeys.AppPrefix + ":" + JobStatsKeys.Sanitize(application) + ":";
-            foreach (var row in await LoadMergedStatsAsync(prefix))
-            {
-                if (JobStatsKeys.TryParseApp(row.Key, out _, out var dim, out var id, out var token))
-                {
-                    Bucket(dim, id).Add(token, row.Value);
-                }
-            }
-        }
+        // Percentiles only for the app-agnostic read (the per-app slice carries no histogram, §8.19).
+        var (typeP95, typeP99) = await PercentilesAsync(dur, Tags.Type, application is null, ct);
+        var (handlerP95, handlerP99) = await PercentilesAsync(dur, Tags.Handler, application is null, ct);
 
         return new JobExecutionMetricsModel
         {
-            ByType = Project(byType),
-            ByHandler = Project(byHandler),
+            ByType = Project(byType, typeP95, typeP99),
+            ByHandler = Project(byHandler, handlerP95, handlerP99),
         };
+    }
+
+    // Folds the outcome counts (from the calls metric) and the duration sum (from the duration metric) of one
+    // jobstat/qwait dimension into its per-identity accumulator map, via the seam.
+    private async Task FoldExecutionAsync(Dictionary<string, ExecutionAccumulator> map, MetricRef counts, MetricRef duration, string idTag, CancellationToken ct)
+    {
+        foreach (var row in await _metrics.GetBreakdownAsync(counts, [idTag, Tags.Outcome], null, ct))
+        {
+            Accumulator(map, row.Tags[idTag]).Add(row.Tags[Tags.Outcome], row.Value);
+        }
+
+        foreach (var row in await _metrics.GetBreakdownAsync(duration, [idTag], null, ct))
+        {
+            Accumulator(map, row.Tags[idTag]).Add(JobStatsKeys.DurationToken, row.Value);
+        }
+    }
+
+    // Per-identity p95 / p99 of a duration histogram metric (empty when the read carries no histogram).
+    private async Task<(Dictionary<string, double> P95, Dictionary<string, double> P99)> PercentilesAsync(MetricRef duration, string idTag, bool hasHistogram, CancellationToken ct)
+    {
+        if (!hasHistogram)
+        {
+            return (new Dictionary<string, double>(StringComparer.Ordinal), new Dictionary<string, double>(StringComparer.Ordinal));
+        }
+
+        var p95 = (await _metrics.GetPercentileBreakdownAsync(duration, 95, [idTag], null, ct)).ToDictionary(r => r.Tags[idTag], r => r.Value, StringComparer.Ordinal);
+        var p99 = (await _metrics.GetPercentileBreakdownAsync(duration, 99, [idTag], null, ct)).ToDictionary(r => r.Tags[idTag], r => r.Value, StringComparer.Ordinal);
+
+        return (p95, p99);
+    }
+
+    private static ExecutionAccumulator Accumulator(Dictionary<string, ExecutionAccumulator> map, string id)
+    {
+        if (!map.TryGetValue(id, out var acc))
+        {
+            acc = new ExecutionAccumulator();
+            map[id] = acc;
+        }
+
+        return acc;
     }
 
     // Per-queue queue-wait (avg + p95/p99 from the qwait: Counter→Statistic fold, reusing the same
@@ -552,58 +567,30 @@ public class JobQueryService<TContext> : IJobQueryService
     // application reads the disjoint per-app slice (no histogram → percentiles 0). §8.26.
     public async Task<QueueMetricsModel> GetQueueMetrics(string? application = null)
     {
+        var ct = CancellationToken.None;
+        var scope = application is null ? null : new Dictionary<string, string> { [Tags.Application] = application };
+        var waitValue = new MetricRef(Names.QueueWait, scope);       // wait-time sum + latency histogram
+        var waitCount = new MetricRef(Names.QueueWaitCount, scope);  // claim tally
+
         var wait = new Dictionary<string, ExecutionAccumulator>(StringComparer.Ordinal);
-        var depth = new Dictionary<string, long>(StringComparer.Ordinal);
-        var oldest = new Dictionary<string, long>(StringComparer.Ordinal);
-
-        ExecutionAccumulator WaitFor(string queue)
+        foreach (var row in await _metrics.GetBreakdownAsync(waitCount, [Tags.Queue], null, ct))
         {
-            if (!wait.TryGetValue(queue, out var acc))
-            {
-                acc = new ExecutionAccumulator();
-                wait[queue] = acc;
-            }
-
-            return acc;
+            Accumulator(wait, row.Tags[Tags.Queue]).Add(QueueWaitKeys.CountToken, row.Value);
         }
 
-        // Queue-wait is executor-attributed, so it reads the app-agnostic or the per-app slice.
-        if (application is null)
+        foreach (var row in await _metrics.GetBreakdownAsync(waitValue, [Tags.Queue], null, ct))
         {
-            foreach (var row in await LoadMergedStatsAsync(QueueWaitKeys.Prefix + ":"))
-            {
-                if (QueueWaitKeys.TryParsePct(row.Key, out var pctQueue, out var upperMs))
-                {
-                    WaitFor(pctQueue).AddBucket(upperMs, row.Value);
-                }
-                else if (QueueWaitKeys.TryParseTotal(row.Key, out var queue, out var token))
-                {
-                    WaitFor(queue).Add(token, row.Value);
-                }
-            }
-        }
-        else
-        {
-            var app = QueueWaitKeys.Sanitize(application);
-            foreach (var row in await LoadMergedStatsAsync(QueueWaitKeys.AppPrefix + ":" + app + ":"))
-            {
-                if (QueueWaitKeys.TryParseApp(row.Key, out _, out var queue, out var token))
-                {
-                    WaitFor(queue).Add(token, row.Value);
-                }
-            }
+            Accumulator(wait, row.Tags[Tags.Queue]).Add(QueueWaitKeys.DurationToken, row.Value);
         }
 
-        // Backlog is a queue-global signal (not application-attributable, §8.23), so it's always read from the
-        // global qbacklog: family — the app-filtered view shows the queue's overall backlog alongside that
-        // app's own wait latency.
-        foreach (var row in await LoadMergedStatsAsync(QueueBacklogKeys.Prefix + ":"))
-        {
-            if (QueueBacklogKeys.TryParseTotal(row.Key, out var queue, out var token))
-            {
-                AddBacklog(depth, oldest, queue, token, row.Value);
-            }
-        }
+        var (p95, p99) = await PercentilesAsync(waitValue, Tags.Queue, application is null, ct);
+
+        // Backlog is a queue-global gauge (never application-attributable, §8.23), always read from the global
+        // family. Each qbacklog key is a single UPSERT row, so a grouped sum is the current gauge value.
+        var depth = (await _metrics.GetBreakdownAsync(new MetricRef(Names.QueueDepth), [Tags.Queue], null, ct))
+            .ToDictionary(r => r.Tags[Tags.Queue], r => r.Value, StringComparer.Ordinal);
+        var oldest = (await _metrics.GetBreakdownAsync(new MetricRef(Names.QueueOldestAge), [Tags.Queue], null, ct))
+            .ToDictionary(r => r.Tags[Tags.Queue], r => r.Value, StringComparer.Ordinal);
 
         var queues = wait.Keys
             .Union(depth.Keys, StringComparer.Ordinal)
@@ -611,15 +598,14 @@ public class JobQueryService<TContext> : IJobQueryService
             .Select(queue =>
             {
                 var acc = wait.GetValueOrDefault(queue) ?? new ExecutionAccumulator();
-                var (p95, p99) = acc.Percentiles();
 
                 return new QueueMetricModel
                 {
                     Queue = queue,
                     ClaimedCount = acc.ExecutedCount,
                     AvgWaitMs = acc.AvgDurationMs,
-                    P95WaitMs = p95,
-                    P99WaitMs = p99,
+                    P95WaitMs = p95.GetValueOrDefault(queue),
+                    P99WaitMs = p99.GetValueOrDefault(queue),
                     BacklogDepth = depth.GetValueOrDefault(queue),
                     OldestAgeSeconds = oldest.GetValueOrDefault(queue),
                 };
@@ -629,50 +615,7 @@ public class JobQueryService<TContext> : IJobQueryService
         return new QueueMetricsModel { Queues = queues };
     }
 
-    private static void AddBacklog(Dictionary<string, long> depth, Dictionary<string, long> oldest, string queue, string token, long value)
-    {
-        if (string.Equals(token, QueueBacklogKeys.DepthToken, StringComparison.Ordinal))
-        {
-            depth[queue] = value;
-        }
-        else if (string.Equals(token, QueueBacklogKeys.OldestAgeToken, StringComparison.Ordinal))
-        {
-            oldest[queue] = value;
-        }
-    }
-
-    private async Task<IEnumerable<KeyValueRow>> LoadMergedStatsAsync(string prefix)
-    {
-        var aggregated = await _context.Set<Statistic>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .Select(x =>
-                new
-                {
-                    x.Key,
-                    x.Value,
-                })
-            .ToListAsync();
-
-        var pending = await _context.Set<Counter>()
-            .AsNoTracking()
-            .Where(x => x.Key.StartsWith(prefix))
-            .GroupBy(x => x.Key)
-            .Select(g =>
-                new
-                {
-                    Key = g.Key,
-                    Value = g.Sum(c => (long)c.Value),
-                })
-            .ToListAsync();
-
-        return aggregated
-            .Concat(pending)
-            .GroupBy(x => x.Key, StringComparer.Ordinal)
-            .Select(g => new KeyValueRow(g.Key, g.Sum(x => x.Value)));
-    }
-
-    private static IReadOnlyList<JobExecutionStatModel> Project(Dictionary<string, ExecutionAccumulator> map)
+    private static IReadOnlyList<JobExecutionStatModel> Project(Dictionary<string, ExecutionAccumulator> map, Dictionary<string, double> p95, Dictionary<string, double> p99)
     {
         return
         [
@@ -680,20 +623,16 @@ public class JobQueryService<TContext> : IJobQueryService
                 .OrderByDescending(x => x.Value.ExecutedCount)
                 .ThenBy(x => x.Key, StringComparer.Ordinal)
                 .Select(x =>
-                {
-                    var (p95, p99) = x.Value.Percentiles();
-
-                    return new JobExecutionStatModel
+                    new JobExecutionStatModel
                     {
                         Identifier = x.Key,
                         ExecutedCount = x.Value.ExecutedCount,
                         ErrorCount = x.Value.Errors,
                         ErrorRate = x.Value.ErrorRate,
                         AvgDurationMs = x.Value.AvgDurationMs,
-                        P95DurationMs = p95,
-                        P99DurationMs = p99,
-                    };
-                }),
+                        P95DurationMs = p95.GetValueOrDefault(x.Key),
+                        P99DurationMs = p99.GetValueOrDefault(x.Key),
+                    }),
         ];
     }
 
@@ -734,14 +673,12 @@ public class JobQueryService<TContext> : IJobQueryService
                 });
     }
 
-    // Accumulates one job type / handler's execution metrics from its parsed jobstat counter rows: the
-    // execution count (succeeded + failed), error count (failed), summed duration, and — for the app-agnostic
-    // read — the latency histogram. The "dur" token folds into DurationSum, never the execution Total, so the
-    // average is sum ÷ executions.
+    // Accumulates one job type / handler / queue's execution metrics from its seam breakdown rows: the execution
+    // count (succeeded + failed, or per-queue claim count), error count (failed), and summed duration. The "dur"
+    // token folds into DurationSum, never the execution Total, so the average is sum ÷ executions. Percentiles now
+    // come from the seam (GetPercentileBreakdownAsync), not this accumulator.
     private sealed class ExecutionAccumulator
     {
-        private readonly Dictionary<int, long> _buckets = [];
-
         public long ExecutedCount { get; private set; }
 
         public long Errors { get; private set; }
@@ -768,43 +705,7 @@ public class JobQueryService<TContext> : IJobQueryService
                 Errors += value;
             }
         }
-
-        public void AddBucket(int upperMs, long value) => _buckets[upperMs] = _buckets.GetValueOrDefault(upperMs) + value;
-
-        // p95 / p99 over the latency histogram: the percentile for quantile q over N samples is the upper
-        // bound of the smallest bucket whose cumulative count reaches ceil(q*N). The overflow bucket
-        // (int.MaxValue) reports the last real bound as a displayable floor. Mirrors AdapterQueryService.
-        public (double P95, double P99) Percentiles()
-        {
-            var total = _buckets.Values.Sum();
-            if (total == 0)
-            {
-                return (0, 0);
-            }
-
-            return (Quantile(total, 0.95), Quantile(total, 0.99));
-        }
-
-        private double Quantile(long total, double q)
-        {
-            var threshold = (long)Math.Ceiling(q * total);
-            long cumulative = 0;
-
-            foreach (var bound in JobStatsKeys.Buckets)
-            {
-                cumulative += _buckets.GetValueOrDefault(bound);
-
-                if (cumulative >= threshold)
-                {
-                    return bound == int.MaxValue ? JobStatsKeys.Buckets[^2] : bound;
-                }
-            }
-
-            return JobStatsKeys.Buckets[^2];
-        }
     }
-
-    private readonly record struct KeyValueRow(string Key, long Value);
 }
 
 // Terminal-state event types written by the worker on job finalization. Sourced from

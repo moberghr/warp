@@ -92,7 +92,7 @@ public abstract class DroppedRecordReporterTestsBase : IAsyncLifetime
         DroppedRecordCounters.Track(DropPipeline.Endpoint, 7);
         await CreateReporter(new SpyNotifier()).ReportOnceAsync(Ct);
 
-        var status = await new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System).GetWarpStatus();
+        var status = await new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext())).GetWarpStatus();
 
         status.EndpointRecordsDropped.ShouldBe(7);
     }

@@ -245,7 +245,9 @@ public sealed class AdapterCallScope : IDisposable
 
     private void EmitTelemetry(AdapterCallOutcome outcome, Exception? exception, double duration)
     {
-        var outcomeName = outcome.ToString();
+        // Canonical lowercase outcome vocabulary (§8.33) — the same token the DB counter keys use, so the meter/
+        // span outcome matches what LocalMetricSource and a Prometheus read-back expect.
+        var outcomeName = Warp.Core.Metrics.WarpMetricCatalog.OutcomeToken(outcome);
 
         if (_activity is not null)
         {

@@ -515,7 +515,7 @@ internal static class AdapterCounterKeys
     // Ascending latency-bucket upper bounds (ms); the trailing int.MaxValue is the "> 10000 ms" catch-all
     // overflow bucket. A single call increments the ONE bucket whose bound is the smallest >= its rounded
     // ms (see BucketFor); the read side walks these cumulatively to derive p90/p95/p99.
-    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, int.MaxValue];
+    public static readonly int[] Buckets = Warp.Core.Metrics.WarpHistogramBuckets.WithOverflow(Warp.Core.Metrics.WarpHistogramBuckets.HttpScale);
 
     public static string Total(string adapter, string outcome) => $"{Prefix}:{adapter}:{outcome}";
 
@@ -662,14 +662,7 @@ internal static class AdapterCounterKeys
         return true;
     }
 
-    public static string OutcomeToken(AdapterCallOutcome outcome) => outcome switch
-    {
-        AdapterCallOutcome.Success => "success",
-        AdapterCallOutcome.Failed => "failed",
-        AdapterCallOutcome.Throttled => "throttled",
-        AdapterCallOutcome.CircuitOpen => "circuit_open",
-        _ => "unknown",
-    };
+    public static string OutcomeToken(AdapterCallOutcome outcome) => Warp.Core.Metrics.WarpMetricCatalog.OutcomeToken(outcome);
 
     // ---------------------------------------------------------------------------------------------------
     // Per-application key family (§8.19 multi-app observability). A DISJOINT namespace under its OWN

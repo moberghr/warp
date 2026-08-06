@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\core\Warp.Core\Warp.Core.csproj" />
+    <ProjectReference Include="..\..\core\Warp.Metrics.Prometheus\Warp.Metrics.Prometheus.csproj" />
     <ProjectReference Include="..\..\core\Warp.Http\Warp.Http.csproj" />
     <ProjectReference Include="..\..\core\Warp.UI\Warp.UI.csproj" />
     <ProjectReference Include="..\..\core\Warp.Worker\Warp.Worker.csproj" />

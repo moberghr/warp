@@ -65,7 +65,7 @@ internal static class JobStatsKeys
     // 30 s/60 s target must be able to observe (and breach) at that scale, not saturate at 10 s (§8.31). One call
     // increments the ONE bucket whose bound is the smallest >= its rounded ms (BucketFor); the extra rungs add no
     // hot-path cost. QueueWaitKeys.Buckets mirrors this array exactly.
-    public static readonly int[] Buckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000, int.MaxValue];
+    public static readonly int[] Buckets = Warp.Core.Metrics.WarpHistogramBuckets.WithOverflow(Warp.Core.Metrics.WarpHistogramBuckets.JobScale);
 
     public static string Total(string dimension, string id, string token) => $"{Prefix}:{dimension}:{id}:{token}";
 

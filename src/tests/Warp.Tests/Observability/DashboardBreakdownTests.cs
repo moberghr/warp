@@ -54,7 +54,7 @@ public abstract class DashboardBreakdownTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var status = await svc.GetWarpStatus();
 
         // Assert
@@ -81,7 +81,7 @@ public abstract class DashboardBreakdownTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var status = await svc.GetWarpStatus();
 
         // Assert — only Enqueued + Awaiting + Processing + Scheduled (saga timeouts) count as active
@@ -112,7 +112,7 @@ public abstract class DashboardBreakdownTestsBase : IAsyncLifetime
 
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var status = await svc.GetWarpStatus();
 
         status.Messages.ShouldBe(3);
@@ -144,7 +144,7 @@ public abstract class DashboardBreakdownTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var status = await svc.GetWarpStatus();
 
         // Assert
@@ -173,7 +173,7 @@ public abstract class DashboardBreakdownTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var status = await svc.GetWarpStatus();
 
         // Assert
@@ -200,7 +200,7 @@ public abstract class DashboardBreakdownTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var status = await svc.GetWarpStatus();
 
         // Assert — job state counts should be zero because only Message/Batch kinds exist
@@ -227,7 +227,7 @@ public abstract class DashboardBreakdownTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
-        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new Warp.Core.Metrics.LocalMetricSource<TestContext>(_fixture.CreateContext()));
         var status = await svc.GetWarpStatus();
 
         // Assert — should combine Statistic(10) + Counter(2+1) = 13

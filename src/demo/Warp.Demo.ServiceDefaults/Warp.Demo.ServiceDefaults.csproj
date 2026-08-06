@@ -19,4 +19,10 @@
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.15.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- For AddWarpHistogramViews: the canonical WarpHistogramBuckets ladders (§8.33), so the exported histogram
+         boundaries match the DB percentile ladders from one source instead of a hand-copied duplicate. -->
+    <ProjectReference Include="..\..\core\Warp.Core\Warp.Core.csproj" />
+  </ItemGroup>
+
 </Project>
