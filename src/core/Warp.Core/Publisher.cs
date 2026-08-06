@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -131,7 +131,14 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
         where T : class, IMessage
     {
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var resolvedQueue = queue ?? "default";
+
+        // Fall back to the configured default, not the literal "default" — WarpConfiguration.DefaultQueue
+        // is documented as the queue used when a caller does not name one, and BatchPublisher already
+        // honours it. Publisher ignoring it meant setting DefaultQueue moved batch children but left
+        // ordinary publishes on "default", so a server polling only the configured queue never saw them.
+        // DefaultQueue is non-nullable and initialised to "default", so this single coalesce is the whole
+        // fallback chain — same resolution as CreateJob below.
+        var resolvedQueue = queue ?? _configuration.DefaultQueue;
 
         var publishCtx = await RunPublishPipeline(message, seed: null, CancellationToken.None);
 
@@ -251,7 +258,7 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
         var newJob = JobHelper.CreateJob(
             job,
             scheduleTime,
-            queue,
+            queue ?? _configuration.DefaultQueue,
             parentId,
             null,
             now,
