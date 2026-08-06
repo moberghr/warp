@@ -66,3 +66,80 @@ When [`ApplicationName`](./applications.md) is set, **queue-wait** is additional
 ## API
 
 - `GET {prefix}/api/queues/metrics` — per-queue rows: `claimedCount`, `avgWaitMs`, `p95WaitMs`, `p99WaitMs`, `backlogDepth`, `oldestAgeSeconds`. Optional `?application=` filter. Resolves in any `AddWarp` process (dashboard-only / publisher-only included) since it reads only the durable aggregates.
+
+## Outcome stats: a metric records an event, current state is a query
+
+The `stats:` counter family answers *what has happened*, and it is **append-only** — nothing rewrites it. A job that failed, was requeued, and then succeeded is counted in both `stats:failed` and `stats:succeeded`, because both events happened.
+
+*What is happening right now* is a different question with a different source: the dashboard tiles and navigation badges count rows in the `Job` table. The two are not redundant. Completed jobs are swept at `JobExpirationTimeout`, so a query can never answer "how many ever succeeded"; and a cumulative counter can never answer "how many are failed at this moment".
+
+This is why a requeue decrements nothing. Earlier versions decremented the source state's counter, which made a lifetime total disagree with the sum of its own hourly buckets (the decrement wrote no bucket row), let the dashboard throughput chart see a negative delta, and left the counter answering roughly the same question as the live query while losing the only thing it uniquely provides.
+
+### The three levels
+
+| Key | Level | Meaning |
+|---|---|---|
+| `stats:unsuccessful` | umbrella | Every terminal outcome that is not `Completed`. **Derived, not stored** — see below |
+| `stats:succeeded`, `stats:failed`, `stats:deleted`, `stats:requeued` | state total | One row per outcome event |
+| `stats:{state}-{reason}` | breakdown | Why it happened |
+| `stats:retried-jobs` | standalone | **Distinct jobs** that entered retry, not retry events |
+
+`stats:retried-jobs` sits outside the hierarchy on purpose — it counts jobs where every other key counts events. A job retried fifteen times contributes fifteen to `stats:requeued-retry` and one to `stats:retried-jobs`, so the pair answers "how much retrying is happening" and "how many jobs are thrashing" separately. It increments only on a job's **first** retry, detected from the retry attempt count the worker already reads before running the handler — so it costs no extra read and no schema column.
+
+Each state total is written independently of its breakdown, so a reader never sums the parts to get a total. The breakdown usually totals *less* than its state key: an outcome with no attributable cause carries no reason, and that difference is the unattributed remainder — surfaced rather than hidden, since a breakdown that silently fails to add up reads like a bug.
+
+**The umbrella is computed on read as `failed + deleted`, and no `stats:unsuccessful` row is ever written.** Ten different sites move those two keys — both worker paths, `DeleteJob`, `BulkDeleteJobs`, crash recovery's cancel and fail arms, worker cancellation — and a stored umbrella has to be maintained at every one of them or it under-reports. Deriving it puts the definition in one place, where it cannot drift from the totals it sums.
+
+Only `failed` and `deleted` sit under the umbrella. A **requeue is not a terminal outcome** — the same job runs again and lands in one of the other totals — so it is a top-level key, not an unsuccessful one.
+
+### Reasons
+
+`OutcomeReason` is a closed enum, stamped on `JobOutcome` by the pipeline behaviour that made the decision — the only component that knows why. Its wire token is pinned by a test, so renaming an enum member cannot silently rename a live metric key and orphan its history.
+
+| Reason | Token | Written when |
+|---|---|---|
+| `Retry` | `retry` | Retry backoff scheduled another attempt |
+| `RetryExhausted` | `retry-exhausted` | The retry budget ran out; this failure is terminal |
+| `Concurrency` | `concurrency` | Mutex / semaphore — `Wait` requeues, `Skip` deletes |
+| `RateLimit` | `ratelimit` | Throttled, skipped, or bounced off lock contention |
+| `Timeout` | `timeout` | Timeout in `Delete` mode |
+| `Saga` | `saga` | Busy, version conflict, missing correlation, or a moot timeout |
+| `Manual` | `manual` | Operator requeue from the dashboard |
+| `Recovery` | `recovery` | Crash recovery re-queued work whose worker stopped responding |
+
+A custom pipeline behaviour may set `Reason` on any outcome it constructs:
+
+```csharp
+_jobContext.Outcome = new JobOutcome
+{
+    State = State.Deleted,
+    Reason = OutcomeReason.RateLimit,
+    LogMessage = "Dropped — vendor quota exhausted",
+};
+```
+
+It is an enum rather than a string on purpose. A free-form reason would let one caller mint a `Statistic` row per tenant, per key, or per URL; the bounded set is what keeps this family a fixed number of keys regardless of traffic.
+
+`Manual` and `Recovery` are the two members not stamped on a `JobOutcome` — no pipeline runs for them. The dashboard requeue paths and crash recovery write their keys directly, using the same tokens so the breakdown reads uniformly.
+
+### An unmapped reason degrades, it does not throw
+
+The token lookup returns the literal `unknown` for a reason it has no mapping for, rather than throwing. This is not defensive habit — a throw there is genuinely unsafe:
+
+Every caller is a finalization site running **inside the job's own `catch`**. Throwing from it would be laundered into a fake handler failure, re-enter finalization from that catch, throw again, and escape before the state is saved. The job would stay `Processing`, crash recovery would requeue it, and it would re-poison itself indefinitely — a metrics-lookup miss would have taken down job processing. Instrumentation never out-throws in Warp, the same rule adapters and the notifier seam follow.
+
+The fallback is a fixed literal rather than anything derived from the unmapped value, so the miss costs one extra bounded key instead of a new key family. A guard test asserts every enum member maps to a distinct token other than `unknown`, so a member added without a token fails the test run — the literal exists for runtime safety, not as a substitute for the mapping.
+
+### Meter
+
+`warp.job.requeued` is a `Counter<long>` emitted unconditionally at finalization, tagged `job.type`, `queue`, `reason`, and `application` (when set).
+
+It closes a real gap: concurrency and rate limiting already emitted detailed **spans**, but spans are sampled, so "how many jobs bounced off this mutex in the last hour" was not answerable from telemetry at all. The concurrency and rate-limit **keys** are deliberately not tags — they are unbounded and PII-adjacent, and stay on the span where cardinality does not compound.
+
+### Mutex and semaphore share one reason
+
+Both go through the same behaviour and take the same lock, and the only local discriminator is whether the effective limit is 1 — which an admin limit override can invert. A label derived from it would be wrong exactly when someone is tuning limits, so both report `concurrency`. The distinction you usually want falls out of the outcome anyway: `Wait` mode requeues, `Skip` mode deletes.
+
+### Cost
+
+Flat keys do not scale with throughput — a million jobs a day and a hundred produce the same number of rows, only different values. Each key retains one lifetime row, 168 hourly buckets (7 days), and 83 daily buckets, so the whole family is a few thousand rows regardless of load. A completed job writes exactly what it wrote before this feature existed; only outcomes carrying a reason write the extra breakdown row.

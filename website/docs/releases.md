@@ -4,6 +4,62 @@ sidebar_position: 6
 
 # Releases
 
+## Unreleased
+
+Additive — **no migration**. The new metric keys are new rows in the existing `Counter` / `Statistic` tables. Two deliberate behaviour changes, both affecting **what numbers you see**, not how jobs execute.
+
+### Requeue and outcome metrics get a reason
+
+`stats:requeued` was a single flat number covering retry backoff, mutex waits, rate-limit waits and saga conflicts alike, and `stats:deleted` mixed operator deletes with mutex skips, rate-limit skips and timeout deletes. Both now carry a breakdown alongside the unchanged totals:
+
+```
+stats:succeeded                 top-level total — a success is not unsuccessful, so it sits
+                                outside the umbrella
+stats:unsuccessful              umbrella — DERIVED on read as failed + deleted, never stored
+  stats:failed                  state total
+    stats:failed-retry-exhausted / -saga
+  stats:deleted                 state total
+    stats:deleted-timeout / -concurrency / -ratelimit / -saga
+stats:requeued                  top-level total — a requeue is not a terminal outcome, so it
+                                sits outside the umbrella too
+  stats:requeued-retry / -concurrency / -ratelimit / -saga / -manual / -recovery
+stats:retried-jobs              standalone — distinct jobs that entered retry, not retry events
+```
+
+Totals are written independently of the breakdown, so nothing needs summing, and an outcome with no attributable cause (a plain handler throw with no addon involved) still lands in its total — the difference between a total and the sum of its reasons is the unattributed remainder.
+
+Retry **exhaustion** is now distinguishable from a first-attempt failure, which it never was: the retry behaviour used to signal exhaustion by setting no outcome at all, producing exactly the same observable event as a job with no retry policy.
+
+The umbrella is **computed on read as `failed + deleted`** and is never written as a `Counter` row. Ten sites move those two totals, and a stored umbrella would have to be maintained at every one or under-report. Only those two belong under it: a **success is not unsuccessful**, and a **requeue is not terminal** — the job runs again and lands in one of the other totals — so both stay top-level.
+
+`Reason` is a new `init` property on the public `JobOutcome`, typed as the closed `OutcomeReason` enum. Custom pipeline behaviours may set it. It is deliberately not a free-form string: an unbounded reason would mint an unbounded number of `Statistic` rows. The token lookup returns `unknown` for an unmapped member rather than throwing — it runs inside the job's own `catch`, where a throw would be laundered into a fake handler failure and re-poison the job forever; a guard test keeps every member mapped.
+
+New meter: **`warp.job.requeued`** (`job.type`, `queue`, `reason`, `application`), always emitted. Concurrency and rate limiting previously emitted spans only, which are sampled — a requeue was not a countable signal. The concurrency and rate-limit **keys** are deliberately not tags (unbounded and PII-adjacent); they stay on the span.
+
+### Dashboard requeues and crash recovery are now counted
+
+Requeueing from the dashboard, and recovering a job whose worker died, both wrote a `Requeued` log row and **no counter at all** — so `stats:requeued` silently under-reported every operator action and every recovered crash. Both now count, attributed as `-manual` and `-recovery`.
+
+### Behaviour change: retries are reported as retried, not failed
+
+`RetryOptions.Delays` defaults to `[15, 60, 300]`, so a retry is scheduled into the future and lands in `Scheduled`, not `Enqueued`. The worker's OpenTelemetry status label tested only `Enqueued`, so **every default-configured retry attempt was emitted as `status=failed`** on `warp.job.completed` and `warp.job.duration`, and `warp.job.retried` never fired. The database recorded the same attempt correctly as a requeue, so the two disagreed.
+
+**If you alert on `warp.job.completed{status=failed}`, your failure count will drop and a `status=retried` series will appear.** Job execution is unchanged — only the label.
+
+### Behaviour change: outcome stats are append-only
+
+`stats:succeeded`, `stats:failed` and `stats:deleted` used to be **decremented** when a requeue or delete undid the outcome already recorded. That is removed, on the principle that **a metric records an event and current state is a query**:
+
+- The decrement wrote only the lifetime key, never an hourly bucket — so a lifetime total already disagreed with the sum of its own buckets.
+- The dashboard throughput chart deltas these counters, and a decrement could drive that delta negative (silently clamped to zero, under-reporting the tick).
+- Failed jobs never auto-expire, so the **Failed tile** — a live `Job` query — already answers "how many are failed right now", accurately and permanently. The decrement made the counter a worse copy of that query while destroying the only thing a counter uniquely provides: "how many ever failed".
+
+**These three totals will read higher than before for anyone who requeues or deletes jobs**, and they no longer decrease. Dashboard tiles and navigation badges are unaffected — they query the `Job` table, not these counters.
+
+### Fixed: `DefaultQueue` was ignored on publish
+
+`WarpConfiguration.DefaultQueue` is documented as the queue used when a caller names none, and `BatchPublisher` honoured it — but `Publisher` resolved `queue ?? "default"` on both its job and message paths. A deployment that set `DefaultQueue` and pointed its worker group at that queue had batch children routed correctly while ordinary publishes went to `"default"`, where nothing was polling: those jobs sat `Enqueued` and never ran. Both paths now consult `DefaultQueue`. Explicit queue arguments still win, and deployments that never set it are unaffected.
+
 ## 3.10.0
 
 *2026-08-03*

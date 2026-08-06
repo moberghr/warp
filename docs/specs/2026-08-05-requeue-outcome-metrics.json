@@ -1,0 +1,400 @@
+{
+  "slug": "requeue-outcome-metrics",
+  "date": "2026-08-05",
+  "title": "Requeue / outcome metrics taxonomy — append-only stats, reason-tagged breakdown keys, derived not-Completed umbrella, distinct-retried-jobs, warp.job.requeued meter, willRetry fix",
+  "scope_classification": "enhancement",
+  "security_impact": "none",
+  "public_contracts": [
+    {
+      "name": "Warp.Core.Handlers.JobOutcome.Reason { get; init; } : OutcomeReason?",
+      "surface": "external"
+    },
+    {
+      "name": "Warp.Core.Enums.OutcomeReason { Retry = 1, RetryExhausted = 2, Concurrency = 3, RateLimit = 4, Timeout = 5, Saga = 6, Manual = 7, Recovery = 8 }",
+      "surface": "external"
+    },
+    {
+      "name": "Meter: warp.job.requeued { queue, type, reason, application } — always-on, no key/PII tags",
+      "surface": "external"
+    },
+    {
+      "name": "Statistic/Counter keys: stats:retried-jobs, stats:{requeued|failed|deleted}-{reason} (+ hourly buckets). NO stats:unsuccessful row — the not-Completed umbrella is derived on read as failed + deleted (CountersPage.buildRows), never stored",
+      "surface": "external"
+    },
+    {
+      "name": "BEHAVIOUR CHANGE: stats:succeeded/failed/deleted are no longer decremented on requeue — they become append-only 'ever' counts (DecrementStatForState removed)",
+      "surface": "external"
+    }
+  ],
+  "change_manifest": [
+    "src/core/Warp.Core/Handlers/JobOutcome.cs",
+    "src/core/Warp.Core/Enums/OutcomeReason.cs",
+    "src/core/Warp.Core/Services/OutcomeReasonTokens.cs",
+    "src/core/Warp.Core/Retry/RetryPipelineBehavior.cs",
+    "src/core/Warp.Core/Concurrency/ConcurrencyPipelineBehavior.cs",
+    "src/core/Warp.Core/RateLimit/RateLimitPipelineBehavior.cs",
+    "src/core/Warp.Core/Timeout/TimeoutPipelineBehavior.cs",
+    "src/core/Warp.Core/Sagas/SagaHandlerProxy.cs",
+    "src/core/Warp.Core/Services/JobCommandService.cs",
+    "src/core/Warp.Core/Logging/WarpTelemetry.cs",
+    "src/core/Warp.Core/Logging/WarpTelemetryAttributes.cs",
+    "src/core/Warp.Core/Publisher.cs",
+    "src/core/Warp.Worker/WarpWorkerService.cs",
+    "src/core/Warp.Worker/WarpDispatcherWorker.cs",
+    "src/core/Warp.Worker/Services/StaleJobRecovery.cs",
+    "src/tests/Warp.Tests/Observability/OTelMetricsTests.cs",
+    "src/tests/Warp.Tests/Observability/OutcomeMetricsTestsBase.cs",
+    "src/tests/Warp.Tests/Observability/RequeueStatsTestsBase.cs",
+    "src/tests/Warp.Tests/Observability/RetryStatusDispatcherIntegrationTestsBase.cs",
+    "src/tests/Warp.Tests/Observability/OutcomeReasonTokenTests.cs",
+    "src/tests/Warp.Tests/Observability/StatCounterTests.cs",
+    "src/tests/Warp.Tests/Admin/JobCommandServiceTests.cs",
+    "src/tests/Warp.Tests/Core/PublisherTests.cs",
+    "src/tests/Warp.Tests/Features/Sagas/SagaHandlerProxyTests.cs",
+    "src/tests/Warp.Tests/Scheduling/RetentionTests.cs",
+    "src/tests/Warp.Tests/Scheduling/RetentionEdgeCaseTests.cs",
+    "src/demo/Warp.Test.Shared/Handlers/OutcomeReasonDemoCommands.cs",
+    "src/demo/Warp.TestApp/Program.cs",
+    "src/demo/Warp.TestWorker/Program.cs",
+    "src/ui/src/pages/counters/CountersPage.tsx",
+    "src/ui/e2e-live/outcome-stats.spec.ts",
+    "src/ui/playwright.aspire.config.ts",
+    "src/ui/tsconfig.node.json",
+    "src/ui/package.json",
+    "website/docs/features/queue-metrics.md",
+    "website/docs/releases.md",
+    "tasks/lessons.md",
+    "src/tests/Warp.Tests/Observability/StatSurfaceTestsBase.cs",
+    "src/tests/Warp.Tests/TestData/Handlers/FailFirstAttemptCommand.cs",
+    ".claude/rules/project-specific.md"
+  ],
+  "change_manifest_corrections": [
+    "OutcomeStatKeys.cs was planned but reverted during T1 — an IEnumerable<Counter> return told the reader nothing at the call site. It shipped as the narrower Services/OutcomeReasonTokens.cs (enum -> token only); the Counter rows are spelled out at each site.",
+    "src/ui/tests/counters.spec.ts was never written. The UI check shipped instead as a LIVE Playwright suite (src/ui/e2e-live/outcome-stats.spec.ts + playwright.aspire.config.ts) driving the real Aspire stack, which is strictly stronger than the planned run against hand-written demo fixtures — those numbers could never have caught a metrics bug.",
+    "src/ui/src/demo/data.ts and CLAUDE.md are UNCHANGED — the demo fixtures are only read by the screenshot config, and CLAUDE.md's standards table indexes rule FILES (project-specific.md -> §8.x), not individual sections, so there is no per-section row to add. .claude/rules/project-specific.md DID change: §8.33 records the taxonomy.",
+    "src/tests/Warp.Tests/Reliability/CrashRecoveryTests.cs and src/tests/Warp.Tests/Features/Retry/RetryTests.cs are UNCHANGED. RSC3 landed in RequeueStatsTestsBase instead (RecoverStaleJobs cases); RSC8's retry-exhausted regression is covered by the pre-existing RetryTests and TimeoutIntegrationTests running green unmodified, which is the regression signal the batch wanted.",
+    "Publisher.cs + PublisherTests.cs are an out-of-scope DefaultQueue fix found during implementation (see the plan's progress notes); RetentionTests/RetentionEdgeCaseTests were collateral of the R3 decrement removal; the demo files added the seeds the live Playwright suite drives.",
+    "StatSurfaceTestsBase.cs was written last (RSC11), after the rest of the batch. It drives direct-drive WarpWorkerService iterations rather than a booted WarpTestServer: a concurrency-Wait outcome returns the job to Enqueued with ScheduleTime = now, so a polling worker re-requeues it for as long as the slot is held and the count stops being a constant — and RSC11 is an exactness claim. It needed one new test handler (TestData/Handlers/FailFirstAttemptCommand.cs) for the retry-recovers shape, which no existing handler produced."
+  ],
+  "success_criteria": [
+    {
+      "id": "RSC1",
+      "description": "Default-delay retry emits status=retried in both worker paths",
+      "verification": "OTelMetricsTests default-delay + dispatcher cases",
+      "evidence_channel": "test-run",
+      "observable": "tests pass; existing Delays=[] test still green"
+    },
+    {
+      "id": "RSC2",
+      "description": "RequeueJob and BulkRequeueJobs write stats:requeued AND stats:requeued-manual (+hourly), each equal to the Requeued JobLog row count",
+      "verification": "RequeueStatsTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "PG + SQL Server pass"
+    },
+    {
+      "id": "RSC3",
+      "description": "StaleJobRecovery requeue arm writes stats:requeued + stats:requeued-recovery (+hourly); the NoRestart arm writes nothing",
+      "verification": "RequeueStatsTestsBase (RecoverStaleJobs_WritesRequeuedTotalAndRecoveryReason, RecoverStaleJobs_NoRestartJob_WritesNoRequeueCounters)",
+      "evidence_channel": "test-run",
+      "observable": "PG + SQL Server pass"
+    },
+    {
+      "id": "RSC4",
+      "description": "No stats: key is ever decremented; DecrementStatForState removed; no negative Counter row from any requeue path",
+      "verification": "JobCommandServiceTests + StatCounterTests (inverted)",
+      "evidence_channel": "test-run",
+      "observable": "5 previously-asserting-(-1) tests now assert no negative row"
+    },
+    {
+      "id": "RSC5",
+      "description": "Every OutcomeReason member maps to a distinct lowercase token",
+      "verification": "OutcomeReasonTokenTests (NoDb)",
+      "evidence_channel": "test-run",
+      "observable": "test iterates Enum.GetValues"
+    },
+    {
+      "id": "RSC6",
+      "description": "REVISED during review. The not-Completed umbrella is DERIVED on read as failed + deleted and is never stored: no stats:unsuccessful Counter row is written anywhere, and CountersPage.buildRows computes it. The original 'stored umbrella equals failed + deleted' criterion was unmeetable — the umbrella was written at only the 2 worker finalization sites while failed/deleted also move at 6 others (DeleteJob, BulkDelete, both recovery arms, both worker cancellation paths), so the stored row under-reported from the first delete and the UI rendered a child exceeding its parent. Deriving a pure function of two stored values removes the drift by construction.",
+      "verification": "OutcomeMetricsTestsBase.AssertUmbrellaIsNotStored (all 4 cases) + the live e2e umbrella test + CountersPage.buildRows",
+      "evidence_channel": "test-run",
+      "observable": "no stats:unsuccessful* row exists after any workload; the page renders failed + deleted"
+    },
+    {
+      "id": "RSC7",
+      "description": "stats:retried-jobs increments once per distinct retried job; never for a first-attempt failure with no retry policy",
+      "verification": "OutcomeMetricsTestsBase",
+      "evidence_channel": "test-run",
+      "observable": "tests pass"
+    },
+    {
+      "id": "RSC8",
+      "description": "All 12 sites stamp a reason; retry-exhausted yields State.Failed + stats:failed-retry-exhausted with unchanged state/handler-type behaviour",
+      "verification": "OutcomeMetricsTestsBase.Retry_BudgetExhausted_CountsFailedRetryExhausted + SagaHandlerProxyTests; the UNMODIFIED RetryTests and TimeoutIntegrationTests (notably DeleteMode_PlusAddRetry_TimedOutNotRetried, which caught the missing ??=) staying green is the behaviour-unchanged signal",
+      "evidence_channel": "test-run",
+      "observable": "tests pass, including the untouched retry/timeout suites"
+    },
+    {
+      "id": "RSC9",
+      "description": "Dispatcher mode produces the same keys and the same status label as single-worker mode",
+      "verification": "RetryStatusDispatcherIntegrationTestsBase (UseDispatcher = true, HeavyIntegration collection)",
+      "evidence_channel": "test-run",
+      "observable": "dispatcher-path attempt labelled retried, not failed"
+    },
+    {
+      "id": "RSC10",
+      "description": "warp.job.requeued emits with reason and no key/PII tag",
+      "verification": "OTelMetricsTests via MeterListener",
+      "evidence_channel": "test-run",
+      "observable": "exact tag set asserted"
+    },
+    {
+      "id": "RSC11",
+      "description": "Mixed-workload surface test asserting the exact expected value for EVERY stats: key in one run, plus every invariant",
+      "verification": "StatSurfaceTestsBase (PG + SQL Server) — nine outcome classes x N=2 on direct-drive workers; the COMPLETE stats: key/value map asserted by equality for both the lifetime keys and their hourly buckets",
+      "evidence_channel": "test-run",
+      "observable": "11 keys matched exactly (succeeded 4, failed 4, failed-retry-exhausted 2, deleted 6, deleted-concurrency 2, deleted-timeout 2, requeued 10, requeued-retry 6, requeued-concurrency 2, requeued-manual 2, retried-jobs 4); umbrella derived not stored; each state total = its reason keys + unattributed remainder; retried-jobs (4 distinct jobs) < requeued-retry (6 events); no negative Counter row"
+    },
+    {
+      "id": "RSC12",
+      "description": "Counters page renders the workload's numbers in the grouped hierarchy",
+      "verification": "src/ui/e2e-live/outcome-stats.spec.ts against the LIVE Aspire stack (real worker, real handlers), not the planned demo fixtures",
+      "evidence_channel": "test-run",
+      "observable": "page shows stats:succeeded with the value the API reports; runs on demand via npm run test:e2e:live (Docker, ~6 min), not in the default suite"
+    },
+    {
+      "id": "RSC13",
+      "description": "Solution builds analyzer-clean; full suite green on both providers",
+      "verification": "dotnet build src/Warp.slnx; dotnet test",
+      "evidence_channel": "build-output",
+      "observable": "exit 0, zero warnings"
+    },
+    {
+      "id": "RSC14",
+      "description": "Frontend builds",
+      "verification": "npm run build in src/ui",
+      "evidence_channel": "build-output",
+      "observable": "exit 0"
+    }
+  ],
+  "test_manifest": [
+    {
+      "path": "src/tests/Warp.Tests/Observability/OTelMetricsTests.cs",
+      "covers": [
+        "RSC1",
+        "RSC10"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Observability/RetryStatusDispatcherIntegrationTestsBase.cs",
+      "covers": [
+        "RSC1",
+        "RSC9"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Observability/RequeueStatsTestsBase.cs",
+      "covers": [
+        "RSC2",
+        "RSC3"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Admin/JobCommandServiceTests.cs",
+      "covers": [
+        "RSC4"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Observability/StatCounterTests.cs",
+      "covers": [
+        "RSC4"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Observability/OutcomeReasonTokenTests.cs",
+      "covers": [
+        "RSC5"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Observability/OutcomeMetricsTestsBase.cs",
+      "covers": [
+        "RSC6",
+        "RSC7",
+        "RSC8"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/Sagas/SagaHandlerProxyTests.cs",
+      "covers": [
+        "RSC8"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Core/PublisherTests.cs",
+      "covers": [
+        "out-of-scope DefaultQueue fix"
+      ]
+    },
+    {
+      "path": "src/ui/e2e-live/outcome-stats.spec.ts",
+      "covers": [
+        "RSC6",
+        "RSC12"
+      ],
+      "note": "on-demand only — npm run test:e2e:live boots the Aspire stack (Docker, ~6 min); not part of dotnet test or CI's default run"
+    },
+    {
+      "path": "src/tests/Warp.Tests/Observability/StatSurfaceTestsBase.cs",
+      "covers": [
+        "RSC4",
+        "RSC6",
+        "RSC7",
+        "RSC8",
+        "RSC11"
+      ],
+      "note": "the cross-key guard — one workload, complete key/value map asserted by equality on both providers"
+    }
+  ],
+  "uncovered_success_criteria": [],
+  "out_of_scope": [
+    "Any schema change — no Job.RequeueCount column, no new entity, no migration",
+    "A dimensioned requeue:{queue}:{type}:{reason} DB key family",
+    "Mutex-vs-semaphore reason split",
+    "Per-queue / per-type requeue breakdown in the DB",
+    "Sink-gating stats:* under JobMetricsSink = Otel (follow-up)",
+    "Resetting RetriedTimes on manual requeue",
+    "Changing the dashboard's live-state tiles or nav badges (they query Job and are correct)",
+    "Reverse navigation from a metric to its jobs",
+    "Any change to the worker fetch/execute hot path beyond reading the outcome reason and the already-read attempt count"
+  ],
+  "open_decisions": [],
+  "assumptions": [
+    "[VERIFIED:src/core/Warp.Worker/WarpWorkerService.cs:190] both worker paths already read RetriedTimes as long via the pinned key (WarpTelemetryTests.cs:269) — reused, so no JobOutcome.Attempt property",
+    "[VERIFIED:src/core/Warp.Core/Retry/RetryOptions.cs] Delays defaults to [15,60,300] so the default retry path is State.Scheduled",
+    "[VERIFIED:src/core/Warp.Core/Services/DashboardStatsService.cs:50-100] dashboard mixes Job queries (live state) with GetCombinedStatValue counters (lifetime); CountersPage.tsx:5,30 is counters-only",
+    "[VERIFIED:src/ui/src/stores/dashboard.ts:51] the realtime chart deltas totalFailed with a Math.max(0,…) clamp — non-monotonic until R3",
+    "[VERIFIED:src/tests/Warp.Tests/Admin/JobCommandServiceTests.cs:411,412,493,759 and Observability/StatCounterTests.cs:45] five assertions pin the -1 decrement; R3 inverts them",
+    "[VERIFIED:src/core/Warp.Core/Data/Entities/Statistic.cs] Statistic is Key + long — volume estimate holds"
+  ],
+  "risks": [
+    "R3 changes the meaning of three existing metrics (ever-X rather than latest-outcome-X); five tests invert; release note required; live tiles/nav unaffected",
+    "Reason boundedness is the cost model — a free-string reason turns 14 keys into keys-per-value",
+    "Both worker paths must move in lockstep (§0.2); §8.29 records the dispatcher path being missed once",
+    "The retry-exhausted branch newly sets an outcome, re-serializing metadata on a hot-path branch",
+    "The willRetry fix changes an emitted metric value for anyone alerting on status=failed",
+    "The mixed-workload test needs exactness, which ruled out a booted server: a concurrency-Wait outcome returns the job to Enqueued with ScheduleTime = now, so a polling worker re-requeues it for as long as the slot is held. It shipped on direct-drive worker iterations with N=2 per case (§0.4), still inside the serialized HeavyIntegration collection (§4.7.1).",
+    "stats:* is not sink-gated; Otel-only deployments still pay these rows (pre-existing, follow-up)"
+  ],
+  "plan": {
+    "batches": [
+      {
+        "id": "R1",
+        "pr": "PR1 (fix/requeue-stats)",
+        "title": "Fix willRetry mislabeling in both worker paths",
+        "files": [
+          "src/core/Warp.Worker/WarpWorkerService.cs",
+          "src/core/Warp.Worker/WarpDispatcherWorker.cs",
+          "src/tests/Warp.Tests/Observability/OTelMetricsTests.cs"
+        ],
+        "acceptance": "willRetry tests Enqueued OR Scheduled in both paths; new default-Delays test asserts status=retried; existing Delays=[] test green. RSC1."
+      },
+      {
+        "id": "R2",
+        "pr": "PR1 (fix/requeue-stats)",
+        "title": "Count manual and crash-recovery requeues",
+        "files": [
+          "src/core/Warp.Core/Services/JobCommandService.cs",
+          "src/core/Warp.Worker/Services/StaleJobRecovery.cs",
+          "src/tests/Warp.Tests/Observability/RequeueStatsTestsBase.cs"
+        ],
+        "acceptance": "Both paths write the state total AND the reason key; counts equal Requeued JobLog rows; bulk path reuses AddRequeueLogsForFlipped's in-transaction re-query. RSC2, RSC3."
+      },
+      {
+        "id": "R3",
+        "pr": "PR1 (fix/requeue-stats)",
+        "title": "Remove the decrement — stats become append-only",
+        "files": [
+          "src/core/Warp.Core/Services/JobCommandService.cs",
+          "src/tests/Warp.Tests/Admin/JobCommandServiceTests.cs",
+          "src/tests/Warp.Tests/Observability/StatCounterTests.cs"
+        ],
+        "acceptance": "DecrementStatForState and the ApplyRequeueAccounting decrement removed; the five pinning tests inverted to assert no negative row; lifetime totals reconcile with their hourly buckets; dashboard rate delta can no longer go negative. RSC4."
+      },
+      {
+        "id": "T1",
+        "pr": "PR2 (feat branch)",
+        "title": "OutcomeReason enum, JobOutcome.Reason, token map, 12 site stamps + explicit retry-exhausted outcome",
+        "files": [
+          "src/core/Warp.Core/Enums/OutcomeReason.cs",
+          "src/core/Warp.Core/Handlers/JobOutcome.cs",
+          "src/core/Warp.Core/Services/OutcomeReasonTokens.cs",
+          "src/core/Warp.Core/Retry/RetryPipelineBehavior.cs",
+          "src/core/Warp.Core/Concurrency/ConcurrencyPipelineBehavior.cs",
+          "src/core/Warp.Core/RateLimit/RateLimitPipelineBehavior.cs",
+          "src/core/Warp.Core/Timeout/TimeoutPipelineBehavior.cs",
+          "src/core/Warp.Core/Sagas/SagaHandlerProxy.cs",
+          "src/tests/Warp.Tests/Observability/OutcomeReasonTokenTests.cs",
+          "src/tests/Warp.Tests/Features/Sagas/SagaHandlerProxyTests.cs"
+        ],
+        "acceptance": "All 12 sites stamped; guard test covers every enum member; retry-exhausted behaviour-preserving. RSC5, RSC8."
+      },
+      {
+        "id": "T2",
+        "pr": "PR2 (feat branch)",
+        "title": "Worker key composition — breakdown, derived not-Completed umbrella, retried-jobs",
+        "files": [
+          "src/core/Warp.Worker/WarpWorkerService.cs",
+          "src/core/Warp.Worker/WarpDispatcherWorker.cs",
+          "src/tests/Warp.Tests/Observability/OutcomeMetricsTestsBase.cs",
+          "src/tests/Warp.Tests/Observability/RetryStatusDispatcherIntegrationTestsBase.cs"
+        ],
+        "acceptance": "Both paths emit identical keys; NO stats:unsuccessful row is written by either (the umbrella is derived on read — see the revised RSC6); retried-jobs once per distinct job; dispatcher test green. RSC6, RSC7, RSC9."
+      },
+      {
+        "id": "T3",
+        "pr": "PR2 (feat branch)",
+        "title": "warp.job.requeued meter",
+        "files": [
+          "src/core/Warp.Core/Logging/WarpTelemetry.cs",
+          "src/core/Warp.Worker/WarpWorkerService.cs",
+          "src/core/Warp.Worker/WarpDispatcherWorker.cs",
+          "src/tests/Warp.Tests/Observability/OTelMetricsTests.cs"
+        ],
+        "acceptance": "Tags are queue/type/reason/application only; MeterListener asserts the exact set. RSC10."
+      },
+      {
+        "id": "T4",
+        "pr": "PR2 (feat branch)",
+        "title": "Counters page — grouped hierarchy, intentional colours, recovery readout",
+        "files": [
+          "src/ui/src/pages/counters/CountersPage.tsx"
+        ],
+        "acceptance": "Flat alphabetical list replaced by umbrella → state total → reason grouping, with ONLY failed and deleted nesting under the umbrella (a success is not unsuccessful and a requeue is not terminal); append-only note; new keys in builtInColors; unattributed remainder shown AND the impossible over-attributed direction surfaced rather than hidden; the one derived readout is the umbrella itself (revised RSC6) — the rejected recovery-rate tile stays rejected; npm run build exit 0. RSC14. (src/ui/src/demo/data.ts was planned but proved unnecessary — the fixtures feed only the screenshot config.)"
+      },
+      {
+        "id": "T5",
+        "pr": "PR2 (feat branch)",
+        "title": "Mixed-workload stat-surface verification + UI check — PARTIALLY DELIVERED",
+        "files": [
+          "src/ui/e2e-live/outcome-stats.spec.ts",
+          "src/ui/playwright.aspire.config.ts",
+          "src/demo/Warp.TestApp/Program.cs",
+          "src/demo/Warp.Test.Shared/Handlers/OutcomeReasonDemoCommands.cs"
+        ],
+        "acceptance": "DELIVERED: a live Playwright suite drives every addon-attributed reason through the real Aspire stack (real worker, real handlers) and confirms the Counters page renders what the API reports — chosen over the planned run against hand-written demo fixtures, whose numbers could never catch a metrics bug. NOT DELIVERED: the DB-level StatSurfaceTestsBase asserting one workload's complete key/value map on both providers (RSC11, see uncovered_success_criteria). RSC12 only."
+      },
+      {
+        "id": "T6",
+        "pr": "PR2 (feat branch)",
+        "title": "Docs + rules",
+        "files": [
+          "website/docs/features/queue-metrics.md",
+          "website/docs/releases.md",
+          "tasks/lessons.md"
+        ],
+        "acceptance": "Docs carry the metric-vs-query principle, the three-level model, the bounded-reason constraint, the volume figures, the derived-umbrella rationale, and release notes for all three behaviour changes (willRetry label, decrement removal, DefaultQueue fix); full suite green on both providers. RSC13. (CLAUDE.md and .claude/rules/project-specific.md were planned but left unchanged — no rule text needed amending.)"
+      }
+    ]
+  }
+}
