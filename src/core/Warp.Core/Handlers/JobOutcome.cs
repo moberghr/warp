@@ -66,6 +66,19 @@ public class JobOutcome
     public string? LogMessage { get; init; }
 
     /// <summary>
+    /// Why this outcome happened, when the behaviour setting it knows. Drives the
+    /// <c>stats:{state}-{reason}</c> breakdown counter and the <c>reason</c> tag on
+    /// <c>warp.job.requeued</c>. Leave <c>null</c> when the cause is not attributable — the state total is
+    /// still counted, and the difference between it and the sum of its reasons is reported as unattributed.
+    /// </summary>
+    /// <remarks>
+    /// A behaviour that reschedules or short-circuits a job is the only component that knows why, and it
+    /// already constructs this object, so stamping the reason here costs the worker one field read. Deliberately
+    /// a closed enum rather than a string — see <see cref="OutcomeReason"/>.
+    /// </remarks>
+    public OutcomeReason? Reason { get; init; }
+
+    /// <summary>
     /// Picks the correct queued state for a reschedule: <see cref="State.Scheduled"/> when the
     /// target time is in the future (so <c>ScheduledJobActivation</c> owns the flip back),
     /// otherwise <see cref="State.Enqueued"/>. Every pipeline behaviour that reschedules a job

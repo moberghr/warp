@@ -63,6 +63,10 @@ public class SagaHandlerProxyTests
         jobContext.Outcome.State.ShouldBe(State.Scheduled);
         jobContext.Outcome.ClearHandlerType.ShouldBeFalse();
         jobContext.Outcome.LogMessage!.ShouldContain("busy");
+
+        // The reason drives the stats:requeued-saga breakdown key. Without it the requeue lands only in the
+        // state total and a saga bouncing off its own mutex is indistinguishable from a retry backoff.
+        jobContext.Outcome.Reason.ShouldBe(OutcomeReason.Saga);
     }
 
     [TimedFact]
@@ -79,6 +83,7 @@ public class SagaHandlerProxyTests
         jobContext.Outcome.ShouldNotBeNull();
         jobContext.Outcome.State.ShouldBe(State.Failed);
         jobContext.Outcome.LogMessage!.ShouldContain("No saga");
+        jobContext.Outcome.Reason.ShouldBe(OutcomeReason.Saga);
         store.AddCount.ShouldBe(0);
         store.UpdateCount.ShouldBe(0);
     }
@@ -131,6 +136,7 @@ public class SagaHandlerProxyTests
         jobContext.Outcome.State.ShouldBe(State.Scheduled);
         jobContext.Outcome.ClearHandlerType.ShouldBeFalse();
         jobContext.Outcome.LogMessage!.ShouldContain("version conflict");
+        jobContext.Outcome.Reason.ShouldBe(OutcomeReason.Saga);
 
         // Jitter: ScheduleTime must be in the future, but capped at <500ms from now.
         var delta = jobContext.Outcome.ScheduleTime!.Value - DateTime.UtcNow;
@@ -151,6 +157,7 @@ public class SagaHandlerProxyTests
         jobContext.Outcome.State.ShouldBe(State.Scheduled);
         jobContext.Outcome.ClearHandlerType.ShouldBeFalse();
         jobContext.Outcome.LogMessage!.ShouldContain("unique-key conflict");
+        jobContext.Outcome.Reason.ShouldBe(OutcomeReason.Saga);
     }
 
     [TimedFact]

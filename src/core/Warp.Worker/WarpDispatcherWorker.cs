@@ -204,6 +204,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         IServiceScope? handlerScope = null;
         JobContext? jobContext = null;
         DateTime? totalDeadlineUtc = null;
+        var incomingAttempts = 0L;
         try
         {
             PerfTrace.Mark(PerfTrace.ExecuteHandler);
@@ -247,6 +248,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             if (jobContext.Metadata.TryGetValue(WarpTelemetryAttributes.RetryMetadataRetriedTimesKey, out var retriedTimesObj)
                 && retriedTimesObj is long retriedTimes)
             {
+                incomingAttempts = retriedTimes;
                 activity?.SetTag(WarpTelemetryAttributes.WarpJobAttempt, retriedTimes + 1);
             }
             else
@@ -332,7 +334,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 job.CurrentState = State.Completed;
             }
 
-            var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc);
+            var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
             _batch.Add(new PendingCompletion(job, counters, logs));
         }
@@ -440,7 +442,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             await jobCts.CancelAsync();
             await monitorTask;
 
-            var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome, totalDeadlineUtc);
+            var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
 
             // Every caught exception (retry or terminal) feeds the error-grouping inbox — no fingerprint on the
@@ -640,7 +642,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     /// and a Scheduled/Enqueued log (with the next attempt time). All other transitions emit one.
     /// State must be set on the job before calling this method.
     /// </summary>
-    private (List<Counter> Counters, List<JobLog> FinalLogs) BuildFinalization(Job job, Exception? error, double? durationMs, JobOutcome? outcome, DateTime? totalDeadlineUtc = null)
+    private (List<Counter> Counters, List<JobLog> FinalLogs) BuildFinalization(Job job, Exception? error, double? durationMs, JobOutcome? outcome, DateTime? totalDeadlineUtc = null, long incomingAttempts = 0)
     {
         var state = job.CurrentState;
         job.CancellationMode = CancellationMode.None;
@@ -690,6 +692,55 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // Covers retry backoff and Mutex Wait — anything that puts the job back on the queue.
             counters.Add(new Counter { Key = "stats:requeued", Value = 1 });
             counters.Add(new Counter { Key = $"stats:requeued:{hourSuffix}", Value = 1 });
+        }
+
+        // Reason breakdown. Joins the SaveChanges the state total above already rides, so this adds no
+        // round-trip to the hot path (§0.2/§6.1) — just a field read and a switch. A completed job carries
+        // no reason, so the happy path writes exactly what it wrote before.
+        //
+        // Written INDEPENDENTLY of the state total, not derived from it: a reader never has to sum the
+        // reasons to get a total, and an outcome with no attributable reason (a plain handler throw with no
+        // addon involved) still lands in the total, showing up as the unattributed remainder.
+        //
+        // There is deliberately NO stats:unsuccessful row — see the matching comment in
+        // WarpWorkerService.FinalizeJobState. Both paths must stay identical (§0.2 lockstep).
+        if (outcome?.Reason is { } reason)
+        {
+            var stateToken = state switch
+            {
+                State.Failed => "failed",
+                State.Deleted => "deleted",
+                State.Enqueued or State.Scheduled => "requeued",
+                _ => null,
+            };
+
+            var token = OutcomeReasonTokens.For(reason);
+
+            if (stateToken != null)
+            {
+                var key = $"stats:{stateToken}-{token}";
+                counters.Add(new Counter { Key = key, Value = 1 });
+                counters.Add(new Counter { Key = $"{key}:{hourSuffix}", Value = 1 });
+            }
+
+            // Mirrors WarpWorkerService — both paths must emit identical telemetry (§0.2 lockstep).
+            if (state is State.Enqueued or State.Scheduled)
+            {
+                WarpTelemetry.RecordJobRequeued(job.Type, job.Queue, token, _configuration.ApplicationName);
+            }
+
+            // Distinct jobs that entered retry, as opposed to the retry EVENTS counted above. A job retried
+            // 15 times is 15 events but one job, and "how many jobs are thrashing" was unanswerable.
+            //
+            // No schema column for this: the per-job counter already exists as RetriedTimes in Job.Metadata,
+            // read above for the span tag BEFORE the handler ran — so an incoming count of 0 on a retry
+            // outcome is exactly this job's first retry. Reusing that read also keeps the worker free of any
+            // dependency on the Retry addon (the literal key is pinned to the property name by a test).
+            if (reason == OutcomeReason.Retry && incomingAttempts == 0)
+            {
+                counters.Add(new Counter { Key = "stats:retried-jobs", Value = 1 });
+                counters.Add(new Counter { Key = $"stats:retried-jobs:{hourSuffix}", Value = 1 });
+            }
         }
 
         // Deadline attainment (§8.30): mirror FinalizeJobState — attainment denominator on every terminal

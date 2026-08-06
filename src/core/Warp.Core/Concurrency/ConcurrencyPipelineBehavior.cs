@@ -1,4 +1,4 @@
-using Warp.Core.Enums;
+﻿using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
 
@@ -89,6 +89,7 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
             State = State.Enqueued,
             ScheduleTime = now,
             ClearHandlerType = true,
+            Reason = OutcomeReason.Concurrency,
             LogMessage = $"Requeued — '{key}' full ({effectiveLimit} slots)",
         };
 
@@ -96,6 +97,7 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         new()
         {
             State = State.Deleted,
+            Reason = OutcomeReason.Concurrency,
             LogMessage = $"Cancelled — '{key}' full ({effectiveLimit} slots)",
         };
 }

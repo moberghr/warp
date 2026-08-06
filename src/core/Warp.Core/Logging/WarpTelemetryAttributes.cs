@@ -138,6 +138,10 @@ public static class WarpTelemetryAttributes
     public const string JobMeterHandler = "job.handler";
     public const string JobMeterOutcome = "outcome";
 
+    // Meter tag key for warp.job.requeued. Bounded by construction — the value is an OutcomeReason token
+    // (OutcomeReasonTokens), never the concurrency / rate-limit KEY, which is unbounded and PII-adjacent (§1.2).
+    public const string JobMeterReason = "reason";
+
     // Meter tag key for warp.job.queue.* instruments (queue-wait histogram + backlog gauges). Bounded, low
     // cardinality; application (executor app) joins via the shared MeterApplication tag when set (§8.23).
     public const string QueueMeterQueue = "queue";

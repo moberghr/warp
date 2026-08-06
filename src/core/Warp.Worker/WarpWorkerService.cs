@@ -1,4 +1,5 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -145,6 +146,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         IServiceScope? handlerScope = null;
         JobContext? jobContext = null;
         DateTime? totalDeadlineUtc = null;
+        var incomingAttempts = 0L;
         try
         {
             PerfTrace.Mark(PerfTrace.ExecuteHandler);
@@ -190,6 +192,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             if (jobContext.Metadata.TryGetValue(WarpTelemetryAttributes.RetryMetadataRetriedTimesKey, out var retriedTimesObj)
                 && retriedTimesObj is long retriedTimes)
             {
+                incomingAttempts = retriedTimes;
                 activity?.SetTag(WarpTelemetryAttributes.WarpJobAttempt, retriedTimes + 1);
             }
             else
@@ -275,7 +278,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 job.CurrentState = State.Completed;
             }
 
-            FinalizeJobState(workerContext, job, null, handlerStopwatch.Elapsed.TotalMilliseconds, successOutcome, totalDeadlineUtc);
+            FinalizeJobState(workerContext, job, null, handlerStopwatch.Elapsed.TotalMilliseconds, successOutcome, totalDeadlineUtc, incomingAttempts);
             if (_configuration.EnableHandlerLogging)
             {
                 await SaveJobLogs(workerContext, logCollector);
@@ -311,7 +314,12 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             job.CancellationMode = CancellationMode.None;
             job.CurrentWorkerId = null;
             job.LastKeepAlive = null;
-            workerContext.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = 1 });
+
+            // Match FinalizeJobState (and the dispatcher's cancel arm): emit the hourly bucket alongside the
+            // lifetime row, or a cancellation is invisible on the Counters chart and the lifetime total stops
+            // reconciling with the sum of its own buckets.
+            var cancelHourSuffix = cancelNow.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
+            AddCounters(workerContext, "stats:deleted", $"stats:deleted:{cancelHourSuffix}");
             workerContext.Set<JobLog>().Add(new JobLog
             {
                 JobId = job.Id,
@@ -400,7 +408,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await monitorTask;
 
             await using var endTransaction = await workerContext.Database.BeginTransactionAsync(default);
-            FinalizeJobState(workerContext, job, e, errorDurationMs, outcome, totalDeadlineUtc);
+            FinalizeJobState(workerContext, job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
             if (_configuration.EnableHandlerLogging)
             {
                 await SaveJobLogs(workerContext, logCollector);
@@ -562,7 +570,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     /// Finalizes job state: clears worker fields, adds counters and log entry.
     /// State must be set on the job before calling this method.
     /// </summary>
-    private void FinalizeJobState(DbContext context, Job job, Exception? error, double? durationMs, JobOutcome? outcome = null, DateTime? totalDeadlineUtc = null)
+    private void FinalizeJobState(DbContext context, Job job, Exception? error, double? durationMs, JobOutcome? outcome = null, DateTime? totalDeadlineUtc = null, long incomingAttempts = 0)
     {
         var state = job.CurrentState;
         job.CancellationMode = CancellationMode.None;
@@ -570,7 +578,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         job.LastKeepAlive = null;
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var hourSuffix = now.ToString("yyyy-MM-dd-HH");
+        var hourSuffix = now.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
         var tierSuffix = MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes);
 
         // Every caught exception (retry attempt or terminal) appends one row to the error-grouping inbox in
@@ -617,6 +625,57 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         {
             // Covers retry backoff and Mutex Wait — anything that puts the job back on the queue.
             AddCounters(context, "stats:requeued", $"stats:requeued:{hourSuffix}");
+        }
+
+        // Reason breakdown. Joins the SaveChanges the state total above already rides, so this adds no
+        // round-trip to the hot path (§0.2/§6.1) — just a field read and a switch. A completed job carries
+        // no reason, so the happy path writes exactly what it wrote before.
+        //
+        // Written INDEPENDENTLY of the state total, not derived from it: a reader never has to sum the
+        // reasons to get a total, and an outcome with no attributable reason (a plain handler throw with no
+        // addon involved) still lands in the total, showing up as the unattributed remainder.
+        //
+        // There is deliberately NO stats:unsuccessful row. "Not Completed" is exactly failed + deleted, and
+        // ten sites write those two keys (worker cancellation, DeleteJob, BulkDelete, crash recovery, …).
+        // A stored umbrella has to be maintained at every one of them or it silently under-reports, which is
+        // what it did; the Counters page derives it on read instead, where it cannot drift.
+        if (outcome?.Reason is { } reason)
+        {
+            var stateToken = state switch
+            {
+                State.Failed => "failed",
+                State.Deleted => "deleted",
+                State.Enqueued or State.Scheduled => "requeued",
+                _ => null,
+            };
+
+            var token = OutcomeReasonTokens.For(reason);
+
+            if (stateToken != null)
+            {
+                var key = $"stats:{stateToken}-{token}";
+                AddCounters(context, key, $"{key}:{hourSuffix}");
+            }
+
+            // Always-on meter for the requeue case — the countable signal concurrency and rate limiting
+            // never had (they emit spans, which are sampled). Reason only; never the concurrency or
+            // rate-limit key, which are unbounded and PII-adjacent (§1.2) and stay on the span.
+            if (state is State.Enqueued or State.Scheduled)
+            {
+                WarpTelemetry.RecordJobRequeued(job.Type, job.Queue, token, _configuration.ApplicationName);
+            }
+
+            // Distinct jobs that entered retry, as opposed to the retry EVENTS counted above. A job retried
+            // 15 times is 15 events but one job, and "how many jobs are thrashing" was unanswerable.
+            //
+            // No schema column for this: the per-job counter already exists as RetriedTimes in Job.Metadata,
+            // read above for the span tag BEFORE the handler ran — so an incoming count of 0 on a retry
+            // outcome is exactly this job's first retry. Reusing that read also keeps the worker free of any
+            // dependency on the Retry addon (the literal key is pinned to the property name by a test).
+            if (reason == OutcomeReason.Retry && incomingAttempts == 0)
+            {
+                AddCounters(context, "stats:retried-jobs", $"stats:retried-jobs:{hourSuffix}");
+            }
         }
 
         // Deadline attainment (§8.30): this job carried a Total-scope timeout deadline (§8.7). Emit the

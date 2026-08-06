@@ -1,4 +1,4 @@
-using Warp.Core.Enums;
+﻿using Warp.Core.Enums;
 using Warp.Core.Handlers;
 
 namespace Warp.Core.Timeout;
@@ -67,6 +67,7 @@ public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TR
             _jobContext.Outcome = new JobOutcome
             {
                 State = State.Deleted,
+                Reason = OutcomeReason.Timeout,
                 LogMessage = message,
             };
 

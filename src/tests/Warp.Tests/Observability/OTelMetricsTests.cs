@@ -547,6 +547,78 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetAndProcessJob_Retried_EmitsRequeuedMeterWithReasonAndNoKeyTag()
+    {
+        // Fills the gap where concurrency and rate limiting emitted rich SPANS but no meter, so "how many
+        // jobs bounced off this mutex in the last hour" was unanswerable from telemetry. Also pins the tag
+        // set: the concurrency / rate-limit KEY is unbounded and PII-adjacent (§1.2) and must never become
+        // a meter dimension, no matter how useful it looks.
+        var queue = $"metrics-requeued-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(ThrowExceptionRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new ThrowExceptionRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = queue,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker(queue, retryDelays: [15, 60, 300]);
+        long requeued = 0;
+        var observedTags = new List<KeyValuePair<string, object?>>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (string.Equals(instrument.Meter.Name, "Warp", StringComparison.Ordinal)
+                && string.Equals(instrument.Name, "warp.job.requeued", StringComparison.Ordinal))
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+        {
+            if (!HasTag(tags, "queue", queue))
+            {
+                return;
+            }
+
+            requeued += value;
+            foreach (var tag in tags)
+            {
+                observedTags.Add(tag);
+            }
+        });
+        listener.Start();
+
+        // Act
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert
+        requeued.ShouldBe(1);
+
+        // The EXACT tag set, not a contains-check. ApplicationName is unset here, so `application` must be
+        // absent too — an over-tagged meter is a cardinality bug, and asserting only presence would never
+        // catch a new dimension being added.
+        observedTags
+            .Select(x => x.Key)
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .ShouldBe(["job.type", "queue", "reason"]);
+
+        // The value matters as much as the key: a `reason` tag carrying the wrong token silently
+        // misattributes every requeue in the dashboard's breakdown.
+        observedTags
+            .Where(x => string.Equals(x.Key, "reason", StringComparison.Ordinal))
+            .Select(x => x.Value?.ToString())
+            .ShouldBe(["retry"]);
+    }
+
+    [TimedFact]
     public async Task StartBatch_RecordsEnqueuedMetricForBatchAndChildren()
     {
         // Arrange
