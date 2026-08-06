@@ -1,3 +1,4 @@
+﻿using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
@@ -30,6 +31,8 @@ public interface IJobCommandService
 public class JobCommandService<TContext> : IJobCommandService
     where TContext : DbContext
 {
+    private const string StatsRequeued = "stats:requeued";
+
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly WarpConfiguration _configuration;
@@ -158,6 +161,10 @@ public class JobCommandService<TContext> : IJobCommandService
         {
             job.HandlerType = null;
         }
+
+        // One Requeued log row ⇒ one requeue event. The counter must agree with the log exactly, which is
+        // why every requeue-writing path counts the rows it actually flipped rather than a separate tally.
+        AddRequeueCounters(OutcomeReasonTokens.For(OutcomeReason.Manual), 1);
 
         await _context.Set<JobLog>().AddAsync(new JobLog
         {
@@ -641,6 +648,11 @@ public class JobCommandService<TContext> : IJobCommandService
             .Select(x => x.Id)
             .ToListAsync();
 
+        // Count what we actually flipped, from the same in-transaction re-query that writes the logs.
+        // ApplyRequeueAccounting's `affected` comes from a different statement and can diverge, so deriving
+        // the counter from it would break the one-counter-per-Requeued-log invariant.
+        AddRequeueCounters(OutcomeReasonTokens.For(OutcomeReason.Manual), flippedIds.Count);
+
         foreach (var id in flippedIds)
         {
             _context.Set<JobLog>().Add(new JobLog
@@ -652,6 +664,39 @@ public class JobCommandService<TContext> : IJobCommandService
                 Message = $"Job {id} was requeued",
             });
         }
+    }
+
+    /// <summary>
+    /// Writes the requeue state total and its reason breakdown, each with an hourly bucket row.
+    /// </summary>
+    /// <remarks>
+    /// The bucket is stamped here, at the write site, because <c>Counter</c> is <c>Id</c>/<c>Key</c>/<c>Value</c>
+    /// with no timestamp — <c>CounterAggregator</c> folds rows whenever it next runs and cannot know when the
+    /// event actually happened, so deriving the hour at fold time would misattribute any row that outlived a
+    /// tick. All four are append-only: a requeue that later succeeds does not un-count anything.
+    /// </remarks>
+    private void AddRequeueCounters(string reason, int count)
+    {
+        AddStatCounters(StatsRequeued, count);
+        AddStatCounters($"{StatsRequeued}-{reason}", count);
+    }
+
+    /// <summary>
+    /// Writes a <c>stats:</c> lifetime row and its hourly bucket sibling. Never one without the other — a
+    /// lifetime row with no bucket makes the lifetime total disagree with the sum of its own buckets, which
+    /// is exactly what the Counters chart plots against.
+    /// </summary>
+    private void AddStatCounters(string key, int count)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        var hourSuffix = _timeProvider.GetUtcNow().UtcDateTime.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
+
+        _context.Set<Counter>().Add(new Counter { Key = key, Value = count });
+        _context.Set<Counter>().Add(new Counter { Key = $"{key}:{hourSuffix}", Value = count });
     }
 
     private static void CollectQueues(Guid[] ids, Dictionary<Guid, string> queueById, int affected, HashSet<string> queues)

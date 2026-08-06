@@ -1,3 +1,4 @@
+﻿using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Warp.Core;
@@ -7,6 +8,7 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.NoRestart;
+using Warp.Core.Services;
 using Warp.Core.Webhooks;
 
 namespace Warp.Worker.Services;
@@ -104,7 +106,6 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                 job.CurrentState = State.Deleted;
                 job.CancellationMode = CancellationMode.None;
                 job.ExpireAt = now.AddDays(1);
-                _context.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = 1 });
                 _context.Set<JobLog>().Add(new JobLog
                 {
                     JobId = job.Id,
@@ -137,7 +138,6 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
             {
                 job.CurrentState = State.Failed;
                 job.ExpireAt = null;
-                _context.Set<Counter>().Add(new Counter { Key = "stats:failed", Value = 1 });
                 _context.Set<JobLog>().Add(new JobLog
                 {
                     JobId = job.Id,
@@ -149,6 +149,17 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                 failed++;
             }
         }
+
+        // One row per key carrying the batch count, not one per job — CounterAggregator sums either way and
+        // this is a sweep, not a hot path. Counts the rows actually flipped, so each key agrees exactly with
+        // the log rows written above. Append-only: a recovery outcome is an event that happened.
+        var hourSuffix = now.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
+        var reason = OutcomeReasonTokens.For(OutcomeReason.Recovery);
+
+        AddStatCounters("stats:requeued", requeued, hourSuffix);
+        AddStatCounters($"stats:requeued-{reason}", requeued, hourSuffix);
+        AddStatCounters("stats:deleted", deleted, hourSuffix);
+        AddStatCounters("stats:failed", failed, hourSuffix);
 
         await _context.SaveChangesAsync(ct);
         if (ownedTx != null)
@@ -244,6 +255,22 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         }
 
         return recovered;
+    }
+
+    /// <summary>
+    /// Writes a <c>stats:</c> lifetime row and its hourly bucket sibling, or nothing when the sweep flipped
+    /// no rows for that key. Never one without the other — a lifetime row with no bucket makes the lifetime
+    /// total disagree with the sum of its own buckets, which is what the Counters chart plots against.
+    /// </summary>
+    private void AddStatCounters(string key, int count, string hourSuffix)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _context.Set<Counter>().Add(new Counter { Key = key, Value = count });
+        _context.Set<Counter>().Add(new Counter { Key = $"{key}:{hourSuffix}", Value = count });
     }
 
     private static bool? ReadCanBeRestarted(string? metadataJson)
