@@ -174,6 +174,16 @@ public abstract class LocalMetricSourceTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetPercentileBreakdown_WithWindow_ThrowsNotSupported_NotSilentLifetime()
+    {
+        // Local has no windowed grouped-percentile path (it reads the lifetime pct histogram). A windowed request
+        // must fail loudly rather than return lifetime data — the Prometheus backend honors the window, so silently
+        // ignoring it here would diverge the two backends. No production caller passes a non-null window today.
+        await Should.ThrowAsync<NotSupportedException>(async () =>
+            await Source().GetPercentileBreakdownAsync(Duration(), 95, ["adapter"], Window(1), Ct));
+    }
+
+    [TimedFact]
     public async Task GetTagValues_AdapterCalls_DistinctAdapters()
     {
         await SeedStatistic(AdapterCounterKeys.Total("stripe", "success"), 1);

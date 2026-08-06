@@ -15,9 +15,10 @@ namespace Warp.Tests.Metrics;
 
 /// <summary>
 /// A real OTel → Prometheus → read-back round trip for <see cref="PrometheusMetricSource"/> (§8.33). Pushes the
-/// actual Warp adapter meters through an OTLP exporter into a live Prometheus (Testcontainers, OTLP receiver on),
-/// then reads them back through the seam and asserts the numbers — proving the full export/query path, not just the
-/// generated PromQL. A unique adapter name isolates the assertions from any concurrent meter emissions.
+/// actual Warp adapter AND endpoint meters through an OTLP exporter into a live Prometheus (Testcontainers, OTLP
+/// receiver on), then reads them back through the seam and asserts the numbers — proving the full export/query path
+/// (both implemented families, the histogram Views, and the lowercase outcome split), not just the generated PromQL.
+/// A unique adapter name / route template isolates the assertions from any concurrent meter emissions.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class PrometheusRoundTripTests : IAsyncLifetime
@@ -28,6 +29,7 @@ public sealed class PrometheusRoundTripTests : IAsyncLifetime
         "global:\n  scrape_interval: 2s\notlp:\n  translation_strategy: UnderscoreEscapingWithSuffixes\n  keep_identifying_resource_attributes: true\nstorage:\n  tsdb:\n    out_of_order_time_window: 30m\n";
 
     private const string Adapter = "rt-roundtrip-adapter"; // unique, so parallel tests can't pollute the assertion
+    private const string Route = "GET /rt-roundtrip/{id}"; // unique inbound route template, same isolation
 
     private IContainer _prometheus = null!;
     private string _baseUrl = null!;
@@ -64,6 +66,10 @@ public sealed class PrometheusRoundTripTests : IAsyncLifetime
             {
                 Boundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
             })
+            .AddView("warp.endpoint.duration", new ExplicitBucketHistogramConfiguration
+            {
+                Boundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+            })
             .AddOtlpExporter((exporter, reader) =>
             {
                 // OTel .NET uses a programmatically-set Endpoint verbatim (no signal-path appending), so give the
@@ -91,6 +97,23 @@ public sealed class PrometheusRoundTripTests : IAsyncLifetime
                 WarpTelemetry.AdapterDuration.Record(40, Tags("success"));
             }
 
+            // Inbound endpoint family: 7 success + 3 failed (the lowercase outcome split must survive the round
+            // trip), plus 100 latency samples at 40 ms for the endpoint histogram.
+            for (var i = 0; i < 7; i++)
+            {
+                WarpTelemetry.EndpointCalls.Add(1, EndpointTags("success"));
+            }
+
+            for (var i = 0; i < 3; i++)
+            {
+                WarpTelemetry.EndpointCalls.Add(1, EndpointTags("failed"));
+            }
+
+            for (var i = 0; i < 100; i++)
+            {
+                WarpTelemetry.EndpointDuration.Record(40, EndpointTags("success"));
+            }
+
             provider!.ForceFlush(5000);
         }
 
@@ -116,6 +139,24 @@ public sealed class PrometheusRoundTripTests : IAsyncLifetime
         var durationRef = new MetricRef(WarpMetricCatalog.Names.AdapterDuration, Tag(WarpMetricCatalog.Tags.Adapter, Adapter));
         var p95 = await source.GetPercentileBreakdownAsync(durationRef, 95, [WarpMetricCatalog.Tags.Adapter], null, ct);
         p95.Single().Value.ShouldBeInRange(25, 50);
+
+        // 3) The endpoint family round-trips through its own warp_endpoint_* series (a distinct implemented family):
+        // the by-route filter, the lowercase outcome split, and the endpoint histogram percentile.
+        var endpointRef = new MetricRef(WarpMetricCatalog.Names.EndpointCalls, Tag(WarpMetricCatalog.Tags.Route, Route));
+
+        IReadOnlyList<BreakdownRow> endpointByOutcome = [];
+        await PollUntil(async () =>
+        {
+            endpointByOutcome = await source.GetBreakdownAsync(endpointRef, [WarpMetricCatalog.Tags.Outcome], null, ct);
+            return endpointByOutcome.Sum(r => r.Value) >= 10;
+        });
+
+        endpointByOutcome.Single(r => Is(r, "success")).Value.ShouldBe(7);
+        endpointByOutcome.Single(r => Is(r, "failed")).Value.ShouldBe(3);
+
+        var endpointDurationRef = new MetricRef(WarpMetricCatalog.Names.EndpointDuration, Tag(WarpMetricCatalog.Tags.Route, Route));
+        var endpointP95 = await source.GetPercentileBreakdownAsync(endpointDurationRef, 95, [WarpMetricCatalog.Tags.Route], null, ct);
+        endpointP95.Single().Value.ShouldBeInRange(25, 50);
     }
 
     private static bool Is(BreakdownRow row, string outcome)
@@ -128,6 +169,12 @@ public sealed class PrometheusRoundTripTests : IAsyncLifetime
         { WarpTelemetryAttributes.AdapterMeterAdapter, Adapter },
         { WarpTelemetryAttributes.AdapterMeterOperation, "charge" },
         { WarpTelemetryAttributes.AdapterMeterOutcome, outcome },
+    };
+
+    private static TagList EndpointTags(string outcome) => new()
+    {
+        { WarpTelemetryAttributes.EndpointMeterRoute, Route },
+        { WarpTelemetryAttributes.EndpointMeterOutcome, outcome },
     };
 
     private static Dictionary<string, string> Tag(string key, string value)

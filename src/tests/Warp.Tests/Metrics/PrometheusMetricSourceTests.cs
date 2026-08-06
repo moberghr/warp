@@ -107,6 +107,139 @@ public class PrometheusMetricSourceTests
         series[1].Value.ShouldBe(3);
     }
 
+    [Fact]
+    public async Task GetTotal_Endpoint_SumsCounterInstant()
+    {
+        OnInstant(Scalar("42"));
+
+        var total = await Source().GetTotalAsync(new MetricRef(WarpMetricCatalog.Names.EndpointCalls), null, Ct);
+
+        _lastQuery.ShouldBe("sum(warp_endpoint_calls_total)");
+        total.ShouldBe(42);
+    }
+
+    [Fact]
+    public async Task GetBreakdown_Endpoint_ByRoute()
+    {
+        OnInstant(Vector(("route", "GET /orders/{id}", null, null, "12")));
+
+        var rows = await Source().GetBreakdownAsync(new MetricRef(WarpMetricCatalog.Names.EndpointCalls), ["route"], null, Ct);
+
+        _lastQuery.ShouldBe("sum by (route) (warp_endpoint_calls_total)");
+        rows.Single(r => TagIs(r.Tags, "route", "GET /orders/{id}")).Value.ShouldBe(12);
+    }
+
+    [Fact]
+    public async Task GetBreakdown_JobExecution_ByType_MapsLogicalTypeToJobTypeLabel()
+    {
+        // The job-execution instrument exports job.type → label job_type; the seam speaks the logical tag 'type'.
+        // The 'by' clause must group on job_type, and each returned row must be keyed back to the LOGICAL 'type'.
+        OnInstant(Vector(("job_type", "SendEmail", "outcome", "succeeded", "7")));
+
+        var rows = await Source().GetBreakdownAsync(new MetricRef(WarpMetricCatalog.Names.JobExecution), ["type", "outcome"], null, Ct);
+
+        _lastQuery.ShouldBe("sum by (job_type, outcome) (warp_job_execution_total)");
+        rows.Single().Tags["type"].ShouldBe("SendEmail");
+        rows.Single().Tags["outcome"].ShouldBe("succeeded");
+        rows.Single().Value.ShouldBe(7);
+    }
+
+    [Fact]
+    public async Task GetBreakdown_JobExecution_WithTypeFilter_EmitsJobTypeMatcher()
+    {
+        OnInstant(Vector(("outcome", "failed", null, null, "3")));
+
+        await Source().GetBreakdownAsync(
+            new MetricRef(WarpMetricCatalog.Names.JobExecution, Tags(("type", "SendEmail"))), ["outcome"], null, Ct);
+
+        _lastQuery.ShouldBe("sum by (outcome) (warp_job_execution_total{job_type=\"SendEmail\"})");
+    }
+
+    [Fact]
+    public async Task GetTagValues_JobExecution_Type_CountsByJobTypeLabel_ReturnsLogicalValues()
+    {
+        OnInstant(Vector(("job_type", "SendEmail", null, null, "1"), ("job_type", "Resize", null, null, "1")));
+
+        var values = await Source().GetTagValuesAsync(new MetricRef(WarpMetricCatalog.Names.JobExecution), "type", null, Ct);
+
+        _lastQuery.ShouldBe("count by (job_type) (warp_job_execution_total)");
+        values.ShouldBe(["Resize", "SendEmail"]);
+    }
+
+    [Fact]
+    public async Task GetPercentileBreakdown_QueueWait_UsesQueueWaitHistogram()
+    {
+        OnInstant(Vector(("queue", "default", null, null, "250")));
+
+        var rows = await Source().GetPercentileBreakdownAsync(
+            new MetricRef(WarpMetricCatalog.Names.QueueWait), 95, ["queue"], null, Ct);
+
+        _lastQuery.ShouldBe("histogram_quantile(0.95, sum by (queue, le) (warp_job_queue_wait_milliseconds_bucket))");
+        rows.Single().Value.ShouldBe(250);
+    }
+
+    [Fact]
+    public async Task GetBreakdown_Deadline_ByTypeAndQueue_MapsTypeToJobType()
+    {
+        OnInstant(Vector(("job_type", "SendEmail", "queue", "default", "9")));
+
+        await Source().GetBreakdownAsync(new MetricRef(WarpMetricCatalog.Names.Deadline), ["type", "queue"], null, Ct);
+
+        _lastQuery.ShouldBe("sum by (job_type, queue) (warp_job_deadline_total)");
+    }
+
+    [Fact]
+    public async Task GetGauge_QueueDepth_UsesInstantSelectorWithQueueMatcher()
+    {
+        OnInstant(Scalar("250"));
+
+        var depth = await Source().GetGaugeAsync(new MetricRef(WarpMetricCatalog.Names.QueueDepth, Tags(("queue", "default"))), Ct);
+
+        _lastQuery.ShouldBe("warp_job_queue_depth{queue=\"default\"}");
+        depth.ShouldBe(250);
+    }
+
+    [Fact]
+    public async Task GetPercentileBreakdown_ClientVitals_UsesUnitlessVitalsHistogram()
+    {
+        // warp.client.vitals is declared with no unit, so its Prometheus base name carries no unit suffix.
+        OnInstant(Vector(("vital", "LCP", null, null, "1800")));
+
+        var rows = await Source().GetPercentileBreakdownAsync(
+            new MetricRef(WarpMetricCatalog.Names.ClientVitalsValue), 75, ["vital"], null, Ct);
+
+        _lastQuery.ShouldBe("histogram_quantile(0.75, sum by (vital, le) (warp_client_vitals_bucket))");
+        rows.Single().Value.ShouldBe(1800);
+    }
+
+    [Fact]
+    public async Task GetBreakdown_ErrorGroup_ByFingerprint()
+    {
+        OnInstant(Vector(("fingerprint", "a1b2c3", null, null, "4")));
+
+        await Source().GetBreakdownAsync(new MetricRef(WarpMetricCatalog.Names.ErrorGroupOccurrences), ["fingerprint"], null, Ct);
+
+        _lastQuery.ShouldBe("sum by (fingerprint) (warp_errorgroup_occurrences_total)");
+    }
+
+    [Theory]
+    [InlineData(WarpMetricCatalog.Names.LifecycleSucceeded)]
+    [InlineData(WarpMetricCatalog.Names.LifecycleFailed)]
+    [InlineData(WarpMetricCatalog.Names.LifecycleDeleted)]
+    [InlineData(WarpMetricCatalog.Names.RecordsDropped)]
+    [InlineData(WarpMetricCatalog.Names.SloAttainment)]
+    [InlineData(WarpMetricCatalog.Names.SloBudget)]
+    public async Task UnservedFamilies_ThrowNotSupported_RatherThanReadingAWrongSeries(string metricName)
+    {
+        // These families have no clean single-instrument OTel export (§8.33), so the Prometheus backend refuses
+        // them loudly instead of silently reading an unrelated or empty series. Pins the deliberate gap so a
+        // future "it just returned 0" regression is impossible.
+        await Should.ThrowAsync<NotSupportedException>(async () =>
+            await Source().GetTotalAsync(new MetricRef(metricName), null, Ct));
+        await Should.ThrowAsync<NotSupportedException>(async () =>
+            await Source().GetBreakdownAsync(new MetricRef(metricName), [], null, Ct));
+    }
+
     private static bool TagIs(IReadOnlyDictionary<string, string> tags, string key, string value)
         => tags.TryGetValue(key, out var v) && string.Equals(v, value, StringComparison.Ordinal);
 
@@ -115,6 +248,10 @@ public class PrometheusMetricSourceTests
 
     private static PromResponse Parse(string json)
         => JsonSerializer.Deserialize<PromResponse>(json)!;
+
+    // A single-sample instant vector with an empty metric{} — what sum()/an aggregate with no 'by' returns.
+    private static string Scalar(string value)
+        => $"{{\"status\":\"success\",\"data\":{{\"resultType\":\"vector\",\"result\":[{{\"metric\":{{}},\"value\":[1700000000,\"{value}\"]}}]}}}}";
 
     // Builds an instant (vector) response envelope; each tuple is (k1, v1, k2, v2, value) with the second pair optional.
     private static string Vector(params (string K1, string V1, string? K2, string? V2, string Value)[] results)

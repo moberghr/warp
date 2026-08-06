@@ -34,7 +34,8 @@ internal sealed class PrometheusMetricSource : IMetricSource
     {
         var (from, to) = ClampRange(query.Window);
         var step = StepFor(query.Resolution);
-        var by = query.BreakdownBy is { } b ? $"sum by ({b}) " : "sum ";
+        var breakdownLabel = query.BreakdownBy is { } b ? LabelFor(query.Metric.Name, b) : null;
+        var by = breakdownLabel is { } bl ? $"sum by ({bl}) " : "sum ";
         var expr = $"{by}(increase({Selector(query.Metric, sum: true)}[{step}]))";
 
         var response = await _api.QueryRangeAsync(expr, Unix(from), Unix(to), step, ct);
@@ -42,7 +43,7 @@ internal sealed class PrometheusMetricSource : IMetricSource
 
         foreach (var result in Results(response))
         {
-            var tagValue = query.BreakdownBy is { } tag ? result.Metric.GetValueOrDefault(tag, string.Empty) : null;
+            var tagValue = breakdownLabel is { } tag ? result.Metric.GetValueOrDefault(tag, string.Empty) : null;
             foreach (var pair in result.Values ?? [])
             {
                 if (pair is { Length: 2 } && PromValue.Parse(pair[1]) is { } value)
@@ -72,14 +73,14 @@ internal sealed class PrometheusMetricSource : IMetricSource
 
     public async Task<IReadOnlyList<BreakdownRow>> GetBreakdownAsync(MetricRef metric, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
     {
-        var by = groupBy.Count == 0 ? string.Empty : $" by ({string.Join(", ", groupBy)}) ";
+        var by = groupBy.Count == 0 ? string.Empty : $" by ({string.Join(", ", groupBy.Select(g => LabelFor(metric.Name, g)))}) ";
         var expr = $"sum{by}({RangeOrInstant(metric, window)})";
         var result = await QueryAsync(expr, window, ct);
 
         return
         [
             .. result.Select(r => new BreakdownRow(
-                groupBy.ToDictionary(g => g, g => r.Metric.GetValueOrDefault(g, string.Empty), StringComparer.Ordinal),
+                groupBy.ToDictionary(g => g, g => r.Metric.GetValueOrDefault(LabelFor(metric.Name, g), string.Empty), StringComparer.Ordinal),
                 (long)Math.Round(PromValue.Scalar(r) ?? 0))),
         ];
     }
@@ -87,8 +88,8 @@ internal sealed class PrometheusMetricSource : IMetricSource
     public async Task<IReadOnlyList<PercentileRow>> GetPercentileBreakdownAsync(MetricRef metric, int percentile, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
     {
         var name = PromName(metric.Name);
-        var byLe = string.Join(", ", groupBy.Append("le"));
-        var labels = Labels(metric.Tags);
+        var byLe = string.Join(", ", groupBy.Select(g => LabelFor(metric.Name, g)).Append("le"));
+        var labels = Labels(metric.Name, metric.Tags);
         var bucketExpr = window is { } w
             ? $"increase({name}_bucket{labels}[{DurationLiteral(w)}])"
             : $"{name}_bucket{labels}";
@@ -100,20 +101,21 @@ internal sealed class PrometheusMetricSource : IMetricSource
         return
         [
             .. result.Select(r => new PercentileRow(
-                groupBy.ToDictionary(g => g, g => r.Metric.GetValueOrDefault(g, string.Empty), StringComparer.Ordinal),
+                groupBy.ToDictionary(g => g, g => r.Metric.GetValueOrDefault(LabelFor(metric.Name, g), string.Empty), StringComparer.Ordinal),
                 PromValue.Scalar(r) ?? 0)),
         ];
     }
 
     public async Task<IReadOnlyList<string>> GetTagValuesAsync(MetricRef metric, string tag, MetricWindow? window, CancellationToken ct)
     {
-        var expr = $"count by ({tag}) ({Selector(metric, sum: false)})";
+        var label = LabelFor(metric.Name, tag);
+        var expr = $"count by ({label}) ({Selector(metric, sum: false)})";
         var result = await QueryAsync(expr, window, ct);
 
         return
         [
             .. result
-                .Select(r => r.Metric.GetValueOrDefault(tag, string.Empty))
+                .Select(r => r.Metric.GetValueOrDefault(label, string.Empty))
                 .Where(v => v.Length > 0)
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(v => v, StringComparer.Ordinal),
@@ -122,23 +124,77 @@ internal sealed class PrometheusMetricSource : IMetricSource
 
     // ---- PromQL translation (per family) ---------------------------------------------------------------------
 
-    // The Prometheus metric name for a logical metric (OTel export naming: dots→underscores, counters carry the
-    // _total suffix, the ms-unit histogram carries the _milliseconds unit suffix + _bucket/_sum/_count families).
+    // The Prometheus metric name for a logical metric (OTel export naming under UnderscoreEscapingWithSuffixes:
+    // dots→underscores; a monotonic counter carries the _total suffix — NOT doubled when the instrument name
+    // already ends in .total, e.g. warp.job.execution.total; a unit'd histogram carries its unit suffix
+    // (_milliseconds / _seconds) plus the _bucket/_sum/_count series). Count-type logical metrics that mirror a
+    // histogram's sample tally (QueueWaitCount, ClientVitals) map to that histogram's _count series directly.
     private static string PromName(string metricName) => metricName switch
     {
         Names.AdapterCalls => "warp_adapter_calls_total",
         Names.AdapterDuration => "warp_adapter_duration_milliseconds",
         Names.EndpointCalls => "warp_endpoint_calls_total",
         Names.EndpointDuration => "warp_endpoint_duration_milliseconds",
-        _ => throw new NotSupportedException($"PrometheusMetricSource has no translation for logical metric '{metricName}' yet."),
+        Names.JobExecution => "warp_job_execution_total",
+        Names.JobExecutionDuration => "warp_job_execution_duration_milliseconds",
+        Names.QueueWait => "warp_job_queue_wait_milliseconds",
+        Names.QueueWaitCount => "warp_job_queue_wait_milliseconds_count",
+        Names.QueueDepth => "warp_job_queue_depth",
+        Names.QueueOldestAge => "warp_job_queue_oldest_age_seconds",
+        Names.Deadline => "warp_job_deadline_total",
+        Names.DeadlineMiss => "warp_job_deadline_miss_total",
+        Names.ClientEvents => "warp_client_events_total",
+        Names.ClientEventsNamed => "warp_client_events_named_total",
+        Names.ClientVitals => "warp_client_vitals_count",
+        Names.ClientVitalsValue => "warp_client_vitals",
+        Names.ErrorGroupOccurrences => "warp_errorgroup_occurrences_total",
+        _ => throw new NotSupportedException(Unmapped(metricName)),
     };
 
+    // A logical metric is histogram-shaped (has _bucket/_sum series) exactly when its OTel instrument is a
+    // Histogram whose distribution Warp reads for a percentile or averages via _sum. The *count* companions
+    // (QueueWaitCount → _count, ClientVitals → _count) are plain counter-shaped series, not histograms.
     private static bool IsHistogram(string metricName) => metricName switch
     {
-        Names.AdapterDuration or Names.EndpointDuration => true,
-        Names.AdapterCalls or Names.EndpointCalls => false,
-        _ => throw new NotSupportedException($"PrometheusMetricSource has no translation for logical metric '{metricName}' yet."),
+        Names.AdapterDuration or Names.EndpointDuration or Names.JobExecutionDuration
+            or Names.QueueWait or Names.ClientVitalsValue => true,
+        Names.AdapterCalls or Names.EndpointCalls or Names.JobExecution or Names.QueueWaitCount
+            or Names.QueueDepth or Names.QueueOldestAge or Names.Deadline or Names.DeadlineMiss
+            or Names.ClientEvents or Names.ClientEventsNamed or Names.ClientVitals
+            or Names.ErrorGroupOccurrences => false,
+        _ => throw new NotSupportedException(Unmapped(metricName)),
     };
+
+    // The Prometheus LABEL name for a logical tag. Adapter/endpoint/client/queue/errorgroup meter tags match the
+    // logical tag key verbatim, but the job-execution and deadline instruments export job.type / job.handler
+    // (→ job_type / job_handler under dots→underscores), so a job-dimensioned family must translate those two.
+    private static string LabelFor(string metricName, string tag)
+    {
+        if (IsJobDimensioned(metricName) && string.Equals(tag, Tags.Type, StringComparison.Ordinal))
+        {
+            return "job_type";
+        }
+
+        if (IsJobDimensioned(metricName) && string.Equals(tag, Tags.Handler, StringComparison.Ordinal))
+        {
+            return "job_handler";
+        }
+
+        return tag;
+    }
+
+    private static bool IsJobDimensioned(string metricName) => metricName switch
+    {
+        Names.JobExecution or Names.JobExecutionDuration or Names.Deadline or Names.DeadlineMiss => true,
+        _ => false,
+    };
+
+    // The Prometheus backend deliberately serves only the metric families that have a clean single-instrument OTel
+    // export. lifecycle.* (deleted has no meter), records.dropped (pipeline selects the instrument NAME, not a
+    // label) and slo.* (not exported) stay local-only; a caller on the Prometheus backend gets a loud, specific
+    // error rather than a silently-wrong number. Pinned by PrometheusMetricSourceTests.
+    private static string Unmapped(string metricName)
+        => $"PrometheusMetricSource does not serve the logical metric '{metricName}' — it has no clean OTel instrument to read back (see §8.33). Use the local backend for this family.";
 
     // The scalar selector for a metric: a histogram's summed total uses the _sum family, a counter uses its name.
     private static string Selector(MetricRef metric, bool sum)
@@ -146,7 +202,7 @@ internal sealed class PrometheusMetricSource : IMetricSource
         var name = PromName(metric.Name);
         var suffix = sum && IsHistogram(metric.Name) ? "_sum" : string.Empty;
 
-        return $"{name}{suffix}{Labels(metric.Tags)}";
+        return $"{name}{suffix}{Labels(metric.Name, metric.Tags)}";
     }
 
     // A windowed read wraps the selector in increase() over the window; a lifetime read uses the raw (cumulative)
@@ -181,7 +237,9 @@ internal sealed class PrometheusMetricSource : IMetricSource
     private static List<PromResult> Results(PromResponse response)
         => string.Equals(response.Status, "success", StringComparison.Ordinal) && response.Data is { } data ? data.Result : [];
 
-    private static string Labels(IReadOnlyDictionary<string, string>? tags)
+    // Renders the fixed filter tags as PromQL label matchers, translating each logical tag key to its family's
+    // Prometheus label name (LabelFor) so a job MetricRef's type filter matches job_type, not type.
+    private static string Labels(string metricName, IReadOnlyDictionary<string, string>? tags)
     {
         if (tags is null || tags.Count == 0)
         {
@@ -189,8 +247,9 @@ internal sealed class PrometheusMetricSource : IMetricSource
         }
 
         var matchers = tags
-            .OrderBy(t => t.Key, StringComparer.Ordinal)
-            .Select(t => $"{t.Key}=\"{Escape(t.Value)}\"");
+            .Select(t => (Label: LabelFor(metricName, t.Key), t.Value))
+            .OrderBy(t => t.Label, StringComparer.Ordinal)
+            .Select(t => $"{t.Label}=\"{Escape(t.Value)}\"");
 
         return $"{{{string.Join(",", matchers)}}}";
     }

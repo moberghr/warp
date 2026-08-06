@@ -66,6 +66,18 @@ Four families needed additional export, now emitted:
 
 The last two families (`client.events.named` by name, `errorgroup.occurrences` by fingerprint) are **higher-cardinality** by design — each is a separate instrument a deployment can drop if the label cost isn't wanted.
 
+### 3. Families the Prometheus backend serves
+
+The Prometheus backend reads back every family that has a clean single-instrument OTel export: **adapters**, **endpoints**, **job execution** (count + duration), **queue-wait** (histogram + count), **queue backlog** (depth + oldest-age gauges), **deadline** attainment, **client events + vitals**, and the **error-group** trend. The job-execution and deadline instruments export `job.type` / `job.handler` labels (the OTel attribute names), so the backend translates the seam's logical `type` / `handler` tags to those labels transparently.
+
+Three things stay **local-only** and the Prometheus backend refuses them with a clear error rather than reading a wrong or empty series:
+
+- the **dashboard summary tiles** (`lifecycle.deleted` has no meter — deletions aren't a job-execution outcome),
+- **dropped-record counts** (the pipeline selects the instrument *name*, `warp.{adapter|endpoint|client}.records_dropped`, not a label), and
+- the **SLO objective gauges** (not exported — see above).
+
+A deployment that points the seam at Prometheus keeps the local backend available for these; the per-surface pages (adapters, endpoints, jobs, queues, clients, issues) and SLO evaluation all read from Prometheus.
+
 ## What stays on the database
 
 Raw per-call detail — the recent-calls lists, last-failure timestamps, session and trace joins, and the drill-down request/response bodies — are **not** metrics and always read from the retained log rows (or the OTel spans). Only the aggregate metric reads flow through `IMetricSource`. All metric reads are off the worker fetch/execute hot path.

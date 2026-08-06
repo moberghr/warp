@@ -197,6 +197,16 @@ internal sealed class LocalMetricSource<TContext> : IMetricSource
 
     public async Task<IReadOnlyList<PercentileRow>> GetPercentileBreakdownAsync(MetricRef metric, int percentile, IReadOnlyList<string> groupBy, MetricWindow? window, CancellationToken ct)
     {
+        // Local reads the LIFETIME pct histogram; it has no windowed grouped-percentile path (the tiered pcth
+        // histogram isn't materialized per breakdown dimension). Fail fast rather than silently return lifetime
+        // data for a windowed request — the Prometheus backend DOES honor the window, so a caller passing one
+        // would get divergent results across backends. No current caller passes a non-null window.
+        if (window is not null)
+        {
+            throw new NotSupportedException(
+                "LocalMetricSource.GetPercentileBreakdownAsync does not support a windowed percentile breakdown (it reads the lifetime histogram); pass null for the window.");
+        }
+
         // Lifetime latency-histogram buckets, grouped. Adapter's pct is Total-only (per adapter), so groupBy is
         // [] or [adapter]; a request for a finer group returns no rows (no such histogram was written).
         var buckets = await ParsedHistogramAsync(metric, ct);
