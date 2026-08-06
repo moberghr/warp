@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -172,7 +172,7 @@ public abstract class RetentionEdgeCaseTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task DeleteJob_CompletedJob_DecrementsSucceededAndIncrementsDeleted()
+    public async Task DeleteJob_CompletedJob_IncrementsDeletedAndLeavesSucceeded()
     {
         // Arrange — create a completed job with existing stats
         var ctx = _fixture.CreateContext();
@@ -212,12 +212,14 @@ public abstract class RetentionEdgeCaseTestsBase : IAsyncLifetime
             .Select(x => x.Value)
             .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
 
-        succeededAfter.ShouldBe(succeededBefore - 1);
+        // stats: keys are append-only. The job did succeed; deleting it afterwards is a second event,
+        // not a retraction of the first. "How many are completed right now" comes from querying Job.
+        succeededAfter.ShouldBe(succeededBefore);
         deletedAfter.ShouldBe(deletedBefore + 1);
     }
 
     [TimedFact]
-    public async Task RequeueJob_FailedJob_DecrementsFailedStat()
+    public async Task RequeueJob_FailedJob_LeavesFailedStat()
     {
         // Arrange — create and process a failing job (no retries via metadata)
         var ctx = _fixture.CreateContext();
@@ -258,6 +260,7 @@ public abstract class RetentionEdgeCaseTestsBase : IAsyncLifetime
             .Select(x => x.Value)
             .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
 
-        failedAfter.ShouldBe(failedBefore - 1);
+        // Requeueing does not un-fail the job — the failure happened and stays counted.
+        failedAfter.ShouldBe(failedBefore);
     }
 }

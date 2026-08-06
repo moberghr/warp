@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core;
@@ -404,12 +404,13 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         jobs.ShouldAllBe(j => j.CurrentState == State.Deleted);
         jobs.ShouldAllBe(j => j.ExpireAt != null);
 
-        // Aggregated counters: +4 deleted, -1 succeeded (Completed), -1 failed (Failed).
-        // Enqueued and Scheduled have no source-state counter.
+        // Aggregated counters: +4 deleted. Source-state counters are NOT rewritten — those jobs really did
+        // succeed / fail, and deleting them later does not un-happen it. stats: keys are append-only.
         var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        AssertAppendOnly(counters);
         counters.Where(c => string.Equals(c.Key, "stats:deleted", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(4);
-        counters.Where(c => string.Equals(c.Key, "stats:succeeded", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(-1);
-        counters.Where(c => string.Equals(c.Key, "stats:failed", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(-1);
+        counters.Where(c => string.Equals(c.Key, "stats:succeeded", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(0);
+        counters.Where(c => string.Equals(c.Key, "stats:failed", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(0);
     }
 
     [TimedFact]
@@ -489,8 +490,9 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
 
         // Counter must reflect a single delete, not three.
         var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        AssertAppendOnly(counters);
         counters.Where(c => string.Equals(c.Key, "stats:deleted", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(1);
-        counters.Where(c => string.Equals(c.Key, "stats:failed", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(-1);
+        counters.Where(c => string.Equals(c.Key, "stats:failed", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(0);
     }
 
     [TimedFact]
@@ -734,8 +736,9 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         jobs.ShouldAllBe(j => j.ExpireAt == null);
 
         var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
-        counters.Where(c => string.Equals(c.Key, "stats:succeeded", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(-2);
-        counters.Where(c => string.Equals(c.Key, "stats:failed", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(-2);
+        AssertAppendOnly(counters);
+        counters.Where(c => string.Equals(c.Key, "stats:succeeded", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(0);
+        counters.Where(c => string.Equals(c.Key, "stats:failed", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(0);
     }
 
     [TimedFact]
@@ -755,8 +758,10 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         var readCtx = _fixture.CreateContext();
         var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Counter reflects a single Failed→Enqueued transition, not three.
-        counters.Where(c => string.Equals(c.Key, "stats:failed", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(-1);
+        // Requeue does not rewrite stats:failed — the job did fail. The requeue counters it DOES write are
+        // asserted in RequeueStatsTestsBase.
+        AssertAppendOnly(counters);
+        counters.Where(c => string.Equals(c.Key, "stats:failed", StringComparison.Ordinal)).Sum(c => c.Value).ShouldBe(0);
     }
 
     [TimedFact]
@@ -1034,6 +1039,14 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         jobs[childCompleted].CurrentState.ShouldBe(State.Completed);
         jobs[terminalGrandchild].CurrentState.ShouldBe(State.Completed);
     }
+
+    /// <summary>
+    /// The append-only rule (RSC4) is "no negative <see cref="Counter"/> row is ever written". That is
+    /// strictly stronger than a key summing to 0, which a compensating <c>+1 / -1</c> pair also satisfies —
+    /// and that pair is exactly the decrement this work removed, so the sum alone would not pin it out.
+    /// </summary>
+    private static void AssertAppendOnly(List<Counter> counters) =>
+        counters.ShouldNotContain(c => c.Value < 0, "stats: counters are append-only — no row may be negative.");
 
     private static Job Job(Guid id, JobKind kind, State state, Guid? parent) =>
         new()

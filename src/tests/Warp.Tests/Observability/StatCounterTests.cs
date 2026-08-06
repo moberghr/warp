@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core;
@@ -22,7 +22,7 @@ public abstract class StatCounterTestsBase : IAsyncLifetime
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     [TimedFact]
-    public async Task DeleteJob_FromCompletedState_DecrementsSucceededCounter()
+    public async Task DeleteJob_FromCompletedState_DoesNotDecrementSucceededCounter()
     {
         // Arrange
         var ctx = _fixture.CreateContext();
@@ -42,16 +42,17 @@ public abstract class StatCounterTestsBase : IAsyncLifetime
         var svc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext());
         await svc.DeleteJob(jobId);
 
-        // Assert — a Counter row for stats:succeeded with value=-1 should exist
+        // Assert — deleting a completed job does NOT rewrite stats:succeeded. The job did succeed; a later
+        // delete does not un-happen it. Current state comes from querying Job, not from a metric.
         var readCtx = _fixture.CreateContext();
-        var counterSum = await readCtx.Set<Counter>()
-            .Where(c => c.Key == "stats:succeeded")
-            .SumAsync(c => c.Value, Xunit.TestContext.Current.CancellationToken);
-        counterSum.ShouldBe(-1);
+        var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        AssertAppendOnly(counters);
+        Sum(counters, "stats:succeeded").ShouldBe(0);
     }
 
     [TimedFact]
-    public async Task DeleteJob_FromFailedState_DecrementsFailedCounter()
+    public async Task DeleteJob_FromFailedState_DoesNotDecrementFailedCounter()
     {
         // Arrange
         var ctx = _fixture.CreateContext();
@@ -73,10 +74,10 @@ public abstract class StatCounterTestsBase : IAsyncLifetime
 
         // Assert
         var readCtx = _fixture.CreateContext();
-        var counterSum = await readCtx.Set<Counter>()
-            .Where(c => c.Key == "stats:failed")
-            .SumAsync(c => c.Value, Xunit.TestContext.Current.CancellationToken);
-        counterSum.ShouldBe(-1);
+        var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        AssertAppendOnly(counters);
+        Sum(counters, "stats:failed").ShouldBe(0);
     }
 
     [TimedFact]
@@ -137,7 +138,7 @@ public abstract class StatCounterTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task RequeueJob_FromCompletedState_DecrementsSucceededCounter()
+    public async Task RequeueJob_FromCompletedState_DoesNotDecrementSucceededCounter()
     {
         // Arrange
         var ctx = _fixture.CreateContext();
@@ -159,14 +160,14 @@ public abstract class StatCounterTestsBase : IAsyncLifetime
 
         // Assert
         var readCtx = _fixture.CreateContext();
-        var counterSum = await readCtx.Set<Counter>()
-            .Where(c => c.Key == "stats:succeeded")
-            .SumAsync(c => c.Value, Xunit.TestContext.Current.CancellationToken);
-        counterSum.ShouldBe(-1);
+        var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        AssertAppendOnly(counters);
+        Sum(counters, "stats:succeeded").ShouldBe(0);
     }
 
     [TimedFact]
-    public async Task RequeueJob_FromFailedState_DecrementsFailedCounter()
+    public async Task RequeueJob_FromFailedState_DoesNotDecrementFailedCounter()
     {
         // Arrange
         var ctx = _fixture.CreateContext();
@@ -188,10 +189,10 @@ public abstract class StatCounterTestsBase : IAsyncLifetime
 
         // Assert
         var readCtx = _fixture.CreateContext();
-        var counterSum = await readCtx.Set<Counter>()
-            .Where(c => c.Key == "stats:failed")
-            .SumAsync(c => c.Value, Xunit.TestContext.Current.CancellationToken);
-        counterSum.ShouldBe(-1);
+        var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        AssertAppendOnly(counters);
+        Sum(counters, "stats:failed").ShouldBe(0);
     }
 
     [TimedFact]
@@ -220,4 +221,17 @@ public abstract class StatCounterTestsBase : IAsyncLifetime
         var counterCount = await readCtx.Set<Counter>().CountAsync(Xunit.TestContext.Current.CancellationToken);
         counterCount.ShouldBe(0);
     }
+
+    /// <summary>
+    /// The append-only rule (RSC4) is "no negative <see cref="Counter"/> row is ever written", which is
+    /// strictly stronger than the sum being 0 — a compensating <c>+1 / -1</c> pair sums to 0 too, and that
+    /// pair is exactly the shape being removed. Asserting only the sum would let the decrement come back.
+    /// </summary>
+    private static void AssertAppendOnly(List<Counter> counters) =>
+        counters.ShouldNotContain(c => c.Value < 0, "stats: counters are append-only — no row may be negative.");
+
+    private static int Sum(List<Counter> counters, string key) =>
+        counters
+            .Where(x => string.Equals(x.Key, key, StringComparison.Ordinal))
+            .Sum(x => x.Value);
 }

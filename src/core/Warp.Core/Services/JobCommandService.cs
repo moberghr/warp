@@ -32,6 +32,7 @@ public class JobCommandService<TContext> : IJobCommandService
     where TContext : DbContext
 {
     private const string StatsRequeued = "stats:requeued";
+    private const string StatsDeleted = "stats:deleted";
 
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
@@ -89,12 +90,10 @@ public class JobCommandService<TContext> : IJobCommandService
             return;
         }
 
-        DecrementStatForState(job.CurrentState);
-
         job.CurrentState = State.Deleted;
         job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
 
-        _context.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = 1 });
+        AddStatCounters(StatsDeleted, 1);
 
         await _context.Set<JobLog>().AddAsync(new JobLog
         {
@@ -133,8 +132,6 @@ public class JobCommandService<TContext> : IJobCommandService
             await transaction.RollbackAsync();
             return;
         }
-
-        DecrementStatForState(job.CurrentState);
 
         job.CurrentState = State.Enqueued;
         job.ScheduleTime = _timeProvider.GetUtcNow().UtcDateTime;
@@ -320,15 +317,9 @@ public class JobCommandService<TContext> : IJobCommandService
                         });
                     }
 
-                    _context.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = affected });
-                    if (sourceState == State.Completed)
-                    {
-                        _context.Set<Counter>().Add(new Counter { Key = "stats:succeeded", Value = -affected });
-                    }
-                    else if (sourceState == State.Failed)
-                    {
-                        _context.Set<Counter>().Add(new Counter { Key = "stats:failed", Value = -affected });
-                    }
+                    // Only the delete is counted. The source state's counter is NOT rewritten — those jobs
+                    // really did succeed / fail, and deleting them afterwards does not un-happen it.
+                    AddStatCounters(StatsDeleted, affected);
                 }
 
                 result.Succeeded += affected;
@@ -506,7 +497,7 @@ public class JobCommandService<TContext> : IJobCommandService
                 var ids = group.Select(x => x.Id).Order().ToArray();
 
                 var affected = await ExecuteRequeueUpdate(ids, sourceState, now, clearHandler: true);
-                ApplyRequeueAccounting(result, affected, sourceState, ids.Length);
+                ApplyRequeueAccounting(result, affected, ids.Length);
                 await AddRequeueLogsForFlipped(ids, now);
                 CollectQueues(ids, queueById, affected, queuesToNotify);
             }
@@ -537,7 +528,7 @@ public class JobCommandService<TContext> : IJobCommandService
                     var affected = await ExecuteRequeueUpdate(ids, sourceState, now, clearHandler);
                     totalAffected += affected;
 
-                    ApplyRequeueAccounting(result, affected, sourceState, ids.Length);
+                    ApplyRequeueAccounting(result, affected, ids.Length);
                     await AddRequeueLogsForFlipped(ids, now);
                     CollectQueues(ids, queueById, affected, queuesToNotify);
                 }
@@ -609,26 +600,20 @@ public class JobCommandService<TContext> : IJobCommandService
                 .SetProperty(j => j.ExpireAt, (DateTime?)null));
     }
 
-    private void ApplyRequeueAccounting(BulkResultModel result, int affected, State sourceState, int groupSize)
+    // Requeueing no longer rewrites the source state's counter. Those counters record that a job DID
+    // succeed / fail / get deleted; a later requeue does not un-happen it. "How many are failed right now"
+    // is answered by querying Job (which is what the dashboard tile already does), so the decrement only
+    // made the counter a worse copy of a query while breaking three things: the lifetime key stopped
+    // agreeing with the sum of its own hourly buckets (the decrement wrote no bucket row), the dashboard's
+    // rate chart could see a negative delta, and a reason breakdown could never be reconciled with a total
+    // that gets rewritten.
+    private static void ApplyRequeueAccounting(BulkResultModel result, int affected, int groupSize)
     {
         if (affected == 0)
         {
             result.Skipped += groupSize;
 
             return;
-        }
-
-        if (sourceState == State.Completed)
-        {
-            _context.Set<Counter>().Add(new Counter { Key = "stats:succeeded", Value = -affected });
-        }
-        else if (sourceState == State.Failed)
-        {
-            _context.Set<Counter>().Add(new Counter { Key = "stats:failed", Value = -affected });
-        }
-        else if (sourceState == State.Deleted)
-        {
-            _context.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = -affected });
         }
 
         result.Succeeded += affected;
@@ -763,21 +748,5 @@ public class JobCommandService<TContext> : IJobCommandService
         }
 
         return result;
-    }
-
-    private void DecrementStatForState(State state)
-    {
-        var key = state switch
-        {
-            State.Completed => "stats:succeeded",
-            State.Failed => "stats:failed",
-            State.Deleted => "stats:deleted",
-            _ => null,
-        };
-
-        if (key != null)
-        {
-            _context.Set<Counter>().Add(new Counter { Key = key, Value = -1 });
-        }
     }
 }
