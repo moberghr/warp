@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -45,7 +45,7 @@ public static class DatabasePushServiceConfiguration
         // UseDatabasePush() if a tighter cadence is desired.
         if (builder is WarpServerConfiguration workerConfig)
         {
-            if (workerConfig.MessageRoutingInterval == TimeSpan.FromSeconds(1))
+            if (workerConfig.MessageRoutingInterval == WarpServerConfiguration.DefaultMessageRoutingInterval)
             {
                 workerConfig.MessageRoutingInterval = TimeSpan.FromSeconds(30);
             }

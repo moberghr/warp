@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.Configuration;
@@ -500,6 +500,29 @@ public static class ServiceConfiguration
 
         // Message/Batch listing pages
         job.HasIndex(p => new { p.Kind, p.CurrentState, p.CreateTime });
+
+        // ScheduledJobActivation's UPDATE ... WHERE CurrentState = Scheduled AND ScheduleTime <= now.
+        // It deliberately does NOT filter on Kind — Publisher parks a delayed ITimeoutMessage as
+        // Kind=Message in Scheduled (the saga-timeout mechanism), so narrowing the predicate to
+        // Kind=Job to reuse the (Kind, CurrentState, ...) index would strand every saga timeout
+        // forever. Without a CurrentState-leading index the planner falls back to the
+        // (Kind, CurrentState, CreateTime) index on CurrentState alone, then heap-fetches EVERY
+        // scheduled row and discards the future-dated ones. Measured on 250k rows / 5,675 scheduled:
+        // 31.8ms, 2,686 buffers, "Rows Removed by Filter: 2,841" per tick. With this index the
+        // predicate is fully covered: 0.35ms, 4 buffers, zero rows discarded.
+        //
+        // The cost scales with the number of rows sitting in Scheduled, NOT with total table size.
+        // Write cost is one more index entry per insert and per state transition (+17.8% on a bulk
+        // insert, +8.9% on a bulk state flip, ~5us of DB time over a job's whole lifetime).
+        //
+        // There is no jobs/sec break-even: write cost scales with the job rate and read cost scales
+        // with the Scheduled backlog, which is itself proportional to the job rate, so throughput
+        // cancels. The deciding variable is how LONG work sits in Scheduled — and Warp's own
+        // defaults (retry [15,60,300], webhook retries [1m,10m,1h,6h], saga timeouts, rate-limit
+        // Wait reschedules) keep that backlog large. A deployment with none of those gains little.
+        // See docs/perf-results.md (2026-08-07) for the EXPLAIN output. Also serves the dashboard's
+        // "scheduled jobs" listing.
+        job.HasIndex(p => new { p.CurrentState, p.ScheduleTime });
 
         job.HasIndex(p => p.ExpireAt);
         job.HasIndex(p => p.TraceId);

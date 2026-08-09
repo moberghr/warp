@@ -172,7 +172,7 @@ public class WarpConfiguration
     /// <c>ErrorGroup</c> issues (§8.29). Set to <c>null</c> to disable error grouping entirely (no aggregator
     /// runs; the inbox is never written). Off the worker hot path (§0.2/§6.1).
     /// </summary>
-    public TimeSpan? ErrorGroupingInterval { get; set; } = TimeSpan.FromSeconds(15);
+    public TimeSpan? ErrorGroupingInterval { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>Age cap for <c>ErrorGroup</c> issues — removed once <c>LastSeenAt</c> exceeds this (§8.22). Trend aggregates persist.</summary>
     public TimeSpan ErrorGroupRetention { get; set; } = TimeSpan.FromDays(30);

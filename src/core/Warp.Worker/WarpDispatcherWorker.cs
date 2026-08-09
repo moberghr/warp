@@ -28,7 +28,7 @@ namespace Warp.Worker;
 /// <summary>
 /// Worker that receives pre-fetched jobs from a dispatcher channel.
 /// Pure executor — handles execution and completion only. Orchestration handled by Orchestrator.
-/// Completions are buffered in a per-worker <see cref="CompletionBatch{TContext}"/> and flushed
+/// Completions are buffered in a per-worker <see cref="CompletionBatch"/> and flushed
 /// as a single multi-row transaction when any of: size threshold, time threshold, idle, or shutdown fires.
 /// </summary>
 public class WarpDispatcherWorker<TContext> : BackgroundService
@@ -40,7 +40,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly ILogger<WarpDispatcherWorker<TContext>> _logger;
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
-    private readonly CompletionBatch<TContext> _batch;
+    private readonly CompletionBatch _batch;
+    private readonly DispatcherWorkerAvailability _availability;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
 
@@ -53,8 +54,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         TimeProvider timeProvider,
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals,
-        IDatabaseExceptionClassifier exceptionClassifier)
+        IDatabaseExceptionClassifier exceptionClassifier,
+        DispatcherWorkerAvailability availability)
     {
+        _availability = availability;
         _workerId = workerId;
         _jobReader = jobReader;
         _scopeFactory = scopeFactory;
@@ -63,7 +66,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         _timeProvider = timeProvider;
         _notificationTransport = notificationTransport;
         _signals = signals;
-        _batch = new CompletionBatch<TContext>(
+        _batch = new CompletionBatch(
             scopeFactory,
             timeProvider,
             logger,
@@ -92,6 +95,9 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         {
             while (_jobReader.TryRead(out var job))
             {
+                // Mark this worker busy for the whole handler, so the dispatcher's next claim is
+                // sized to workers that can actually start work rather than to channel space.
+                _availability.EnterBusy();
                 try
                 {
                     await ProcessJob(job, stoppingToken);
@@ -104,6 +110,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Dispatcher worker failed on job {id}", job.Id);
+                }
+                finally
+                {
+                    _availability.ExitBusy();
                 }
 
                 if (_batch.IsFull || _batch.IsTimeElapsed)
@@ -178,7 +188,17 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // CancellationToken.None: the claim already committed State=Processing, so aborting this
             // UPDATE on shutdown would orphan the row without clearing the worker stamp. Fast UPDATE,
             // uncancellable is cheap insurance.
-            await MarkWorkerOwnership(job, CancellationToken.None);
+            if (!await MarkWorkerOwnership(job, CancellationToken.None))
+            {
+                // Reclaimed while it waited in the channel — another claim owns it now, and may
+                // already have run it. Drop it: no execution, no completion, no log rows.
+                _logger.LogInformation(
+                    "Skipping job {id}: it was recovered or re-claimed while buffered",
+                    job.Id);
+
+                return;
+            }
+
             job.CurrentWorkerId = _workerId;
         }
 
@@ -468,18 +488,40 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         PerfTrace.End();
     }
 
-    private async Task MarkWorkerOwnership(Job job, CancellationToken cancellationToken)
+    /// <summary>
+    /// Takes individual ownership of a job the dispatcher claimed for the group, and verifies the
+    /// claim is still ours. Returns false when it is not — the caller must then drop the job.
+    /// <para>
+    /// A prefetched job waits in the channel as Processing with the LastKeepAlive stamped at claim
+    /// time; nothing refreshes it until execution starts, so StaleJobRecovery can return it to
+    /// Enqueued and someone (including this same group) can re-claim it. LastKeepAlive is the claim
+    /// token: a re-claim writes a fresh one, so a stale copy fails this guard instead of executing
+    /// a job that is already running elsewhere. The guard rides the update we already issue per
+    /// job, so it costs no extra round trip (§0.2/§6.1).
+    /// </para>
+    /// </summary>
+    private async Task<bool> MarkWorkerOwnership(Job job, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var handlerTypeToSet = job.HandlerType;
-        await context.Set<Job>()
+        var claimedWorkerId = job.CurrentWorkerId;
+        var claimedKeepAlive = job.LastKeepAlive;
+        var stillOurs = await context.Set<Job>()
             .Where(x => x.Id == job.Id)
+            .Where(x => x.CurrentState == State.Processing)
+            .Where(x => x.CurrentWorkerId == claimedWorkerId)
+            .Where(x => x.LastKeepAlive == claimedKeepAlive)
             .ExecuteUpdateAsync(
                 x => x
                     .SetProperty(p => p.CurrentWorkerId, _workerId)
                     .SetProperty(p => p.HandlerType, handlerTypeToSet),
                 cancellationToken);
+
+        if (stillOurs == 0)
+        {
+            return false;
+        }
 
         // The "Processing" JobLog is written here, not in WarpDispatcher.FetchAndDistribute.
         // Writing it dispatcher-side would orphan log rows for jobs whose channel-write got
@@ -512,6 +554,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         }
 
         await context.SaveChangesAsync(cancellationToken);
+
+        return true;
     }
 
     private static async Task ExecuteJob(Job job, IServiceProvider provider, CancellationToken cancellationToken)

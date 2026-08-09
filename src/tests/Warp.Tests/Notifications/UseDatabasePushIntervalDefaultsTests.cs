@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Provider.PostgreSql;
@@ -24,7 +24,7 @@ public class UseDatabasePushIntervalDefaultsTests
             .AddWarpServer<TestContext>(opt =>
             {
                 opt.UsePostgreSql();
-                opt.MessageRoutingInterval.ShouldBe(TimeSpan.FromSeconds(1), "precondition: class default is 1s");
+                opt.MessageRoutingInterval.ShouldBe(WarpServerConfiguration.DefaultMessageRoutingInterval, "precondition: still at the class default");
                 opt.UseDatabasePush();
                 observed = opt.MessageRoutingInterval;
             });

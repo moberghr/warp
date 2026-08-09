@@ -45,6 +45,168 @@ becomes a throughput ceiling (single-server serialization). The right fix is an 
 UPDATE-RETURNING claim like `WarpDispatcher.ClaimEnqueuedJobsAsync` plus stale-message recovery —
 tracked as a follow-up; not on this branch.
 
+---
+
+## Scheduled-job activation: the `(CurrentState, ScheduleTime)` index (PostgreSQL, 2026-08-07)
+
+`ScheduledJobActivation` runs one statement every `ScheduledActivationInterval`:
+
+```sql
+UPDATE job SET current_state = 1
+WHERE current_state = 7 AND schedule_time <= now()
+RETURNING id, queue, schedule_time
+```
+
+It filters `current_state` **without** `kind`, so it cannot use the leading column of the existing
+`(Kind, CurrentState, Queue, ScheduleTime)` index. The planner instead reached for
+`(Kind, CurrentState, CreateTime)` on `current_state` alone, heap-fetched **every** row in
+`Scheduled`, and discarded the future-dated ones.
+
+### Correction to an earlier analysis
+
+An earlier write-up of this claimed a **sequential scan** costing ~115 ms. **That was wrong.** It came
+from a seed whose `parent_job_id` column was entirely NULL, which changed which index the planner
+found usable. Against a realistic seed the pre-index plan is an index scan, not a seq scan, and the
+honest cost is **31.8 ms of pointless heap fetching** — a tenth of what was previously claimed. The
+numbers below supersede it.
+
+### EXPLAIN (ANALYZE, BUFFERS)
+
+250,000 `job` rows, 5,675 of them in `Scheduled`, `VACUUM ANALYZE`d before each measurement.
+
+| | Before | After |
+|---|---|---|
+| Access path | Bitmap Index Scan on `(kind, current_state, create_time)` | Bitmap Index Scan on `(current_state, schedule_time)` |
+| Index Cond | `current_state = 7` | `current_state = 7 AND schedule_time <= now()` |
+| Filter | `schedule_time <= now()` | — |
+| **Rows Removed by Filter** | **2,841** | **0** |
+| Scan buffers | 2,469 hit + 217 read | 2 hit + 2 read |
+| **Execution Time** | **31.8 ms** | **0.35 ms** |
+
+The whole difference is the filter: without the second index column, every future-dated `Scheduled`
+row is fetched from the heap and thrown away. Cost therefore scales with **how many rows are sitting
+in `Scheduled`**, not with how many are actually due.
+
+### Why the predicate was not narrowed to `kind = 1` instead
+
+This is the trap worth recording. The obvious cheaper fix — add `kind = 1` to the predicate so the
+existing `(Kind, CurrentState, Queue, ScheduleTime)` index applies, no new index needed — is
+**wrong, and silently so**.
+
+`Publisher.ResolveDelivery` parks a delayed `ITimeoutMessage` as `Kind = JobKind.Message` in
+`State.Scheduled`. That is the saga-timeout mechanism. Filtering `kind = 1` would strand **every saga
+timeout forever**, with no error and no log line — the rows would simply sit in `Scheduled` and never
+activate. A measured seed had **500 of 11,250** `Scheduled` rows at `Kind = Message`.
+
+The `kind IN (1, 2)` variant was measured at **9.3 ms / 4,103 buffers** — better than no index,
+**~10× worse than the index**, and still a landmine for any future code path that parks a third kind
+in `Scheduled`. The index makes the predicate's breadth free instead of making the predicate narrower
+than the data.
+
+### Write cost
+
+Four alternating A/B rounds with `VACUUM ANALYZE` before each, 20,000 rows per round:
+
+| Operation | Without index | With index | Delta |
+|---|---:|---:|---:|
+| Bulk `INSERT` | 187.0 ms | 220.2 ms | **+17.8%** |
+| Bulk `UPDATE current_state` | 264.1 ms | 287.5 ms | **+8.9%** |
+
+A job pays this on one insert plus roughly three state transitions over its whole life —
+**≈ 5 µs of database time per job, total**. Index size is **9.2 MB** against **71 MB** of existing
+`job` indexes (**+13%**).
+
+`WarpDispatcher.ClaimEnqueuedJobsAsync` — the worker hot path — was re-`EXPLAIN`ed with and without
+the index: **identical plan, no regression.** The new index does not compete with the claim path.
+
+### The economics — there is no jobs/sec break-even
+
+An earlier framing of this said the index "pays off below a few thousand jobs/sec". **That framing is
+wrong** and is corrected here:
+
+- Write cost scales with the **job rate `R`** (one extra index entry per insert and per transition).
+- Read cost scales with **`S` = rows sitting in `Scheduled`** ≈ `R × (fraction delayed) × (average delay)`.
+
+Both scale linearly with `R`, so **throughput cancels out**. There is no jobs/sec threshold.
+
+**The deciding variable is how long work sits in `Scheduled`.** A deployment that schedules a lot of
+work far into the future pays a large read cost regardless of its throughput; one that never delays
+anything has `S ≈ 0` and pays only the write cost.
+
+Warp's own defaults put most deployments firmly on the winning side:
+
+- Retry delays default to `[15, 60, 300]` seconds.
+- The webhook retry schedule defaults to `[1m, 10m, 1h, 6h]` — **a delivery in its six-hour backoff
+  holds a `Scheduled` row for six hours.**
+- Saga timeouts (`ITimeoutMessage`) and rate-limit `Wait`-mode reschedules both park rows in
+  `Scheduled` too.
+
+**Stated plainly: the index does not pay for a deployment with no retries, no webhooks, no sagas and
+no scheduled jobs.** Such a deployment keeps `S ≈ 0` and buys ~+18% insert cost for nothing. That is
+a real configuration and the honest answer for it is "skip this index", though it is not the shape
+Warp's defaults produce.
+
+### What is not measured
+
+- **PostgreSQL only.** The SQL Server provider's activation statement carries the identical predicate,
+  so the index applies there, but no SQL Server `SET STATISTICS` numbers were taken.
+- Single machine, single run of the EXPLAIN pair (the write costs are the 4-round average). No
+  concurrency during measurement — these are not contended numbers.
+- `S = 5,675` and `S = 11,250` are two arbitrary points, not a curve. The read cost is expected to
+  grow linearly in `S`; that was not swept.
+
+---
+
+## Idle queries/sec after the interval changes (PostgreSQL, 2026-08-07)
+
+Same `--mode idle` harness and the same `ActivityListener` on Npgsql's activity source (so every
+command is counted, including raw `DbCommand` ones). Three runs per scenario; **every run reproduced
+identical command totals.**
+
+| Scenario | May (2026-05-14) | Before changes (30s window) | After changes (120s window) |
+|---|---:|---:|---:|
+| `workers-poll` *(the default config)* | 6.4 | 10.1 | **3.6** |
+| `workers-push` | 3.1 | 4.8 | **2.4** |
+| `dispatcher-poll` | 4.5 | 8.3 | **2.9** |
+| **`dispatcher-push`** *(recommended)* | 1.2 | 2.9 | **2.1** |
+
+> **Caveat — the before/after columns are not a clean comparison.** The "before" numbers were taken
+> over a **30s** window, and the old polling backoff took roughly 31s to first reach its 30s ceiling,
+> so that window was partly measuring the ramp rather than steady-state idle. The "after" numbers use
+> a 120s window. **`dispatcher-push` (−28%) is the fairest row** — it has the least polling in it and
+> so the least ramp contamination. Treat the other three deltas as directional.
+
+Note that `workers-poll` is the **default** configuration (no `UseDispatcher`, no `UseDatabasePush`),
+which is why its number matters more than its position at the top of the table suggests.
+
+### Per-statement census (dispatcher-push, 30s window)
+
+| Statement | Count / 30s |
+|---|---:|
+| `UPDATE server_task` (one per server-task tick) | 14 |
+| `INSERT server_log` | 8 |
+| advisory lock acquire | 7 |
+| Heartbeat CTE | 6 |
+| scheduled activation `UPDATE … RETURNING` | 3 |
+| assorted single-digit probes | — |
+
+**Roughly 47% of idle database traffic is loop bookkeeping** — the `server_task` row UPDATE written
+on every tick, plus `ServerLog` rows written by tasks that did no work:
+
+| Task | Idle `ServerLog` rows / 30s |
+|---|---:|
+| `ScheduledJobActivation` | 3 |
+| `RecurringJobScheduler` | 2 |
+| `StaleJobRecovery` | 1 |
+| `MessageRouting` | 1 |
+| `ServerCleanup` | 1 |
+
+**This is a known finding and is deliberately not fixed here.** Suppressing the bookkeeping write for
+a no-op tick would roughly halve idle traffic again, but it changes what the dashboard's server-task
+history shows (a task that ran and found nothing would become indistinguishable from one that did not
+run), so it belongs in its own change with its own UI decision. Recorded so the next person does not
+re-derive it.
+
 ## Workload duration (PostgreSQL, 2026-04-20)
 
 Generated with `--mode workload --jobs 1000`.

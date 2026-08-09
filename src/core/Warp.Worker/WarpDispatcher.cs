@@ -24,7 +24,8 @@ public class WarpDispatcher<TContext> : BackgroundService
     private readonly WorkerGroupConfiguration _groupConfiguration;
     private readonly TimeProvider _timeProvider;
     private readonly Channel<Job> _jobChannel;
-    private readonly int _workerCount;
+    private readonly DispatcherWorkerAvailability _availability;
+    private readonly int _prefetchCount;
     private readonly PauseStateHolder _pauseStateHolder;
     private readonly Guid _workerGroupId;
     private readonly SemaphoreSlim _signal = new(0);
@@ -44,11 +45,16 @@ public class WarpDispatcher<TContext> : BackgroundService
         _logger = logger;
         _groupConfiguration = groupConfiguration;
         _timeProvider = timeProvider;
-        _workerCount = groupConfiguration.WorkerCount;
         _pauseStateHolder = pauseStateHolder;
         _workerGroupId = workerGroupId;
 
-        _jobChannel = Channel.CreateBounded<Job>(new BoundedChannelOptions(_workerCount)
+        // Null means "the depth this has always buffered" — WorkerCount (§ back-compat).
+        _prefetchCount = Math.Max(0, groupConfiguration.PrefetchCount ?? groupConfiguration.WorkerCount);
+        _availability = new DispatcherWorkerAvailability(groupConfiguration.WorkerCount);
+
+        // The buffer must be able to hold everything a claim may produce: one job per idle worker
+        // plus the configured prefetch depth.
+        _jobChannel = Channel.CreateBounded<Job>(new BoundedChannelOptions(groupConfiguration.WorkerCount + _prefetchCount)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleWriter = true,
@@ -58,6 +64,8 @@ public class WarpDispatcher<TContext> : BackgroundService
     }
 
     public ChannelReader<Job> JobReader => _jobChannel.Reader;
+
+    public DispatcherWorkerAvailability Availability => _availability;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -131,7 +139,12 @@ public class WarpDispatcher<TContext> : BackgroundService
 
     private async Task<FetchResult> FetchAndDistribute(CancellationToken ct)
     {
-        var available = _workerCount - _jobChannel.Reader.Count;
+        // Size the claim to workers that are genuinely free, NOT to channel space — a busy worker
+        // has already removed its job from the channel, so channel space is not availability
+        // (§0.2/§6.1: two interlocked reads, no extra DB work). Anything already queued is
+        // earmarked for an idle worker, so subtract it. PrefetchCount is the deliberate,
+        // opt-in over-claim on top.
+        var available = _availability.Idle + _prefetchCount - _jobChannel.Reader.Count;
         if (available <= 0)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(10), ct);

@@ -13,11 +13,13 @@
     <ProjectReference Include="../../core/Warp.Core/Warp.Core.csproj" />
     <ProjectReference Include="../../core/Warp.Worker/Warp.Worker.csproj" />
     <ProjectReference Include="../../core/providers/Warp.Provider.PostgreSql/Warp.Provider.PostgreSql.csproj" />
+    <ProjectReference Include="../../core/providers/Warp.Provider.SqlServer/Warp.Provider.SqlServer.csproj" />
     <ProjectReference Include="../../demo/Warp.Test.Shared/Warp.Test.Shared.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Testcontainers.PostgreSql" Version="4.*" />
+    <PackageReference Include="Testcontainers.MsSql" Version="4.*" />
     <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
   </ItemGroup>
 

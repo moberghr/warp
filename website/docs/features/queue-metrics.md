@@ -37,7 +37,7 @@ Queue-wait is measured where a worker flips a job `Enqueued → Processing`. The
 
 ## Backlog sampling (off the hot path)
 
-`BacklogSampler` is an ordinary `IServerTask` (like `CounterAggregator`) that runs every `BacklogSampleInterval` (default 15s), takes a distributed lock, and runs one grouped query:
+`BacklogSampler` is an ordinary `IServerTask` (like `CounterAggregator`) that runs every `BacklogSampleInterval` (default 60s), takes a distributed lock, and runs one grouped query:
 
 ```
 SELECT queue, COUNT(*), MIN(schedule_time)
@@ -47,6 +47,54 @@ GROUP BY queue
 ```
 
 This is served by the existing `(Kind, CurrentState, Queue, ScheduleTime)` index — no new index, no hot-path cost. The result updates the always-on gauges and the `qbacklog:` `Statistic` rows.
+
+## Scheduled jobs and the `(CurrentState, ScheduleTime)` index
+
+Queue-wait is measured from a job's `ScheduleTime`, so for any job that was *scheduled* rather than enqueued immediately — a retry backoff, a webhook retry, a saga timeout, a rate-limit `Wait` reschedule — **the activation task's latency is part of the queue-wait you see on this page.** That makes the scheduling path worth understanding here.
+
+`ScheduledJobActivation` runs one statement every `ScheduledActivationInterval` (default 10s):
+
+```sql
+UPDATE job SET current_state = 1
+WHERE current_state = 7 AND schedule_time <= now()
+RETURNING id, queue, schedule_time
+```
+
+### Why it does not filter on `Kind`
+
+The backlog query above filters `kind = Job` and so rides the existing `(Kind, CurrentState, Queue, ScheduleTime)` index. The activation statement **cannot**, because it deliberately does not constrain `Kind`.
+
+`Publisher` parks a delayed `ITimeoutMessage` as `Kind = Message` in `State.Scheduled` — that is how [saga timeouts](./sagas.md) fire. Narrowing the activation predicate to `Kind = Job` so it could reuse the existing index would **strand every saga timeout forever**, with no error and no log line: the rows would sit in `Scheduled` and never activate. A `Kind IN (Job, Message)` variant would work today but re-breaks the moment any future path parks a third kind in `Scheduled`, and it measured roughly 10× slower than the dedicated index anyway.
+
+So the predicate stays broad — `CurrentState` and `ScheduleTime` only — and Warp carries an index shaped to it:
+
+```csharp
+job.HasIndex(p => new { p.CurrentState, p.ScheduleTime });
+```
+
+:::note Requires a migration
+
+This index is picked up by a standard `dotnet ef migrations add` / `database update`. On a large `job` table, note that a plain `CREATE INDEX` blocks writes for the duration of the build — see the [release notes](../releases.md) for the `CONCURRENTLY` / `ONLINE = ON` workaround.
+
+:::
+
+The SQL Server provider's activation statement carries the identical predicate, so the same index serves both providers.
+
+### What it costs and what it buys
+
+Without a `CurrentState`-leading index the planner falls back to `(Kind, CurrentState, CreateTime)` on `current_state` alone, then heap-fetches **every** row in `Scheduled` and discards the future-dated ones. Measured on 250,000 job rows with 5,675 in `Scheduled`: **31.8 ms and 2,686 buffers per tick, versus 0.35 ms and 4 buffers** with the index, purely from eliminating 2,841 rows fetched-and-discarded.
+
+The write side pays for it: **+17.8% on a bulk insert and +8.9% on a bulk state transition**, which over a job's whole life (one insert plus ~3 transitions) is **≈ 5 µs of database time per job**. Index size is 9.2 MB against 71 MB of existing `job` indexes. The worker's own claim query was re-checked with and without the index — identical plan, no regression.
+
+### When it is *not* worth it
+
+**There is no jobs/sec break-even.** Write cost scales with your job rate; read cost scales with how many rows are sitting in `Scheduled`, which is itself your job rate times the fraction delayed times the average delay. Throughput appears on both sides and cancels.
+
+**The deciding variable is how long work sits in `Scheduled`** — not how fast it moves. Warp's own defaults keep that number high: retry delays are `[15, 60, 300]` seconds, the webhook retry schedule is `[1m, 10m, 1h, 6h]` (a delivery in its six-hour backoff holds a `Scheduled` row for six hours), and saga timeouts and rate-limit `Wait` reschedules park rows there too.
+
+If you run **no retries, no webhooks, no sagas and no scheduled jobs**, nothing accumulates in `Scheduled`, the read cost the index removes was never being paid, and you are buying ~18% insert overhead for nothing. That is a legitimate reason to drop the index from your migration.
+
+Full EXPLAIN plans, buffer counts and the A/B write measurements are in `docs/perf-results.md` in the repository.
 
 ## Sinks
 

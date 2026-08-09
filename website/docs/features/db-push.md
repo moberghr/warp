@@ -37,7 +37,7 @@ Worker-fetch push only wires when `UseDispatcher = true` — individual-worker m
 
 ## Scheduled Jobs
 
-Push accelerates *immediate* enqueues. Jobs published via `Schedule(job, at)` sit in `State.Scheduled` until `ScheduledJobActivation` flips them to `Enqueued` — only then does the `JobEnqueued` notification fire. Dispatcher pickup after activation is &lt;50ms via push, but the activation itself is time-driven and bounded by `ScheduledActivationInterval` (default 5s). If you need sub-second precision on scheduled jobs, lower that interval — polling is the only mechanism, since there's no event for "wall-clock time has advanced."
+Push accelerates *immediate* enqueues. Jobs published via `Schedule(job, at)` sit in `State.Scheduled` until `ScheduledJobActivation` flips them to `Enqueued` — only then does the `JobEnqueued` notification fire. Dispatcher pickup after activation is &lt;50ms via push, but the activation itself is time-driven and bounded by `ScheduledActivationInterval` (default 10s). If you need sub-second precision on scheduled jobs, lower that interval — polling is the only mechanism, since there's no event for "wall-clock time has advanced."
 
 ## SQL Server Setup Requirements
 
