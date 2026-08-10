@@ -72,8 +72,22 @@ public static class SqlServerServiceConfiguration
 internal sealed class SqlServerServerContextConfigurator<TContext> : IWarpServerContextConfigurator
     where TContext : DbContext
 {
+    private readonly Lock _resolveLock = new();
+    private string? _connectionString;
+
+    // The server context's options are Scoped (AddDbContext's (sp, options) overload registers them
+    // that way), so this runs on EVERY scope that resolves IWarpServerContext — and resolving the
+    // connection string creates a nested scope to read the user's DbContextOptions. ServerTaskLoop
+    // opens a scope per bookkeeping call, once per tick, per server task, so that cost multiplies.
+    // The string cannot change at runtime, so resolve it once (under a lock — server startup fires
+    // many loops' first scopes concurrently).
     public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
     {
-        optionsBuilder.UseSqlServer(SqlServerServiceConfiguration.ResolveConnectionString<TContext>(applicationServices));
+        lock (_resolveLock)
+        {
+            _connectionString ??= SqlServerServiceConfiguration.ResolveConnectionString<TContext>(applicationServices);
+        }
+
+        optionsBuilder.UseSqlServer(_connectionString);
     }
 }

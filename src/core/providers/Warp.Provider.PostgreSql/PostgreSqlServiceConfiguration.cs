@@ -114,16 +114,40 @@ public static class PostgreSqlServiceConfiguration
 internal sealed class PostgresServerContextConfigurator<TContext> : IWarpServerContextConfigurator
     where TContext : DbContext
 {
+    private readonly Lock _resolveLock = new();
+    private NpgsqlDataSource? _dataSource;
+    private string? _connectionString;
+    private bool _resolved;
+
+    // The server context's options are Scoped (AddDbContext's (sp, options) overload registers them
+    // that way), so this runs on EVERY scope that resolves IWarpServerContext — and resolving the
+    // connection source creates a nested scope to read the user's DbContextOptions. ServerTaskLoop
+    // opens a scope per bookkeeping call, once per tick, per server task, so that cost multiplies.
+    // The source cannot change at runtime, so resolve it once (under a lock — server startup fires
+    // many loops' first scopes concurrently, and a null data-source probe must cache too).
     public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
     {
-        var dataSource = PostgreSqlServiceConfiguration.ResolveDataSource<TContext>(applicationServices);
-        if (dataSource is not null)
+        lock (_resolveLock)
         {
-            optionsBuilder.UseNpgsql(dataSource);
+            if (!_resolved)
+            {
+                _dataSource = PostgreSqlServiceConfiguration.ResolveDataSource<TContext>(applicationServices);
+                if (_dataSource is null)
+                {
+                    _connectionString = PostgreSqlServiceConfiguration.ResolveConnectionString<TContext>(applicationServices);
+                }
+
+                _resolved = true;
+            }
+        }
+
+        if (_dataSource is not null)
+        {
+            optionsBuilder.UseNpgsql(_dataSource);
 
             return;
         }
 
-        optionsBuilder.UseNpgsql(PostgreSqlServiceConfiguration.ResolveConnectionString<TContext>(applicationServices));
+        optionsBuilder.UseNpgsql(_connectionString);
     }
 }
