@@ -60,6 +60,7 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
         var queues = new[] { queue };
         var services = new ServiceCollection();
         services.AddWarpMediator();
+
         services.AddLogging(builder => builder.AddProvider(new JobLoggerProvider()));
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
         services.AddTestServerContext<TestContext>();
@@ -616,6 +617,69 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
             .Where(x => string.Equals(x.Key, "reason", StringComparison.Ordinal))
             .Select(x => x.Value?.ToString())
             .ShouldBe(["retry"]);
+    }
+
+    // RED until the requeue meter moves out of the reason block and beside the state total it must agree
+    // with. JobOutcome.Reason is nullable and JobOutcome is public API, so a user-written pipeline
+    // behaviour can validly reschedule without one — as this one does. Emitting the meter only for
+    // reason-bearing outcomes makes an "always-on" meter undercount requeues that stats:requeued already
+    // counted, and the two silently disagree.
+    [TimedFact]
+    public async Task GetAndProcessJob_RequeuedWithNoReason_StillEmitsRequeuedMeterAsUnknown()
+    {
+        var queue = $"metrics-requeued-noreason-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(ReasonlessRequeueRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new ReasonlessRequeueRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = queue,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker(queue);
+        long requeued = 0;
+        var observedReasons = new List<string?>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (string.Equals(instrument.Meter.Name, "Warp", StringComparison.Ordinal)
+                && string.Equals(instrument.Name, "warp.job.requeued", StringComparison.Ordinal))
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+        {
+            if (!HasTag(tags, "queue", queue))
+            {
+                return;
+            }
+
+            requeued += value;
+            foreach (var tag in tags)
+            {
+                if (string.Equals(tag.Key, "reason", StringComparison.Ordinal))
+                {
+                    observedReasons.Add(tag.Value?.ToString());
+                }
+            }
+        });
+        listener.Start();
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        requeued.ShouldBe(1);
+
+        // The bounded fallback, not a value derived from the outcome — an unbounded reason tag would mint
+        // a meter dimension per caller (§1.2/§8.33).
+        observedReasons.ShouldBe(["unknown"]);
     }
 
     [TimedFact]

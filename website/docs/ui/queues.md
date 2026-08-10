@@ -12,7 +12,7 @@ The **Queues** page shows the health of each queue: how long jobs wait to be pic
 
 Per queue you get:
 
-- **Backlog** — how many eligible jobs are waiting right now, and the **Oldest** age of the frontmost one (sampled every ~15s).
+- **Backlog** — how many eligible jobs are waiting right now, and the **Oldest** age of the frontmost one (sampled every ~60s).
 - **Claimed** — how many jobs have been picked up (the queue-wait sample count).
 - **Queue-wait latency** — **Avg**, **p95**, and **p99** time between a job becoming eligible and a worker claiming it.
 

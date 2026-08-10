@@ -77,6 +77,26 @@ public static class ServiceConfiguration
                 + "StatisticRollup roll a bucket into a coarser parent that is already past its own retention.");
         }
 
+        // Fail fast when the singleton background-service lease cannot survive a missed renewal. Heartbeat
+        // renews the lease, so HealthCheckInterval is the renewal cadence and BackgroundServiceLeaseTtl is
+        // the deadline — but they are configured independently, so a TTL under three cadences leaves barely
+        // one attempt before expiry, and a single slow round-trip hands a "singleton" service to a second
+        // server while the first still runs it. Nothing surfaces that shape at runtime until it bites, and
+        // it moves whenever either default changes, so it is checked here rather than documented.
+        // A null HealthCheckInterval disables the heartbeat (and lease renewal) altogether — a deliberate
+        // limited shape, not a margin violation.
+        if (builder.HealthCheckInterval is { } healthCheckInterval
+            && builder.BackgroundServiceLeaseTtl is { } leaseTtl
+            && leaseTtl < healthCheckInterval * 3)
+        {
+            throw new InvalidOperationException(
+                $"BackgroundServiceLeaseTtl ({leaseTtl}) must be at least three times HealthCheckInterval "
+                + $"({healthCheckInterval}); the lease is renewed by the Heartbeat task, so a shorter TTL "
+                + "leaves fewer than three renewal attempts before expiry and one slow round-trip can "
+                + "transfer a singleton service that is still running. Raise BackgroundServiceLeaseTtl or "
+                + "lower HealthCheckInterval.");
+        }
+
         // The builder IS the configuration. TryAdd: if AddWarp was called separately first, its
         // builder wins for the Core-level IOptions — addons from that lambda are preserved.
         services.TryAddSingleton<IOptions<WarpServerConfiguration>>(Options.Create<WarpServerConfiguration>(builder));

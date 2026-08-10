@@ -96,6 +96,71 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
         counter.Counter.ShouldBe(1);
     }
 
+    // RED until MarkWorkerOwnership renews LastKeepAlive as well as checking it. Checking alone only
+    // closes the window BEFORE the guard: a job that waited in the channel past InvisibilityTimeout is
+    // still stale the instant the check passes, so recovery can requeue it — and hand it to a second
+    // worker — while this worker walks into the handler. That is the same double execution the guard
+    // exists to prevent, moved a few milliseconds later.
+    //
+    // Deterministic by construction: auto-recovery is off and driven by hand, and CancellationCheckInterval
+    // is longer than the test, so RunJobMonitor's periodic renewal never fires. The ONLY thing that can
+    // refresh the token in this window is the ownership mark itself.
+    [TimedFact]
+    public async Task DispatcherMode_WhenOwnershipIsTaken_RenewsTheClaimAgainstRecovery()
+    {
+        var barrier = new BarrierSignal();
+
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            config =>
+            {
+                config.UseDispatcher = true;
+                config.WorkerCount = 1;
+                config.PrefetchCount = 1;
+                config.InvisibilityTimeout = TimeSpan.FromMilliseconds(500);
+
+                // Drive recovery by hand so the sweep happens at a known point, not on a timer.
+                config.StaleJobRecoveryInterval = null;
+
+                // Keep RunJobMonitor's keep-alive renewal out of the window under test.
+                config.CancellationCheckInterval = TimeSpan.FromMinutes(5);
+            },
+            services => services.AddSingleton(barrier));
+
+        var publisher = server.CreatePublisher();
+        await publisher.Enqueue(new BarrierRequest());
+        await publisher.SaveChangesAsync();
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5))).ShouldBeTrue();
+
+        // Prefetched while the only worker is pinned: claimed, Processing, sitting in the channel with
+        // the claim-time keep-alive and nothing renewing it.
+        var prefetchedId = await publisher.Enqueue(new BarrierRequest());
+        await publisher.SaveChangesAsync();
+        await WaitForStateAsync(prefetchedId, State.Processing);
+
+        // Let it age past InvisibilityTimeout while it waits its turn.
+        await Task.Delay(TimeSpan.FromSeconds(1));
+
+        // Release the first job so the worker picks the aged one up and takes ownership of it.
+        barrier.CanFinish.Release();
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5))).ShouldBeTrue();
+
+        // The prefetched job is now inside its handler. Sweep: a worker that renewed its claim on
+        // ownership is not a candidate; one that only checked it is still sitting there with a stale
+        // token and gets pulled out from under itself.
+        await server.RunServerTaskOnceAsync<Warp.Worker.Services.StaleJobRecovery<TestContext>>();
+
+        var state = await Fixture.CreateContext().Set<Job>()
+            .Where(x => x.Id == prefetchedId)
+            .Select(x => x.CurrentState)
+            .FirstOrDefaultAsync();
+
+        // Release before asserting so a failure reports the state instead of hanging teardown (§4.9).
+        barrier.CanFinish.Release(10);
+
+        state.ShouldBe(State.Processing);
+    }
+
     private async Task WaitForStateAsync(Guid jobId, State expected)
     {
         var deadline = DateTime.UtcNow.AddSeconds(5);

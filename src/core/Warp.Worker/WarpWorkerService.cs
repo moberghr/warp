@@ -625,6 +625,20 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         {
             // Covers retry backoff and Mutex Wait — anything that puts the job back on the queue.
             AddCounters(context, "stats:requeued", $"stats:requeued:{hourSuffix}");
+
+            // Always-on meter — the countable signal concurrency and rate limiting never had (they emit
+            // spans, which are sampled). It sits HERE, beside the state total it must agree with, and NOT
+            // in the reason block below: JobOutcome.Reason is nullable and JobOutcome is public API, so a
+            // user-written pipeline behaviour can validly reschedule without one. Emitting only for
+            // reason-bearing outcomes would let an "always-on" meter undercount requeues the state total
+            // already recorded. Those fall under the same bounded "unknown" token the reason map uses —
+            // reason only, never the concurrency or rate-limit key, which are unbounded and PII-adjacent
+            // (§1.2) and stay on the span.
+            WarpTelemetry.RecordJobRequeued(
+                job.Type,
+                job.Queue,
+                outcome?.Reason is { } requeueReason ? OutcomeReasonTokens.For(requeueReason) : OutcomeReasonTokens.Unknown,
+                _configuration.ApplicationName);
         }
 
         // Reason breakdown. Joins the SaveChanges the state total above already rides, so this adds no
@@ -655,14 +669,6 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             {
                 var key = $"stats:{stateToken}-{token}";
                 AddCounters(context, key, $"{key}:{hourSuffix}");
-            }
-
-            // Always-on meter for the requeue case — the countable signal concurrency and rate limiting
-            // never had (they emit spans, which are sampled). Reason only; never the concurrency or
-            // rate-limit key, which are unbounded and PII-adjacent (§1.2) and stay on the span.
-            if (state is State.Enqueued or State.Scheduled)
-            {
-                WarpTelemetry.RecordJobRequeued(job.Type, job.Queue, token, _configuration.ApplicationName);
             }
 
             // Distinct jobs that entered retry, as opposed to the retry EVENTS counted above. A job retried

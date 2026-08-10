@@ -203,18 +203,18 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan? OrchestrationInterval { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// How often the <see cref="Services.MessageRouter{TContext}"/> task runs to discover
-    /// handlers for newly-enqueued <c>Kind=Message</c> rows. Set to <c>null</c> to disable
-    /// the periodic auto-loop — routing is then driven entirely by <c>MessageEnqueued</c>
-    /// push signals plus any explicit ticks.
-    /// </summary>
-    /// <summary>
     /// The out-of-the-box <see cref="MessageRoutingInterval"/>. Exposed so <c>UseDatabasePush()</c> can
     /// detect "still at the default" without hardcoding the number — the two drifted apart when the
     /// default moved from 1s to 10s, silently disabling the push backstop bump.
     /// </summary>
     public static readonly TimeSpan DefaultMessageRoutingInterval = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// How often the <see cref="Services.MessageRouter{TContext}"/> task runs to discover
+    /// handlers for newly-enqueued <c>Kind=Message</c> rows. Set to <c>null</c> to disable
+    /// the periodic auto-loop — routing is then driven entirely by <c>MessageEnqueued</c>
+    /// push signals plus any explicit ticks.
+    /// </summary>
     public TimeSpan? MessageRoutingInterval { get; set; } = DefaultMessageRoutingInterval;
 
     /// <summary>

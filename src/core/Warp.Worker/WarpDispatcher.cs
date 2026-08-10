@@ -25,7 +25,6 @@ public class WarpDispatcher<TContext> : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly Channel<Job> _jobChannel;
     private readonly DispatcherWorkerAvailability _availability;
-    private readonly int _prefetchCount;
     private readonly PauseStateHolder _pauseStateHolder;
     private readonly Guid _workerGroupId;
     private readonly SemaphoreSlim _signal = new(0);
@@ -49,12 +48,12 @@ public class WarpDispatcher<TContext> : BackgroundService
         _workerGroupId = workerGroupId;
 
         // Null means "the depth this has always buffered" — WorkerCount (§ back-compat).
-        _prefetchCount = Math.Max(0, groupConfiguration.PrefetchCount ?? groupConfiguration.WorkerCount);
-        _availability = new DispatcherWorkerAvailability(groupConfiguration.WorkerCount);
+        var prefetchCount = Math.Max(0, groupConfiguration.PrefetchCount ?? groupConfiguration.WorkerCount);
+        _availability = new DispatcherWorkerAvailability(groupConfiguration.WorkerCount, prefetchCount);
 
-        // The buffer must be able to hold everything a claim may produce: one job per idle worker
-        // plus the configured prefetch depth.
-        _jobChannel = Channel.CreateBounded<Job>(new BoundedChannelOptions(groupConfiguration.WorkerCount + _prefetchCount)
+        // The buffer must be able to hold everything a claim may produce: one job per worker slot
+        // plus the configured prefetch depth — the same ceiling the availability counter enforces.
+        _jobChannel = Channel.CreateBounded<Job>(new BoundedChannelOptions(_availability.Capacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleWriter = true,
@@ -139,12 +138,11 @@ public class WarpDispatcher<TContext> : BackgroundService
 
     private async Task<FetchResult> FetchAndDistribute(CancellationToken ct)
     {
-        // Size the claim to workers that are genuinely free, NOT to channel space — a busy worker
-        // has already removed its job from the channel, so channel space is not availability
-        // (§0.2/§6.1: two interlocked reads, no extra DB work). Anything already queued is
-        // earmarked for an idle worker, so subtract it. PrefetchCount is the deliberate,
-        // opt-in over-claim on top.
-        var available = _availability.Idle + _prefetchCount - _jobChannel.Reader.Count;
+        // Size the claim to the capacity that is genuinely free: worker slots plus the configured
+        // prefetch depth, minus everything this group already holds. One interlocked read, no extra
+        // DB work (§0.2/§6.1). See DispatcherWorkerAvailability for why this is a single outstanding
+        // counter rather than idle-workers-plus-channel-space.
+        var available = _availability.Available;
         if (available <= 0)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(10), ct);
@@ -176,6 +174,12 @@ public class WarpDispatcher<TContext> : BackgroundService
             return FetchResult.Empty;
         }
 
+        // Book the claim against capacity the moment the rows are committed as Processing — before
+        // they reach the channel, so the next iteration cannot see these slots as free. Each job's
+        // slot is released exactly once: by the worker that finishes it, or below for a job we
+        // claimed but could not hand over.
+        _availability.Reserve(jobs.Count);
+
         // The atomic claim already committed State=Processing for every row in `jobs`. Delivering
         // them to the channel is a separate, interruptible phase: each WriteAsync is an await
         // point where a shutdown-triggered cancellation can fire. If we don't recover,
@@ -201,6 +205,8 @@ public class WarpDispatcher<TContext> : BackgroundService
         {
             if (delivered < jobs.Count)
             {
+                // These never reached a worker, so no worker will release them.
+                _availability.Release(jobs.Count - delivered);
                 await UnclaimUndelivered(jobs, delivered);
             }
 

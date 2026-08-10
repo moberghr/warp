@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using Microsoft.Extensions.Options;
+using Warp.Core.Enums;
 using Warp.Core.Handlers;
 
 namespace Warp.Core.CircuitBreaker;
@@ -118,6 +119,11 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
         {
             State = JobOutcome.RescheduledState(scheduleTime, now),
             ScheduleTime = scheduleTime,
+
+            // All three reschedule causes (open, probe-in-progress, probe-lost) collapse to one reason:
+            // they are the same operational fact — the breaker held this job back. The finer detail stays
+            // in LogMessage, which is not a metric dimension (§8.33 keeps the reason set bounded).
+            Reason = OutcomeReason.CircuitBreaker,
             LogMessage = $"Rescheduled due to circuit breaker '{groupKey}' ({reason})",
         };
     }

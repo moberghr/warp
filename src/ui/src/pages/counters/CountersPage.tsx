@@ -50,11 +50,13 @@ function colorFor(key: string): string {
 // other three totals, so indenting either under the umbrella claims something false.
 const UMBRELLA_KEY = 'stats:unsuccessful';
 
-const OUTCOME_GROUPS: { total: string; underUmbrella: boolean }[] = [
-  { total: 'stats:succeeded', underUmbrella: false },
-  { total: 'stats:failed', underUmbrella: true },
-  { total: 'stats:deleted', underUmbrella: true },
-  { total: 'stats:requeued', underUmbrella: false },
+// `attributable` marks the states that HAVE a reason taxonomy. Succeeded does not — nothing stamps a reason
+// on a success — so it is the one total whose missing breakdown is expected rather than informative.
+const OUTCOME_GROUPS: { total: string; underUmbrella: boolean; attributable: boolean }[] = [
+  { total: 'stats:succeeded', underUmbrella: false, attributable: false },
+  { total: 'stats:failed', underUmbrella: true, attributable: true },
+  { total: 'stats:deleted', underUmbrella: true, attributable: true },
+  { total: 'stats:requeued', underUmbrella: false, attributable: true },
 ];
 
 interface CounterRow {
@@ -115,7 +117,13 @@ function buildRows(counters: { key: string; value: number }[]): { outcomes: Coun
     // larger than the sum of its reasons. Naming the remainder beats letting someone conclude the numbers
     // are broken. The row key is namespaced by group — two groups with a remainder used to emit the same
     // React key twice.
-    if (reasons.length > 0 && total > attributed) {
+    //
+    // Gated on the group being attributable at all, NOT on some reasons having arrived. A deployment whose
+    // failures are all plain handler throws has zero reason rows and a fully unattributed total — the case
+    // the remainder most needs to explain — and hiding it there would show a bare total on exactly the
+    // page that promises the breakdown. Succeeded is excluded because it has no reason taxonomy to be
+    // missing from.
+    if (group.attributable && total > attributed) {
       outcomes.push({
         key: `${group.total}#unattributed`,
         label: `unattributed (${group.total})`,

@@ -84,6 +84,49 @@ public abstract class CircuitBreakerIntegrationTestsBase : IntegrationTestBase
         await cmd.DeleteJob(nextJobId);
     }
 
+    // RED until the circuit breaker stamps an OutcomeReason. It builds a real requeue outcome like every
+    // other addon, so without a reason of its own its requeues land in the stats:requeued total with
+    // nothing to attribute them to — they show up as unattributed remainder, indistinguishable from a
+    // plain reschedule, and the taxonomy's claim to cover every outcome-construction site is false.
+    [TimedFact]
+    public async Task GivenOpenCircuit_WhenJobRescheduled_ThenRequeueIsAttributedToTheBreaker()
+    {
+        const string groupKey = nameof(ThrowExceptionRequest);
+
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+
+        var seedCtx = Fixture.CreateContext();
+        seedCtx.Set<CircuitBreakerState>().Add(new CircuitBreakerState
+        {
+            GroupKey = groupKey,
+            FailureCount = 999,
+            LastFailureAt = DateTime.UtcNow,
+            OpenUntil = DateTime.UtcNow.AddMinutes(10),
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(
+            new ThrowExceptionRequest(),
+            new JobParameters().Configure<IRetryMetadata>(m => m.MaxRetries = 0));
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobLog(jobId, "Scheduled", timeout: TimeSpan.FromSeconds(15));
+
+        var readCtx = Fixture.CreateContext();
+        var counters = await readCtx.Set<Counter>()
+            .Where(x => x.Key.StartsWith("stats:requeued"))
+            .Select(x => x.Key)
+            .ToListAsync(CancellationToken.None);
+
+        var cmd = server.CreateCommandService();
+        await cmd.DeleteJob(jobId);
+
+        // The state total was always written; what was missing is the attribution beside it.
+        counters.ShouldContain("stats:requeued");
+        counters.ShouldContain("stats:requeued-circuitbreaker");
+    }
+
     [TimedFact]
     public async Task GivenSuccessAfterFailures_WhenJobSucceeds_ThenCounterResets()
     {

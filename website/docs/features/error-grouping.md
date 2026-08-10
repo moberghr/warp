@@ -68,7 +68,7 @@ All on `WarpConfiguration`:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `ErrorGroupingInterval` | `15s` | Aggregator cadence. **`null` disables the feature.** |
+| `ErrorGroupingInterval` | `60s` | Aggregator cadence. **`null` disables the feature.** |
 | `ErrorGroupRetention` | `30d` | Age cap (by `LastSeenAt`) for `ErrorGroup` rows. |
 | `ErrorGroupRetentionCount` | `null` | Row-count cap (keep newest N), off by default. |
 | `MaxDistinctErrorGroups` | `2000` | Per-source cap; overflow collapses into a per-source `{other}` group. |

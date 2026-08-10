@@ -88,6 +88,42 @@ public abstract class RequeueStatsTestsBase : IAsyncLifetime
         HourlySum(counters, "stats:requeued-manual").ShouldBe(requeuedLogs);
     }
 
+    // RED until the bulk path identifies the rows IT flipped rather than re-querying for a shared clock
+    // value. `ScheduleTime == now` is not an ownership token: two callers that stamp the same instant each
+    // select BOTH rows, so the loser of the UPDATE — which flipped nothing — still writes a full set of
+    // logs and counters. A fake clock makes the shared instant certain rather than a millisecond-wide
+    // gamble, but the collision is the same one a real clock produces under concurrent operator actions.
+    [TimedFact]
+    public async Task BulkRequeueJobs_WhenTwoCallersShareAnInstant_CountsEachRequeueOnce()
+    {
+        var ctx = _fixture.CreateContext();
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+        ctx.Set<Job>().Add(NewJob(firstId, State.Failed));
+        ctx.Set<Job>().Add(NewJob(secondId, State.Failed));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Both services read the same instant, as two dashboard requeues landing on one tick do.
+        var frozen = new Microsoft.Extensions.Time.Testing.FakeTimeProvider(DateTimeOffset.UtcNow);
+
+        var first = TestTasks.CreateJobCommandService(_fixture.CreateContext(), frozen);
+        await first.BulkRequeueJobs([firstId, secondId]);
+
+        // The second call flips nothing — both rows are already Enqueued at exactly this instant.
+        var second = TestTasks.CreateJobCommandService(_fixture.CreateContext(), frozen);
+        await second.BulkRequeueJobs([firstId, secondId]);
+
+        var readCtx = _fixture.CreateContext();
+        var requeuedLogs = await CountRequeuedLogs(readCtx);
+        var counters = await readCtx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Two jobs were requeued once each. Anything above two means the second call counted work it did
+        // not do — the invariant this whole file exists to hold.
+        requeuedLogs.ShouldBe(2);
+        Sum(counters, "stats:requeued").ShouldBe(2);
+        Sum(counters, "stats:requeued-manual").ShouldBe(2);
+    }
+
     [TimedFact]
     public async Task RecoverStaleJobs_WritesRequeuedTotalAndRecoveryReason()
     {

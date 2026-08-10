@@ -42,6 +42,7 @@ internal static class OutcomeReasonTokens
             OutcomeReason.Saga => "saga",
             OutcomeReason.Manual => "manual",
             OutcomeReason.Recovery => "recovery",
+            OutcomeReason.CircuitBreaker => "circuitbreaker",
             _ => Unknown,
         };
 }

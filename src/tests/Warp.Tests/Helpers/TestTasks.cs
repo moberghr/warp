@@ -67,12 +67,12 @@ public static class TestTasks
         return QueriesFor(context);
     }
 
-    public static JobCommandService<TContext> CreateJobCommandService<TContext>(TContext context)
+    public static JobCommandService<TContext> CreateJobCommandService<TContext>(TContext context, TimeProvider? timeProvider = null)
         where TContext : DbContext
     {
         return new JobCommandService<TContext>(
             context,
-            TimeProvider.System,
+            timeProvider ?? TimeProvider.System,
             Options.Create(new WarpConfiguration()),
             NullTransport,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),

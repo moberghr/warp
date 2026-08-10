@@ -95,9 +95,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         {
             while (_jobReader.TryRead(out var job))
             {
-                // Mark this worker busy for the whole handler, so the dispatcher's next claim is
-                // sized to workers that can actually start work rather than to channel space.
-                _availability.EnterBusy();
                 try
                 {
                     await ProcessJob(job, stoppingToken);
@@ -113,7 +110,11 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 }
                 finally
                 {
-                    _availability.ExitBusy();
+                    // Hand the slot back. The dispatcher reserved it at claim time, so this is a
+                    // release-only site — and it must run for every path out of ProcessJob,
+                    // including the ownership guard dropping the job, or the group leaks capacity
+                    // and eventually stops claiming.
+                    _availability.Release();
                 }
 
                 if (_batch.IsFull || _batch.IsTimeElapsed)
@@ -499,6 +500,14 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     /// a job that is already running elsewhere. The guard rides the update we already issue per
     /// job, so it costs no extra round trip (§0.2/§6.1).
     /// </para>
+    /// <para>
+    /// The same statement also RENEWS the token, which is what makes the guard hold rather than just
+    /// narrow the window. Checking alone only rules out a reclaim that already happened: a job that
+    /// waited in the channel past InvisibilityTimeout is still stale the instant the check passes, so
+    /// recovery could requeue it — and a second worker start it — while this one walks into the
+    /// handler. Stamping a fresh LastKeepAlive under the same row lock as the check buys the full
+    /// InvisibilityTimeout, by which point RunJobMonitor is renewing on its own cadence.
+    /// </para>
     /// </summary>
     private async Task<bool> MarkWorkerOwnership(Job job, CancellationToken cancellationToken)
     {
@@ -507,6 +516,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         var handlerTypeToSet = job.HandlerType;
         var claimedWorkerId = job.CurrentWorkerId;
         var claimedKeepAlive = job.LastKeepAlive;
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
         var stillOurs = await context.Set<Job>()
             .Where(x => x.Id == job.Id)
             .Where(x => x.CurrentState == State.Processing)
@@ -515,6 +525,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             .ExecuteUpdateAsync(
                 x => x
                     .SetProperty(p => p.CurrentWorkerId, _workerId)
+                    .SetProperty(p => p.LastKeepAlive, now)
                     .SetProperty(p => p.HandlerType, handlerTypeToSet),
                 cancellationToken);
 
@@ -528,8 +539,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         // cancelled at shutdown (UnclaimUndelivered reverts the row to Enqueued, but the log
         // entry would remain). Writing it on receipt by the actual worker keeps the audit
         // trail truthful and lets us tag the entry with the specific WorkerId, matching
-        // single-worker-mode semantics.
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        // single-worker-mode semantics. Reuses the ownership instant so the log timestamp and the
+        // renewed keep-alive agree.
         context.Set<JobLog>().Add(new JobLog
         {
             JobId = job.Id,
@@ -736,6 +747,15 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // Covers retry backoff and Mutex Wait — anything that puts the job back on the queue.
             counters.Add(new Counter { Key = "stats:requeued", Value = 1 });
             counters.Add(new Counter { Key = $"stats:requeued:{hourSuffix}", Value = 1 });
+
+            // Beside the state total it must agree with, NOT in the reason block below — a reasonless
+            // reschedule from a user-written pipeline behaviour is still a real requeue, and falls under
+            // the bounded "unknown" token. Mirrors WarpWorkerService (§0.2 lockstep).
+            WarpTelemetry.RecordJobRequeued(
+                job.Type,
+                job.Queue,
+                outcome?.Reason is { } requeueReason ? OutcomeReasonTokens.For(requeueReason) : OutcomeReasonTokens.Unknown,
+                _configuration.ApplicationName);
         }
 
         // Reason breakdown. Joins the SaveChanges the state total above already rides, so this adds no
@@ -765,12 +785,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 var key = $"stats:{stateToken}-{token}";
                 counters.Add(new Counter { Key = key, Value = 1 });
                 counters.Add(new Counter { Key = $"{key}:{hourSuffix}", Value = 1 });
-            }
-
-            // Mirrors WarpWorkerService — both paths must emit identical telemetry (§0.2 lockstep).
-            if (state is State.Enqueued or State.Scheduled)
-            {
-                WarpTelemetry.RecordJobRequeued(job.Type, job.Queue, token, _configuration.ApplicationName);
             }
 
             // Distinct jobs that entered retry, as opposed to the retry EVENTS counted above. A job retried

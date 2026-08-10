@@ -41,4 +41,7 @@ public enum OutcomeReason
 
     /// <summary>Crash recovery re-queued work whose worker stopped responding. Not set via <c>JobOutcome</c>.</summary>
     Recovery = 8,
+
+    /// <summary>Circuit breaker — the group is open, so the attempt was rescheduled past the reset window.</summary>
+    CircuitBreaker = 9,
 }
