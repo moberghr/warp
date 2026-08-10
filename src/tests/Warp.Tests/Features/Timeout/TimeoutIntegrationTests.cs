@@ -27,19 +27,13 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
             .WithTimeout(TimeSpan.FromSeconds(seconds))
             .Configure<IRetryMetadata>(m => m.MaxRetries = 0);
 
+    // WarpTestServer.StartWithFakeTime disables every loop that compares fake-time stamps
+    // against fake now (stale-job recovery, server cleanup, heartbeat) — advancing the clock
+    // by minutes makes the LIVE server look hours past HealthCheckTimeout, and ServerCleanup
+    // deletes its own Server/Worker rows mid-test (jobs stop being claimable, and the delete
+    // FK-races the ServerLog/ServerTask bookkeeping writes into 1205 deadlocks).
     private static Task<WarpTestServer> StartWithFakeTime(IDatabaseFixture fixture, FakeTimeProvider time) =>
-        WarpTestServer.StartAsync(
-            fixture,
-            configure: cfg =>
-            {
-                // Driving FakeTimeProvider forward affects every TimeProvider-aware comparison
-                // in the worker, including LastKeepAlive freshness. Disable stale-job recovery
-                // so a fake-time jump past InvisibilityTimeout doesn't trigger concurrent
-                // re-enqueue of an already-processing job (manifests as extra Processing logs).
-                cfg.StaleJobRecoveryInterval = null;
-                cfg.InvisibilityTimeout = TimeSpan.FromDays(365);
-            },
-            configureServices: services => services.AddSingleton<TimeProvider>(time));
+        WarpTestServer.StartWithFakeTime(fixture, time);
 
     /// <summary>
     /// Drive fake time forward in small chunks while polling for a terminal state. Every chunk
