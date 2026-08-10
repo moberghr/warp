@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
@@ -6,6 +6,7 @@ using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Events;
+using Warp.Core.Logging;
 using Warp.Core.Models;
 using Warp.Core.Notifications;
 
@@ -174,8 +175,17 @@ public class JobCommandService<TContext> : IJobCommandService
         await _context.SaveChangesAsync();
         await transaction.CommitAsync();
 
-        // Requeue lands the row in Enqueued with ScheduleTime=now — wake dispatcher / bare workers immediately.
+        // The always-on meter moves with the DB counter — a manual requeue is one of the two reasons an
+        // Otel-only deployment (JobMetricsSink = Otel, no stats: rows) most needs visible after an incident.
+        // Post-commit, so the meter never records a requeue a rollback undid.
         var queue = string.IsNullOrEmpty(job.Queue) ? "default" : job.Queue;
+        WarpTelemetry.RecordJobRequeued(
+            job.Type,
+            queue,
+            OutcomeReasonTokens.For(OutcomeReason.Manual),
+            _configuration.ApplicationName);
+
+        // Requeue lands the row in Enqueued with ScheduleTime=now — wake dispatcher / bare workers immediately.
         await NotificationDispatch.DispatchAsync(
             [new Notification(NotificationKind.JobEnqueued, queue)],
             _signals,
@@ -480,6 +490,10 @@ public class JobCommandService<TContext> : IJobCommandService
 
             await using var transaction = await _context.Database.BeginTransactionAsync();
 
+            // (Type, Queue) of every row this chunk flips, buffered so the always-on meter fires only
+            // after the commit below makes those requeues real.
+            var flippedForMeter = new List<(string? Type, string Queue)>();
+
             // Step 1: UPDATE all child rows first. ExecuteUpdateAsync acquires statement-level
             // row locks held until commit, matching the child-then-parent lock order used by
             // single RequeueJob (line 107 → 139). This is the must-fix for the deadlock that
@@ -498,7 +512,7 @@ public class JobCommandService<TContext> : IJobCommandService
 
                 var affected = await ExecuteRequeueUpdate(ids, sourceState, now, clearHandler: true);
                 ApplyRequeueAccounting(result, affected, ids.Length);
-                await AddRequeueLogsForFlipped(ids, now);
+                await AddRequeueLogsForFlipped(ids, now, flippedForMeter);
                 CollectQueues(ids, queueById, affected, queuesToNotify);
             }
 
@@ -529,7 +543,7 @@ public class JobCommandService<TContext> : IJobCommandService
                     totalAffected += affected;
 
                     ApplyRequeueAccounting(result, affected, ids.Length);
-                    await AddRequeueLogsForFlipped(ids, now);
+                    await AddRequeueLogsForFlipped(ids, now, flippedForMeter);
                     CollectQueues(ids, queueById, affected, queuesToNotify);
                 }
 
@@ -560,6 +574,15 @@ public class JobCommandService<TContext> : IJobCommandService
 
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
+
+            foreach (var (type, jobQueue) in flippedForMeter)
+            {
+                WarpTelemetry.RecordJobRequeued(
+                    type,
+                    jobQueue,
+                    OutcomeReasonTokens.For(OutcomeReason.Manual),
+                    _configuration.ApplicationName);
+            }
         }
 
         if (queuesToNotify.Count > 0)
@@ -620,33 +643,43 @@ public class JobCommandService<TContext> : IJobCommandService
         result.Skipped += groupSize - affected;
     }
 
-    private async Task AddRequeueLogsForFlipped(Guid[] ids, DateTime now)
+    private async Task AddRequeueLogsForFlipped(Guid[] ids, DateTime now, List<(string? Type, string Queue)> flippedForMeter)
     {
         // Re-query inside the transaction to identify rows our UPDATE just flipped. ScheduleTime
         // = now narrows the result to our batch — collisions only matter if two BulkRequeueJobs
         // calls land on the same tick, in which case both add identical Requeued log entries.
-        var flippedIds = await _context.Set<Job>()
+        var flipped = await _context.Set<Job>()
             .AsNoTracking()
             .Where(x => ids.Contains(x.Id))
             .Where(x => x.CurrentState == State.Enqueued)
             .Where(x => x.ScheduleTime == now)
-            .Select(x => x.Id)
+            .Select(x =>
+                new
+                {
+                    x.Id,
+                    x.Type,
+                    x.Queue,
+                })
             .ToListAsync();
 
         // Count what we actually flipped, from the same in-transaction re-query that writes the logs.
         // ApplyRequeueAccounting's `affected` comes from a different statement and can diverge, so deriving
         // the counter from it would break the one-counter-per-Requeued-log invariant.
-        AddRequeueCounters(OutcomeReasonTokens.For(OutcomeReason.Manual), flippedIds.Count);
+        AddRequeueCounters(OutcomeReasonTokens.For(OutcomeReason.Manual), flipped.Count);
 
-        foreach (var id in flippedIds)
+        foreach (var job in flipped)
         {
+            // Buffered for the caller to emit AFTER the chunk's commit — the meter mirrors the counter
+            // one-to-one, but must never record a requeue a rollback then undoes.
+            flippedForMeter.Add((job.Type, string.IsNullOrEmpty(job.Queue) ? "default" : job.Queue));
+
             _context.Set<JobLog>().Add(new JobLog
             {
-                JobId = id,
+                JobId = job.Id,
                 EventType = "Requeued",
                 Timestamp = now,
                 Level = "Information",
-                Message = $"Job {id} was requeued",
+                Message = $"Job {job.Id} was requeued",
             });
         }
     }

@@ -160,6 +160,134 @@ public abstract class RequeueStatsTestsBase : IAsyncLifetime
         Sum(counters, "stats:requeued-manual").ShouldBe(0);
     }
 
+    // RED until the manual path emits the meter. warp.job.requeued is documented as always-on, but it was
+    // only fired at worker finalization — a dashboard requeue moved stats:requeued-manual in the DB and
+    // nothing on the meter. Under JobMetricsSink = Otel the DB rows are the part that DOESN'T exist, so a
+    // Grafana-only operator saw a requeue count strictly below the truth, missing exactly the two reasons
+    // (manual, recovery) an on-call engineer looks for after an incident.
+    [TimedFact]
+    public async Task RequeueJob_EmitsRequeuedMeterWithManualReason()
+    {
+        // Arrange — unique queue: the meter is process-global and parallel tests requeue too.
+        var queue = $"requeue-meter-manual-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        var jobId = Guid.NewGuid();
+        var job = NewJob(jobId, State.Failed);
+        job.Queue = queue;
+        ctx.Set<Job>().Add(job);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        using var recorder = new RequeueMeterRecorder(queue);
+
+        // Act
+        var svc = TestTasks.CreateJobCommandService(_fixture.CreateContext());
+        await svc.RequeueJob(jobId);
+
+        // Assert
+        recorder.Count.ShouldBe(1);
+        recorder.Reasons.ShouldBe(["manual"]);
+    }
+
+    [TimedFact]
+    public async Task RecoverStaleJobs_EmitsRequeuedMeterWithRecoveryReason()
+    {
+        // Arrange
+        var queue = $"requeue-meter-recovery-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        var job = NewJob(Guid.NewGuid(), State.Processing);
+        job.Queue = queue;
+        job.LastKeepAlive = DateTime.UtcNow.AddMinutes(-10);
+        ctx.Set<Job>().Add(job);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        using var recorder = new RequeueMeterRecorder(queue);
+
+        // Act
+        var result = await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5))
+            .RecoverStaleJobsAsync(CancellationToken.None);
+
+        // Assert
+        result.Requeued.ShouldBe(1);
+        recorder.Count.ShouldBe(1);
+        recorder.Reasons.ShouldBe(["recovery"]);
+    }
+
+    /// <summary>
+    /// Listens on <c>warp.job.requeued</c> for one queue. A class because two tests need it and a meter
+    /// listener's callback plumbing drowns the arrange/act/assert shape when written inline.
+    /// </summary>
+    private sealed class RequeueMeterRecorder : IDisposable
+    {
+        private readonly System.Diagnostics.Metrics.MeterListener _listener = new();
+        private readonly List<string?> _reasons = [];
+        private long _count;
+
+        public RequeueMeterRecorder(string queue)
+        {
+            _listener.InstrumentPublished = (instrument, meterListener) =>
+            {
+                if (string.Equals(instrument.Meter.Name, "Warp", StringComparison.Ordinal)
+                    && string.Equals(instrument.Name, "warp.job.requeued", StringComparison.Ordinal))
+                {
+                    meterListener.EnableMeasurementEvents(instrument);
+                }
+            };
+            _listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+            {
+                string? reason = null;
+                var matches = false;
+                foreach (var tag in tags)
+                {
+                    if (string.Equals(tag.Key, "queue", StringComparison.Ordinal)
+                        && string.Equals(tag.Value?.ToString(), queue, StringComparison.Ordinal))
+                    {
+                        matches = true;
+                    }
+
+                    if (string.Equals(tag.Key, "reason", StringComparison.Ordinal))
+                    {
+                        reason = tag.Value?.ToString();
+                    }
+                }
+
+                if (matches)
+                {
+                    lock (_reasons)
+                    {
+                        _count += value;
+                        _reasons.Add(reason);
+                    }
+                }
+            });
+            _listener.Start();
+        }
+
+        public long Count
+        {
+            get
+            {
+                lock (_reasons)
+                {
+                    return _count;
+                }
+            }
+        }
+
+        public List<string?> Reasons
+        {
+            get
+            {
+                lock (_reasons)
+                {
+                    return [.. _reasons];
+                }
+            }
+        }
+
+        public void Dispose() => _listener.Dispose();
+    }
+
     [TimedFact]
     public async Task RecoverStaleJobs_NoRestartJob_WritesNoRequeueCounters()
     {

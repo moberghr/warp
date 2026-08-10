@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;

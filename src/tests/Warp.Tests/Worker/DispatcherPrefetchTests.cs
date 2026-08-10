@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
@@ -10,12 +11,12 @@ using Warp.Worker;
 namespace Warp.Tests.Worker;
 
 // Pins how many jobs dispatcher mode holds in the Processing state at once. The dispatcher claims
-// into a bounded channel sized at WorkerCount, and workers pull jobs OUT of that channel to run
-// them — so Reader.Count drops to zero while they are busy and the dispatcher immediately claims
-// another full WorkerCount. The buffered jobs are already Processing but nothing has started them,
-// and their LastKeepAlive is only stamped at claim time (renewal begins in RunJobMonitor, i.e. at
-// execution). A job that waits in the channel longer than InvisibilityTimeout is therefore visible
-// to StaleJobRecovery as stale while a healthy server still intends to run it.
+// into a bounded channel sized at WorkerCount + PrefetchCount, and workers pull jobs OUT of that
+// channel to run them — so buffer occupancy alone cannot tell busy from free, and the claim is sized
+// by the reserve/release capacity counter instead. A buffered job is already Processing but nothing
+// has started it, and its LastKeepAlive is only stamped at claim time (renewal begins at ownership,
+// then in RunJobMonitor). A job that waits in the channel longer than InvisibilityTimeout is
+// therefore visible to StaleJobRecovery as stale while a healthy server still intends to run it.
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
 {
@@ -25,7 +26,7 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
-    public async Task DispatcherMode_WithDefaultPrefetch_ClaimsOnlyWhatWorkersCanStart()
+    public async Task DispatcherMode_WithZeroPrefetch_ClaimsOnlyWhatWorkersCanStart()
     {
         var processing = await RunAndCountProcessingAsync(prefetchCount: 0);
 
@@ -42,11 +43,23 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
         processing.ShouldBe(4);
     }
 
-    // RED until MarkWorkerOwnership becomes conditional. A prefetched job sits in the channel with
-    // the LastKeepAlive stamped at claim time and nothing refreshing it (renewal starts in
-    // RunJobMonitor, i.e. at execution), so StaleJobRecovery reclaims it while this server still
-    // intends to run it. The worker then runs its stale copy AND the dispatcher re-claims the now
-    // Enqueued row and hands it over again — the same job executes twice with no crash involved.
+    // The back-compat contract: an UNSET PrefetchCount buffers WorkerCount — the depth dispatcher mode
+    // has always claimed ahead. Every other test here sets the knob explicitly, so without this one the
+    // null-coalescing default could regress to 0 (or anything else) and the suite would stay green.
+    [TimedFact]
+    public async Task DispatcherMode_WithPrefetchUnset_BuffersWorkerCountJobs()
+    {
+        var processing = await RunAndCountProcessingAsync(prefetchCount: null);
+
+        // 2 executing + WorkerCount (2) buffered — the historical depth.
+        processing.ShouldBe(4);
+    }
+
+    // Regression pin for the double-execution bug the ownership guard closed. A prefetched job sits in
+    // the channel with the LastKeepAlive stamped at claim time and nothing refreshing it, so
+    // StaleJobRecovery reclaims it while this server still intends to run it. Unguarded, the worker then
+    // ran its stale copy AND the dispatcher re-claimed the now-Enqueued row and handed it over again —
+    // the same job executed twice with no crash involved.
     [TimedFact]
     public async Task DispatcherMode_WhenPrefetchedJobIsReclaimed_ExecutesItExactlyOnce()
     {
@@ -80,13 +93,15 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
 
         // It gets claimed into the channel (Processing), then goes stale and is recovered back to
         // Enqueued while the worker is still holding its copy.
-        await WaitForStateAsync(prefetchedId, State.Processing);
-        await WaitForStateAsync(prefetchedId, State.Enqueued);
+        await server.WaitForJobState(prefetchedId, State.Processing);
+        await server.WaitForJobState(prefetchedId, State.Enqueued);
 
         barrier.CanFinish.Release(10);
         await server.WaitForCompletion();
 
-        // Settle: a duplicate run lands shortly after the first completes.
+        // Absence check: the bug is a SECOND execution landing shortly after the first completes, so
+        // there is no positive signal to wait on — the settle window is the §4.5 carve-out for proving
+        // something does NOT happen. Exits early the moment the duplicate appears.
         var deadline = DateTime.UtcNow.AddSeconds(2);
         while (DateTime.UtcNow < deadline && counter.Counter < 2)
         {
@@ -96,36 +111,37 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
         counter.Counter.ShouldBe(1);
     }
 
-    // RED until MarkWorkerOwnership renews LastKeepAlive as well as checking it. Checking alone only
+    // Pins that MarkWorkerOwnership RENEWS LastKeepAlive as well as checking it. Checking alone only
     // closes the window BEFORE the guard: a job that waited in the channel past InvisibilityTimeout is
     // still stale the instant the check passes, so recovery can requeue it — and hand it to a second
     // worker — while this worker walks into the handler. That is the same double execution the guard
     // exists to prevent, moved a few milliseconds later.
     //
-    // Deterministic by construction: auto-recovery is off and driven by hand, and CancellationCheckInterval
-    // is longer than the test, so RunJobMonitor's periodic renewal never fires. The ONLY thing that can
-    // refresh the token in this window is the ownership mark itself.
+    // Deterministic by construction, no wall-clock sleeps (§4.5): the claim ages by ADVANCING the fake
+    // clock while the job waits in the channel, recovery is driven by hand (StartWithFakeTime disables
+    // the auto sweep), and CancellationCheckInterval is longer than the test so RunJobMonitor's periodic
+    // renewal never fires. The ONLY thing that can refresh the token before the sweep is the ownership
+    // mark itself.
     [TimedFact]
     public async Task DispatcherMode_WhenOwnershipIsTaken_RenewsTheClaimAgainstRecovery()
     {
         var barrier = new BarrierSignal();
+        var time = new FakeTimeProvider(DateTimeOffset.UtcNow);
 
-        await using var server = await WarpTestServer.StartAsync(
+        await using var server = await WarpTestServer.StartWithFakeTime(
             Fixture,
-            config =>
+            time,
+            configure: config =>
             {
                 config.UseDispatcher = true;
                 config.WorkerCount = 1;
                 config.PrefetchCount = 1;
                 config.InvisibilityTimeout = TimeSpan.FromMilliseconds(500);
 
-                // Drive recovery by hand so the sweep happens at a known point, not on a timer.
-                config.StaleJobRecoveryInterval = null;
-
                 // Keep RunJobMonitor's keep-alive renewal out of the window under test.
                 config.CancellationCheckInterval = TimeSpan.FromMinutes(5);
             },
-            services => services.AddSingleton(barrier));
+            configureServices: services => services.AddSingleton(barrier));
 
         var publisher = server.CreatePublisher();
         await publisher.Enqueue(new BarrierRequest());
@@ -136,18 +152,20 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
         // the claim-time keep-alive and nothing renewing it.
         var prefetchedId = await publisher.Enqueue(new BarrierRequest());
         await publisher.SaveChangesAsync();
-        await WaitForStateAsync(prefetchedId, State.Processing);
+        await server.WaitForJobState(prefetchedId, State.Processing);
 
-        // Let it age past InvisibilityTimeout while it waits its turn.
-        await Task.Delay(TimeSpan.FromSeconds(1));
+        // Age the buffered claim a full fake second past InvisibilityTimeout — one clock advance, no
+        // sleeping. (The pinned first job goes equally stale; it is not what the sweep assertion reads.)
+        time.Advance(TimeSpan.FromSeconds(1));
 
-        // Release the first job so the worker picks the aged one up and takes ownership of it.
+        // Release the first job so the worker picks the aged one up and takes ownership of it — the
+        // ownership mark stamps the ADVANCED now, which is what makes it survive the sweep below.
         barrier.CanFinish.Release();
         (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5))).ShouldBeTrue();
 
         // The prefetched job is now inside its handler. Sweep: a worker that renewed its claim on
-        // ownership is not a candidate; one that only checked it is still sitting there with a stale
-        // token and gets pulled out from under itself.
+        // ownership is not a candidate; one that only checked it is still sitting there with the
+        // claim-time token and gets pulled out from under itself.
         await server.RunServerTaskOnceAsync<Warp.Worker.Services.StaleJobRecovery<TestContext>>();
 
         var state = await Fixture.CreateContext().Set<Job>()
@@ -161,25 +179,7 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
         state.ShouldBe(State.Processing);
     }
 
-    private async Task WaitForStateAsync(Guid jobId, State expected)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            var state = await Fixture.CreateContext().Set<Job>()
-                .Where(x => x.Id == jobId)
-                .Select(x => x.CurrentState)
-                .FirstOrDefaultAsync();
-            if (state == expected)
-            {
-                return;
-            }
-        }
-
-        throw new TimeoutException($"Job {jobId} did not reach {expected}");
-    }
-
-    private async Task<int> RunAndCountProcessingAsync(int prefetchCount)
+    private async Task<int> RunAndCountProcessingAsync(int? prefetchCount)
     {
         var barrier = new BarrierSignal();
 
@@ -193,6 +193,11 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
             },
             services => services.AddSingleton(barrier));
 
+        // Enough jobs that the dispatcher can always claim to whatever depth it believes it has —
+        // workers + the largest prefetch under test + slack. This is a capacity bound being measured,
+        // not a concurrency race being provoked, so the count is a supply of fuel, not a spray (§0.4):
+        // the assertion is on the PEAK Processing count, which an over-claiming dispatcher exceeds with
+        // two jobs or twenty.
         var publisher = server.CreatePublisher();
         for (var i = 0; i < 6; i++)
         {
@@ -205,10 +210,10 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
         (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5))).ShouldBeTrue();
         (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5))).ShouldBeTrue();
 
-        // With only 2 workers, at most 2 jobs can be executing. Anything beyond that which has left
-        // Enqueued was claimed speculatively and is sitting in the channel, unstarted.
-        // Sample the peak: give the dispatcher time to top the channel up to whatever it will
-        // claim, then take the highest count seen.
+        // Sample the peak: give the dispatcher time to top the channel up to whatever it will claim,
+        // then take the highest count seen. An absence-style window (§4.5 carve-out — over-claiming has
+        // no positive signal to await), sampled on a cadence rather than a hot loop so it doesn't hammer
+        // the shared container's pool (the SqlServer-under-load flake family).
         var processing = 0;
         var deadline = DateTime.UtcNow.AddSeconds(3);
         while (DateTime.UtcNow < deadline)
@@ -217,6 +222,8 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
                 .Where(x => x.CurrentState == State.Processing)
                 .CountAsync();
             processing = Math.Max(processing, snapshot);
+
+            await Task.Delay(50);
         }
 
         // Release before returning so a failed assertion reports the count instead of hanging

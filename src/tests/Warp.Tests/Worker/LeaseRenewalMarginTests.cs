@@ -78,6 +78,24 @@ public class LeaseRenewalMarginTests
             }));
     }
 
+    // RED until the guard validates the EFFECTIVE TTL. BackgroundServiceLeaseTtl is nullable and every
+    // runtime consumer coalesces null to 30s — so a deployment that only raises HealthCheckInterval (the
+    // tuning move this release's own notes recommend) runs a 30s lease against an 11s cadence, fewer than
+    // three renewal attempts, and the guard that exists for precisely that shape pattern-matches the null
+    // away and stays silent.
+    [TimedFact]
+    public void AddWarpServer_WithRaisedHeartbeatAndDefaultLeaseTtl_Throws()
+    {
+        var services = new ServiceCollection();
+        RegisterMinimalDependencies(services);
+
+        var ex = Should.Throw<InvalidOperationException>(() =>
+            services.AddWarpServer<TestContext>(opt => opt.HealthCheckInterval = TimeSpan.FromSeconds(11)));
+
+        ex.Message.ShouldContain("BackgroundServiceLeaseTtl");
+        ex.Message.ShouldContain("HealthCheckInterval");
+    }
+
     // The shipped pair must satisfy its own rule — a default that fails the validation it introduces
     // would break every existing deployment on upgrade.
     [TimedFact]

@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Warp.Core;
@@ -7,6 +7,7 @@ using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Logging;
 using Warp.Core.NoRestart;
 using Warp.Core.Services;
 using Warp.Core.Webhooks;
@@ -133,6 +134,16 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                     Message = "Requeued by crash recovery — worker stopped responding",
                 });
                 requeued++;
+
+                // The always-on meter moves with the DB counter, per requeue — recovery requeues are one of
+                // the two reasons an Otel-only deployment (JobMetricsSink = Otel, no stats: rows) most needs
+                // on a dashboard after an incident. Same fire-at-decision stance as the worker finalization
+                // sites: a rolled-back sweep may over-count the meter by a tick, which telemetry tolerates.
+                WarpTelemetry.RecordJobRequeued(
+                    job.Type,
+                    string.IsNullOrEmpty(job.Queue) ? "default" : job.Queue,
+                    OutcomeReasonTokens.For(OutcomeReason.Recovery),
+                    _configuration.ApplicationName);
             }
             else
             {

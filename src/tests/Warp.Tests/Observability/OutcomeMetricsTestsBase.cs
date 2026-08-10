@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -165,8 +165,14 @@ public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
     public async Task FirstAttemptFailure_WithNoRetryBudget_WritesNoRetriedJobs()
     {
         // Arrange — MaxRetries = 0. The job fails on its first and only attempt, so no job ever entered
-        // retry and the distinct-jobs counter must stay at zero. Guards against incrementing it off the
-        // reason alone (the exhausted reason IS stamped here — a zero budget is still a spent budget).
+        // retry and the distinct-jobs counter must stay at zero.
+        //
+        // The exhausted reason must NOT be stamped either. RetryOptions.MaxRetries defaults to 0 and the
+        // behaviour runs for every job once AddRetry() is called, so a deployment that registers the addon
+        // and puts [Retry] on the three types that need it would otherwise see every OTHER type's plain
+        // failure labelled "burned through every retry" — and the unattributed remainder, the row that
+        // exists to expose exactly these failures, would be unreachable in that common configuration.
+        // "Exhausted" means a budget was granted and spent, not that none was ever granted.
         var queue = $"outcome-no-retry-{Guid.NewGuid():N}";
         var jobId = await SeedThrowingJob(queue);
         var worker = CreateWorker(queue, maxRetries: 0, retryDelays: []);
@@ -182,6 +188,7 @@ public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
         Sum(counters, "stats:requeued").ShouldBe(0);
         Sum(counters, "stats:requeued-retry").ShouldBe(0);
         Sum(counters, "stats:failed").ShouldBe(1);
+        Sum(counters, "stats:failed-retry-exhausted").ShouldBe(0);
         AssertAppendOnly(counters);
         AssertUmbrellaIsNotStored(counters);
     }

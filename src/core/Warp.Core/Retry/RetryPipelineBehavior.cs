@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Reflection;
 using Microsoft.Extensions.Options;
 using Warp.Core.Enums;
@@ -83,12 +83,18 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
                     Reason = OutcomeReason.Retry,
                 };
             }
-            else
+            else if (maxRetries > 0)
             {
                 // Exhaustion used to be signalled by ABSENCE: no outcome was set and the worker's fallback
                 // marked the job Failed — the same observable event as a job with no retry policy at all,
                 // so "burned through every retry" was indistinguishable from "failed once". Setting the
                 // state explicitly makes the distinction countable.
+                //
+                // Gated on maxRetries > 0: this behaviour runs for EVERY job once AddRetry() is called, and
+                // RetryOptions.MaxRetries defaults to 0 — so without the gate, a type that simply carries no
+                // [Retry] attribute had its first and only failure labelled "retry exhausted". Exhausted
+                // means a budget was granted and spent, not that none was ever granted; a zero-budget
+                // failure stays reasonless and lands in the unattributed remainder where it belongs.
                 //
                 // The ??= is load-bearing, not defensive, but NOT for the reason first written here: Timeout's
                 // Delete mode does not reach this catch at all. It swallows the OperationCanceledException,

@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;

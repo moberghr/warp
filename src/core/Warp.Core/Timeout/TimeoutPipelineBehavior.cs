@@ -1,4 +1,4 @@
-﻿using Warp.Core.Enums;
+using Warp.Core.Enums;
 using Warp.Core.Handlers;
 
 namespace Warp.Core.Timeout;

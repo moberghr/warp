@@ -31,7 +31,7 @@ public static class PostgreSqlServiceConfiguration
             // Propagate the configured lease TTL so the heartbeat SQL renewal window matches
             // what SingletonServiceStrategy uses when it first acquires the lease.
             var workerConfig = sp.GetService<IOptions<WarpServerConfiguration>>();
-            var leaseTtl = workerConfig?.Value.BackgroundServiceLeaseTtl ?? TimeSpan.FromSeconds(30);
+            var leaseTtl = workerConfig?.Value.BackgroundServiceLeaseTtl ?? WarpServerConfiguration.DefaultBackgroundServiceLeaseTtl;
             var names = WarpJobTableNames.FromModel(context.Model, (int)leaseTtl.TotalSeconds);
 
             return new PostgresWarpSqlQueries<TContext>(names);

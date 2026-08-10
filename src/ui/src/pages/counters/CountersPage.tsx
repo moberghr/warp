@@ -25,6 +25,7 @@ const builtInColors: Record<string, string> = {
   'stats:requeued-retry': '#fbbf24',
   'stats:requeued-concurrency': '#fcd34d',
   'stats:requeued-ratelimit': '#fde68a',
+  'stats:requeued-circuitbreaker': '#fef3c7',
   'stats:requeued-saga': '#fef08a',
   'stats:requeued-manual': '#d97706',
   'stats:requeued-recovery': '#b45309',

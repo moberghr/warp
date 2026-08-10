@@ -56,7 +56,7 @@ stats:unsuccessful              umbrella — DERIVED on read as failed + deleted
     stats:deleted-timeout / -concurrency / -ratelimit / -saga
 stats:requeued                  top-level total — a requeue is not a terminal outcome, so it
                                 sits outside the umbrella too
-  stats:requeued-retry / -concurrency / -ratelimit / -saga / -manual / -recovery
+  stats:requeued-retry / -concurrency / -ratelimit / -circuitbreaker / -saga / -manual / -recovery
 stats:retried-jobs              standalone — distinct jobs that entered retry, not retry events
 ```
 
@@ -89,6 +89,22 @@ Requeueing from the dashboard, and recovering a job whose worker died, both wrot
 - Failed jobs never auto-expire, so the **Failed tile** — a live `Job` query — already answers "how many are failed right now", accurately and permanently. The decrement made the counter a worse copy of that query while destroying the only thing a counter uniquely provides: "how many ever failed".
 
 **These three totals will read higher than before for anyone who requeues or deletes jobs**, and they no longer decrease. Dashboard tiles and navigation badges are unaffected — they query the `Job` table, not these counters.
+
+### Behaviour change: the circuit breaker now counts retry exhaustion
+
+With the breaker registered **outer** of retry (the documented order — "Circuit Breaker short-circuits before Retry"), the terminal failure of a retried job never incremented `FailureCount`: the breaker skipped any attempt that carried a `JobOutcome`, and retry exhaustion now carries one. The breaker counts a `Failed` outcome as the dependency failure it is; reschedule and delete outcomes are still skipped. If you run breaker-outer, circuits that never opened during retry-exhausting outages will now open — that is the feature working, not a regression. Retry-inner registrations are unchanged.
+
+### Behaviour change: `retry-exhausted` is only stamped when a retry budget existed
+
+`RetryOptions.MaxRetries` defaults to `0` and the retry behaviour runs for every job once `AddRetry()` is called — so a job type with no `[Retry]` attribute had its first and only failure labelled `stats:failed-retry-exhausted`. Zero-budget failures are now unattributed (they land in the remainder row on the Counters page, where they belong). If you chart `stats:failed-retry-exhausted`, expect it to drop to only genuinely exhausted retries.
+
+### Startup validation: singleton-lease renewal margin
+
+`AddWarpServer` now throws when `BackgroundServiceLeaseTtl` (or its 30s default) is less than **3× `HealthCheckInterval`** — the lease is renewed by the heartbeat, and a thinner margin lets one slow round-trip hand a running singleton service to a second server. **A config that started before may fail at startup after upgrading** (e.g. an explicit 10s TTL against the new 5s heartbeat default, or a heartbeat raised past 10s with the TTL left at its 30s default). The exception names both knobs; raise the TTL or lower the interval.
+
+### Behaviour change: the implicit worker group follows `DefaultQueue`
+
+The `Publisher` now honours `WarpConfiguration.DefaultQueue` (previously ignored — untargeted publishes always landed on the literal `"default"`). To keep the pair coherent, a server whose `Queues` is left untouched now polls `[DefaultQueue]` instead of the literal `"default"` — so setting only `DefaultQueue = "orders"` publishes to `orders` **and** processes it, instead of stranding every job on a queue no worker polls. An explicitly set `Queues` is never widened.
 
 ### Behaviour change: quieter idle — seven background-task intervals relaxed
 

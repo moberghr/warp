@@ -19,11 +19,8 @@ public sealed class DispatcherWorkerAvailability
 
     public DispatcherWorkerAvailability(int workerCount, int prefetchCount)
     {
-        WorkerCount = workerCount;
         Capacity = workerCount + prefetchCount;
     }
-
-    public int WorkerCount { get; }
 
     /// <summary>
     /// Jobs this group may hold at once: one per worker, plus the configured prefetch depth.

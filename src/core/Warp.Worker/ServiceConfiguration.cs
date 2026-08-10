@@ -84,17 +84,21 @@ public static class ServiceConfiguration
         // server while the first still runs it. Nothing surfaces that shape at runtime until it bites, and
         // it moves whenever either default changes, so it is checked here rather than documented.
         // A null HealthCheckInterval disables the heartbeat (and lease renewal) altogether — a deliberate
-        // limited shape, not a margin violation.
+        // limited shape, not a margin violation. A null TTL is NOT skipped: the runtime coalesces it to the
+        // 30s default, so the check must run against that same effective value — raising only the heartbeat
+        // cadence past a third of the default is exactly the misconfiguration this exists to catch.
+        var effectiveLeaseTtl = builder.BackgroundServiceLeaseTtl
+            ?? WarpServerConfiguration.DefaultBackgroundServiceLeaseTtl;
         if (builder.HealthCheckInterval is { } healthCheckInterval
-            && builder.BackgroundServiceLeaseTtl is { } leaseTtl
-            && leaseTtl < healthCheckInterval * 3)
+            && effectiveLeaseTtl < healthCheckInterval * 3)
         {
             throw new InvalidOperationException(
-                $"BackgroundServiceLeaseTtl ({leaseTtl}) must be at least three times HealthCheckInterval "
-                + $"({healthCheckInterval}); the lease is renewed by the Heartbeat task, so a shorter TTL "
-                + "leaves fewer than three renewal attempts before expiry and one slow round-trip can "
-                + "transfer a singleton service that is still running. Raise BackgroundServiceLeaseTtl or "
-                + "lower HealthCheckInterval.");
+                $"BackgroundServiceLeaseTtl ({effectiveLeaseTtl}"
+                + $"{(builder.BackgroundServiceLeaseTtl is null ? ", the default" : string.Empty)}) must be "
+                + $"at least three times HealthCheckInterval ({healthCheckInterval}); the lease is renewed "
+                + "by the Heartbeat task, so a shorter TTL leaves fewer than three renewal attempts before "
+                + "expiry and one slow round-trip can transfer a singleton service that is still running. "
+                + "Raise BackgroundServiceLeaseTtl or lower HealthCheckInterval.");
         }
 
         // The builder IS the configuration. TryAdd: if AddWarp was called separately first, its
