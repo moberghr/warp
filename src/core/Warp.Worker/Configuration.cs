@@ -120,8 +120,17 @@ public class WarpServerConfiguration : WarpConfiguration
         get => _queues;
         set
         {
-            _queues = value;
-            _queuesExplicitlySet = true;
+            // ConfigurationBinder invokes every public setter with a rebound copy of the CURRENT value
+            // even when the bound section carries no matching key at all — so "the setter ran" cannot
+            // mean "the user chose". A value indistinguishable from the untouched default is treated as
+            // no choice; anything else is explicit. (The one intent this folds away — explicitly wanting
+            // the literal "default" queue WHILE routing publishes elsewhere via DefaultQueue — is a
+            // config that strands every untargeted publish, which is the bug this exists to prevent.)
+            var isExplicit = _queuesExplicitlySet
+                || value is null
+                || !value.SequenceEqual(_queues, StringComparer.Ordinal);
+            _queues = value!;
+            _queuesExplicitlySet = isExplicit;
         }
     }
 
@@ -371,14 +380,20 @@ public class WarpServerConfiguration : WarpConfiguration
     /// Returns all effective worker groups. Top-level settings always form the first group.
     /// Any groups added via <see cref="AddWorkerGroup"/> are appended after.
     /// </summary>
-    internal List<WorkerGroupConfiguration> GetEffectiveWorkerGroups()
+    internal List<WorkerGroupConfiguration> GetEffectiveWorkerGroups(string? resolvedDefaultQueue = null)
     {
         // An untouched Queues follows DefaultQueue. The Publisher stamps untargeted jobs with
         // WarpConfiguration.DefaultQueue, so a config that sets ONLY DefaultQueue = "orders" publishes
         // every job onto "orders" — and a group still polling the literal "default" would leave all of
         // them Enqueued forever with no error anywhere. An explicitly set Queues is an explicit decision
         // (a worker deliberately dedicated to other queues is a supported shape) and is never widened.
-        var baseQueues = _queuesExplicitlySet ? Queues : [DefaultQueue];
+        //
+        // resolvedDefaultQueue exists because this builder is not always the WarpConfiguration publishes
+        // resolve: when AddWarp was called first, ITS builder wins the IOptions<WarpConfiguration>
+        // TryAddSingleton, so publishes use AddWarp's DefaultQueue while this server builder's copy still
+        // reads "default". The caller that knows the resolved options (WarpServerRegistration) passes that
+        // value so the substitution follows the queue publishes actually land on.
+        var baseQueues = _queuesExplicitlySet ? Queues : [resolvedDefaultQueue ?? DefaultQueue];
 
         // Webhook delivery is a Core feature (§8.20): the implicit default group always subscribes to the
         // dedicated warp:webhooks queue so any server with a worker drains deliveries — no per-process opt-in

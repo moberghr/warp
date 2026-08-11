@@ -92,7 +92,7 @@ Requeueing from the dashboard, and recovering a job whose worker died, both wrot
 
 ### Behaviour change: the circuit breaker now counts retry exhaustion
 
-With the breaker registered **outer** of retry (the documented order — "Circuit Breaker short-circuits before Retry"), the terminal failure of a retried job never incremented `FailureCount`: the breaker skipped any attempt that carried a `JobOutcome`, and retry exhaustion now carries one. The breaker counts a `Failed` outcome as the dependency failure it is; reschedule and delete outcomes are still skipped. If you run breaker-outer, circuits that never opened during retry-exhausting outages will now open — that is the feature working, not a regression. Retry-inner registrations are unchanged.
+With the breaker registered **outer** of retry (the documented order — "Circuit Breaker short-circuits before Retry"), the terminal failure of a retried job never incremented `FailureCount`: the breaker skipped any attempt that carried a `JobOutcome`, and retry exhaustion now carries one. The breaker counts a `Failed` outcome as the dependency failure it is; reschedule and delete outcomes are still skipped. If you run breaker-outer, circuits that never opened during retry-exhausting outages will now open — that is the feature working, not a regression. In any registration order, a handler that stamps a `Failed` outcome itself and then throws now also counts toward its circuit — a deliberately failed attempt is a failure.
 
 ### Behaviour change: `retry-exhausted` is only stamped when a retry budget existed
 

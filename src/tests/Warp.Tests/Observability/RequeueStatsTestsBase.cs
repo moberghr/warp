@@ -213,6 +213,108 @@ public abstract class RequeueStatsTestsBase : IAsyncLifetime
         recorder.Reasons.ShouldBe(["recovery"]);
     }
 
+    // RED until the recovery meter is buffered and dispatched post-commit. RecoverStaleJobsAsync runs
+    // INSIDE the server-task host's lock transaction (LocksWithTransaction defaults true), where its
+    // SaveChangesAsync only flushes — the commit happens after ExecuteAsync returns. A meter fired inline
+    // records requeues a rollback then undoes, and the next sweep re-records the same jobs: the OTel count
+    // drifts above the DB count it is documented to mirror, permanently. §8.25's rule applies verbatim —
+    // buffer in ExecuteAsync, dispatch from OnCommittedAsync.
+    [TimedFact]
+    public async Task RecoverStaleJobs_WhenOuterTransactionRollsBack_EmitsNoRequeuedMeter()
+    {
+        // Arrange
+        var queue = $"requeue-meter-rollback-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        var job = NewJob(Guid.NewGuid(), State.Processing);
+        job.Queue = queue;
+        job.LastKeepAlive = DateTime.UtcNow.AddMinutes(-10);
+        ctx.Set<Job>().Add(job);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        using var recorder = new RequeueMeterRecorder(queue);
+
+        // Act — the sweep joins OUR transaction (hasOuterTx), which we then throw away, exactly what a
+        // deadlock or connection drop does to the task host's lock transaction.
+        var sweepCtx = _fixture.CreateContext();
+        await using (var tx = await sweepCtx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken))
+        {
+            var result = await TestTasks
+                .CreateStaleJobRecovery(sweepCtx, TimeProvider.System, TimeSpan.FromMinutes(5))
+                .RecoverStaleJobsAsync(CancellationToken.None);
+            result.Requeued.ShouldBe(1);
+
+            await tx.RollbackAsync(Xunit.TestContext.Current.CancellationToken);
+        }
+
+        // Assert — nothing was durably requeued, so nothing may have been counted.
+        recorder.Count.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task RecoverStaleJobs_UnderOuterTransaction_EmitsMeterOnlyFromCommittedHook()
+    {
+        // Arrange
+        var queue = $"requeue-meter-hook-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        var job = NewJob(Guid.NewGuid(), State.Processing);
+        job.Queue = queue;
+        job.LastKeepAlive = DateTime.UtcNow.AddMinutes(-10);
+        ctx.Set<Job>().Add(job);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        using var recorder = new RequeueMeterRecorder(queue);
+
+        // Act — commit, then invoke the post-commit hook the task host calls after its lock transaction
+        // lands (§8.25). The meter must move exactly once, and only via the hook.
+        var sweepCtx = _fixture.CreateContext();
+        var task = TestTasks.CreateStaleJobRecovery(sweepCtx, TimeProvider.System, TimeSpan.FromMinutes(5));
+        await using (var tx = await sweepCtx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken))
+        {
+            await task.RecoverStaleJobsAsync(CancellationToken.None);
+            recorder.Count.ShouldBe(0, "nothing is committed yet — an inline emission here is the defect");
+
+            await tx.CommitAsync(Xunit.TestContext.Current.CancellationToken);
+        }
+
+        await ((Warp.Worker.Services.IServerTask)task).OnCommittedAsync(CancellationToken.None);
+
+        // Assert
+        recorder.Count.ShouldBe(1);
+        recorder.Reasons.ShouldBe(["recovery"]);
+    }
+
+    // RED (by mutation only): pins the highest-volume emitter — the bulk path buffers (Type, Queue) per
+    // chunk across two fill loops and drains after the chunk commit. Deleting the drain, or hoisting the
+    // buffer across chunks (re-emitting earlier chunks), previously left the whole suite green.
+    [TimedFact]
+    public async Task BulkRequeueJobs_EmitsRequeuedMeterOncePerFlippedJob()
+    {
+        // Arrange — two requeueable, one already Enqueued (a no-op success that must NOT emit).
+        var queue = $"requeue-meter-bulk-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+        var alreadyEnqueuedId = Guid.NewGuid();
+        foreach (var (id, state) in new[] { (firstId, State.Failed), (secondId, State.Completed), (alreadyEnqueuedId, State.Enqueued) })
+        {
+            var seeded = NewJob(id, state);
+            seeded.Queue = queue;
+            ctx.Set<Job>().Add(seeded);
+        }
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        using var recorder = new RequeueMeterRecorder(queue);
+
+        // Act
+        var svc = TestTasks.CreateJobCommandService(_fixture.CreateContext());
+        await svc.BulkRequeueJobs([firstId, secondId, alreadyEnqueuedId]);
+
+        // Assert — one emission per row actually flipped, tagged manual.
+        recorder.Count.ShouldBe(2);
+        recorder.Reasons.ShouldBe(["manual", "manual"]);
+    }
+
     /// <summary>
     /// Listens on <c>warp.job.requeued</c> for one queue. A class because two tests need it and a meter
     /// listener's callback plumbing drowns the arrange/act/assert shape when written inline.

@@ -36,6 +36,13 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     private readonly WarpServerConfiguration _configuration;
     private readonly IEnumerable<IWebhookRedeliveryEnqueuer> _webhookEnqueuers;
 
+    // Requeue meter emissions buffered until the sweep's transaction COMMITS. Under the task host this
+    // method runs inside the lock transaction (LocksWithTransaction, §8.25) — SaveChangesAsync only
+    // flushes, and an inline emission would record requeues a rollback then undoes, which the next sweep
+    // re-records: the meter drifts permanently above the DB counter it mirrors. The task is scoped (one
+    // instance per iteration), so the buffer never outlives its run.
+    private readonly List<(string? Type, string Queue)> _pendingRequeueMeters = [];
+
     public StaleJobRecovery(
         IWarpServerContext serverContext,
         TContext userContext,
@@ -135,15 +142,10 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                 });
                 requeued++;
 
-                // The always-on meter moves with the DB counter, per requeue — recovery requeues are one of
-                // the two reasons an Otel-only deployment (JobMetricsSink = Otel, no stats: rows) most needs
-                // on a dashboard after an incident. Same fire-at-decision stance as the worker finalization
-                // sites: a rolled-back sweep may over-count the meter by a tick, which telemetry tolerates.
-                WarpTelemetry.RecordJobRequeued(
-                    job.Type,
-                    string.IsNullOrEmpty(job.Queue) ? "default" : job.Queue,
-                    OutcomeReasonTokens.For(OutcomeReason.Recovery),
-                    _configuration.ApplicationName);
+                // Buffered, not emitted — see _pendingRequeueMeters. The always-on meter moves with the DB
+                // counter, per requeue: recovery requeues are one of the two reasons an Otel-only deployment
+                // (JobMetricsSink = Otel, no stats: rows) most needs on a dashboard after an incident.
+                _pendingRequeueMeters.Add((job.Type, string.IsNullOrEmpty(job.Queue) ? "default" : job.Queue));
             }
             else
             {
@@ -175,10 +177,37 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         await _context.SaveChangesAsync(ct);
         if (ownedTx != null)
         {
+            // Direct caller (test, admin trigger): we own the transaction, so this commit is the durable
+            // point — drain here. Under the task host ownedTx is null and the host's lock transaction
+            // commits after ExecuteAsync returns; the host then invokes OnCommittedAsync, which drains.
             await ownedTx.CommitAsync(ct);
+            EmitPendingRequeueMeters();
         }
 
         return new StaleJobRecoveryResult(requeued, failed, deleted);
+    }
+
+    // Post-commit hook (§8.25): the task host calls this only after its lock transaction has committed —
+    // and never on a throw/rollback, which leaves the buffer to die with this scoped instance.
+    public Task OnCommittedAsync(CancellationToken ct)
+    {
+        EmitPendingRequeueMeters();
+
+        return Task.CompletedTask;
+    }
+
+    private void EmitPendingRequeueMeters()
+    {
+        foreach (var (type, queue) in _pendingRequeueMeters)
+        {
+            WarpTelemetry.RecordJobRequeued(
+                type,
+                queue,
+                OutcomeReasonTokens.For(OutcomeReason.Recovery),
+                _configuration.ApplicationName);
+        }
+
+        _pendingRequeueMeters.Clear();
     }
 
     // A Pending WebhookDelivery whose NextAttemptAt is more than WebhookStuckDeliveryGrace past has lost
