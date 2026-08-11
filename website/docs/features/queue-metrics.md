@@ -180,7 +180,7 @@ The fallback is a fixed literal rather than anything derived from the unmapped v
 
 ### Meter
 
-`warp.job.requeued` is a `Counter<long>` emitted unconditionally at finalization, tagged `job.type`, `queue`, `reason`, and `application` (when set).
+`warp.job.requeued` is a `Counter<long>` emitted unconditionally for **every** requeue — worker finalization (retry, mutex Wait, rate-limit Wait, circuit breaker), dashboard requeues (`reason=manual`), and crash recovery (`reason=recovery`) — tagged `job.type`, `queue`, `reason`, and `application` (when set). The manual and recovery paths emit **after** their transaction commits, so a rollback can never leave the meter above the `stats:requeued` counter it mirrors.
 
 It closes a real gap: concurrency and rate limiting already emitted detailed **spans**, but spans are sampled, so "how many jobs bounced off this mutex in the last hour" was not answerable from telemetry at all. The concurrency and rate-limit **keys** are deliberately not tags — they are unbounded and PII-adjacent, and stay on the span where cardinality does not compound.
 

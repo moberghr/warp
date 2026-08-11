@@ -138,7 +138,7 @@ Singleton coordination uses a database lease row instead of a Medallion long-hel
 
 **Lease semantics:**
 
-- **TTL:** 30 seconds (configurable via `opt.BackgroundServiceLeaseTtl`).
+- **TTL:** 30 seconds (configurable via `opt.BackgroundServiceLeaseTtl`). Must be at least **3× `HealthCheckInterval`** — the lease is renewed by the heartbeat, and a thinner margin lets one slow round-trip expire a lease whose service is still running. `AddWarpServer` validates this at startup (against the 30s default too, so raising only the heartbeat cadence past 10s also fails fast).
 - **Renewal:** piggybacked on the `Heartbeat` server task (~5s cadence). The heartbeat SQL batch also updates `BackgroundServiceLease.LeaseExpiresAt = now + TTL` for every lease this server currently holds.
 - **Loss detection:** The heartbeat computes which leases it held last beat but not this beat (expired, stolen, or deleted). Each lost-lease name is published as a `BackgroundServiceLeaseLost` signal. The affected supervisor cancels the `CancellationToken` it passed to `ExecuteAsync`, so user code observes `OperationCanceledException` and can exit cleanly.
 - **Acquisition:** A waiting server polls every ~15 seconds (configurable via `opt.BackgroundServiceAcquirePollInterval`). The acquire query is an atomic UPDATE: `SET holder_server_id = @me, lease_expires_at = @now + ttl WHERE holder_server_id IS NULL OR lease_expires_at < @now`. Zero rows returned = lease still held; one row = acquired.

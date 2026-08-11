@@ -8,14 +8,19 @@ Raw view of every counter row in the database. Used for forensics ("what events 
 
 ## Built-in counters
 
-The worker writes the following keys on every job outcome:
+Every counter is **append-only**: it records that an outcome happened, and a later requeue or delete never un-counts it. `stats:succeeded` / `failed` / `deleted` therefore mean *ever*, not *currently* — "how many are failed right now" is the Failed tile, which queries the `Job` table.
+
+Each **state total** carries a **reason breakdown** written by the addon that caused the outcome:
 
 | Key | Incremented when |
 |---|---|
-| `stats:succeeded` | A job's handler completes successfully |
-| `stats:failed` | A job's handler throws and retries are exhausted |
-| `stats:deleted` | A job ends in the `Deleted` state (user cancellation, mutex Skip, stale recovery, etc.) |
-| `stats:requeued` | A job is put back on the queue without finishing — covers Retry backoff and Mutex Wait |
+| `stats:succeeded` | A job's handler completes successfully. No reason breakdown — nothing stamps a reason on a success |
+| `stats:failed` | A job ends `Failed` — plus `-retry-exhausted` (a granted retry budget was spent) and `-saga` |
+| `stats:deleted` | A job ends `Deleted` — plus `-timeout`, `-concurrency` (mutex/semaphore Skip), `-ratelimit`, `-saga` |
+| `stats:requeued` | A job goes back on the queue without finishing — plus `-retry`, `-concurrency` (Wait), `-ratelimit` (Wait), `-circuitbreaker`, `-saga`, `-manual` (dashboard requeue), `-recovery` (crash recovery) |
+| `stats:retried-jobs` | A job enters retry for the **first** time — distinct jobs, where `requeued-retry` counts events |
+
+Totals are written independently of their breakdown, so an outcome no addon claimed (a plain handler throw) still lands in its total; the page shows the difference as an **unattributed** row rather than letting the numbers look broken. `stats:unsuccessful` is **derived on read** as `failed + deleted` and never stored.
 
 Each event also writes a parallel `:{yyyy-MM-dd-HH}` hourly key so the chart can break the same metric down by hour.
 
@@ -23,9 +28,9 @@ Each event also writes a parallel `:{yyyy-MM-dd-HH}` hourly key so the chart can
 
 Two sections, polled every 5s:
 
-**Hourly history chart** — every hourly counter is its own series. Toggle 24h / 7d. Click a legend entry to hide that series. Built-in metrics get fixed colors (succeeded green, failed red, deleted gray, requeued amber); addon-defined keys get a deterministic color hashed from the key name so it stays the same across reloads.
+**Hourly history chart** — every hourly counter is its own series. Toggle 24h / 7d. Click a legend entry to hide that series. Built-in metrics get fixed colors in family hues (succeeded green, failed reds, deleted grays, requeued ambers — breakdown keys tint their parent's hue); addon-defined keys get a deterministic color hashed from the key name so it stays the same across reloads.
 
-**Counters table** — the rolled-up totals (lifetime values), one row per key, sorted alphabetically. Hourly variants are filtered out of this view; the chart consumes them separately.
+**Outcomes table** — the lifetime totals rendered as the hierarchy above: the derived `unsuccessful` umbrella over `failed` and `deleted`, each state total over its reason rows, with the unattributed remainder (muted) when a total exceeds the sum of its reasons — and a loud `over-attributed` row for the impossible opposite direction. Keys the hierarchy doesn't claim (addon-defined counters) follow in a flat **Other** table, sorted alphabetically. Hourly variants are filtered out of both; the chart consumes them separately.
 
 import Screenshot from '@site/src/components/Screenshot';
 

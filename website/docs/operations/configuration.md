@@ -20,7 +20,7 @@ builder.Services.AddWarp<AppDbContext>(options =>
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `Schema` | `string?` | `"warp"` | Database schema for all Warp tables. Set to `null` for the database's default schema. |
-| `DefaultQueue` | `string` | `"default"` | Queue used when no queue is specified at publish time |
+| `DefaultQueue` | `string` | `"default"` | Queue used when no queue is specified at publish time. The implicit worker group follows it when `Queues` is left untouched (see the worker options below). |
 | `JobExpirationTimeout` | `TimeSpan` | `1 day` | How long completed/deleted jobs are kept before cleanup. Failed jobs never expire. |
 
 ### Naming Conventions
@@ -171,7 +171,7 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 | `PollingInterval` | `TimeSpan` | `10 seconds` | Delay between polls when no jobs are available. Also serves as the floor for exponential backoff — it resets to this floor the moment a job is processed, and in-process enqueue signals (and DB push) shortcut it entirely. |
 | `MaxPollingInterval` | `TimeSpan` | `30 seconds` | Upper bound on the polling delay during idle periods. The delay grows from `PollingInterval` by `PollingIntervalFactor` on each empty poll, clamped to this value, and resets instantly when a job is processed. |
 | `PollingIntervalFactor` | `double` | `2.0` | Multiplier applied to the current polling delay on each consecutive empty poll. Set to `1.0` (or lower) to disable exponential backoff — the delay stays at `PollingInterval`. |
-| `Queues` | `string[]` | `["default"]` | Queues this worker subscribes to. Processed in alphabetical order |
+| `Queues` | `string[]` | follows `DefaultQueue` | Queues this worker subscribes to, processed in alphabetical order. Left untouched, the implicit group polls `[DefaultQueue]` — the queue untargeted publishes actually land on — so setting only `DefaultQueue` cannot strand jobs. An explicitly set value wins outright and is never widened. |
 
 ### Exponential Polling Backoff
 

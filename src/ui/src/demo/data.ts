@@ -297,6 +297,7 @@ export function getCountersDemo() {
     { key: 'stats:requeued-retry', value: 138 },
     { key: 'stats:requeued-ratelimit', value: 31 },
     { key: 'stats:requeued-concurrency', value: 22 },
+    { key: 'stats:requeued-circuitbreaker', value: 4 },
     { key: 'stats:requeued-manual', value: 9 },
     { key: 'stats:requeued-recovery', value: 5 },
     { key: 'stats:requeued-saga', value: 3 },
