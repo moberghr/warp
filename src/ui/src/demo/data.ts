@@ -303,6 +303,108 @@ export function getCountersDemo() {
     { key: 'stats:requeued-saga', value: 3 },
 
     { key: 'stats:retried-jobs', value: 61 },
+
+    ...perDimensionCounters(),
+  ];
+}
+
+// Job.Type / Job.HandlerType are ASSEMBLY-QUALIFIED, so that is what lands in the key. Demo data uses the real
+// shape rather than a bare name, because rendering it readably is half of what the Counters page has to do —
+// a demo with short names would hide whether that works.
+function qualified(type: string): string {
+  const assembly = type.split('.').slice(0, 2).join('.');
+
+  return `${type}, ${assembly}, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null`;
+}
+
+// Per-dimension execution stats (§8.23), queue-wait + backlog (§8.26), deadline attainment (§8.31), and the
+// adapter / endpoint / client folds. Every duration is a SUM in ms and every pct entry is a histogram bucket
+// count, so the page's derived Avg and p95 columns have something real to be derived from.
+function perDimensionCounters() {
+  const executed = [
+    { type: 'Acme.Orders.ProcessOrderRequest', handler: 'Acme.Orders.ProcessOrderHandler', succeeded: 8214, failed: 21, durMs: 1_437_450, buckets: { 100: 5100, 250: 2600, 500: 420, 2500: 110, 10000: 5 } },
+    { type: 'Acme.Reports.GenerateReportRequest', handler: 'Acme.Reports.GenerateReportHandler', succeeded: 412, failed: 9, durMs: 2_884_300, buckets: { 2500: 90, 5000: 210, 10000: 96, 30000: 25 } },
+    { type: 'Acme.Notifications.SendEmailRequest', handler: 'Acme.Notifications.SendEmailCommand', succeeded: 6103, failed: 14, durMs: 421_760, buckets: { 25: 3400, 50: 2100, 100: 560, 250: 57 } },
+    { type: 'Acme.Payments.ProcessPaymentRequest', handler: 'Acme.Payments.ProcessPaymentHandler', succeeded: 1118, failed: 3, durMs: 604_920, buckets: { 250: 300, 500: 610, 1000: 190, 2500: 21 } },
+  ];
+
+  const counters: { key: string; value: number }[] = [];
+
+  for (const row of executed) {
+    for (const [dimension, id] of [['type', row.type], ['handler', row.handler]] as const) {
+      const prefix = `jobstat:${dimension}:${qualified(id)}`;
+      counters.push({ key: `${prefix}:succeeded`, value: row.succeeded });
+      counters.push({ key: `${prefix}:failed`, value: row.failed });
+      counters.push({ key: `${prefix}:dur`, value: row.durMs });
+
+      for (const [bound, count] of Object.entries(row.buckets)) {
+        counters.push({ key: `${prefix}:pct:${bound}`, value: count });
+      }
+    }
+  }
+
+  return [
+    ...counters,
+
+    // Queue-wait fold + the backlog gauge, which share the queue subject and land on one row per queue.
+    { key: 'qwait:default:count', value: 15294 },
+    { key: 'qwait:default:dur', value: 1_071_580 },
+    { key: 'qwait:default:pct:50', value: 9800 },
+    { key: 'qwait:default:pct:100', value: 4300 },
+    { key: 'qwait:default:pct:250', value: 1100 },
+    { key: 'qwait:default:pct:1000', value: 94 },
+    { key: 'qbacklog:default:depth', value: 12 },
+    { key: 'qbacklog:default:oldest_age_seconds', value: 34 },
+    { key: 'qwait:reports:count', value: 421 },
+    { key: 'qwait:reports:dur', value: 1_852_400 },
+    { key: 'qwait:reports:pct:2500', value: 120 },
+    { key: 'qwait:reports:pct:5000', value: 240 },
+    { key: 'qwait:reports:pct:30000', value: 61 },
+    { key: 'qbacklog:reports:depth', value: 3 },
+    { key: 'qbacklog:reports:oldest_age_seconds', value: 412 },
+    { key: 'qwait:warp-webhooks:count', value: 2841 },
+    { key: 'qwait:warp-webhooks:dur', value: 198_870 },
+    { key: 'qbacklog:warp-webhooks:depth', value: 0 },
+
+    // Total-scope timeout attainment: 9 misses in 431 terminations.
+    { key: `deadline:${qualified('Acme.Reports.GenerateReportRequest')}:count`, value: 421 },
+    { key: `deadline:${qualified('Acme.Reports.GenerateReportRequest')}:miss`, value: 9 },
+    { key: `deadline:${qualified('Acme.Payments.ProcessPaymentRequest')}:count`, value: 1118 },
+
+    { key: 'adapter:payments:success', value: 4820 },
+    { key: 'adapter:payments:failed', value: 37 },
+    { key: 'adapter:payments:throttled', value: 12 },
+    { key: 'adapter:payments:dur', value: 1_264_400 },
+    { key: 'adapter:payments:pct:250', value: 3900 },
+    { key: 'adapter:payments:pct:500', value: 820 },
+    { key: 'adapter:payments:pct:2500', value: 149 },
+    { key: 'adapter:payments:op:Charge:success', value: 3110 },
+    { key: 'adapter:payments:op:Refund:success', value: 1710 },
+    { key: 'adapter:shipping:success', value: 2044 },
+    { key: 'adapter:shipping:failed', value: 96 },
+    { key: 'adapter:shipping:dur', value: 918_000 },
+
+    { key: 'endpoint:POST /orders:success', value: 9210 },
+    { key: 'endpoint:POST /orders:failed', value: 18 },
+    { key: 'endpoint:POST /orders:dur', value: 645_700 },
+    { key: 'endpoint:POST /orders:pct:50', value: 6400 },
+    { key: 'endpoint:POST /orders:pct:100', value: 2500 },
+    { key: 'endpoint:POST /orders:pct:500', value: 328 },
+    { key: 'endpoint:GET /orders/{id}:success', value: 24188 },
+    { key: 'endpoint:GET /orders/{id}:dur', value: 483_760 },
+
+    { key: 'clientevent:total:error:count', value: 184 },
+    { key: 'clientevent:total:log:count', value: 2910 },
+    { key: 'clientevent:total:vital:count', value: 6042 },
+    { key: 'clientevent:name:error:TypeError:count', value: 121 },
+    { key: 'clientevent:name:error:NetworkError:count', value: 63 },
+    { key: 'clientevent:vital:LCP:count', value: 2014 },
+    { key: 'clientevent:vital:LCP:dur', value: 4_631_000 },
+    { key: 'clientevent:vital:LCP:pct:2000', value: 1180 },
+    { key: 'clientevent:vital:LCP:pct:2500', value: 610 },
+    { key: 'clientevent:vital:LCP:pct:4000', value: 224 },
+    { key: 'clientevent:vital:INP:count', value: 2014 },
+    { key: 'clientevent:vital:INP:dur', value: 289_000 },
   ];
 }
 
@@ -333,10 +435,47 @@ export function getCountersHistoryDemo(hours: number) {
     points.push({ hour: hourDate.toISOString(), key: 'stats:requeued-retry', value: Math.round(requeued * 0.65) });
     points.push({ hour: hourDate.toISOString(), key: 'stats:requeued-ratelimit', value: Math.round(requeued * 0.15) });
     points.push({ hour: hourDate.toISOString(), key: 'stats:retried-jobs', value: Math.round(requeued * 0.3) });
+
+    // The per-dimension series the family tabs chart. Each family plots ONE metric at a time, so a duration sum
+    // in the hundreds of thousands can sit beside a count of 3 in the data without flattening it on screen.
+    const share = [0.52, 0.03, 0.38, 0.07];
+    HISTORY_TYPES.forEach((type, t) => {
+      const executions = Math.round(base * share[t]);
+      const perJobMs = [175, 6900, 69, 540][t];
+
+      points.push({ hour: hourDate.toISOString(), key: `jobstat:type:${qualified(type)}:hist:succeeded`, value: executions });
+      points.push({ hour: hourDate.toISOString(), key: `jobstat:type:${qualified(type)}:hist:dur`, value: executions * perJobMs });
+      points.push({ hour: hourDate.toISOString(), key: `jobstat:handler:${qualified(HISTORY_HANDLERS[t])}:hist:succeeded`, value: executions });
+      points.push({ hour: hourDate.toISOString(), key: `jobstat:handler:${qualified(HISTORY_HANDLERS[t])}:hist:dur`, value: executions * perJobMs });
+    });
+
+    points.push({ hour: hourDate.toISOString(), key: 'qwait:default:hist:count', value: Math.round(base) });
+    points.push({ hour: hourDate.toISOString(), key: 'qwait:default:hist:dur', value: Math.round(base * 70) });
+    points.push({ hour: hourDate.toISOString(), key: 'qwait:reports:hist:count', value: Math.round(base * 0.03) });
+    points.push({ hour: hourDate.toISOString(), key: 'adapter:payments:hist:success', value: Math.round(base * 0.3) });
+    points.push({ hour: hourDate.toISOString(), key: 'adapter:payments:hist:failed', value: Math.round(failed * 0.2) });
+    points.push({ hour: hourDate.toISOString(), key: 'endpoint:POST /orders:hist:success', value: Math.round(base * 0.6) });
+    points.push({ hour: hourDate.toISOString(), key: 'clientevent:total:error:hist', value: Math.round(failed * 0.4) });
+    points.push({ hour: hourDate.toISOString(), key: 'errorgroup:job-nullref-processorder', value: Math.round(failed * 0.5) });
+    points.push({ hour: hourDate.toISOString(), key: 'warpsys:records-dropped:adapter', value: business && i % 7 === 0 ? 14 : 0 });
   }
 
   return points;
 }
+
+const HISTORY_TYPES = [
+  'Acme.Orders.ProcessOrderRequest',
+  'Acme.Reports.GenerateReportRequest',
+  'Acme.Notifications.SendEmailRequest',
+  'Acme.Payments.ProcessPaymentRequest',
+];
+
+const HISTORY_HANDLERS = [
+  'Acme.Orders.ProcessOrderHandler',
+  'Acme.Reports.GenerateReportHandler',
+  'Acme.Notifications.SendEmailCommand',
+  'Acme.Payments.ProcessPaymentHandler',
+];
 
 // ============================================================
 // Concurrency limits

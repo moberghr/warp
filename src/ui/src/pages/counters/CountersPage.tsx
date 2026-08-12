@@ -3,6 +3,20 @@ import { Chart, LineController, LineElement, PointElement, LinearScale, Category
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { useCounters, useCountersHistory } from '@/api/hooks/useCounters';
+import {
+  buildFamilySeries,
+  buildFamilyTable,
+  buildOutcomeRows,
+  historyTokens,
+  parseCounterKey,
+  presentFamilies,
+  type CounterEntry,
+  type CounterRow,
+  type FamilyDef,
+  type FamilyId,
+  type FamilySeries,
+  type MetricRow,
+} from './counterModel';
 import type { CounterHistoryPoint } from '@/types';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, ChartTooltip, Legend);
@@ -43,166 +57,67 @@ function colorFor(key: string): string {
   return `hsl(${hue}, 65%, 50%)`;
 }
 
-// The outcome family is a hierarchy, not an alphabetical list: state totals with a reason breakdown under
-// each. Rendering it flat forced the reader to reconstruct that from key names.
-//
-// ONLY failed and deleted nest under the unsuccessful umbrella. A success is obviously not an unsuccessful
-// outcome, and a requeue is not even a terminal one — the same job will run again and land in one of the
-// other three totals, so indenting either under the umbrella claims something false.
-const UMBRELLA_KEY = 'stats:unsuccessful';
+// A legend of forty assembly-qualified names is not a legend. The tail is dropped from the CHART only — every
+// dimension is still in the table below it — and the count of what was dropped is stated on screen.
+const MAX_SERIES = 10;
 
-// `attributable` marks the states that HAVE a reason taxonomy. Succeeded does not — nothing stamps a reason
-// on a success — so it is the one total whose missing breakdown is expected rather than informative.
-const OUTCOME_GROUPS: { total: string; underUmbrella: boolean; attributable: boolean }[] = [
-  { total: 'stats:succeeded', underUmbrella: false, attributable: false },
-  { total: 'stats:failed', underUmbrella: true, attributable: true },
-  { total: 'stats:deleted', underUmbrella: true, attributable: true },
-  { total: 'stats:requeued', underUmbrella: false, attributable: true },
-];
+const TOKEN_LABELS: Record<string, string> = {
+  count: 'Count',
+  succeeded: 'Succeeded',
+  success: 'Success',
+  failed: 'Failed',
+  miss: 'Missed',
+  throttled: 'Throttled',
+  circuitopen: 'Circuit open',
+  dropped: 'Dropped',
+  depth: 'Backlog',
+  oldest_age_seconds: 'Oldest',
+  dur: 'Duration',
+};
 
-interface CounterRow {
-  /** React key. Unique per row — derived rows namespace themselves under the group they belong to. */
-  key: string;
-  /** What the cell shows. Equals `key` for a real counter row. */
-  label: string;
-  value: number;
-  depth: number;
-  muted?: boolean;
-  warn?: boolean;
+function tokenLabel(token: string): string {
+  return TOKEN_LABELS[token] ?? token.charAt(0).toUpperCase() + token.slice(1);
 }
 
-function buildRows(counters: { key: string; value: number }[]): { outcomes: CounterRow[]; other: CounterRow[] } {
-  const byKey = new Map(counters.map((c) => [c.key, c.value]));
-  const claimed = new Set<string>();
-  const outcomes: CounterRow[] = [];
+function formatMs(ms: number | null): string {
+  if (ms === null) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(2)}s`;
 
-  // Derived on read, never stored. "Not Completed" is exactly failed + deleted, and ten sites write those
-  // two keys (worker cancellation, DeleteJob, BulkDelete, crash recovery, …). A stored umbrella has to be
-  // maintained at every one of them or it silently under-reports — which is precisely what it did. Computing
-  // it here cannot drift from the totals it sums.
-  const failed = byKey.get('stats:failed');
-  const deleted = byKey.get('stats:deleted');
-  const umbrella = failed === undefined && deleted === undefined ? undefined : (failed ?? 0) + (deleted ?? 0);
-
-  // Claimed so a leftover row from a build that still wrote it doesn't render twice with two values.
-  claimed.add(UMBRELLA_KEY);
-
-  let umbrellaEmitted = false;
-
-  for (const group of OUTCOME_GROUPS) {
-    const total = byKey.get(group.total);
-    if (total === undefined) continue;
-
-    if (group.underUmbrella && umbrella !== undefined && !umbrellaEmitted) {
-      outcomes.push({ key: UMBRELLA_KEY, label: `${UMBRELLA_KEY} (derived: failed + deleted)`, value: umbrella, depth: 0 });
-      umbrellaEmitted = true;
-    }
-
-    const depth = group.underUmbrella && umbrella !== undefined ? 1 : 0;
-    outcomes.push({ key: group.total, label: group.total, value: total, depth });
-    claimed.add(group.total);
-
-    const reasons = counters
-      .filter((c) => c.key.startsWith(group.total + '-'))
-      .sort((a, b) => b.value - a.value);
-
-    let attributed = 0;
-    for (const reason of reasons) {
-      outcomes.push({ key: reason.key, label: reason.key, value: reason.value, depth: depth + 1 });
-      claimed.add(reason.key);
-      attributed += reason.value;
-    }
-
-    // "Unattributed" is computed and SHOWN rather than hidden. An outcome with no attributable cause (a
-    // plain handler throw with no addon involved) carries no reason, so a state total is legitimately
-    // larger than the sum of its reasons. Naming the remainder beats letting someone conclude the numbers
-    // are broken. The row key is namespaced by group — two groups with a remainder used to emit the same
-    // React key twice.
-    //
-    // Gated on the group being attributable at all, NOT on some reasons having arrived. A deployment whose
-    // failures are all plain handler throws has zero reason rows and a fully unattributed total — the case
-    // the remainder most needs to explain — and hiding it there would show a bare total on exactly the
-    // page that promises the breakdown. Succeeded is excluded because it has no reason taxonomy to be
-    // missing from.
-    if (group.attributable && total > attributed) {
-      outcomes.push({
-        key: `${group.total}#unattributed`,
-        label: `unattributed (${group.total})`,
-        value: total - attributed,
-        depth: depth + 1,
-        muted: true,
-      });
-    }
-
-    // The impossible direction, surfaced rather than swallowed: a child larger than its parent means a
-    // reason key was written without its state total (a write site out of step). Hiding it would render a
-    // breakdown that visibly does not add up with no explanation on screen.
-    if (attributed > total) {
-      outcomes.push({
-        key: `${group.total}#over-attributed`,
-        label: `over-attributed (${group.total}) — reasons exceed the total`,
-        value: attributed - total,
-        depth: depth + 1,
-        warn: true,
-      });
-    }
-  }
-
-  const distinct = byKey.get('stats:retried-jobs');
-  if (distinct !== undefined) {
-    outcomes.push({ key: 'stats:retried-jobs', label: 'stats:retried-jobs', value: distinct, depth: 0 });
-    claimed.add('stats:retried-jobs');
-  }
-
-  const other = counters
-    .filter((c) => !claimed.has(c.key))
-    .map((c) => ({ key: c.key, label: c.key, value: c.value, depth: 0 }));
-
-  return { outcomes, other };
+  return `${(ms / 60000).toFixed(1)}m`;
 }
 
-function CounterTable({ title, rows }: { title: string; rows: CounterRow[] }) {
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-base">{title}</CardTitle>
-      </CardHeader>
-      <CardContent className="p-0">
-        <table className="w-full text-sm">
-          <thead className="border-b bg-muted/50">
-            <tr>
-              <th className="text-left font-semibold px-4 py-2">Key</th>
-              <th className="text-right font-semibold px-4 py-2 w-40">Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.key} className="border-b last:border-b-0 hover:bg-muted/30">
-                <td
-                  className={`px-4 py-2 font-mono ${r.depth === 0 ? 'font-semibold' : ''} ${r.muted ? 'text-muted-foreground italic' : ''} ${r.warn ? 'text-destructive' : ''}`}
-                  style={{ paddingLeft: `${1 + r.depth * 1.25}rem` }}
-                >
-                  {r.label}
-                </td>
-                <td
-                  className={`px-4 py-2 text-right font-mono tabular-nums ${r.muted ? 'text-muted-foreground' : ''} ${r.warn ? 'text-destructive' : ''}`}
-                >
-                  {r.value.toLocaleString()}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </CardContent>
-    </Card>
-  );
+function formatSeconds(seconds: number): string {
+  if (seconds <= 0) return '—';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function formatCell(token: string, value: number | undefined): string {
+  if (value === undefined) return '—';
+  if (token === 'oldest_age_seconds') return formatSeconds(value);
+
+  return value.toLocaleString();
 }
 
 export default function CountersPage() {
   const [historyHours, setHistoryHours] = useState(24);
+  const [tab, setTab] = useState<FamilyId>('outcomes');
+  const [metricByFamily, setMetricByFamily] = useState<Record<string, string>>({});
+  const [filter, setFilter] = useState('');
   const { data: counters, isLoading, isError } = useCounters();
   const { data: history } = useCountersHistory(historyHours);
-  const rows = useMemo(() => buildRows(counters ?? []), [counters]);
+
+  const families = useMemo(
+    () => presentFamilies(counters ?? [], (history ?? []).map((p) => p.key)),
+    [counters, history],
+  );
+
+  // The active tab is derived rather than corrected in an effect: a family can disappear between refetches
+  // (its last counter aged out), and falling back to the first present family keeps the page rendering.
+  const family = families.find((f) => f.id === tab) ?? families[0];
 
   if (isError) return <ErrorState message="Unable to load counters" />;
   if (isLoading || !counters) return <LoadingState />;
@@ -211,66 +126,326 @@ export default function CountersPage() {
     <div>
       <h1 className="text-2xl font-bold mb-2">Counters</h1>
       <p className="text-sm text-muted-foreground mb-4">
-        Raw counter rows from the database. Built-in: <code>stats:succeeded</code>,{' '}
-        <code>stats:failed</code>, <code>stats:deleted</code>, <code>stats:requeued</code>, per-reason
-        breakdowns such as <code>stats:failed-retry-exhausted</code>, and <code>stats:retried-jobs</code>.
-        These are recorded events and only ever increase &mdash; a requeue never rewrites history. The{' '}
-        <code>stats:unsuccessful</code> row is derived here as <code>failed + deleted</code>, not stored, so
-        it can never drift from the totals it sums. For what is happening <em>right now</em>, see the
-        Dashboard. Addons can write their own keys here.
+        Every durable metric Warp folds through <code>Counter</code> &rarr; <code>Statistic</code>, grouped by the
+        subsystem that wrote it. These are recorded events and only ever increase &mdash; a requeue never rewrites
+        history &mdash; and they survive the cleanup of the rows they were derived from. For what is happening{' '}
+        <em>right now</em>, see the Dashboard.
       </p>
 
-      <Card className="mb-6">
-        <CardHeader className="pb-2 flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">Hourly history</CardTitle>
+      {family === undefined ? (
+        <Card>
+          <CardContent className="py-8 text-center text-muted-foreground">No counters</CardContent>
+        </Card>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-1 mb-4 border-b pb-2">
+            {families.map((f) => (
+              <button
+                key={f.id}
+                onClick={() => { setTab(f.id); setFilter(''); }}
+                className={`px-3 py-1 text-sm rounded-md transition-colors ${
+                  family.id === f.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-sm text-muted-foreground mb-4">{family.description}</p>
+
+          <FamilyChart
+            family={family}
+            points={history ?? null}
+            hours={historyHours}
+            onHoursChange={setHistoryHours}
+            metric={metricByFamily[family.id]}
+            onMetricChange={(token) => setMetricByFamily((prev) => ({ ...prev, [family.id]: token }))}
+          />
+
+          <FamilyBody family={family} counters={counters} filter={filter} onFilterChange={setFilter} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function FamilyBody({
+  family,
+  counters,
+  filter,
+  onFilterChange,
+}: {
+  family: FamilyDef;
+  counters: CounterEntry[];
+  filter: string;
+  onFilterChange: (value: string) => void;
+}) {
+  const needle = filter.trim().toLowerCase();
+
+  const outcomes = useMemo(
+    () => (family.id === 'outcomes' ? buildOutcomeRows(counters.filter((c) => c.key.startsWith('stats:'))) : []),
+    [family.id, counters],
+  );
+
+  // Unrecognised keys are the ONLY thing the `other` family holds, so they are matched by parse failure rather
+  // than by a prefix — an addon key nobody taught this page about still renders, raw.
+  const unparsed = useMemo(
+    () => (family.id === 'other' ? counters.filter((c) => parseCounterKey(c.key) === null) : []),
+    [family.id, counters],
+  );
+
+  const table = useMemo(
+    () => (family.id === 'outcomes' || family.id === 'other' ? null : buildFamilyTable(counters, family)),
+    [family, counters],
+  );
+
+  if (family.id === 'outcomes' || family.id === 'other') {
+    const rows: CounterRow[] =
+      family.id === 'outcomes'
+        ? outcomes
+        : unparsed.map((c) => ({ key: c.key, label: c.key, value: c.value, depth: 0 }));
+    const visible = needle ? rows.filter((r) => r.label.toLowerCase().includes(needle)) : rows;
+
+    return (
+      <Card>
+        <TableHeaderBar count={visible.length} filter={filter} onFilterChange={onFilterChange} />
+        <CardContent className="p-0">
+          {visible.length === 0 ? (
+            <EmptyBody filtered={needle.length > 0} />
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="border-b bg-muted/50">
+                <tr>
+                  <th className="text-left font-semibold px-4 py-2">Key</th>
+                  <th className="text-right font-semibold px-4 py-2 w-40">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((r) => (
+                  <tr key={r.key} className="border-b last:border-b-0 hover:bg-muted/30">
+                    <td
+                      className={`px-4 py-2 font-mono ${r.depth === 0 ? 'font-semibold' : ''} ${r.muted ? 'text-muted-foreground italic' : ''} ${r.warn ? 'text-destructive' : ''}`}
+                      style={{ paddingLeft: `${1 + r.depth * 1.25}rem` }}
+                    >
+                      {r.label}
+                    </td>
+                    <td
+                      className={`px-4 py-2 text-right font-mono tabular-nums ${r.muted ? 'text-muted-foreground' : ''} ${r.warn ? 'text-destructive' : ''}`}
+                    >
+                      {r.value.toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (table === null) return null;
+
+  const visible = needle
+    ? table.rows.filter((r) => r.subject.toLowerCase().includes(needle) || r.label.toLowerCase().includes(needle))
+    : table.rows;
+
+  return (
+    <Card>
+      <TableHeaderBar count={visible.length} filter={filter} onFilterChange={onFilterChange} />
+      <CardContent className="p-0">
+        {visible.length === 0 ? (
+          <EmptyBody filtered={needle.length > 0} chartOnly={table.rows.length === 0} />
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="border-b bg-muted/50">
+              <tr>
+                <th className="text-left font-semibold px-4 py-2">Name</th>
+                {table.hasApplication && <th className="text-left font-semibold px-4 py-2 w-40">Application</th>}
+                {table.columns.map((token) => (
+                  <th key={token} className="text-right font-semibold px-4 py-2 w-28">
+                    {tokenLabel(token)}
+                  </th>
+                ))}
+                {table.hasAvg && <th className="text-right font-semibold px-4 py-2 w-24">Avg</th>}
+                {table.hasPercentile && (
+                  <th className="text-right font-semibold px-4 py-2 w-24">{table.percentileLabel}</th>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((row) => (
+                <MetricTableRow key={row.id} row={row} columns={table.columns} hasApplication={table.hasApplication} hasAvg={table.hasAvg} hasPercentile={table.hasPercentile} />
+              ))}
+            </tbody>
+          </table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function MetricTableRow({
+  row,
+  columns,
+  hasApplication,
+  hasAvg,
+  hasPercentile,
+}: {
+  row: MetricRow;
+  columns: string[];
+  hasApplication: boolean;
+  hasAvg: boolean;
+  hasPercentile: boolean;
+}) {
+  return (
+    <tr className="border-b last:border-b-0 hover:bg-muted/30">
+      <td className="px-4 py-2" title={row.subject}>
+        <div className="font-mono font-medium">{row.label}</div>
+        {row.sub && <div className="font-mono text-xs text-muted-foreground">{row.sub}</div>}
+      </td>
+      {hasApplication && (
+        <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{row.application ?? 'all'}</td>
+      )}
+      {columns.map((token) => (
+        <td key={token} className="px-4 py-2 text-right font-mono tabular-nums">
+          {formatCell(token, row.values[token])}
+        </td>
+      ))}
+      {hasAvg && <td className="px-4 py-2 text-right font-mono tabular-nums">{formatMs(row.avgMs)}</td>}
+      {hasPercentile && (
+        <td className="px-4 py-2 text-right font-mono tabular-nums">
+          {row.percentileOverflow ? `>${formatMs(row.percentileMs)}` : formatMs(row.percentileMs)}
+        </td>
+      )}
+    </tr>
+  );
+}
+
+function TableHeaderBar({
+  count,
+  filter,
+  onFilterChange,
+}: {
+  count: number;
+  filter: string;
+  onFilterChange: (value: string) => void;
+}) {
+  return (
+    <CardHeader className="pb-2 flex-row items-center justify-between space-y-0 gap-4">
+      <CardTitle className="text-base">
+        {count.toLocaleString()} {count === 1 ? 'row' : 'rows'}
+      </CardTitle>
+      <input
+        value={filter}
+        onChange={(e) => onFilterChange(e.target.value)}
+        placeholder="Filter…"
+        className="h-8 w-56 rounded-md border bg-background px-2 text-sm"
+      />
+    </CardHeader>
+  );
+}
+
+function EmptyBody({ filtered, chartOnly }: { filtered: boolean; chartOnly?: boolean }) {
+  return (
+    <div className="py-8 text-center text-sm text-muted-foreground">
+      {filtered
+        ? 'No rows match the filter'
+        : chartOnly
+          ? 'This family records an hourly trend only — see the chart above.'
+          : 'No counters'}
+    </div>
+  );
+}
+
+function FamilyChart({
+  family,
+  points,
+  hours,
+  onHoursChange,
+  metric,
+  onMetricChange,
+}: {
+  family: FamilyDef;
+  points: CounterHistoryPoint[] | null;
+  hours: number;
+  onHoursChange: (hours: number) => void;
+  metric: string | undefined;
+  onMetricChange: (token: string) => void;
+}) {
+  const tokens = useMemo(() => historyTokens(points ?? [], family.id), [points, family.id]);
+  const selected = metric !== undefined && tokens.includes(metric) ? metric : tokens[0];
+
+  const series = useMemo(
+    () => (points === null || selected === undefined ? [] : buildFamilySeries(points, family, selected)),
+    [points, family, selected],
+  );
+
+  const shown = series.slice(0, MAX_SERIES);
+  const hidden = series.length - shown.length;
+
+  return (
+    <Card className="mb-6">
+      <CardHeader className="pb-2 flex-row items-center justify-between space-y-0 gap-4">
+        <CardTitle className="text-base">
+          Hourly history
+          {selected === 'dur' && (
+            <span className="ml-2 text-xs font-normal text-muted-foreground">total milliseconds per hour</span>
+          )}
+        </CardTitle>
+        <div className="flex items-center gap-3">
+          {tokens.length > 1 && (
+            <div className="flex gap-1">
+              {tokens.map((token) => (
+                <button
+                  key={token}
+                  onClick={() => onMetricChange(token)}
+                  className={`px-2 py-0.5 text-xs rounded-md transition-colors ${
+                    selected === token ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'
+                  }`}
+                >
+                  {tokenLabel(token)}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex gap-1">
             {[
               { label: '24h', hours: 24 },
               { label: '7d', hours: 168 },
-            ].map(({ label, hours }) => (
+            ].map(({ label, hours: h }) => (
               <button
                 key={label}
-                onClick={() => setHistoryHours(hours)}
+                onClick={() => onHoursChange(h)}
                 className={`px-2 py-0.5 text-xs rounded-md transition-colors ${
-                  historyHours === hours
-                    ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:bg-accent'
+                  hours === h ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'
                 }`}
               >
                 {label}
               </button>
             ))}
           </div>
-        </CardHeader>
-        <CardContent>
-          <HistoryChart points={history ?? null} hours={historyHours} />
-        </CardContent>
-      </Card>
-
-      {counters.length === 0 ? (
-        <Card>
-          <CardContent className="py-8 text-center text-muted-foreground">
-            No counters
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="flex flex-col gap-6">
-          {rows.outcomes.length > 0 && <CounterTable title="Outcomes" rows={rows.outcomes} />}
-          {rows.other.length > 0 && <CounterTable title="Other" rows={rows.other} />}
         </div>
-      )}
-    </div>
+      </CardHeader>
+      <CardContent>
+        <HistoryChart series={shown} hours={hours} loading={points === null} />
+        {hidden > 0 && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Showing the {MAX_SERIES} largest of {series.length}. All {series.length} are in the table below.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
-function HistoryChart({ points, hours }: { points: CounterHistoryPoint[] | null; hours: number }) {
+function HistoryChart({ series, hours, loading }: { series: FamilySeries[]; hours: number; loading: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<Chart | null>(null);
 
-  // Pivot points → labels + per-key series, padding empty hours with 0.
+  // Pivot each series onto the hour slots of the window, padding empty hours with 0.
   const data = useMemo(() => {
-    if (!points) return null;
-
     const now = new Date();
     now.setMinutes(0, 0, 0);
 
@@ -287,26 +462,15 @@ function HistoryChart({ points, hours }: { points: CounterHistoryPoint[] | null;
       );
     }
 
-    const seriesMap = new Map<string, number[]>();
-    for (const p of points) {
-      const t = new Date(p.hour).getTime();
-      const idx = hourTimes.indexOf(t);
-      if (idx < 0) continue;
-
-      let series = seriesMap.get(p.key);
-      if (!series) {
-        series = new Array(hours).fill(0);
-        seriesMap.set(p.key, series);
-      }
-      series[idx] = p.value;
-    }
-
-    const series = [...seriesMap.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, values]) => ({ key, values, color: colorFor(key) }));
-
-    return { labels, series };
-  }, [points, hours]);
+    return {
+      labels,
+      series: series.map((s) => ({
+        label: s.label,
+        color: colorFor(s.colorKey),
+        values: hourTimes.map((t) => s.byHour.get(t) ?? 0),
+      })),
+    };
+  }, [series, hours]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -334,6 +498,12 @@ function HistoryChart({ points, hours }: { points: CounterHistoryPoint[] | null;
             labels: { color: textColor, font: { size: 11 }, boxWidth: 12, boxHeight: 12 },
           },
           tooltip: {
+            // A counter series is zero for most hours, so an unfiltered index tooltip listed every dimension
+            // in the chart with ": 0" and buried the one or two that actually moved in that hour. Dropping the
+            // zeros and sorting by value makes the hover answer "what happened at 06:00" directly. An hour where
+            // nothing moved shows no tooltip at all, which is the honest answer.
+            filter: (item) => (item.parsed.y ?? 0) !== 0,
+            itemSort: (a, b) => (b.parsed.y ?? 0) - (a.parsed.y ?? 0),
             backgroundColor: isDark ? '#1f1f23' : '#fff',
             titleColor: isDark ? '#e4e4e7' : '#18181b',
             bodyColor: isDark ? '#a1a1aa' : '#52525b',
@@ -348,10 +518,10 @@ function HistoryChart({ points, hours }: { points: CounterHistoryPoint[] | null;
   }, []);
 
   useEffect(() => {
-    if (!chartRef.current || !data) return;
+    if (!chartRef.current) return;
     chartRef.current.data.labels = data.labels;
     chartRef.current.data.datasets = data.series.map(s => ({
-      label: s.key,
+      label: s.label,
       data: s.values,
       borderColor: s.color,
       backgroundColor: s.color + '22',
@@ -364,17 +534,19 @@ function HistoryChart({ points, hours }: { points: CounterHistoryPoint[] | null;
     chartRef.current.update();
   }, [data]);
 
-  if (!points) {
-    return <div style={{ height: 240 }} className="flex items-center justify-center text-sm text-muted-foreground">Loading...</div>;
-  }
-
-  if (data && data.series.length === 0) {
-    return <div style={{ height: 240 }} className="flex items-center justify-center text-sm text-muted-foreground">No hourly data yet</div>;
-  }
+  // The canvas stays mounted through loading and empty states, and the message overlays it. Swapping it for a
+  // placeholder div meant the mount-once chart-creation effect could fire while the canvas was absent and never
+  // run again, leaving a permanently blank chart on any tab whose first render had no data yet.
+  const overlay = loading ? 'Loading...' : series.length === 0 ? 'No hourly data yet' : null;
 
   return (
-    <div style={{ height: 240 }}>
+    <div style={{ height: 240 }} className="relative">
       <canvas ref={canvasRef} />
+      {overlay !== null && (
+        <div className="absolute inset-0 flex items-center justify-center bg-card text-sm text-muted-foreground">
+          {overlay}
+        </div>
+      )}
     </div>
   );
 }

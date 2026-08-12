@@ -4,7 +4,7 @@ sidebar_position: 9
 
 # Counters
 
-Raw view of every counter row in the database. Used for forensics ("what events happened, by metric, when") and addon visibility — any counter an addon writes to the `Counter` / `Statistic` tables shows up here automatically, no per-key wiring required.
+Every durable metric Warp folds through `Counter` → `Statistic`, grouped by the subsystem that wrote it. Used for forensics ("what events happened, by metric, when") and addon visibility — any counter an addon writes to the `Counter` / `Statistic` tables shows up here automatically, no per-key wiring required.
 
 ## Built-in counters
 
@@ -26,11 +26,27 @@ Each event also writes a parallel `:{yyyy-MM-dd-HH}` hourly key so the chart can
 
 ## The page
 
-Two sections, polled every 5s:
+One **tab per counter family**, because the families measure different things in different units and reading them as one alphabetical list does not work: a per-job-type duration SUM in the hundreds of thousands of milliseconds sits next to an execution count of 2, and the dimension is an assembly-qualified type name. Only families that actually have data get a tab.
 
-**Hourly history chart** — every hourly counter is its own series. Toggle 24h / 7d. Click a legend entry to hide that series. Built-in metrics get fixed colors in family hues (succeeded green, failed reds, deleted grays, requeued ambers — breakdown keys tint their parent's hue); addon-defined keys get a deterministic color hashed from the key name so it stays the same across reloads.
+| Tab | Rows | Key family |
+|---|---|---|
+| **Job outcomes** | The global outcome hierarchy | `stats:` |
+| **Job types** / **Handlers** | One row per job type / handler: executions, failures, avg, p95 | `jobstat:` |
+| **Queues** | Queue-wait latency plus the current backlog gauge, one row per queue | `qwait:`, `qbacklog:` |
+| **Deadlines** | Total-scope timeout attainment per job type | `deadline:` |
+| **Adapters** / **Endpoints** | Outbound / inbound call outcomes and latency | `adapter:`, `endpoint:` |
+| **Client** | Browser events by type and name, web vitals at **p75** | `clientevent:` |
+| **Issues** | Hourly occurrence trend per error-group fingerprint (chart only) | `errorgroup:` |
+| **System** | Records dropped by the lossy recording pipelines | `warpsys:` |
+| **Other** | Anything the page does not recognise, rendered raw | addon-defined |
 
-**Outcomes table** — the lifetime totals rendered as the hierarchy above: the derived `unsuccessful` umbrella over `failed` and `deleted`, each state total over its reason rows, with the unattributed remainder (muted) when a total exceeds the sum of its reasons — and a loud `over-attributed` row for the impossible opposite direction. Keys the hierarchy doesn't claim (addon-defined counters) follow in a flat **Other** table, sorted alphabetically. Hourly variants are filtered out of both; the chart consumes them separately.
+Each tab has:
+
+**Hourly history chart** — one series per dimension, for **one metric at a time** (the metric toggle sits next to 24h / 7d). Plotting a duration sum on the same axis as a count flattens the count to zero, so they are never charted together. The ten largest series are drawn and the rest stay in the table below, which is stated on screen. Hovering shows only the series that actually moved in that hour, largest first — zeros are dropped. Built-in outcome metrics get fixed colors in family hues (succeeded green, failed reds, deleted grays, requeued ambers — breakdown keys tint their parent's hue); everything else gets a deterministic color hashed from the key so it stays the same across reloads.
+
+**Table** — one row per dimension, with a filter box. Names are shortened for display (`ProcessOrderRequest` with `Acme.Orders` beneath it; the full assembly-qualified name is the row's tooltip). Duration sums and latency-histogram buckets are never shown as raw columns — they are folded into derived **Avg** and **p95** (p75 for web vitals) columns instead. A per-application slice is a separate row, never merged into the cluster-wide one.
+
+The **Job outcomes** tab keeps its hierarchy rendering: the derived `unsuccessful` umbrella over `failed` and `deleted`, each state total over its reason rows, with the unattributed remainder (muted) when a total exceeds the sum of its reasons — and a loud `over-attributed` row for the impossible opposite direction. Hourly variants are filtered out of every table; the charts consume them separately.
 
 import Screenshot from '@site/src/components/Screenshot';
 
@@ -71,4 +87,4 @@ var hourSuffix = DateTime.UtcNow.ToString("yyyy-MM-dd-HH");
 context.Set<Counter>().Add(new Counter { Key = $"addon:my-metric:{hourSuffix}", Value = 1 });
 ```
 
-The aggregator and cleanup handle the rest — `addon:my-metric` shows up in the table immediately, the hourly variant gets graphed and pruned at 7 days. Use `+1` / `−1` deltas (the column is signed) and let the aggregator sum them.
+The aggregator and cleanup handle the rest — `addon:my-metric` shows up in the **Other** tab immediately (unrecognised keys are rendered raw rather than dropped), the hourly variant gets graphed and pruned at 7 days. Use `+1` / `−1` deltas (the column is signed) and let the aggregator sum them.
