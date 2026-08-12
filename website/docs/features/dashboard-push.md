@@ -48,9 +48,9 @@ The broadcaster subscribes to in-process `ServerTaskSignals<TContext>`. In a sin
 
 The broadcaster is the **third** consumer of `ServerTaskSignals<TContext>`, after `Orchestrator` and `MessageRouter`.
 
-## Auth piggybacks on `WarpUIMiddleware`
+## Auth piggybacks on the dashboard's endpoint conventions
 
-Both the SignalR negotiate (`POST /warp/api/hub/negotiate`) and the WebSocket-upgrade HTTP request pass through `/api/`, so `WarpUIMiddleware`'s existing 401-on-unauthenticated behaviour catches both. An auth-protected dashboard needs no extra wiring — built-in cookie login and custom `IWarpAuthorizationFilter` both work.
+The hub is one of the endpoints `MapWarpUI` returns, so whatever you applied — `RequireAuthorization`, `RequireWarpDashboardLogin`, `RequireLocalRequests` — covers the SignalR negotiate (`POST /warp/api/hub/negotiate`) and the WebSocket-upgrade request too. An auth-protected dashboard needs no extra wiring, and there is no parallel auth code path.
 
 ## Connection states
 

@@ -24,8 +24,8 @@ using Warp.Http.Observability;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
 using Warp.Tests.Fixtures;
+using Warp.UI;
 using Warp.UI.Endpoints;
-using Warp.UI.UIMiddleware;
 using Warp.Worker;
 
 namespace Warp.Tests.EndToEnd;

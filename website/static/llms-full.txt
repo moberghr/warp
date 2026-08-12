@@ -88,7 +88,7 @@ await context.Database.EnsureCreatedAsync();
 ### 4. Add Dashboard (Optional)
 
 ```csharp
-app.UseWarpUI(); // Serves at /warp
+app.MapWarpUI("/warp"); // Serves at /warp
 ```
 
 ### 5. Complete Minimal Example
@@ -108,7 +108,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 var app = builder.Build();
 
-app.UseWarpUI();
+app.MapWarpUI("/warp");
 app.Run();
 ```
 
@@ -961,54 +961,46 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 ### Dashboard Configuration
 
 ```csharp
-app.UseWarpUI(options =>
-{
-    options.Authorization = new MyAuthFilter();
-    options.UnauthorizedRedirectUrl = "/login";   // optional redirect for browsers
-});
+app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
 ```
 
 ---
 
 ## Dashboard Authorization
 
-By default, the dashboard is open. Two approaches to restrict access:
+The dashboard is a set of routed ASP.NET Core endpoints. `MapWarpUI` returns an endpoint builder covering
+the SPA shell, the REST API and the SignalR hub, so one convention gates all three. Default (no
+convention) is open access. Because ASP.NET makes the decision, an anonymous caller is CHALLENGED (reaches
+your sign-in) while an authenticated caller lacking the permission is FORBIDDEN (403 / AccessDeniedPath) —
+and authorization requirements are async, so a DB-backed permission check is an ordinary await.
 
-### Custom auth filter
+### Gate on your own policy (host has an identity system)
 
-Use your existing authentication:
+Needs nothing from Warp:
 
 ```csharp
-public class MyAuthFilter : IWarpAuthorizationFilter
-{
-    public bool Authorize(HttpContext httpContext)
-    {
-        return httpContext.User.Identity?.IsAuthenticated == true
-            && httpContext.User.IsInRole("Admin");
-    }
-}
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("WarpDashboard", policy => policy.RequireRole("Admin"));
 
-app.UseWarpUI(options =>
-{
-    options.Authorization = new MyAuthFilter();
-    options.UnauthorizedRedirectUrl = "/login";
-});
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
 ```
 
-`UseWarpUI()` must come AFTER `UseAuthentication()` and `UseAuthorization()` in the pipeline.
+A DB-backed permission becomes an `AuthorizationHandler<T>`. For XHR, configure your scheme to answer
+`/warp/api` paths with 401 rather than a redirect the SPA cannot follow; the SPA then reloads once so the
+challenge lands on a navigation.
 
-### Built-in login
+### Built-in login (host has no identity system)
 
-Warp serves its own login page and manages session via HTTP-only signed cookie:
+Registers a real cookie authentication scheme; expiry is enforced server-side. `AddBuiltInLogin<T>`
+registers the validator as scoped for you, and `AddDataProtection()` is not needed.
 
 ```csharp
-builder.Services.AddDataProtection();
-builder.Services.AddScoped<IWarpCredentialValidator, MyCredentialValidator>();
+builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>();
 
-app.UseWarpUI(options =>
-{
-    options.UseBuiltInLogin<MyCredentialValidator>();
-});
+app.MapWarpUI("/warp").RequireWarpDashboardLogin();
 ```
 
 ```csharp
@@ -1026,11 +1018,28 @@ public class MyCredentialValidator : IWarpCredentialValidator
 }
 ```
 
-### Localhost-only filter (built-in)
+`RequireWarpDashboardLogin()` gates the API and hub only — the SPA shell stays anonymous because it
+renders the login form itself.
+
+### Localhost only
 
 ```csharp
-options.Authorization = new LocalRequestsOnlyAuthorizationFilter();
+builder.Services.AddWarpDashboard();
+
+app.MapWarpUI("/warp").RequireLocalRequests();
 ```
+
+A remote caller gets 403 — signing in cannot change the answer. Covers shell, API and hub. The same
+mechanism (pin `WarpDashboardDefaults.DenyScheme` on a policy) works for any rule signing in cannot
+satisfy, even with no identity provider registered.
+
+### What is gated
+
+Everything under the route prefix: the SPA shell, its static assets (`/warp/assets/...`), dashboard
+extension JS (`/warp/_ext/...`), the REST API and the SignalR hub. The dashboard's endpoints serve the
+embedded assets themselves rather than UseStaticFiles, because StaticFileMiddleware stands down once
+routing has matched an endpoint and the shell catch-all matches every asset path. Conditional requests
+still work (304 on If-None-Match / If-Modified-Since).
 
 ---
 
@@ -1451,15 +1460,6 @@ public interface IRecurringJobPublisher
 }
 ```
 
-### IWarpAuthorizationFilter
-
-```csharp
-public interface IWarpAuthorizationFilter
-{
-    bool Authorize(HttpContext httpContext);
-}
-```
-
 ### IWarpCredentialValidator
 
 ```csharp
@@ -1527,8 +1527,11 @@ opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi
 // extension methods exist. Define a class implementing the handler/behavior interface and build.
 
 // Dashboard
-WebApplication.UseWarpUI();
-WebApplication.UseWarpUI(Action<WarpUIOptions> setupAction);
+WebApplication.MapWarpUI(string routePrefix);
+WebApplication.MapWarpUI(Action<WarpUIOptions> setupAction);
+WarpUIEndpointConventionBuilder.RequireWarpDashboardLogin();
+WarpUIEndpointConventionBuilder.RequireLocalRequests();
+IServiceCollection.AddWarpDashboard().AddBuiltInLogin<TValidator>();
 
 // Inbound endpoint observability middleware (after UseRouting) — pairs with opt.AddEndpointObservability()
 IApplicationBuilder.UseWarpHttpObservability();
@@ -1662,7 +1665,7 @@ Both apps share the same database. The worker polls for and executes jobs create
 3. **Failed jobs never auto-delete** — they persist until manually handled
 4. **Queue order is alphabetical** — use prefixes like "a-", "b-", "c-" for priority
 5. **AddWarpServer includes AddWarp** — don't call both
-6. **UseWarpUI after auth middleware** — so HttpContext.User is populated
+6. **MapWarpUI + RequireAuthorization** — gate the dashboard with an ASP.NET policy, not a bool filter
 7. **TimeProvider is injectable** — use it for testability, Warp registers TimeProvider.System by default
 8. **Handler ILogger output is captured** — logs are flushed every ~1s and appear in the dashboard in real time
 9. **Job metadata is inherited** — child jobs automatically inherit parent metadata via ambient context

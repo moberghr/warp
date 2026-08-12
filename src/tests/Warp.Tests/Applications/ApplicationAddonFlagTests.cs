@@ -15,8 +15,8 @@ using Warp.Core.Data.Queries;
 using Warp.Core.Endpoints;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
+using Warp.UI;
 using Warp.UI.Endpoints;
-using Warp.UI.UIMiddleware;
 
 namespace Warp.Tests.Applications;
 

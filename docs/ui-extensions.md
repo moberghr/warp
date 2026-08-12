@@ -16,7 +16,7 @@ The extension system has three layers:
 
 ```
 1. User registers IWarpUIExtension in DI
-2. UseWarpUI() discovers extensions, serves their embedded JS at /_ext/{name}/
+2. MapWarpUI() discovers extensions, serves their embedded JS at /_ext/{name}/
 3. GET /api/extensions returns all manifests (name, scriptUrl, pages)
 4. SPA imports each extension's JS module
 5. Extension's install() registers mount/append/insert operations via CSS selectors

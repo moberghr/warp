@@ -7,9 +7,9 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Core.RateLimit;
+using Warp.UI;
 using Warp.UI.Endpoints;
 using Warp.UI.Extensions;
-using Warp.UI.UIMiddleware;
 
 namespace Warp.Tests.Features.RateLimit;
 

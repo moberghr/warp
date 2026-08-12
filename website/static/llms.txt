@@ -36,7 +36,7 @@ Warp ships as core packages — Moberg.Warp.Core (publishing; also includes alwa
 - [Configuration](https://moberghr.github.io/warp/docs/operations/configuration): Worker, polling, retention (age + count), dispatcher mode, worker groups, schema, naming conventions
 - [EF Core Integration](https://moberghr.github.io/warp/docs/operations/ef-core-integration): DbContext setup, server-internal context, migrations, naming conventions
 - [Crash Recovery](https://moberghr.github.io/warp/docs/operations/crash-recovery): Sliding invisibility timeout, keep-alive, stale job recovery
-- [Dashboard Auth](https://moberghr.github.io/warp/docs/operations/dashboard-auth): IWarpAuthorizationFilter, built-in login, cookie auth
+- [Dashboard Auth](https://moberghr.github.io/warp/docs/operations/dashboard-auth): MapWarpUI + RequireAuthorization, built-in cookie login, localhost-only
 - [Releases](https://moberghr.github.io/warp/docs/releases): Version history and upgrade notes
 
 ## Optional

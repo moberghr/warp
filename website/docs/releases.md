@@ -4,6 +4,61 @@ sidebar_position: 6
 
 # Releases
 
+## 4.0.0
+
+*Unreleased*
+
+**Breaking, code-only — no schema migration.** The dashboard is now exposed as routed ASP.NET Core endpoints, so you gate it with the framework's own authorization instead of a Warp-specific filter. This is the whole release; nothing about job execution, the worker, or the data model changes.
+
+### Why
+
+`IWarpAuthorizationFilter.Authorize(HttpContext) → bool` could express only two outcomes, but HTTP has three: allowed, denied-because-anonymous (challenge, so the browser reaches a sign-in), and denied-because-unpermitted (forbid). Warp returned a bare **401 for both**, so a signed-out visitor opening the dashboard hit a dead page while every other route in the host app redirected to its identity provider.
+
+`UnauthorizedRedirectUrl` was the option built to fix that and could not: it redirected on *every* denial, so an authenticated user who lacked the permission was sent to sign in, came back in an identical state, and **bounced forever**. The filter could not tell Warp which kind of "no" it meant, so the option could not either. Consumers worked around it with their own middleware ahead of `UseWarpUI`, hardcoding Warp's route prefix and sniffing `Accept: text/html` to keep XHR on 401.
+
+Being synchronous, the filter also forced a blocking `.GetAwaiter().GetResult()` on any permission check that read a database.
+
+Authorization policies fix all three, and Warp ends up with *less* public surface than before. Reported from [#266](https://github.com/moberghr/warp/issues/266).
+
+### Migration
+
+`MapWarpUI` returns an endpoint builder spanning the SPA shell, the REST API and the SignalR hub, so one convention gates all three:
+
+```csharp
+// 3.x
+app.UseWarpUI(options =>
+{
+    options.Authorization = new MyAuthFilter();
+    options.UnauthorizedRedirectUrl = "/login";
+});
+
+// 4.0
+app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+```
+
+| Removed | Replacement |
+|---|---|
+| `app.UseWarpUI(...)` | `app.MapWarpUI(...)` |
+| `IWarpAuthorizationFilter` / `options.Authorization` | an authorization policy + `.RequireAuthorization("...")` |
+| `options.UnauthorizedRedirectUrl` | your scheme's `LoginPath` / `AccessDeniedPath` |
+| `options.UseBuiltInLogin<T>()` | `services.AddWarpDashboard().AddBuiltInLogin<T>()` + `.RequireWarpDashboardLogin()` |
+| `LocalRequestsOnlyAuthorizationFilter` | `services.AddWarpDashboard()` + `.RequireLocalRequests()` |
+| `namespace Warp.UI.UIMiddleware` | `namespace Warp.UI` (`WarpUIOptions` moved with it) |
+
+Every removal is a compile error with a one-line fix — the same shape as the 2.0 `AddWarpWorker` → `AddWarpServer` rename. An open-access dashboard is `app.MapWarpUI("/warp");` and behaves exactly as before.
+
+The built-in login is now a real `AddCookie` authentication scheme rather than a hand-rolled protected cookie. Three consequences worth knowing: `AddBuiltInLogin<T>()` **registers your `IWarpCredentialValidator` for you** (`UseBuiltInLogin<T>()` did not, so hosts had to remember a separate `AddScoped`), the session expiry is now **enforced server-side** (the old cookie's embedded timestamp was never checked on read, so a captured cookie stayed valid until the data-protection keys rotated), and an explicit `AddDataProtection()` call is no longer needed.
+
+`RequireWarpDashboardLogin()` gates the API and the hub while leaving the SPA shell anonymous — the shell renders the login form, so gating it would challenge the page that collects the credentials. This preserves the 3.x experience exactly.
+
+### Also in this release
+
+- **Gating is now uniform across the whole route prefix.** In 3.x the per-extension static files under `/warp/_ext/{name}` were registered ahead of the auth check and served unconditionally. In 4.0 the dashboard's endpoints serve the SPA bundle and extension JS themselves, so one convention covers the shell, its assets, the API and the hub. Conditional requests are preserved — assets still answer `If-None-Match` / `If-Modified-Since` with a 304.
+- **The SignalR hub is gated by authorization, not an endpoint filter.** Endpoint filters do not run for hub endpoints, so a filter-based design would have silently left negotiate open; a regression test now asserts the hub is covered.
+- **Expired-session recovery in the SPA.** When the host owns authentication, a 401 (or an API response that turns out to be sign-in HTML) triggers a single guarded reload, converting a dead XHR into a navigation your challenge can act on.
+
+See [Dashboard Authorization](/docs/operations/dashboard-auth) for the full set of shapes.
+
 ## 3.11.0
 
 *2026-08-12*

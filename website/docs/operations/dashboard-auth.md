@@ -4,59 +4,110 @@ sidebar_position: 3
 
 # Dashboard Authorization
 
-By default, the Warp dashboard is open to everyone. Use `IWarpAuthorizationFilter` to restrict access.
-
-## Setup
+The dashboard is a set of routed endpoints, so you gate it the way you gate any other part of your app — with ASP.NET Core authorization. `MapWarpUI` returns an endpoint builder covering the SPA shell, the REST API and the SignalR hub, so one call protects all three:
 
 ```csharp
-app.UseWarpUI(options =>
-{
-    options.Authorization = new MyAuthFilter();
-    options.UnauthorizedRedirectUrl = "/login"; // optional
-});
+app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
 ```
 
-## IWarpAuthorizationFilter
+By default (no convention applied) the dashboard is open to everyone.
 
-Implement this interface to control who can access the dashboard:
+Handing the decision to ASP.NET is what makes the two kinds of "no" behave differently: a signed-out visitor is **challenged**, so they reach your sign-in page, while a signed-in visitor who lacks the permission is **forbidden** (403, or your `AccessDeniedPath`). Your authorization requirements are also `async`, so a permission check that reads the database is an ordinary `await`.
+
+## Choosing a shape
+
+| Your situation | What to write |
+|---|---|
+| Local development, no gate | `app.MapWarpUI("/warp");` |
+| The app already has an identity system | `app.MapWarpUI("/warp").RequireAuthorization("YourPolicy");` |
+| No identity system — want a login page | `AddWarpDashboard().AddBuiltInLogin<T>()` + `.RequireWarpDashboardLogin()` |
+| Localhost only | `AddWarpDashboard()` + `.RequireLocalRequests()` |
+
+## Gating on your own policy
+
+Nothing from Warp is needed — the dashboard endpoints take your policy like any other endpoint:
 
 ```csharp
-public class MyAuthFilter : IWarpAuthorizationFilter
-{
-    public bool Authorize(HttpContext httpContext)
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
     {
-        return httpContext.User.Identity?.IsAuthenticated == true
-            && httpContext.User.IsInRole("Admin");
+        options.LoginPath = "/login";
+        options.AccessDeniedPath = "/denied";
+    });
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("WarpDashboard", policy => policy.RequireRole("Admin"));
+
+var app = builder.Build();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+```
+
+A permission that lives in your database becomes an authorization handler — natively async, unit-testable, and identical to how the rest of your app is gated:
+
+```csharp
+public class WarpDashboardHandler : AuthorizationHandler<WarpDashboardRequirement>
+{
+    private readonly IPermissionService _permissions;
+
+    public WarpDashboardHandler(IPermissionService permissions) => _permissions = permissions;
+
+    protected override async Task HandleRequirementAsync(
+        AuthorizationHandlerContext context,
+        WarpDashboardRequirement requirement)
+    {
+        if (await _permissions.HasAsync(context.User, "warp.dashboard"))
+        {
+            context.Succeed(requirement);
+        }
     }
 }
 ```
 
-The filter is called for both the SPA (HTML/CSS/JS) and the API endpoints (`/warp/api/...`).
+:::important Pipeline order
+`UseAuthentication()` and `UseAuthorization()` must be in the pipeline. If you call neither explicitly, `WebApplication` adds them for you when the matching services are registered — but it inserts them ahead of your own middleware, so call them yourself if any middleware of yours needs to run first.
+:::
 
-## Redirect Behavior
+### XHR and expired sessions
 
-When `UnauthorizedRedirectUrl` is set:
-- **Browser requests** to `/warp` get a 302 redirect to the login URL with `?returnUrl=/warp`
-- **API requests** (`/warp/api/...`) always return 401 — no redirect
-
-When `UnauthorizedRedirectUrl` is null:
-- All unauthorized requests return 401
-
-## Built-in Login
-
-Warp can serve its own login page — no external auth setup needed. Users authenticate with credentials you validate, and Warp manages the session via an HTTP-only signed cookie.
+The dashboard is a single-page app that talks to `/warp/api/...` over XHR. A challenge answered with a redirect to an identity provider is not something a `fetch` can follow, so configure your scheme to answer API paths with a status code — the standard pattern for an app that serves both pages and APIs:
 
 ```csharp
-builder.Services.AddDataProtection(); // Required for cookie signing
-builder.Services.AddScoped<IWarpCredentialValidator, MyCredentialValidator>();
-
-app.UseWarpUI(options =>
+.AddCookie(options =>
 {
-    options.UseBuiltInLogin<MyCredentialValidator>();
+    options.LoginPath = "/login";
+    options.Events.OnRedirectToLogin = context =>
+    {
+        if (context.Request.Path.StartsWithSegments("/warp/api"))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        }
+
+        context.Response.Redirect(context.RedirectUri);
+        return Task.CompletedTask;
+    };
 });
 ```
 
-Implement `IWarpCredentialValidator` to check credentials against your database, LDAP, or any source:
+The dashboard handles the rest: on a 401 (or a response that turns out to be sign-in HTML) it reloads once, turning the dead XHR back into a navigation that your challenge can act on.
+
+## Built-in login
+
+Warp can serve its own login page — no identity system needed. It registers a real cookie authentication scheme, so sessions, expiry and sign-out are ASP.NET's, not a bespoke cookie.
+
+```csharp
+builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>();
+
+var app = builder.Build();
+
+app.MapWarpUI("/warp").RequireWarpDashboardLogin();
+```
+
+`AddBuiltInLogin<T>` registers your validator as **Scoped**, so it can inject a `DbContext`:
 
 ```csharp
 public class MyCredentialValidator : IWarpCredentialValidator
@@ -73,7 +124,16 @@ public class MyCredentialValidator : IWarpCredentialValidator
 }
 ```
 
-The validator is registered as **Scoped**, so it can inject DbContext and other scoped services.
+Session lifetime is configurable:
+
+```csharp
+builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>(options =>
+{
+    options.ExpireTimeSpan = TimeSpan.FromHours(8);
+    options.SlidingExpiration = true;
+    options.CookiePath = "/warp";   // defaults to the dashboard's route prefix
+});
+```
 
 import Screenshot from '@site/src/components/Screenshot';
 
@@ -81,66 +141,57 @@ import Screenshot from '@site/src/components/Screenshot';
 
 ### How it works
 
-1. Unauthenticated users see the built-in login page at `/warp`
-2. The SPA posts credentials to `/warp/api/auth/login`
-3. On success, Warp sets an HTTP-only signed cookie (1-day expiry via ASP.NET Data Protection)
-4. API requests include the cookie automatically — 401 triggers the login page
-5. Logout via `/warp/api/auth/logout` clears the cookie
+1. `RequireWarpDashboardLogin()` protects the REST API and the hub, and leaves the SPA shell anonymous — the shell *is* the login page, so gating it would challenge the page that collects the credentials
+2. The SPA posts credentials to `/warp/api/auth/login`, which calls your validator and signs the user in
+3. Warp sets an HTTP-only, `SameSite=Strict` cookie whose expiry is **enforced server-side**
+4. API requests carry the cookie; a 401 sends the SPA back to the login form
+5. `POST /warp/api/auth/logout` signs the user out
 
-### When to use built-in login vs custom auth
-
-| | Built-in Login | Custom Auth Filter |
-|---|---|---|
-| Setup | `UseBuiltInLogin<T>()` | `options.Authorization = new MyFilter()` |
-| Login page | Warp serves it | Your app serves it |
-| Session | Warp cookie | Your existing auth (cookies, JWT, etc.) |
-| Best for | Standalone dashboard access | Apps with existing authentication |
-
-## Built-in Filters
-
-### LocalRequestsOnlyAuthorizationFilter
-
-Allows access only from localhost (127.0.0.1 / ::1):
+## Localhost only
 
 ```csharp
-app.UseWarpUI(options =>
-{
-    options.Authorization = new LocalRequestsOnlyAuthorizationFilter();
-});
-```
-
-## Cookie Auth Example
-
-If your app uses cookie authentication, the dashboard works automatically — cookies are sent with every request:
-
-```csharp
-// Program.cs
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
-    .AddCookie();
+builder.Services.AddWarpDashboard();
 
 var app = builder.Build();
 
-app.UseAuthentication();
-app.UseAuthorization();
-
-// UseWarpUI AFTER auth middleware so HttpContext.User is populated
-app.UseWarpUI(options =>
-{
-    options.Authorization = new AuthenticatedUserFilter();
-    options.UnauthorizedRedirectUrl = "/login";
-});
+app.MapWarpUI("/warp").RequireLocalRequests();
 ```
+
+A remote caller gets 403 — signing in cannot change the answer, so there is nothing to challenge. This covers the shell, the API and the hub.
+
+The same mechanism is available for any rule that signing in cannot satisfy — an API-key check, an allowlist — even in a host with no identity provider at all. Pin `WarpDashboardDefaults.DenyScheme` on the policy and its denials render as 403 instead of failing on a challenge that has no scheme to use:
 
 ```csharp
-public class AuthenticatedUserFilter : IWarpAuthorizationFilter
-{
-    public bool Authorize(HttpContext httpContext)
-    {
-        return httpContext.User.Identity?.IsAuthenticated == true;
-    }
-}
+builder.Services.AddWarpDashboard();   // registers the deny scheme
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("WarpApiKey", policy => policy
+        .AddAuthenticationSchemes(WarpDashboardDefaults.DenyScheme)
+        .RequireAssertion(context => context.Resource is HttpContext http
+            && http.Request.Headers["X-Api-Key"] == "…"));
+
+app.MapWarpUI("/warp").RequireAuthorization("WarpApiKey");
 ```
 
-:::important Pipeline Order
-`UseWarpUI()` must come **after** `UseAuthentication()` and `UseAuthorization()` so that `HttpContext.User` is populated when the filter runs.
-:::
+## What is gated
+
+Everything under the route prefix. Conventions apply to the SPA shell (`/warp`, `/warp/{**path}`), the SPA's static assets (`/warp/assets/...`), dashboard extension JS (`/warp/_ext/...`), every REST endpoint under `/warp/api/...`, and the SignalR hub — including its negotiate request and WebSocket upgrade.
+
+The dashboard's own endpoints serve its embedded assets, rather than static-file middleware, because `StaticFileMiddleware` stands down once routing has matched an endpoint and the shell's catch-all route matches every asset path. Conditional requests still work — assets answer `If-None-Match` / `If-Modified-Since` with a 304.
+
+`RequireWarpDashboardLogin()` is the one deliberate exception: it gates the API and hub but leaves the shell and its assets anonymous, because the shell renders the login form and needs its own JavaScript to do so.
+
+## Upgrading from 3.x
+
+| 3.x | 4.0 |
+|---|---|
+| `app.UseWarpUI(...)` | `app.MapWarpUI(...)` — returns an endpoint builder |
+| `options.Authorization = new MyFilter()` | an authorization policy + `.RequireAuthorization("...")` |
+| `options.UnauthorizedRedirectUrl = "/login"` | your scheme's `LoginPath` (ASP.NET adds `returnUrl` and an access-denied path) |
+| `options.UseBuiltInLogin<T>()` | `services.AddWarpDashboard().AddBuiltInLogin<T>()` + `.RequireWarpDashboardLogin()` |
+| `new LocalRequestsOnlyAuthorizationFilter()` | `.RequireLocalRequests()` |
+| `using Warp.UI.UIMiddleware;` | `using Warp.UI;` |
+
+`IWarpAuthorizationFilter` and `LocalRequestsOnlyAuthorizationFilter` are gone. A bool-returning filter could not distinguish "not signed in" from "not permitted", so both produced a bare 401, and `UnauthorizedRedirectUrl` — which redirected on every denial — bounced an authenticated-but-unpermitted user between the dashboard and the sign-in page forever. Being synchronous, it also forced a blocking `.GetAwaiter().GetResult()` on any permission check that read a database. Authorization policies fix all three.
+
+`AddDataProtection()` is no longer needed for the dashboard — the cookie handler brings it.
