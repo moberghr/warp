@@ -4,6 +4,25 @@ sidebar_position: 6
 
 # Releases
 
+## 3.11.1
+
+*Unreleased*
+
+Patch release — one bug fix. No migration, no API change.
+
+### Recurring jobs no longer wait out the polling backoff
+
+`RecurringJobScheduler` created its firing directly in `State.Enqueued` and returned without announcing it — the only enqueue site in Warp that fired neither the in-process `JobEnqueued` signal nor the cross-process push notification. `Publisher`, `MessageRouter`, `ScheduledJobActivation`, the worker outbox and "Trigger Now" all announce their enqueues; this one didn't. An otherwise idle worker therefore discovered a cron firing only on its next backoff poll.
+
+How long that took depends on `MaxPollingInterval` — 30 seconds by default, and **5 minutes if you call `UseDatabasePush()`**, which raises the cap precisely because push is assumed to do the waking. Enabling push therefore made recurring-job pickup *worse*, and a single-process deployment (API and worker in one host) got no wake at all despite needing no database round-trip to do it.
+
+Recurring firings are now claimed as promptly as anything published through `IPublisher`. Two visible effects:
+
+- The gap between a cron occurrence and the handler starting drops from up to `MaxPollingInterval` to the usual sub-second wake.
+- Queue-wait on the [Queues page](./features/queue-metrics.md) stops being dominated by multi-minute recurring samples. On a queue whose only traffic is recurring jobs, that was every sample — an average wait of minutes on a queue with zero backlog.
+
+Existing `qwait` history is not rewritten: the lifetime average still carries the old samples, and the improvement shows in the hourly buckets from the upgrade onward.
+
 ## 3.11.0
 
 *2026-08-12*

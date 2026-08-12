@@ -5,7 +5,9 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Helper;
+using Warp.Core.Notifications;
 
 namespace Warp.Worker.Services;
 
@@ -14,21 +16,37 @@ namespace Warp.Worker.Services;
 /// from execution — recurring jobs fire regardless of whether the previous execution
 /// succeeded or failed. The dedup check uses the latest RecurringJobLog entry rather
 /// than the oldest to catch the correct outstanding job.
+/// <para>
+/// A firing lands directly in <see cref="State.Enqueued"/>, so it must announce itself like every
+/// other enqueue site (Publisher, MessageRouter, ScheduledJobActivation, the worker outbox): without
+/// the <c>JobEnqueued</c> wake, an idle worker only finds the row on its next backoff poll — up to
+/// <c>MaxPollingInterval</c> later, which <c>UseDatabasePush()</c> raises to 5 minutes precisely
+/// because push is assumed to do the waking. The notifications are captured pre-save and dispatched
+/// from <see cref="OnCommittedAsync"/> (§8.25): <see cref="ExecuteAsync"/> runs inside the server-task
+/// host's lock transaction, so a dispatch there would wake workers onto rows that are not committed yet.
+/// </para>
 /// </summary>
 public sealed class RecurringJobScheduler<TContext> : IServerTask
     where TContext : DbContext
 {
     private readonly DbContext _context;
     private readonly TimeProvider _time;
+    private readonly IWarpNotificationTransport _notificationTransport;
+    private readonly ServerTaskSignals<TContext> _signals;
     private readonly WarpServerConfiguration _configuration;
+    private List<Notification> _pendingNotifications = [];
 
     public RecurringJobScheduler(
         IWarpServerContext serverContext,
         TimeProvider time,
+        IWarpNotificationTransport notificationTransport,
+        ServerTaskSignals<TContext> signals,
         IOptions<WarpServerConfiguration> configuration)
     {
         _context = serverContext.Context;
         _time = time;
+        _notificationTransport = notificationTransport;
+        _signals = signals;
         _configuration = configuration.Value;
     }
 
@@ -45,6 +63,23 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
         var count = await ScheduleRecurringJobsAsync(ct);
 
         return count > 0 ? $"Scheduled {count} recurring jobs" : null;
+    }
+
+    // Post-commit (§8.25): the firings buffered by ScheduleRecurringJobsAsync are durable by the time the
+    // host calls this, so the wake can't race ahead of the rows it announces. CancellationToken.None because
+    // a shutdown mid-iteration still leaves the jobs committed — another server's dispatcher should hear
+    // about them rather than wait out its own backoff.
+    public async Task OnCommittedAsync(CancellationToken ct)
+    {
+        if (_pendingNotifications.Count == 0)
+        {
+            return;
+        }
+
+        var notifications = _pendingNotifications;
+        _pendingNotifications = [];
+
+        await NotificationDispatch.DispatchAsync(notifications, _signals, _notificationTransport, CancellationToken.None);
     }
 
     internal async Task<int> ScheduleRecurringJobsAsync(CancellationToken ct)
@@ -128,6 +163,11 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
 
         if (count > 0)
         {
+            // Capture before the save — CapturePending reads Added Job entries off the change tracker, and
+            // SaveChanges flips them to Unchanged. Same helper the other enqueue sites use, so queue
+            // normalisation (null/empty → "default") and per-queue deduplication are identical here.
+            _pendingNotifications = NotificationDispatch.CapturePending(_context);
+
             await _context.SaveChangesAsync(ct);
         }
 
