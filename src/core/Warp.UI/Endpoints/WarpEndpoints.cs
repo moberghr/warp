@@ -26,6 +26,11 @@ public static class WarpEndpoints
     {
         var apiGroup = app.MapGroup($"{options.RoutePrefix}/api");
 
+        // Pin the dashboard's own JSON shape (camelCase, numeric enums) instead of inheriting the
+        // host's process-wide ConfigureHttpJsonOptions — see WarpDashboardJson. Registered first so it
+        // wraps every route under the prefix, extension sub-groups included.
+        apiGroup.AddEndpointFilter(WarpDashboardJson.NormalizeAsync);
+
         if (options.Authorization != null)
         {
             var filter = options.Authorization;

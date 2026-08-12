@@ -30,6 +30,27 @@ app.UseWarpUI(o =>
 
 All four are optional. Values are injected into the SPA as JSON-encoded runtime config, so a stray quote or markup in a branding string can't break the page.
 
+### The dashboard API ignores your JSON options
+
+The dashboard's REST API (everything under `{RoutePrefix}/api`) and the bundled SPA ship together as one closed contract, so Warp pins its own response format — camelCase property names, enums as numbers — regardless of what the host process configures.
+
+This matters because `ConfigureHttpJsonOptions` is **process-wide** for minimal APIs. Before Warp pinned its own options, a host that did the common thing:
+
+```csharp
+builder.Services.ConfigureHttpJsonOptions(o =>
+    o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+```
+
+reshaped Warp's payloads as a side effect: `currentState` arrived as `"Failed"` instead of `5`, so the dashboard — which looks states up by number — showed **Unknown** on every state badge, dropped the Requeue/Delete buttons on job detail, and could never render the "Cancelling…" badge. A `PropertyNamingPolicy` change broke it the same way.
+
+Nothing is required of you, and there is no setting to get wrong: configure JSON however your own API needs it. Your endpoints keep your options; the dashboard keeps its own.
+
+:::note Inbound Warp HTTP endpoints are different
+
+[`Warp.Http`](/docs/features/http) exposes **your** handlers as **your** public API, so those endpoints deliberately keep honouring your `ConfigureHttpJsonOptions` — your callers see the format you chose. Only Warp's own dashboard API is pinned.
+
+:::
+
 ## Dashboard
 
 The main dashboard shows real-time statistics, live graphs, and server status.
