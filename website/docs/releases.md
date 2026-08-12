@@ -4,7 +4,9 @@ sidebar_position: 6
 
 # Releases
 
-## Unreleased
+## 3.11.0
+
+*2026-08-12*
 
 Additive, but **this release requires a migration** — one new index on `job`. Everything else is additive with no schema impact: the new metric keys are new rows in the existing `Counter` / `Statistic` tables. Two deliberate behaviour changes affect **what numbers you see**, not how jobs execute; a third relaxes several background-task intervals, trading latency for a much quieter idle server.
 
