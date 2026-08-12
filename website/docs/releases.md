@@ -177,6 +177,12 @@ This is **deliberately not fixed here.** Skipping the bookkeeping write on a no-
 
 `WarpConfiguration.DefaultQueue` is documented as the queue used when a caller names none, and `BatchPublisher` honoured it — but `Publisher` resolved `queue ?? "default"` on both its job and message paths. A deployment that set `DefaultQueue` and pointed its worker group at that queue had batch children routed correctly while ordinary publishes went to `"default"`, where nothing was polling: those jobs sat `Enqueued` and never ran. Both paths now consult `DefaultQueue`. Explicit queue arguments still win, and deployments that never set it are unaffected.
 
+### Fixed: the dashboard showed "Unknown" job states in hosts that configure their own JSON options
+
+The dashboard API is minimal APIs returning POCOs, so it serialized with the host application's `ConfigureHttpJsonOptions` — process-wide options a host sets for its **own** API. A host that registers a `JsonStringEnumConverter` (a common choice) silently reshaped Warp's payloads: `currentState` arrived as `"Failed"` instead of `5`, so the state badge read **Unknown** on every page, the Requeue/Delete buttons vanished from job detail (they test `kind === 1`), and the "Cancelling…" badge could never render. A `PropertyNamingPolicy` change broke it the same way.
+
+The dashboard API and the bundled dashboard ship together as one closed contract, so Warp now pins its own response format — camelCase names, numeric enums — for everything under `{RoutePrefix}/api`, extension routes included. **No host change is needed and none is possible to get wrong:** your own endpoints keep whatever JSON options you configured. Request bodies were never affected (`JsonStringEnumConverter` reads numbers as well as names).
+
 ## 3.10.0
 
 *2026-08-03*
