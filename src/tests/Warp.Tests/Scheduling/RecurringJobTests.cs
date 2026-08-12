@@ -5,6 +5,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
@@ -162,6 +163,63 @@ public abstract class RecurringJobTestsBase : IAsyncLifetime
         transport.Published.Count.ShouldBe(1);
         transport.Published[0].Kind.ShouldBe(NotificationKind.JobEnqueued);
         transport.Published[0].Queue.ShouldBe("default");
+    }
+
+    [TimedFact]
+    public async Task ScheduleRecurringJobs_DueJob_DoesNotWakeBeforeCommit()
+    {
+        // ExecuteAsync runs inside the server-task host's lock transaction, so the firing is not durable
+        // yet when it returns. Waking a worker here would send it querying for a row it cannot see (§8.25).
+        await ArrangeDueRecurringJob("wake-precommit-test");
+
+        var transport = new RecordingNotificationTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        await TestTasks.CreateRecurringJobScheduler(_fixture.CreateContext(), TimeProvider.System, signals, transport)
+            .ScheduleRecurringJobsAsync(CancellationToken.None);
+
+        woken.ShouldBe(0);
+        transport.Published.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task OnCommitted_AfterDueRecurringJobScheduled_FiresJobEnqueued()
+    {
+        // Regression: TriggerRecurringJob_FiresJobEnqueuedNotification fixed the manual "Trigger Now"
+        // path, but the scheduler itself still enqueued silently — the firing waited out the worker's
+        // backoff (up to MaxPollingInterval, which UseDatabasePush raises to 5 minutes) before pickup.
+        await ArrangeDueRecurringJob("wake-postcommit-test");
+
+        var transport = new RecordingNotificationTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        var scheduler = TestTasks.CreateRecurringJobScheduler(_fixture.CreateContext(), TimeProvider.System, signals, transport);
+        await scheduler.ExecuteAsync(CancellationToken.None);
+
+        // Act: the host calls this once the lock transaction has committed.
+        await scheduler.OnCommittedAsync(CancellationToken.None);
+
+        woken.ShouldBe(1);
+        transport.Published.Count.ShouldBe(1);
+        transport.Published[0].Kind.ShouldBe(NotificationKind.JobEnqueued);
+        transport.Published[0].Queue.ShouldBe("default");
+    }
+
+    private async Task<RecurringJob> ArrangeDueRecurringJob(string name)
+    {
+        var publisher = new RecurringJobPublisher<TestContext>(_fixture.CreateContext(), TimeProvider.System, new FakeLockProvider());
+        await publisher.AddOrUpdateRecurringJob(new UnitRequest(), name, "* * * * *");
+
+        var setupCtx = _fixture.CreateContext();
+        var recurring = await setupCtx.Set<RecurringJob>().FirstAsync(r => r.Name == name, Xunit.TestContext.Current.CancellationToken);
+        recurring.NextExecution = DateTime.UtcNow.AddMinutes(-5);
+        await setupCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        return recurring;
     }
 
     private sealed class RecordingNotificationTransport : IWarpNotificationTransport

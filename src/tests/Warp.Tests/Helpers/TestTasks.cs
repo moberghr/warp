@@ -163,12 +163,16 @@ public static class TestTasks
 
     public static RecurringJobScheduler<TContext> CreateRecurringJobScheduler<TContext>(
         TContext context,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        ServerTaskSignals<TContext>? signals = null,
+        IWarpNotificationTransport? transport = null)
         where TContext : DbContext
     {
         return new RecurringJobScheduler<TContext>(
             new TestServerContext(context),
             timeProvider,
+            transport ?? NullTransport,
+            signals ?? new ServerTaskSignals<TContext>(),
             Options.Create(new WarpServerConfiguration()));
     }
 

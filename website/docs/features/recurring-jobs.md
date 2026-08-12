@@ -26,7 +26,7 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 1. **Registration**: `AddOrUpdateRecurringJob` stores the cron expression, message payload, and type. Sets `NextExecution` to the next cron occurrence.
 2. **Scheduling**: `RecurringJobScheduler` polls every 15 seconds. When `NextExecution <= now`, it creates a job with `ScheduleTime = now` (ready for immediate execution) and updates `NextExecution` to the next cron occurrence.
 3. **Deduplication**: Before creating a new job, the scheduler checks the most recent `RecurringJobLog` entry. If that job is still `Enqueued` or `Processing`, it skips — no duplicate jobs.
-4. **Execution**: The created job is a regular job. Workers pick it up, execute the handler, and it follows the normal lifecycle.
+4. **Execution**: The created job is a regular job. Workers pick it up, execute the handler, and it follows the normal lifecycle. Once the scheduler's transaction commits, it fires a `JobEnqueued` wake — the in-process signal that shortcuts an idle worker's polling backoff, plus the cross-process push notification when `UseDatabasePush()` is enabled — so a firing is claimed promptly instead of waiting out the backoff.
 
 ## Execution History
 
