@@ -18,6 +18,7 @@ public class WarpServerRegistration<TContext> : IHostedService
     where TContext : DbContext
 {
     private readonly WarpServerConfiguration _configuration;
+    private readonly WarpConfiguration _resolvedConfiguration;
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly TimeProvider _timeProvider;
     private readonly PauseStateHolder _pauseStateHolder;
@@ -25,12 +26,14 @@ public class WarpServerRegistration<TContext> : IHostedService
 
     public WarpServerRegistration(
         IOptions<WarpServerConfiguration> configuration,
+        IOptions<WarpConfiguration> resolvedConfiguration,
         IServiceScopeFactory serviceScopeFactory,
         TimeProvider timeProvider,
         PauseStateHolder pauseStateHolder,
         ServerRegistrationState state)
     {
         _configuration = configuration.Value;
+        _resolvedConfiguration = resolvedConfiguration.Value;
         _serviceScopeFactory = serviceScopeFactory;
         _timeProvider = timeProvider;
         _pauseStateHolder = pauseStateHolder;
@@ -42,8 +45,11 @@ public class WarpServerRegistration<TContext> : IHostedService
         // A service-only server (RunWorker = false, set by DisableWorker()) creates no worker
         // groups or workers at all, regardless of WorkerCount / AddWorkerGroup. When the worker
         // runs, zero-worker groups are still skipped per-group below.
+        // The resolved WarpConfiguration is what the Publisher reads (when AddWarp was called first, ITS
+        // builder wins that registration, not this server builder) — so the untouched-Queues substitution
+        // must follow the resolved DefaultQueue, the queue untargeted publishes actually land on.
         var workerGroups = _configuration.RunWorker
-            ? _configuration.GetEffectiveWorkerGroups()
+            ? _configuration.GetEffectiveWorkerGroups(_resolvedConfiguration.DefaultQueue)
             : [];
         var totalWorkerCount = workerGroups.Sum(g => g.WorkerCount);
 

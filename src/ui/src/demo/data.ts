@@ -271,12 +271,38 @@ export function getStatsHistoryPoints(hours: number): StatsHistoryPoint[] {
   });
 }
 
+// Deliberately internally consistent, because the Counters page derives and cross-checks these rather than
+// just listing them: the umbrella renders as failed + deleted (109), and every state total is set slightly
+// ABOVE the sum of its reasons so the "unattributed" remainder row appears — that row is a real state of the
+// data (a plain handler throw carries no reason), and a demo where every total added up exactly would hide
+// it. retried-jobs (61) is below requeued-retry (138) because it counts distinct jobs, not retry events.
 export function getCountersDemo() {
   return [
     { key: 'stats:succeeded', value: 15847 },
+
+    // failed: 29 + 6 attributed, 12 unattributed
     { key: 'stats:failed', value: 47 },
+    { key: 'stats:failed-retry-exhausted', value: 29 },
+    { key: 'stats:failed-saga', value: 6 },
+
+    // deleted: 24 + 18 + 11 + 4 attributed, 5 unattributed
     { key: 'stats:deleted', value: 62 },
-    { key: 'stats:requeued', value: 18 },
+    { key: 'stats:deleted-timeout', value: 24 },
+    { key: 'stats:deleted-concurrency', value: 18 },
+    { key: 'stats:deleted-ratelimit', value: 11 },
+    { key: 'stats:deleted-saga', value: 4 },
+
+    // requeued: 138 + 31 + 22 + 9 + 5 + 3 attributed, 6 unattributed
+    { key: 'stats:requeued', value: 214 },
+    { key: 'stats:requeued-retry', value: 138 },
+    { key: 'stats:requeued-ratelimit', value: 31 },
+    { key: 'stats:requeued-concurrency', value: 22 },
+    { key: 'stats:requeued-circuitbreaker', value: 4 },
+    { key: 'stats:requeued-manual', value: 9 },
+    { key: 'stats:requeued-recovery', value: 5 },
+    { key: 'stats:requeued-saga', value: 3 },
+
+    { key: 'stats:retried-jobs', value: 61 },
   ];
 }
 
@@ -291,10 +317,22 @@ export function getCountersHistoryDemo(hours: number) {
     const business = h >= 9 && h <= 17;
     const base = business ? 800 + seeded(i + 10) * 500 : 50 + seeded(i + 40) * 150;
 
+    const failed = Math.round(base * (0.01 + seeded(i + 50) * 0.04));
+    const deleted = Math.round(base * 0.005);
+    const requeued = Math.round(base * (0.02 + seeded(i + 60) * 0.03));
+
     points.push({ hour: hourDate.toISOString(), key: 'stats:succeeded', value: Math.round(base) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:failed', value: Math.round(base * (0.01 + seeded(i + 50) * 0.04)) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:deleted', value: Math.round(base * 0.005) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued', value: Math.round(base * (0.005 + seeded(i + 60) * 0.02)) });
+    points.push({ hour: hourDate.toISOString(), key: 'stats:failed', value: failed });
+    points.push({ hour: hourDate.toISOString(), key: 'stats:deleted', value: deleted });
+    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued', value: requeued });
+
+    // The dominant reason per state, so the chart shows the breakdown families tinting their parent's hue
+    // (builtInColors in CountersPage) rather than four flat lines. Each stays below its state total.
+    points.push({ hour: hourDate.toISOString(), key: 'stats:failed-retry-exhausted', value: Math.round(failed * 0.6) });
+    points.push({ hour: hourDate.toISOString(), key: 'stats:deleted-timeout', value: Math.round(deleted * 0.4) });
+    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued-retry', value: Math.round(requeued * 0.65) });
+    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued-ratelimit', value: Math.round(requeued * 0.15) });
+    points.push({ hour: hourDate.toISOString(), key: 'stats:retried-jobs', value: Math.round(requeued * 0.3) });
   }
 
   return points;

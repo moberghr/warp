@@ -105,7 +105,7 @@ The schedule persists as a JSON seconds array (`"[60,600,3600,21600]"`, `"[]"` f
 
 ### Cadence precision
 
-Retry timing is **not** a precision scheduler, and the docs are explicit about it: a scheduled retry fires at *delay + up to ~5s activation latency + worker pickup*. Each retry is a job in `State.Scheduled`; `ScheduledJobActivation` flips it to `Enqueued` when `ScheduleTime <= now`, and its cadence (`ScheduledActivationInterval`, default 5s) is the worst-case slack before the job becomes eligible, after which a worker fetches it on its normal poll/signal cycle. This is exactly the right precision for exponential backoff and deliberately not marketed as anything tighter — if you need sub-second delivery deadlines, webhooks are the wrong tool.
+Retry timing is **not** a precision scheduler, and the docs are explicit about it: a scheduled retry fires at *delay + up to ~10s activation latency + worker pickup*. Each retry is a job in `State.Scheduled`; `ScheduledJobActivation` flips it to `Enqueued` when `ScheduleTime <= now`, and its cadence (`ScheduledActivationInterval`, default 10s) is the worst-case slack before the job becomes eligible, after which a worker fetches it on its normal poll/signal cycle. This is exactly the right precision for exponential backoff and deliberately not marketed as anything tighter — if you need sub-second delivery deadlines, webhooks are the wrong tool.
 
 ### Do not wrap the client in an external HTTP retry handler
 

@@ -77,6 +77,7 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
                 State = JobOutcome.RescheduledState(rescheduleTo, contentionNow),
                 ScheduleTime = rescheduleTo,
                 ClearHandlerType = true,
+                Reason = OutcomeReason.RateLimit,
                 LogMessage = $"Requeued — rate limit '{key}' lock contention",
             };
             span?.SetTag(WarpTelemetryAttributes.WarpRateLimitOutcome, WarpTelemetryAttributes.WarpRateLimitOutcomeLockContention);
@@ -102,6 +103,7 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
                 State = JobOutcome.RescheduledState(evaluation.NextAvailable, now),
                 ScheduleTime = evaluation.NextAvailable,
                 ClearHandlerType = true,
+                Reason = OutcomeReason.RateLimit,
                 LogMessage = $"Throttled — rate limit '{key}' ({effectiveCount}/{windowSeconds}s), rescheduled to {evaluation.NextAvailable:O}",
             };
             span?.SetTag(WarpTelemetryAttributes.WarpRateLimitOutcome, WarpTelemetryAttributes.WarpRateLimitOutcomeThrottled);
@@ -111,6 +113,7 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             _jobContext.Outcome = new JobOutcome
             {
                 State = State.Deleted,
+                Reason = OutcomeReason.RateLimit,
                 LogMessage = $"Cancelled — rate limit '{key}' exceeded ({effectiveCount}/{windowSeconds}s)",
             };
             span?.SetTag(WarpTelemetryAttributes.WarpRateLimitOutcome, WarpTelemetryAttributes.WarpRateLimitOutcomeSkipped);

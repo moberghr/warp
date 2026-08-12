@@ -13,7 +13,7 @@ public class WorkerGroupConfiguration
     /// Each time the worker polls for a job, it will wait for this interval before polling again.
     /// Also serves as the floor for exponential backoff when consecutive polls return no work.
     /// </summary>
-    public TimeSpan PollingInterval { get; set; } = TimeSpan.FromSeconds(1);
+    public TimeSpan PollingInterval { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// Upper bound on the polling delay when consecutive polls return no work.
@@ -29,6 +29,26 @@ public class WorkerGroupConfiguration
     /// <see cref="PollingInterval"/>.
     /// </summary>
     public double PollingIntervalFactor { get; set; } = 2.0;
+
+    /// <summary>
+    /// Dispatcher mode only. How many jobs to claim BEYOND what idle workers can start right now.
+    /// <para>
+    /// Null (the default) means <see cref="WorkerCount"/> — the depth the dispatcher has always
+    /// buffered. Prefetch is what makes dispatcher mode worth running: workers free up one at a
+    /// time, so without it a claim degenerates to roughly one job per round trip and throughput
+    /// falls below plain per-worker fetching.
+    /// </para>
+    /// <para>
+    /// Zero means never claim speculatively — nothing waits in the buffer beyond the moment a worker
+    /// picks it up (a worker finishing its completion-batch flush is briefly counted as free, so a job
+    /// can sit buffered for that instant; the claim is bounded, not zero), at the cost of that
+    /// throughput. Choose it when cross-server fairness matters more: prefetched jobs
+    /// are Processing on THIS server, so another server with idle workers cannot take them, and
+    /// they wait behind whatever the local workers are running. Higher values trade further the
+    /// other way and suit short jobs on a single-server or evenly loaded deployment.
+    /// </para>
+    /// </summary>
+    public int? PrefetchCount { get; set; }
 }
 
 public class WarpServerConfiguration : WarpConfiguration
@@ -64,7 +84,7 @@ public class WarpServerConfiguration : WarpConfiguration
     /// Applies to the implicit default worker group. Also serves as the floor for exponential
     /// backoff when consecutive polls return no work.
     /// </summary>
-    public TimeSpan PollingInterval { get; set; } = TimeSpan.FromSeconds(1);
+    public TimeSpan PollingInterval { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// Upper bound on the polling delay when consecutive polls return no work.
@@ -79,9 +99,40 @@ public class WarpServerConfiguration : WarpConfiguration
     public double PollingIntervalFactor { get; set; } = 2.0;
 
     /// <summary>
-    /// Queues this worker subscribes to. Applies to the implicit default worker group.
+    /// Dispatcher mode only. How many jobs to claim beyond what idle workers can start right now.
+    /// Null (the default) means <see cref="WorkerCount"/>. Applies to the implicit default worker
+    /// group; see <see cref="WorkerGroupConfiguration.PrefetchCount"/>.
     /// </summary>
-    public string[] Queues { get; set; } = ["default"];
+    public int? PrefetchCount { get; set; }
+
+    private string[] _queues = ["default"];
+    private bool _queuesExplicitlySet;
+
+    /// <summary>
+    /// Queues this worker subscribes to. Applies to the implicit default worker group. When left
+    /// untouched, the implicit group follows <see cref="WarpConfiguration.DefaultQueue"/> — the queue
+    /// untargeted publishes actually land on — rather than the literal <c>"default"</c>. Setting this
+    /// explicitly is an explicit decision and wins outright; see
+    /// <see cref="GetEffectiveWorkerGroups"/> for why the tracking exists.
+    /// </summary>
+    public string[] Queues
+    {
+        get => _queues;
+        set
+        {
+            // ConfigurationBinder invokes every public setter with a rebound copy of the CURRENT value
+            // even when the bound section carries no matching key at all — so "the setter ran" cannot
+            // mean "the user chose". A value indistinguishable from the untouched default is treated as
+            // no choice; anything else is explicit. (The one intent this folds away — explicitly wanting
+            // the literal "default" queue WHILE routing publishes elsewhere via DefaultQueue — is a
+            // config that strands every untargeted publish, which is the bug this exists to prevent.)
+            var isExplicit = _queuesExplicitlySet
+                || value is null
+                || !value.SequenceEqual(_queues, StringComparer.Ordinal);
+            _queues = value!;
+            _queuesExplicitlySet = isExplicit;
+        }
+    }
 
     /// <summary>
     /// Upper bound on how many rows <see cref="Services.MessageRouter{TContext}"/> and
@@ -101,8 +152,14 @@ public class WarpServerConfiguration : WarpConfiguration
     /// <see cref="PauseStateHolder"/>. Set to <c>null</c> to disable the auto-run loop —
     /// useful for tests that drive the heartbeat tick manually via
     /// <c>ServerTaskHost.RunOnceAsync&lt;Heartbeat&gt;</c>.
+    /// <para>
+    /// Raised 3s -> 5s: Heartbeat and ScheduledJobActivation were measured as 51% of an idle server's
+    /// DB traffic. The binding constraint is <c>BackgroundServiceLease</c> renewal — this must tick
+    /// comfortably inside the 30s lease TTL, and 5s still leaves a 6x margin. The visible cost is that
+    /// pause propagation (§6.8) is now bounded by 5s rather than 3s.
+    /// </para>
     /// </summary>
-    public TimeSpan? HealthCheckInterval { get; set; } = TimeSpan.FromSeconds(3);
+    public TimeSpan? HealthCheckInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     public TimeSpan HealthCheckTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
@@ -135,7 +192,7 @@ public class WarpServerConfiguration : WarpConfiguration
     /// <see cref="WarpConfiguration.JobMetricsSink"/>) the per-queue backlog <c>Statistic</c> the dashboard
     /// reads. Set to <c>null</c> to disable.
     /// </summary>
-    public TimeSpan? BacklogSampleInterval { get; set; } = TimeSpan.FromSeconds(15);
+    public TimeSpan? BacklogSampleInterval { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// How often <see cref="Services.ServerCleanup{TContext}"/> removes Server rows whose
@@ -153,7 +210,7 @@ public class WarpServerConfiguration : WarpConfiguration
     /// How often <see cref="Services.ExpirationCleanup{TContext}"/> deletes expired jobs and
     /// their log rows. Set to <c>null</c> to disable.
     /// </summary>
-    public TimeSpan? ExpirationCleanupInterval { get; set; } = TimeSpan.FromSeconds(60);
+    public TimeSpan? ExpirationCleanupInterval { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// How often <see cref="Services.RecurringJobScheduler{TContext}"/> checks for recurring
@@ -172,18 +229,32 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan? OrchestrationInterval { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// The out-of-the-box <see cref="MessageRoutingInterval"/>. Exposed so <c>UseDatabasePush()</c> can
+    /// detect "still at the default" without hardcoding the number — the two drifted apart when the
+    /// default moved from 1s to 10s, silently disabling the push backstop bump.
+    /// </summary>
+    public static readonly TimeSpan DefaultMessageRoutingInterval = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// How often the <see cref="Services.MessageRouter{TContext}"/> task runs to discover
     /// handlers for newly-enqueued <c>Kind=Message</c> rows. Set to <c>null</c> to disable
     /// the periodic auto-loop — routing is then driven entirely by <c>MessageEnqueued</c>
     /// push signals plus any explicit ticks.
     /// </summary>
-    public TimeSpan? MessageRoutingInterval { get; set; } = TimeSpan.FromSeconds(1);
+    public TimeSpan? MessageRoutingInterval { get; set; } = DefaultMessageRoutingInterval;
 
     /// <summary>
     /// How often the scheduled-job activation task checks for rows in <see cref="Core.Enums.State.Scheduled"/>
     /// whose <c>ScheduleTime</c> has elapsed and flips them to <see cref="Core.Enums.State.Enqueued"/>.
+    /// <para>
+    /// Raised 5s -> 10s. This interval IS the worst-case latency between a job's <c>ScheduleTime</c> and
+    /// it becoming eligible for pickup (§2.8) — the task is time-driven and deliberately does not
+    /// participate in DB-push wake-up. It was the single largest contributor to idle DB traffic (28% of
+    /// commands on the dispatcher-push config), and unlike Heartbeat it has no correctness coupling: the
+    /// only cost is latency. Note rate-limit Wait-mode reschedules are floored by this value too (§8.8).
+    /// </para>
     /// </summary>
-    public TimeSpan ScheduledActivationInterval { get; set; } = TimeSpan.FromSeconds(5);
+    public TimeSpan ScheduledActivationInterval { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// How often the worker checks if a running job has been cancelled (deleted).
@@ -269,10 +340,20 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan CompletionFlushInterval { get; set; } = TimeSpan.FromMilliseconds(100);
 
     /// <summary>
+    /// The effective <see cref="BackgroundServiceLeaseTtl"/> when none is configured. Shared by every
+    /// consumer that coalesces the null — the lease host, both providers' SQL factories, and the
+    /// <c>AddWarpServer</c> renewal-margin validation. The validation is WHY this is one constant: it has
+    /// to reject a heartbeat cadence the default TTL cannot survive, and a literal duplicated four ways
+    /// would let the checked value drift from the running one.
+    /// </summary>
+    public static readonly TimeSpan DefaultBackgroundServiceLeaseTtl = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// TTL applied to <c>BackgroundServiceLease</c> rows when a singleton service acquires
-    /// the cluster lease. <c>null</c> falls back to 30 seconds. The lease must be renewed
-    /// every <see cref="HealthCheckInterval"/> by the <c>Heartbeat</c> server task; the TTL
-    /// should be at least 3× the heartbeat cadence to tolerate transient DB blips.
+    /// the cluster lease. <c>null</c> falls back to <see cref="DefaultBackgroundServiceLeaseTtl"/>
+    /// (30 seconds). The lease must be renewed every <see cref="HealthCheckInterval"/> by the
+    /// <c>Heartbeat</c> server task; the TTL must be at least 3× the heartbeat cadence to tolerate
+    /// transient DB blips — <c>AddWarpServer</c> enforces this at startup.
     /// </summary>
     public TimeSpan? BackgroundServiceLeaseTtl { get; set; }
 
@@ -299,14 +380,27 @@ public class WarpServerConfiguration : WarpConfiguration
     /// Returns all effective worker groups. Top-level settings always form the first group.
     /// Any groups added via <see cref="AddWorkerGroup"/> are appended after.
     /// </summary>
-    internal List<WorkerGroupConfiguration> GetEffectiveWorkerGroups()
+    internal List<WorkerGroupConfiguration> GetEffectiveWorkerGroups(string? resolvedDefaultQueue = null)
     {
+        // An untouched Queues follows DefaultQueue. The Publisher stamps untargeted jobs with
+        // WarpConfiguration.DefaultQueue, so a config that sets ONLY DefaultQueue = "orders" publishes
+        // every job onto "orders" — and a group still polling the literal "default" would leave all of
+        // them Enqueued forever with no error anywhere. An explicitly set Queues is an explicit decision
+        // (a worker deliberately dedicated to other queues is a supported shape) and is never widened.
+        //
+        // resolvedDefaultQueue exists because this builder is not always the WarpConfiguration publishes
+        // resolve: when AddWarp was called first, ITS builder wins the IOptions<WarpConfiguration>
+        // TryAddSingleton, so publishes use AddWarp's DefaultQueue while this server builder's copy still
+        // reads "default". The caller that knows the resolved options (WarpServerRegistration) passes that
+        // value so the substitution follows the queue publishes actually land on.
+        var baseQueues = _queuesExplicitlySet ? Queues : [resolvedDefaultQueue ?? DefaultQueue];
+
         // Webhook delivery is a Core feature (§8.20): the implicit default group always subscribes to the
         // dedicated warp:webhooks queue so any server with a worker drains deliveries — no per-process opt-in
         // to forget. Deduped so an explicit Queues that already lists it stays single.
-        var defaultQueues = Queues.Contains(WebhookConstants.Queue, StringComparer.Ordinal)
-            ? Queues
-            : [.. Queues, WebhookConstants.Queue];
+        var defaultQueues = baseQueues.Contains(WebhookConstants.Queue, StringComparer.Ordinal)
+            ? baseQueues
+            : [.. baseQueues, WebhookConstants.Queue];
 
         var groups = new List<WorkerGroupConfiguration>
         {
@@ -317,6 +411,7 @@ public class WarpServerConfiguration : WarpConfiguration
                 PollingInterval = PollingInterval,
                 MaxPollingInterval = MaxPollingInterval,
                 PollingIntervalFactor = PollingIntervalFactor,
+                PrefetchCount = PrefetchCount,
             },
         };
 

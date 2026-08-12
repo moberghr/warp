@@ -4,6 +4,179 @@ sidebar_position: 6
 
 # Releases
 
+## 3.11.0
+
+*2026-08-12*
+
+Additive, but **this release requires a migration** — one new index on `job`. Everything else is additive with no schema impact: the new metric keys are new rows in the existing `Counter` / `Statistic` tables. Two deliberate behaviour changes affect **what numbers you see**, not how jobs execute; a third relaxes several background-task intervals, trading latency for a much quieter idle server.
+
+:::warning Migration required — read before upgrading
+
+Earlier drafts of these notes said "no migration". **That is no longer true.** See [Migration: one new index on `job`](#migration-one-new-index-on-job) below, including the note on building it without a write outage.
+
+:::
+
+### Migration: one new index on `job`
+
+Run `dotnet ef migrations add <Name>` against your `DbContext` and apply it. The migration contains a single statement:
+
+```sql
+CREATE INDEX ix_job_current_state_schedule_time
+    ON warp.job USING btree (current_state, schedule_time);
+```
+
+**Why.** `ScheduledJobActivation` runs `UPDATE job SET current_state = 1 WHERE current_state = 7 AND schedule_time <= now() RETURNING id, queue, schedule_time` on every tick. It filters `current_state` **without** `kind`, so it cannot use the leading column of the existing `(Kind, CurrentState, Queue, ScheduleTime)` index. The planner instead used `(Kind, CurrentState, CreateTime)` on `current_state` alone, heap-fetched **every** row sitting in `Scheduled`, and discarded the future-dated ones. On 250,000 job rows with 5,675 in `Scheduled` that cost **31.8 ms and 2,686 buffers per tick**; with the index it is **0.35 ms and 4 buffers**, because the 2,841 rows previously fetched-and-discarded are now excluded by the index condition.
+
+The cost is **+17.8% on a bulk insert and +8.9% on a bulk state transition** — about **5 µs of database time over a job's entire life** (one insert plus roughly three state transitions) — and 9.2 MB of index against 71 MB of existing `job` indexes. The worker's claim query was re-checked with and without: identical plan, no regression.
+
+**The SQL Server provider's activation statement has the identical predicate**, so the index applies there too and is emitted by the same migration.
+
+:::danger Building the index locks the table
+
+A plain `CREATE INDEX` takes a lock that **blocks writes to `job` for the whole build**. On a large `job` table that is a write outage — jobs cannot be published or claimed while it runs. If that matters, hand-edit the generated migration before applying it:
+
+- **PostgreSQL** — `CREATE INDEX CONCURRENTLY` (must run outside a transaction; in EF Core, use `migrationBuilder.Sql(..., suppressTransaction: true)`).
+- **SQL Server Enterprise** — `WITH (ONLINE = ON)`.
+
+:::
+
+**When this index is not worth it.** There is **no jobs/sec break-even** — write cost scales with your job rate and read cost scales with how many rows sit in `Scheduled`, which is itself the job rate times the fraction delayed times the average delay, so throughput appears on both sides and cancels. **The deciding variable is how long work sits in `Scheduled`.** Warp's defaults keep that high: retry delays are `[15, 60, 300]` seconds, the webhook retry schedule is `[1m, 10m, 1h, 6h]` (a delivery in its six-hour backoff holds a `Scheduled` row for six hours), and saga timeouts and rate-limit `Wait` reschedules park rows there too. But if you run **no retries, no webhooks, no sagas and no scheduled jobs**, nothing accumulates in `Scheduled`, the read cost this removes was never being paid, and you are buying ~18% insert overhead for nothing — drop the index from the generated migration. See [Queue metrics](./features/queue-metrics.md#scheduled-jobs-and-the-currentstate-scheduletime-index).
+
+> **Correction.** An earlier analysis on this branch described the pre-index plan as a **sequential scan** costing ~115 ms. That was wrong — it came from a test seed whose `parent_job_id` column was entirely NULL, which changed which index the planner found usable. Against a realistic seed the pre-index plan is an index scan and the real cost is 31.8 ms of pointless heap fetching. The 31.8 ms figure is the one to trust.
+
+### Requeue and outcome metrics get a reason
+
+`stats:requeued` was a single flat number covering retry backoff, mutex waits, rate-limit waits and saga conflicts alike, and `stats:deleted` mixed operator deletes with mutex skips, rate-limit skips and timeout deletes. Both now carry a breakdown alongside the unchanged totals:
+
+```
+stats:succeeded                 top-level total — a success is not unsuccessful, so it sits
+                                outside the umbrella
+stats:unsuccessful              umbrella — DERIVED on read as failed + deleted, never stored
+  stats:failed                  state total
+    stats:failed-retry-exhausted / -saga
+  stats:deleted                 state total
+    stats:deleted-timeout / -concurrency / -ratelimit / -saga
+stats:requeued                  top-level total — a requeue is not a terminal outcome, so it
+                                sits outside the umbrella too
+  stats:requeued-retry / -concurrency / -ratelimit / -circuitbreaker / -saga / -manual / -recovery
+stats:retried-jobs              standalone — distinct jobs that entered retry, not retry events
+```
+
+Totals are written independently of the breakdown, so nothing needs summing, and an outcome with no attributable cause (a plain handler throw with no addon involved) still lands in its total — the difference between a total and the sum of its reasons is the unattributed remainder.
+
+Retry **exhaustion** is now distinguishable from a first-attempt failure, which it never was: the retry behaviour used to signal exhaustion by setting no outcome at all, producing exactly the same observable event as a job with no retry policy.
+
+The umbrella is **computed on read as `failed + deleted`** and is never written as a `Counter` row. Ten sites move those two totals, and a stored umbrella would have to be maintained at every one or under-report. Only those two belong under it: a **success is not unsuccessful**, and a **requeue is not terminal** — the job runs again and lands in one of the other totals — so both stay top-level.
+
+`Reason` is a new `init` property on the public `JobOutcome`, typed as the closed `OutcomeReason` enum. Custom pipeline behaviours may set it. It is deliberately not a free-form string: an unbounded reason would mint an unbounded number of `Statistic` rows. The token lookup returns `unknown` for an unmapped member rather than throwing — it runs inside the job's own `catch`, where a throw would be laundered into a fake handler failure and re-poison the job forever; a guard test keeps every member mapped.
+
+New meter: **`warp.job.requeued`** (`job.type`, `queue`, `reason`, `application`), always emitted. Concurrency and rate limiting previously emitted spans only, which are sampled — a requeue was not a countable signal. The concurrency and rate-limit **keys** are deliberately not tags (unbounded and PII-adjacent); they stay on the span.
+
+### Dashboard requeues and crash recovery are now counted
+
+Requeueing from the dashboard, and recovering a job whose worker died, both wrote a `Requeued` log row and **no counter at all** — so `stats:requeued` silently under-reported every operator action and every recovered crash. Both now count, attributed as `-manual` and `-recovery`.
+
+### Behaviour change: retries are reported as retried, not failed
+
+`RetryOptions.Delays` defaults to `[15, 60, 300]`, so a retry is scheduled into the future and lands in `Scheduled`, not `Enqueued`. The worker's OpenTelemetry status label tested only `Enqueued`, so **every default-configured retry attempt was emitted as `status=failed`** on `warp.job.completed` and `warp.job.duration`, and `warp.job.retried` never fired. The database recorded the same attempt correctly as a requeue, so the two disagreed.
+
+**If you alert on `warp.job.completed{status=failed}`, your failure count will drop and a `status=retried` series will appear.** Job execution is unchanged — only the label.
+
+### Behaviour change: outcome stats are append-only
+
+`stats:succeeded`, `stats:failed` and `stats:deleted` used to be **decremented** when a requeue or delete undid the outcome already recorded. That is removed, on the principle that **a metric records an event and current state is a query**:
+
+- The decrement wrote only the lifetime key, never an hourly bucket — so a lifetime total already disagreed with the sum of its own buckets.
+- The dashboard throughput chart deltas these counters, and a decrement could drive that delta negative (silently clamped to zero, under-reporting the tick).
+- Failed jobs never auto-expire, so the **Failed tile** — a live `Job` query — already answers "how many are failed right now", accurately and permanently. The decrement made the counter a worse copy of that query while destroying the only thing a counter uniquely provides: "how many ever failed".
+
+**These three totals will read higher than before for anyone who requeues or deletes jobs**, and they no longer decrease. Dashboard tiles and navigation badges are unaffected — they query the `Job` table, not these counters.
+
+### Behaviour change: the circuit breaker now counts retry exhaustion
+
+With the breaker registered **outer** of retry (the documented order — "Circuit Breaker short-circuits before Retry"), the terminal failure of a retried job never incremented `FailureCount`: the breaker skipped any attempt that carried a `JobOutcome`, and retry exhaustion now carries one. The breaker counts a `Failed` outcome as the dependency failure it is; reschedule and delete outcomes are still skipped. If you run breaker-outer, circuits that never opened during retry-exhausting outages will now open — that is the feature working, not a regression. In any registration order, a handler that stamps a `Failed` outcome itself and then throws now also counts toward its circuit — a deliberately failed attempt is a failure.
+
+### Behaviour change: `retry-exhausted` is only stamped when a retry budget existed
+
+`RetryOptions.MaxRetries` defaults to `0` and the retry behaviour runs for every job once `AddRetry()` is called — so a job type with no `[Retry]` attribute had its first and only failure labelled `stats:failed-retry-exhausted`. Zero-budget failures are now unattributed (they land in the remainder row on the Counters page, where they belong). If you chart `stats:failed-retry-exhausted`, expect it to drop to only genuinely exhausted retries.
+
+### Startup validation: singleton-lease renewal margin
+
+`AddWarpServer` now throws when `BackgroundServiceLeaseTtl` (or its 30s default) is less than **3× `HealthCheckInterval`** — the lease is renewed by the heartbeat, and a thinner margin lets one slow round-trip hand a running singleton service to a second server. **A config that started before may fail at startup after upgrading** (e.g. an explicit 10s TTL against the new 5s heartbeat default, or a heartbeat raised past 10s with the TTL left at its 30s default). The exception names both knobs; raise the TTL or lower the interval.
+
+### Behaviour change: the implicit worker group follows `DefaultQueue`
+
+The `Publisher` now honours `WarpConfiguration.DefaultQueue` (previously ignored — untargeted publishes always landed on the literal `"default"`). To keep the pair coherent, a server whose `Queues` is left untouched now polls `[DefaultQueue]` instead of the literal `"default"` — so setting only `DefaultQueue = "orders"` publishes to `orders` **and** processes it, instead of stranding every job on a queue no worker polls. An explicitly set `Queues` is never widened.
+
+### Behaviour change: quieter idle — seven background-task intervals relaxed
+
+An idle Warp server had grown noisy. On the recommended `dispatcher-push` configuration it was issuing **2.9 database queries per second doing nothing at all**, against 1.2 q/s measured in May. Per-loop attribution (30s window, 3 runs, every run reproducing the same command totals exactly) found the two biggest contributors were not the newer background tasks but the two oldest cadences:
+
+| Loop | Interval | Commands / 30s | Share of idle traffic |
+|---|---|---:|---:|
+| `ScheduledJobActivation` | 5s | 24 | 28% |
+| `Heartbeat` | 3s | 20 | 23% |
+| everything else (11 loops) | — | 43 | 49% |
+
+Together those two were **51%** of all idle database traffic. Seven defaults have been relaxed in total:
+
+| Setting | Was | Now | What gets slower |
+|---|---|---|---|
+| `PollingInterval` | 1s | **10s** | Backoff **floor** for a worker that just went idle — see below |
+| `ScheduledActivationInterval` | 5s | **10s** | Worst-case `ScheduleTime` → eligible-for-pickup latency |
+| `MessageRoutingInterval` | 1s | **10s** | Worst-case `IMessage` → child jobs latency (poll-only) |
+| `HealthCheckInterval` | 3s | **5s** | Pause propagation; singleton-lease renewal cadence |
+| `BacklogSampleInterval` | 15s | **60s** | Refresh rate of the Queues page backlog gauges |
+| `ErrorGroupingInterval` | 15s | **60s** | Delay before an error appears as an issue |
+| `ExpirationCleanupInterval` | 60s | **5m** | Delay between a row's `ExpireAt` and its deletion |
+
+All seven are ordinary configuration — set any of them back if the old latency matters more to you than the query rate.
+
+**The two that need the most thought:**
+
+- **`PollingInterval` 1s → 10s.** This is the **floor** of the worker's exponential backoff, not a fixed poll rate: the delay grows from this floor toward `MaxPollingInterval` (30s) on consecutive empty polls and **resets to the floor the moment a job is processed**. So this does not slow a busy worker down — it slows the *first* poll after a worker goes quiet. The consequences differ by configuration:
+  - **Same-process publishes are unaffected.** A `Kind=Job` row committed in `Enqueued` on the same server fires a local `JobEnqueued` signal that shortcuts the backoff entirely, independent of DB push.
+  - **With `UseDatabasePush()`, cross-process publishes are unaffected** — the notification wakes the dispatcher.
+  - **Without push, cross-process pickup latency can now be up to 10s instead of 1s.** If you publish from a web app and process on a separate worker process with no push configured, this is the change you will feel. Enable `UseDatabasePush()` or set `PollingInterval` back.
+- **`MessageRoutingInterval` 1s → 10s.** Same shape: routing is signal-driven within a process and push-driven across processes, so this is the poll-only backstop. Note that `UseDatabasePush()` bumps this to 30s when it is still at the default — that check previously compared against a hardcoded `1s` and would have **silently stopped applying** once the default moved, leaving push deployments polling 3× more often than intended. The default is now a named constant that both sides read.
+
+**The rest, briefly:**
+
+- **`ScheduledActivationInterval` 5s → 10s.** This interval *is* the worst-case latency between a job's `ScheduleTime` and it becoming eligible for pickup — the task is time-driven and deliberately does not participate in DB-push wake-up, so push cannot shorten it. It has no correctness coupling: the only cost is latency. **A scheduled job may now start up to 10s after its scheduled time instead of 5s**, and the same bound applies to rate-limit `Wait`-mode reschedules and to webhook retry backoff (which was already documented as "delay + activation latency + worker pickup", not a precision scheduler).
+- **`HealthCheckInterval` 3s → 5s.** The binding constraint here is `BackgroundServiceLease` renewal — the heartbeat must tick comfortably inside the 30s lease TTL, and 5s still leaves a 6× margin. The visible cost is that **pause propagation is now bounded by 5s rather than 3s**: `PauseServer`/`PauseWorkerGroup` stamps `PausedAt`, and each server stops fetching at its next heartbeat.
+- **`BacklogSampleInterval` 15s → 60s.** Backlog depth and oldest-age are point samples, so a backlog spike shorter than the sampling interval can now be missed entirely. Queue-*wait* is unaffected — it is measured per claim on the hot path, not sampled.
+- **`ErrorGroupingInterval` 15s → 60s.** An error now takes up to a minute to show up on the Issues page, and occurrence-inbox rows live correspondingly longer before being drained. No occurrences are lost — the drain is exactly-once by construction regardless of cadence.
+- **`ExpirationCleanupInterval` 60s → 5m.** Expired rows are deleted up to five minutes late. Retention windows become correspondingly fuzzy at the edge; nothing is retained less than configured.
+
+Four loops were measured at **exactly zero** idle cost and were left alone (`SloEvaluator`, `StatisticRollup`, `CounterAggregator`, `ExpirationCleanup`, `Orchestrator`) — their intervals are long enough, or their guards short-circuit before touching the database.
+
+**Also fixed: `ErrorGroupAggregator` no longer pays for an idle tick.** It ran its cardinality-guard `GROUP BY` over `ErrorGroup` *before* draining the occurrence inbox — so every tick on an idle server paid for a group-count query guarding against an overflow that could not happen (measured at ~10 of 87 commands per 30s, third behind the two oldest loops). It now probes the inbox with a single `AnyAsync` and returns before loading the guard, making an idle tick one cheap `SELECT`. Behaviour when there *is* work is unchanged.
+
+#### Measured result
+
+Idle database commands per second, same harness as before (an `ActivityListener` on Npgsql's activity source, so every command is counted including raw `DbCommand` ones), 3 runs per scenario with every run reproducing identical totals:
+
+| Scenario | May (2026-05-14) | Before (30s window) | After (120s window) |
+|---|---:|---:|---:|
+| `workers-poll` *(the default configuration)* | 6.4 | 10.1 | **3.6** |
+| `workers-push` | 3.1 | 4.8 | **2.4** |
+| `dispatcher-poll` | 4.5 | 8.3 | **2.9** |
+| **`dispatcher-push`** *(recommended)* | 1.2 | 2.9 | **2.1** |
+
+**The before/after columns are not a clean comparison and should not be quoted as one.** The "before" numbers came from a **30s** window, and the old polling backoff took roughly 31s to first reach its 30s ceiling — so that window was partly measuring the ramp rather than steady-state idle, inflating the "before" figures for the polling scenarios. The "after" numbers use a 120s window. **`dispatcher-push` (−28%) is the fairest row**, having the least polling in it and therefore the least ramp contamination; treat the other three deltas as directional only.
+
+#### Known and not fixed: loop bookkeeping is ~47% of what remains
+
+The per-statement census on `dispatcher-push` (30s) reads: 14× `UPDATE server_task` (one per server-task tick), 8× `INSERT server_log`, 7× advisory lock acquire, 6× heartbeat CTE, 3× scheduled activation, and assorted single-digit probes.
+
+That means **roughly 47% of the remaining idle traffic is the loop machinery reporting on itself** — the per-tick `server_task` row update, plus `ServerLog` rows written by tasks that did no work: `ScheduledJobActivation` ×3, `RecurringJobScheduler` ×2, `StaleJobRecovery` ×1, `MessageRouting` ×1, `ServerCleanup` ×1 per 30s.
+
+This is **deliberately not fixed here.** Skipping the bookkeeping write on a no-op tick would roughly halve idle traffic again, but it changes what the dashboard's server-task history means — a task that ran and found nothing would become indistinguishable from one that did not run at all — so it needs its own change and its own UI decision. Recorded here so it is not re-derived from scratch.
+
+### Fixed: `DefaultQueue` was ignored on publish
+
+`WarpConfiguration.DefaultQueue` is documented as the queue used when a caller names none, and `BatchPublisher` honoured it — but `Publisher` resolved `queue ?? "default"` on both its job and message paths. A deployment that set `DefaultQueue` and pointed its worker group at that queue had batch children routed correctly while ordinary publishes went to `"default"`, where nothing was polling: those jobs sat `Enqueued` and never ran. Both paths now consult `DefaultQueue`. Explicit queue arguments still win, and deployments that never set it are unaffected.
+
 ## 3.10.0
 
 *2026-08-03*

@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
@@ -5,6 +6,7 @@ using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Events;
+using Warp.Core.Logging;
 using Warp.Core.Models;
 using Warp.Core.Notifications;
 
@@ -30,6 +32,9 @@ public interface IJobCommandService
 public class JobCommandService<TContext> : IJobCommandService
     where TContext : DbContext
 {
+    private const string StatsRequeued = "stats:requeued";
+    private const string StatsDeleted = "stats:deleted";
+
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly WarpConfiguration _configuration;
@@ -86,12 +91,10 @@ public class JobCommandService<TContext> : IJobCommandService
             return;
         }
 
-        DecrementStatForState(job.CurrentState);
-
         job.CurrentState = State.Deleted;
         job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
 
-        _context.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = 1 });
+        AddStatCounters(StatsDeleted, 1);
 
         await _context.Set<JobLog>().AddAsync(new JobLog
         {
@@ -131,8 +134,6 @@ public class JobCommandService<TContext> : IJobCommandService
             return;
         }
 
-        DecrementStatForState(job.CurrentState);
-
         job.CurrentState = State.Enqueued;
         job.ScheduleTime = _timeProvider.GetUtcNow().UtcDateTime;
         job.ExpireAt = null;
@@ -159,6 +160,10 @@ public class JobCommandService<TContext> : IJobCommandService
             job.HandlerType = null;
         }
 
+        // One Requeued log row ⇒ one requeue event. The counter must agree with the log exactly, which is
+        // why every requeue-writing path counts the rows it actually flipped rather than a separate tally.
+        AddRequeueCounters(OutcomeReasonTokens.For(OutcomeReason.Manual), 1);
+
         await _context.Set<JobLog>().AddAsync(new JobLog
         {
             JobId = job.Id,
@@ -170,8 +175,17 @@ public class JobCommandService<TContext> : IJobCommandService
         await _context.SaveChangesAsync();
         await transaction.CommitAsync();
 
-        // Requeue lands the row in Enqueued with ScheduleTime=now — wake dispatcher / bare workers immediately.
+        // The always-on meter moves with the DB counter — a manual requeue is one of the two reasons an
+        // Otel-only deployment (JobMetricsSink = Otel, no stats: rows) most needs visible after an incident.
+        // Post-commit, so the meter never records a requeue a rollback undid.
         var queue = string.IsNullOrEmpty(job.Queue) ? "default" : job.Queue;
+        WarpTelemetry.RecordJobRequeued(
+            job.Type,
+            queue,
+            OutcomeReasonTokens.For(OutcomeReason.Manual),
+            _configuration.ApplicationName);
+
+        // Requeue lands the row in Enqueued with ScheduleTime=now — wake dispatcher / bare workers immediately.
         await NotificationDispatch.DispatchAsync(
             [new Notification(NotificationKind.JobEnqueued, queue)],
             _signals,
@@ -313,15 +327,9 @@ public class JobCommandService<TContext> : IJobCommandService
                         });
                     }
 
-                    _context.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = affected });
-                    if (sourceState == State.Completed)
-                    {
-                        _context.Set<Counter>().Add(new Counter { Key = "stats:succeeded", Value = -affected });
-                    }
-                    else if (sourceState == State.Failed)
-                    {
-                        _context.Set<Counter>().Add(new Counter { Key = "stats:failed", Value = -affected });
-                    }
+                    // Only the delete is counted. The source state's counter is NOT rewritten — those jobs
+                    // really did succeed / fail, and deleting them afterwards does not un-happen it.
+                    AddStatCounters(StatsDeleted, affected);
                 }
 
                 result.Succeeded += affected;
@@ -482,6 +490,10 @@ public class JobCommandService<TContext> : IJobCommandService
 
             await using var transaction = await _context.Database.BeginTransactionAsync();
 
+            // (Type, Queue) of every row this chunk flips, buffered so the always-on meter fires only
+            // after the commit below makes those requeues real.
+            var flippedForMeter = new List<(string? Type, string Queue)>();
+
             // Step 1: UPDATE all child rows first. ExecuteUpdateAsync acquires statement-level
             // row locks held until commit, matching the child-then-parent lock order used by
             // single RequeueJob (line 107 → 139). This is the must-fix for the deadlock that
@@ -499,8 +511,8 @@ public class JobCommandService<TContext> : IJobCommandService
                 var ids = group.Select(x => x.Id).Order().ToArray();
 
                 var affected = await ExecuteRequeueUpdate(ids, sourceState, now, clearHandler: true);
-                ApplyRequeueAccounting(result, affected, sourceState, ids.Length);
-                await AddRequeueLogsForFlipped(ids, now);
+                ApplyRequeueAccounting(result, affected, ids.Length);
+                await AddRequeueLogsForFlipped(ids, now, flippedForMeter);
                 CollectQueues(ids, queueById, affected, queuesToNotify);
             }
 
@@ -530,8 +542,8 @@ public class JobCommandService<TContext> : IJobCommandService
                     var affected = await ExecuteRequeueUpdate(ids, sourceState, now, clearHandler);
                     totalAffected += affected;
 
-                    ApplyRequeueAccounting(result, affected, sourceState, ids.Length);
-                    await AddRequeueLogsForFlipped(ids, now);
+                    ApplyRequeueAccounting(result, affected, ids.Length);
+                    await AddRequeueLogsForFlipped(ids, now, flippedForMeter);
                     CollectQueues(ids, queueById, affected, queuesToNotify);
                 }
 
@@ -562,6 +574,15 @@ public class JobCommandService<TContext> : IJobCommandService
 
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
+
+            foreach (var (type, jobQueue) in flippedForMeter)
+            {
+                WarpTelemetry.RecordJobRequeued(
+                    type,
+                    jobQueue,
+                    OutcomeReasonTokens.For(OutcomeReason.Manual),
+                    _configuration.ApplicationName);
+            }
         }
 
         if (queuesToNotify.Count > 0)
@@ -602,7 +623,14 @@ public class JobCommandService<TContext> : IJobCommandService
                 .SetProperty(j => j.ExpireAt, (DateTime?)null));
     }
 
-    private void ApplyRequeueAccounting(BulkResultModel result, int affected, State sourceState, int groupSize)
+    // Requeueing no longer rewrites the source state's counter. Those counters record that a job DID
+    // succeed / fail / get deleted; a later requeue does not un-happen it. "How many are failed right now"
+    // is answered by querying Job (which is what the dashboard tile already does), so the decrement only
+    // made the counter a worse copy of a query while breaking three things: the lifetime key stopped
+    // agreeing with the sum of its own hourly buckets (the decrement wrote no bucket row), the dashboard's
+    // rate chart could see a negative delta, and a reason breakdown could never be reconciled with a total
+    // that gets rewritten.
+    private static void ApplyRequeueAccounting(BulkResultModel result, int affected, int groupSize)
     {
         if (affected == 0)
         {
@@ -611,47 +639,82 @@ public class JobCommandService<TContext> : IJobCommandService
             return;
         }
 
-        if (sourceState == State.Completed)
-        {
-            _context.Set<Counter>().Add(new Counter { Key = "stats:succeeded", Value = -affected });
-        }
-        else if (sourceState == State.Failed)
-        {
-            _context.Set<Counter>().Add(new Counter { Key = "stats:failed", Value = -affected });
-        }
-        else if (sourceState == State.Deleted)
-        {
-            _context.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = -affected });
-        }
-
         result.Succeeded += affected;
         result.Skipped += groupSize - affected;
     }
 
-    private async Task AddRequeueLogsForFlipped(Guid[] ids, DateTime now)
+    private async Task AddRequeueLogsForFlipped(Guid[] ids, DateTime now, List<(string? Type, string Queue)> flippedForMeter)
     {
         // Re-query inside the transaction to identify rows our UPDATE just flipped. ScheduleTime
         // = now narrows the result to our batch — collisions only matter if two BulkRequeueJobs
         // calls land on the same tick, in which case both add identical Requeued log entries.
-        var flippedIds = await _context.Set<Job>()
+        var flipped = await _context.Set<Job>()
             .AsNoTracking()
             .Where(x => ids.Contains(x.Id))
             .Where(x => x.CurrentState == State.Enqueued)
             .Where(x => x.ScheduleTime == now)
-            .Select(x => x.Id)
+            .Select(x =>
+                new
+                {
+                    x.Id,
+                    x.Type,
+                    x.Queue,
+                })
             .ToListAsync();
 
-        foreach (var id in flippedIds)
+        // Count what we actually flipped, from the same in-transaction re-query that writes the logs.
+        // ApplyRequeueAccounting's `affected` comes from a different statement and can diverge, so deriving
+        // the counter from it would break the one-counter-per-Requeued-log invariant.
+        AddRequeueCounters(OutcomeReasonTokens.For(OutcomeReason.Manual), flipped.Count);
+
+        foreach (var job in flipped)
         {
+            // Buffered for the caller to emit AFTER the chunk's commit — the meter mirrors the counter
+            // one-to-one, but must never record a requeue a rollback then undoes.
+            flippedForMeter.Add((job.Type, string.IsNullOrEmpty(job.Queue) ? "default" : job.Queue));
+
             _context.Set<JobLog>().Add(new JobLog
             {
-                JobId = id,
+                JobId = job.Id,
                 EventType = "Requeued",
                 Timestamp = now,
                 Level = "Information",
-                Message = $"Job {id} was requeued",
+                Message = $"Job {job.Id} was requeued",
             });
         }
+    }
+
+    /// <summary>
+    /// Writes the requeue state total and its reason breakdown, each with an hourly bucket row.
+    /// </summary>
+    /// <remarks>
+    /// The bucket is stamped here, at the write site, because <c>Counter</c> is <c>Id</c>/<c>Key</c>/<c>Value</c>
+    /// with no timestamp — <c>CounterAggregator</c> folds rows whenever it next runs and cannot know when the
+    /// event actually happened, so deriving the hour at fold time would misattribute any row that outlived a
+    /// tick. All four are append-only: a requeue that later succeeds does not un-count anything.
+    /// </remarks>
+    private void AddRequeueCounters(string reason, int count)
+    {
+        AddStatCounters(StatsRequeued, count);
+        AddStatCounters($"{StatsRequeued}-{reason}", count);
+    }
+
+    /// <summary>
+    /// Writes a <c>stats:</c> lifetime row and its hourly bucket sibling. Never one without the other — a
+    /// lifetime row with no bucket makes the lifetime total disagree with the sum of its own buckets, which
+    /// is exactly what the Counters chart plots against.
+    /// </summary>
+    private void AddStatCounters(string key, int count)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        var hourSuffix = _timeProvider.GetUtcNow().UtcDateTime.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
+
+        _context.Set<Counter>().Add(new Counter { Key = key, Value = count });
+        _context.Set<Counter>().Add(new Counter { Key = $"{key}:{hourSuffix}", Value = count });
     }
 
     private static void CollectQueues(Guid[] ids, Dictionary<Guid, string> queueById, int affected, HashSet<string> queues)
@@ -718,21 +781,5 @@ public class JobCommandService<TContext> : IJobCommandService
         }
 
         return result;
-    }
-
-    private void DecrementStatForState(State state)
-    {
-        var key = state switch
-        {
-            State.Completed => "stats:succeeded",
-            State.Failed => "stats:failed",
-            State.Deleted => "stats:deleted",
-            _ => null,
-        };
-
-        if (key != null)
-        {
-            _context.Set<Counter>().Add(new Counter { Key = key, Value = -1 });
-        }
     }
 }

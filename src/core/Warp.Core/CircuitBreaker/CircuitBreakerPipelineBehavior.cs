@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using Microsoft.Extensions.Options;
+using Warp.Core.Enums;
 using Warp.Core.Handlers;
 
 namespace Warp.Core.CircuitBreaker;
@@ -94,7 +95,17 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
         }
         catch
         {
-            if (_jobContext.Outcome is not null)
+            // An inner behaviour's NON-FAILURE outcome means the attempt is not settled (a retry/rate-limit
+            // reschedule — it will run again) or was deliberately discarded (a timeout/concurrency delete) —
+            // neither is evidence about the downstream's health, so neither counts.
+            //
+            // A FAILED outcome is the opposite: it is the raw dependency failure itself, labelled by the
+            // behaviour that watched the budget die on it (retry exhaustion stamps Failed/RetryExhausted).
+            // With this breaker registered outer of retry — the documented order — that terminal throw is
+            // the ONLY failure of a retried job that ever reaches this catch un-rescheduled; treating
+            // "an outcome exists" as "don't count" made the breaker blind to every failure of every retried
+            // job, and the circuit never opened during exactly the outage it exists for.
+            if (_jobContext.Outcome is { } outcome && outcome.State != State.Failed)
             {
                 throw;
             }
@@ -118,6 +129,11 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
         {
             State = JobOutcome.RescheduledState(scheduleTime, now),
             ScheduleTime = scheduleTime,
+
+            // All three reschedule causes (open, probe-in-progress, probe-lost) collapse to one reason:
+            // they are the same operational fact — the breaker held this job back. The finer detail stays
+            // in LogMessage, which is not a metric dimension (§8.33 keeps the reason set bounded).
+            Reason = OutcomeReason.CircuitBreaker,
             LogMessage = $"Rescheduled due to circuit breaker '{groupKey}' ({reason})",
         };
     }

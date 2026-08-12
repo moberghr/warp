@@ -13,7 +13,7 @@ public enum RateLimitStyle
     /// <para>
     /// The reschedule target is exact, but <c>Wait</c> reschedules land in <c>State.Scheduled</c> and ride
     /// <c>ScheduledJobActivation</c> (§8.8), which is <b>not</b> accelerated by DB push. So the effective
-    /// release cadence is floored at <c>ScheduledActivationInterval</c> (default 5s): a bucket whose refill
+    /// release cadence is floored at <c>ScheduledActivationInterval</c> (default 10s): a bucket whose refill
     /// interval is shorter than that tick (e.g. a high <c>count</c>/short window) releases in per-tick
     /// clumps rather than a truly smooth trickle. It never over-admits (burst stays ≤ <c>count</c>); for
     /// sub-second pacing precision lower <c>ScheduledActivationInterval</c>.

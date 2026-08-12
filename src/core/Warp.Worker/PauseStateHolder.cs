@@ -7,7 +7,7 @@ namespace Warp.Worker;
 /// <para>
 /// <b>Pause is not instantaneous.</b> The holder is only refreshed by the periodic
 /// <see cref="Services.Heartbeat{TContext}"/> task (cadence:
-/// <see cref="WarpServerConfiguration.HealthCheckInterval"/>, default 3s). Once a
+/// <see cref="WarpServerConfiguration.HealthCheckInterval"/>, default 5s). Once a
 /// caller writes <c>PausedAt</c> to <see cref="Warp.Core.Data.Entities.Server"/> /
 /// <see cref="Warp.Core.Data.Entities.WorkerGroup"/>, every server's worker pool keeps
 /// fetching until that server's next heartbeat tick reads the new state and updates its

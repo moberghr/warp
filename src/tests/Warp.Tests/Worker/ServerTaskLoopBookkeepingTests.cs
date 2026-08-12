@@ -6,6 +6,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Events;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Worker.Services;
 
 namespace Warp.Tests.Worker;
@@ -226,6 +227,13 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
                 if (serviceType == typeof(TestContext))
                 {
                     return _context;
+                }
+
+                // ServerTaskLoop's bookkeeping (ServerTask registration/interval/status, ServerLog)
+                // runs on the server context (§2.14), backed here by the fixture's TestContext.
+                if (serviceType == typeof(IWarpServerContext))
+                {
+                    return new TestServerContext(_context);
                 }
 
                 if (serviceType == typeof(IEnumerable<IServerTask>))

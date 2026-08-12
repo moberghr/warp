@@ -22,5 +22,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["vite.config.ts"]
+  // e2e-live is here, not in tsconfig.app.json: it runs in Node under Playwright, not in the browser
+  // bundle. Without it the spec is type-checked by nothing — `tsc -b` would pass while the spec had
+  // errors, which is how a spec asserting on a key the API no longer returns went unnoticed.
+  "include": ["vite.config.ts", "playwright.aspire.config.ts", "e2e-live"]
 }

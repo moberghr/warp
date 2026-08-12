@@ -376,5 +376,7 @@ tasks/todo.md
 # MTK toolkit ephemerals
 .claude/.mtk-cache/
 .claude/references.index
+# Local per-machine toolkit telemetry, at the repo root and in any nested workspace
+**/.claude/analytics.json
 .mtk/
 .claude.local.md

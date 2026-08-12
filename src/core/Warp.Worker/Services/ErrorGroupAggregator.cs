@@ -68,6 +68,17 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
+        // Probe the inbox BEFORE loading the cardinality guard. On an idle server the inbox is empty on
+        // every tick, and the guard query below exists only to cap groups we are about to create — so
+        // loading it first meant paying a GroupBy over ErrorGroup on every tick to guard against overflow
+        // that cannot happen. Probing first makes an idle tick a single cheap SELECT. Measured as ~10 of
+        // 87 commands per 30s on an idle dispatcher-push server, second only to the two oldest loops.
+        var hasWork = await _context.Set<ErrorOccurrence>().AnyAsync(ct);
+        if (!hasWork)
+        {
+            return null;
+        }
+
         // Per-source distinct-group counts for the cardinality guard — loaded once; incremented as we create.
         var sourceCounts = await _context.Set<ErrorGroup>()
             .GroupBy(x => x.Source)

@@ -260,7 +260,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task RequeueJob_DecrementsSucceededStat()
+    public async Task RequeueJob_LeavesSucceededStat()
     {
         // Arrange — enqueue and process a job so stats:succeeded is incremented
         var ctx = _fixture.CreateContext();
@@ -290,7 +290,8 @@ public abstract class RetentionTestsBase : IAsyncLifetime
             .Select(x => x.Value)
             .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
 
-        succeededAfter.ShouldBe(succeededBefore - 1);
+        // Requeueing a completed job does not retract the success it already recorded.
+        succeededAfter.ShouldBe(succeededBefore);
     }
 
     [TimedFact]

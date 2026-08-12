@@ -243,6 +243,7 @@ public abstract class WarpServerRegistrationTestsBase : IAsyncLifetime
         var pauseStateHolder = new PauseStateHolder();
         var registration = new WarpServerRegistration<TestContext>(
             config,
+            Options.Create<Warp.Core.WarpConfiguration>(config.Value),
             scopeFactory,
             TimeProvider.System,
             pauseStateHolder,

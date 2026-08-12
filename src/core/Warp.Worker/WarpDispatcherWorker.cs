@@ -28,7 +28,7 @@ namespace Warp.Worker;
 /// <summary>
 /// Worker that receives pre-fetched jobs from a dispatcher channel.
 /// Pure executor — handles execution and completion only. Orchestration handled by Orchestrator.
-/// Completions are buffered in a per-worker <see cref="CompletionBatch{TContext}"/> and flushed
+/// Completions are buffered in a per-worker <see cref="CompletionBatch"/> and flushed
 /// as a single multi-row transaction when any of: size threshold, time threshold, idle, or shutdown fires.
 /// </summary>
 public class WarpDispatcherWorker<TContext> : BackgroundService
@@ -40,7 +40,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly ILogger<WarpDispatcherWorker<TContext>> _logger;
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
-    private readonly CompletionBatch<TContext> _batch;
+    private readonly CompletionBatch _batch;
+    private readonly DispatcherWorkerAvailability _availability;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
 
@@ -53,8 +54,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         TimeProvider timeProvider,
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals,
-        IDatabaseExceptionClassifier exceptionClassifier)
+        IDatabaseExceptionClassifier exceptionClassifier,
+        DispatcherWorkerAvailability availability)
     {
+        _availability = availability;
         _workerId = workerId;
         _jobReader = jobReader;
         _scopeFactory = scopeFactory;
@@ -63,7 +66,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         _timeProvider = timeProvider;
         _notificationTransport = notificationTransport;
         _signals = signals;
-        _batch = new CompletionBatch<TContext>(
+        _batch = new CompletionBatch(
             scopeFactory,
             timeProvider,
             logger,
@@ -104,6 +107,14 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Dispatcher worker failed on job {id}", job.Id);
+                }
+                finally
+                {
+                    // Hand the slot back. The dispatcher reserved it at claim time, so this is a
+                    // release-only site — and it must run for every path out of ProcessJob,
+                    // including the ownership guard dropping the job, or the group leaks capacity
+                    // and eventually stops claiming.
+                    _availability.Release();
                 }
 
                 if (_batch.IsFull || _batch.IsTimeElapsed)
@@ -178,7 +189,17 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // CancellationToken.None: the claim already committed State=Processing, so aborting this
             // UPDATE on shutdown would orphan the row without clearing the worker stamp. Fast UPDATE,
             // uncancellable is cheap insurance.
-            await MarkWorkerOwnership(job, CancellationToken.None);
+            if (!await MarkWorkerOwnership(job, CancellationToken.None))
+            {
+                // Reclaimed while it waited in the channel — another claim owns it now, and may
+                // already have run it. Drop it: no execution, no completion, no log rows.
+                _logger.LogInformation(
+                    "Skipping job {id}: it was recovered or re-claimed while buffered",
+                    job.Id);
+
+                return;
+            }
+
             job.CurrentWorkerId = _workerId;
         }
 
@@ -204,6 +225,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         IServiceScope? handlerScope = null;
         JobContext? jobContext = null;
         DateTime? totalDeadlineUtc = null;
+        var incomingAttempts = 0L;
         try
         {
             PerfTrace.Mark(PerfTrace.ExecuteHandler);
@@ -247,6 +269,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             if (jobContext.Metadata.TryGetValue(WarpTelemetryAttributes.RetryMetadataRetriedTimesKey, out var retriedTimesObj)
                 && retriedTimesObj is long retriedTimes)
             {
+                incomingAttempts = retriedTimes;
                 activity?.SetTag(WarpTelemetryAttributes.WarpJobAttempt, retriedTimes + 1);
             }
             else
@@ -332,7 +355,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 job.CurrentState = State.Completed;
             }
 
-            var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc);
+            var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
             _batch.Add(new PendingCompletion(job, counters, logs));
         }
@@ -409,7 +432,11 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             handlerScope?.Dispose();
             handlerScope = null;
 
-            var willRetry = job.CurrentState == State.Enqueued;
+            // Scheduled counts as a retry: JobOutcome.RescheduledState returns Scheduled whenever the
+            // target time is in the future, and RetryOptions.Delays defaults to [15,60,300] — so testing
+            // Enqueued alone labelled every DEFAULT retry as "failed". Must stay in step with the
+            // Enqueued-or-Scheduled branch in BuildFinalization that writes stats:requeued.
+            var willRetry = job.CurrentState is State.Enqueued or State.Scheduled;
             var errorStatus = willRetry ? "retried" : "failed";
             activity?.SetStatus(ActivityStatusCode.Error, WarpTelemetry.TruncateMessage(e.Message, 256));
             activity?.SetTag(WarpTelemetryAttributes.WarpJobStatus, errorStatus);
@@ -436,7 +463,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             await jobCts.CancelAsync();
             await monitorTask;
 
-            var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome, totalDeadlineUtc);
+            var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
 
             // Every caught exception (retry or terminal) feeds the error-grouping inbox — no fingerprint on the
@@ -462,26 +489,58 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         PerfTrace.End();
     }
 
-    private async Task MarkWorkerOwnership(Job job, CancellationToken cancellationToken)
+    /// <summary>
+    /// Takes individual ownership of a job the dispatcher claimed for the group, and verifies the
+    /// claim is still ours. Returns false when it is not — the caller must then drop the job.
+    /// <para>
+    /// A prefetched job waits in the channel as Processing with the LastKeepAlive stamped at claim
+    /// time; nothing refreshes it until execution starts, so StaleJobRecovery can return it to
+    /// Enqueued and someone (including this same group) can re-claim it. LastKeepAlive is the claim
+    /// token: a re-claim writes a fresh one, so a stale copy fails this guard instead of executing
+    /// a job that is already running elsewhere. The guard rides the update we already issue per
+    /// job, so it costs no extra round trip (§0.2/§6.1).
+    /// </para>
+    /// <para>
+    /// The same statement also RENEWS the token, which is what makes the guard hold rather than just
+    /// narrow the window. Checking alone only rules out a reclaim that already happened: a job that
+    /// waited in the channel past InvisibilityTimeout is still stale the instant the check passes, so
+    /// recovery could requeue it — and a second worker start it — while this one walks into the
+    /// handler. Stamping a fresh LastKeepAlive under the same row lock as the check buys the full
+    /// InvisibilityTimeout, by which point RunJobMonitor is renewing on its own cadence.
+    /// </para>
+    /// </summary>
+    private async Task<bool> MarkWorkerOwnership(Job job, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var handlerTypeToSet = job.HandlerType;
-        await context.Set<Job>()
+        var claimedWorkerId = job.CurrentWorkerId;
+        var claimedKeepAlive = job.LastKeepAlive;
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var stillOurs = await context.Set<Job>()
             .Where(x => x.Id == job.Id)
+            .Where(x => x.CurrentState == State.Processing)
+            .Where(x => x.CurrentWorkerId == claimedWorkerId)
+            .Where(x => x.LastKeepAlive == claimedKeepAlive)
             .ExecuteUpdateAsync(
                 x => x
                     .SetProperty(p => p.CurrentWorkerId, _workerId)
+                    .SetProperty(p => p.LastKeepAlive, now)
                     .SetProperty(p => p.HandlerType, handlerTypeToSet),
                 cancellationToken);
+
+        if (stillOurs == 0)
+        {
+            return false;
+        }
 
         // The "Processing" JobLog is written here, not in WarpDispatcher.FetchAndDistribute.
         // Writing it dispatcher-side would orphan log rows for jobs whose channel-write got
         // cancelled at shutdown (UnclaimUndelivered reverts the row to Enqueued, but the log
         // entry would remain). Writing it on receipt by the actual worker keeps the audit
         // trail truthful and lets us tag the entry with the specific WorkerId, matching
-        // single-worker-mode semantics.
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        // single-worker-mode semantics. Reuses the ownership instant so the log timestamp and the
+        // renewed keep-alive agree.
         context.Set<JobLog>().Add(new JobLog
         {
             JobId = job.Id,
@@ -506,6 +565,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         }
 
         await context.SaveChangesAsync(cancellationToken);
+
+        return true;
     }
 
     private static async Task ExecuteJob(Job job, IServiceProvider provider, CancellationToken cancellationToken)
@@ -636,7 +697,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     /// and a Scheduled/Enqueued log (with the next attempt time). All other transitions emit one.
     /// State must be set on the job before calling this method.
     /// </summary>
-    private (List<Counter> Counters, List<JobLog> FinalLogs) BuildFinalization(Job job, Exception? error, double? durationMs, JobOutcome? outcome, DateTime? totalDeadlineUtc = null)
+    private (List<Counter> Counters, List<JobLog> FinalLogs) BuildFinalization(Job job, Exception? error, double? durationMs, JobOutcome? outcome, DateTime? totalDeadlineUtc = null, long incomingAttempts = 0)
     {
         var state = job.CurrentState;
         job.CancellationMode = CancellationMode.None;
@@ -686,6 +747,58 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // Covers retry backoff and Mutex Wait — anything that puts the job back on the queue.
             counters.Add(new Counter { Key = "stats:requeued", Value = 1 });
             counters.Add(new Counter { Key = $"stats:requeued:{hourSuffix}", Value = 1 });
+
+            // Beside the state total it must agree with, NOT in the reason block below — a reasonless
+            // reschedule from a user-written pipeline behaviour is still a real requeue, and falls under
+            // the bounded "unknown" token. Mirrors WarpWorkerService (§0.2 lockstep).
+            WarpTelemetry.RecordJobRequeued(
+                job.Type,
+                job.Queue,
+                outcome?.Reason is { } requeueReason ? OutcomeReasonTokens.For(requeueReason) : OutcomeReasonTokens.Unknown,
+                _configuration.ApplicationName);
+        }
+
+        // Reason breakdown. Joins the SaveChanges the state total above already rides, so this adds no
+        // round-trip to the hot path (§0.2/§6.1) — just a field read and a switch. A completed job carries
+        // no reason, so the happy path writes exactly what it wrote before.
+        //
+        // Written INDEPENDENTLY of the state total, not derived from it: a reader never has to sum the
+        // reasons to get a total, and an outcome with no attributable reason (a plain handler throw with no
+        // addon involved) still lands in the total, showing up as the unattributed remainder.
+        //
+        // There is deliberately NO stats:unsuccessful row — see the matching comment in
+        // WarpWorkerService.FinalizeJobState. Both paths must stay identical (§0.2 lockstep).
+        if (outcome?.Reason is { } reason)
+        {
+            var stateToken = state switch
+            {
+                State.Failed => "failed",
+                State.Deleted => "deleted",
+                State.Enqueued or State.Scheduled => "requeued",
+                _ => null,
+            };
+
+            var token = OutcomeReasonTokens.For(reason);
+
+            if (stateToken != null)
+            {
+                var key = $"stats:{stateToken}-{token}";
+                counters.Add(new Counter { Key = key, Value = 1 });
+                counters.Add(new Counter { Key = $"{key}:{hourSuffix}", Value = 1 });
+            }
+
+            // Distinct jobs that entered retry, as opposed to the retry EVENTS counted above. A job retried
+            // 15 times is 15 events but one job, and "how many jobs are thrashing" was unanswerable.
+            //
+            // No schema column for this: the per-job counter already exists as RetriedTimes in Job.Metadata,
+            // read above for the span tag BEFORE the handler ran — so an incoming count of 0 on a retry
+            // outcome is exactly this job's first retry. Reusing that read also keeps the worker free of any
+            // dependency on the Retry addon (the literal key is pinned to the property name by a test).
+            if (reason == OutcomeReason.Retry && incomingAttempts == 0)
+            {
+                counters.Add(new Counter { Key = "stats:retried-jobs", Value = 1 });
+                counters.Add(new Counter { Key = $"stats:retried-jobs:{hourSuffix}", Value = 1 });
+            }
         }
 
         // Deadline attainment (§8.30): mirror FinalizeJobState — attainment denominator on every terminal

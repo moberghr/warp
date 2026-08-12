@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -28,8 +29,7 @@ internal readonly record struct PendingCompletion(
 /// <c>Processing</c> row. Non-<see cref="DbUpdateException"/> failures propagate to the caller.
 /// </para>
 /// </summary>
-internal sealed class CompletionBatch<TContext>
-    where TContext : DbContext
+internal sealed class CompletionBatch
 {
     // Transient-deadlock retry budget for the whole batch flush. Three attempts with a short
     // exponential backoff is enough to clear a SQL Server 1205 / PG 40P01 storm in practice
@@ -125,7 +125,7 @@ internal sealed class CompletionBatch<TContext>
             try
             {
                 using var scope = _scopeFactory.CreateScope();
-                var context = scope.ServiceProvider.GetRequiredService<TContext>();
+                var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
                 await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
 

@@ -350,7 +350,7 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
     private async Task EnsureRegisteredAsync(CancellationToken ct)
     {
         using var scope = _scopes.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
         var existing = await context.Set<ServerTask>()
             .Where(x => x.ServerId == _serverId)
@@ -392,7 +392,7 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
         }
 
         using var scope = _scopes.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
         var seconds = await context.Set<ServerTask>()
             .Where(x => x.Id == _serverTaskId)
@@ -429,7 +429,7 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
         }
 
         using var scope = _scopes.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var now = _time.GetUtcNow().UtcDateTime;
 
         await context.Set<ServerTask>()
@@ -457,7 +457,7 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
     private async Task WriteServerLogAsync(string status, string? message, double durationMs)
     {
         using var scope = _scopes.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<TContext>();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
         context.Set<ServerLog>().Add(new ServerLog
         {

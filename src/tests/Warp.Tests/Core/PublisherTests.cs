@@ -331,4 +331,68 @@ public abstract class PublisherTestsBase : IAsyncLifetime
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Enqueued);
     }
+
+    [TimedFact]
+    public async Task Enqueue_NoExplicitQueue_UsesConfiguredDefaultQueue()
+    {
+        // WarpConfiguration.DefaultQueue is documented as the queue used when a caller names none, and
+        // BatchPublisher honoured it — Publisher did not, resolving `queue ?? "default"` instead. A
+        // deployment that set DefaultQueue and pointed its worker group at that queue therefore published
+        // ordinary jobs to "default" and never executed them, while batch children went to the right place.
+        var ctx = _fixture.CreateContext();
+        var publisher = new Publisher<TestContext>(
+            ctx,
+            Options.Create(new WarpConfiguration { DefaultQueue = "configured-queue" }),
+            TimeProvider.System,
+            new ServiceCollection().BuildServiceProvider(),
+            TestTasks.NullTransport,
+            TestTasks.NullSignals);
+
+        var jobId = await publisher.Enqueue(new UnitRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var job = await _fixture.CreateContext()
+            .Set<Job>()
+            .FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+
+        job.Queue.ShouldBe("configured-queue");
+    }
+
+    [TimedFact]
+    public async Task Enqueue_ExplicitQueue_WinsOverConfiguredDefault()
+    {
+        var ctx = _fixture.CreateContext();
+        var publisher = new Publisher<TestContext>(
+            ctx,
+            Options.Create(new WarpConfiguration { DefaultQueue = "configured-queue" }),
+            TimeProvider.System,
+            new ServiceCollection().BuildServiceProvider(),
+            TestTasks.NullTransport,
+            TestTasks.NullSignals);
+
+        var jobId = await publisher.Enqueue(new UnitRequest(), new Warp.Core.Helper.JobParameters { Queue = "explicit-queue" });
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var job = await _fixture.CreateContext()
+            .Set<Job>()
+            .FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+
+        job.Queue.ShouldBe("explicit-queue");
+    }
+
+    [TimedFact]
+    public async Task Enqueue_DefaultConfiguration_StillUsesDefaultQueue()
+    {
+        // DefaultQueue itself defaults to "default", so an unconfigured deployment is unaffected.
+        var publisher = CreatePublisher(_fixture.CreateContext());
+
+        var jobId = await publisher.Enqueue(new UnitRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var job = await _fixture.CreateContext()
+            .Set<Job>()
+            .FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+
+        job.Queue.ShouldBe("default");
+    }
 }

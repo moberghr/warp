@@ -20,7 +20,7 @@ builder.Services.AddWarp<AppDbContext>(options =>
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `Schema` | `string?` | `"warp"` | Database schema for all Warp tables. Set to `null` for the database's default schema. |
-| `DefaultQueue` | `string` | `"default"` | Queue used when no queue is specified at publish time |
+| `DefaultQueue` | `string` | `"default"` | Queue used when no queue is specified at publish time. The implicit worker group follows it when `Queues` is left untouched (see the worker options below). |
 | `JobExpirationTimeout` | `TimeSpan` | `1 day` | How long completed/deleted jobs are kept before cleanup. Failed jobs never expire. |
 
 ### Naming Conventions
@@ -122,7 +122,7 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
     // service-only server that runs background services but processes no jobs.
     options.RunWorker = true;
     options.WorkerCount = 10;
-    options.PollingInterval = TimeSpan.FromSeconds(1);    // floor
+    options.PollingInterval = TimeSpan.FromSeconds(1);    // floor (default is 10s)
     options.MaxPollingInterval = TimeSpan.FromSeconds(30); // ceiling for exponential backoff
     options.PollingIntervalFactor = 2.0;                   // multiplier on each empty poll (1.0 disables backoff)
     options.Queues = ["a-critical", "b-default", "c-low"];
@@ -138,7 +138,7 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
     options.ServerId = Guid.NewGuid(); // Auto-generated, rarely needs override
 
     // Health & crash recovery
-    options.HealthCheckInterval = TimeSpan.FromSeconds(3);
+    options.HealthCheckInterval = TimeSpan.FromSeconds(5);
     options.HealthCheckTimeout = TimeSpan.FromMinutes(5);
     options.InvisibilityTimeout = TimeSpan.FromMinutes(5);
 
@@ -149,12 +149,12 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 
     // Background task intervals
     options.OrchestrationInterval = TimeSpan.FromSeconds(10);
-    options.MessageRoutingInterval = TimeSpan.FromSeconds(1);
-    options.ScheduledActivationInterval = TimeSpan.FromSeconds(5);
+    options.MessageRoutingInterval = TimeSpan.FromSeconds(10);
+    options.ScheduledActivationInterval = TimeSpan.FromSeconds(10);
     options.CounterAggregationInterval = TimeSpan.FromSeconds(5);
     options.ServerCleanupInterval = TimeSpan.FromSeconds(30);
     options.StaleJobRecoveryInterval = TimeSpan.FromSeconds(30);
-    options.ExpirationCleanupInterval = TimeSpan.FromSeconds(60);
+    options.ExpirationCleanupInterval = TimeSpan.FromMinutes(5);
 
     // Inherited from WarpConfiguration
     options.DefaultQueue = "default";
@@ -167,16 +167,17 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 |--------|------|---------|-------------|
 | `RunWorker` | `bool` | `true` | Whether this server runs the job worker. Call `DisableWorker()` (which sets this to `false`) for a service-only server: background services + server infrastructure, no worker hosts, no job-only server tasks, no `Worker`/`WorkerGroup` rows. **Do not** set `WorkerCount = 0` while leaving the worker enabled — `AddWarpServer` throws at registration for that contradiction (it would orchestrate jobs but never execute them). Use `DisableWorker()` instead. |
 | `WorkerCount` | `int` | `min(CPU * 5, 20)` | Number of concurrent worker threads |
-| `PollingInterval` | `TimeSpan` | `1 second` | Delay between polls when no jobs are available. Also serves as the floor for exponential backoff. |
+| `PrefetchCount` | `int?` | `null` (= `WorkerCount`) | **Dispatcher mode only.** How many jobs the dispatcher may claim beyond the workers that are free to start one. A prefetched job is already `Processing` in the database while it waits in the in-memory buffer, so it is unavailable to other servers and its claim ages against `InvisibilityTimeout` — depth buys pickup latency at the cost of fairness across servers. Set `0` to claim only what a worker can start immediately — fairest across servers, at some throughput cost on bursty short jobs; raise it for bursty, very short jobs where the claim round-trip dominates. `null` keeps the historical behaviour of buffering one job per worker. |
+| `PollingInterval` | `TimeSpan` | `10 seconds` | Delay between polls when no jobs are available. Also serves as the floor for exponential backoff — it resets to this floor the moment a job is processed, and in-process enqueue signals (and DB push) shortcut it entirely. |
 | `MaxPollingInterval` | `TimeSpan` | `30 seconds` | Upper bound on the polling delay during idle periods. The delay grows from `PollingInterval` by `PollingIntervalFactor` on each empty poll, clamped to this value, and resets instantly when a job is processed. |
 | `PollingIntervalFactor` | `double` | `2.0` | Multiplier applied to the current polling delay on each consecutive empty poll. Set to `1.0` (or lower) to disable exponential backoff — the delay stays at `PollingInterval`. |
-| `Queues` | `string[]` | `["default"]` | Queues this worker subscribes to. Processed in alphabetical order |
+| `Queues` | `string[]` | follows `DefaultQueue` | Queues this worker subscribes to, processed in alphabetical order. Left untouched, the implicit group polls `[DefaultQueue]` — the queue untargeted publishes actually land on — so setting only `DefaultQueue` cannot strand jobs. An explicitly set value wins outright and is never widened. |
 
 ### Exponential Polling Backoff
 
 On idle queues, the poll delay grows geometrically from `PollingInterval` (floor) toward `MaxPollingInterval` (ceiling) by `PollingIntervalFactor` on each consecutive empty poll. The delay resets to the floor instantly when any job is processed, so latency remains bounded by `PollingInterval` under load.
 
-With defaults (`1s` → `30s`, factor `2.0`), an idle worker backs off through `1s → 2s → 4s → 8s → 16s → 30s` before capping at 30s. A burst of work resets it back to 1s immediately.
+With defaults (`10s` → `30s`, factor `2.0`), an idle worker backs off through `10s → 20s → 30s` before capping at 30s. A burst of work resets it back to 10s immediately — and an in-process enqueue signal (or DB push) shortcuts the wait entirely, so the backoff governs how often an idle worker asks the database, not how long a newly enqueued job waits.
 
 To disable backoff entirely, set `PollingIntervalFactor = 1.0`. The delay then stays at `PollingInterval` on every poll.
 
@@ -243,8 +244,9 @@ This creates 7 workers total: 5 polling `critical` every 100ms, and 2 polling `r
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `WorkerCount` | `int` | `min(CPU * 5, 20)` | Number of workers in this group |
+| `PrefetchCount` | `int?` | `null` (= `WorkerCount`) | Prefetch depth for this group, dispatcher mode only. See the server-level option above. |
 | `Queues` | `string[]` | `["default"]` | Queues this group subscribes to |
-| `PollingInterval` | `TimeSpan` | `1 second` | Delay between polls for this group. Also the floor for exponential backoff. |
+| `PollingInterval` | `TimeSpan` | `10 seconds` | Delay between polls for this group. Also the floor for exponential backoff. |
 | `MaxPollingInterval` | `TimeSpan` | `30 seconds` | Upper bound on the polling delay during idle periods for this group |
 | `PollingIntervalFactor` | `double` | `2.0` | Multiplier on each consecutive empty poll for this group. Set to `1.0` to disable backoff. |
 
@@ -259,7 +261,7 @@ This creates 7 workers total: 5 polling `critical` every 100ms, and 2 polling `r
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `HealthCheckInterval` | `TimeSpan` | `3 seconds` | How often the health manager runs (heartbeat, stale job detection, cleanup) |
+| `HealthCheckInterval` | `TimeSpan` | `5 seconds` | How often the health manager runs (heartbeat, stale job detection, cleanup) |
 | `HealthCheckTimeout` | `TimeSpan` | `5 minutes` | Time without heartbeat before a server is considered dead and removed |
 | `InvisibilityTimeout` | `TimeSpan` | `5 minutes` | Time without keep-alive before a processing job is considered stale and requeued. Workers refresh keep-alive every `InvisibilityTimeout / 5` |
 
@@ -280,12 +282,12 @@ Failed jobs have `ExpireAt = null` and are never automatically deleted. They mus
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `OrchestrationInterval` | `TimeSpan` | `10 seconds` | Fallback sweep interval for parent finalization |
-| `MessageRoutingInterval` | `TimeSpan` | `1 second` | Message routing poll interval |
-| `ScheduledActivationInterval` | `TimeSpan` | `5 seconds` | How often `ScheduledJobActivation` flips `State.Scheduled` jobs to `Enqueued`. Controls worst-case latency between a job's `ScheduleTime` and when it becomes eligible for pickup |
+| `MessageRoutingInterval` | `TimeSpan` | `10 seconds` | Message routing poll interval |
+| `ScheduledActivationInterval` | `TimeSpan` | `10 seconds` | How often `ScheduledJobActivation` flips `State.Scheduled` jobs to `Enqueued`. Controls worst-case latency between a job's `ScheduleTime` and when it becomes eligible for pickup |
 | `CounterAggregationInterval` | `TimeSpan` | `5 seconds` | Counter aggregation interval |
 | `ServerCleanupInterval` | `TimeSpan` | `30 seconds` | Dead server cleanup interval |
 | `StaleJobRecoveryInterval` | `TimeSpan` | `30 seconds` | Stale job recovery interval |
-| `ExpirationCleanupInterval` | `TimeSpan` | `60 seconds` | Expiration cleanup interval |
+| `ExpirationCleanupInterval` | `TimeSpan` | `5 minutes` | Expiration cleanup interval |
 
 ## Queue Ordering
 

@@ -64,6 +64,8 @@ Jitter is applied to `ScheduleTime` so rescheduled jobs don't all hit the downst
 
 Circuit Breaker short-circuits before Retry. If the circuit is open when a job would have retried, the job is rescheduled — but Retry's `RetriedTimes` counter is NOT incremented (the handler didn't run, so there was nothing to retry). The retry budget is preserved for when the circuit closes and the downstream is reachable again.
 
+**Retry exhaustion counts as a breaker failure.** Intermediate retry attempts carry a reschedule outcome and are deliberately not counted — the attempt is not settled, the job will run again. The terminal attempt carries a `Failed` outcome (`retry-exhausted`), and the breaker records it: it is the raw dependency failure, reported by the retry budget that spent itself on it. This is what lets the circuit open during an outage where every job exhausts its retries. More generally, the breaker counts any attempt whose outcome is `Failed` (including a handler that stamps a `Failed` outcome itself and then throws) and skips reschedule/delete outcomes, in every registration order.
+
 ## Interaction with concurrency control
 
 Circuit Breaker runs inside the handler pipeline after the concurrency behavior (Mutex / Semaphore). A full slot short-circuits the job to `Deleted` (Skip mode) or `Enqueued` (Wait mode) before the circuit is consulted — concurrency-rejected jobs don't count toward the failure threshold.

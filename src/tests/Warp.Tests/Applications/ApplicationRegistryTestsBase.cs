@@ -329,6 +329,7 @@ public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
 
         return new WarpServerRegistration<TestContext>(
             Options.Create(configuration),
+            Options.Create<WarpConfiguration>(configuration),
             scopeFactory,
             TimeProvider.System,
             new PauseStateHolder(),

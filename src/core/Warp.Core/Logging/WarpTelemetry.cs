@@ -193,6 +193,11 @@ public static class WarpTelemetry
         unit: "{miss}",
         description: "A Total-scope timeout deadline (§8.7) was missed by a terminated job. Emitted unconditionally at finalization (independent of JobMetricsSink); the deadline-attainment DB Counter fold is separate and sink-gated. Tags: job.type, queue, application (executor app when set).");
 
+    public static readonly Counter<long> JobRequeued = Meter.CreateCounter<long>(
+        "warp.job.requeued",
+        unit: "{requeue}",
+        description: "A job was put back on the queue instead of settling terminal. Emitted unconditionally at finalization. Tags: job.type, queue, reason (retry|concurrency|ratelimit|saga), application (executor app when set). Concurrency and rate-limit keys are deliberately NOT tags — they are unbounded and PII-adjacent, and stay on the span.");
+
     // Backlog is a point-in-time gauge sampled periodically by the BacklogSampler server task, so it uses
     // ObservableGauges over a snapshot the sampler replaces each tick (SetBacklogSnapshot) — the callbacks
     // report the last sample on the exporter's collection schedule. Empty snapshot ⇒ no measurements.
@@ -435,6 +440,29 @@ public static class WarpTelemetry
         }
 
         JobQueueWait.Record(Math.Max(0, waitMs), tags);
+    }
+
+    /// <summary>
+    /// Counts a requeue with its cause. Fills the gap where concurrency and rate limiting emitted rich
+    /// SPANS but no meter: spans are sampled, so "how many jobs bounced off this mutex in the last hour"
+    /// was not answerable from telemetry at all. The reason is a bounded enum token, so it is safe as a
+    /// dimension; the concurrency/rate-limit KEY is not, and is never added here.
+    /// </summary>
+    public static void RecordJobRequeued(string? jobType, string queue, string reason, string? application)
+    {
+        var tags = new TagList
+        {
+            { WarpTelemetryAttributes.JobMeterType, jobType },
+            { WarpTelemetryAttributes.QueueMeterQueue, queue },
+            { WarpTelemetryAttributes.JobMeterReason, reason },
+        };
+
+        if (application is not null)
+        {
+            tags.Add(WarpTelemetryAttributes.MeterApplication, application);
+        }
+
+        JobRequeued.Add(1, tags);
     }
 
     /// <summary>

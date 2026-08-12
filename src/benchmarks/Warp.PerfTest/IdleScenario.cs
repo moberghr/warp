@@ -21,9 +21,15 @@ public sealed record IdleResult(
     long Delete,
     long Other,
     long Total,
-    IReadOnlyDictionary<string, long>? CapturedByText = null)
+    IReadOnlyDictionary<string, long>? CapturedByText = null,
+    IReadOnlyList<string>? DisabledLoops = null,
+    IReadOnlyDictionary<string, long>? ServerLogByTask = null)
 {
     public double QueriesPerSecond => Total / WallClock.TotalSeconds;
+
+    public string Label => DisabledLoops is null || DisabledLoops.Count == 0
+        ? Name
+        : $"{Name} -{string.Join(",", DisabledLoops)}";
 }
 
 /// <summary>
@@ -48,11 +54,12 @@ public sealed class IdleScenario : IAsyncDisposable
         int idleSeconds,
         bool useDispatcher,
         bool enableDatabasePush,
-        bool captureSql = false)
+        bool captureSql = false,
+        IReadOnlyList<string>? disabledLoops = null)
     {
         await using var scenario = new IdleScenario();
 
-        return await scenario.ExecuteAsync(name, idleSeconds, useDispatcher, enableDatabasePush, captureSql);
+        return await scenario.ExecuteAsync(name, idleSeconds, useDispatcher, enableDatabasePush, captureSql, disabledLoops ?? []);
     }
 
     private async Task<IdleResult> ExecuteAsync(
@@ -60,7 +67,8 @@ public sealed class IdleScenario : IAsyncDisposable
         int idleSeconds,
         bool useDispatcher,
         bool enableDatabasePush,
-        bool captureSql)
+        bool captureSql,
+        IReadOnlyList<string> disabledLoops)
     {
         await _container.StartAsync();
         var connectionString = _container.GetConnectionString();
@@ -95,7 +103,23 @@ public sealed class IdleScenario : IAsyncDisposable
                         var channel = "warp_idle_" + name.Replace('-', '_');
                         config.UseDatabasePush(o => o.ChannelName = channel);
                     }
+
+                    // Harness-only per-loop attribution switch. No-op unless --disable was
+                    // passed, so the default matrix still measures out-of-the-box defaults.
+                    // Applied last so it also overrides the interval bumps UseDatabasePush
+                    // makes to MessageRouting/Orchestration.
+                    IdleLoopSwitches.Apply(config, disabledLoops);
                 });
+
+                // Server tasks run on the internal WarpServerContext (§2.14), so an interceptor on
+                // TestContext alone misses their queries. Decorate the provider's configurator so the
+                // same counter observes both contexts — otherwise idle q/s counts only the traffic
+                // that leaks onto the user's context.
+                var configurator = services.Last(d => d.ServiceType == typeof(IWarpServerContextConfigurator));
+                services.Remove(configurator);
+                var inner = (IWarpServerContextConfigurator)configurator.ImplementationInstance!;
+                services.AddSingleton<IWarpServerContextConfigurator>(
+                    new InterceptingServerContextConfigurator(inner, _interceptor));
             })
             .Build();
 
@@ -116,9 +140,26 @@ public sealed class IdleScenario : IAsyncDisposable
         _activityCounter.Reset();
         _activityCounter.CaptureSql = captureSql;
 
+        var windowStart = DateTime.UtcNow;
         var sw = Stopwatch.StartNew();
         await Task.Delay(TimeSpan.FromSeconds(idleSeconds));
         sw.Stop();
+
+        // Snapshot the counters BEFORE the diagnostic query below, so the diagnostic's own
+        // commands are never part of the measurement.
+        var (select, update, insert, delete, other, total) = (
+            _activityCounter.Select,
+            _activityCounter.Update,
+            _activityCounter.Insert,
+            _activityCounter.Delete,
+            _activityCounter.Other,
+            _activityCounter.Total);
+        var captured = captureSql ? new Dictionary<string, long>(_activityCounter.CapturedByText) : null;
+
+        // Which task wrote how many ServerLog rows during the run. Explains the bookkeeping
+        // half of the command total: a ServerLog INSERT only happens on a tick that reported
+        // work (message != null) or failed, whereas the ServerTask UPDATE happens every tick.
+        var serverLogByTask = captureSql ? await ReadServerLogByTaskAsync(windowStart) : null;
 
         // The activity counter is the source of truth: it sees ALL Npgsql commands, including
         // those issued via raw DbConnection.CreateCommand() (Warp's HeartbeatAsync,
@@ -130,13 +171,57 @@ public sealed class IdleScenario : IAsyncDisposable
             useDispatcher,
             enableDatabasePush,
             sw.Elapsed,
-            _activityCounter.Select,
-            _activityCounter.Update,
-            _activityCounter.Insert,
-            _activityCounter.Delete,
-            _activityCounter.Other,
-            _activityCounter.Total,
-            captureSql ? new Dictionary<string, long>(_activityCounter.CapturedByText) : null);
+            select,
+            update,
+            insert,
+            delete,
+            other,
+            total,
+            captured,
+            disabledLoops,
+            serverLogByTask);
+    }
+
+    private async Task<IReadOnlyDictionary<string, long>> ReadServerLogByTaskAsync(DateTime windowStart)
+    {
+        await using var scope = _host!.Services.CreateAsyncScope();
+        var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
+
+        var rows = await ctx.Set<Warp.Core.Data.Entities.ServerLog>()
+            .Where(x => x.Timestamp >= windowStart)
+            .GroupBy(x => x.ServerTaskId)
+            .Select(x =>
+                new
+                {
+                    TaskId = x.Key,
+                    Count = (long)x.Count(),
+                })
+            .ToListAsync();
+
+        var names = await ctx.Set<Warp.Core.Data.Entities.ServerTask>()
+            .Select(x =>
+                new
+                {
+                    x.Id,
+                    x.TaskName,
+                })
+            .ToDictionaryAsync(x => x.Id, x => x.TaskName);
+
+        return rows.ToDictionary(
+            x => x.TaskId != null && names.TryGetValue(x.TaskId.Value, out var n) ? n : "(none)",
+            x => x.Count,
+            StringComparer.Ordinal);
+    }
+
+    private sealed class InterceptingServerContextConfigurator(
+        IWarpServerContextConfigurator inner,
+        CommandCountingInterceptor interceptor) : IWarpServerContextConfigurator
+    {
+        public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
+        {
+            inner.Configure(optionsBuilder, applicationServices);
+            optionsBuilder.AddInterceptors(interceptor);
+        }
     }
 
     public async ValueTask DisposeAsync()

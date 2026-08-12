@@ -266,6 +266,7 @@ public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage
             // rather than the IJobHandler<TMessage> discovery path (which would fail because
             // TMessage : IMessage, not IJob).
             ClearHandlerType = false,
+            Reason = OutcomeReason.Saga,
             LogMessage = $"Requeued — saga '{typeof(TSaga).Name}' busy for '{key}'",
         };
     }
@@ -279,6 +280,7 @@ public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage
             State = JobOutcome.RescheduledState(schedule, now),
             ScheduleTime = schedule,
             ClearHandlerType = false,
+            Reason = OutcomeReason.Saga,
             LogMessage = logMessage,
         };
     }
@@ -287,6 +289,7 @@ public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage
         new()
         {
             State = State.Failed,
+            Reason = OutcomeReason.Saga,
             LogMessage = $"No saga of type '{typeof(TSaga).Name}' for correlation key '{key}'",
         };
 
@@ -294,6 +297,7 @@ public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage
         new()
         {
             State = State.Deleted,
+            Reason = OutcomeReason.Saga,
             LogMessage = $"Timeout '{typeof(TMessage).Name}' fired after saga '{typeof(TSaga).Name}' (key '{key}') completed — moot",
         };
 }

@@ -55,11 +55,12 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    private WarpWorkerService<TestContext> CreateWorker(string queue, BarrierSignal? barrier = null)
+    private WarpWorkerService<TestContext> CreateWorker(string queue, BarrierSignal? barrier = null, int[]? retryDelays = null)
     {
         var queues = new[] { queue };
         var services = new ServiceCollection();
         services.AddWarpMediator();
+
         services.AddLogging(builder => builder.AddProvider(new JobLoggerProvider()));
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
         services.AddTestServerContext<TestContext>();
@@ -73,7 +74,10 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
         new Warp.Core.WarpBuilder<TestContext>(services).AddRetry(o =>
         {
             o.MaxRetries = 3;
-            o.Delays = [];
+
+            // Empty by default so a retry lands in Enqueued (immediate). Pass retryDelays to exercise the
+            // PRODUCTION default shape, where a delay puts the retry in Scheduled instead.
+            o.Delays = retryDelays ?? [];
         });
 
         var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
@@ -467,6 +471,215 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
 
         // Assert
         retriedCount.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// The PRODUCTION default: <c>RetryOptions.Delays</c> is <c>[15,60,300]</c>, so a retry is scheduled into
+    /// the future and <c>JobOutcome.RescheduledState</c> returns <see cref="State.Scheduled"/>, not
+    /// <see cref="State.Enqueued"/>. The worker's status label used to test Enqueued alone, so every
+    /// default-configured retry was emitted as <c>status=failed</c> — disagreeing with the DB, which correctly
+    /// wrote <c>stats:requeued</c> for the same attempt. The sibling test above passes only because it
+    /// configures <c>Delays = []</c>, the one shape that lands in Enqueued.
+    /// </summary>
+    [TimedFact]
+    public async Task GetAndProcessJob_FailedWithDefaultDelays_RecordsRetriedStatus()
+    {
+        // Arrange
+        var queue = $"metrics-retry-delayed-{Guid.NewGuid():N}";
+        var jobId = Guid.NewGuid();
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(ThrowExceptionRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new ThrowExceptionRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = queue,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker(queue, retryDelays: [15, 60, 300]);
+        long retriedCount = 0;
+        long failedCount = 0;
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (string.Equals(instrument.Meter.Name, "Warp", StringComparison.Ordinal)
+                && string.Equals(instrument.Name, "warp.job.completed", StringComparison.Ordinal))
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+        {
+            if (!HasTag(tags, "queue", queue))
+            {
+                return;
+            }
+
+            if (HasTag(tags, "status", "retried"))
+            {
+                retriedCount += value;
+            }
+            else if (HasTag(tags, "status", "failed"))
+            {
+                failedCount += value;
+            }
+        });
+        listener.Start();
+
+        // Act
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert — the job took the DELAYED path (this is the discriminator: without it a future change to the
+        // delay defaults would silently turn this back into the Enqueued case and the test would still pass).
+        var job = await _fixture.CreateContext()
+            .Set<Job>()
+            .AsNoTracking()
+            .FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Scheduled);
+
+        retriedCount.ShouldBe(1);
+        failedCount.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task GetAndProcessJob_Retried_EmitsRequeuedMeterWithReasonAndNoKeyTag()
+    {
+        // Fills the gap where concurrency and rate limiting emitted rich SPANS but no meter, so "how many
+        // jobs bounced off this mutex in the last hour" was unanswerable from telemetry. Also pins the tag
+        // set: the concurrency / rate-limit KEY is unbounded and PII-adjacent (§1.2) and must never become
+        // a meter dimension, no matter how useful it looks.
+        var queue = $"metrics-requeued-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(ThrowExceptionRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new ThrowExceptionRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = queue,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker(queue, retryDelays: [15, 60, 300]);
+        long requeued = 0;
+        var observedTags = new List<KeyValuePair<string, object?>>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (string.Equals(instrument.Meter.Name, "Warp", StringComparison.Ordinal)
+                && string.Equals(instrument.Name, "warp.job.requeued", StringComparison.Ordinal))
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+        {
+            if (!HasTag(tags, "queue", queue))
+            {
+                return;
+            }
+
+            requeued += value;
+            foreach (var tag in tags)
+            {
+                observedTags.Add(tag);
+            }
+        });
+        listener.Start();
+
+        // Act
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert
+        requeued.ShouldBe(1);
+
+        // The EXACT tag set, not a contains-check. ApplicationName is unset here, so `application` must be
+        // absent too — an over-tagged meter is a cardinality bug, and asserting only presence would never
+        // catch a new dimension being added.
+        observedTags
+            .Select(x => x.Key)
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .ShouldBe(["job.type", "queue", "reason"]);
+
+        // The value matters as much as the key: a `reason` tag carrying the wrong token silently
+        // misattributes every requeue in the dashboard's breakdown.
+        observedTags
+            .Where(x => string.Equals(x.Key, "reason", StringComparison.Ordinal))
+            .Select(x => x.Value?.ToString())
+            .ShouldBe(["retry"]);
+    }
+
+    // RED until the requeue meter moves out of the reason block and beside the state total it must agree
+    // with. JobOutcome.Reason is nullable and JobOutcome is public API, so a user-written pipeline
+    // behaviour can validly reschedule without one — as this one does. Emitting the meter only for
+    // reason-bearing outcomes makes an "always-on" meter undercount requeues that stats:requeued already
+    // counted, and the two silently disagree.
+    [TimedFact]
+    public async Task GetAndProcessJob_RequeuedWithNoReason_StillEmitsRequeuedMeterAsUnknown()
+    {
+        var queue = $"metrics-requeued-noreason-{Guid.NewGuid():N}";
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(ReasonlessRequeueRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new ReasonlessRequeueRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = queue,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker(queue);
+        long requeued = 0;
+        var observedReasons = new List<string?>();
+
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (string.Equals(instrument.Meter.Name, "Warp", StringComparison.Ordinal)
+                && string.Equals(instrument.Name, "warp.job.requeued", StringComparison.Ordinal))
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+        {
+            if (!HasTag(tags, "queue", queue))
+            {
+                return;
+            }
+
+            requeued += value;
+            foreach (var tag in tags)
+            {
+                if (string.Equals(tag.Key, "reason", StringComparison.Ordinal))
+                {
+                    observedReasons.Add(tag.Value?.ToString());
+                }
+            }
+        });
+        listener.Start();
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        requeued.ShouldBe(1);
+
+        // The bounded fallback, not a value derived from the outcome — an unbounded reason tag would mint
+        // a meter dimension per caller (§1.2/§8.33).
+        observedReasons.ShouldBe(["unknown"]);
     }
 
     [TimedFact]

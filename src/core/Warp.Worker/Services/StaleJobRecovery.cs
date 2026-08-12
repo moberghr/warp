@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Warp.Core;
@@ -6,7 +7,9 @@ using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Logging;
 using Warp.Core.NoRestart;
+using Warp.Core.Services;
 using Warp.Core.Webhooks;
 
 namespace Warp.Worker.Services;
@@ -32,6 +35,13 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly WarpServerConfiguration _configuration;
     private readonly IEnumerable<IWebhookRedeliveryEnqueuer> _webhookEnqueuers;
+
+    // Requeue meter emissions buffered until the sweep's transaction COMMITS. Under the task host this
+    // method runs inside the lock transaction (LocksWithTransaction, §8.25) — SaveChangesAsync only
+    // flushes, and an inline emission would record requeues a rollback then undoes, which the next sweep
+    // re-records: the meter drifts permanently above the DB counter it mirrors. The task is scoped (one
+    // instance per iteration), so the buffer never outlives its run.
+    private readonly List<(string? Type, string Queue)> _pendingRequeueMeters = [];
 
     public StaleJobRecovery(
         IWarpServerContext serverContext,
@@ -104,7 +114,6 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                 job.CurrentState = State.Deleted;
                 job.CancellationMode = CancellationMode.None;
                 job.ExpireAt = now.AddDays(1);
-                _context.Set<Counter>().Add(new Counter { Key = "stats:deleted", Value = 1 });
                 _context.Set<JobLog>().Add(new JobLog
                 {
                     JobId = job.Id,
@@ -132,12 +141,16 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                     Message = "Requeued by crash recovery — worker stopped responding",
                 });
                 requeued++;
+
+                // Buffered, not emitted — see _pendingRequeueMeters. The always-on meter moves with the DB
+                // counter, per requeue: recovery requeues are one of the two reasons an Otel-only deployment
+                // (JobMetricsSink = Otel, no stats: rows) most needs on a dashboard after an incident.
+                _pendingRequeueMeters.Add((job.Type, string.IsNullOrEmpty(job.Queue) ? "default" : job.Queue));
             }
             else
             {
                 job.CurrentState = State.Failed;
                 job.ExpireAt = null;
-                _context.Set<Counter>().Add(new Counter { Key = "stats:failed", Value = 1 });
                 _context.Set<JobLog>().Add(new JobLog
                 {
                     JobId = job.Id,
@@ -150,13 +163,51 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
             }
         }
 
+        // One row per key carrying the batch count, not one per job — CounterAggregator sums either way and
+        // this is a sweep, not a hot path. Counts the rows actually flipped, so each key agrees exactly with
+        // the log rows written above. Append-only: a recovery outcome is an event that happened.
+        var hourSuffix = now.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
+        var reason = OutcomeReasonTokens.For(OutcomeReason.Recovery);
+
+        AddStatCounters("stats:requeued", requeued, hourSuffix);
+        AddStatCounters($"stats:requeued-{reason}", requeued, hourSuffix);
+        AddStatCounters("stats:deleted", deleted, hourSuffix);
+        AddStatCounters("stats:failed", failed, hourSuffix);
+
         await _context.SaveChangesAsync(ct);
         if (ownedTx != null)
         {
+            // Direct caller (test, admin trigger): we own the transaction, so this commit is the durable
+            // point — drain here. Under the task host ownedTx is null and the host's lock transaction
+            // commits after ExecuteAsync returns; the host then invokes OnCommittedAsync, which drains.
             await ownedTx.CommitAsync(ct);
+            EmitPendingRequeueMeters();
         }
 
         return new StaleJobRecoveryResult(requeued, failed, deleted);
+    }
+
+    // Post-commit hook (§8.25): the task host calls this only after its lock transaction has committed —
+    // and never on a throw/rollback, which leaves the buffer to die with this scoped instance.
+    public Task OnCommittedAsync(CancellationToken ct)
+    {
+        EmitPendingRequeueMeters();
+
+        return Task.CompletedTask;
+    }
+
+    private void EmitPendingRequeueMeters()
+    {
+        foreach (var (type, queue) in _pendingRequeueMeters)
+        {
+            WarpTelemetry.RecordJobRequeued(
+                type,
+                queue,
+                OutcomeReasonTokens.For(OutcomeReason.Recovery),
+                _configuration.ApplicationName);
+        }
+
+        _pendingRequeueMeters.Clear();
     }
 
     // A Pending WebhookDelivery whose NextAttemptAt is more than WebhookStuckDeliveryGrace past has lost
@@ -244,6 +295,22 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         }
 
         return recovered;
+    }
+
+    /// <summary>
+    /// Writes a <c>stats:</c> lifetime row and its hourly bucket sibling, or nothing when the sweep flipped
+    /// no rows for that key. Never one without the other — a lifetime row with no bucket makes the lifetime
+    /// total disagree with the sum of its own buckets, which is what the Counters chart plots against.
+    /// </summary>
+    private void AddStatCounters(string key, int count, string hourSuffix)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _context.Set<Counter>().Add(new Counter { Key = key, Value = count });
+        _context.Set<Counter>().Add(new Counter { Key = $"{key}:{hourSuffix}", Value = count });
     }
 
     private static bool? ReadCanBeRestarted(string? metadataJson)

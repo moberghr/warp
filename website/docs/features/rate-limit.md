@@ -96,7 +96,7 @@ DI insertion order is outer → inner. With the mutex outer, a rejected mutex ac
 
 ## DB push does not accelerate `Wait`
 
-DB push (`opt.UseDatabasePush()`) wakes workers on `JobEnqueued` notifications. Rate-limit `Wait`-mode reschedules land in `State.Scheduled`, which is handled by `ScheduledJobActivation` (time-driven, `ScheduledActivationInterval` default 5 s). Push does **not** speed up these reschedules — they wait for the next activation tick.
+DB push (`opt.UseDatabasePush()`) wakes workers on `JobEnqueued` notifications. Rate-limit `Wait`-mode reschedules land in `State.Scheduled`, which is handled by `ScheduledJobActivation` (time-driven, `ScheduledActivationInterval` default 10 s). Push does **not** speed up these reschedules — they wait for the next activation tick.
 
 If you need sub-second `Wait` precision against a high-volume key, lower `ScheduledActivationInterval` rather than reaching for push.
 

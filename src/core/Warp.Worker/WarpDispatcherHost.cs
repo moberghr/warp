@@ -91,7 +91,8 @@ public class WarpDispatcherHost<TContext> : IHostedService
                     _timeProvider,
                     _notificationTransport,
                     _signals,
-                    _exceptionClassifier);
+                    _exceptionClassifier,
+                    dispatcher.Availability);
 
                 await worker.StartAsync(cancellationToken);
                 _workers.Add(worker);

@@ -47,7 +47,7 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
         _scopes = scopes;
         _logger = logger;
 
-        var leaseTtl = workerConfig.Value.BackgroundServiceLeaseTtl ?? TimeSpan.FromSeconds(30);
+        var leaseTtl = workerConfig.Value.BackgroundServiceLeaseTtl ?? WarpServerConfiguration.DefaultBackgroundServiceLeaseTtl;
         var acquirePollInterval = workerConfig.Value.BackgroundServiceAcquirePollInterval ?? TimeSpan.FromSeconds(15);
         var logFlushInterval = workerConfig.Value.LogFlushInterval;
 
