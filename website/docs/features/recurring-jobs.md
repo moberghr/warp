@@ -34,6 +34,8 @@ Each job created by the scheduler is logged in `RecurringJobLog`. The dashboard 
 
 The `RecurringJobLog` has a FK to `Job` with `SET NULL` cascade. When a job expires and is cleaned up, the log entry survives with `JobId = null`. The last 100 entries per recurring job are retained.
 
+The recurring job **list** condenses this into a **Last Result** column — the state of the most recent real run, carried on `RecurringJobModel` as `HasLastRun` / `LastJobId` / `LastState`. A skipped firing is not a run, so a disabled recurring job keeps showing the outcome of its last actual execution rather than blanking out. `HasLastRun = false` means the definition has never fired; `HasLastRun = true` with a null `LastState` means it fired but the job row has since been cleaned up.
+
 ## Cron Expressions
 
 Standard 5-part cron (minute, hour, day, month, weekday) and 6-part with seconds:

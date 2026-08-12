@@ -411,4 +411,171 @@ public abstract class RecurringJobTestsBase : IAsyncLifetime
         job.TraceId.ShouldNotBeNull();
         job.TraceId.ShouldBe(job.Id);
     }
+
+    [TimedFact]
+    public async Task GetRecurringJobs_WithFailedRun_ReturnsLastRunState()
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var rj = AddRecurringJob(ctx, "last-run-state", DateTime.UtcNow.AddMinutes(1));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var jobId = AddJob(ctx, State.Failed);
+        AddRun(ctx, rj.Id, jobId);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var svc = new RecurringJobService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
+        var result = await svc.GetRecurringJobs(new BaseListRequest { Page = 0, PageSize = 20 });
+
+        // Assert
+        var item = result.Items.ShouldHaveSingleItem();
+        item.HasLastRun.ShouldBeTrue();
+        item.LastJobId.ShouldBe(jobId);
+        item.LastState.ShouldBe(State.Failed);
+    }
+
+    [TimedFact]
+    public async Task GetRecurringJobs_WithNewerSkippedLog_ReturnsLastRealRunState()
+    {
+        // Arrange: a real run, then a skipped firing on top of it (the definition was disabled)
+        var ctx = _fixture.CreateContext();
+        var rj = AddRecurringJob(ctx, "skipped-on-top", DateTime.UtcNow.AddMinutes(1));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var jobId = AddJob(ctx, State.Completed);
+        AddRun(ctx, rj.Id, jobId);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        ctx.Set<RecurringJobLog>().Add(new RecurringJobLog
+        {
+            RecurringJobId = rj.Id,
+            Skipped = true,
+            CreatedAt = DateTime.UtcNow,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var svc = new RecurringJobService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
+        var result = await svc.GetRecurringJobs(new BaseListRequest { Page = 0, PageSize = 20 });
+
+        // Assert: a skip is not a run, so the last real firing still reports
+        var item = result.Items.ShouldHaveSingleItem();
+        item.HasLastRun.ShouldBeTrue();
+        item.LastJobId.ShouldBe(jobId);
+        item.LastState.ShouldBe(State.Completed);
+    }
+
+    [TimedFact]
+    public async Task GetRecurringJobs_WithCleanedUpJob_ReportsRunWithoutState()
+    {
+        // Arrange: a run whose job row is gone (JobId nulled by DeleteBehavior.SetNull)
+        var ctx = _fixture.CreateContext();
+        var rj = AddRecurringJob(ctx, "cleaned-up-run", DateTime.UtcNow.AddMinutes(1));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        AddRun(ctx, rj.Id, jobId: null);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var svc = new RecurringJobService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
+        var result = await svc.GetRecurringJobs(new BaseListRequest { Page = 0, PageSize = 20 });
+
+        // Assert: it ran, but the outcome is no longer knowable
+        var item = result.Items.ShouldHaveSingleItem();
+        item.HasLastRun.ShouldBeTrue();
+        item.LastJobId.ShouldBeNull();
+        item.LastState.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task GetRecurringJobs_WithoutRuns_ReportsNoLastRun()
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        AddRecurringJob(ctx, "never-ran", DateTime.UtcNow.AddMinutes(1));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var svc = new RecurringJobService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
+        var result = await svc.GetRecurringJobs(new BaseListRequest { Page = 0, PageSize = 20 });
+
+        // Assert
+        var item = result.Items.ShouldHaveSingleItem();
+        item.HasLastRun.ShouldBeFalse();
+        item.LastJobId.ShouldBeNull();
+        item.LastState.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task GetRecurringJobs_WithMultipleDefinitions_MapsEachRunToItsOwnDefinition()
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var first = AddRecurringJob(ctx, "multi-first", DateTime.UtcNow.AddMinutes(1));
+        var second = AddRecurringJob(ctx, "multi-second", DateTime.UtcNow.AddMinutes(2));
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var firstJobId = AddJob(ctx, State.Completed);
+        AddRun(ctx, first.Id, firstJobId);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var secondJobId = AddJob(ctx, State.Processing);
+        AddRun(ctx, second.Id, secondJobId);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var svc = new RecurringJobService<TestContext>(_fixture.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
+        var result = await svc.GetRecurringJobs(new BaseListRequest { Page = 0, PageSize = 20 });
+
+        // Assert: ordered by NextExecution
+        result.Items.Count.ShouldBe(2);
+        result.Items[0].LastJobId.ShouldBe(firstJobId);
+        result.Items[0].LastState.ShouldBe(State.Completed);
+        result.Items[1].LastJobId.ShouldBe(secondJobId);
+        result.Items[1].LastState.ShouldBe(State.Processing);
+    }
+
+    private static RecurringJob AddRecurringJob(TestContext ctx, string name, DateTime nextExecution)
+    {
+        var recurringJob = new RecurringJob
+        {
+            Name = name,
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new UnitRequest()),
+            Cron = "* * * * *",
+            CreatedAt = DateTime.UtcNow,
+            NextExecution = nextExecution,
+        };
+
+        ctx.Set<RecurringJob>().Add(recurringJob);
+
+        return recurringJob;
+    }
+
+    private static Guid AddJob(TestContext ctx, State state)
+    {
+        var jobId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = state,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+
+        return jobId;
+    }
+
+    private static void AddRun(TestContext ctx, int recurringJobId, Guid? jobId)
+    {
+        ctx.Set<RecurringJobLog>().Add(new RecurringJobLog
+        {
+            RecurringJobId = recurringJobId,
+            JobId = jobId,
+            CreatedAt = DateTime.UtcNow,
+        });
+    }
 }
