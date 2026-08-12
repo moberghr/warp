@@ -4,6 +4,7 @@ import type { ColumnDef } from '@tanstack/react-table';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { RelativeTime } from '@/components/RelativeTime';
+import { StateBadge } from '@/components/StateBadge';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { DataTable } from '@/components/DataTable';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
@@ -100,6 +101,29 @@ export default function RecurringPage() {
           ) : (
             <span className="text-sm text-muted-foreground">Never</span>
           ),
+      },
+      {
+        id: 'lastResult',
+        header: 'Last Result',
+        cell: ({ row }) => {
+          const { hasLastRun, lastJobId, lastState } = row.original;
+
+          if (!hasLastRun) {
+            return <span className="text-sm text-muted-foreground">—</span>;
+          }
+
+          if (lastState == null) {
+            return <span className="text-xs text-muted-foreground">Cleaned up</span>;
+          }
+
+          return lastJobId ? (
+            <Link to={`/detail/${lastJobId}`}>
+              <StateBadge state={lastState} />
+            </Link>
+          ) : (
+            <StateBadge state={lastState} />
+          );
+        },
       },
       {
         id: 'actions',

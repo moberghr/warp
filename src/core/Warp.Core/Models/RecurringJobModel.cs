@@ -1,3 +1,5 @@
+using Warp.Core.Enums;
+
 namespace Warp.Core.Models;
 
 public class RecurringJobModel
@@ -17,6 +19,15 @@ public class RecurringJobModel
     public DateTime CreatedAt { get; set; }
 
     public DateTime? DisabledAt { get; set; }
+
+    // Last run = the newest non-skipped firing. HasLastRun distinguishes "never actually fired"
+    // from "fired, but the job row has since been cleaned up" — both leave LastJobId/LastState null,
+    // because deleting a Job sets RecurringJobLog.JobId to null (DeleteBehavior.SetNull).
+    public bool HasLastRun { get; set; }
+
+    public Guid? LastJobId { get; set; }
+
+    public State? LastState { get; set; }
 }
 
 public class RecurringJobDetailModel : RecurringJobModel
