@@ -8,7 +8,7 @@ sidebar_position: 6
 
 *Unreleased*
 
-**Breaking, code-only — no schema migration.** The dashboard is now exposed as routed ASP.NET Core endpoints, so you gate it with the framework's own authorization instead of a Warp-specific filter. This is the whole release; nothing about job execution, the worker, or the data model changes.
+**Breaking, code-only — no schema migration.** The dashboard is now exposed as routed ASP.NET Core endpoints, so you gate it with the framework's own authorization instead of a Warp-specific filter. The break is confined to dashboard setup: nothing about job execution, the worker, or the data model changes. Three bug fixes and two dashboard improvements that landed after 3.11.0 ship here as well.
 
 ### Why
 
@@ -51,7 +51,7 @@ The built-in login is now a real `AddCookie` authentication scheme rather than a
 
 `RequireWarpDashboardLogin()` gates the API and the hub while leaving the SPA shell anonymous — the shell renders the login form, so gating it would challenge the page that collects the credentials. This preserves the 3.x experience exactly.
 
-### Also in this release
+### Also in the authorization rework
 
 - **Registering the built-in login gates the dashboard by itself.** `AddWarpDashboard().AddBuiltInLogin<T>()` applies its policy to the API and hub when you map the dashboard, so the half-configured shape — services registered, `RequireWarpDashboardLogin()` forgotten — cannot leave a dashboard that renders a login page while every API route answers anonymously. The explicit call remains available and is idempotent. This restores exactly what `UseBuiltInLogin<T>()` guaranteed in 3.x. Applying a policy of your own **replaces** the login gate instead of stacking on it, and the SPA then stops offering a login form that could not grant access.
 - **Warp owns every path under the route prefix.** The shell's catch-all claims `{prefix}/{**path}`, so content your own app serves under the dashboard prefix via middleware is no longer reachable — in 3.x unmatched paths continued down the pipeline. Move such content outside the prefix; host endpoints with literal routes still win over the catch-all.
@@ -65,19 +65,19 @@ The built-in login is now a real `AddCookie` authentication scheme rather than a
 
 See [Dashboard Authorization](/docs/operations/dashboard-auth) for the full set of shapes.
 
-## 3.11.1
+### Fix: job states read "Unknown" when the host configured JSON options
 
-*Unreleased*
+The dashboard API is minimal APIs returning POCOs, so it serialized with the host's **process-wide** `ConfigureHttpJsonOptions`. A host that registered a `JsonStringEnumConverter` — a common choice — reshaped Warp's payloads as a side effect: `currentState` arrived as `"Failed"` instead of `5`, so every state badge read **Unknown**, job detail lost its Requeue and Delete buttons (they test `kind === 1`), and the "Cancelling…" badge could never render. A `PropertyNamingPolicy` change broke it the same way.
 
-Patch release — two bug fixes. No migration, no API change.
+The dashboard API and the bundled SPA ship together as one closed contract, so Warp now pins its own response format (camelCase names, numeric enums) for everything under `{RoutePrefix}/api`. Nothing is required of you and there is no setting to get wrong — configure JSON however your own API needs it. Inbound [`Warp.Http`](/docs/features/http) endpoints are deliberately unaffected: those are *your* public API and keep honouring your options.
 
-### Endpoint calls record the real wire status when a handler exception is mapped upstream
+### Fix: endpoint calls record the real wire status when a handler exception is mapped upstream
 
 A Warp HTTP endpoint whose handler threw an exception that a **host** exception middleware later translated into a status (the common `NotSignedInException` → 401 shape) was recorded with `StatusCode = 200` — the never-written ASP.NET default, snapshotted while the exception was still unwinding, before the host middleware ran. The call-detail page then showed the contradiction: status 200, outcome Failed, an exception pane.
 
 Recording for an exception that escapes before the response starts is now deferred to response completion, so the row carries the **final wire status** (the 401 the client actually received; a genuinely unhandled exception records the server's 500). The outcome derives from that status: ≥ 500 is `Failed`, a host-mapped 4xx counts like any other 4xx — a client error, kept off the endpoint error rate — while the exception type and message stay on the row. Exception-bearing calls are never dropped by `RecordCalls = FailuresOnly` or sampling, and `OnFailure` capture tiers treat them as failures, so the diagnostic detail is still captured. An exception thrown after the response started (a truncated 2xx on the wire) still records `Failed`. Error grouping follows the same split: a host-mapped 401 now mints a 4xx status-code issue for its route instead of an exception issue.
 
-### Recurring jobs no longer wait out the polling backoff
+### Fix: recurring jobs no longer wait out the polling backoff
 
 `RecurringJobScheduler` created its firing directly in `State.Enqueued` and returned without announcing it — the only enqueue site in Warp that fired neither the in-process `JobEnqueued` signal nor the cross-process push notification. `Publisher`, `MessageRouter`, `ScheduledJobActivation`, the worker outbox and "Trigger Now" all announce their enqueues; this one didn't. An otherwise idle worker therefore discovered a cron firing only on its next backoff poll.
 
@@ -89,6 +89,18 @@ Recurring firings are now claimed as promptly as anything published through `IPu
 - Queue-wait on the [Queues page](./features/queue-metrics.md) stops being dominated by multi-minute recurring samples. On a queue whose only traffic is recurring jobs, that was every sample — an average wait of minutes on a queue with zero backlog.
 
 Existing `qwait` history is not rewritten: the lifetime average still carries the old samples, and the improvement shows in the hourly buckets from the upgrade onward.
+
+### The Counters page is split into per-family tabs
+
+The page rendered every `Counter` / `Statistic` key as one alphabetical table over one chart, which made most of it unreadable: a per-job-type duration **sum** in the hundreds of thousands of milliseconds shared an axis with an execution count of 2, so the count sat flat on zero; dimensions were raw assembly-qualified type names; and global `stats:` totals were interleaved with per-type, per-queue, per-adapter and per-endpoint keys.
+
+Each family now gets its own tab, pivoted to one row per dimension (short type name, namespace beneath it) with duration sums and histogram buckets folded into derived **Avg** and **p95** columns rather than shown as raw count-shaped numbers. Web vitals read p75. Charts plot one metric at a time over the top 10 series and state on screen how many were dropped; tooltips drop zero-valued series and sort by value, so hovering answers what moved in that hour. Unrecognised keys fall through to an **Other** tab and render raw, so an addon's keys are never silently dropped. Per-application slices stay separate rows — merging them into the cluster-wide row would double every count.
+
+This also fixes a latent blank chart: the canvas was swapped for a placeholder while loading, so the mount-once creation effect could fire with no canvas and never run again. See [Counters](/docs/ui/counters).
+
+### The recurring job list shows the last run outcome
+
+The list carried only `LastExecution`, a timestamp stamped at *enqueue* time, so whether the last firing succeeded was visible only by opening the detail page. A **Last Result** column now shows the state of the most recent real run and links to that job. A skipped firing is not a run, so a disabled definition keeps reporting the outcome of its last actual execution; a definition that has never fired shows `—`, and one whose job row has since been cleaned up says so. No schema change and nothing added to the worker path — the state is reached through `RecurringJobLog` in a two-step fetch. See [Recurring Jobs](/docs/ui/recurring).
 
 ## 3.11.0
 
