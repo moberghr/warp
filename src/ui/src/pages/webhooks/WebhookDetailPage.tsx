@@ -9,7 +9,7 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { WebhookDeliveryStatus, WebhookSigning } from '@/types/webhooks';
-import { OutcomeBadge, formatMs } from '@/pages/adapters/shared';
+import { OutcomeBadge, formatMs, HttpStatus } from '@/pages/adapters/shared';
 
 export default function WebhookDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -168,7 +168,7 @@ export default function WebhookDetailPage() {
                     <span className="text-muted-foreground tabular-nums">#{index + 1}</span>
                     <RelativeTime date={attempt.timestamp} />
                     <OutcomeBadge outcome={attempt.outcome} />
-                    <span className="tabular-nums text-muted-foreground">{attempt.statusCode ?? '—'}</span>
+                    <HttpStatus code={attempt.statusCode} className="tabular-nums text-muted-foreground" />
                     <span className="tabular-nums text-muted-foreground">{formatMs(attempt.durationMs)}</span>
                   </div>
                   {attempt.exceptionType && (

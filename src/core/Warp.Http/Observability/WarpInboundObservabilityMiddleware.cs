@@ -124,7 +124,20 @@ internal sealed class WarpInboundObservabilityMiddleware
 
             if (!clientAborted)
             {
-                await RecordAsync(context, identity, start, capture, forceCapture, exceptionType, exceptionMessage);
+                if (exceptionType is not null && !context.Response.HasStarted)
+                {
+                    // The final status doesn't exist yet: an upstream exception handler (or the server
+                    // itself) writes it AFTER this frame unwinds, so reading Response.StatusCode here would
+                    // record the never-written 200 default. Defer until the response completes so the row
+                    // carries the real wire status (e.g. a host mapping the exception to 401).
+                    var type = exceptionType;
+                    var message = exceptionMessage;
+                    context.Response.OnCompleted(() => RecordAsync(context, identity, start, capture, forceCapture, type, message, midStreamFault: false));
+                }
+                else
+                {
+                    await RecordAsync(context, identity, start, capture, forceCapture, exceptionType, exceptionMessage, midStreamFault: exceptionType is not null);
+                }
             }
         }
     }
@@ -136,14 +149,22 @@ internal sealed class WarpInboundObservabilityMiddleware
         CaptureBodyStream? capture,
         bool forceCapture,
         string? exceptionType,
-        string? exceptionMessage)
+        string? exceptionMessage,
+        bool midStreamFault)
     {
         try
         {
             var now = _timeProvider.GetUtcNow().UtcDateTime;
             var durationMs = _timeProvider.GetElapsedTime(start).TotalMilliseconds;
             var statusCode = context.Response.StatusCode;
-            var failed = exceptionType is not null || statusCode >= 500;
+
+            // The status here is the wire status (a deferred record runs after the response completed), so
+            // the outcome derives from it: ≥500 = Failed, 4xx = client error = Success — an escaped exception
+            // an upstream handler mapped to 4xx counts like any 4xx (§8.21), with the exception kept on the
+            // row. The one exception-driven failure is a throw AFTER the response started: the client got a
+            // truncated 2xx, which no status can express.
+            var faulted = exceptionType is not null;
+            var failed = statusCode >= 500 || midStreamFault;
             var outcome = failed ? AdapterCallOutcome.Failed : AdapterCallOutcome.Success;
 
             // Always-on meters (independent of the recording Sink): an OTel-only user reconstructs
@@ -155,9 +176,12 @@ internal sealed class WarpInboundObservabilityMiddleware
             // captures bodies + headers even on success and even if the tier is None/OnFailure. Request
             // bodies are the exception — they are only captured for Always/force (see the buffering note in
             // InvokeAsync), never OnFailure, because that would require buffering every request up-front.
-            var captureBodies = forceCapture || _options.CaptureResponseBodies == CaptureMode.Always || (failed && _options.CaptureResponseBodies == CaptureMode.OnFailure);
+            // OnFailure treats any exception-bearing call as a failure even when the wire outcome is a 4xx
+            // client error — the exception is exactly the diagnostic detail worth capturing.
+            var captureWorthy = failed || faulted;
+            var captureBodies = forceCapture || _options.CaptureResponseBodies == CaptureMode.Always || (captureWorthy && _options.CaptureResponseBodies == CaptureMode.OnFailure);
             var captureReq = forceCapture || _options.CaptureRequestBodies == CaptureMode.Always;
-            var captureHeaders = forceCapture || _options.CaptureHeaders == CaptureMode.Always || (failed && _options.CaptureHeaders == CaptureMode.OnFailure);
+            var captureHeaders = forceCapture || _options.CaptureHeaders == CaptureMode.Always || (captureWorthy && _options.CaptureHeaders == CaptureMode.OnFailure);
 
             // Compute the captured detail once — both the span enrichment (Otel/Both) and the DB row
             // (Database/Both) draw from the same already-redacted/truncated values.
@@ -204,7 +228,10 @@ internal sealed class WarpInboundObservabilityMiddleware
             var sampledIn = _options.SampleRate >= 1.0 || Random.Shared.NextDouble() < _options.SampleRate;
 #pragma warning restore CA5394
 
+            // Exception-bearing calls are never suppressed: even when the wire outcome is a 4xx client error,
+            // the row carries the exception detail a FailuresOnly host is asking to keep.
             var suppressLog = !failed
+                && !faulted
                 && !forceCapture
                 && (_options.RecordCalls == CallRecording.FailuresOnly || !sampledIn);
 

@@ -6,6 +6,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import { RelativeTime } from '@/components/RelativeTime';
 import * as api from '@/api';
 import { ClientEventType } from '@/types/client';
+import { HttpStatus } from '@/pages/adapters/shared';
 import type { ClientSessionEntry } from '@/types/client';
 
 // The unified client<->server session timeline (§8.27): a browser session's client events (errors, logs,
@@ -71,7 +72,7 @@ function TimelineRow({ entry }: { entry: ClientSessionEntry }) {
         {isServer ? (
           <div className="flex items-center gap-2">
             <span className="font-mono text-xs">{entry.method} {entry.route}</span>
-            {entry.statusCode != null && <span className="tabular-nums text-muted-foreground">{entry.statusCode}</span>}
+            {entry.statusCode != null && <HttpStatus code={entry.statusCode} className="tabular-nums text-muted-foreground" />}
             {entry.durationMs != null && <span className="tabular-nums text-muted-foreground">{Math.round(entry.durationMs)}ms</span>}
             {entry.traceId && <Link to={`/trace/${entry.traceId}`} className="text-xs text-primary hover:underline">trace →</Link>}
           </div>

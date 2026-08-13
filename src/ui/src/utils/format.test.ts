@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   shortType, shortId, stateName, formatBytes, isServerStale,
   formatRelativeTime, formatDateTime, formatDateTimeExact, stateColor, serverStatusDotColor,
+  httpStatusName,
 } from './format';
 import { State } from '@/types';
 
@@ -65,6 +66,28 @@ describe('date formatters', () => {
     const rel = formatRelativeTime('2026-01-01T00:00:00Z');
     expect(rel).toBeTruthy();
     expect(rel).toContain('1');
+  });
+});
+
+describe('httpStatusName', () => {
+  it('names the common codes', () => {
+    expect(httpStatusName(200)).toBe('OK');
+    expect(httpStatusName(401)).toBe('Unauthorized');
+    expect(httpStatusName(404)).toBe('Not Found');
+    expect(httpStatusName(429)).toBe('Too Many Requests');
+    expect(httpStatusName(500)).toBe('Internal Server Error');
+    expect(httpStatusName(503)).toBe('Service Unavailable');
+  });
+
+  it('falls back to the status class for unmapped codes', () => {
+    expect(httpStatusName(299)).toBe('Success');
+    expect(httpStatusName(499)).toBe('Client Error');
+    expect(httpStatusName(599)).toBe('Server Error');
+  });
+
+  it('is Unknown outside the status code range', () => {
+    expect(httpStatusName(0)).toBe('Unknown');
+    expect(httpStatusName(999)).toBe('Unknown');
   });
 });
 

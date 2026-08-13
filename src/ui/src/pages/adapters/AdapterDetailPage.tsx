@@ -9,7 +9,7 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { PerformanceChart } from '@/components/PerformanceChart';
 import * as api from '@/api';
-import { HealthPill, adapterHealth, OutcomeBadge, formatPercent, formatMs, parseTags } from './shared';
+import { HealthPill, adapterHealth, OutcomeBadge, HttpStatus, formatPercent, formatMs, parseTags } from './shared';
 
 const PAGE_SIZE = 15;
 
@@ -257,7 +257,7 @@ export default function AdapterDetailPage() {
                       <TableCell className="font-mono text-xs text-muted-foreground">{call.groupName ?? '—'}</TableCell>
                     )}
                     <TableCell><OutcomeBadge outcome={call.outcome} /></TableCell>
-                    <TableCell className="text-right tabular-nums text-sm">{call.statusCode ?? '—'}</TableCell>
+                    <TableCell className="text-right tabular-nums text-sm"><HttpStatus code={call.statusCode} /></TableCell>
                     <TableCell className="text-right tabular-nums text-sm">{formatMs(call.durationMs)}</TableCell>
                     <TableCell><Tags tagsJson={call.tagsJson} /></TableCell>
                   </TableRow>

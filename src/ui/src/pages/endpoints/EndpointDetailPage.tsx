@@ -9,7 +9,7 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { PerformanceChart } from '@/components/PerformanceChart';
 import * as api from '@/api';
-import { HealthPill, adapterHealth, OutcomeBadge, formatPercent, formatMs } from '../adapters/shared';
+import { HealthPill, adapterHealth, OutcomeBadge, HttpStatus, formatPercent, formatMs } from '../adapters/shared';
 
 const PAGE_SIZE = 15;
 
@@ -194,7 +194,7 @@ export default function EndpointDetailPage() {
                       <RelativeTime date={call.timestamp} />
                     </TableCell>
                     <TableCell><OutcomeBadge outcome={call.outcome} /></TableCell>
-                    <TableCell className="text-right tabular-nums text-sm">{call.statusCode ?? '—'}</TableCell>
+                    <TableCell className="text-right tabular-nums text-sm"><HttpStatus code={call.statusCode} /></TableCell>
                     <TableCell className="text-right tabular-nums text-sm">{formatMs(call.durationMs)}</TableCell>
                     {hasGroups && (
                       <TableCell className="font-mono text-xs text-muted-foreground">{call.groupName ?? '—'}</TableCell>

@@ -4,7 +4,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
-import { OutcomeBadge, formatMs, Pane, Field, PayloadPane } from './shared';
+import { OutcomeBadge, formatMs, HttpStatus, Pane, Field, PayloadPane } from './shared';
 
 // Full, linkable detail page for a single outbound adapter call (formerly a drawer). The URL
 // carries both the adapter name and the call id, so a call is shareable and survives refresh.
@@ -45,7 +45,7 @@ export default function AdapterCallDetailPage() {
                 <Field label="Timestamp"><RelativeTime date={call.timestamp} /></Field>
                 <Field label="Duration">{formatMs(call.durationMs)}</Field>
                 <Field label="Attempts">{call.attempts}</Field>
-                <Field label="Status">{call.statusCode ?? '—'}</Field>
+                <Field label="Status"><HttpStatus code={call.statusCode} /></Field>
                 {call.groupName && <Field label="Group"><span className="font-mono text-xs">{call.groupName}</span></Field>}
                 <Field label="Machine"><span className="font-mono text-xs">{call.machineName}</span></Field>
                 {call.traceId && <Field label="Trace"><span className="font-mono text-xs">{call.traceId}</span></Field>}

@@ -5,6 +5,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import type { ReactNode } from 'react';
 import { AdapterCallOutcome } from '@/types/adapters';
+import { httpStatusName } from '@/utils/format';
 
 export function formatPercent(rate: number): string {
   if (rate <= 0) {
@@ -82,6 +83,20 @@ const outcomeStyles: Record<AdapterCallOutcome, { label: string; cls: string }> 
     cls: 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400',
   },
 };
+
+// Status code with the reason phrase on hover ("401 Unauthorized"); em-dash when the call has no
+// status (e.g. an exception escaped before the response completed on an older recording).
+export function HttpStatus({ code, className }: { code: number | null | undefined; className?: string }) {
+  if (code == null) {
+    return <>—</>;
+  }
+
+  return (
+    <span className={`cursor-help ${className ?? ''}`.trim()} title={`${code} ${httpStatusName(code)}`}>
+      {code}
+    </span>
+  );
+}
 
 export function OutcomeBadge({ outcome }: { outcome: AdapterCallOutcome }) {
   const style = outcomeStyles[outcome] ?? {
