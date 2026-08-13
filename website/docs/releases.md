@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 4.0.0
 
-*Unreleased*
+*2026-08-13*
 
 **Breaking, code-only — no schema migration.** The dashboard is now exposed as routed ASP.NET Core endpoints, so you gate it with the framework's own authorization instead of a Warp-specific filter. The break is confined to dashboard setup: nothing about job execution, the worker, or the data model changes. Three bug fixes and two dashboard improvements that landed after 3.11.0 ship here as well.
 
