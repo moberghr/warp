@@ -18,6 +18,9 @@
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.14.*" />
     <PackageReference Include="Testcontainers.PostgreSql" Version="4.*" />
+    <!-- Override the vulnerable SSH.NET 2025.1.0 (GHSA-q939-rpr3-3284) that Testcontainers pulls
+         transitively; 2026.0.0 is patched. Same pin as Warp.Tests — see the comment there. -->
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
     <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
   </ItemGroup>
 

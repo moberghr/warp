@@ -51,6 +51,11 @@
 		<PackageReference Include="Testcontainers" Version="4.11.0" />
 		<PackageReference Include="Testcontainers.MsSql" Version="4.11.0" />
 		<PackageReference Include="Testcontainers.PostgreSql" Version="4.11.0" />
+		<!-- Override the vulnerable SSH.NET 2025.1.0 (GHSA-q939-rpr3-3284, published 2026-08-12) that
+		     Testcontainers pulls transitively; 2026.0.0 is patched. Testcontainers 4.13.0 (latest) still
+		     pins the vulnerable version, so bumping Testcontainers is not a fix. Same NuGetAuditMode=all +
+		     TreatWarningsAsErrors reason as the SQLitePCLRaw pin above. -->
+		<PackageReference Include="SSH.NET" Version="2026.0.0" />
 		<PackageReference Include="xunit.v3.mtp-v2" Version="3.2.2" />
 	</ItemGroup>
 
