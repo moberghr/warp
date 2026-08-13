@@ -9,7 +9,7 @@ Warp ships with a built-in web dashboard for monitoring and managing jobs.
 ## Setup
 
 ```csharp
-app.UseWarpUI(); // Serves at /warp
+app.MapWarpUI("/warp");
 ```
 
 To restrict access to the dashboard, see [Dashboard Auth](/docs/operations/dashboard-auth).
@@ -19,7 +19,7 @@ To restrict access to the dashboard, see [Dashboard Auth](/docs/operations/dashb
 When you run the same dashboard across several environments, brand it so operators can tell them apart and jump back to your own portal:
 
 ```csharp
-app.UseWarpUI(o =>
+app.MapWarpUI(o =>
 {
     o.InstanceName = "Production";           // shown in the header + browser tab title
     o.LogoUrl = "/img/acme-logo.svg";        // header logo

@@ -10,8 +10,8 @@ using Warp.Core;
 using Warp.Core.Enums;
 using Warp.Core.Models;
 using Warp.Core.Services;
+using Warp.UI;
 using Warp.UI.Endpoints;
-using Warp.UI.UIMiddleware;
 
 namespace Warp.Tests.Admin;
 

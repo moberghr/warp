@@ -110,19 +110,16 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 ### 5. Add the dashboard (optional)
 
 ```csharp
-app.UseWarpUI(); // Serves at /warp
+app.MapWarpUI("/warp");
 ```
 
-To protect the dashboard with authentication:
+The dashboard is a set of routed endpoints, so gate it with your own authorization policy:
 
 ```csharp
-// Dashboard with auth (optional)
-app.UseWarpUI(options =>
-{
-    options.Authorization = new MyAuthFilter();
-    options.UnauthorizedRedirectUrl = "/login";
-});
+app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
 ```
+
+See [Dashboard Auth](/docs/operations/dashboard-auth) for the built-in login and localhost-only options.
 
 ### 6. Define handlers
 

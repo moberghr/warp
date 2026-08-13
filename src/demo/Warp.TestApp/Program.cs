@@ -28,7 +28,6 @@ using Warp.UI;
 using Warp.UI.DashboardPush;
 using Warp.UI.Extensions;
 using Warp.UI.Extensions.Retry;
-using Warp.UI.UIMiddleware;
 using Warp.Worker;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -56,8 +55,10 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddServices(builder.Configuration);
 builder.Services.AddWarpHttp();
 
-builder.Services.AddDataProtection();
-builder.Services.AddScoped<IWarpCredentialValidator, DemoCredentialValidator>();
+// Built-in dashboard login: a real cookie authentication scheme plus the WarpDashboardLogin policy that
+// RequireWarpDashboardLogin() applies below. The validator is registered as scoped for us, so it could
+// resolve a DbContext and check credentials against the database.
+builder.Services.AddWarpDashboard().AddBuiltInLogin<DemoCredentialValidator>();
 
 // Webhook-password authorization demo. Proves a custom IAuthorizationRequirement +
 // AuthorizationHandler composes with [Authorize(Policy = "WebhookPassword")] on a
@@ -182,7 +183,7 @@ app.UseWarpHttpObservability();
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseWarpUI(options => options.UseBuiltInLogin<DemoCredentialValidator>());
+app.MapWarpUI().RequireWarpDashboardLogin();
 app.MapControllers();
 app.MapWarpHttp();
 

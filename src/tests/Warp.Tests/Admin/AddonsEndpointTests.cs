@@ -10,9 +10,9 @@ using Warp.Core.Concurrency;
 using Warp.Core.RateLimit;
 using Warp.Core.Sagas;
 using Warp.Core.Services;
+using Warp.UI;
 using Warp.UI.DashboardPush;
 using Warp.UI.Endpoints;
-using Warp.UI.UIMiddleware;
 
 namespace Warp.Tests.Admin;
 

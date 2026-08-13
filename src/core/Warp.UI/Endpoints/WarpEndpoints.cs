@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Adapters;
@@ -16,13 +17,16 @@ using Warp.Core.Services;
 using Warp.Core.Webhooks;
 using Warp.UI.DashboardPush;
 using Warp.UI.Extensions;
-using Warp.UI.UIMiddleware;
 
 namespace Warp.UI.Endpoints;
 
 public static class WarpEndpoints
 {
-    public static void MapWarpApiEndpoints(this WebApplication app, WarpUIOptions options, List<IWarpUIExtension> extensions)
+    /// <summary>
+    /// Maps the dashboard's REST API. Returns the group so <c>MapWarpUI</c> can hand the host's endpoint
+    /// conventions — <c>RequireAuthorization</c> and friends — to every endpoint in it.
+    /// </summary>
+    public static RouteGroupBuilder MapWarpApiEndpoints(this WebApplication app, WarpUIOptions options, List<IWarpUIExtension> extensions)
     {
         var apiGroup = app.MapGroup($"{options.RoutePrefix}/api");
 
@@ -30,20 +34,6 @@ public static class WarpEndpoints
         // host's process-wide ConfigureHttpJsonOptions — see WarpDashboardJson. Registered first so it
         // wraps every route under the prefix, extension sub-groups included.
         apiGroup.AddEndpointFilter(WarpDashboardJson.NormalizeAsync);
-
-        if (options.Authorization != null)
-        {
-            var filter = options.Authorization;
-            apiGroup.AddEndpointFilter(async (context, next) =>
-            {
-                if (!filter.Authorize(context.HttpContext))
-                {
-                    return Results.Unauthorized();
-                }
-
-                return await next(context);
-            });
-        }
 
         apiGroup.MapGet("status", async ([FromServices] IDashboardStatsService statsService) => await statsService.GetWarpStatus());
 
@@ -881,12 +871,14 @@ public static class WarpEndpoints
         var manifests = extensions.ConvertAll(x => x.GetManifest());
         apiGroup.MapGet("extensions", () => manifests);
 
-        // Extension API endpoints (each under /ext/{name}/, auth-protected)
+        // Extension API endpoints (each under /ext/{name}/, so they inherit the group's authorization)
         foreach (var ext in extensions)
         {
             var extGroup = apiGroup.MapGroup($"ext/{ext.Name}");
             ext.MapEndpoints(extGroup);
         }
+
+        return apiGroup;
     }
 }
 
