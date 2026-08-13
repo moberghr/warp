@@ -222,6 +222,53 @@ in your app.
 | `new LocalRequestsOnlyAuthorizationFilter()` | `.RequireLocalRequests()` |
 | `using Warp.UI.UIMiddleware;` | `using Warp.UI;` |
 
+### If you wrote your own `IWarpAuthorizationFilter`
+
+Which replacement you want depends on **what your filter looked at**, because that decides whether "no" can mean *challenge*.
+
+**It consulted the signed-in user** — a role, a claim, a permission keyed on `ctx.User`. This is the case the change was made for: your filter becomes a requirement plus a handler, and ASP.NET picks challenge or forbid for you.
+
+```csharp
+// 3.x — one bool for three different answers
+public class WarpAuthFilter : IWarpAuthorizationFilter
+{
+    public bool Authorize(HttpContext ctx) =>
+        ctx.User.Identity?.IsAuthenticated == true
+        && ctx.RequestServices.GetRequiredService<IPermissionService>()
+              .HasAsync(ctx.User, "warp.dashboard").GetAwaiter().GetResult();
+}
+
+options.Authorization = new WarpAuthFilter();
+options.UnauthorizedRedirectUrl = "/login";
+```
+
+```csharp
+// 4.0 — the authentication half is the framework's job, so drop it
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("WarpDashboard", policy => policy
+        .RequireAuthenticatedUser()
+        .AddRequirements(new WarpDashboardRequirement()));
+
+app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+```
+
+with the handler [shown above](#gating-on-your-own-policy) — the `.GetAwaiter().GetResult()` becomes an `await`. Delete your `IsAuthenticated` check: `RequireAuthenticatedUser()` is what makes an anonymous caller *challenge* to your `LoginPath` instead of dead-ending on a 401, and it is the whole point of the upgrade. Delete `UnauthorizedRedirectUrl` too — your scheme's `LoginPath` and `AccessDeniedPath` now cover both answers separately.
+
+**It looked at anything else** — an API key header, an IP allowlist, a shared secret, a feature flag. Signing in cannot satisfy a rule like that, so the answer is always 403. A plain `RequireAuthorization` would try to *challenge* the anonymous caller instead, and in a host with no authentication scheme registered `ChallengeAsync` **throws**. Pin the deny scheme, [as shown under Localhost only](#localhost-only), and denials render as 403:
+
+```csharp
+builder.Services.AddWarpDashboard();   // registers the deny scheme
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("WarpDashboard", policy => policy
+        .AddAuthenticationSchemes(WarpDashboardDefaults.DenyScheme)
+        .RequireAssertion(context => context.Resource is HttpContext http && /* your check */));
+```
+
+`RequireAssertion` receives the `HttpContext` as `context.Resource`, which is how your filter's `HttpContext` parameter carries over. Fail closed when it is not an `HttpContext` — the pattern above does.
+
+**If your filter did both** — an identity check *and* a non-challengeable one — keep the schemes off the policy and split the rules: identity requirements in the policy (so anonymous still challenges) and the extra rule as its own requirement returning failure.
+
 Two smaller behaviour changes to know about:
 
 - **`GET {prefix}/api/auth/status` only exists with the built-in login.** It is anonymous by necessity (it is

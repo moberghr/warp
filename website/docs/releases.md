@@ -47,6 +47,8 @@ app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
 
 Every removal is a compile error with a one-line fix — the same shape as the 2.0 `AddWarpWorker` → `AddWarpServer` rename. An open-access dashboard is `app.MapWarpUI("/warp");` and behaves exactly as before.
 
+If you wrote your own `IWarpAuthorizationFilter`, [the migration guide walks both cases](/docs/operations/dashboard-auth#if-you-wrote-your-own-iwarpauthorizationfilter) with before-and-after code. The one that needs care is a filter that did **not** consult the signed-in user — an API-key header, an IP allowlist, a shared secret. Signing in cannot satisfy a rule like that, so a plain `RequireAuthorization` would try to challenge an anonymous caller, and in a host with no authentication scheme registered that throws. Pin `WarpDashboardDefaults.DenyScheme` on the policy and denials render as 403 instead.
+
 The built-in login is now a real `AddCookie` authentication scheme rather than a hand-rolled protected cookie. Three consequences worth knowing: `AddBuiltInLogin<T>()` **registers your `IWarpCredentialValidator` for you** (`UseBuiltInLogin<T>()` did not, so hosts had to remember a separate `AddScoped`), the session expiry is now **enforced server-side** (the old cookie's embedded timestamp was never checked on read, so a captured cookie stayed valid until the data-protection keys rotated), and an explicit `AddDataProtection()` call is no longer needed.
 
 `RequireWarpDashboardLogin()` gates the API and the hub while leaving the SPA shell anonymous — the shell renders the login form, so gating it would challenge the page that collects the credentials. This preserves the 3.x experience exactly.
