@@ -43,7 +43,7 @@ public class RecurringJobService<TContext> : IRecurringJobService
 
     public async Task<PagedList<RecurringJobModel>> GetRecurringJobs(BaseListRequest request)
     {
-        return await _context.Set<RecurringJob>()
+        var page = await _context.Set<RecurringJob>()
             .OrderBy(x => x.NextExecution)
             .ThenBy(x => x.Name)
             .Select(x => new RecurringJobModel
@@ -58,6 +58,10 @@ public class RecurringJobService<TContext> : IRecurringJobService
                 DisabledAt = x.DisabledAt,
             })
             .ToPagedListAsync(request);
+
+        await AttachLastRun(page.Items);
+
+        return page;
     }
 
     public async Task<RecurringJobDetailModel?> GetRecurringJobById(int id)
@@ -153,5 +157,49 @@ public class RecurringJobService<TContext> : IRecurringJobService
         var recurringJob = await _context.Set<RecurringJob>().FindAsync(id) ?? throw new ArgumentException("Recurring job not found.", nameof(id));
         recurringJob.DisabledAt = _timeProvider.GetUtcNow().UtcDateTime;
         await _context.SaveChangesAsync();
+    }
+
+    // Two-step fetch over the page's definitions (§5.2 — no Set<> subquery inside a projection):
+    // newest non-skipped log id per definition, then those rows joined to their job via the nav property.
+    private async Task AttachLastRun(List<RecurringJobModel> items)
+    {
+        if (items.Count == 0)
+        {
+            return;
+        }
+
+        var ids = items.ConvertAll(x => x.Id);
+
+        var latestLogIds = await _context.Set<RecurringJobLog>()
+            .Where(x => ids.Contains(x.RecurringJobId))
+            .Where(x => !x.Skipped)
+            .GroupBy(x => x.RecurringJobId)
+            .Select(x => x.Max(y => y.Id))
+            .ToListAsync();
+
+        var runs = await _context.Set<RecurringJobLog>()
+            .Where(x => latestLogIds.Contains(x.Id))
+            .Select(x =>
+                new
+                {
+                    x.RecurringJobId,
+                    x.JobId,
+                    State = x.Job != null ? x.Job.CurrentState : (State?)null,
+                })
+            .ToListAsync();
+
+        var byDefinition = runs.ToDictionary(x => x.RecurringJobId);
+
+        foreach (var item in items)
+        {
+            if (!byDefinition.TryGetValue(item.Id, out var run))
+            {
+                continue;
+            }
+
+            item.HasLastRun = true;
+            item.LastJobId = run.JobId;
+            item.LastState = run.State;
+        }
     }
 }

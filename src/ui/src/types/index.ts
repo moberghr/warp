@@ -160,6 +160,9 @@ export interface RecurringJobModel {
   lastExecution: string | null;
   createdAt: string;
   disabledAt: string | null;
+  hasLastRun: boolean;
+  lastJobId: string | null;
+  lastState: State | null;
 }
 
 export interface RecurringJobDetailModel extends RecurringJobModel {

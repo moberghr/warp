@@ -8,7 +8,7 @@ import { StateBadge } from '@/components/StateBadge';
 import type { State } from '@/types';
 import type { EndpointRelatedJob } from '@/types/endpoints';
 import * as api from '@/api';
-import { OutcomeBadge, formatMs, Pane, Field, PayloadPane, parseTags } from '../adapters/shared';
+import { OutcomeBadge, formatMs, HttpStatus, Pane, Field, PayloadPane, parseTags } from '../adapters/shared';
 
 // Full, linkable detail page for a single inbound endpoint call (formerly a drawer). The URL
 // carries both the endpoint id and the call id, so a call is shareable and survives refresh.
@@ -51,7 +51,7 @@ export default function EndpointCallDetailPage() {
               <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
                 <Field label="Timestamp"><RelativeTime date={call.timestamp} /></Field>
                 <Field label="Duration">{formatMs(call.durationMs)}</Field>
-                <Field label="Status">{call.statusCode ?? '—'}</Field>
+                <Field label="Status"><HttpStatus code={call.statusCode} /></Field>
                 {call.groupName && <Field label="Caller"><span className="font-mono text-xs">{call.groupName}</span></Field>}
                 <Field label="Remote IP"><span className="font-mono text-xs">{call.remoteIp ?? '—'}</span></Field>
                 <Field label="User"><span className="font-mono text-xs">{call.user ?? '—'}</span></Field>

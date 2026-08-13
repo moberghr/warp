@@ -65,6 +65,31 @@ The built-in login is now a real `AddCookie` authentication scheme rather than a
 
 See [Dashboard Authorization](/docs/operations/dashboard-auth) for the full set of shapes.
 
+## 3.11.1
+
+*Unreleased*
+
+Patch release — two bug fixes. No migration, no API change.
+
+### Endpoint calls record the real wire status when a handler exception is mapped upstream
+
+A Warp HTTP endpoint whose handler threw an exception that a **host** exception middleware later translated into a status (the common `NotSignedInException` → 401 shape) was recorded with `StatusCode = 200` — the never-written ASP.NET default, snapshotted while the exception was still unwinding, before the host middleware ran. The call-detail page then showed the contradiction: status 200, outcome Failed, an exception pane.
+
+Recording for an exception that escapes before the response starts is now deferred to response completion, so the row carries the **final wire status** (the 401 the client actually received; a genuinely unhandled exception records the server's 500). The outcome derives from that status: ≥ 500 is `Failed`, a host-mapped 4xx counts like any other 4xx — a client error, kept off the endpoint error rate — while the exception type and message stay on the row. Exception-bearing calls are never dropped by `RecordCalls = FailuresOnly` or sampling, and `OnFailure` capture tiers treat them as failures, so the diagnostic detail is still captured. An exception thrown after the response started (a truncated 2xx on the wire) still records `Failed`. Error grouping follows the same split: a host-mapped 401 now mints a 4xx status-code issue for its route instead of an exception issue.
+
+### Recurring jobs no longer wait out the polling backoff
+
+`RecurringJobScheduler` created its firing directly in `State.Enqueued` and returned without announcing it — the only enqueue site in Warp that fired neither the in-process `JobEnqueued` signal nor the cross-process push notification. `Publisher`, `MessageRouter`, `ScheduledJobActivation`, the worker outbox and "Trigger Now" all announce their enqueues; this one didn't. An otherwise idle worker therefore discovered a cron firing only on its next backoff poll.
+
+How long that took depends on `MaxPollingInterval` — 30 seconds by default, and **5 minutes if you call `UseDatabasePush()`**, which raises the cap precisely because push is assumed to do the waking. Enabling push therefore made recurring-job pickup *worse*, and a single-process deployment (API and worker in one host) got no wake at all despite needing no database round-trip to do it.
+
+Recurring firings are now claimed as promptly as anything published through `IPublisher`. Two visible effects:
+
+- The gap between a cron occurrence and the handler starting drops from up to `MaxPollingInterval` to the usual sub-second wake.
+- Queue-wait on the [Queues page](./features/queue-metrics.md) stops being dominated by multi-minute recurring samples. On a queue whose only traffic is recurring jobs, that was every sample — an average wait of minutes on a queue with zero backlog.
+
+Existing `qwait` history is not rewritten: the lifetime average still carries the old samples, and the improvement shows in the hourly buckets from the upgrade onward.
+
 ## 3.11.0
 
 *2026-08-12*
@@ -237,6 +262,12 @@ This is **deliberately not fixed here.** Skipping the bookkeeping write on a no-
 ### Fixed: `DefaultQueue` was ignored on publish
 
 `WarpConfiguration.DefaultQueue` is documented as the queue used when a caller names none, and `BatchPublisher` honoured it — but `Publisher` resolved `queue ?? "default"` on both its job and message paths. A deployment that set `DefaultQueue` and pointed its worker group at that queue had batch children routed correctly while ordinary publishes went to `"default"`, where nothing was polling: those jobs sat `Enqueued` and never ran. Both paths now consult `DefaultQueue`. Explicit queue arguments still win, and deployments that never set it are unaffected.
+
+### Fixed: the dashboard showed "Unknown" job states in hosts that configure their own JSON options
+
+The dashboard API is minimal APIs returning POCOs, so it serialized with the host application's `ConfigureHttpJsonOptions` — process-wide options a host sets for its **own** API. A host that registers a `JsonStringEnumConverter` (a common choice) silently reshaped Warp's payloads: `currentState` arrived as `"Failed"` instead of `5`, so the state badge read **Unknown** on every page, the Requeue/Delete buttons vanished from job detail (they test `kind === 1`), and the "Cancelling…" badge could never render. A `PropertyNamingPolicy` change broke it the same way.
+
+The dashboard API and the bundled dashboard ship together as one closed contract, so Warp now pins its own response format — camelCase names, numeric enums — for everything under `{RoutePrefix}/api`, extension routes included. **No host change is needed and none is possible to get wrong:** your own endpoints keep whatever JSON options you configured. Request bodies were never affected (`JsonStringEnumConverter` reads numbers as well as names).
 
 ## 3.10.0
 

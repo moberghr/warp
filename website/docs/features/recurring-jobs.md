@@ -26,13 +26,15 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 1. **Registration**: `AddOrUpdateRecurringJob` stores the cron expression, message payload, and type. Sets `NextExecution` to the next cron occurrence.
 2. **Scheduling**: `RecurringJobScheduler` polls every 15 seconds. When `NextExecution <= now`, it creates a job with `ScheduleTime = now` (ready for immediate execution) and updates `NextExecution` to the next cron occurrence.
 3. **Deduplication**: Before creating a new job, the scheduler checks the most recent `RecurringJobLog` entry. If that job is still `Enqueued` or `Processing`, it skips — no duplicate jobs.
-4. **Execution**: The created job is a regular job. Workers pick it up, execute the handler, and it follows the normal lifecycle.
+4. **Execution**: The created job is a regular job. Workers pick it up, execute the handler, and it follows the normal lifecycle. Once the scheduler's transaction commits, it fires a `JobEnqueued` wake — the in-process signal that shortcuts an idle worker's polling backoff, plus the cross-process push notification when `UseDatabasePush()` is enabled — so a firing is claimed promptly instead of waiting out the backoff.
 
 ## Execution History
 
 Each job created by the scheduler is logged in `RecurringJobLog`. The dashboard shows execution history on the recurring job detail page — including jobs that have been cleaned up (shown as "Cleaned up").
 
 The `RecurringJobLog` has a FK to `Job` with `SET NULL` cascade. When a job expires and is cleaned up, the log entry survives with `JobId = null`. The last 100 entries per recurring job are retained.
+
+The recurring job **list** condenses this into a **Last Result** column — the state of the most recent real run, carried on `RecurringJobModel` as `HasLastRun` / `LastJobId` / `LastState`. A skipped firing is not a run, so a disabled recurring job keeps showing the outcome of its last actual execution rather than blanking out. `HasLastRun = false` means the definition has never fired; `HasLastRun = true` with a null `LastState` means it fired but the job row has since been cleaned up.
 
 ## Cron Expressions
 

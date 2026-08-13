@@ -30,6 +30,11 @@ public static class WarpEndpoints
     {
         var apiGroup = app.MapGroup($"{options.RoutePrefix}/api");
 
+        // Pin the dashboard's own JSON shape (camelCase, numeric enums) instead of inheriting the
+        // host's process-wide ConfigureHttpJsonOptions — see WarpDashboardJson. Registered first so it
+        // wraps every route under the prefix, extension sub-groups included.
+        apiGroup.AddEndpointFilter(WarpDashboardJson.NormalizeAsync);
+
         apiGroup.MapGet("status", async ([FromServices] IDashboardStatsService statsService) => await statsService.GetWarpStatus());
 
         apiGroup.MapGet("jobs/enqueued", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string? application) => await jobQueryService.GetJobsList(request, State.Enqueued, application));

@@ -4,7 +4,7 @@ sidebar_position: 5
 
 # Recurring Jobs
 
-Cron-based scheduled jobs with name, cron expression, type, next/last execution times.
+Cron-based scheduled jobs with name, cron expression, type, next/last execution times, and the outcome of the last run.
 
 ## How Recurring Jobs Work
 
@@ -16,6 +16,8 @@ Each recurring job tracks its executions via `RecurringJobLog` entries. The hist
 - Normal executions link to the job and show its current state
 - If the underlying job has been deleted, the entry displays **"Cleaned up"**
 - If the recurring job was disabled at the time, the entry displays an orange **"Skipped"** badge
+
+The list page condenses this into a **Last Result** column showing the state of the most recent *real* run (skipped firings are not runs, so a disabled job keeps showing the outcome of its last actual execution). The badge links to that job. A definition that has never fired shows `—`; one whose job row has since been cleaned up shows **"Cleaned up"**.
 
 ## Dashboard Actions
 
