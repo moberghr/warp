@@ -65,9 +65,14 @@ jobs:
         working-directory: src/ui
         run: npm ci
 
+      # Restore the whole solution, not just the test project: NuGetAuditMode=all reports vulnerable
+      # transitive packages as NU1903, which TreatWarningsAsErrors turns into a restore failure. Restoring
+      # only the test project left the 8 projects it doesn't reference (benchmarks, demo apps) unaudited,
+      # so an advisory against one of their dependencies broke `dotnet build src/Warp.slnx` with CI green.
+      # Costs a few seconds and no extra compilation — Build below still targets the test project.
       - name: Restore
         working-directory: src
-        run: dotnet restore tests/Warp.Tests/Warp.Tests.csproj
+        run: dotnet restore Warp.slnx
 
       - name: Build
         working-directory: src
