@@ -13,7 +13,6 @@ public sealed class WarpUIEndpointConventionBuilder : IEndpointConventionBuilder
     internal WarpUIEndpointConventionBuilder(IServiceProvider services, IEndpointConventionBuilder shell, IEndpointConventionBuilder api)
     {
         Services = services;
-        Shell = shell;
         Api = api;
         _all = new CompositeEndpointConventionBuilder([shell, api]);
     }
@@ -21,10 +20,10 @@ public sealed class WarpUIEndpointConventionBuilder : IEndpointConventionBuilder
     /// <summary>The host's services, so the <c>Require*</c> conventions can verify their registrations.</summary>
     internal IServiceProvider Services { get; }
 
-    /// <summary>The SPA shell endpoints (<c>{prefix}</c> and <c>{prefix}/{**path}</c>).</summary>
-    internal IEndpointConventionBuilder Shell { get; }
-
-    /// <summary>The REST API group and, when dashboard push is enabled, the SignalR hub.</summary>
+    /// <summary>
+    /// The REST API group, the bare API root, and — when dashboard push is enabled — the SignalR hub. Held
+    /// separately because the built-in login gates these while leaving the SPA shell anonymous.
+    /// </summary>
     internal IEndpointConventionBuilder Api { get; }
 
     public void Add(Action<EndpointBuilder> convention) => _all.Add(convention);

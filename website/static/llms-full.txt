@@ -1003,6 +1003,10 @@ builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>();
 app.MapWarpUI("/warp").RequireWarpDashboardLogin();
 ```
 
+Registering the built-in login GATES the dashboard on its own — RequireWarpDashboardLogin() is explicit
+rather than required, and is idempotent. Otherwise the half-configured shape (services registered,
+convention forgotten) would render a login page over an anonymous API.
+
 ```csharp
 public class MyCredentialValidator : IWarpCredentialValidator
 {
@@ -1018,8 +1022,9 @@ public class MyCredentialValidator : IWarpCredentialValidator
 }
 ```
 
-`RequireWarpDashboardLogin()` gates the API and hub only — the SPA shell stays anonymous because it
-renders the login form itself.
+The built-in login gates the API and hub only — the SPA shell stays anonymous because it renders the login
+form itself. `{prefix}/api/auth/status` is mapped ONLY with the built-in login: it is necessarily anonymous,
+so mapping it always would bypass the host's gate and answer a constant `true`.
 
 ### Localhost only
 
@@ -1040,6 +1045,12 @@ extension JS (`/warp/_ext/...`), the REST API and the SignalR hub. The dashboard
 embedded assets themselves rather than UseStaticFiles, because StaticFileMiddleware stands down once
 routing has matched an endpoint and the shell catch-all matches every asset path. Conditional requests
 still work (304 on If-None-Match / If-Modified-Since).
+
+Warp owns every path under the prefix: the shell's catch-all claims `{prefix}/{**path}`, so host content
+served under the prefix by middleware is unreachable (a 4.0 break — move it outside the prefix; host
+endpoints with literal routes still win). RoutePrefix is normalized ('/' + trim('/')) and the application
+root is rejected. Every API response carries an `X-Warp-Api` header so the SPA can distinguish a genuine API
+answer from a sign-in redirect it followed.
 
 ---
 

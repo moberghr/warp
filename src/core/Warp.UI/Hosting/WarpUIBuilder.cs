@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.UI.DashboardPush;
@@ -46,27 +47,104 @@ public static class WarpUIBuilder
         ArgumentNullException.ThrowIfNull(app);
         ArgumentNullException.ThrowIfNull(options);
 
+        options.RoutePrefix = NormalizeRoutePrefix(options.RoutePrefix);
+
         var extensions = app.Services.GetServices<IWarpUIExtension>().ToList();
 
-        // The login cookie is scoped to the dashboard, and the prefix is only known here (see
-        // WarpDashboardCookiePath). Set before the first request resolves the cookie options.
-        var cookiePath = app.Services.GetService<WarpDashboardCookiePath>();
-        if (cookiePath != null)
-        {
-            cookiePath.Value = options.RoutePrefix;
-        }
+        ClaimDashboard(app.Services, options.RoutePrefix);
 
         var shell = app.MapWarpSpa(options, extensions);
 
         var apiGroup = app.MapWarpApiEndpoints(options, extensions);
         apiGroup.MapWarpAuthEndpoints(app.Services);
 
-        var api = new List<IEndpointConventionBuilder> { apiGroup };
+        // Every API response carries a marker header. The SPA reads it to distinguish "the Warp API
+        // answered" from "something intercepted this call" — a sign-in redirect it transparently followed
+        // and resolved with someone else's 200. A content-type sniff would misfire on the extension
+        // endpoints below, which are free to return HTML.
+        apiGroup.AddEndpointFilter(async (context, next) =>
+        {
+            context.HttpContext.Response.Headers[WarpApiMarkerHeader] = "1";
+
+            return await next(context);
+        });
+
+        // Claims every unmatched path under {prefix}/api so it inherits this group's authorization. Without
+        // it those paths fell through to the SPA's catch-all and answered an anonymous 404, letting an
+        // unauthenticated prober tell registered API routes (401) from unregistered ones and enumerate
+        // which addons are live.
+        apiGroup.Map("{**path}", () => Results.NotFound());
+
+        List<IEndpointConventionBuilder> api = [apiGroup];
+
+        // The group's routes all sit under "{prefix}/api/", so the bare "{prefix}/api" is not one of them.
+        // Mapped separately and folded into the API builders so the host's conventions still cover it.
+        api.Add(app.Map($"{options.RoutePrefix}/api", () => Results.NotFound()));
+
         if (app.Services.GetService<IDashboardPushMarker>() is not null)
         {
             api.Add(app.MapHub<WarpDashboardHub>($"{options.RoutePrefix}/api/hub"));
         }
 
-        return new WarpUIEndpointConventionBuilder(app.Services, shell, new CompositeEndpointConventionBuilder(api));
+        var mapped = new WarpUIEndpointConventionBuilder(app.Services, shell, new CompositeEndpointConventionBuilder(api));
+
+        // Registering the built-in login gates the dashboard on its own — the way UseBuiltInLogin did before
+        // the endpoints existed. Requiring a separate RequireWarpDashboardLogin() call would mean the
+        // half-migrated shape (services registered, convention forgotten) compiles, renders a login page,
+        // and serves every API route anonymously. Secure by default instead; the explicit call remains
+        // available and is idempotent.
+        if (app.Services.GetService<IWarpDashboardLoginMarker>() != null)
+        {
+            mapped.RequireWarpDashboardLogin();
+        }
+
+        return mapped;
+    }
+
+    /// <summary>Name of the header stamped on every dashboard API response.</summary>
+    internal const string WarpApiMarkerHeader = "X-Warp-Api";
+
+    // A missing leading slash silently breaks asset resolution (the prefix is sliced off request paths by
+    // length) and makes the injected apiPath document-relative; a trailing slash builds "{prefix}//{**path}"
+    // and dies inside the route parser with no hint at the cause. Both are worth correcting rather than
+    // debugging.
+    private static string NormalizeRoutePrefix(string routePrefix)
+    {
+        var trimmed = routePrefix?.Trim().Trim('/') ?? string.Empty;
+
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            throw new ArgumentException(
+                "WarpUIOptions.RoutePrefix must name a path segment, e.g. \"/warp\". Mounting the dashboard at "
+                + "the application root is not supported — its catch-all route would swallow every request.",
+                nameof(routePrefix));
+        }
+
+        return $"/{trimmed}";
+    }
+
+    // The built-in login is one authentication scheme with one cookie name and one cookie path, so it
+    // cannot serve two dashboards: whichever prefix is mapped last wins the path, and logging in to the
+    // other silently never sticks because the browser won't send the cookie back.
+    private static void ClaimDashboard(IServiceProvider services, string routePrefix)
+    {
+        var cookiePath = services.GetService<WarpDashboardCookiePath>();
+        if (cookiePath == null)
+        {
+            return;
+        }
+
+        if (cookiePath.Value != null && services.GetService<IWarpDashboardLoginMarker>() != null)
+        {
+            throw new InvalidOperationException(
+                $"MapWarpUI was called more than once (already mapped at \"{cookiePath.Value}\", now \"{routePrefix}\") "
+                + "while the built-in login is registered. One cookie scheme cannot serve two dashboards — sign-in "
+                + "would silently fail on all but the last one mapped. Map a single dashboard, or gate the others "
+                + "with your own authorization policy instead of AddBuiltInLogin.");
+        }
+
+        // The prefix is only known here, and cookie options resolve lazily on the first request, so this
+        // lands before any reader (see WarpDashboardCookiePath).
+        cookiePath.Value = routePrefix;
     }
 }

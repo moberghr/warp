@@ -1,1 +1,0 @@
-import{o as e,u as t}from"./client-DGrk6nnh.js";var n=t(e(),1),r=[10,20,50,100],i=`warp:pageSize`;function a(){let[e,t]=(0,n.useState)(()=>{let e=localStorage.getItem(i),t=e?parseInt(e,10):NaN;return r.includes(t)?t:20});return[e,e=>{t(e),localStorage.setItem(i,String(e))}]}export{a as t};

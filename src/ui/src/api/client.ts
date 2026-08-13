@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { AxiosResponse } from 'axios';
 import { config } from '@/config';
+import { decideReauth, reloadGuard, type ReauthSignal } from './reauth';
 
 const apiPath = config.apiPath;
 
@@ -15,47 +16,50 @@ export function setOnUnauthorized(handler: () => void) {
   onUnauthorized = handler;
 }
 
-// Without the built-in login there is no login screen to show: the host gates the dashboard with its own
-// policy, so a session that expired mid-visit can only be recovered by a full navigation, which the host's
-// authorization then challenges (an OIDC redirect, say). An XHR cannot usefully follow that — it either
-// 401s, or the host's scheme redirects it and axios resolves with the identity provider's sign-in HTML
-// instead of JSON. Both mean the same thing here. Reloading turns it back into a navigation; the guard
-// stops a reload loop when the dashboard is genuinely forbidden rather than merely signed out.
-const RELOAD_GUARD_KEY = 'warp.reauth.reloaded';
+/** Stamped on every Warp API response. Its absence on a 2xx means something else answered. */
+const WARP_API_HEADER = 'x-warp-api';
 
-function reauthenticateViaNavigation() {
-  if (sessionStorage.getItem(RELOAD_GUARD_KEY)) {
+function carriesApiMarker(response: AxiosResponse | undefined) {
+  return response?.headers?.[WARP_API_HEADER] !== undefined;
+}
+
+function act(signal: ReauthSignal) {
+  if (signal === 'login-page') {
+    onUnauthorized?.();
     return;
   }
 
-  sessionStorage.setItem(RELOAD_GUARD_KEY, '1');
-  window.location.reload();
-}
-
-function isHtml(response: AxiosResponse | undefined) {
-  return String(response?.headers?.['content-type'] ?? '').includes('text/html');
+  if (signal === 'navigate' && reloadGuard.tryClaim()) {
+    // Turns a dead XHR back into a navigation, which the host's authorization can challenge.
+    window.location.reload();
+  }
 }
 
 api.interceptors.response.use(
   (response: AxiosResponse) => {
-    // A 200 carrying HTML from an endpoint that only ever returns JSON is a followed sign-in redirect.
-    if (!config.hasBuiltInLogin && isHtml(response)) {
-      reauthenticateViaNavigation();
-    } else {
-      // A genuine response proves the session is alive, so re-arm the guard for the next expiry.
-      sessionStorage.removeItem(RELOAD_GUARD_KEY);
+    const signal = decideReauth({
+      hasBuiltInLogin: config.hasBuiltInLogin,
+      status: response.status,
+      isWarpApiResponse: carriesApiMarker(response),
+      responseless: false,
+    });
+
+    if (signal === 'none') {
+      // A genuine API response proves the session is alive, so re-arm the guard for the next expiry.
+      reloadGuard.clear();
     }
+
+    act(signal);
 
     return response;
   },
   error => {
-    if (error.response?.status === 401) {
-      if (config.hasBuiltInLogin) {
-        onUnauthorized?.();
-      } else {
-        reauthenticateViaNavigation();
-      }
-    }
+    act(decideReauth({
+      hasBuiltInLogin: config.hasBuiltInLogin,
+      status: error.response?.status,
+      isWarpApiResponse: carriesApiMarker(error.response),
+      responseless: error.response === undefined,
+    }));
 
     return Promise.reject(error);
   },

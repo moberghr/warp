@@ -235,14 +235,33 @@ public class DashboardAuthTests
     }
 
     [TimedFact]
-    public async Task AuthStatus_NoGate_ReturnsAuthenticatedTrue()
+    public async Task AuthStatus_WithoutBuiltInLogin_IsNotMapped()
     {
+        // The probe is AllowAnonymous, so mapping it unconditionally would bypass every convention the host
+        // applied and answer a constant "true" — wrong under a host policy, and a recon signal on a
+        // dashboard meant to be loopback-only.
         var (app, client) = await StartAsync();
         try
         {
-            var body = await GetAuthStatusAsync(client);
+            var response = await client.GetAsync("/warp/api/auth/status", XunitTestContext.Current.CancellationToken);
 
-            body.ShouldBe("{\"authenticated\":true}");
+            response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task AuthStatus_LocalRequestsOnly_IsNotReachableRemotely()
+    {
+        var (app, client) = await StartAsync(x => x.AddWarpDashboard(), x => x.RequireLocalRequests());
+        try
+        {
+            var response = await client.GetAsync("/warp/api/auth/status", XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldNotBe(HttpStatusCode.OK);
         }
         finally
         {
@@ -354,6 +373,42 @@ public class DashboardAuthTests
             var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
 
             response.StatusCode.ShouldNotBe(HttpStatusCode.OK);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task ApiResponses_CarryTheWarpApiMarkerHeader()
+    {
+        // The SPA uses this header to tell "the Warp API answered" from "something intercepted the call
+        // and returned its own 200" — a sign-in redirect it followed. Without a positive marker the SPA
+        // can only sniff content types, which misfires on extension endpoints that return HTML.
+        var (app, client) = await StartAsync();
+        try
+        {
+            var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+            response.Headers.GetValues("X-Warp-Api").ShouldContain("1");
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task ShellResponse_DoesNotCarryTheApiMarkerHeader()
+    {
+        var (app, client) = await StartAsync();
+        try
+        {
+            var response = await client.GetAsync("/warp", XunitTestContext.Current.CancellationToken);
+
+            response.Headers.Contains("X-Warp-Api").ShouldBeFalse();
         }
         finally
         {
@@ -520,6 +575,189 @@ public class DashboardAuthTests
             .Message.ShouldContain("AddBuiltInLogin");
     }
 
+    [TimedFact]
+    public async Task SpaDeepLink_WithDottedSegment_ReturnsShell()
+    {
+        // /jobs/by-type/{type} carries an assembly-qualified job type, and encodeURIComponent leaves dots
+        // alone — so a refresh or bookmark of a real dashboard link lands here. Treating it as a file
+        // request 404s a page that works on first navigation.
+        var (app, client) = await StartAsync();
+        try
+        {
+            var response = await client.GetAsync("/warp/jobs/by-type/MyApp.Jobs.SendEmail", XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+            var body = await response.Content.ReadAsStringAsync(XunitTestContext.Current.CancellationToken);
+            body.ShouldContain("window.basePath");
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task UnmatchedApiPath_MixedCase_ReturnsNotFound()
+    {
+        // Routing is case-insensitive, so the guard in front of it must be too — otherwise /warp/API/x
+        // answers the HTML shell while its lowercase twin 404s.
+        var (app, client) = await StartAsync();
+        try
+        {
+            var response = await client.GetAsync("/warp/API/does-not-exist", XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task ApiRootPath_ReturnsNotFoundNotTheShell()
+    {
+        var (app, client) = await StartAsync();
+        try
+        {
+            var response = await client.GetAsync("/warp/api", XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task UnmatchedApiPath_UnderGate_IsDeniedRatherThanAnonymously404d()
+    {
+        // An anonymous 404 for unregistered routes next to a 401 for registered ones is an enumeration
+        // oracle: it tells an unauthenticated prober which addons are live. Unmatched API paths must
+        // inherit the group's authorization and answer like every other API route.
+        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        try
+        {
+            var registered = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
+            var unregistered = await client.GetAsync("/warp/api/does-not-exist", XunitTestContext.Current.CancellationToken);
+
+            registered.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+            unregistered.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task RoutePrefix_WithoutLeadingSlash_IsNormalized()
+    {
+        // Unnormalized, the prefix is sliced off request paths by length, so every asset resolves to
+        // garbage and the dashboard renders blank with no error.
+        var (app, client) = await StartAsync(routePrefix: "warp");
+        try
+        {
+            var shell = await client.GetAsync("/warp", XunitTestContext.Current.CancellationToken);
+            var asset = await client.GetAsync("/warp/favicon.svg", XunitTestContext.Current.CancellationToken);
+
+            shell.StatusCode.ShouldBe(HttpStatusCode.OK);
+            asset.StatusCode.ShouldBe(HttpStatusCode.OK);
+            (await shell.Content.ReadAsStringAsync(XunitTestContext.Current.CancellationToken))
+                .ShouldContain("window.basePath = \"/warp\"");
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task RoutePrefix_WithTrailingSlash_IsNormalized()
+    {
+        // "/warp/" built the pattern "/warp//{**path}" and died inside the route parser.
+        var (app, client) = await StartAsync(routePrefix: "/warp/");
+        try
+        {
+            var response = await client.GetAsync("/warp/favicon.svg", XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task RoutePrefix_ApplicationRoot_ThrowsWithAClearMessage()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        await using var app = builder.Build();
+
+        Should.Throw<ArgumentException>(() => app.MapWarpUI("/"))
+            .Message.ShouldContain("RoutePrefix");
+    }
+
+    [TimedFact]
+    public async Task BuiltInLogin_WithoutTheExplicitConvention_StillGatesTheApi()
+    {
+        // The half-migrated shape: the service half of the old UseBuiltInLogin<T> without the endpoint half.
+        // It compiles and renders a login page, so if it did not gate, the dashboard would look locked while
+        // every API route answered anonymously. Registering the login is therefore enough on its own — the
+        // same guarantee UseBuiltInLogin gave before the endpoints existed.
+        var (app, client) = await StartAsync(AddBuiltInLogin);
+        try
+        {
+            var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task BuiltInLogin_WithTheExplicitConvention_IsIdempotent()
+    {
+        // Applying the convention on top of the automatic one must not double-gate into something a valid
+        // cookie can no longer satisfy.
+        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        try
+        {
+            var login = await LoginAsync(client, "admin", "admin");
+            CarryCookie(client, login);
+
+            var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task MapWarpUI_TwiceWithBuiltInLogin_ThrowsRatherThanBreakingSignIn()
+    {
+        // One scheme, one cookie name, one path: the second map wins the cookie path and sign-in on the
+        // first dashboard silently stops working.
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
+
+        await using var app = builder.Build();
+        app.MapWarpUI("/warp").RequireWarpDashboardLogin();
+
+        Should.Throw<InvalidOperationException>(() => app.MapWarpUI("/admin/warp"))
+            .Message.ShouldContain("more than once");
+    }
+
     private static void AddBuiltInLogin(IServiceCollection services)
         => services.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
 
@@ -560,7 +798,8 @@ public class DashboardAuthTests
     private static async Task<(WebApplication App, HttpClient Client)> StartAsync(
         Action<IServiceCollection>? services = null,
         Action<WarpUIEndpointConventionBuilder>? gate = null,
-        Action<WebApplication>? pipeline = null)
+        Action<WebApplication>? pipeline = null,
+        string routePrefix = "/warp")
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -578,7 +817,7 @@ public class DashboardAuthTests
             app.UseAuthorization();
         }
 
-        var warp = app.MapWarpUI("/warp");
+        var warp = app.MapWarpUI(routePrefix);
         gate?.Invoke(warp);
 
         await app.StartAsync(XunitTestContext.Current.CancellationToken);

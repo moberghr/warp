@@ -93,7 +93,12 @@ The dashboard is a single-page app that talks to `/warp/api/...` over XHR. A cha
 });
 ```
 
-The dashboard handles the rest: on a 401 (or a response that turns out to be sign-in HTML) it reloads once, turning the dead XHR back into a navigation that your challenge can act on.
+The dashboard handles the rest. Every API response carries an `X-Warp-Api` header, so the SPA can tell "the
+Warp API answered" from "something intercepted this call and returned its own 200" — a sign-in redirect the
+browser transparently followed. On that, on a 401, or on a request killed outright by CORS (which is how a
+cross-origin challenge presents), it reloads **once**, turning the dead XHR back into a navigation your
+challenge can act on. A 403 deliberately does not trigger it: the caller is signed in and forbidden, so a
+re-challenge would return the same answer and loop.
 
 ## Built-in login
 
@@ -106,6 +111,14 @@ var app = builder.Build();
 
 app.MapWarpUI("/warp").RequireWarpDashboardLogin();
 ```
+
+Registering the built-in login **gates the dashboard on its own** — `RequireWarpDashboardLogin()` is
+explicit rather than required, and applying it twice is harmless. Otherwise the half-configured shape
+(services registered, convention forgotten) would compile, render a login page, and serve every API route
+anonymously.
+
+One consequence: adding `.RequireAuthorization("YourPolicy")` on top means callers must satisfy **both** the
+Warp cookie and your policy. If your own policy is the gate you want, don't register the built-in login.
 
 `AddBuiltInLogin<T>` registers your validator as **Scoped**, so it can inject a `DbContext`:
 
@@ -141,7 +154,7 @@ import Screenshot from '@site/src/components/Screenshot';
 
 ### How it works
 
-1. `RequireWarpDashboardLogin()` protects the REST API and the hub, and leaves the SPA shell anonymous — the shell *is* the login page, so gating it would challenge the page that collects the credentials
+1. The REST API and the hub are protected; the SPA shell stays anonymous — the shell *is* the login page, so gating it would challenge the page that collects the credentials
 2. The SPA posts credentials to `/warp/api/auth/login`, which calls your validator and signs the user in
 3. Warp sets an HTTP-only, `SameSite=Strict` cookie whose expiry is **enforced server-side**
 4. API requests carry the cookie; a 401 sends the SPA back to the login form
@@ -179,7 +192,22 @@ Everything under the route prefix. Conventions apply to the SPA shell (`/warp`, 
 
 The dashboard's own endpoints serve its embedded assets, rather than static-file middleware, because `StaticFileMiddleware` stands down once routing has matched an endpoint and the shell's catch-all route matches every asset path. Conditional requests still work — assets answer `If-None-Match` / `If-Modified-Since` with a 304.
 
-`RequireWarpDashboardLogin()` is the one deliberate exception: it gates the API and hub but leaves the shell and its assets anonymous, because the shell renders the login form and needs its own JavaScript to do so.
+The built-in login is the one deliberate exception: it gates the API and hub but leaves the shell and its
+assets anonymous, because the shell renders the login form and needs its own JavaScript to do so.
+
+### Warp owns every path under the prefix
+
+Because the shell's catch-all route claims `{prefix}/{**path}`, **content your own app serves under the
+dashboard's prefix is no longer reachable** — in 3.x the dashboard was middleware and unmatched paths
+continued down the pipeline. If you were serving, say, `wwwroot/warp/logo.png` and pointing `LogoUrl` at it,
+move it outside the prefix. Host *endpoints* with literal routes still win over the catch-all; only
+middleware-served content is affected.
+
+### Route prefix
+
+The prefix is normalized to a leading slash with no trailing slash, so `"warp"`, `"/warp"` and `"/warp/"`
+are equivalent. Mounting at the application root (`"/"`) throws — the catch-all would swallow every request
+in your app.
 
 ## Upgrading from 3.x
 
@@ -191,6 +219,14 @@ The dashboard's own endpoints serve its embedded assets, rather than static-file
 | `options.UseBuiltInLogin<T>()` | `services.AddWarpDashboard().AddBuiltInLogin<T>()` + `.RequireWarpDashboardLogin()` |
 | `new LocalRequestsOnlyAuthorizationFilter()` | `.RequireLocalRequests()` |
 | `using Warp.UI.UIMiddleware;` | `using Warp.UI;` |
+
+Two smaller behaviour changes to know about:
+
+- **`GET {prefix}/api/auth/status` only exists with the built-in login.** It is anonymous by necessity (it is
+  the pre-login probe), so mapping it unconditionally would bypass whatever gate you applied and answer a
+  constant `true` — wrong under a host policy, and a recon signal on a dashboard meant to be loopback-only.
+- **Mapping two dashboards while the built-in login is registered now throws.** One cookie scheme has one
+  cookie name and one path, so sign-in silently failed on all but the last one mapped.
 
 `IWarpAuthorizationFilter` and `LocalRequestsOnlyAuthorizationFilter` are gone. A bool-returning filter could not distinguish "not signed in" from "not permitted", so both produced a bare 401, and `UnauthorizedRedirectUrl` — which redirected on every denial — bounced an authenticated-but-unpermitted user between the dashboard and the sign-in page forever. Being synchronous, it also forced a blocking `.GetAwaiter().GetResult()` on any permission check that read a database. Authorization policies fix all three.
 

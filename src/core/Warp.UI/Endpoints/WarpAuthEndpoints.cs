@@ -16,24 +16,25 @@ internal static class WarpAuthEndpoints
 {
     internal static void MapWarpAuthEndpoints(this RouteGroupBuilder apiGroup, IServiceProvider services)
     {
-        var hasLogin = services.GetService<IWarpDashboardLoginMarker>() != null;
+        // All three endpoints belong to the built-in login and are mapped only with it. In particular the
+        // status probe is NOT mapped otherwise: being AllowAnonymous it would bypass every convention the
+        // host applied — answering a constant "authenticated: true" to a remote caller of a dashboard that
+        // is supposed to be loopback-only, and reporting the opposite of the truth under a host policy.
+        if (services.GetService<IWarpDashboardLoginMarker>() == null)
+        {
+            return;
+        }
 
         // Cookie-free status probe — lets the SPA decide whether to render the login page before firing
         // any other API call, so a fresh browser session doesn't log a 401 in the console on every boot.
         apiGroup
             .MapGet("auth/status", async (HttpContext context) =>
             {
-                var authenticated = !hasLogin
-                    || (await context.AuthenticateAsync(WarpDashboardDefaults.AuthenticationScheme)).Succeeded;
+                var result = await context.AuthenticateAsync(WarpDashboardDefaults.AuthenticationScheme);
 
-                return Results.Json(new AuthStatusResponse(authenticated));
+                return Results.Json(new AuthStatusResponse(result.Succeeded));
             })
             .AllowAnonymous();
-
-        if (!hasLogin)
-        {
-            return;
-        }
 
         apiGroup
             .MapPost("auth/login", async (HttpContext context, IWarpCredentialValidator validator) =>

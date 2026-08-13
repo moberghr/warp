@@ -53,13 +53,12 @@ internal static class WarpSpaEndpoints
     {
         var path = context.Request.Path.Value ?? string.Empty;
 
-        // A path under /api/ that reached the shell route is an unmatched API route, never a SPA route.
-        if (path.Contains("/api/", StringComparison.Ordinal))
-        {
-            return Results.NotFound();
-        }
-
-        if (Path.HasExtension(path))
+        // An asset request is one whose extension names a media type we could actually serve — NOT merely
+        // any path containing a dot. SPA deep links routinely carry dots in their last segment: a job type
+        // (/jobs/by-type/MyApp.Jobs.SendEmail), a webhook event (payment.completed), an adapter name. Those
+        // must reach the shell so a refresh or bookmark works, while a genuinely missing asset still 404s
+        // rather than answering HTML to a <script> tag.
+        if (WarpSpaAssets.IsAssetRequest(path))
         {
             return assets.Resolve(path);
         }
@@ -117,6 +116,12 @@ internal static class WarpSpaEndpoints
                 x => (IFileProvider)new EmbeddedFileProvider(x.ResourceAssembly, x.ResourceNamespace),
                 StringComparer.OrdinalIgnoreCase);
         }
+
+        /// <summary>
+        /// Whether the path names something this serves: an extension that maps to a known media type.
+        /// A dotted SPA route segment (<c>MyApp.Jobs.SendEmail</c>) maps to nothing and is not an asset.
+        /// </summary>
+        public static bool IsAssetRequest(string path) => ContentTypes.TryGetContentType(path, out _);
 
         public IResult Resolve(string path)
         {
