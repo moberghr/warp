@@ -8,7 +8,13 @@ sidebar_position: 6
 
 *Unreleased*
 
-Patch release — one bug fix. No migration, no API change.
+Patch release — two bug fixes. No migration, no API change.
+
+### Endpoint calls record the real wire status when a handler exception is mapped upstream
+
+A Warp HTTP endpoint whose handler threw an exception that a **host** exception middleware later translated into a status (the common `NotSignedInException` → 401 shape) was recorded with `StatusCode = 200` — the never-written ASP.NET default, snapshotted while the exception was still unwinding, before the host middleware ran. The call-detail page then showed the contradiction: status 200, outcome Failed, an exception pane.
+
+Recording for an exception that escapes before the response starts is now deferred to response completion, so the row carries the **final wire status** (the 401 the client actually received; a genuinely unhandled exception records the server's 500). The outcome derives from that status: ≥ 500 is `Failed`, a host-mapped 4xx counts like any other 4xx — a client error, kept off the endpoint error rate — while the exception type and message stay on the row. Exception-bearing calls are never dropped by `RecordCalls = FailuresOnly` or sampling, and `OnFailure` capture tiers treat them as failures, so the diagnostic detail is still captured. An exception thrown after the response started (a truncated 2xx on the wire) still records `Failed`. Error grouping follows the same split: a host-mapped 401 now mints a 4xx status-code issue for its route instead of an exception issue.
 
 ### Recurring jobs no longer wait out the polling backoff
 

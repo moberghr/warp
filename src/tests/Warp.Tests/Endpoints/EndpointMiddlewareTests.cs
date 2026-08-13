@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -290,22 +292,200 @@ public class EndpointMiddlewareTests
     }
 
     [TimedFact]
-    public async Task WarpEndpoint_UnhandledException_RecordsFailedWithExceptionType_AndRethrows()
+    public async Task WarpEndpoint_UnhandledException_Rethrows()
     {
+        // The middleware must stay transparent to the exception (rethrow, never swallow). The record itself
+        // is deferred to Response.OnCompleted, which a real server (Kestrel/IIS) fires after writing its 500
+        // — but TestServer's abort path never completes the response, so the record is unobservable here; the
+        // 500-mapped test below covers the deferred Failed record.
+        var (app, client, _) = await CreateHost();
+
+        try
+        {
+            await Should.ThrowAsync<InvalidOperationException>(async () =>
+                await client.GetAsync("/throw", Xunit.TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task WarpEndpoint_UnhandledException_Kestrel_RecordsServerWritten500()
+    {
+        // The production shape of a truly unhandled exception: no host exception middleware at all. A real
+        // server (unlike TestServer, see above) converts it to a 500 and completes the response, so the
+        // deferred record lands with the server-written wire status.
+        var (app, client, recorder) = await CreateHost(useKestrel: true);
+
+        try
+        {
+            var response = await client.GetAsync("/throw", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(500);
+
+            var record = await WaitForRecordAsync(recorder);
+            record.RouteTemplate.ShouldBe("/throw");
+            record.Outcome.ShouldBe(AdapterCallOutcome.Failed);
+            record.StatusCode.ShouldBe(500);
+            record.ExceptionType.ShouldBe(typeof(InvalidOperationException).FullName);
+            record.ExceptionMessage.ShouldBe("unhandled-boom");
+
+            // The trace join key survives the deferral even on the fully-unhandled path, where nothing but
+            // the server itself handles the exception.
+            record.TraceId.ShouldNotBeNull();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task WarpEndpoint_ExceptionMappedTo500Upstream_RecordsFailedWithWireStatus()
+    {
+        // A host exception handler that answers 500 (the same shape Kestrel produces for a fully unhandled
+        // exception): the deferred record derives Failed from the final wire status and keeps the exception.
+        var (app, client, recorder) = await CreateHost(mapExceptionsToStatus: 500);
+
+        try
+        {
+            var response = await client.GetAsync("/throw", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(500);
+
+            var record = await WaitForRecordAsync(recorder);
+            record.RouteTemplate.ShouldBe("/throw");
+            record.Outcome.ShouldBe(AdapterCallOutcome.Failed);
+            record.StatusCode.ShouldBe(500);
+            record.ExceptionType.ShouldBe(typeof(InvalidOperationException).FullName);
+            record.ExceptionMessage.ShouldBe("unhandled-boom");
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task WarpEndpoint_ExceptionMappedTo401Upstream_RecordsWireStatusAsClientError()
+    {
+        // The handler throws; the HOST's exception middleware (registered outside Warp) maps it to 401 AFTER
+        // Warp's frame has unwound. The recorded status must be the wire 401 — not the never-written 200
+        // default — and a 4xx is a client error (Success) per the §8.21 stance, with the exception kept on
+        // the row for diagnosis.
+        var (app, client, recorder) = await CreateHost(mapExceptionsToStatus: 401);
+
+        try
+        {
+            var response = await client.GetAsync("/throw", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(401);
+
+            var record = await WaitForRecordAsync(recorder);
+            record.StatusCode.ShouldBe(401);
+            record.Outcome.ShouldBe(AdapterCallOutcome.Success);
+            record.ExceptionType.ShouldBe(typeof(InvalidOperationException).FullName);
+            record.ExceptionMessage.ShouldBe("unhandled-boom");
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task WarpEndpoint_ExceptionMappedTo401Upstream_StillCarriesTraceId()
+    {
+        // The deferred record runs from Response.OnCompleted, after the app delegate returned — assert the
+        // ambient request Activity is still flowing there, because TraceId is the join key the unified trace
+        // view uses to tie this call to the jobs it spawned. Losing it would be a silent regression.
+        var (app, client, recorder) = await CreateHost(mapExceptionsToStatus: 401);
+
+        try
+        {
+            var response = await client.GetAsync("/throw", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(401);
+            (await WaitForRecordAsync(recorder)).TraceId.ShouldNotBeNull();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task RecordCallsFailuresOnly_ExceptionMappedTo401_NotSuppressed()
+    {
+        // An exception-bearing call is never suppressed: even though the wire outcome is a 4xx client error,
+        // the row carries the exception detail a FailuresOnly host is asking to keep.
+        var (app, client, recorder) = await CreateHost(o => o.RecordCalls = CallRecording.FailuresOnly, mapExceptionsToStatus: 401);
+
+        try
+        {
+            var response = await client.GetAsync("/throw", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(401);
+            (await WaitForRecordAsync(recorder)).SuppressLog.ShouldBeFalse();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task Headers_CaptureOnFailure_ExceptionMappedTo401_CapturesHeaders()
+    {
+        // OnFailure treats exception-bearing calls as capture-worthy even when the outcome is Success (4xx).
+        var (app, client, recorder) = await CreateHost(o => o.CaptureHeaders = CaptureMode.OnFailure, mapExceptionsToStatus: 401);
+
+        try
+        {
+            var response = await client.GetAsync("/throw", Xunit.TestContext.Current.CancellationToken);
+
+            ((int)response.StatusCode).ShouldBe(401);
+            (await WaitForRecordAsync(recorder)).RequestHeaders.ShouldNotBeNull();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task WarpEndpoint_ExceptionAfterResponseStarted_RecordsFailedWithStartedStatus()
+    {
+        // A throw AFTER the response started means the client received a truncated 2xx — that IS a failure,
+        // and the started status is the real wire status, so the record is written inline: Failed + 200.
         var (app, client, recorder) = await CreateHost();
 
         try
         {
-            // TestServer surfaces the unhandled exception to the client; the middleware must still record the
-            // call as Failed with the exception type before rethrowing (the finally runs on the throw path).
-            await Should.ThrowAsync<InvalidOperationException>(async () =>
-                await client.GetAsync("/throw", Xunit.TestContext.Current.CancellationToken));
+            try
+            {
+                using var response = await client.GetAsync("/midstream", HttpCompletionOption.ResponseHeadersRead, Xunit.TestContext.Current.CancellationToken);
+                await response.Content.ReadAsStringAsync(Xunit.TestContext.Current.CancellationToken);
+            }
+            catch (HttpRequestException)
+            {
+                // The aborted body read is the client-visible symptom — the record is what's under test.
+            }
 
-            var record = recorder.Records.ShouldHaveSingleItem();
-            record.RouteTemplate.ShouldBe("/throw");
+            var record = await WaitForRecordAsync(recorder);
+            record.RouteTemplate.ShouldBe("/midstream");
             record.Outcome.ShouldBe(AdapterCallOutcome.Failed);
-            record.ExceptionType.ShouldBe(typeof(InvalidOperationException).FullName);
-            record.ExceptionMessage.ShouldBe("unhandled-boom");
+            record.StatusCode.ShouldBe(200);
+            record.ExceptionMessage.ShouldBe("midstream-boom");
         }
         finally
         {
@@ -426,10 +606,24 @@ public class EndpointMiddlewareTests
 
     private static async Task<(WebApplication App, HttpClient Client, CapturingRecorder Recorder)> CreateHost(
         Action<WarpEndpointObservabilityOptions>? configure = null,
-        IEndpointCallRecorder? recorderOverride = null)
+        IEndpointCallRecorder? recorderOverride = null,
+        int? mapExceptionsToStatus = null,
+        bool useKestrel = false)
     {
         var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseTestServer();
+
+        // Kestrel (loopback, ephemeral port) is only used by the truly-unhandled-exception test: TestServer's
+        // abort path never completes the response, so the deferred record is unobservable there, while a real
+        // server converts the exception to a 500 and fires OnCompleted.
+        if (useKestrel)
+        {
+            builder.WebHost.UseUrls("http://127.0.0.1:0");
+        }
+        else
+        {
+            builder.WebHost.UseTestServer();
+        }
+
         builder.WebHost.UseDefaultServiceProvider(o => o.ValidateScopes = true);
 
         var recorder = new CapturingRecorder();
@@ -439,6 +633,25 @@ public class EndpointMiddlewareTests
         builder.Services.Configure<WarpEndpointObservabilityOptions>(o => configure?.Invoke(o));
 
         var app = builder.Build();
+
+        // A host-owned exception-to-status middleware registered OUTSIDE the Warp middleware — the common
+        // production shape (domain exceptions mapped to 401/404/...) that writes the real wire status only
+        // AFTER Warp's frame has unwound.
+        if (mapExceptionsToStatus is not null)
+        {
+            app.Use(async (context, next) =>
+            {
+                try
+                {
+                    await next(context);
+                }
+                catch (InvalidOperationException)
+                {
+                    context.Response.StatusCode = mapExceptionsToStatus.Value;
+                    await context.Response.WriteAsync("handled-by-host");
+                }
+            });
+        }
 
         app.UseRouting();
         app.UseWarpHttpObservability();
@@ -454,6 +667,13 @@ public class EndpointMiddlewareTests
             .WithMetadata(new WarpEndpointIdentity("GET", "/accented", "Accented"));
         app.MapGet("/throw", void () => throw new InvalidOperationException("unhandled-boom"))
             .WithMetadata(new WarpEndpointIdentity("GET", "/throw", "Throw"));
+        app.MapGet("/midstream", async context =>
+        {
+            await context.Response.WriteAsync("partial");
+            await context.Response.Body.FlushAsync();
+
+            throw new InvalidOperationException("midstream-boom");
+        }).WithMetadata(new WarpEndpointIdentity("GET", "/midstream", "MidStream"));
         app.MapPost("/hdr", () => Results.Ok())
             .WithMetadata(new WarpEndpointIdentity("POST", "/hdr", "Hdr"));
         app.MapGet("/notfound", () => Results.NotFound())
@@ -461,7 +681,28 @@ public class EndpointMiddlewareTests
 
         await app.StartAsync(CancellationToken.None);
 
-        return (app, app.GetTestClient(), recorder);
+        if (!useKestrel)
+        {
+            return (app, app.GetTestClient(), recorder);
+        }
+
+        var address = app.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!
+            .Addresses.First();
+
+        return (app, new HttpClient { BaseAddress = new Uri(address) }, recorder);
+    }
+
+    // Exception-path records are deferred to Response.OnCompleted, which can land after the client's await
+    // resumes — poll (yield, no delay) until the single record arrives; [TimedFact] bounds the wait.
+    private static async Task<EndpointCallRecord> WaitForRecordAsync(CapturingRecorder recorder)
+    {
+        while (recorder.Records.Count == 0)
+        {
+            await Task.Yield();
+        }
+
+        return recorder.Records.ShouldHaveSingleItem();
     }
 
     private sealed class ThrowingRecorder : IEndpointCallRecorder

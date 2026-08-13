@@ -8,6 +8,7 @@ import * as api from '@/api';
 import { ErrorGroupStatus, ErrorSource } from '@/types/issues';
 import type { ErrorGroupTrendPoint, ErrorSample } from '@/types/issues';
 import { SourceBadge, StatusChip, IssueFlags } from './shared';
+import { HttpStatus } from '@/pages/adapters/shared';
 
 // Detail for one issue (error group, §8.29): the grouped identity, the most recent captured sample,
 // an hourly volume trend, a jump to a representative trace, and the resolve/ignore workflow — the
@@ -98,7 +99,10 @@ export default function IssueDetailPage() {
           <Field label="First seen" value={data.firstSeenAt} relative />
           <Field label="Last seen" value={data.lastSeenAt} relative />
           <Field label="Events" value={data.count.toLocaleString()} />
-          <Field label="Status code" value={data.statusCode != null ? String(data.statusCode) : null} />
+          <div className="flex gap-2">
+            <span className="text-muted-foreground w-28 shrink-0">Status code</span>
+            <HttpStatus code={data.statusCode} />
+          </div>
           <Field label="Culprit" value={data.culprit} />
           <Field label="Application" value={data.application} />
           {data.environment && <Field label="Environment" value={data.environment} />}
