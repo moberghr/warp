@@ -33,7 +33,7 @@ internal static class WarpSpaEndpoints
     private const string EmbeddedFileNamespace = "Warp.UI.dist";
     private static readonly FileExtensionContentTypeProvider ContentTypes = new();
 
-    internal static IEndpointConventionBuilder MapWarpSpa(this IEndpointRouteBuilder app, WarpUIOptions options, List<IWarpUIExtension> extensions)
+    internal static IEndpointConventionBuilder MapWarpSpa(this IEndpointRouteBuilder app, WarpUIOptions options, List<IWarpUIExtension> extensions, WarpDashboardGate gate)
     {
         var hasLogin = app.ServiceProvider.GetService<IWarpDashboardLoginMarker>() != null;
         var assets = new WarpSpaAssets(options.RoutePrefix, extensions);
@@ -41,7 +41,9 @@ internal static class WarpSpaEndpoints
 
         // Typed as Delegate so overload resolution picks the route-handler overload rather than
         // RequestDelegate, which would discard the IResult instead of writing it (ASP0016).
-        Delegate handler = (HttpContext context) => Serve(context, options, assets, hasLogin);
+        // The login flag is read per request, not captured here: whether the host replaced the login gate is
+        // only settled once its conventions have been applied, which happens after this runs.
+        Delegate handler = (HttpContext context) => Serve(context, options, assets, hasLogin && !gate.ReplacedByHostPolicy);
 
         var root = app.MapMethods(options.RoutePrefix, methods, handler);
         var rest = app.MapMethods($"{options.RoutePrefix}/{{**path}}", methods, handler);

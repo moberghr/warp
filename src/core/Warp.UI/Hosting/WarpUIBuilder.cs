@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -53,7 +54,8 @@ public static class WarpUIBuilder
 
         ClaimDashboard(app.Services, options.RoutePrefix);
 
-        var shell = app.MapWarpSpa(options, extensions);
+        var gate = new WarpDashboardGate();
+        var shell = app.MapWarpSpa(options, extensions, gate);
 
         var apiGroup = app.MapWarpApiEndpoints(options, extensions);
         apiGroup.MapWarpAuthEndpoints(app.Services);
@@ -88,14 +90,9 @@ public static class WarpUIBuilder
 
         var mapped = new WarpUIEndpointConventionBuilder(app.Services, shell, new CompositeEndpointConventionBuilder(api));
 
-        // Registering the built-in login gates the dashboard on its own — the way UseBuiltInLogin did before
-        // the endpoints existed. Requiring a separate RequireWarpDashboardLogin() call would mean the
-        // half-migrated shape (services registered, convention forgotten) compiles, renders a login page,
-        // and serves every API route anonymously. Secure by default instead; the explicit call remains
-        // available and is idempotent.
         if (app.Services.GetService<IWarpDashboardLoginMarker>() != null)
         {
-            mapped.RequireWarpDashboardLogin();
+            ApplyBuiltInLoginGate(mapped, gate);
         }
 
         return mapped;
@@ -103,6 +100,40 @@ public static class WarpUIBuilder
 
     /// <summary>Name of the header stamped on every dashboard API response.</summary>
     internal const string WarpApiMarkerHeader = "X-Warp-Api";
+
+    // Registering the built-in login gates the dashboard on its own — the way UseBuiltInLogin did before the
+    // endpoints existed. Requiring a separate RequireWarpDashboardLogin() call would mean the half-migrated
+    // shape (services registered, convention forgotten) compiles, renders a login page, and serves every API
+    // route anonymously.
+    //
+    // Applied through Finally, which runs after every convention the host added, for two reasons: it can see
+    // whether the host already gated these endpoints, and it can therefore step aside rather than stack on
+    // top. A caller who satisfies the host's policy must not then be turned away for lacking a Warp cookie
+    // that the host's setup gives them no way to obtain.
+    private static void ApplyBuiltInLoginGate(WarpUIEndpointConventionBuilder mapped, WarpDashboardGate gate)
+    {
+        mapped.Api.Finally(builder =>
+        {
+            var authorization = builder.Metadata.OfType<IAuthorizeData>().ToList();
+
+            var hostGated = authorization.Exists(x => !string.Equals(x.Policy, WarpDashboardDefaults.LoginPolicy, StringComparison.Ordinal))
+                || builder.Metadata.OfType<AuthorizationPolicy>().Any();
+
+            if (hostGated)
+            {
+                gate.ReplacedByHostPolicy = true;
+
+                return;
+            }
+
+            // Nothing else claimed these endpoints. RequireWarpDashboardLogin() may already have added the
+            // same policy explicitly, in which case adding it twice would only evaluate it twice.
+            if (authorization.Count == 0)
+            {
+                builder.Metadata.Add(new AuthorizeAttribute(WarpDashboardDefaults.LoginPolicy));
+            }
+        });
+    }
 
     // A missing leading slash silently breaks asset resolution (the prefix is sliced off request paths by
     // length) and makes the injected apiPath document-relative; a trailing slash builds "{prefix}//{**path}"

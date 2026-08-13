@@ -1005,7 +1005,8 @@ app.MapWarpUI("/warp").RequireWarpDashboardLogin();
 
 Registering the built-in login GATES the dashboard on its own — RequireWarpDashboardLogin() is explicit
 rather than required, and is idempotent. Otherwise the half-configured shape (services registered,
-convention forgotten) would render a login page over an anonymous API.
+convention forgotten) would render a login page over an anonymous API. Applying your own policy REPLACES the
+login gate (it does not stack), and the SPA then reports hasBuiltInLogin=false.
 
 ```csharp
 public class MyCredentialValidator : IWarpCredentialValidator

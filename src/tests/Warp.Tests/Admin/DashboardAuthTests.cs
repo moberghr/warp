@@ -758,6 +758,89 @@ public class DashboardAuthTests
             .Message.ShouldContain("more than once");
     }
 
+    [TimedFact]
+    public async Task HostPolicy_ReplacesTheBuiltInLoginGate()
+    {
+        // Registering the built-in login and then applying your own policy is contradictory, and requiring
+        // BOTH is the wrong reading — a caller who satisfies the host policy would still be turned away for
+        // lacking a Warp cookie there is no longer any way to obtain. The host's policy wins outright.
+        var (app, client) = await StartAsync(
+            x =>
+            {
+                x.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
+                AddHostIdentity(x);
+            },
+            x => x.RequireAuthorization(HostPolicy),
+            MapSignIn);
+        try
+        {
+            var signIn = await client.GetAsync("/signin?admin=true", XunitTestContext.Current.CancellationToken);
+            CarryCookie(client, signIn);
+
+            var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task HostPolicy_ReplacingTheLogin_TellsTheSpaThereIsNoLoginPage()
+    {
+        // The SPA must not offer a login form that cannot grant access — the cookie it would issue is no
+        // longer the gate.
+        var (app, client) = await StartAsync(
+            x =>
+            {
+                x.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
+                AddHostIdentity(x);
+            },
+            x => x.RequireAuthorization(HostPolicy),
+            MapSignIn);
+        try
+        {
+            var signIn = await client.GetAsync("/signin?admin=true", XunitTestContext.Current.CancellationToken);
+            CarryCookie(client, signIn);
+
+            var response = await client.GetAsync("/warp", XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+            var body = await response.Content.ReadAsStringAsync(XunitTestContext.Current.CancellationToken);
+            body.ShouldContain("window.hasBuiltInLogin = false");
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task HostPolicy_ReplacingTheLogin_StillGatesAnonymousCallers()
+    {
+        // Replacing the gate must not mean removing it.
+        var (app, client) = await StartAsync(
+            x =>
+            {
+                x.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
+                AddHostIdentity(x);
+            },
+            x => x.RequireAuthorization(HostPolicy),
+            MapSignIn);
+        try
+        {
+            var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
+
+            response.StatusCode.ShouldNotBe(HttpStatusCode.OK);
+        }
+        finally
+        {
+            await StopAsync(app, client);
+        }
+    }
+
     private static void AddBuiltInLogin(IServiceCollection services)
         => services.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
 

@@ -117,8 +117,10 @@ explicit rather than required, and applying it twice is harmless. Otherwise the 
 (services registered, convention forgotten) would compile, render a login page, and serve every API route
 anonymously.
 
-One consequence: adding `.RequireAuthorization("YourPolicy")` on top means callers must satisfy **both** the
-Warp cookie and your policy. If your own policy is the gate you want, don't register the built-in login.
+If you apply a policy of your own — `.RequireAuthorization("YourPolicy")` or `.RequireLocalRequests()` — it
+**replaces** the built-in login rather than stacking on top of it, and the SPA stops offering the login form.
+Requiring both would turn away a caller who satisfies your policy for lacking a Warp cookie your setup gives
+them no way to obtain.
 
 `AddBuiltInLogin<T>` registers your validator as **Scoped**, so it can inject a `DbContext`:
 

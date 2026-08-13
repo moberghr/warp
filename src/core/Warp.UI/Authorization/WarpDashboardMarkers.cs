@@ -28,3 +28,16 @@ internal sealed class WarpDashboardCookiePath
 {
     public string? Value { get; set; }
 }
+
+/// <summary>
+/// Whether the host gated the dashboard with an authorization policy of its own, in which case the built-in
+/// login is not the gate and its login form cannot grant access.
+/// </summary>
+/// <remarks>
+/// Set while the dashboard's endpoints are built, which happens after the host has finished applying
+/// conventions and before the first request — so the SPA shell can read it per request and report honestly.
+/// </remarks>
+internal sealed class WarpDashboardGate
+{
+    public bool ReplacedByHostPolicy { get; set; }
+}
