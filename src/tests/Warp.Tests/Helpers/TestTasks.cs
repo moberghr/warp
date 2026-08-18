@@ -99,20 +99,24 @@ public static class TestTasks
         TContext context,
         TimeProvider timeProvider,
         TimeSpan invisibilityTimeout,
-        bool restartByDefault = true)
+        bool restartByDefault = true,
+        ServerTaskSignals<TContext>? signals = null,
+        IWarpNotificationTransport? transport = null,
+        string? applicationName = null)
         where TContext : DbContext
     {
         return new StaleJobRecovery<TContext>(
             new TestServerContext(context),
-            context,
             timeProvider,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),
             Options.Create(new WarpServerConfiguration
             {
                 InvisibilityTimeout = invisibilityTimeout,
                 RestartStaleJobsByDefault = restartByDefault,
+                ApplicationName = applicationName,
             }),
-            webhookEnqueuers: []);
+            transport ?? NullTransport,
+            signals ?? new ServerTaskSignals<TContext>());
     }
 
     public static CounterAggregator<TContext> CreateCounterAggregator<TContext>(TContext context)
@@ -126,7 +130,8 @@ public static class TestTasks
     public static ScheduledJobActivation<TContext> CreateScheduledJobActivation<TContext>(
         TContext context,
         TimeProvider timeProvider,
-        IWarpNotificationTransport? transport = null)
+        IWarpNotificationTransport? transport = null,
+        ServerTaskSignals<TContext>? signals = null)
         where TContext : DbContext
     {
         return new ScheduledJobActivation<TContext>(
@@ -135,7 +140,7 @@ public static class TestTasks
             transport ?? NullTransport,
             Options.Create(new WarpServerConfiguration()),
             QueriesFor(context),
-            new ServerTaskSignals<TContext>());
+            signals ?? new ServerTaskSignals<TContext>());
     }
 
     public static Orchestrator<TContext> CreateOrchestrator<TContext>(
