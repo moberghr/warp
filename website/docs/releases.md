@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 4.1.0
 
-*Unreleased*
+*2026-08-18*
 
 Minor release, no schema change. One **breaking API removal, confined to outbound adapters** — `UseResilience` is gone and `Warp.Adapters.Http` no longer depends on Polly. Alongside it, four correctness fixes on the server-task path, found by auditing whether the 3.0 server-context migration was actually complete, plus a recurring-job reporting fix. Three changes affect behaviour a host may be reading today: the adapter change **removes a public method**, one **adds a startup exception** for a configuration shape that was previously accepted and silently half-applied, and one **stops advancing the recurring-job `Last Execution` column** for definitions left disabled — all below.
 
