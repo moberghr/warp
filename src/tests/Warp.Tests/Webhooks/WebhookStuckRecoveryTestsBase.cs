@@ -1,11 +1,15 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Handlers;
+using Warp.Core.NoRestart;
 using Warp.Core.Webhooks;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
@@ -19,9 +23,9 @@ namespace Warp.Tests.Webhooks;
 /// commit leaves a delivery <c>Pending</c> with a claimed attempt and NO live executor job — nothing scans
 /// <c>NextAttemptAt</c> and <c>Redeliver</c> rejects <c>Pending</c>, so the <c>StaleJobRecovery</c> sweep
 /// is the only path back. The sweep finds <c>Pending</c> rows whose <c>NextAttemptAt</c> is more than
-/// <c>WebhookStuckDeliveryGrace</c> past, re-enqueues an executor job through the addon-registered
-/// <see cref="IWebhookRedeliveryEnqueuer"/> seam, and defers the row's next sweep by bumping
-/// <c>NextAttemptAt</c> with a guarded update (the claim pattern — no duplicate enqueue).
+/// <c>WebhookStuckDeliveryGrace</c> past, stages an executor job on the server context, and defers the
+/// row's next sweep by bumping <c>NextAttemptAt</c> with a guarded update (the claim pattern — no
+/// duplicate enqueue).
 /// </summary>
 [GenerateDatabaseTests]
 public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
@@ -48,6 +52,28 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
         delivery.Status.ShouldBe(WebhookDeliveryStatus.Pending);
         delivery.NextAttemptAt.ShouldNotBeNull();
         delivery.NextAttemptAt!.Value.ShouldBeGreaterThan(DateTime.UtcNow);
+    }
+
+    [TimedFact]
+    public async Task Recover_StuckPendingDelivery_StagesJobThatAlwaysRestarts()
+    {
+        // Staging the job directly bypasses NoRestartPublishBehavior, which is what would otherwise read
+        // [Restart] off ExecuteWebhookDelivery — and it only runs when the host called AddNoRestart(). The
+        // sweep must stamp the metadata itself: a recovered executor that crashes mid-attempt has to be
+        // re-run for the delivery-completes guarantee to hold, whatever RestartStaleJobsByDefault says.
+        await using var server = await StartIdleServerAsync();
+        await SeedDeliveryAsync(server, nextAttemptAt: DateTime.UtcNow.AddHours(-1));
+
+        using var scope = server.GetService<IServiceScopeFactory>().CreateScope();
+        await CreateRecovery(scope).RecoverStuckWebhookDeliveriesAsync(Ct);
+
+        var job = await server.CreateContext().Set<Job>()
+            .AsNoTracking()
+            .Where(x => x.Queue == "warp:webhooks")
+            .FirstAsync(Ct);
+
+        var metadata = MetadataFactory.Create<ICanBeRestartedMetadata>(MetadataSerializer.Deserialize(job.Metadata));
+        metadata.CanBeRestarted.ShouldBe(true);
     }
 
     [TimedFact]
@@ -111,30 +137,42 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
-    public async Task Recover_NoEnqueuerRegistered_LeavesRowUntouched()
+    public async Task Recover_StaleExecutorJobInSameSweep_CompletesWithoutBlocking()
     {
-        // Core-only server (no AddWebhooks in this process): the sweep must not bump NextAttemptAt — a bump
-        // without an enqueued job would just push the stuck row another grace into the future, repeatedly.
+        // Both halves of ExecuteAsync in one tick, run the way the task host runs them: inside the
+        // xact-lock transaction. The stale-job sweep locks and requeues delivery B's crashed executor job
+        // and holds those row locks until the transaction commits — which cannot happen until ExecuteAsync
+        // returns. The webhook sweep then probes the webhooks queue for delivery A's job, which must read
+        // B's locked row. While that probe ran on the user's TContext it was a SECOND connection, so under
+        // read-committed locking (SQL Server without RCSI) it waited on a transaction that could never
+        // commit — a self-block until the command timeout. On the server context it is the same connection
+        // and sees its own uncommitted write, so the sweep completes and recovers A.
         await using var server = await StartIdleServerAsync();
-        var past = DateTime.UtcNow.AddHours(-1);
-        var deliveryId = await SeedDeliveryAsync(server, nextAttemptAt: past);
 
-        var recovery = new StaleJobRecovery<TestContext>(
-            new TestServerContext(server.CreateContext()),
-            server.CreateContext(),
-            TimeProvider.System,
-            TestTasks.QueriesFor(server.CreateContext()),
-            Options.Create(new WarpServerConfiguration()),
-            webhookEnqueuers: []);
+        var stuckId = await SeedDeliveryAsync(server, nextAttemptAt: DateTime.UtcNow.AddHours(-1));
+        var crashedId = await SeedDeliveryAsync(server, nextAttemptAt: DateTime.UtcNow.AddHours(-1));
+        var staleJobId = await SeedStaleExecutorJobAsync(server, crashedId);
 
-        var recovered = await recovery.RecoverStuckWebhookDeliveriesAsync(Ct);
+        using var scope = server.GetService<IServiceScopeFactory>().CreateScope();
+        var serverContext = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+        var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TestContext>>();
 
-        recovered.ShouldBe(0);
-        (await WebhookJobCountAsync(server)).ShouldBe(0);
+        var outcome = await queries.RunUnderTransactionLockAsync(
+            serverContext,
+            "warp:stale-job-recovery",
+            async (_, ct) => await CreateRecovery(scope).ExecuteAsync(ct),
+            Ct);
 
-        var delivery = await GetDeliveryAsync(server, deliveryId);
-        delivery.NextAttemptAt.ShouldNotBeNull();
-        delivery.NextAttemptAt!.Value.ShouldBe(past, TimeSpan.FromSeconds(1));
+        outcome.LockHeld.ShouldBeTrue();
+
+        // The crashed executor was requeued by the job sweep, so its delivery counts as having live work
+        // and gets no second job; only the genuinely job-less delivery is recovered.
+        var staleJob = await server.CreateContext().Set<Job>().AsNoTracking().FirstAsync(x => x.Id == staleJobId, Ct);
+        staleJob.CurrentState.ShouldBe(State.Enqueued);
+
+        (await WebhookJobCountAsync(server)).ShouldBe(2);
+        (await GetDeliveryAsync(server, stuckId)).NextAttemptAt!.Value.ShouldBeGreaterThan(DateTime.UtcNow);
+        (await GetDeliveryAsync(server, crashedId)).NextAttemptAt!.Value.ShouldBeLessThan(DateTime.UtcNow);
     }
 
     [TimedFact]
@@ -209,8 +247,9 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
     }
 
     // Resolved from the server's REAL DI as IServerTask — not hand-constructed — so these tests also prove
-    // the production registration wires the scoped TContext and the addon-registered enqueuers into the
-    // task's constructor (tests that construct internal seams verify the seam, not the wiring).
+    // the production registration wires the scoped server context into the task's constructor, and that it
+    // is a genuinely separate DbContext from the user's TContext (a hand-built task can share one, which is
+    // exactly what the same-sweep blocking test must not do).
     private static StaleJobRecovery<TestContext> CreateRecovery(IServiceScope scope)
         => scope.ServiceProvider.GetServices<IServerTask>()
             .OfType<StaleJobRecovery<TestContext>>()
@@ -241,6 +280,29 @@ public abstract class WebhookStuckRecoveryTestsBase : IntegrationTestBase
         await ctx.SaveChangesAsync(Ct);
 
         return delivery.Id;
+    }
+
+    // The delivery's executor job as a crashed worker left it: Processing, with a keep-alive well past the
+    // invisibility timeout so the stale-job sweep claims and requeues it.
+    private static async Task<Guid> SeedStaleExecutorJobAsync(WarpTestServer server, Guid deliveryId)
+    {
+        var job = new Job
+        {
+            Id = Guid.NewGuid(),
+            Type = typeof(ExecuteWebhookDelivery).AssemblyQualifiedName!,
+            Message = JsonSerializer.Serialize(new ExecuteWebhookDelivery { DeliveryId = deliveryId }),
+            Queue = "warp:webhooks",
+            CurrentState = State.Processing,
+            CreateTime = DateTime.UtcNow.AddHours(-1),
+            ScheduleTime = DateTime.UtcNow.AddHours(-1),
+            LastKeepAlive = DateTime.UtcNow.AddHours(-1),
+        };
+
+        var ctx = server.CreateContext();
+        ctx.Set<Job>().Add(job);
+        await ctx.SaveChangesAsync(Ct);
+
+        return job.Id;
     }
 
     private static async Task<WebhookDelivery> GetDeliveryAsync(WarpTestServer server, Guid id)

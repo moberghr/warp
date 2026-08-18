@@ -1,10 +1,13 @@
+using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Handlers;
+using Warp.Core.Notifications;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Worker.Services;
@@ -404,6 +407,216 @@ public abstract class CrashRecoveryTestsBase : IAsyncLifetime
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Deleted, "Stale job with CancellationMode=Graceful should be Deleted, not requeued");
         job.CancellationMode.ShouldBe(CancellationMode.None);
+    }
+
+    [TimedFact]
+    public async Task RecoverStaleJobs_RequeuedJob_WakesWorkersOnItsOwnCommit()
+    {
+        // Regression: a recovered job landed in Enqueued with no wake at all. NotificationDispatch's
+        // CapturePending only sees ADDED Job rows and a requeue is Modified, so recovery was the one
+        // enqueue site that announced nothing — the job then waited out a worker's backoff poll, up to
+        // MaxPollingInterval (which UseDatabasePush raises to 5 minutes) after the crash it recovers from.
+        await SeedStaleProcessingJobAsync();
+
+        var transport = new RecordingNotificationTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport)
+            .RecoverStaleJobsAsync(CancellationToken.None);
+
+        // No outer transaction, so the sweep owns and commits its own — the wake is durable and fires here.
+        woken.ShouldBe(1);
+        transport.Published.Count.ShouldBe(1);
+        transport.Published[0].Kind.ShouldBe(NotificationKind.JobEnqueued);
+        transport.Published[0].Queue.ShouldBe("default");
+    }
+
+    [TimedFact]
+    public async Task RecoverStaleJobs_RequeuedJob_DoesNotWakeBeforeCommit()
+    {
+        // Under the server-task host the sweep runs inside the lock transaction, so the requeue is not
+        // durable when it returns. Waking a worker here sends it querying for a row it cannot see (§8.25).
+        await SeedStaleProcessingJobAsync();
+
+        var transport = new RecordingNotificationTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        var ctx = _fixture.CreateContext();
+        await using var outerTx = await ctx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await TestTasks
+            .CreateStaleJobRecovery(ctx, TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport)
+            .RecoverStaleJobsAsync(CancellationToken.None);
+
+        woken.ShouldBe(0);
+        transport.Published.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task OnCommitted_AfterStaleJobRequeued_FiresJobEnqueued()
+    {
+        await SeedStaleProcessingJobAsync();
+
+        var transport = new RecordingNotificationTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        var ctx = _fixture.CreateContext();
+        await using var outerTx = await ctx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken);
+        var recovery = TestTasks.CreateStaleJobRecovery(ctx, TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport);
+        await recovery.RecoverStaleJobsAsync(CancellationToken.None);
+        await outerTx.CommitAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act: the host calls this once the lock transaction has committed.
+        await recovery.OnCommittedAsync(CancellationToken.None);
+
+        woken.ShouldBe(1);
+        transport.Published.Count.ShouldBe(1);
+        transport.Published[0].Kind.ShouldBe(NotificationKind.JobEnqueued);
+        transport.Published[0].Queue.ShouldBe("default");
+    }
+
+    [TimedFact]
+    public async Task RecoverStuckWebhookDeliveries_StagedJob_WakesWorkersOnTheWebhooksQueue()
+    {
+        // The staged executor job replaced an IPublisher.Enqueue, which announced itself via
+        // Publisher.SaveChangesAsync. Staging directly bypasses that, so the sweep has to announce the row
+        // itself or a recovered delivery sits on warp:webhooks until a worker's backoff poll finds it.
+        await SeedStuckDeliveryAsync();
+
+        var transport = new RecordingNotificationTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        var recovered = await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport)
+            .RecoverStuckWebhookDeliveriesAsync(CancellationToken.None);
+
+        // No outer transaction, so the sweep owns and commits its own — the wake is durable and fires here.
+        recovered.ShouldBe(1);
+        woken.ShouldBe(1);
+        transport.Published.Count.ShouldBe(1);
+        transport.Published[0].Kind.ShouldBe(NotificationKind.JobEnqueued);
+        transport.Published[0].Queue.ShouldBe("warp:webhooks");
+    }
+
+    [TimedFact]
+    public async Task Execute_StaleJobAndStuckDeliveryInOneSweep_WakesBothQueues()
+    {
+        // Both sweeps buffer into the same set, so the webhook sweep must UNION its CapturePending result
+        // rather than assign it — assigning drops the job sweep's requeue wake, and only under the task
+        // host's transaction (where neither sweep drains for itself) does that loss actually show.
+        await SeedStaleProcessingJobAsync();
+        await SeedStuckDeliveryAsync();
+
+        var transport = new RecordingNotificationTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        var ctx = _fixture.CreateContext();
+        await using var outerTx = await ctx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken);
+        var recovery = TestTasks.CreateStaleJobRecovery(ctx, TimeProvider.System, TimeSpan.FromMinutes(5), signals: signals, transport: transport);
+        await recovery.ExecuteAsync(CancellationToken.None);
+        await outerTx.CommitAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await recovery.OnCommittedAsync(CancellationToken.None);
+
+        woken.ShouldBe(2);
+        transport.Published.Count.ShouldBe(2);
+        transport.Published.ShouldContain(n => n.Kind == NotificationKind.JobEnqueued && n.Queue == "default");
+        transport.Published.ShouldContain(n => n.Kind == NotificationKind.JobEnqueued && n.Queue == "warp:webhooks");
+    }
+
+    [TimedFact]
+    public async Task RecoverStuckWebhookDeliveries_StagedJob_RootsItsOwnTraceAndCarriesTheApplication()
+    {
+        // Provenance the replaced IPublisher path used to supply: it stamped Application from config and
+        // fell back to rooting the trace at the job id when no caller trace was ambient — which is always
+        // the case for a recovery sweep. (That the server options carry the Core-level ApplicationName at
+        // all in the two-builder shape is guaranteed by the registration merge — see
+        // WarpConfigurationMergeTests.)
+        await SeedStuckDeliveryAsync();
+
+        await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), applicationName: "recovery-app")
+            .RecoverStuckWebhookDeliveriesAsync(CancellationToken.None);
+
+        var job = await _fixture.CreateContext().Set<Job>()
+            .Where(x => x.Queue == "warp:webhooks")
+            .FirstAsync(Xunit.TestContext.Current.CancellationToken);
+
+        job.TraceId.ShouldBe(job.Id);
+        job.Application.ShouldBe("recovery-app");
+    }
+
+    private async Task SeedStuckDeliveryAsync()
+    {
+        var ctx = _fixture.CreateContext();
+        ctx.Set<WebhookDelivery>().Add(new WebhookDelivery
+        {
+            Id = Guid.NewGuid(),
+            EventType = "order.created",
+            EventId = Guid.NewGuid().ToString(),
+            Url = "https://example.test/hook",
+            PayloadJson = "{}",
+            SigningMode = WebhookSigning.None,
+            RetrySchedule = [],
+            Status = WebhookDeliveryStatus.Pending,
+            AttemptCount = 1,
+            NextAttemptAt = DateTime.UtcNow.AddHours(-1),
+            CreatedAt = DateTime.UtcNow.AddHours(-2),
+        });
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+    }
+
+    private async Task<Guid> SeedStaleProcessingJobAsync()
+    {
+        var jobId = Guid.NewGuid();
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Processing,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            LastKeepAlive = DateTime.UtcNow.AddMinutes(-10),
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        return jobId;
+    }
+
+    private sealed class RecordingNotificationTransport : IWarpNotificationTransport
+    {
+        public List<(NotificationKind Kind, string? Queue)> Published { get; } = [];
+
+        public Task ListenerReady { get; } = Task.CompletedTask;
+
+        public Task PublishAsync(NotificationKind kind, string? queue, CancellationToken ct)
+        {
+            Published.Add((kind, queue));
+
+            return Task.CompletedTask;
+        }
+
+        public async IAsyncEnumerable<Notification> ListenAsync([EnumeratorCancellation] CancellationToken ct)
+        {
+            // Test-only — listening is irrelevant for the publish-side regression.
+            await Task.Yield();
+
+            yield break;
+        }
     }
 }
 

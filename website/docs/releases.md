@@ -4,6 +4,32 @@ sidebar_position: 6
 
 # Releases
 
+## 4.1.0
+
+*Unreleased*
+
+Additive minor release — no breaking API changes, no schema change. Four correctness fixes on the server-task path, found by auditing whether the 3.0 server-context migration was actually complete. One of them **adds a startup exception** for a configuration shape that was previously accepted and silently half-applied — see below.
+
+### Core settings shared by `AddWarp` and `AddWarpServer`
+
+`WarpServerConfiguration` extends `WarpConfiguration`, but the two are separate `IOptions` singletons — and a host that calls **both** entry points with their own lambdas gets two different objects. Since the server type *inherits* every Core setting, each object presented a complete-looking view of settings it might not own: `ExpirationCleanup`'s retention caps, `StatisticRollup`'s metrics-retention tiers and the worker's `ApplicationName` read defaults while the Core services read the configured values.
+
+Warp now folds the two together at registration, in either call order, so every consumer sees one set. A Core setting configured in one lambda and left at its default in the other is carried across; configured in **both to different values it throws**, naming the property and both values, because nothing distinguishes which lambda was meant to win:
+
+```
+InvalidOperationException: Warp configuration conflict: 'Schema' is set to 'warp' in the AddWarp
+lambda and to 'jobs' in the AddWarpServer lambda. It is a Core-level setting shared by both, so
+set it in exactly one of them.
+```
+
+A host that hits this on upgrade was already running on one of the two values with the other silently ignored — the message names the setting to move. Setting the same value in both is fine, and a host that calls only `AddWarpServer` is unaffected. See **[Configuration](./operations/configuration.md)**.
+
+### Fixed
+
+- **Webhook stuck-delivery recovery no longer stalls `StaleJobRecovery` on SQL Server.** The sweep ran on the user's `DbContext` — it enqueued through `IPublisher`, which is bound to it — so its live-job probe ran on a second connection while the stale-job sweep in the same tick still held row locks on the `Job` rows it scanned. Under read-committed locking (SQL Server without RCSI) that is a wait on a transaction which cannot commit until the sweep returns: the task died on its command timeout every tick, and **neither** stale jobs nor stuck deliveries were recovered while the condition held. Postgres was unaffected (MVCC readers do not block). Both sweeps now run on the server context, and the executor job is staged directly instead of through the publisher — which also means a recovered executor is always restarted on a second crash, rather than only when the host had registered `AddNoRestart()`.
+- **Crash-recovery requeues now wake workers.** A stale job flipped back to `Enqueued` announced nothing, because the push-notification capture only sees newly *added* job rows and a requeue modifies an existing one. The job then waited out a worker's polling backoff — up to `MaxPollingInterval`, which `UseDatabasePush()` raises to 5 minutes — immediately after the crash it was recovering from.
+- **`ScheduledJobActivation` announces activations after its transaction commits.** It dispatched the `JobEnqueued` wake inline, from inside the server-task host's lock transaction, so a woken worker queried for rows that were not committed yet and went back to sleep having found nothing. The wake now fires post-commit.
+
 ## 4.0.0
 
 *2026-08-13*

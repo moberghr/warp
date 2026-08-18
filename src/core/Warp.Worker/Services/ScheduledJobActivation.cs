@@ -14,6 +14,14 @@ namespace Warp.Worker.Services;
 /// Flips jobs in <see cref="State.Scheduled"/> to <see cref="State.Enqueued"/> when their
 /// <c>ScheduleTime</c> has elapsed. Time-driven, always polling — there is no event trigger
 /// for "schedule time elapsed", so this task never participates in DB-push wake-up.
+/// <para>
+/// It does announce its own activations, though: a flipped row is an enqueue site like any other
+/// (§6.3/§2.9), and <c>NotificationDispatch.CapturePending</c> cannot see it — that walks the change
+/// tracker for <b>Added</b> <see cref="Job"/> rows and an activation is Modified — so the wake is built
+/// from the flip itself. Under the server-task host that wake is buffered and fired from
+/// <see cref="OnCommittedAsync"/> (§8.25): <see cref="ExecuteAsync"/> runs inside the host's lock
+/// transaction, so a dispatch there sends workers querying for rows that are not committed yet.
+/// </para>
 /// </summary>
 public sealed class ScheduledJobActivation<TContext> : IServerTask
     where TContext : DbContext
@@ -24,6 +32,7 @@ public sealed class ScheduledJobActivation<TContext> : IServerTask
     private readonly WarpServerConfiguration _configuration;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly ServerTaskSignals<TContext> _signals;
+    private readonly List<Notification> _pendingNotifications = [];
 
     public ScheduledJobActivation(
         IWarpServerContext serverContext,
@@ -52,6 +61,23 @@ public sealed class ScheduledJobActivation<TContext> : IServerTask
         var result = await ActivateWithNotifyAsync(ct);
 
         return result.Activated > 0 ? $"Activated {result.Activated} scheduled jobs" : null;
+    }
+
+    // Post-commit hook (§8.25): the task host calls this only after its lock transaction has committed —
+    // and never on a throw/rollback, which leaves the buffer to die with this scoped instance.
+    public async Task OnCommittedAsync(CancellationToken ct)
+    {
+        if (_pendingNotifications.Count == 0)
+        {
+            return;
+        }
+
+        var notifications = _pendingNotifications.ToList();
+        _pendingNotifications.Clear();
+
+        // CancellationToken.None: a shutdown mid-iteration still leaves the activations committed, and
+        // workers should hear about them rather than wait out their own backoff.
+        await NotificationDispatch.DispatchAsync(notifications, _signals, _transport, CancellationToken.None);
     }
 
     internal async Task<(int Activated, List<string> Queues)> ActivateWithNotifyAsync(CancellationToken ct)
@@ -93,7 +119,19 @@ public sealed class ScheduledJobActivation<TContext> : IServerTask
             .Distinct(StringComparer.Ordinal)
             .ToList();
         var notifications = distinctQueues.ConvertAll(q => new Notification(NotificationKind.JobEnqueued, q));
-        await NotificationDispatch.DispatchAsync(notifications, _signals, _transport, ct);
+
+        // Under the task host there is an ambient lock transaction, so nothing above is durable yet and the
+        // wake has to wait for OnCommittedAsync. A direct caller (test, admin trigger) has no ambient
+        // transaction — the UPDATE and the SaveChanges each committed on their own — so it can fire now,
+        // and would otherwise never see the wake at all since nothing calls the hook for it.
+        if (_context.Database.CurrentTransaction != null)
+        {
+            _pendingNotifications.AddRange(notifications);
+        }
+        else
+        {
+            await NotificationDispatch.DispatchAsync(notifications, _signals, _transport, ct);
+        }
 
         return (activated.Count, distinctQueues);
     }

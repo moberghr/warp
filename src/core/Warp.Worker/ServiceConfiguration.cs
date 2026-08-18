@@ -43,6 +43,20 @@ public static class ServiceConfiguration
         var builder = new WarpServerBuilder<TContext>(services);
         configure?.Invoke(builder);
 
+        // Two-builder shape (AddWarp ran first with its own lambda): the Core-level settings live on THAT
+        // builder and this one never saw them, yet WarpServerConfiguration inherits every one of them — so
+        // server-side readers (ExpirationCleanup's retention caps, StatisticRollup's tiers, the worker's
+        // ApplicationName) would quietly use defaults while Core readers used the configured values. Merge
+        // before the validation below so the fail-fast checks run against the same values the runtime sees.
+        var registeredCore = services
+            .LastOrDefault(x => x.ServiceType == typeof(IOptions<WarpConfiguration>))
+            ?.ImplementationInstance as IOptions<WarpConfiguration>;
+
+        if (registeredCore is not null)
+        {
+            WarpConfigurationMerge.ApplyCoreSettings(registeredCore.Value, builder);
+        }
+
         // Fail fast on the contradictory "run the worker, but with zero workers" shape. Without
         // this, such a server registers the worker hosts and all job-orchestration tasks (taking
         // distributed locks, routing messages, activating scheduled jobs) yet never fetches a

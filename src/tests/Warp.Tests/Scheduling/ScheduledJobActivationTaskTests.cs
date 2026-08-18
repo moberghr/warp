@@ -3,8 +3,10 @@ using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Notifications;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Worker.Services;
 
 namespace Warp.Tests.Scheduling;
@@ -243,6 +245,75 @@ public abstract class ScheduledJobActivationTaskTestsBase : IAsyncLifetime
         transport.Published.Count.ShouldBe(2);
         transport.Published.ShouldContain(n => n.Kind == NotificationKind.JobEnqueued && n.Queue == "default");
         transport.Published.ShouldContain(n => n.Kind == NotificationKind.JobEnqueued && n.Queue == "critical");
+    }
+
+    [TimedFact]
+    public async Task Activate_DueJob_DoesNotWakeBeforeCommit()
+    {
+        // Under the server-task host ExecuteAsync runs inside the lock transaction, so an activated row is
+        // not durable when it returns. Waking a worker here sends it querying for a row it cannot see, and
+        // it goes back to sleep having found nothing (§8.25 — the same bug §8.9 fixed in the recurring
+        // scheduler). The wake belongs in OnCommittedAsync.
+        await SeedDueScheduledJobAsync();
+
+        var transport = new RecordingTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        var actCtx = _fixture.CreateContext();
+        await using var outerTx = await actCtx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var result = await Warp.Tests.Helpers.TestTasks
+            .CreateScheduledJobActivation(actCtx, TimeProvider.System, transport, signals)
+            .ActivateWithNotifyAsync(CancellationToken.None);
+
+        result.Activated.ShouldBe(1);
+        woken.ShouldBe(0);
+        transport.Published.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task OnCommitted_AfterActivation_FiresJobEnqueued()
+    {
+        await SeedDueScheduledJobAsync();
+
+        var transport = new RecordingTransport();
+        var signals = new ServerTaskSignals<TestContext>();
+        var woken = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => woken++);
+
+        var actCtx = _fixture.CreateContext();
+        await using var outerTx = await actCtx.Database.BeginTransactionAsync(Xunit.TestContext.Current.CancellationToken);
+        var task = Warp.Tests.Helpers.TestTasks.CreateScheduledJobActivation(actCtx, TimeProvider.System, transport, signals);
+        await task.ActivateWithNotifyAsync(CancellationToken.None);
+        await outerTx.CommitAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act: the host calls this once the lock transaction has committed.
+        await task.OnCommittedAsync(CancellationToken.None);
+
+        woken.ShouldBe(1);
+        transport.Published.Count.ShouldBe(1);
+        transport.Published[0].Kind.ShouldBe(NotificationKind.JobEnqueued);
+        transport.Published[0].Queue.ShouldBe("default");
+    }
+
+    private async Task SeedDueScheduledJobAsync()
+    {
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Scheduled,
+            Queue = "default",
+            Type = "TestType",
+            Message = "{}",
+            CreateTime = DateTime.UtcNow.AddMinutes(-5),
+            ScheduleTime = DateTime.UtcNow.AddMinutes(-1),
+        });
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
     }
 
     private sealed class RecordingTransport : IWarpNotificationTransport
