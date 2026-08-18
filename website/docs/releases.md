@@ -30,6 +30,16 @@ A host that hits this on upgrade was already running on one of the two values wi
 - **Crash-recovery requeues now wake workers.** A stale job flipped back to `Enqueued` announced nothing, because the push-notification capture only sees newly *added* job rows and a requeue modifies an existing one. The job then waited out a worker's polling backoff — up to `MaxPollingInterval`, which `UseDatabasePush()` raises to 5 minutes — immediately after the crash it was recovering from.
 - **`ScheduledJobActivation` announces activations after its transaction commits.** It dispatched the `JobEnqueued` wake inline, from inside the server-task host's lock transaction, so a woken worker queried for rows that were not committed yet and went back to sleep having found nothing. The wake now fires post-commit.
 
+### Dependencies
+
+Clears 35 of the 37 open Dependabot alerts, all in the two npm lockfiles — every one a transitive bump, so no `package.json` changed.
+
+One of them reaches a published package. The dashboard bundle embedded in `Moberg.Warp.UI` is rebuilt from `src/ui/package-lock.json` at pack time, so it picks up **react-router 7.17.0 → 7.18.2** (via `react-router-dom`), clearing five advisories. The dashboard renders as a client-only `BrowserRouter` SPA with no SSR and no RSC, so exactly one of the five is reachable in that configuration: a **protocol-relative open redirect via a backslash in `<Link>` and `useNavigate`** (`GHSA-wrjc-x8rr-h8h6`, medium — a bypass of the earlier CVE-2025-68470 fix). The other four need a server-side or React Server Components router: SSR hydration constructor injection through `deserializeErrors()` (`GHSA-337j-9hxr-rhxg`), unauthenticated denial of service via inefficient server route matching (`GHSA-chx6-hx7r-mcp5`), missing protocol validation in `RSCErrorHandler` (`GHSA-h8fp-f39c-q6mh`), and an RSC-mode CSRF bypass executing actions ahead of a 400 response (`GHSA-qwww-vcr4-c8h2`).
+
+The rest ship nowhere. In `src/ui` they trace to `shadcn` (a scaffolding CLI) or `vite`, and in `website` to the Docusaurus toolchain; nothing imports them from dashboard source, so none reaches a published package: **nanoid 3.3.18**, **postcss 8.5.26**, **js-yaml 4.3.1** (and 3.15.1 under `gray-matter`), **brace-expansion 1.1.18 / 5.0.9**, **hono 4.13.2**, **undici 7.29.0**, **ip-address 10.5.0**, **fast-uri 3.1.5**.
+
+Two alerts stay open because they cannot be closed yet: **image-size** (`GHSA-w3rx-r6r6-pgpr` and `GHSA-5p2g-fcmc-qvqq`, both high — infinite loops in the ICNS and JXL/HEIF parsers) has no patched version published upstream. It reaches the repo only through `@docusaurus/mdx-loader`, so it runs at docs-build time over images committed to this repository and is absent from every published package. It clears when Docusaurus releases a version that moves off it.
+
 ## 4.0.0
 
 *2026-08-13*
