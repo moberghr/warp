@@ -137,7 +137,13 @@ export default function RecurringDetailPage() {
               {detail.updatedAt && <div><span className="text-muted-foreground">Updated:</span> {formatDateTime(detail.updatedAt)}</div>}
               <div>
                 <span className="text-muted-foreground">Next Execution:</span>{' '}
-                {detail.nextExecution ? <RelativeTime date={detail.nextExecution} /> : 'N/A'}
+                {detail.disabledAt ? (
+                  <span title="Disabled — this recurring job will not execute">—</span>
+                ) : detail.nextExecution ? (
+                  <RelativeTime date={detail.nextExecution} />
+                ) : (
+                  'N/A'
+                )}
               </div>
               <div>
                 <span className="text-muted-foreground">Last Execution:</span>{' '}

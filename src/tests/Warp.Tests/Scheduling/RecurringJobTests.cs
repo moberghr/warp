@@ -431,10 +431,10 @@ public abstract class RecurringJobTestsBase : IAsyncLifetime
 
         // Act
         var schedCtx = _fixture.CreateContext();
-        var count = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+        var result = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
 
         // Assert
-        count.ShouldBeGreaterThanOrEqualTo(1);
+        result.Scheduled.ShouldBeGreaterThanOrEqualTo(1);
 
         var jobCountAfter = await _fixture.CreateContext().Set<Job>().CountAsync(Xunit.TestContext.Current.CancellationToken);
         jobCountAfter.ShouldBeGreaterThan(jobCountBefore);

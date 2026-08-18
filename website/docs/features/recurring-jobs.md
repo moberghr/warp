@@ -74,14 +74,19 @@ Or use the Enable/Disable button on the dashboard.
 1. **Disable** sets `DisabledAt` timestamp on the recurring job
 2. **Scheduler** still picks up the job when `NextExecution <= now`, but sees `DisabledAt != null`
 3. Instead of creating a job, it creates a `RecurringJobLog` entry with `Skipped = true` and `JobId = null`
-4. `NextExecution` and `LastExecution` advance normally
-5. **Enable** clears `DisabledAt` — next cron tick creates a real job again
+4. `NextExecution` advances normally, so the skip cadence stays cron-paced — a frozen `NextExecution` would leave the row permanently due and record one skipped entry per scheduler tick instead of one per occurrence
+5. `LastExecution` does **not** advance — it names the last occurrence that actually ran, and a skip runs nothing. A disabled definition that never fired keeps reading `Never`
+6. **Enable** clears `DisabledAt` — next cron tick creates a real job again
+
+The dashboard hides `NextExecution` for a disabled definition (it renders `—`) rather than showing a firing time that will not produce a job. The column is still maintained in the database; only the display is suppressed.
+
+The scheduler's entry in the server-task history counts the two outcomes separately — `Scheduled 3 recurring jobs, skipped 1 disabled` — so a tick that only skipped disabled definitions never reads as if it had scheduled work. A tick with nothing due writes no message at all.
 
 ### Behavior
 
 | Scenario | What happens |
 |----------|-------------|
-| Disable | Scheduler creates "Skipped" log entries instead of jobs |
+| Disable | Scheduler creates "Skipped" log entries instead of jobs; `LastExecution` stops advancing and the dashboard shows `—` for next execution |
 | Enable | Next cron tick creates a real job as normal |
 | Manual Trigger while disabled | Creates a real job — explicit trigger ignores disabled state |
 | `AddOrUpdateRecurringJob` while disabled | Updates the definition (cron, payload) but does not change disabled state |
