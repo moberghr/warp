@@ -1,5 +1,4 @@
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Http.Resilience;
 using Warp.Core.Adapters;
 using Warp.Core.Enums;
 
@@ -12,8 +11,8 @@ namespace Warp.Adapters.Http;
 /// for mTLS, custom primary handlers, auth <c>DelegatingHandler</c>s, etc.
 /// <para>
 /// <b>Handler ordering is fixed</b> (not user-configurable): <c>WarpAdapterHandler</c> (outermost —
-/// times the logical call and records one row) → your handlers (<see cref="ConfigureHttpClientBuilder"/>)
-/// → the resilience handler (<see cref="UseResilience"/>) → the shared rate-limit handler
+/// times the logical call and records one row) → your handlers (<see cref="ConfigureHttpClientBuilder"/>,
+/// where a retry/resilience handler belongs) → the shared rate-limit handler
 /// (<see cref="UseSharedRateLimit"/>, innermost — one token per physical attempt) → transport.
 /// </para>
 /// <para>
@@ -40,10 +39,6 @@ public sealed class WarpAdapterHttpOptions
 
     internal Action<HttpClient>? ClientConfigurator { get; private set; }
 
-    internal bool ResilienceEnabled { get; private set; }
-
-    internal Action<HttpStandardResilienceOptions>? ResilienceConfigurator { get; private set; }
-
     internal AdapterSharedRateLimit? SharedRateLimit { get; private set; }
 
     internal IReadOnlyList<Action<IHttpClientBuilder>> BuilderConfigurators => _builderConfigurators;
@@ -64,9 +59,16 @@ public sealed class WarpAdapterHttpOptions
     }
 
     /// <summary>
-    /// Escape hatch onto the raw <see cref="IHttpClientBuilder"/> — add your own auth/logging
+    /// Escape hatch onto the raw <see cref="IHttpClientBuilder"/> — add your own auth/logging/retry
     /// <c>DelegatingHandler</c>s, a custom primary handler for mTLS, etc. Your handlers nest inside the
-    /// Warp handler and outside the resilience/rate-limit handlers. May be called multiple times.
+    /// Warp handler and outside the shared rate-limit handler. May be called multiple times.
+    /// <para>
+    /// This is where resilience goes. Warp takes no retry dependency of its own; add the package you
+    /// want and wire it here — e.g. <c>Microsoft.Extensions.Http.Resilience</c> via
+    /// <c>ConfigureHttpClientBuilder(b =&gt; b.AddStandardResilienceHandler())</c>. Landing here keeps the
+    /// documented ordering: retries stay inside the Warp handler (a call that succeeds on retry #3 is
+    /// still one recorded row) and outside the shared rate limiter (one token per physical attempt).
+    /// </para>
     /// </summary>
     public void ConfigureHttpClientBuilder(Action<IHttpClientBuilder> configure)
     {
@@ -82,17 +84,6 @@ public sealed class WarpAdapterHttpOptions
     public void AddTypedClient<TClient>()
         where TClient : class
         => _builderConfigurators.Add(builder => builder.AddTypedClient<TClient>());
-
-    /// <summary>
-    /// Adds a Polly resilience handler (<c>Microsoft.Extensions.Http.Resilience</c> standard pipeline:
-    /// retry, timeout, circuit breaker) inside your handlers. Optional <paramref name="configure"/>
-    /// tunes the standard options; omit for defaults.
-    /// </summary>
-    public void UseResilience(Action<HttpStandardResilienceOptions>? configure = null)
-    {
-        ResilienceEnabled = true;
-        ResilienceConfigurator = configure;
-    }
 
     /// <summary>
     /// Enables the cluster-shared, DB-backed rate limiter (token leasing on the shared

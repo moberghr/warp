@@ -120,8 +120,10 @@ builder.Services.AddWarpServer<TestContext>(options =>
     //  at one mock partner and lets the adapter identity do the modelling.)
 
     // Payment providers — named HTTP-client adapters. Bodies captured on failure only (payments carry
-    // data — §1.2). Resilience retries transient errors; each vendor gets its OWN cluster-shared rate
-    // limit (keyed by adapter name), a differentiator per-process Polly cannot provide.
+    // data — §1.2). These follow the documented observe-first rollout: no retry handler, so a call is
+    // one attempt and the recorded row is the unaltered truth. Each vendor still gets its OWN
+    // cluster-shared rate limit (keyed by adapter name), a differentiator per-process retry cannot
+    // provide. Add retries per adapter via a.ConfigureHttpClientBuilder(...) once the data justifies it.
     foreach (var provider in ShopProviders.Payment)
     {
         options.AddAdapter(provider, a =>
@@ -131,7 +133,6 @@ builder.Services.AddWarpServer<TestContext>(options =>
             a.Recording.CaptureRequestBodies = CaptureMode.OnFailure;
             a.Recording.CaptureResponseBodies = CaptureMode.OnFailure;
             a.Recording.IncludeGroupInMetrics = true;
-            a.UseResilience();
             a.UseSharedRateLimit(limit: 50, perSeconds: 10, AdapterRateLimitOverflow.Wait, maxWait: TimeSpan.FromSeconds(5));
         });
     }
@@ -147,7 +148,6 @@ builder.Services.AddWarpServer<TestContext>(options =>
         a.BaseUrl = providersBaseUrl;
         a.Recording.GroupLabel = "Channel";
         a.Recording.IncludeGroupInMetrics = true;
-        a.UseResilience();
     }
 
     // === Durable outbound webhooks — order.paid / order.shipped delivered to subscribers, tracked to done ===

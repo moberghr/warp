@@ -8,7 +8,44 @@ sidebar_position: 6
 
 *Unreleased*
 
-Additive minor release — no breaking API changes, no schema change. Four correctness fixes on the server-task path, found by auditing whether the 3.0 server-context migration was actually complete, plus a recurring-job reporting fix. Two of them change behaviour a host may be reading today: one **adds a startup exception** for a configuration shape that was previously accepted and silently half-applied, and one **stops advancing the recurring-job `Last Execution` column** for definitions left disabled — both below.
+Minor release, no schema change. One **breaking API removal, confined to outbound adapters** — `UseResilience` is gone and `Warp.Adapters.Http` no longer depends on Polly. Alongside it, four correctness fixes on the server-task path, found by auditing whether the 3.0 server-context migration was actually complete, plus a recurring-job reporting fix. Three changes affect behaviour a host may be reading today: the adapter change **removes a public method**, one **adds a startup exception** for a configuration shape that was previously accepted and silently half-applied, and one **stops advancing the recurring-job `Last Execution` column** for definitions left disabled — all below.
+
+### Outbound adapters no longer depend on Polly
+
+`Warp.Adapters.Http` no longer references `Microsoft.Extensions.Http.Resilience`, and `WarpAdapterHttpOptions.UseResilience(...)` is **removed**. Resilience becomes a handler you supply, wired through the escape hatch that was always there. This affects `Warp.Adapters.Refit` too: `AddAdapter<TApi>(...)` configures the same `WarpAdapterHttpOptions`, so a Refit adapter that called `UseResilience` migrates identically.
+
+Adapters are an *observability* feature. Referencing a resilience stack from the binding package meant every consumer of `Moberg.Warp.Adapters.Http` restored `Microsoft.Extensions.Http.Resilience`, `Polly.Core`, `Polly.Extensions`, and `Polly.RateLimiting` — four packages pulled in to support an opt-in feature most adapters never enable, since [observe-first](./features/adapters.md#observe-first-rollout-recommended) is the documented rollout. `UseResilience` was a two-line passthrough to `AddStandardResilienceHandler()`, and it put `HttpStandardResilienceOptions` — a type from that dependency — into Warp's public API, so the coupling could not be dropped later without a break. A library should not choose your retry library for you; Warp now depends on `Microsoft.Extensions.Http` alone and stays out of that decision.
+
+Polly's July 2026 [Open Source Maintenance Fee](https://thepollyproject.org/2026/07/14/polly-osmf-announcement.html) prompted the review but is not the reason. Polly's licence is unchanged BSD-3-Clause, the fee is a sponsorship request rather than a licence term, and nothing about it obliged this change.
+
+To migrate, add the resilience package to your own project and move the call onto the adapter's `IHttpClientBuilder`:
+
+```csharp
+// 4.0
+opt.AddAdapter("acme-payments", a =>
+{
+    a.BaseUrl = new Uri("https://api.acme.example");
+    a.UseResilience(r => r.Retry.MaxRetryAttempts = 3);
+});
+
+// 4.1 — dotnet add package Microsoft.Extensions.Http.Resilience
+opt.AddAdapter("acme-payments", a =>
+{
+    a.BaseUrl = new Uri("https://api.acme.example");
+    a.ConfigureHttpClientBuilder(b => b.AddStandardResilienceHandler(r => r.Retry.MaxRetryAttempts = 3));
+});
+```
+
+**Behaviour is unchanged.** Handlers registered through `ConfigureHttpClientBuilder` occupy exactly the slot the resilience handler used to: inside the observing `WarpAdapterHandler` (a call that succeeds on retry #3 is still one recorded row, not three) and outside `WarpAdapterRateLimitHandler` (each physical attempt still spends its own shared-rate-limit token). Any `DelegatingHandler` works — a hand-rolled retry or a vendor SDK's policy handler wires up identically.
+
+Adapters that never called `UseResilience` need no change — including the built-in `warp-webhooks` adapter, which owns its own retry schedule and deliberately never had a resilience handler.
+
+| Removed | Replacement |
+|---|---|
+| `a.UseResilience()` | `a.ConfigureHttpClientBuilder(b => b.AddStandardResilienceHandler())` |
+| `a.UseResilience(o => ...)` | `a.ConfigureHttpClientBuilder(b => b.AddStandardResilienceHandler(o => ...))` |
+
+One visible side effect: the persisted `AdapterDefinition.ConfigSummary` string drops its `resilience=on|off` token, since registration can no longer observe whether a user handler is present, and the dashboard's adapter **Policy** card drops the matching badge. Existing rows are rewritten by the flusher on the next call; the dashboard ignores the stale token in the meantime. Cluster-shared rate limiting, capture tiers, and every other adapter behaviour are untouched.
 
 ### Core settings shared by `AddWarp` and `AddWarpServer`
 

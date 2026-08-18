@@ -1,6 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Http.Resilience;
 using Warp.Core;
 using Warp.Core.Adapters;
 
@@ -18,7 +17,7 @@ public static class HttpAdapterServiceConfiguration
     /// <summary>
     /// Registers an HTTP adapter named <paramref name="name"/>. The name is the adapter's cluster-wide
     /// identity (stats merge and shared limits coordinate by name). Configure the base address, capture
-    /// tiers, resilience, shared rate limit, and typed/custom clients via <paramref name="configure"/>.
+    /// tiers, shared rate limit, and typed/custom clients via <paramref name="configure"/>.
     /// </summary>
     public static IWarpBuilder AddAdapter(this IWarpBuilder builder, string name, Action<WarpAdapterHttpOptions> configure)
     {
@@ -63,8 +62,9 @@ public static class HttpAdapterServiceConfiguration
         });
 
         // Fixed ordering: the Warp handler is added first, so it is the outermost handler and observes one
-        // logical call. User handlers (added by their configurators) nest inside it; the resilience handler
-        // nests inside those; the shared rate-limit handler (added by the rate-limiter batch) is innermost.
+        // logical call. User handlers (added by their configurators) nest inside it — that is where a retry
+        // handler belongs; the shared rate-limit handler (added below) is innermost, so each physical
+        // attempt spends its own token.
         httpBuilder.AddHttpMessageHandler(sp => new WarpAdapterHandler(
             name,
             options,
@@ -76,19 +76,7 @@ public static class HttpAdapterServiceConfiguration
             configurator(httpBuilder);
         }
 
-        if (options.ResilienceEnabled)
-        {
-            if (options.ResilienceConfigurator is null)
-            {
-                httpBuilder.AddStandardResilienceHandler();
-            }
-            else
-            {
-                httpBuilder.AddStandardResilienceHandler(options.ResilienceConfigurator);
-            }
-        }
-
-        // Innermost handler (added last): one shared token per physical attempt. Sits inside the resilience
+        // Innermost handler (added last): one shared token per physical attempt. Sits inside any user retry
         // handler so each retry attempt spends its own token — the vendor counts attempts, not logical calls.
         if (options.SharedRateLimit is { } rateLimit)
         {
@@ -110,12 +98,13 @@ public static class HttpAdapterServiceConfiguration
             && x.ImplementationInstance is AdapterRegistrationEntry entry
             && string.Equals(entry.Name, name, StringComparison.Ordinal));
 
-    // Non-secret one-liner for the dashboard: capture tiers, resilience on/off, and the shared-limit
-    // shape. Deliberately carries no URLs, headers, or payloads (§1.2) — only registration-time policy.
+    // Non-secret one-liner for the dashboard: capture tiers and the shared-limit shape. Deliberately
+    // carries no URLs, headers, or payloads (§1.2) — only registration-time policy. Resilience is not
+    // reported: it is a user-supplied handler now (ConfigureHttpClientBuilder), so registration cannot
+    // see whether one is present.
     private static string BuildConfigSummary(WarpAdapterHttpOptions options)
     {
         var recording = options.Recording;
-        var resilience = options.ResilienceEnabled ? "on" : "off";
         var sharedLimit = options.SharedRateLimit is { } limit
             ? $"{limit.Limit}/{limit.PerSeconds}s ({limit.Overflow})"
             : "none";
@@ -125,6 +114,6 @@ public static class HttpAdapterServiceConfiguration
             ? $"; sample={recording.SampleRate.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)}"
             : string.Empty;
 
-        return $"record={recording.RecordCalls}; capture req-body={recording.CaptureRequestBodies}, resp-body={recording.CaptureResponseBodies}, headers={recording.CaptureHeaders}; resilience={resilience}; shared-limit={sharedLimit}{sample}";
+        return $"record={recording.RecordCalls}; capture req-body={recording.CaptureRequestBodies}, resp-body={recording.CaptureResponseBodies}, headers={recording.CaptureHeaders}; shared-limit={sharedLimit}{sample}";
     }
 }

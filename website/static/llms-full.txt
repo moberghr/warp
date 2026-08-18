@@ -1245,7 +1245,7 @@ Endpoint metadata is populated automatically: `.Accepts<TRequest>("application/j
 Observes calls your app **makes to** other services — the mirror of the inbound `Warp.Http` binding. An adapter is a named outbound dependency (vendor API, SOAP service, payment gateway). Three layers:
 
 1. **Protocol-agnostic core** (`Warp.Core.Adapters`) — `IWarpAdapters.BeginCall(adapter, operation, group?)` returns an `AdapterCallScope` (`Succeed`/`Fail`/`SetGroup`/`SetCorrelation`/`SetTag`) usable for any transport via manual scopes.
-2. **HTTP binding** (`Warp.Adapters.Http`) — a `DelegatingHandler` that auto-scopes `IHttpClientFactory` clients; Polly resilience via `Microsoft.Extensions.Http.Resilience`.
+2. **HTTP binding** (`Warp.Adapters.Http`) — a `DelegatingHandler` that auto-scopes `IHttpClientFactory` clients; no retry dependency — bring your own via `ConfigureHttpClientBuilder`.
 3. **Refit sugar** (`Warp.Adapters.Refit`) — operation names from `RestMethodInfo`.
 
 **Telemetry is unconditional** (null-listener, zero cost without a listener): every completed scope emits a `Client` Activity named `{adapter}.{operation}` plus `warp.adapter.calls` / `warp.adapter.duration` meters, regardless of `AddAdapters()`. **Only DB call-log recording is gated by `opt.AddAdapters()`** (a bounded lossy channel + flusher; a full channel drops the record and increments `warp.adapter.records_dropped` — never blocks or fails a user call). Entities (`AdapterDefinition`, `AdapterCallLog`) are always in the schema.
