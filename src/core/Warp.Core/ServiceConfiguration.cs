@@ -58,6 +58,21 @@ public static class ServiceConfiguration
         // AddWarpServer, which inherits WarpConfiguration), keep theirs.
         services.TryAddSingleton<IOptions<WarpConfiguration>>(Options.Create<WarpConfiguration>(builder));
 
+        // Reverse two-builder order (AddWarpServer first, then AddWarp with its own lambda): the TryAdd
+        // above just no-opped, so without this every config field set in THIS lambda would be silently
+        // discarded — the addons it registered went straight to `services` and survive, which makes the
+        // loss especially easy to miss. Fold them into the registered configuration instead, the mirror of
+        // what AddWarpServer does for the other order. A bare AddWarp() (the one AddServerHostCore makes)
+        // is all defaults and therefore contributes nothing.
+        var registered = services
+            .LastOrDefault(x => x.ServiceType == typeof(IOptions<WarpConfiguration>))
+            ?.ImplementationInstance as IOptions<WarpConfiguration>;
+
+        if (registered is not null)
+        {
+            WarpConfigurationMerge.ApplyCoreSettings(builder, registered.Value);
+        }
+
         var configured = CreateWarpServices<TContext>(services);
 
         // Non-server application heartbeat host — registered ONLY when this process opted into
