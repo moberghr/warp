@@ -27,15 +27,16 @@ public static class Extensions
 
         builder.Services.AddServiceDiscovery();
 
-        // NOTE: deliberately NOT calling http.AddStandardResilienceHandler() here. The Aspire template
-        // adds it by default, but a *global* Polly handler wraps EVERY HttpClient — including Warp's
-        // adapter clients and the warp-webhooks delivery client — and that conflicts with Warp's model:
+        // NOTE: deliberately NOT calling http.AddStandardResilienceHandler() here (and the resilience
+        // package is not referenced at all). The Aspire template adds it by default, but a *global* retry
+        // handler wraps EVERY HttpClient — including Warp's adapter clients and the warp-webhooks
+        // delivery client — and that conflicts with Warp's model:
         //   • Webhooks: the delivery layer owns retries (RetrySchedule + scheduled jobs). An external
-        //     Polly retry double-retries each scheduled attempt and each retry lands its own adapter
-        //     call-log row, so a 3-attempt schedule shows up as ~12 "attempts" in the dashboard.
-        //   • Adapters: the payment/shipping adapters already opt into resilience per-adapter via
-        //     a.UseResilience(); a global handler stacks a second, redundant resilience layer on top.
-        // Warp adapters configure resilience per-adapter; the webhook adapter intentionally has none.
+        //     retry double-retries each scheduled attempt and each retry lands its own adapter call-log
+        //     row, so a 3-attempt schedule shows up as ~12 "attempts" in the dashboard.
+        //   • Adapters: resilience is per-adapter and opt-in, wired through the adapter's own
+        //     ConfigureHttpClientBuilder so it nests correctly inside the observing handler. A global
+        //     handler stacks a second, redundant layer on top and breaks that ordering.
         builder.Services.ConfigureHttpClientDefaults(http => http.AddServiceDiscovery());
 
         return builder;

@@ -312,8 +312,10 @@ function StatTile({ label, value, emphasis }: { label: string; value: string; em
 }
 
 // The persisted config summary has the shape:
-//   record=All; capture req-body=OnFailure, resp-body=OnFailure, headers=None; resilience=on; shared-limit=50/10s (Wait)
+//   record=All; capture req-body=OnFailure, resp-body=OnFailure, headers=None; shared-limit=50/10s (Wait)
 // Parse it into structured pieces for a tidy badge layout, falling back to the raw string if the shape drifts.
+// Rows written before 4.1 also carry a `resilience=on|off` token — resilience is a user-supplied handler
+// now, so registration can no longer observe it. Unknown tokens are simply ignored.
 function parsePolicy(summary: string | null) {
   if (!summary) {
     return null;
@@ -324,14 +326,13 @@ function parsePolicy(summary: string | null) {
   const reqBody = pick(/req-body=([^,;]+)/);
   const respBody = pick(/resp-body=([^,;]+)/);
   const headers = pick(/headers=([^,;]+)/);
-  const resilience = pick(/resilience=([^;]+)/);
   const sharedLimit = pick(/shared-limit=([^;]+)/);
 
-  if (!record || !resilience) {
+  if (!record) {
     return null;
   }
 
-  return { record, reqBody, respBody, headers, resilience, sharedLimit };
+  return { record, reqBody, respBody, headers, sharedLimit };
 }
 
 function PolicyCard({
@@ -364,11 +365,6 @@ function PolicyCard({
               <CaptureBadge label="req body" value={policy.reqBody} />
               <CaptureBadge label="resp body" value={policy.respBody} />
               <CaptureBadge label="headers" value={policy.headers} />
-              <PolicyBadge
-                label="Resilience"
-                value={policy.resilience}
-                tone={policy.resilience === 'on' ? 'good' : 'off'}
-              />
               <PolicyBadge
                 label="Rate limit"
                 value={policy.sharedLimit ?? 'none'}

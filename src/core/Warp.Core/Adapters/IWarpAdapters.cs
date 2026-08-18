@@ -160,7 +160,7 @@ internal sealed class AdapterRegistry
 /// contributes at <c>AddAdapter</c> time. Registered as a DI singleton so the <c>AdapterRegistry</c>
 /// singleton folds every entry in on first resolve — the DI-correct seam that keeps the registry
 /// internal while binding packages compose against Core's public API only (§0.5). <see cref="ConfigSummary"/>
-/// is a non-secret display string (capture modes, resilience on/off, shared-limit) surfaced on the
+/// is a non-secret display string (capture modes, shared-limit) surfaced on the
 /// dashboard via <c>AdapterDefinition.ConfigSummary</c>.
 /// </summary>
 public sealed record AdapterRegistrationEntry(string Name, WarpAdapterOptions Options, string? ConfigSummary);

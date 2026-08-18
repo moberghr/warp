@@ -8,7 +8,7 @@ namespace Warp.Adapters.Refit;
 /// <summary>
 /// Registers Refit interfaces as observed Warp adapters. <c>AddAdapter&lt;TApi&gt;("vendor", a =&gt; ...)</c>
 /// wires a named, Refit-backed <see cref="HttpClient"/> onto the standard <c>Warp.Adapters.Http</c>
-/// pipeline (<c>WarpAdapterHandler</c> + optional resilience/shared rate limit) and names each outbound
+/// pipeline (<c>WarpAdapterHandler</c> + optional shared rate limit) and names each outbound
 /// call after the interface method — existing Refit interfaces, DTOs, auth handlers, and
 /// <see cref="RefitSettings"/> (e.g. XML-over-REST serializers) all pass through unchanged.
 /// </summary>
@@ -18,8 +18,8 @@ public static class RefitAdapterServiceConfiguration
     /// Registers the Refit interface <typeparamref name="TApi"/> as an adapter named
     /// <paramref name="name"/> (the adapter's cluster-wide identity). The typed client binds to the
     /// named Warp client, so calls flow through the observing handler and record one call row each,
-    /// with the operation set to the interface method name. Configure capture tiers, resilience, and the
-    /// shared rate limit via <paramref name="configure"/>; supply optional Refit behaviour (custom
+    /// with the operation set to the interface method name. Configure capture tiers and the shared
+    /// rate limit via <paramref name="configure"/>; supply optional Refit behaviour (custom
     /// serializer, auth header getter, exception factory) via <paramref name="refitSettings"/>.
     /// </summary>
     public static IWarpBuilder AddAdapter<TApi>(
@@ -41,7 +41,7 @@ public static class RefitAdapterServiceConfiguration
             .AddRefitClient<TApi>(refitSettings, name)
             .AddHttpMessageHandler(() => new RefitOperationNameReader());
 
-        // Wire the standard observing pipeline (WarpAdapterHandler + resilience + shared rate limit) and
+        // Wire the standard observing pipeline (WarpAdapterHandler + shared rate limit) and
         // ensure the Core recording services are present, all on the same named client.
         builder.AddAdapter(name, configure);
 

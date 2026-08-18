@@ -4,7 +4,7 @@ sidebar_position: 12
 
 # Outbound Adapters (Warp.Adapters)
 
-An **adapter** is a named outbound dependency — a vendor API, a SOAP service, a webhook receiver, a GraphQL endpoint. `Warp.Adapters` makes every call you *make to* one of them first-class in Warp: named, timed, telemetered, captured on failure, and visible in the dashboard — with **cluster-shared rate limiting** that per-process Polly cannot provide.
+An **adapter** is a named outbound dependency — a vendor API, a SOAP service, a webhook receiver, a GraphQL endpoint. `Warp.Adapters` makes every call you *make to* one of them first-class in Warp: named, timed, telemetered, captured on failure, and visible in the dashboard — with **cluster-shared rate limiting** that a per-process limiter cannot provide.
 
 The value proposition is the glue you stop hand-writing: logging handlers, ad-hoc metrics, per-project retry config, and — the part almost nobody builds — failure forensics. When a payment vendor starts returning 500s at 3am, the adapter call log already has the redacted request, the response, the exception, and the trace id.
 
@@ -22,7 +22,7 @@ If you are annotating a handler to serve a request, that is `Warp.Http`. If you 
 ## Three layers
 
 1. **Protocol-agnostic core** (`Warp.Core.Adapters`) — a call-scope API (`BeginCall` → `Succeed`/`Fail`) that works for anything: SOAP proxies, vendor SDKs, gRPC, a raw socket. Manual scopes, no HTTP assumed.
-2. **HTTP binding** (`Warp.Adapters.Http`) — a `DelegatingHandler` that creates scopes automatically for `IHttpClientFactory` clients. Polly (`Microsoft.Extensions.Http.Resilience`) handles retry/timeout; the raw `IHttpClientBuilder` is always reachable.
+2. **HTTP binding** (`Warp.Adapters.Http`) — a `DelegatingHandler` that creates scopes automatically for `IHttpClientFactory` clients. It brings **no retry dependency of its own**; the raw `IHttpClientBuilder` is always reachable, so you bring the resilience library you already use.
 3. **Refit sugar** (`Warp.Adapters.Refit`) — one-call registration for an existing Refit interface, with operation names read from Refit's `RestMethodInfo`. Refit is referenced only by this package.
 
 ## Setup
@@ -227,30 +227,39 @@ Recording is **lossy by design.** If the channel is full, the record is dropped,
 
 ## Observe-first rollout (recommended)
 
-The recommended way to adopt adapters is to **add no policy on day one**. Register the adapter with neither `UseResilience` nor `UseSharedRateLimit`:
+The recommended way to adopt adapters is to **add no policy on day one**. Register the adapter with no retry handler and no `UseSharedRateLimit`:
 
 ```csharp
 opt.AddAdapter("acme-payments", a => a.BaseUrl = "https://api.acme.example");
-// no UseResilience, no UseSharedRateLimit
+// no retry handler, no UseSharedRateLimit
 ```
 
 The pipeline then contains only the passive observing handler — **zero behavioral change** to your existing calls: same timeouts, single attempt, same exceptions. You get spans, meters, and call logs and nothing else moves. Read the data for a week. *Then* add policy per adapter, once the numbers justify the split — resilience where you see transient failures, a shared rate limit where you see the vendor pushing back. Policy is a deliberate, data-driven decision, not a default you inherited.
 
-## Resilience (Polly)
+## Resilience
+
+Warp deliberately ships **no retry library**. `Warp.Adapters.Http` depends on `Microsoft.Extensions.Http` and nothing else, so adopting adapters never drags a resilience stack (and its transitive dependencies) into your build. Add the one you want and wire it on the adapter's own `IHttpClientBuilder`:
 
 ```csharp
+// dotnet add package Microsoft.Extensions.Http.Resilience
 opt.AddAdapter("acme-payments", a =>
 {
     a.BaseUrl = "https://api.acme.example";
-    a.UseResilience(r => r.AddRetry(new()).AddTimeout(TimeSpan.FromSeconds(10)));
+    a.ConfigureHttpClientBuilder(b => b.AddStandardResilienceHandler());
 });
 ```
 
-`UseResilience` wires `Microsoft.Extensions.Http.Resilience` (standard Polly). Handler ordering is fixed (not configurable): the Warp observing handler is **outermost** — it times the whole logical call and records one row with the final outcome and total attempt count — so a call that succeeds on retry #3 is one green row, not three rows. Per-attempt latency lives in the resilience pipeline's own OTel telemetry.
+Any `DelegatingHandler` works the same way — a hand-rolled retry, a vendor SDK's own policy handler, whatever you already standardise on.
+
+Handler ordering is fixed (not configurable) and lands your handler in exactly the right place: the Warp observing handler is **outermost** — it times the whole logical call and records one row with the final outcome and total attempt count — so a call that succeeds on retry #3 is one green row, not three rows. The shared rate limiter is **innermost**, inside your retry handler, so each physical attempt spends its own token. Per-attempt latency lives in your resilience library's own OTel telemetry.
+
+:::note Changed in 4.1
+`a.UseResilience(...)` was removed along with the `Microsoft.Extensions.Http.Resilience` package reference. Replace it with `a.ConfigureHttpClientBuilder(b => b.AddStandardResilienceHandler())` and add that package to your own project — the handler lands in the same position in the chain, so behaviour is unchanged. See the [4.1 release notes](../releases.md).
+:::
 
 ## Cluster-shared rate limiting
 
-Per-process Polly rate limiting multiplies by the number of servers: N hosts each limited to 10/s means the vendor sees up to 10N/s. Warp's shared limiter is DB-backed and **cluster-wide**:
+Per-process rate limiting multiplies by the number of servers: N hosts each limited to 10/s means the vendor sees up to 10N/s. Warp's shared limiter is DB-backed and **cluster-wide**:
 
 ```csharp
 opt.AddAdapter("acme-payments", a =>

@@ -53,9 +53,9 @@ public class HttpAdapterRegistrationTests
     }
 
     [TimedFact]
-    public async Task AddAdapter_ObservabilityOnly_NoResilienceOrRateLimit_OneAttempt_OneRecord()
+    public async Task AddAdapter_ObservabilityOnly_NoRetryOrRateLimit_OneAttempt_OneRecord()
     {
-        // No UseResilience / UseSharedRateLimit: the handler chain is just WarpAdapterHandler over the
+        // No user handlers / UseSharedRateLimit: the handler chain is just WarpAdapterHandler over the
         // primary handler. A counting primary handler proves it — exactly one physical attempt (no retry)
         // and exactly one recorded logical call (the outermost WarpAdapterHandler ran).
         var recorder = new CapturingRecorder();
@@ -74,19 +74,16 @@ public class HttpAdapterRegistrationTests
     }
 
     [TimedFact]
-    public async Task AddAdapter_UseResilience_RetriesInsideAdapterHandler_TwoAttempts_OneRecord()
+    public async Task AddAdapter_UserRetryHandler_RetriesInsideAdapterHandler_TwoAttempts_OneRecord()
     {
-        // The resilience handler nests INSIDE WarpAdapterHandler, so a retried 500→200 is two physical
+        // Resilience is a user-supplied handler added through ConfigureHttpClientBuilder (Warp takes no
+        // retry dependency). It must nest INSIDE WarpAdapterHandler, so a retried 500→200 is two physical
         // attempts but one logical call: the counting handler sees 2, the recorder sees exactly 1.
         var recorder = new CapturingRecorder();
         var stub = new CountingStubHandler(HttpStatusCode.InternalServerError, HttpStatusCode.OK);
         var provider = BuildProvider(recorder, "resilient", a =>
         {
-            a.UseResilience(o =>
-            {
-                o.Retry.MaxRetryAttempts = 1;
-                o.Retry.Delay = TimeSpan.Zero;
-            });
+            a.ConfigureHttpClientBuilder(b => b.AddHttpMessageHandler(() => new RetryOnceHandler()));
             a.ConfigureHttpClientBuilder(b => b.ConfigurePrimaryHttpMessageHandler(() => stub));
         });
 
@@ -101,7 +98,7 @@ public class HttpAdapterRegistrationTests
             var record = recorder.Records.ShouldHaveSingleItem();
             record.Outcome.ShouldBe(AdapterCallOutcome.Success);
 
-            // Two physical attempts, ONE logical call: the WarpAdapterHandler sits outside the resilience
+            // Two physical attempts, ONE logical call: the WarpAdapterHandler sits outside the retry
             // handler and records Attempts == 1 (the documented logical-call fallback), not the retry count.
             record.Attempts.ShouldBe(1);
         }
@@ -138,12 +135,12 @@ public class HttpAdapterRegistrationTests
     }
 
     [TimedFact]
-    public async Task AddAdapter_ResilienceAndSharedRateLimit_LeasesOneTokenPerPhysicalAttempt()
+    public async Task AddAdapter_UserRetryHandlerAndSharedRateLimit_LeasesOneTokenPerPhysicalAttempt()
     {
-        // The documented chain is Warp handler → resilience → rate limit → transport, so a retried call
+        // The documented chain is Warp handler → your handlers → rate limit → transport, so a retried call
         // must lease one token PER PHYSICAL ATTEMPT ("the vendor counts attempts, not logical calls"). A
-        // registration reorder that hoisted the rate-limit handler outside resilience would lease one
-        // token per logical call and silently over-admit against the shared budget on every retry.
+        // registration reorder that hoisted the rate-limit handler outside the user handlers would lease
+        // one token per logical call and silently over-admit against the shared budget on every retry.
         var recorder = new CapturingRecorder();
         var limiter = new CountingRateLimiter();
         var stub = new CountingStubHandler(HttpStatusCode.InternalServerError, HttpStatusCode.OK);
@@ -152,11 +149,7 @@ public class HttpAdapterRegistrationTests
             "resilient-limited",
             a =>
             {
-                a.UseResilience(o =>
-                {
-                    o.Retry.MaxRetryAttempts = 1;
-                    o.Retry.Delay = TimeSpan.Zero;
-                });
+                a.ConfigureHttpClientBuilder(b => b.AddHttpMessageHandler(() => new RetryOnceHandler()));
                 a.UseSharedRateLimit(10, 60, AdapterRateLimitOverflow.FailFast);
                 a.ConfigureHttpClientBuilder(b => b.ConfigurePrimaryHttpMessageHandler(() => stub));
             },
@@ -295,6 +288,29 @@ public class HttpAdapterRegistrationTests
         new WarpBuilder<TestContext>(services).AddAdapter(name, configure);
 
         return services.BuildServiceProvider();
+    }
+}
+
+/// <summary>
+/// Stand-in for whatever resilience package a consumer wires through
+/// <c>ConfigureHttpClientBuilder</c>: retries a 5xx exactly once. Warp references no retry library, and
+/// these tests assert Warp's own handler ORDERING contract (retry nests inside the observing handler and
+/// outside the shared rate limiter), not a third-party retry implementation.
+/// </summary>
+internal sealed class RetryOnceHandler : DelegatingHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var response = await base.SendAsync(request, cancellationToken);
+
+        if ((int)response.StatusCode < 500)
+        {
+            return response;
+        }
+
+        response.Dispose();
+
+        return await base.SendAsync(request, cancellationToken);
     }
 }
 
