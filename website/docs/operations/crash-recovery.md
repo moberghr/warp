@@ -19,6 +19,7 @@ Warp uses a **sliding invisibility timeout** to detect and recover from worker/s
 - **No lost retries**: Crash requeues do NOT count against `MaxRetries`. The job didn't fail — the server died.
 - **Long-running jobs are safe**: The keep-alive refreshes continuously, so a job running for hours won't be falsely requeued.
 - **Concurrent safety**: Row locking prevents multiple health managers from double-requeuing the same job.
+- **Recovered jobs are picked up immediately**: a requeue announces itself like any other enqueue, so a worker is woken as soon as the recovery transaction commits rather than waiting out its polling backoff (up to `MaxPollingInterval`, which `UseDatabasePush()` raises to 5 minutes).
 
 ## Configuration
 

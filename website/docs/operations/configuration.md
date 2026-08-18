@@ -111,6 +111,38 @@ No options. Register it to make `[NoRestart]` / `[Restart]` attributes take effe
 
 The fleet-wide default is controlled by `WarpServerConfiguration.RestartStaleJobsByDefault` (default `true`). Flip to `false` to fail stale jobs on crash unless they explicitly opt in.
 
+## Calling both `AddWarp` and `AddWarpServer`
+
+`WarpServerConfiguration` extends `WarpConfiguration`, so a server lambda can set any Core setting and most hosts only ever call `AddWarpServer`. If you call **both** — shared setup registers `AddWarp`, and the server host adds `AddWarpServer` — each Core setting belongs to exactly one of the two lambdas:
+
+```csharp
+// Shared setup, used by every process
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.ApplicationName = "orders";
+    opt.AdapterCallLogRetention = TimeSpan.FromDays(3);
+});
+
+// Server host only — server settings here, Core settings stay above
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.WorkerCount = 10;
+});
+```
+
+Warp folds the two together at registration, in either call order, so the server tasks and the Core services always read the same values. Setting the **same** Core setting in both lambdas to **different** values throws at startup, naming the property and both values:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt => opt.Schema = "warp");
+builder.Services.AddWarpServer<AppDbContext>(opt => opt.Schema = "jobs");
+// InvalidOperationException: Warp configuration conflict: 'Schema' is set to 'warp' in the
+// AddWarp lambda and to 'jobs' in the AddWarpServer lambda. It is a Core-level setting shared
+// by both, so set it in exactly one of them.
+```
+
+Nothing distinguishes which lambda you meant to win, so Warp refuses to pick rather than let half your configuration be silently ignored. Setting the same value in both is fine. Server-only settings (`WorkerCount`, the polling and task intervals, `InvisibilityTimeout`, …) exist only on `WarpServerConfiguration` and are never involved.
+
 ## Server Configuration (`WarpServerConfiguration`)
 
 Extends `WarpConfiguration`. Used by a Warp server (`AddWarpServer<TContext>`):
