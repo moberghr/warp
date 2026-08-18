@@ -60,9 +60,17 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
 
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
-        var count = await ScheduleRecurringJobsAsync(ct);
+        var result = await ScheduleRecurringJobsAsync(ct);
 
-        return count > 0 ? $"Scheduled {count} recurring jobs" : null;
+        // Both numbers, always, once anything happened: a skip is not a scheduled job, and reporting
+        // it as one made a purely disabled definition read as "Scheduled 1 recurring jobs" in the
+        // server-task history — the same false signal the dashboard's Last Execution column had.
+        if (result.Scheduled == 0 && result.Skipped == 0)
+        {
+            return null;
+        }
+
+        return $"Scheduled {result.Scheduled} recurring jobs, skipped {result.Skipped} disabled";
     }
 
     // Post-commit (§8.25): the firings buffered by ScheduleRecurringJobsAsync are durable by the time the
@@ -82,10 +90,11 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
         await NotificationDispatch.DispatchAsync(notifications, _signals, _notificationTransport, CancellationToken.None);
     }
 
-    internal async Task<int> ScheduleRecurringJobsAsync(CancellationToken ct)
+    internal async Task<(int Scheduled, int Skipped)> ScheduleRecurringJobsAsync(CancellationToken ct)
     {
         var now = _time.GetUtcNow().UtcDateTime;
-        var count = 0;
+        var scheduled = 0;
+        var skipped = 0;
 
         var recurringJobs = await _context.Set<RecurringJob>()
             .Where(x => x.NextExecution != null && x.NextExecution <= now)
@@ -116,9 +125,17 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
                     CreatedAt = now,
                 });
 
-                recurringJob.LastExecution = recurringJob.NextExecution;
+                // LastExecution is deliberately NOT advanced here: it names the last occurrence that
+                // actually ran, and a skip ran nothing. Advancing it made a disabled definition read as
+                // if it were still firing on the dashboard (the reported bug) while AttachLastRun
+                // (which filters !Skipped) correctly showed no last run beside it.
+                //
+                // NextExecution IS advanced, so the skip cadence stays cron-paced. Freezing it would
+                // leave the row permanently due and write one skip log per scheduler tick instead of
+                // one per occurrence. The dashboard hides it while disabled rather than relying on
+                // this column standing still.
                 recurringJob.NextExecution = nextExecution;
-                count++;
+                skipped++;
 
                 continue;
             }
@@ -158,10 +175,12 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
             recurringJob.LastExecution = recurringJob.NextExecution;
             recurringJob.NextExecution = nextExecution;
 
-            count++;
+            scheduled++;
         }
 
-        if (count > 0)
+        // A skip still mutates rows (the Skipped log plus the advanced NextExecution), so it has to
+        // open the save even though it scheduled nothing.
+        if (scheduled + skipped > 0)
         {
             // Capture before the save — CapturePending reads Added Job entries off the change tracker, and
             // SaveChanges flips them to Unchanged. Same helper the other enqueue sites use, so queue
@@ -171,6 +190,6 @@ public sealed class RecurringJobScheduler<TContext> : IServerTask
             await _context.SaveChangesAsync(ct);
         }
 
-        return count;
+        return (scheduled, skipped);
     }
 }

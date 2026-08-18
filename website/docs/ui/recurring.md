@@ -21,7 +21,7 @@ The list page condenses this into a **Last Result** column showing the state of 
 
 ## Dashboard Actions
 
-- **Enable / Disable** — toggle whether the scheduler creates real jobs or skips. Disabled jobs still fire on schedule but record "Skipped" entries in the history instead. The recurring job list shows an **Enabled** or **Disabled** badge per row.
+- **Enable / Disable** — toggle whether the scheduler creates real jobs or skips. Disabled jobs still fire on schedule but record "Skipped" entries in the history instead. The recurring job list shows an **Enabled** or **Disabled** badge per row. A disabled definition shows `—` for **Next Execution** (it will not execute while disabled) and its **Last Execution** stays pinned to the last occurrence that actually ran — `Never` if it never ran.
 - **Trigger** — immediately creates and enqueues a new job instance, regardless of the cron schedule or disabled state
 - **Delete** — removes the recurring job definition (existing job instances are not affected)
 

@@ -64,10 +64,12 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
 
         // Act
         var schedCtx = _fixture.CreateContext();
-        var count = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+        var result = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
 
-        // Assert — should skip because the pending job still exists
-        count.ShouldBe(0);
+        // Assert — should skip because the pending job still exists. The dedup `continue` runs before
+        // the disabled branch, so this is not a "skipped disabled definition" and neither counter moves.
+        result.Scheduled.ShouldBe(0);
+        result.Skipped.ShouldBe(0);
 
         var jobCountAfter = await _fixture.CreateContext().Set<Job>().CountAsync(Xunit.TestContext.Current.CancellationToken);
         jobCountAfter.ShouldBe(jobCountBefore);
@@ -118,10 +120,10 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
 
         // Act
         var schedCtx = _fixture.CreateContext();
-        var count = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+        var result = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
 
         // Assert
-        count.ShouldBe(3);
+        result.Scheduled.ShouldBe(3);
     }
 
     [TimedFact]
@@ -250,10 +252,11 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
 
         // Act
         var schedCtx = _fixture.CreateContext();
-        var count = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+        var result = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
 
-        // Assert
-        count.ShouldBe(1);
+        // Assert — a skip is counted as a skip, never as a scheduled job
+        result.Scheduled.ShouldBe(0);
+        result.Skipped.ShouldBe(1);
 
         var readCtx = _fixture.CreateContext();
         var log = await readCtx.Set<RecurringJobLog>()
@@ -319,6 +322,10 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
         // Assert — compare against the pre-scheduler timestamp, not a fresh DateTime.UtcNow:
         // cron `* * * * *` produces minute-boundary times, so a scheduler invocation at
         // 15:55:59.99x computes NextExecution = 15:56:00.000, which is < UtcNow at assertion.
+        //
+        // Advancing it is deliberate even though the definition is inert: it keeps the skip cadence
+        // cron-paced. A frozen NextExecution would leave the row permanently due and write one skip
+        // log per scheduler tick. The dashboard hides the column while disabled instead.
         var readCtx = _fixture.CreateContext();
         var rj = await readCtx.Set<RecurringJob>().FirstAsync(r => r.Name == "disabled-next-exec-test", Xunit.TestContext.Current.CancellationToken);
         rj.NextExecution.ShouldNotBeNull();
@@ -326,32 +333,121 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task ScheduleRecurringJobs_DisabledJob_AdvancesLastExecution()
+    public async Task ExecuteAsync_OneDueAndOneDisabled_ReportsScheduledAndSkippedSeparately()
     {
-        // Arrange
+        // Arrange — one firing definition and one disabled one, both due
         var ctx = _fixture.CreateContext();
-        var pastTime = DateTime.UtcNow.AddMinutes(-5);
+        var dueAt = DateTime.UtcNow.AddMinutes(-5);
         ctx.Set<RecurringJob>().Add(new RecurringJob
+        {
+            Name = "message-enabled-test",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new UnitRequest()),
+            Cron = "* * * * *",
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            NextExecution = dueAt,
+        });
+        ctx.Set<RecurringJob>().Add(new RecurringJob
+        {
+            Name = "message-disabled-test",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new UnitRequest()),
+            Cron = "* * * * *",
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            NextExecution = dueAt,
+            DisabledAt = DateTime.UtcNow.AddMinutes(-8),
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var schedCtx = _fixture.CreateContext();
+        var message = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ExecuteAsync(CancellationToken.None);
+
+        // Assert — the server-task history must not report the skipped definition as scheduled
+        message.ShouldBe("Scheduled 1 recurring jobs, skipped 1 disabled");
+    }
+
+    [TimedFact]
+    public async Task ExecuteAsync_NothingDue_ReportsNothing()
+    {
+        // Arrange — a definition that is not due yet
+        var ctx = _fixture.CreateContext();
+        ctx.Set<RecurringJob>().Add(new RecurringJob
+        {
+            Name = "message-idle-test",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new UnitRequest()),
+            Cron = "* * * * *",
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            NextExecution = DateTime.UtcNow.AddHours(1),
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var schedCtx = _fixture.CreateContext();
+        var message = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ExecuteAsync(CancellationToken.None);
+
+        // Assert — an idle tick stays silent rather than logging "Scheduled 0"
+        message.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task ScheduleRecurringJobs_DisabledJob_DoesNotAdvanceLastExecution()
+    {
+        // Arrange — a definition that ran once, then was disabled
+        var ctx = _fixture.CreateContext();
+        var lastRealExecution = DateTime.UtcNow.AddMinutes(-30);
+        var recurringJob = new RecurringJob
         {
             Name = "disabled-last-exec-test",
             Type = typeof(UnitRequest).AssemblyQualifiedName,
             Message = JsonSerializer.Serialize(new UnitRequest()),
             Cron = "* * * * *",
-            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
-            NextExecution = pastTime,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-60),
+            LastExecution = lastRealExecution,
+            NextExecution = DateTime.UtcNow.AddMinutes(-5),
             DisabledAt = DateTime.UtcNow.AddMinutes(-20),
-        });
+        };
+        ctx.Set<RecurringJob>().Add(recurringJob);
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Act
         var schedCtx = _fixture.CreateContext();
         await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
 
-        // Assert
+        // Assert — a skip executed nothing, so LastExecution still names the last real run
         var readCtx = _fixture.CreateContext();
-        var rj = await readCtx.Set<RecurringJob>().FirstAsync(r => r.Name == "disabled-last-exec-test", Xunit.TestContext.Current.CancellationToken);
+        var rj = await readCtx.Set<RecurringJob>().FirstAsync(r => r.Id == recurringJob.Id, Xunit.TestContext.Current.CancellationToken);
         rj.LastExecution.ShouldNotBeNull();
-        rj.LastExecution.Value.ShouldBe(pastTime, TimeSpan.FromSeconds(1));
+        rj.LastExecution.Value.ShouldBe(lastRealExecution, TimeSpan.FromSeconds(1));
+    }
+
+    [TimedFact]
+    public async Task ScheduleRecurringJobs_DisabledJobNeverRan_LeavesLastExecutionNull()
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var recurringJob = new RecurringJob
+        {
+            Name = "disabled-never-ran-test",
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new UnitRequest()),
+            Cron = "* * * * *",
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            NextExecution = DateTime.UtcNow.AddMinutes(-5),
+            DisabledAt = DateTime.UtcNow.AddMinutes(-8),
+        };
+        ctx.Set<RecurringJob>().Add(recurringJob);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var schedCtx = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+
+        // Assert — the dashboard must keep reading "Never", not the skipped occurrence
+        var readCtx = _fixture.CreateContext();
+        var rj = await readCtx.Set<RecurringJob>().FirstAsync(r => r.Id == recurringJob.Id, Xunit.TestContext.Current.CancellationToken);
+        rj.LastExecution.ShouldBeNull();
     }
 
     [TimedFact]
@@ -398,10 +494,10 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
 
         // Act
         var schedCtx = _fixture.CreateContext();
-        var count = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+        var result = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
 
         // Assert — should create a real job
-        count.ShouldBe(1);
+        result.Scheduled.ShouldBe(1);
 
         var jobCountAfter = await _fixture.CreateContext().Set<Job>().CountAsync(Xunit.TestContext.Current.CancellationToken);
         jobCountAfter.ShouldBe(jobCountBefore + 1);
@@ -436,10 +532,10 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
         // Act
         var tp = new FakeTimeProvider(now);
         var schedCtx = _fixture.CreateContext();
-        var count = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, tp).ScheduleRecurringJobsAsync(CancellationToken.None);
+        var result = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, tp).ScheduleRecurringJobsAsync(CancellationToken.None);
 
         // Assert — should schedule (NextExecution <= now)
-        count.ShouldBe(1);
+        result.Scheduled.ShouldBe(1);
     }
 
     [TimedFact]
@@ -463,10 +559,10 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
 
         // Act
         var schedCtx = _fixture.CreateContext();
-        var count = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+        var result = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
 
         // Assert
-        count.ShouldBe(0);
+        result.Scheduled.ShouldBe(0);
     }
 
     [TimedFact]
@@ -533,10 +629,10 @@ public abstract class RecurringJobEdgeCaseTestsBase : IAsyncLifetime
 
         // Act
         var schedCtx = _fixture.CreateContext();
-        var count = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
+        var result = await Warp.Tests.Helpers.TestTasks.CreateRecurringJobScheduler(schedCtx, TimeProvider.System).ScheduleRecurringJobsAsync(CancellationToken.None);
 
         // Assert — should skip because latest log's job is Enqueued
-        count.ShouldBe(0);
+        result.Scheduled.ShouldBe(0);
     }
 }
 

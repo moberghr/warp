@@ -82,7 +82,14 @@ export default function RecurringPage() {
         accessorKey: 'nextExecution',
         header: 'Next Execution',
         cell: ({ row }) =>
-          row.original.nextExecution ? (
+          row.original.disabledAt ? (
+            <span
+              className="text-sm text-muted-foreground"
+              title="Disabled — this recurring job will not execute"
+            >
+              —
+            </span>
+          ) : row.original.nextExecution ? (
             <span className="text-sm">
               <RelativeTime date={row.original.nextExecution} />
             </span>
