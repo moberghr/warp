@@ -164,6 +164,8 @@ protected override void ConfigureConventions(ModelConfigurationBuilder configura
 
 The pass is scoped to Warp's own entity CLR types by assembly, so it never reaches an entity of yours — including one that happens to live in a `Warp.*` namespace. It also overrides a converter set by hand on a Warp entity property (`modelBuilder.Entity<Job>().Property(x => x.CreateTime).HasConversion<long>()` has no effect from 5.0.0 onward): how Warp stores its own columns is a contract, not a preference.
 
+The pass covers Warp's own entity types. An entity contributed by a third-party addon through `WarpConfiguration.EntityConfigurators` lives in another assembly, so it is outside the filter and a conversion convention still reaches it — with the same consequence, since the server context mirrors those entities too. No in-tree package uses that extension point; an addon that does should pin its own storage the same way.
+
 Conventions that change a **facet** rather than a type — `Properties<string>().HaveMaxLength(n)`, `HaveColumnType(...)`, `HavePrecision(...)` — are **not** neutralised, because Warp cannot distinguish them from its own explicit facets. A model-wide string length cap is the dangerous one: it will truncate job payloads. Scope facet conventions to your own types.
 
 ## Testing handlers that publish

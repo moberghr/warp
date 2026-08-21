@@ -4,6 +4,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core;
+using Warp.Core.CircuitBreaker;
+using Warp.Core.Data.Converters;
+using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 
@@ -14,19 +17,23 @@ namespace Warp.Tests.Core;
 // ConfigureConventions — so a convention that retypes a Warp column diverges the two contexts and
 // nothing executes. ApplyWarpModel pins enums, DateTime and Guid on its own entities for that
 // reason; these are the rot guards, including the non-bleed guarantee for the consumer's own types.
+// Model-build only, so both providers are asserted without a container (§4.2).
 [Trait("Category", "NoDb")]
 public class StorageTypeConventionTests
 {
-    private const string DummyConnection = "Host=dummy;Database=warp";
+    private const string PostgresConnection = "Host=dummy;Database=warp";
+    private const string SqlServerConnection = "Server=dummy;Database=warp";
 
-    [TimedFact]
-    public void WarpEnumProperties_AreStoredAsInteger_WhenNoConventionApplied()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarpEnumProperties_AreStoredAsInteger_WhenNoConventionApplied(bool sqlServer)
     {
-        var options = new DbContextOptionsBuilder<TestContext>()
-            .UseNpgsql(DummyConnection)
-            .Options;
-
-        using var context = new TestContext(options);
+        // TestContext takes an optional schema argument, so it is built directly rather than through
+        // the shared Activator helper.
+        var builder = new DbContextOptionsBuilder<TestContext>();
+        Provider(builder, sqlServer).UseSnakeCaseNamingConvention();
+        using var context = new TestContext(builder.Options);
 
         WarpProperties(context.Model)
             .Where(x => IsEnum(x.Property))
@@ -35,10 +42,12 @@ public class StorageTypeConventionTests
             .ShouldBeEmpty();
     }
 
-    [TimedFact]
-    public void WarpEnumProperties_AreStoredAsInteger_WhenConsumerRetypesWarpColumns()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarpEnumProperties_AreStoredAsInteger_WhenConsumerRetypesWarpColumns(bool sqlServer)
     {
-        using var context = UserContext<HostileConventionContext>();
+        using var context = Context<HostileConventionContext>(sqlServer);
 
         WarpProperties(context.Model)
             .Where(x => IsEnum(x.Property))
@@ -47,10 +56,29 @@ public class StorageTypeConventionTests
             .ShouldBeEmpty();
     }
 
-    [TimedFact]
-    public void WarpDateTimeProperties_KeepUtcConversion_WhenConsumerRetypesWarpColumns()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarpEnumProperty_IsStoredAsInteger_WhenTheEntityDeclaresNoExplicitPin(bool sqlServer)
     {
-        using var context = UserContext<HostileConventionContext>();
+        using var context = Context<UnpinnedWarpEntityContext>(sqlServer);
+
+        // Every Warp entity currently pins its enums explicitly at the declaration, so the tests above
+        // pass on those pins alone and cannot see the sweep. This context registers a Warp entity type
+        // WITHOUT Warp's own configuration — the case the sweep exists to backstop, i.e. a new entity
+        // whose author forgot the explicit pin — so it fails if the enum arm of the sweep is removed.
+        var state = context.Model.FindEntityType(typeof(CircuitBreakerState))!
+            .FindProperty(nameof(CircuitBreakerState.State))!;
+
+        state.GetProviderClrType().ShouldBe(typeof(int));
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarpDateTimeProperties_KeepUtcConversion_WhenConsumerRetypesWarpColumns(bool sqlServer)
+    {
+        using var context = Context<HostileConventionContext>(sqlServer);
 
         // The UTC converter round-trips DateTime to DateTime (§5.7): a provider type of anything else
         // means the consumer's conversion reached Warp's column and took the Kind stamp with it.
@@ -61,10 +89,12 @@ public class StorageTypeConventionTests
             .ShouldBeEmpty();
     }
 
-    [TimedFact]
-    public void WarpGuidProperties_KeepNativeType_WhenConsumerRetypesWarpColumns()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarpGuidProperties_KeepNativeType_WhenConsumerRetypesWarpColumns(bool sqlServer)
     {
-        using var context = UserContext<HostileConventionContext>();
+        using var context = Context<HostileConventionContext>(sqlServer);
 
         WarpProperties(context.Model)
             .Where(x => Unwrap(x.Property) == typeof(Guid))
@@ -73,10 +103,12 @@ public class StorageTypeConventionTests
             .ShouldBeEmpty();
     }
 
-    [TimedFact]
-    public void ConsumerProperties_KeepTheirConventionTypes_WhenWarpPinsItsOwn()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConsumerProperties_KeepTheirConventionTypes_WhenWarpPinsItsOwn(bool sqlServer)
     {
-        using var context = UserContext<HostileConventionContext>();
+        using var context = Context<HostileConventionContext>(sqlServer);
         var consumer = context.Model.FindEntityType(typeof(ConsumerRow))!;
 
         // Warp pinning its own storage must not reach across into the consumer's entities.
@@ -85,21 +117,22 @@ public class StorageTypeConventionTests
         consumer.FindProperty(nameof(ConsumerRow.Reference))!.GetProviderClrType().ShouldBe(typeof(string));
     }
 
-    [TimedFact]
-    public void ServerContext_MatchesUserContextColumnTypes_WhenConsumerRetypesWarpColumns()
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ServerContext_MatchesUserContextColumnTypes_WhenConsumerRetypesWarpColumns(bool sqlServer)
     {
         var services = new ServiceCollection();
-        services.AddDbContext<HostileConventionContext>(x => x
-            .UseNpgsql(DummyConnection)
-            .UseSnakeCaseNamingConvention());
-        services.AddDbContext<WarpServerContext<HostileConventionContext>>(x => x.UseNpgsql(DummyConnection));
+        services.AddDbContext<HostileConventionContext>(x => Provider(x, sqlServer).UseSnakeCaseNamingConvention());
+        services.AddDbContext<WarpServerContext<HostileConventionContext>>(x => Provider(x, sqlServer));
         services.AddSingleton<IOptions<WarpConfiguration>>(Options.Create(new WarpConfiguration()));
         services.AddSingleton<IWarpServerModelNames>(sp =>
             new WarpServerModelNames<HostileConventionContext>(sp.GetRequiredService<IServiceScopeFactory>()));
 
-        using var provider = services.BuildServiceProvider();
-        var userModel = provider.GetRequiredService<HostileConventionContext>().Model;
-        var serverModel = provider.GetRequiredService<WarpServerContext<HostileConventionContext>>().Model;
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = provider.CreateScope();
+        var userModel = scope.ServiceProvider.GetRequiredService<HostileConventionContext>().Model;
+        var serverModel = scope.ServiceProvider.GetRequiredService<WarpServerContext<HostileConventionContext>>().Model;
 
         // Both contexts read and write the same physical columns, so any disagreement here is the
         // "operator does not exist" failure the server tasks hit every tick.
@@ -109,7 +142,9 @@ public class StorageTypeConventionTests
                 {
                     x.Entity,
                     x.Property,
-                    UserType = userModel.FindEntityType(x.Entity.ClrType)!.FindProperty(x.Property.Name)!.GetColumnType(),
+                    UserType = userModel.FindEntityType(x.Entity.ClrType)
+                        ?.FindProperty(x.Property.Name)
+                        ?.GetColumnType() ?? "absent from the user model",
                 })
             .Where(x => !string.Equals(x.Property.GetColumnType(), x.UserType, StringComparison.Ordinal))
             .Select(x => $"{x.Entity.ClrType.Name}.{x.Property.Name}: server={x.Property.GetColumnType()} user={x.UserType}");
@@ -117,15 +152,20 @@ public class StorageTypeConventionTests
         divergent.ShouldBeEmpty();
     }
 
-    private static TContext UserContext<TContext>()
+    private static DbContextOptionsBuilder Provider(DbContextOptionsBuilder builder, bool sqlServer)
+    {
+        return sqlServer
+            ? builder.UseSqlServer(SqlServerConnection)
+            : builder.UseNpgsql(PostgresConnection);
+    }
+
+    private static TContext Context<TContext>(bool sqlServer)
         where TContext : DbContext
     {
-        var options = new DbContextOptionsBuilder<TContext>()
-            .UseNpgsql(DummyConnection)
-            .UseSnakeCaseNamingConvention()
-            .Options;
+        var builder = new DbContextOptionsBuilder<TContext>();
+        Provider(builder, sqlServer).UseSnakeCaseNamingConvention();
 
-        return (TContext)Activator.CreateInstance(typeof(TContext), options)!;
+        return (TContext)Activator.CreateInstance(typeof(TContext), builder.Options)!;
     }
 
     private static IEnumerable<WarpProperty> WarpProperties(IReadOnlyModel model)
@@ -185,6 +225,28 @@ internal class HostileConventionContext : DbContext
         base.OnModelCreating(modelBuilder);
         modelBuilder.Entity<ConsumerRow>();
         modelBuilder.ApplyWarpModel("warp");
+    }
+}
+
+// A Warp entity type registered WITHOUT Warp's own configuration, so nothing pins its enum but the
+// sweep — standing in for a future Warp entity whose author forgets the explicit pin.
+internal class UnpinnedWarpEntityContext : DbContext
+{
+    public UnpinnedWarpEntityContext(DbContextOptions<UnpinnedWarpEntityContext> options)
+        : base(options)
+    {
+    }
+
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+    {
+        configurationBuilder.Properties<Enum>().HaveConversion<string>();
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.Entity<CircuitBreakerState>().HasKey(x => x.GroupKey);
+        modelBuilder.PinWarpStorageTypes();
     }
 }
 

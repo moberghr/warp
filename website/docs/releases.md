@@ -38,6 +38,8 @@ The same hole existed for two more families, with the same two consequences: `Pr
 
 **Why this is a major version rather than a patch:** in 4.x, a converter already present on a Warp entity property was deliberately preserved, and that is documented behaviour. It is now overridden. If you set one by hand — `modelBuilder.Entity<Job>().Property(x => x.CreateTime).HasConversion<long>()` — it stops taking effect. That is the intended outcome: how Warp stores its own columns is a contract its claim SQL depends on, not a preference. Remove such a converter; keeping it is now a no-op rather than an error.
 
+**Scope:** the pass covers Warp's own entity types. An entity a third-party addon contributes through `WarpConfiguration.EntityConfigurators` is outside it and can still be retyped by a convention; no in-tree package uses that seam.
+
 **What is still not neutralised:** conventions that change a *facet* rather than a type — `Properties<string>().HaveMaxLength(n)`, `HaveColumnType(...)`, `HavePrecision(...)` — continue to reach Warp's columns, and Warp cannot tell them apart from its own explicit facets. A model-wide string length cap in particular will truncate job payloads. Scope facet conventions to your own types.
 
 ### What you need to do
