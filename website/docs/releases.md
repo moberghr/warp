@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 5.0.0
 
-*Unreleased*
+*2026-08-22*
 
 Major release. **One change, one cause, and the reason it is breaking:** Warp now pins the storage types of its own columns, so a model-wide EF Core conversion convention in the consuming `DbContext` can no longer retype them.
 
