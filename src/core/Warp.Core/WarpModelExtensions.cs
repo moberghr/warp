@@ -55,7 +55,8 @@ public static class WarpModelExtensions
         ServiceConfiguration.AddSagaJobLinkEntity(modelBuilder, schema);
 
         // Scoped to Warp.Core's own entity CLR types, so safe to run before external configurators.
-        modelBuilder.ApplyWarpUtcDateTimeConverters();
+        // Runs last so it outranks anything a consumer's ConfigureConventions retyped (§5.12).
+        modelBuilder.PinWarpStorageTypes();
 
         return modelBuilder;
     }

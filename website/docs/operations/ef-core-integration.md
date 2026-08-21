@@ -142,20 +142,29 @@ If you compose your own `IModelCustomizer` chain, the Warp customizer must run *
 
 ### Naming conventions are honoured; type-changing conventions are not
 
-The distinction matters because Warp's server-internal work runs on its own context (see [Server-internal logging](#server-internal-logging--the-warp-server-context) below). That context mirrors the **resolved table, schema, and column names** from your model — which is why `UseSnakeCaseNamingConvention()` and friends need no re-pinning — but it does not replay your `ConfigureConventions`. A convention that changes a **column type** on a Warp entity would therefore leave the two contexts disagreeing about what is physically stored.
+The distinction matters because Warp's server-internal work runs on its own context (see [Server-internal logging](#server-internal-logging--the-warp-server-context) below). That context mirrors the **resolved table, schema, and column names** from your model — which is why `UseSnakeCaseNamingConvention()` and friends need no re-pinning — but it does not replay your `ConfigureConventions`. A convention that changed a **column type** on a Warp entity would therefore leave the two contexts disagreeing about what is physically stored, and Warp's providers compare against literals of a fixed type in their atomic claim statements.
 
-The common case is a global enum conversion:
+So `ApplyWarpModel` finishes by pinning the storage of its own columns:
+
+| Warp property type | Pinned to |
+|---|---|
+| any `enum` | `integer` |
+| `DateTime` / `DateTime?` | the provider's native timestamp, with Warp's UTC `Kind` converter |
+| `Guid` / `Guid?` | native `uuid` / `uniqueidentifier` |
+
+That makes a model-wide conversion convention safe to declare — it applies to your entities and stops at Warp's:
 
 ```csharp
 protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
 {
+    // Your entities get string enums. Warp's stay integers.
     configurationBuilder.Properties<Enum>().HaveConversion<string>();
 }
 ```
 
-This is fine, and needs no workaround. **Warp pins every enum property in its own model to `integer` explicitly**, and explicit fluent configuration outranks a convention — so your own entities get string enums and Warp's stay integers. Warp's storage of `Job.Kind`, `Job.CurrentState`, and the rest is a fixed contract, not a preference: the providers' atomic claim statements compare against integer literals.
+The pass is scoped to Warp's own entity CLR types by assembly, so it never reaches an entity of yours — including one that happens to live in a `Warp.*` namespace. It also overrides a converter set by hand on a Warp entity property (`modelBuilder.Entity<Job>().Property(x => x.CreateTime).HasConversion<long>()` has no effect from 5.0.0 onward): how Warp stores its own columns is a contract, not a preference.
 
-Other type-changing conventions on Warp's entities (`Properties<DateTime>().HaveConversion<long>()`, for example) are **not** supported. Scope such a convention to your own types — `Properties<DateTime>()` can be narrowed with an explicit configuration on the entities that need it — rather than applying it model-wide.
+Conventions that change a **facet** rather than a type — `Properties<string>().HaveMaxLength(n)`, `HaveColumnType(...)`, `HavePrecision(...)` — are **not** neutralised, because Warp cannot distinguish them from its own explicit facets. A model-wide string length cap is the dangerous one: it will truncate job payloads. Scope facet conventions to your own types.
 
 ## Testing handlers that publish
 
