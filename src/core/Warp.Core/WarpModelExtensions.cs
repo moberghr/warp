@@ -11,9 +11,22 @@ public static class WarpModelExtensions
 {
     /// <summary>
     /// Adds Warp's entire EF Core model — the job-store entities, the unconditionally-registered
-    /// addon entities, and the UTC <see cref="DateTime"/> converters — to <paramref name="modelBuilder"/>
-    /// under <paramref name="schema"/> (default <c>"warp"</c>; pass <c>null</c> for the database's
-    /// default schema).
+    /// addon entities, and the storage types Warp pins on its own columns — to
+    /// <paramref name="modelBuilder"/> under <paramref name="schema"/> (default <c>"warp"</c>; pass
+    /// <c>null</c> for the database's default schema).
+    /// <para>
+    /// The pinned storage is a contract, not a preference: Warp's providers compare against literals
+    /// of a fixed type in their atomic claim statements, and the internal server context maps the same
+    /// physical columns without replaying your <c>ConfigureConventions</c>. So enums are stored as
+    /// <c>int</c>, <see cref="DateTime"/> as the provider's native timestamp (carrying Warp's UTC
+    /// <c>Kind</c> converter), and <see cref="Guid"/> as the native uuid type — on Warp's own entity
+    /// types only, never yours. A model-wide conversion convention
+    /// (<c>Properties&lt;Enum&gt;().HaveConversion&lt;string&gt;()</c> and friends) therefore applies
+    /// to your entities and stops at Warp's. <strong>This overrides a converter set by hand on a Warp
+    /// entity property</strong> (behaviour change in 5.0.0: 4.x preserved it). Conventions that change
+    /// a facet rather than a type (max length, column type, precision) are not neutralised and are
+    /// unsupported on Warp's entities.
+    /// </para>
     /// <para>
     /// Call this inside your <c>DbContext.OnModelCreating</c> to make Warp's model contribution
     /// explicit and visible to design-time tooling. When the model is declared in the context's own
@@ -54,8 +67,10 @@ public static class WarpModelExtensions
         ServiceConfiguration.AddSagaStateEntity(modelBuilder, schema);
         ServiceConfiguration.AddSagaJobLinkEntity(modelBuilder, schema);
 
-        // Scoped to Warp.Core's own entity CLR types, so safe to run before external configurators.
-        modelBuilder.ApplyWarpUtcDateTimeConverters();
+        // Last, so it outranks anything a consumer's ConfigureConventions retyped (§5.12). Scoped to
+        // Warp.Core's own entity CLR types, which is also why running before the external
+        // configurators costs nothing: the types they contribute are outside that filter either way.
+        modelBuilder.PinWarpStorageTypes();
 
         return modelBuilder;
     }

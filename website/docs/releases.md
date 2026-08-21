@@ -4,6 +4,79 @@ sidebar_position: 6
 
 # Releases
 
+## 5.0.0
+
+*Unreleased*
+
+Major release. **One change, one cause, and the reason it is breaking:** Warp now pins the storage types of its own columns, so a model-wide EF Core conversion convention in the consuming `DbContext` can no longer retype them.
+
+**If your `DbContext` declares no model-wide conversion convention** — no `configurationBuilder.Properties<Enum>()`, `Properties<DateTime>()` or `Properties<Guid>()` in `ConfigureConventions`, and no hand-written converter on a Warp entity property — **this release is a no-op for you.** Warp's model comes out byte-for-byte identical (verified property by property: same store types, same nullability, same converters), `dotnet ef migrations add` after upgrading produces an **empty** migration, and nothing below applies.
+
+**If it does declare one, Warp was not working for you before this release** — not degraded, not working — and the upgrade needs Warp's tables rebuilt. The [what you need to do](#what-you-need-to-do) section is the whole procedure.
+
+### Warp's columns keep Warp's types
+
+A consuming context is free to write this, and plenty do:
+
+```csharp
+protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+{
+    configurationBuilder.Properties<Enum>().HaveConversion<string>();
+}
+```
+
+Your context owns the schema, so that convention created `Job.Kind`, `Job.CurrentState`, `Job.CancellationMode` and `Job.ContinuationOptions` as `text` — the four enum properties Warp had left to convention, while its other 19 were pinned. Two independent surfaces then broke, and between them nothing ran:
+
+- The providers' atomic claim statements compare against **integer literals** — `"current_state" = 1` — because a claim has to be a single statement. `WarpWorkerService` never claimed a job and `ScheduledJobActivation` never activated one.
+- The Warp **server context** — the runtime-only mirror that carries all server-internal DB work — reflects your model's resolved table and column **names**, not its value converters. It kept mapping those columns as `int` and emitted integer literals against `text`, so `Orchestrator`, `MessageRouter` and `StaleJobRecovery` failed every tick with `42883: operator does not exist: text = integer` (SQL Server: a conversion failure on the same comparison).
+
+Publishing, the outbox and the entire dashboard kept working throughout, because on your own context EF knows about the converter. The symptom was jobs piling up in `Enqueued` forever, with the errors only in the worker's logs.
+
+The same hole existed for two more families, with the same two consequences: `Properties<DateTime>().HaveConversion<long>()` stored every Warp timestamp as `bigint` (and, incidentally, discarded Warp's UTC `Kind` stamp), and `Properties<Guid>().HaveConversion<string>()` stored every Warp key as `character varying(36)` while the server context read `uuid`.
+
+`ApplyWarpModel` now finishes by pinning all three families on its own entity types — enums to `integer`, `DateTime` to the provider's native timestamp with Warp's UTC converter, `Guid` to the native `uuid`/`uniqueidentifier`. The pass is scoped by assembly to Warp's own entities, so **your** entities keep every convention you declared; a Warp entity's storage is no longer influenced by them.
+
+**Why this is a major version rather than a patch:** in 4.x, a converter already present on a Warp entity property was deliberately preserved, and that is documented behaviour. It is now overridden. If you set one by hand — `modelBuilder.Entity<Job>().Property(x => x.CreateTime).HasConversion<long>()` — it stops taking effect. That is the intended outcome: how Warp stores its own columns is a contract its claim SQL depends on, not a preference. Remove such a converter; keeping it is now a no-op rather than an error.
+
+**Scope:** the pass covers Warp's own entity types. An entity a third-party addon contributes through `WarpConfiguration.EntityConfigurators` is outside it and can still be retyped by a convention; no in-tree package uses that seam.
+
+**What is still not neutralised:** conventions that change a *facet* rather than a type — `Properties<string>().HaveMaxLength(n)`, `HaveColumnType(...)`, `HavePrecision(...)` — continue to reach Warp's columns, and Warp cannot tell them apart from its own explicit facets. A model-wide string length cap in particular will truncate job payloads. Scope facet conventions to your own types.
+
+### What you need to do
+
+| Your `ConfigureConventions` | On upgrade |
+|---|---|
+| No model-wide conversion convention | **Nothing.** Empty migration, no behaviour change. |
+| `Properties<Enum>().HaveConversion<string>()` | Rebuild Warp's tables, or convert 4 columns (SQL below). |
+| `Properties<DateTime>()` / `Properties<Guid>()` conversion | Rebuild Warp's tables. |
+| A hand-set converter on a Warp entity property | Remove it; rebuild the tables if the database already has that shape. |
+
+**Generate a migration after upgrading and inspect it.** An empty migration means you are in the first row and done. If instead it contains `AlterColumn` operations against Warp's tables, you are in one of the others — and note that the generated migration **will not run**: it emits bare `ALTER TABLE warp.job ALTER COLUMN kind TYPE integer` statements, which Postgres rejects (`42804` — it wants a `USING` clause, and it rejects them even when the table is empty) and which SQL Server fails on converting `'Enqueued'` to `int`. That failure is expected, not a bug to work around.
+
+**The recommended path is to rebuild Warp's tables** — revert the Warp migration, or drop the `warp` schema, then re-migrate on 5.0.0. Warp never executed a job for you, so the only rows that can exist are jobs that never ran and dashboard residue. For a `DateTime` or `Guid` convention this is the only sane path: the wrong physical type is on every timestamp and key column across ~30 tables.
+
+If you have queued work you must keep **and** the enum convention is the only one you declared, the conversion is four columns in one table (every other Warp enum column was always an integer). Hand-edit the generated migration — on Postgres, replace the four `AlterColumn` calls with the cast spelled out (column names follow your own naming convention; snake_case shown, and the dependent indexes are rebuilt automatically):
+
+```sql
+ALTER TABLE warp.job ALTER COLUMN kind TYPE integer
+  USING CASE kind WHEN 'Job' THEN 1 WHEN 'Message' THEN 2 WHEN 'Batch' THEN 3 END;
+ALTER TABLE warp.job ALTER COLUMN current_state TYPE integer
+  USING CASE current_state WHEN 'Enqueued' THEN 1 WHEN 'Awaiting' THEN 2 WHEN 'Processing' THEN 3
+    WHEN 'Completed' THEN 4 WHEN 'Failed' THEN 5 WHEN 'Deleted' THEN 6 WHEN 'Scheduled' THEN 7 END;
+ALTER TABLE warp.job ALTER COLUMN cancellation_mode TYPE integer
+  USING CASE cancellation_mode WHEN 'None' THEN 0 WHEN 'Graceful' THEN 1 END;
+ALTER TABLE warp.job ALTER COLUMN continuation_options TYPE integer
+  USING CASE continuation_options WHEN 'OnlyOnSucceeded' THEN 1 WHEN 'OnAnyFinishedState' THEN 2 END;
+```
+
+On SQL Server, keep EF's `AlterColumn` calls — they drop and recreate the dependent indexes for you — and prepend a `migrationBuilder.Sql` that rewrites the names to their numeric form first (`SET [CurrentState] = CASE [CurrentState] WHEN 'Enqueued' THEN '1' ... END`), after which the type change converts cleanly. Run `SELECT DISTINCT kind, current_state FROM warp.job` first either way: a value the map does not cover becomes `NULL`, and the alter then fails on the non-nullable column.
+
+The workaround posted on the issue — re-pinning the four properties in your own `OnModelCreating` — is no longer needed and can be removed. Leaving it in place is harmless; it declares exactly what Warp now declares.
+
+Model-level tests now assert that every enum, `DateTime` and `Guid` property in the Warp model keeps its pinned storage under a context that retypes all three, that the server context and your context agree on every Warp column type, and that your own entities keep their convention — so a new entity cannot reopen the hole. See **[EF Core integration](./operations/ef-core-integration.md#naming-conventions-are-honoured-type-changing-conventions-are-not)**.
+
+Reported in [#279](https://github.com/moberghr/warp/issues/279).
+
 ## 4.1.0
 
 *2026-08-18*

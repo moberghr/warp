@@ -140,6 +140,34 @@ The tradeoff: 6 unused tables in deployments that don't use these addons. They'r
 
 If you compose your own `IModelCustomizer` chain, the Warp customizer must run **after** your entity registrations (it doesn't depend on yours, but composability is one-directional).
 
+### Naming conventions are honoured; type-changing conventions are not
+
+The distinction matters because Warp's server-internal work runs on its own context (see [Server-internal logging](#server-internal-logging--the-warp-server-context) below). That context mirrors the **resolved table, schema, and column names** from your model — which is why `UseSnakeCaseNamingConvention()` and friends need no re-pinning — but it does not replay your `ConfigureConventions`. A convention that changed a **column type** on a Warp entity would therefore leave the two contexts disagreeing about what is physically stored, and Warp's providers compare against literals of a fixed type in their atomic claim statements.
+
+So `ApplyWarpModel` finishes by pinning the storage of its own columns:
+
+| Warp property type | Pinned to |
+|---|---|
+| any `enum` | `integer` |
+| `DateTime` / `DateTime?` | the provider's native timestamp, with Warp's UTC `Kind` converter |
+| `Guid` / `Guid?` | native `uuid` / `uniqueidentifier` |
+
+That makes a model-wide conversion convention safe to declare — it applies to your entities and stops at Warp's:
+
+```csharp
+protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+{
+    // Your entities get string enums. Warp's stay integers.
+    configurationBuilder.Properties<Enum>().HaveConversion<string>();
+}
+```
+
+The pass is scoped to Warp's own entity CLR types by assembly, so it never reaches an entity of yours — including one that happens to live in a `Warp.*` namespace. It also overrides a converter set by hand on a Warp entity property (`modelBuilder.Entity<Job>().Property(x => x.CreateTime).HasConversion<long>()` has no effect from 5.0.0 onward): how Warp stores its own columns is a contract, not a preference.
+
+The pass covers Warp's own entity types. An entity contributed by a third-party addon through `WarpConfiguration.EntityConfigurators` lives in another assembly, so it is outside the filter and a conversion convention still reaches it — with the same consequence, since the server context mirrors those entities too. No in-tree package uses that extension point; an addon that does should pin its own storage the same way.
+
+Conventions that change a **facet** rather than a type — `Properties<string>().HaveMaxLength(n)`, `HaveColumnType(...)`, `HavePrecision(...)` — are **not** neutralised, because Warp cannot distinguish them from its own explicit facets. A model-wide string length cap is the dangerous one: it will truncate job payloads. Scope facet conventions to your own types.
+
 ## Testing handlers that publish
 
 A handler that calls `IPublisher.Enqueue` / `Publish` / `Schedule` doesn't need a database to be unit-testable. Warp ships `InMemoryPublisher` (in `Warp.Core.Testing`) — a drop-in `IPublisher` that records every publish in memory and never touches a `DbContext`:

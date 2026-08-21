@@ -487,12 +487,19 @@ public static class ServiceConfiguration
         job.Property(p => p.Id);
         job.HasKey(p => p.Id);
 
-        job.Property(p => p.Kind);
+        // Every enum property in the Warp model pins its provider type to int, on purpose. A consuming
+        // context is free to declare `configurationBuilder.Properties<Enum>().HaveConversion<string>()`
+        // in ConfigureConventions, and TContext owns the schema — so without an explicit pin that
+        // convention makes these columns text. Two things then break at once: the provider claim SQL
+        // bakes integer literals in (`"current_state" = 1`), and WarpServerContext mirrors names only,
+        // so it keeps mapping the column as int and emits integer literals against text. Nothing would
+        // execute. Explicit fluent configuration outranks a convention, so pinning here is the fix.
+        job.Property(p => p.Kind).HasConversion<int>();
         job.Property(p => p.Type);
         job.Property(p => p.Message);
         job.Property(p => p.CreateTime);
         job.Property(p => p.ScheduleTime);
-        job.Property(p => p.CurrentState);
+        job.Property(p => p.CurrentState).HasConversion<int>();
         job.Property(p => p.Queue);
         job.Property(p => p.ParentJobId);
         job.Property(p => p.HandlerType);
@@ -501,7 +508,7 @@ public static class ServiceConfiguration
         job.Property(p => p.TraceId);
         job.Property(p => p.SpawnedByJobId);
         job.Property(p => p.JobCount);
-        job.Property(p => p.ContinuationOptions);
+        job.Property(p => p.ContinuationOptions).HasConversion<int>();
 
         job.HasMany(x => x.ChildJobs)
             .WithOne(x => x.ParentJob)
@@ -542,7 +549,7 @@ public static class ServiceConfiguration
         job.HasIndex(p => p.ExpireAt);
         job.HasIndex(p => p.TraceId);
 
-        job.Property(p => p.CancellationMode);
+        job.Property(p => p.CancellationMode).HasConversion<int>();
 
         job.Property(p => p.Metadata);
 
