@@ -4,6 +4,62 @@ sidebar_position: 6
 
 # Releases
 
+## 4.1.1
+
+*Unreleased*
+
+Patch release, one fix, **no schema change for any deployment where Warp currently works**. Warp was unusable — not degraded, unusable — for a consuming `DbContext` that applies a global enum-to-string conversion convention. If yours does not, upgrading is a no-op and nothing below applies to you.
+
+### Warp's enum columns are pinned to `integer`
+
+A consuming context is free to write this, and many do:
+
+```csharp
+protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+{
+    configurationBuilder.Properties<Enum>().HaveConversion<string>();
+}
+```
+
+Warp pins the provider type on every enum property in its own model — except that four on `Job` were declared without one and left to convention: `Kind`, `CurrentState`, `CancellationMode`, and `ContinuationOptions`. Your context owns the schema, so under that convention those four columns were physically created as `text` while every other Warp enum column (19 of them) stayed `integer`.
+
+Two independent surfaces then broke, and between them nothing ran:
+
+- The providers' atomic claim statements compare against **integer literals** — `"current_state" = 1` — because a claim has to be one statement, so `WarpWorkerService` never claimed a job and `ScheduledJobActivation` never activated one.
+- The Warp server context mirrors your model's resolved table and column **names**, not its value converters, so it kept mapping `Kind`/`CurrentState` as `int` and emitted integer literals against `text` columns. Every server task that filters on either — `Orchestrator`, `MessageRouter`, `StaleJobRecovery` — failed each tick with `42883: operator does not exist: text = integer` (SQL Server: a conversion failure on the same comparison).
+
+Publishing, the outbox, and the whole dashboard worked fine throughout, because on your own context EF knows about the converter. The symptom was jobs accumulating in `Enqueued` forever with errors only in the worker's logs.
+
+The four properties are now pinned like the other 19. Explicit fluent configuration outranks a convention, so the convention still applies to *your* entities and no longer reaches Warp's. There is nothing to configure, and the earlier workaround — re-pinning the four in your own `OnModelCreating` — can be removed (leaving it in place is harmless; it declares exactly what Warp now declares). Warp's storage of these columns is a fixed contract rather than a preference, and [EF Core integration](./operations/ef-core-integration.md#naming-conventions-are-honoured-type-changing-conventions-are-not) now says so: naming conventions on Warp's entities are honoured, type-changing ones are not.
+
+#### Upgrading
+
+**If your context has no such convention — the case for every deployment where Warp works today — there is nothing to do.** The pin changes no store type and no nullability; EF's model differ produces **zero** operations, so `dotnet ef migrations add` after upgrading yields an empty migration.
+
+**If it does**, your `job` table has four `text` columns holding enum *names*, and the migration EF generates for you is not runnable: it emits bare `ALTER TABLE warp.job ALTER COLUMN kind TYPE integer` statements, which Postgres rejects (`42804`, it wants a `USING` clause) and which SQL Server fails on converting `'Enqueued'` to `int`.
+
+The recommended path is to **drop and recreate the Warp tables**. Warp never executed a job for you, so the only rows that exist are unexecuted jobs and dashboard residue — reverting the Warp migration (or dropping the `warp` schema) and re-migrating with 4.1.1 is cheaper and safer than converting data.
+
+If you have queued work you need to keep, hand-edit the generated migration. On Postgres, replace the four `AlterColumn` calls with the cast spelled out (column names follow your own naming convention; snake_case shown, and the dependent indexes are rebuilt automatically):
+
+```sql
+ALTER TABLE warp.job ALTER COLUMN kind TYPE integer
+  USING CASE kind WHEN 'Job' THEN 1 WHEN 'Message' THEN 2 WHEN 'Batch' THEN 3 END;
+ALTER TABLE warp.job ALTER COLUMN current_state TYPE integer
+  USING CASE current_state WHEN 'Enqueued' THEN 1 WHEN 'Awaiting' THEN 2 WHEN 'Processing' THEN 3
+    WHEN 'Completed' THEN 4 WHEN 'Failed' THEN 5 WHEN 'Deleted' THEN 6 WHEN 'Scheduled' THEN 7 END;
+ALTER TABLE warp.job ALTER COLUMN cancellation_mode TYPE integer
+  USING CASE cancellation_mode WHEN 'None' THEN 0 WHEN 'Graceful' THEN 1 END;
+ALTER TABLE warp.job ALTER COLUMN continuation_options TYPE integer
+  USING CASE continuation_options WHEN 'OnlyOnSucceeded' THEN 1 WHEN 'OnAnyFinishedState' THEN 2 END;
+```
+
+On SQL Server, keep EF's `AlterColumn` calls — they drop and recreate the dependent indexes for you — and prepend a `migrationBuilder.Sql` that rewrites the names to their numeric form first (`SET [CurrentState] = CASE [CurrentState] WHEN 'Enqueued' THEN '1' ... END`), after which the type change converts cleanly. Run `SELECT DISTINCT kind, current_state FROM warp.job` first either way: a value the map doesn't cover becomes `NULL` and the alter then fails on the non-nullable column. Only the `job` table needs this — the other 19 enum columns were always integers.
+
+A model-level test now asserts that **every** enum property in the Warp model pins its provider type, and that Warp's model and the server context's agree under a hostile convention, so a future entity cannot reopen the hole.
+
+Reported in [#279](https://github.com/moberghr/warp/issues/279).
+
 ## 4.1.0
 
 *2026-08-18*

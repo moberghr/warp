@@ -140,6 +140,23 @@ The tradeoff: 6 unused tables in deployments that don't use these addons. They'r
 
 If you compose your own `IModelCustomizer` chain, the Warp customizer must run **after** your entity registrations (it doesn't depend on yours, but composability is one-directional).
 
+### Naming conventions are honoured; type-changing conventions are not
+
+The distinction matters because Warp's server-internal work runs on its own context (see [Server-internal logging](#server-internal-logging--the-warp-server-context) below). That context mirrors the **resolved table, schema, and column names** from your model — which is why `UseSnakeCaseNamingConvention()` and friends need no re-pinning — but it does not replay your `ConfigureConventions`. A convention that changes a **column type** on a Warp entity would therefore leave the two contexts disagreeing about what is physically stored.
+
+The common case is a global enum conversion:
+
+```csharp
+protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+{
+    configurationBuilder.Properties<Enum>().HaveConversion<string>();
+}
+```
+
+This is fine, and needs no workaround. **Warp pins every enum property in its own model to `integer` explicitly**, and explicit fluent configuration outranks a convention — so your own entities get string enums and Warp's stay integers. Warp's storage of `Job.Kind`, `Job.CurrentState`, and the rest is a fixed contract, not a preference: the providers' atomic claim statements compare against integer literals.
+
+Other type-changing conventions on Warp's entities (`Properties<DateTime>().HaveConversion<long>()`, for example) are **not** supported. Scope such a convention to your own types — `Properties<DateTime>()` can be narrowed with an explicit configuration on the entities that need it — rather than applying it model-wide.
+
 ## Testing handlers that publish
 
 A handler that calls `IPublisher.Enqueue` / `Publish` / `Schedule` doesn't need a database to be unit-testable. Warp ships `InMemoryPublisher` (in `Warp.Core.Testing`) — a drop-in `IPublisher` that records every publish in memory and never touches a `DbContext`:
