@@ -1,5 +1,7 @@
+using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Warp.Core.Data.Converters;
 using Warp.Core.Entities;
 
 namespace Warp.Core;
@@ -46,9 +48,17 @@ internal static class WarpModelGuard
     // OnModelCreating entirely, and can mutate Warp's properties past every pin. Left unchecked
     // that resurfaces as per-tick server-task failures ("operator does not exist: text = integer")
     // or claim SQL comparing literals of the wrong type — this turns it into one startup error
-    // naming the property. Facet drift (max length, column type) is deliberately not validated
-    // here: it cannot break Warp's own SQL, and a deliberate post-ApplyWarpModel override of a
-    // facet remains the host's documented escape hatch.
+    // naming the property. Max-length/unicode facet drift is deliberately not validated (it cannot
+    // break Warp's own SQL); a post-ApplyWarpModel HasColumnType override is likewise left to the
+    // host, and the docs are explicit that changing a Warp column's underlying TYPE that way
+    // recreates the divergence this guard exists to catch.
+    //
+    // Each arm checks BOTH retype signals (converter and provider CLR type) — a retype can arrive
+    // through either one alone — and converter identity is reference-equality against Warp's own
+    // instances, so a foreign converter of the right CLR shape (e.g. a local-time DateTime
+    // round-trip) is still rejected. Native storage with no annotations is accepted everywhere:
+    // it is physically correct, and hard-failing it would newly break the documented
+    // sentinel-skip shape (a model that referenced Job before ApplyWarpModel ran).
     public static void EnsureWarpStorageContract(DbContext context)
     {
         var violations = new List<string>();
@@ -81,11 +91,31 @@ internal static class WarpModelGuard
             + "columns is a fixed contract - its providers compare against literals of these types in "
             + "their atomic claim SQL, and its internal server context maps the same physical columns. "
             + "Warp neutralizes model-wide conversion conventions on its own entities automatically, so "
-            + "this usually means a runtime convention added via ConfigureConventions(c => "
-            + "c.Conventions.Add(...)) is retyping Warp's properties at model finalization, or the "
-            + "context reconfigures a Warp entity's conversion after ApplyWarpModel. Scope the "
-            + "convention to your own entity types, or remove the conversion from Warp's properties.");
+            + "this usually means one of: a runtime convention added via ConfigureConventions(c => "
+            + "c.Conventions.Add(...)) is retyping Warp's properties at model finalization (scope it to "
+            + "your own entity types); the context reconfigures a Warp entity's conversion after "
+            + "ApplyWarpModel (remove the conversion - Warp's storage cannot be overridden); or the "
+            + "model referenced a Warp entity type before ApplyWarpModel ran, tripping its idempotency "
+            + "sentinel so Warp's own configuration was skipped (call ApplyWarpModel before declaring "
+            + "entities that reference Warp types).");
     }
+
+    // Per-model memo so the Publisher/BatchPublisher constructor backstop (non-hosted usage that
+    // never runs WarpModelValidationService) pays the property walk once per model, not per scope.
+    public static void EnsureWarpStorageContractOnce(DbContext context)
+    {
+        var model = context.Model;
+        if (ValidatedModels.TryGetValue(model, out _))
+        {
+            return;
+        }
+
+        EnsureWarpStorageContract(context);
+        ValidatedModels.Add(model, ValidatedSentinel);
+    }
+
+    private static readonly ConditionalWeakTable<IModel, object> ValidatedModels = [];
+    private static readonly object ValidatedSentinel = new();
 
     private static string? Validate(IReadOnlyProperty property)
     {
@@ -95,25 +125,38 @@ internal static class WarpModelGuard
 
         if (clrType.IsEnum)
         {
-            return providerType == typeof(int)
+            // Native enum storage IS int, so a bare property (no annotations) is correct; what breaks
+            // the claim SQL is a converter or a non-int provider type arriving through either signal.
+            var stored = converter is null && (providerType is null || providerType == typeof(int));
+
+            return stored
                 ? null
-                : $"enum stored as {providerType?.Name ?? "its default"}, expected int";
+                : $"enum stored as {converter?.ProviderClrType.Name ?? providerType?.Name}, expected int";
         }
 
         if (clrType == typeof(DateTime))
         {
-            var roundTrips = converter is not null
-                && (Nullable.GetUnderlyingType(converter.ProviderClrType) ?? converter.ProviderClrType) == typeof(DateTime);
+            // Warp's own UTC converter (reference-equality - a foreign DateTime round-trip converter
+            // can carry local-time semantics), or bare native storage; never a provider retype.
+            var stored = providerType is null
+                && (converter is null
+                    || ReferenceEquals(converter, WarpStorageTypes.UtcDateTime)
+                    || ReferenceEquals(converter, WarpStorageTypes.UtcNullableDateTime));
 
-            return roundTrips
+            return stored
                 ? null
-                : $"DateTime stored as {converter?.ProviderClrType.Name ?? providerType?.Name ?? "its default without Warp's UTC converter"}, expected Warp's UTC converter";
+                : $"DateTime stored via {converter?.GetType().Name ?? providerType?.Name}, expected Warp's UTC converter or the native timestamp";
         }
 
-        // WebhookDelivery.RetrySchedule persists through Warp's own JSON converter.
+        // WebhookDelivery.RetrySchedule persists through Warp's own JSON converter - a replacement
+        // diverges TContext from the server context on the one column both sides parse (§8.20).
         if (clrType == typeof(IReadOnlyList<TimeSpan>))
         {
-            return null;
+            var stored = converter is null || ReferenceEquals(converter, RetryScheduleConverter.Converter);
+
+            return stored
+                ? null
+                : $"stored via {converter!.GetType().Name}, expected Warp's retry-schedule converter";
         }
 
         if (converter is not null || providerType is not null)

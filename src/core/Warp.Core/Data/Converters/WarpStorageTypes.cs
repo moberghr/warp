@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
@@ -37,7 +38,7 @@ internal static class WarpStorageTypes
         v => v.HasValue ? DateTime.SpecifyKind(v.Value, DateTimeKind.Utc) : v);
 
     // Strips every storage-affecting setting a consumer's pre-convention configuration injected
-    // into Warp's own properties: conversions AND facets (column type, max length, unicode,
+    // into Warp's own properties: conversions, comparers AND facets (column type, max length, unicode,
     // precision/scale, fixed length, collation). Column NAMES are deliberately untouched — naming
     // conventions are honoured by design (§2.14 mirrors them). Warp's own declarations are wiped
     // too; ApplyWarpModel re-applies them immediately after.
@@ -46,6 +47,8 @@ internal static class WarpStorageTypes
         foreach (var property in WarpProperties(modelBuilder))
         {
             property.SetValueConverter((ValueConverter?)null);
+            property.SetValueComparer((ValueComparer?)null);
+            property.SetProviderValueComparer((ValueComparer?)null);
             property.SetProviderClrType(null);
             property.SetColumnType(null);
             property.SetMaxLength(null);

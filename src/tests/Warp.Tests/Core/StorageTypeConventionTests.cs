@@ -116,7 +116,8 @@ public class StorageTypeConventionTests
         // Warp pinning its own storage must not reach across into the consumer's entities —
         // conversions and facets both keep applying there.
         consumer.FindProperty(nameof(ConsumerRow.Flavour))!.GetProviderClrType().ShouldBe(typeof(string));
-        consumer.FindProperty(nameof(ConsumerRow.PlacedAt))!.GetProviderClrType().ShouldBe(typeof(long));
+        consumer.FindProperty(nameof(ConsumerRow.PlacedAt))!.GetValueConverter().ShouldBeOfType<TicksDateTimeConverter>();
+        consumer.FindProperty(nameof(ConsumerRow.PlacedAt))!.GetValueComparer().ShouldBeOfType<CoarseDateTimeComparer>();
         consumer.FindProperty(nameof(ConsumerRow.Reference))!.GetProviderClrType().ShouldBe(typeof(string));
         consumer.FindProperty(nameof(ConsumerRow.Note))!.GetMaxLength().ShouldBe(50);
     }
@@ -206,6 +207,80 @@ public class StorageTypeConventionTests
             .FindProperty(nameof(Job.Message))!
             .GetMaxLength()
             .ShouldBe(123);
+    }
+
+    [TimedFact]
+    public void EnsureWarpStorageContract_Throws_WhenAForeignDateTimeConverterIsPlacedOnAWarpColumn()
+    {
+        var options = new DbContextOptionsBuilder<ForeignDateTimeConverterContext>()
+            .UseNpgsql(PostgresConnection)
+            .Options;
+
+        using var context = new ForeignDateTimeConverterContext(options);
+
+        // A DateTime-to-DateTime converter has the right CLR shape but can carry local-time
+        // semantics — the guard accepts Warp's own UTC converters by reference, nothing else.
+        var ex = Should.Throw<InvalidOperationException>(() => WarpModelGuard.EnsureWarpStorageContract(context));
+
+        ex.Message.ShouldContain("Job.CreateTime");
+    }
+
+    [TimedFact]
+    public void EnsureWarpStorageContract_Throws_WhenARetryScheduleConverterIsReplaced()
+    {
+        var options = new DbContextOptionsBuilder<ForeignRetryScheduleConverterContext>()
+            .UseNpgsql(PostgresConnection)
+            .Options;
+
+        using var context = new ForeignRetryScheduleConverterContext(options);
+
+        var ex = Should.Throw<InvalidOperationException>(() => WarpModelGuard.EnsureWarpStorageContract(context));
+
+        ex.Message.ShouldContain("WebhookDelivery.RetrySchedule");
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarpDateTimeProperties_DoNotKeepConsumerComparers(bool sqlServer)
+    {
+        using var context = Context<HostileConventionContext>(sqlServer);
+
+        // A comparer welded on by Properties<T>().HaveConversion<TConv, TComparer>() would make
+        // Warp's change tracking skip small updates (a requeue ScheduleTime reset, a heartbeat
+        // bump) — the reclaim strips comparers along with converters.
+        var comparer = context.Model.FindEntityType(typeof(Job))!
+            .FindProperty(nameof(Job.CreateTime))!
+            .GetValueComparer();
+
+        comparer.ShouldNotBeOfType<CoarseDateTimeComparer>();
+    }
+
+    [TimedFact]
+    public void ConfiguratorAddedDateTimeProperty_OnAWarpEntity_GetsPinnedAndPassesTheContract()
+    {
+        // A dedicated TContext: EF caches the built model per closed context type, so reusing
+        // WarpServerContext<HostileConventionContext> here would silently get the model an earlier
+        // test built WITHOUT the configurator.
+        var services = new ServiceCollection();
+        var configuration = new WarpConfiguration();
+        configuration.EntityConfigurators.Add((modelBuilder, _) =>
+            modelBuilder.Entity<Job>().Property<DateTime>("AddonAuditedAt"));
+        services.AddDbContext<WarpServerContext<ConfiguratorHostContext>>(x => x.UseNpgsql(PostgresConnection));
+        services.AddDbContext<ConfiguratorHostContext>(x => x.UseNpgsql(PostgresConnection));
+        services.AddSingleton<IOptions<WarpConfiguration>>(Options.Create(configuration));
+        services.AddSingleton<IWarpServerModelNames>(sp =>
+            new WarpServerModelNames<ConfiguratorHostContext>(sp.GetRequiredService<IServiceScopeFactory>()));
+
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = provider.CreateScope();
+        var server = scope.ServiceProvider.GetRequiredService<WarpServerContext<ConfiguratorHostContext>>();
+
+        // A configurator-added property lands after ApplyWarpModel's ownership pass; the re-pin
+        // gives it Warp's UTC converter so the storage contract stays satisfiable for addons.
+        var added = server.Model.FindEntityType(typeof(Job))!.FindProperty("AddonAuditedAt")!;
+        added.GetValueConverter().ShouldNotBeNull();
+        Should.NotThrow(() => WarpModelGuard.EnsureWarpStorageContract(server));
     }
 
     [TimedFact]
@@ -315,7 +390,7 @@ internal class HostileConventionContext : DbContext
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
         configurationBuilder.Properties<Enum>().HaveConversion<string>();
-        configurationBuilder.Properties<DateTime>().HaveConversion<long>();
+        configurationBuilder.Properties<DateTime>().HaveConversion<TicksDateTimeConverter, CoarseDateTimeComparer>();
         configurationBuilder.Properties<Guid>().HaveConversion<string>();
         configurationBuilder.Properties<bool>().HaveConversion<string>();
         configurationBuilder.Properties<int>().HaveConversion<string>();
@@ -352,6 +427,70 @@ internal class UnpinnedWarpEntityContext : DbContext
         base.OnModelCreating(modelBuilder);
         modelBuilder.Entity<CircuitBreakerState>().HasKey(x => x.GroupKey);
         modelBuilder.PinWarpStorageTypes();
+    }
+}
+
+internal sealed class CoarseDateTimeComparer : Microsoft.EntityFrameworkCore.ChangeTracking.ValueComparer<DateTime>
+{
+    public CoarseDateTimeComparer()
+        : base((x, y) => x.Date == y.Date, x => x.Date.GetHashCode())
+    {
+    }
+}
+
+internal sealed class TicksDateTimeConverter : Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<DateTime, DateTime>
+{
+    public TicksDateTimeConverter()
+        : base(x => x.ToLocalTime(), x => x)
+    {
+    }
+}
+
+internal class ConfiguratorHostContext : DbContext
+{
+    public ConfiguratorHostContext(DbContextOptions<ConfiguratorHostContext> options)
+        : base(options)
+    {
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyWarpModel("warp");
+    }
+}
+
+internal class ForeignDateTimeConverterContext : DbContext
+{
+    public ForeignDateTimeConverterContext(DbContextOptions<ForeignDateTimeConverterContext> options)
+        : base(options)
+    {
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyWarpModel("warp");
+        modelBuilder.Entity<Job>().Property(x => x.CreateTime).HasConversion(new TicksDateTimeConverter());
+    }
+}
+
+internal class ForeignRetryScheduleConverterContext : DbContext
+{
+    public ForeignRetryScheduleConverterContext(DbContextOptions<ForeignRetryScheduleConverterContext> options)
+        : base(options)
+    {
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyWarpModel("warp");
+        modelBuilder.Entity<Warp.Core.Data.Entities.WebhookDelivery>()
+            .Property(x => x.RetrySchedule)
+            .HasConversion(
+                x => string.Join(";", x.Select(y => y.TotalSeconds)),
+                x => x.Split(";", StringSplitOptions.RemoveEmptyEntries).Select(y => TimeSpan.FromSeconds(double.Parse(y, System.Globalization.CultureInfo.InvariantCulture))).ToList());
     }
 }
 

@@ -147,7 +147,7 @@ The distinction matters because Warp's server-internal work runs on its own cont
 | What your convention sets | On your entities | On Warp's entities |
 |---|---|---|
 | Column/table **names** (`UseSnakeCaseNamingConvention()` etc.) | applies | **applies** — honoured by design |
-| Conversions (`Properties<Enum>().HaveConversion<string>()`, `Properties<DateTime>()`, `Properties<Guid>()`, `Properties<bool>()`, …) | applies | never applies — enums stay `integer`, timestamps native + Warp's UTC converter, everything else native |
+| Conversions and their value comparers (`Properties<Enum>().HaveConversion<string>()`, `Properties<DateTime>().HaveConversion<TConv, TComparer>()`, `Properties<Guid>()`, `Properties<bool>()`, …) | applies | never applies — enums stay `integer`, timestamps native + Warp's UTC converter, everything else native, change tracking on default comparers |
 | Facets (`HaveMaxLength(n)`, `HaveColumnType(...)`, `AreUnicode(...)`, `HavePrecision(...)`) | applies | never applies — a global length cap cannot truncate `Job.Message` |
 
 That makes model-wide conventions safe to declare — they apply to your entities and stop at Warp's:
@@ -165,8 +165,8 @@ The ownership pass is scoped to Warp's own entity CLR types by assembly, so it n
 
 Two edges remain, both deliberate:
 
-- **A hand-written override placed *after* `ApplyWarpModel`** in your `OnModelCreating` still wins for *facets* — that is the escape hatch if you genuinely need, say, a different column type on a Warp column. Overriding a Warp column's **conversion** that way is not an escape hatch: it breaks Warp's own SQL, and the startup check below rejects it.
-- **A runtime convention you add via `ConfigureConventions(c => c.Conventions.Add(...))`** runs at model *finalization*, after `OnModelCreating` entirely, where no build-time ordering can neutralize it. Warp validates the finalized model at host startup instead: a Warp column whose storage type was changed fails fast with an error naming the property — instead of the worker silently never executing a job while server tasks fail every tick with `42883: operator does not exist: text = integer`.
+- **A hand-written override placed *after* `ApplyWarpModel`** in your `OnModelCreating` still wins for *facets* — the escape hatch if you genuinely need, say, a longer cap or a different collation on one Warp column. It is for **non-type-changing** facets only: an override that changes the column's underlying *type* (`HasColumnType("jsonb")` on `Job.Message`, say) recreates exactly the divergence this section exists to prevent — your migration reshapes the physical column while Warp's internal server context keeps mapping the declared type, and the server tasks fail on their own tables. Overriding a Warp column's **conversion** from any position is rejected by the startup check below.
+- **A runtime convention you add via `ConfigureConventions(c => c.Conventions.Add(...))`** runs at model *finalization*, after `OnModelCreating` entirely, where no build-time ordering can neutralize it. Warp validates the finalized model at host startup instead (and once per model in non-hosted publisher processes): a Warp column whose storage was retyped — through a converter, a provider type, or a foreign `DateTime` round-trip converter that would smuggle local-time semantics — fails fast with an error naming the property, instead of the worker silently never executing a job while server tasks fail every tick with `42883: operator does not exist: text = integer`.
 
 ## Testing handlers that publish
 

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Warp.Core.Data.Converters;
 
 namespace Warp.Core;
 
@@ -33,6 +34,12 @@ internal sealed class WarpModelCustomizer : RelationalModelCustomizer
             {
                 configurator(modelBuilder, schema);
             }
+
+            // A configurator may add properties to a WARP-owned entity (its own entities are outside
+            // the assembly filter and untouched). Those additions land after ApplyWarpModel's
+            // ownership pass, so re-pin: an added enum stores as int and an added DateTime carries
+            // the UTC converter, keeping the boot-time storage contract satisfiable for addons.
+            modelBuilder.PinWarpStorageTypes();
         }
     }
 }

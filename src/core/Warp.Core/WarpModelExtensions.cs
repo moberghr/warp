@@ -22,10 +22,12 @@ public static class WarpModelExtensions
     /// <c>Kind</c> converter), and <see cref="Guid"/> as the native uuid type — on Warp's own entity
     /// types only, never yours. A model-wide conversion convention
     /// (<c>Properties&lt;Enum&gt;().HaveConversion&lt;string&gt;()</c> and friends) therefore applies
-    /// to your entities and stops at Warp's. <strong>This overrides a converter set by hand on a Warp
-    /// entity property</strong> (behaviour change in 5.0.0: 4.x preserved it). Conventions that change
-    /// a facet rather than a type (max length, column type, precision) are not neutralised and are
-    /// unsupported on Warp's entities.
+    /// to your entities and stops at Warp's — facet conventions (max length, column type, unicode,
+    /// precision) and conversion comparers included. <strong>A conversion set by hand on a Warp entity
+    /// property is not supported from any position</strong>: one declared before this call is
+    /// reclaimed, and one that survives to the finalized model (declared after it, or injected by a
+    /// runtime convention) fails host startup with an error naming the property. A deliberate
+    /// NON-type-changing facet override placed after this call remains the supported escape hatch.
     /// </para>
     /// <para>
     /// Call this inside your <c>DbContext.OnModelCreating</c> to make Warp's model contribution
