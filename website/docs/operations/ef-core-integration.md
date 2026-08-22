@@ -168,6 +168,14 @@ Two edges remain, both deliberate:
 - **A hand-written override placed *after* `ApplyWarpModel`** in your `OnModelCreating` still wins for *facets* — the escape hatch if you genuinely need, say, a longer cap or a different collation on one Warp column. It is for **non-type-changing** facets only: an override that changes the column's underlying *type* (`HasColumnType("jsonb")` on `Job.Message`, say) recreates exactly the divergence this section exists to prevent — your migration reshapes the physical column while Warp's internal server context keeps mapping the declared type, and the server tasks fail on their own tables. Overriding a Warp column's **conversion** from any position is rejected by the startup check below.
 - **A runtime convention you add via `ConfigureConventions(c => c.Conventions.Add(...))`** runs at model *finalization*, after `OnModelCreating` entirely, where no build-time ordering can neutralize it. Warp validates the finalized model at host startup instead (and once per model in non-hosted publisher processes): a Warp column whose storage was retyped — through a converter, a provider type, or a foreign `DateTime` round-trip converter that would smuggle local-time semantics — fails fast with an error naming the property, instead of the worker silently never executing a job while server tasks fail every tick with `42883: operator does not exist: text = integer`.
 
+:::info How this behaved in earlier versions
+
+- **4.x and earlier:** conventions applied to Warp's columns unchecked. A global enum→string conversion physically created `Job.Kind`/`Job.CurrentState` as `text`, and Warp silently never executed a job ([#279](https://github.com/moberghr/warp/issues/279)); a global `HaveMaxLength` silently truncated `Job.Message`. A hand-set converter on a Warp property was preserved.
+- **5.0.0:** enum, `DateTime` and `Guid` conversions were pinned; other conversions, comparers and all facets still leaked through, and nothing was validated.
+- **5.1.0 (current):** the full ownership pass above — every conversion, comparer and facet convention stops at Warp's entities, and the startup check catches what model building cannot.
+
+:::
+
 ## Testing handlers that publish
 
 A handler that calls `IPublisher.Enqueue` / `Publish` / `Schedule` doesn't need a database to be unit-testable. Warp ships `InMemoryPublisher` (in `Warp.Core.Testing`) — a drop-in `IPublisher` that records every publish in memory and never touches a `DbContext`:
