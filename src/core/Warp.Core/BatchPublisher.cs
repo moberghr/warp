@@ -40,6 +40,7 @@ public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
     public BatchPublisher(TContext context, IOptions<WarpConfiguration> configuration, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
         WarpModelGuard.EnsureWarpModelApplied(context);
+        WarpModelGuard.EnsureWarpStorageContractOnce(context);
 
         _context = context;
         _warpConfiguration = configuration.Value;

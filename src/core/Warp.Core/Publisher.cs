@@ -105,6 +105,7 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
     public Publisher(TContext context, IOptions<WarpConfiguration> configuration, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
         WarpModelGuard.EnsureWarpModelApplied(context);
+        WarpModelGuard.EnsureWarpStorageContractOnce(context);
 
         _context = context;
         _configuration = configuration.Value;

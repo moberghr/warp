@@ -22,10 +22,12 @@ public static class WarpModelExtensions
     /// <c>Kind</c> converter), and <see cref="Guid"/> as the native uuid type — on Warp's own entity
     /// types only, never yours. A model-wide conversion convention
     /// (<c>Properties&lt;Enum&gt;().HaveConversion&lt;string&gt;()</c> and friends) therefore applies
-    /// to your entities and stops at Warp's. <strong>This overrides a converter set by hand on a Warp
-    /// entity property</strong> (behaviour change in 5.0.0: 4.x preserved it). Conventions that change
-    /// a facet rather than a type (max length, column type, precision) are not neutralised and are
-    /// unsupported on Warp's entities.
+    /// to your entities and stops at Warp's — facet conventions (max length, column type, unicode,
+    /// precision) and conversion comparers included. <strong>A conversion set by hand on a Warp entity
+    /// property is not supported from any position</strong>: one declared before this call is
+    /// reclaimed, and one that survives to the finalized model (declared after it, or injected by a
+    /// runtime convention) fails host startup with an error naming the property. A deliberate
+    /// NON-type-changing facet override placed after this call remains the supported escape hatch.
     /// </para>
     /// <para>
     /// Call this inside your <c>DbContext.OnModelCreating</c> to make Warp's model contribution
@@ -56,6 +58,24 @@ public static class WarpModelExtensions
             return modelBuilder;
         }
 
+        // A consumer's pre-convention configuration (ConfigureConventions) is applied to each
+        // property AT CREATION with the same configuration source as explicit fluent calls, so it
+        // cannot be told apart from Warp's own declarations afterwards. Ownership of Warp's columns
+        // is therefore enforced by ordering: declare the model (user defaults land on creation, Warp's
+        // explicit facets overwrite where declared), strip every storage-affecting setting from Warp's
+        // properties, re-declare so Warp's own facets and converters come back, then pin the storage
+        // types. Net effect: conventions keep applying to the consumer's entities and never to Warp's
+        // (§5.12). Naming conventions are untouched throughout — they are honoured by design (§2.14).
+        AddWarpEntities(modelBuilder, schema);
+        modelBuilder.ReclaimWarpStorage();
+        AddWarpEntities(modelBuilder, schema);
+        modelBuilder.PinWarpStorageTypes();
+
+        return modelBuilder;
+    }
+
+    private static void AddWarpEntities(ModelBuilder modelBuilder, string? schema)
+    {
         modelBuilder.AddOutboxStateEntity(schema);
 
         // Addon entities are registered unconditionally regardless of which addons the host opts into
@@ -66,12 +86,5 @@ public static class WarpModelExtensions
         ServiceConfiguration.AddRateLimitOverrideEntity(modelBuilder, schema);
         ServiceConfiguration.AddSagaStateEntity(modelBuilder, schema);
         ServiceConfiguration.AddSagaJobLinkEntity(modelBuilder, schema);
-
-        // Last, so it outranks anything a consumer's ConfigureConventions retyped (§5.12). Scoped to
-        // Warp.Core's own entity CLR types, which is also why running before the external
-        // configurators costs nothing: the types they contribute are outside that filter either way.
-        modelBuilder.PinWarpStorageTypes();
-
-        return modelBuilder;
     }
 }

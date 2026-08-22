@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Warp.Core.Data.Converters;
 
 namespace Warp.Core;
 
@@ -40,6 +41,10 @@ internal sealed class WarpServerContext<TContext> : DbContext, IWarpServerContex
         {
             configurator(modelBuilder, schema);
         }
+
+        // Same re-pin as WarpModelCustomizer: a configurator-added property on a Warp-owned entity
+        // must store identically on both contexts.
+        modelBuilder.PinWarpStorageTypes();
 
         WarpServerModel.MirrorNames(modelBuilder, _modelNames);
     }
