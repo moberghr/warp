@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 5.1.0
 
-*Unreleased*
+*2026-08-22*
 
 Minor release, completing what 5.0.0 started: **Warp is now in full control of its own model — no model-wide EF Core convention you declare reaches a Warp entity.** 5.0.0 pinned three conversion families (enum, `DateTime`, `Guid`); this release closes the rest of the class in one mechanism instead of family-by-family, and adds a startup check for the one surface that cannot be neutralized at model-build time.
 
