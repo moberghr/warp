@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Microsoft.EntityFrameworkCore.Metadata.Conventions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Shouldly;
@@ -111,10 +113,107 @@ public class StorageTypeConventionTests
         using var context = Context<HostileConventionContext>(sqlServer);
         var consumer = context.Model.FindEntityType(typeof(ConsumerRow))!;
 
-        // Warp pinning its own storage must not reach across into the consumer's entities.
+        // Warp pinning its own storage must not reach across into the consumer's entities —
+        // conversions and facets both keep applying there.
         consumer.FindProperty(nameof(ConsumerRow.Flavour))!.GetProviderClrType().ShouldBe(typeof(string));
         consumer.FindProperty(nameof(ConsumerRow.PlacedAt))!.GetProviderClrType().ShouldBe(typeof(long));
         consumer.FindProperty(nameof(ConsumerRow.Reference))!.GetProviderClrType().ShouldBe(typeof(string));
+        consumer.FindProperty(nameof(ConsumerRow.Note))!.GetMaxLength().ShouldBe(50);
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarpScalarProperties_KeepNativeTypes_WhenConsumerRetypesWarpColumns(bool sqlServer)
+    {
+        using var context = Context<HostileConventionContext>(sqlServer);
+
+        // The generalized reclaim: every non-whitelisted scalar goes back to native storage, so bool,
+        // int, long and double conversions never reach Warp's columns either.
+        WarpProperties(context.Model)
+            .Where(x => !IsEnum(x.Property))
+            .Where(x => Unwrap(x.Property) != typeof(DateTime))
+            .Where(x => Unwrap(x.Property) != typeof(IReadOnlyList<TimeSpan>))
+            .Where(x => x.Property.GetProviderClrType() is not null || x.Property.GetValueConverter() is not null)
+            .Select(x => x.Describe())
+            .ShouldBeEmpty();
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WarpStringProperties_KeepWarpFacets_WhenConsumerAppliesFacetConventions(bool sqlServer)
+    {
+        using var context = Context<HostileConventionContext>(sqlServer);
+        var job = context.Model.FindEntityType(typeof(Job))!;
+
+        // Pre-convention facets land at property creation with the same configuration source as
+        // Warp's own fluent calls, so ApplyWarpModel resets and re-declares: Warp's declared facets
+        // survive, the consumer's model-wide ones do not — a global HaveMaxLength must never
+        // silently truncate Job.Message, and a global HaveColumnType must never retype it.
+        job.FindProperty(nameof(Job.Message))!.GetMaxLength().ShouldBeNull();
+        job.FindProperty(nameof(Job.Message))!.FindAnnotation("Relational:ColumnType").ShouldBeNull();
+        job.FindProperty(nameof(Job.Message))!.IsUnicode().ShouldBeNull();
+        job.FindProperty(nameof(Job.Application))!.GetMaxLength().ShouldBe(200);
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RetryScheduleConverter_SurvivesTheReclaim(bool sqlServer)
+    {
+        using var context = Context<HostileConventionContext>(sqlServer);
+        var delivery = context.Model.FindEntityType(typeof(Warp.Core.Data.Entities.WebhookDelivery))!;
+
+        // The reclaim wipes converters and the re-declaration restores Warp's own — losing this one
+        // would silently break webhook retry-schedule persistence (§8.20 roundtrip mandate).
+        delivery.FindProperty(nameof(Warp.Core.Data.Entities.WebhookDelivery.RetrySchedule))!
+            .GetValueConverter()
+            .ShouldNotBeNull();
+    }
+
+    [TimedFact]
+    public void EnsureWarpStorageContract_Throws_WhenAFinalizingConventionRetypesAWarpColumn()
+    {
+        var options = new DbContextOptionsBuilder<FinalizingConventionContext>()
+            .UseNpgsql(PostgresConnection)
+            .Options;
+
+        using var context = new FinalizingConventionContext(options);
+
+        // A convention added via ConfigureConventions(c => c.Conventions.Add(...)) runs at model
+        // finalization — after OnModelCreating and past every build-time pin. The boot guard is the
+        // only line of defense, and it must name the property.
+        var ex = Should.Throw<InvalidOperationException>(() => WarpModelGuard.EnsureWarpStorageContract(context));
+
+        ex.Message.ShouldContain("Job.Kind");
+    }
+
+    [TimedFact]
+    public void ExplicitFacetOverride_AfterApplyWarpModel_StillWins()
+    {
+        var options = new DbContextOptionsBuilder<EscapeHatchContext>()
+            .UseNpgsql(PostgresConnection)
+            .Options;
+
+        using var context = new EscapeHatchContext(options);
+
+        // The documented escape hatch: a deliberate per-property FACET override placed after
+        // ApplyWarpModel in the consumer's OnModelCreating outranks the ownership pass, which only
+        // neutralizes model-wide conventions. Conversions are not part of the hatch — the boot
+        // guard rejects those.
+        context.Model.FindEntityType(typeof(Job))!
+            .FindProperty(nameof(Job.Message))!
+            .GetMaxLength()
+            .ShouldBe(123);
+    }
+
+    [TimedFact]
+    public void EnsureWarpStorageContract_Passes_OnACleanModel()
+    {
+        using var context = Context<HostileConventionContext>(sqlServer: false);
+
+        Should.NotThrow(() => WarpModelGuard.EnsureWarpStorageContract(context));
     }
 
     [TimedTheory]
@@ -218,6 +317,12 @@ internal class HostileConventionContext : DbContext
         configurationBuilder.Properties<Enum>().HaveConversion<string>();
         configurationBuilder.Properties<DateTime>().HaveConversion<long>();
         configurationBuilder.Properties<Guid>().HaveConversion<string>();
+        configurationBuilder.Properties<bool>().HaveConversion<string>();
+        configurationBuilder.Properties<int>().HaveConversion<string>();
+        configurationBuilder.Properties<long>().HaveConversion<string>();
+        configurationBuilder.Properties<double>().HaveConversion<decimal>();
+        configurationBuilder.Properties<string>().HaveMaxLength(50).AreUnicode(false);
+        configurationBuilder.Properties<string>().HaveColumnType("varchar(64)");
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -250,6 +355,53 @@ internal class UnpinnedWarpEntityContext : DbContext
     }
 }
 
+internal class EscapeHatchContext : DbContext
+{
+    public EscapeHatchContext(DbContextOptions<EscapeHatchContext> options)
+        : base(options)
+    {
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyWarpModel("warp");
+        modelBuilder.Entity<Job>().Property(x => x.Message).HasMaxLength(123);
+    }
+}
+
+// The one surface build-time ordering cannot beat: a runtime convention added by the host runs at
+// model finalization, after OnModelCreating entirely. WarpModelGuard.EnsureWarpStorageContract is
+// the guard for it.
+internal class FinalizingConventionContext : DbContext
+{
+    public FinalizingConventionContext(DbContextOptions<FinalizingConventionContext> options)
+        : base(options)
+    {
+    }
+
+    protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+    {
+        configurationBuilder.Conventions.Add(_ => new RetypeWarpColumnConvention());
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyWarpModel("warp");
+    }
+
+    private sealed class RetypeWarpColumnConvention : IModelFinalizingConvention
+    {
+        public void ProcessModelFinalizing(IConventionModelBuilder modelBuilder, IConventionContext<IConventionModelBuilder> context)
+        {
+            modelBuilder.Metadata.FindEntityType(typeof(Job))
+                ?.FindProperty(nameof(Job.Kind))
+                ?.SetProviderClrType(typeof(string), fromDataAnnotation: false);
+        }
+    }
+}
+
 internal class ConsumerRow
 {
     public int Id { get; set; }
@@ -259,4 +411,6 @@ internal class ConsumerRow
     public DateTime PlacedAt { get; set; }
 
     public Guid Reference { get; set; }
+
+    public string Note { get; set; } = string.Empty;
 }

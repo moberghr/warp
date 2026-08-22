@@ -8,12 +8,17 @@ namespace Warp.Core.Data.Converters;
 // statements compare against literals of a fixed type (§1.6), and WarpServerContext mirrors table
 // and column NAMES from TContext without replaying its ConfigureConventions — so a consuming
 // context whose convention retypes a Warp column leaves the two contexts disagreeing about what is
-// physically there, and the server tasks fail every tick against their own tables. This pass runs
-// last in ApplyWarpModel and pins the three families a global convention typically retargets, so
-// `Properties<Enum>().HaveConversion<string>()`, `Properties<DateTime>().HaveConversion<long>()`
-// and friends stay confined to the consumer's own entities.
+// physically there, and the server tasks fail every tick against their own tables.
 //
-// UTC stamping is part of the same pass. SQL Server datetime/datetime2 columns carry no timezone
+// Pre-convention model configuration (ModelConfigurationBuilder) is applied to each property AT
+// CREATION with Explicit configuration source — indistinguishable from Warp's own fluent calls, so
+// it cannot be filtered by source. Ownership is therefore enforced by ordering instead:
+// ApplyWarpModel applies Warp's entity declarations, RESETS every storage-affecting facet and
+// conversion this pass knows about, re-applies the declarations (restoring Warp's own explicit
+// facets and converters), and finishes with the pins below. The consumer's conventions keep
+// applying to the consumer's own entities — both passes are scoped to Warp.Core's entity CLR types.
+//
+// UTC stamping is part of the final pass. SQL Server datetime/datetime2 columns carry no timezone
 // marker, so EF Core materializes DateTime values with Kind=Unspecified. System.Text.Json then
 // serializes them without a 'Z' suffix, and JavaScript Date() parses the string as local time.
 // These converters stamp Kind=Utc on read so JSON output stays unambiguous and §5.7's UTC invariant
@@ -31,23 +36,43 @@ internal static class WarpStorageTypes
         v => v.HasValue ? ToUtcOnWrite(v.Value) : v,
         v => v.HasValue ? DateTime.SpecifyKind(v.Value, DateTimeKind.Utc) : v);
 
+    // Strips every storage-affecting setting a consumer's pre-convention configuration injected
+    // into Warp's own properties: conversions AND facets (column type, max length, unicode,
+    // precision/scale, fixed length, collation). Column NAMES are deliberately untouched — naming
+    // conventions are honoured by design (§2.14 mirrors them). Warp's own declarations are wiped
+    // too; ApplyWarpModel re-applies them immediately after.
+    internal static void ReclaimWarpStorage(this ModelBuilder modelBuilder)
+    {
+        foreach (var property in WarpProperties(modelBuilder))
+        {
+            property.SetValueConverter((ValueConverter?)null);
+            property.SetProviderClrType(null);
+            property.SetColumnType(null);
+            property.SetMaxLength(null);
+            property.SetIsUnicode(null);
+            property.SetPrecision(null);
+            property.SetScale(null);
+            property.SetIsFixedLength(null);
+            property.SetCollation(null);
+        }
+    }
+
     // Applied by WarpModelCustomizer in production and by TestContext.OnModelCreating in tests.
     // Scoped to Warp.Core's own entity CLR types (assembly-equality rather than namespace prefix)
     // so it can't bleed into a user's entity that happens to live under Warp.*.
     internal static void PinWarpStorageTypes(this ModelBuilder modelBuilder)
     {
-        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        foreach (var property in WarpProperties(modelBuilder))
         {
-            if (entityType.ClrType.Assembly != WarpCoreAssembly)
-            {
-                continue;
-            }
-
-            foreach (var property in entityType.GetProperties())
-            {
-                PinProperty(property);
-            }
+            PinProperty(property);
         }
+    }
+
+    private static IEnumerable<IMutableProperty> WarpProperties(ModelBuilder modelBuilder)
+    {
+        return modelBuilder.Model.GetEntityTypes()
+            .Where(x => x.ClrType.Assembly == WarpCoreAssembly)
+            .SelectMany(x => x.GetProperties());
     }
 
     private static void PinProperty(IMutableProperty property)

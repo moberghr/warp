@@ -4,6 +4,43 @@ sidebar_position: 6
 
 # Releases
 
+## 5.1.0
+
+*Unreleased*
+
+Minor release, completing what 5.0.0 started: **Warp is now in full control of its own model — no model-wide EF Core convention you declare reaches a Warp entity.** 5.0.0 pinned three conversion families (enum, `DateTime`, `Guid`); this release closes the rest of the class in one mechanism instead of family-by-family, and adds a startup check for the one surface that cannot be neutralized at model-build time.
+
+**If your `DbContext` declares no model-wide convention, this release is a no-op** — verified byte-for-byte: every Warp property (store type, name, nullability, facets, converters) and every index comes out identical, so `dotnet ef migrations add` after upgrading produces an empty migration.
+
+### No consumer convention applies to a Warp entity
+
+What now stops at Warp's entities, on top of 5.0.0's three families:
+
+- **All remaining conversion conventions** — `Properties<bool>().HaveConversion<string>()` (the `char(1)` Y/N habit), `Properties<int>()`, `Properties<long>()`, `Properties<double>()`, and any other scalar retype. Each of these physically retyped Warp's columns while Warp's claim SQL and server context kept the native type — the same total execution failure as the 5.0.0 enum case (#279), just rarer conventions.
+- **Facet conventions** — `HaveMaxLength(n)`, `HaveColumnType(...)`, `AreUnicode(...)`, `HavePrecision(...)`. These were documented as unsupported in 5.0.0; they are now neutralized. The dangerous one was silent rather than loud: a model-wide `HaveMaxLength(50)` put a 50-character cap on `Job.Message` — **truncating job payloads** — and on 45 other Warp columns.
+
+Naming conventions (`UseSnakeCaseNamingConvention()` and friends) are untouched and keep applying — they were always honoured by design.
+
+The mechanism is ordering, not enumeration: EF applies `ConfigureConventions` settings to each property at creation, indistinguishable from explicit configuration — so `ApplyWarpModel` now declares its model, strips every storage-affecting setting from its own properties, re-declares (restoring Warp's own facets and converters), and pins the storage types. Scoped by assembly to Warp's entity CLR types: your entities keep every convention you declared, including one living in a `Warp.*` namespace. A future convention EF grows is neutralized automatically — there is no family list to keep current.
+
+### Startup check for the one unbeatable surface
+
+A runtime convention added via `ConfigureConventions(c => c.Conventions.Add(...))` runs at model *finalization* — after `OnModelCreating` entirely, past any build-time ordering. If such a convention retypes a Warp column, the host now **fails at startup** with an error naming the property and the fix, instead of what previously happened: publishing works, the dashboard works, and no job is ever executed while server tasks fail every tick in the worker logs. A boot error is strictly better than that silent shape — but it is a new throw for a configuration that previously *appeared* to run, which is the reason this is 5.1.0 and not 5.0.1.
+
+### What you need to do
+
+| Your `ConfigureConventions` | On upgrade |
+|---|---|
+| Nothing model-wide | **Nothing.** Empty migration, byte-identical model. |
+| A conversion convention (`bool`/`int`/`long`/`double`/…) | Warp never executed a job for you (see the 5.0.0 notes below — same situation, same procedure): rebuild Warp's tables, or convert the affected columns. |
+| A facet convention (`HaveMaxLength`, `AreUnicode`, …) | Your Warp columns exist capped (e.g. `varchar(50)`). The generated migration **widens** them (`varchar(50)` → `text`) — widening converts automatically on both providers, so it runs as generated. Already-truncated payloads are not recoverable. |
+| A `HaveColumnType(...)` convention | As above if the type differs only in width; rebuild the Warp tables if it changed the underlying type. |
+| A runtime convention (`Conventions.Add(...)`) touching Warp entities | The host now refuses to start, naming the property. Scope the convention to your own entity types. |
+
+To deliberately override a *facet* on a Warp column (a different column type for one column, say), configure it **after** `ApplyWarpModel` in `OnModelCreating` — that explicit per-property override is the supported escape hatch and still wins. Overriding a Warp column's *conversion* is not supported from any position: the startup check rejects it, because Warp's claim SQL physically depends on those types.
+
+See **[EF Core integration](./operations/ef-core-integration.md#naming-conventions-are-honoured-type-changing-conventions-are-not)** for the full table of what applies where.
+
 ## 5.0.0
 
 *2026-08-22*

@@ -56,6 +56,24 @@ public static class WarpModelExtensions
             return modelBuilder;
         }
 
+        // A consumer's pre-convention configuration (ConfigureConventions) is applied to each
+        // property AT CREATION with the same configuration source as explicit fluent calls, so it
+        // cannot be told apart from Warp's own declarations afterwards. Ownership of Warp's columns
+        // is therefore enforced by ordering: declare the model (user defaults land on creation, Warp's
+        // explicit facets overwrite where declared), strip every storage-affecting setting from Warp's
+        // properties, re-declare so Warp's own facets and converters come back, then pin the storage
+        // types. Net effect: conventions keep applying to the consumer's entities and never to Warp's
+        // (§5.12). Naming conventions are untouched throughout — they are honoured by design (§2.14).
+        AddWarpEntities(modelBuilder, schema);
+        modelBuilder.ReclaimWarpStorage();
+        AddWarpEntities(modelBuilder, schema);
+        modelBuilder.PinWarpStorageTypes();
+
+        return modelBuilder;
+    }
+
+    private static void AddWarpEntities(ModelBuilder modelBuilder, string? schema)
+    {
         modelBuilder.AddOutboxStateEntity(schema);
 
         // Addon entities are registered unconditionally regardless of which addons the host opts into
@@ -66,12 +84,5 @@ public static class WarpModelExtensions
         ServiceConfiguration.AddRateLimitOverrideEntity(modelBuilder, schema);
         ServiceConfiguration.AddSagaStateEntity(modelBuilder, schema);
         ServiceConfiguration.AddSagaJobLinkEntity(modelBuilder, schema);
-
-        // Last, so it outranks anything a consumer's ConfigureConventions retyped (§5.12). Scoped to
-        // Warp.Core's own entity CLR types, which is also why running before the external
-        // configurators costs nothing: the types they contribute are outside that filter either way.
-        modelBuilder.PinWarpStorageTypes();
-
-        return modelBuilder;
     }
 }
