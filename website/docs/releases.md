@@ -4,6 +4,48 @@ sidebar_position: 6
 
 # Releases
 
+## 6.0.0
+
+*Unreleased*
+
+Major release, one breaking change: **`IRecurringJobService` now addresses a recurring job by the name it was registered under, not by the table's surrogate id.**
+
+### Recurring jobs are keyed by name
+
+`AddOrUpdateRecurringJob(message, name, cron)` has always registered a definition under a name. Everything you could then *do* to that definition took an `int id` — which meant a code caller holding the only identity it ever had (the name) first had to query the `RecurringJob` table for a surrogate key:
+
+```csharp
+// Before 6.0
+var id = await ctx.Set<RecurringJob>()
+    .Where(x => x.Name == "session-cleanup")
+    .Select(x => x.Id)
+    .FirstAsync();
+
+await svc.TriggerRecurringJob(id);
+
+// 6.0
+await svc.TriggerRecurringJob("session-cleanup");
+```
+
+The rename is not only ergonomics. The name is unique-indexed and **stable across a delete-and-re-register**; the identity column is not, so an id captured in code, stored in config, or bookmarked from the dashboard could silently outlive the definition it named and land on a different one. Six methods changed:
+
+| Before | 6.0 |
+|---|---|
+| `TriggerRecurringJob(int id)` | `TriggerRecurringJob(string name)` |
+| `EnableRecurringJob(int id)` | `EnableRecurringJob(string name)` |
+| `DisableRecurringJob(int id)` | `DisableRecurringJob(string name)` |
+| `DeleteRecurringJob(int id)` | `DeleteRecurringJob(string name)` |
+| `GetRecurringJobById(int id)` | `GetRecurringJob(string name)` |
+| `GetRecurringJobHistory(int id, …)` | `GetRecurringJobHistory(string name, …)` |
+
+These are compile errors on upgrade, and the fix is to pass the name you already register with. `GetRecurringJobs(BaseListRequest)` is unchanged, and `RecurringJobModel` still carries `Id` — nothing about the schema or the stored rows changed, so **there is no migration**.
+
+Behavior worth knowing: names are **trimmed** on both the write and the read side, so a padded name still resolves. A name no definition matches **throws `ArgumentException`** from the four command methods and reads as not-found (null / empty page) from the two queries. `AddOrUpdateRecurringJob` now **validates the name** — non-empty after trimming, at most 200 characters (it is also the name of the registration's distributed lock) — instead of accepting an identity nothing could address afterwards. No column facet changed, so this too generates no migration.
+
+### Dashboard API routes carry the name
+
+The six routes under `{prefix}/api/recurring/{id}` keep their shape, but `{id}` is now the **URL-safe base64 of the name** rather than an integer — the same codec the endpoints and applications routes already use (base64 of the UTF-8 bytes, `+`→`-`, `/`→`_`, trailing `=` trimmed), because a name may contain `/` and spaces. `session-cleanup` becomes `c2Vzc2lvbi1jbGVhbnVw`. An id that does not decode, and a name no definition matches, both answer **404** — previously an unknown id surfaced as a 500. The bundled dashboard moves with it; only a caller scripting these endpoints directly needs to change. The recurring job detail page drops its "ID" row, which named a value nothing addresses any more.
+
 ## 5.1.0
 
 *2026-08-22*

@@ -51,12 +51,22 @@ Standard 5-part cron (minute, hour, day, month, weekday) and 6-part with seconds
 
 ## Manual Trigger
 
-Trigger a recurring job immediately from the dashboard or via the API:
+Trigger a recurring job immediately — from code, from the dashboard, or over the API. `IRecurringJobService` keys on the **name** you registered the definition under, so a code caller needs nothing it does not already have:
 
 ```csharp
 var svc = serviceProvider.GetRequiredService<IRecurringJobService>();
-await svc.TriggerRecurringJob(id);
+await svc.TriggerRecurringJob("session-cleanup");
 ```
+
+The definition's cron schedule is untouched: the trigger stages one extra job with `ScheduleTime = now`, writes its `RecurringJobLog` entry, and fires the `JobEnqueued` wake, so a worker claims it without waiting out its polling backoff. `NextExecution` still points at the next natural cron occurrence.
+
+An explicit trigger deliberately **ignores `DisabledAt`** — it is an operator override, so a disabled definition still produces a real job (see [Behavior](#behavior)).
+
+A name no definition matches throws `ArgumentException`. The name is trimmed before lookup, so surrounding whitespace never causes a miss.
+
+:::info The name is the identity
+Every single-definition method on `IRecurringJobService` — `TriggerRecurringJob`, `EnableRecurringJob`, `DisableRecurringJob`, `DeleteRecurringJob`, `GetRecurringJob`, `GetRecurringJobHistory` — takes the registered name. It is unique, it is what your code already holds, and unlike the table's surrogate id it survives a delete-and-re-register unchanged. Names are trimmed, must be non-empty, and are capped at 200 characters (the name also names the registration's distributed lock).
+:::
 
 ## Enable / Disable
 
@@ -68,6 +78,10 @@ POST /api/recurring/{id}/enable
 ```
 
 Or use the Enable/Disable button on the dashboard.
+
+:::note `{id}` in the dashboard API
+A recurring job name may contain `/` and spaces, so the REST routes carry it as its URL-safe base64 (the same encoding the endpoints and applications routes use): base64 of the UTF-8 bytes with `+`→`-`, `/`→`_`, and trailing `=` trimmed. `session-cleanup` becomes `c2Vzc2lvbi1jbGVhbnVw`. An id that does not decode, or a name no definition matches, answers `404`.
+:::
 
 ### How It Works
 
@@ -110,7 +124,7 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 ## Deleting a Recurring Job
 
 ```csharp
-await recurringJobService.DeleteRecurringJob(id);
+await recurringJobService.DeleteRecurringJob("session-cleanup");
 ```
 
 Or use the delete button on the dashboard.

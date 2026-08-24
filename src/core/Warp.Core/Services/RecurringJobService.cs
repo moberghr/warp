@@ -8,21 +8,29 @@ using Warp.Core.Notifications;
 
 namespace Warp.Core.Services;
 
+/// <summary>
+/// Reads and operates on recurring job definitions. Every single-definition method keys on the
+/// <c>name</c> the definition was registered under (<see cref="IRecurringJobPublisher.AddOrUpdateRecurringJob{T}"/>)
+/// — the identity a caller already holds, unique-indexed, and stable across a delete-and-re-register
+/// (the surrogate <c>Id</c> is not). Names are trimmed before lookup, so they match however the
+/// caller spaced them. A name no definition matches throws <see cref="ArgumentException"/> from the
+/// command methods and reads as "not found" (null / empty page) from the queries.
+/// </summary>
 public interface IRecurringJobService
 {
     Task<PagedList<RecurringJobModel>> GetRecurringJobs(BaseListRequest request);
 
-    Task<RecurringJobDetailModel?> GetRecurringJobById(int id);
+    Task<RecurringJobDetailModel?> GetRecurringJob(string name);
 
-    Task<PagedList<RecurringJobHistoryModel>> GetRecurringJobHistory(int id, BaseListRequest request);
+    Task<PagedList<RecurringJobHistoryModel>> GetRecurringJobHistory(string name, BaseListRequest request);
 
-    Task TriggerRecurringJob(int id);
+    Task TriggerRecurringJob(string name);
 
-    Task DeleteRecurringJob(int id);
+    Task DeleteRecurringJob(string name);
 
-    Task EnableRecurringJob(int id);
+    Task EnableRecurringJob(string name);
 
-    Task DisableRecurringJob(int id);
+    Task DisableRecurringJob(string name);
 }
 
 public class RecurringJobService<TContext> : IRecurringJobService
@@ -64,10 +72,12 @@ public class RecurringJobService<TContext> : IRecurringJobService
         return page;
     }
 
-    public async Task<RecurringJobDetailModel?> GetRecurringJobById(int id)
+    public async Task<RecurringJobDetailModel?> GetRecurringJob(string name)
     {
+        var jobName = RecurringJobName.Normalize(name);
+
         return await _context.Set<RecurringJob>()
-            .Where(x => x.Id == id)
+            .Where(x => x.Name == jobName)
             .Select(x => new RecurringJobDetailModel
             {
                 Id = x.Id,
@@ -84,8 +94,22 @@ public class RecurringJobService<TContext> : IRecurringJobService
             .FirstOrDefaultAsync();
     }
 
-    public async Task<PagedList<RecurringJobHistoryModel>> GetRecurringJobHistory(int id, BaseListRequest request)
+    public async Task<PagedList<RecurringJobHistoryModel>> GetRecurringJobHistory(string name, BaseListRequest request)
     {
+        var jobName = RecurringJobName.Normalize(name);
+
+        // Two-step over the name (§5.2): RecurringJobLog carries no navigation back to its
+        // definition, so resolve the surrogate key the log rows are indexed on first.
+        var id = await _context.Set<RecurringJob>()
+            .Where(x => x.Name == jobName)
+            .Select(x => (int?)x.Id)
+            .FirstOrDefaultAsync();
+
+        if (id is null)
+        {
+            return new PagedList<RecurringJobHistoryModel>(0, [], 0);
+        }
+
         return await _context.Set<RecurringJobLog>()
             .Where(l => l.RecurringJobId == id)
             .OrderByDescending(l => l.CreatedAt)
@@ -101,9 +125,9 @@ public class RecurringJobService<TContext> : IRecurringJobService
             .ToPagedListAsync(request);
     }
 
-    public async Task TriggerRecurringJob(int id)
+    public async Task TriggerRecurringJob(string name)
     {
-        var recurringJob = await _context.Set<RecurringJob>().FindAsync(id) ?? throw new ArgumentException("Recurring job not found.", nameof(id));
+        var recurringJob = await LoadByName(name);
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
@@ -138,25 +162,37 @@ public class RecurringJobService<TContext> : IRecurringJobService
         await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport);
     }
 
-    public async Task DeleteRecurringJob(int id)
+    public async Task DeleteRecurringJob(string name)
     {
-        var recurringJob = await _context.Set<RecurringJob>().FindAsync(id) ?? throw new ArgumentException("Recurring job not found.", nameof(id));
+        var recurringJob = await LoadByName(name);
         _context.Set<RecurringJob>().Remove(recurringJob);
         await _context.SaveChangesAsync();
     }
 
-    public async Task EnableRecurringJob(int id)
+    public async Task EnableRecurringJob(string name)
     {
-        var recurringJob = await _context.Set<RecurringJob>().FindAsync(id) ?? throw new ArgumentException("Recurring job not found.", nameof(id));
+        var recurringJob = await LoadByName(name);
         recurringJob.DisabledAt = null;
         await _context.SaveChangesAsync();
     }
 
-    public async Task DisableRecurringJob(int id)
+    public async Task DisableRecurringJob(string name)
     {
-        var recurringJob = await _context.Set<RecurringJob>().FindAsync(id) ?? throw new ArgumentException("Recurring job not found.", nameof(id));
+        var recurringJob = await LoadByName(name);
         recurringJob.DisabledAt = _timeProvider.GetUtcNow().UtcDateTime;
         await _context.SaveChangesAsync();
+    }
+
+    // Tracked load for the four command methods — they all mutate or remove the row, so this is the
+    // one place that loads a full entity rather than a projection (§5.3).
+    private async Task<RecurringJob> LoadByName(string name)
+    {
+        var jobName = RecurringJobName.Normalize(name);
+
+        return await _context.Set<RecurringJob>()
+            .Where(x => x.Name == jobName)
+            .FirstOrDefaultAsync()
+            ?? throw new ArgumentException($"Recurring job '{jobName}' not found.", nameof(name));
     }
 
     // Two-step fetch over the page's definitions (§5.2 — no Set<> subquery inside a projection):

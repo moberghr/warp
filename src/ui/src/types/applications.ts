@@ -2,6 +2,8 @@
 // in Warp.Core/Models/ApplicationSummaryModel.cs, ApplicationDetailModel.cs, InstanceView.cs and
 // JobExecutionMetricsModel.cs, serialized camelCase.
 
+import { encodeUrlSafeId } from '@/lib/urlSafeId';
+
 // ApplicationInstanceEventType — numeric on the wire (§8.11, starts at 1), matching
 // Warp.Core.Enums.ApplicationInstanceEventType.
 export const ApplicationInstanceEventType = {
@@ -89,18 +91,11 @@ export interface JobExecutionMetricsModel {
 }
 
 /**
- * URL-safe base64 of an application name for the detail route segment — mirrors the backend
- * Warp.Core.Models.UrlSafeId.Encode (base64 of the UTF-8 bytes, '+'→'-', '/'→'_', trailing
- * '=' trimmed) so the route decodes back to the exact name.
+ * URL-safe base64 of an application name for the detail route segment. One codec shared with the
+ * other name-addressed routes (endpoints, recurring jobs) — see lib/urlSafeId.
  */
 export function encodeAppId(name: string): string {
-  const bytes = new TextEncoder().encode(name);
-  let binary = '';
-  for (const b of bytes) {
-    binary += String.fromCharCode(b);
-  }
-
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return encodeUrlSafeId(name);
 }
 
 /** Per-queue SLIs (§8.26): queue-wait latency + latest backlog gauge. */

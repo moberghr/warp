@@ -27,8 +27,8 @@ describe('queryKeys', () => {
     expect(queryKeys.messageJobCounts('m')).toEqual(['messages', 'm', 'jobs', 'counts']);
     expect(queryKeys.batchJobCounts('b')).toEqual(['batches', 'b', 'jobs', 'counts']);
     expect(queryKeys.recurring(0, 20)).toEqual(['recurring', 0, 20]);
-    expect(queryKeys.recurringDetail(3)).toEqual(['recurring', 3]);
-    expect(queryKeys.recurringJobs(3, 0, 20)).toEqual(['recurring', 3, 'jobs', 0, 20]);
+    expect(queryKeys.recurringDetail('nightly')).toEqual(['recurring', 'nightly']);
+    expect(queryKeys.recurringJobs('nightly', 0, 20)).toEqual(['recurring', 'nightly', 'jobs', 0, 20]);
     expect(queryKeys.servers).toEqual(['servers']);
     expect(queryKeys.serverDetail('s')).toEqual(['servers', 's']);
     expect(queryKeys.serverTasks('s')).toEqual(['servers', 's', 'tasks']);

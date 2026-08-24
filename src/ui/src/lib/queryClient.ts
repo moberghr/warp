@@ -43,9 +43,9 @@ export const queryKeys = {
     ['batches', id, 'jobs', state ?? 'all', page, pageSize] as const,
   batchJobCounts: (id: string) => ['batches', id, 'jobs', 'counts'] as const,
   recurring: (page: number, pageSize: number) => ['recurring', page, pageSize] as const,
-  recurringDetail: (id: number) => ['recurring', id] as const,
-  recurringJobs: (id: number, page: number, pageSize: number) =>
-    ['recurring', id, 'jobs', page, pageSize] as const,
+  recurringDetail: (name: string) => ['recurring', name] as const,
+  recurringJobs: (name: string, page: number, pageSize: number) =>
+    ['recurring', name, 'jobs', page, pageSize] as const,
   servers: ['servers'] as const,
   serverDetail: (id: string) => ['servers', id] as const,
   serverTasks: (id: string) => ['servers', id, 'tasks'] as const,
