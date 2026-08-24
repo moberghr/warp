@@ -1,5 +1,6 @@
 import type { InternalAxiosRequestConfig, AxiosResponse } from 'axios';
 import * as data from './data';
+import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { demoAdapters, demoAdapterDetails, demoAdapterCalls } from './data/adapters';
 import { demoWebhooks, demoWebhookDetails, demoWebhookSummary } from './data/webhooks';
 import {
@@ -868,15 +869,16 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   if (url === '/recurring') {
     return data.paginate(data.recurringJobs, page, pageSize);
   }
-  if (/^\/recurring\/\d+\/jobs$/.test(url)) {
-    const id = Number(url.split('/')[2]);
+  // {id} is the URL-safe base64 of the definition's NAME (mirrors UrlSafeId / lib/urlSafeId).
+  if (/^\/recurring\/[^/]+\/jobs$/.test(url)) {
+    const name = decodeUrlSafeId(url.split('/')[2]);
 
-    return data.paginate(data.getRecurringHistory(id), page, pageSize);
+    return data.paginate(data.getRecurringHistory(name), page, pageSize);
   }
-  if (/^\/recurring\/\d+$/.test(url)) {
-    const id = Number(url.split('/').pop());
+  if (/^\/recurring\/[^/]+$/.test(url)) {
+    const name = decodeUrlSafeId(url.split('/').pop()!);
 
-    return data.getRecurringDetail(id);
+    return data.getRecurringDetail(name);
   }
 
   // Servers

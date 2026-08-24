@@ -743,8 +743,10 @@ export const recurringJobs: RecurringJobModel[] = [
   },
 ];
 
-export function getRecurringDetail(id: number): RecurringJobDetailModel {
-  const rj = recurringJobs.find((r) => r.id === id) ?? recurringJobs[0];
+// Definitions are addressed by NAME (the identity the real API keys on), so the demo router looks
+// them up the same way. The surrogate id survives only as the fixtures' history seed.
+export function getRecurringDetail(name: string): RecurringJobDetailModel {
+  const rj = recurringJobs.find((r) => r.name === name) ?? recurringJobs[0];
   return {
     ...rj,
     message: JSON.stringify({ filter: 'stale', maxAge: '30d' }),
@@ -752,11 +754,12 @@ export function getRecurringDetail(id: number): RecurringJobDetailModel {
   };
 }
 
-export function getRecurringHistory(id: number): RecurringJobHistoryModel[] {
-  const rj = recurringJobs.find((r) => r.id === id);
+export function getRecurringHistory(name: string): RecurringJobHistoryModel[] {
+  const rj = recurringJobs.find((r) => r.name === name);
+  const seed = rj?.id ?? 1;
   return Array.from({ length: 15 }, (_, i) => ({
-    jobId: i < 12 ? uid(8000 + id * 100 + i) : null,
-    createdAt: ago(i * 86400 + id * 3600),
+    jobId: i < 12 ? uid(8000 + seed * 100 + i) : null,
+    createdAt: ago(i * 86400 + seed * 3600),
     jobExists: i < 12,
     type: rj?.type ?? null,
     currentState: i < 12 ? (i === 3 ? State.Failed : State.Completed) : null,

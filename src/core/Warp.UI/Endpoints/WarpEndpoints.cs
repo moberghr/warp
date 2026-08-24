@@ -105,23 +105,56 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("messages/{messageId}/jobs/counts", async ([FromServices] IJobGroupQueryService svc, Guid messageId) => await svc.GetJobGroupJobCounts(messageId));
 
-        apiGroup.MapGet("recurring", async ([FromServices] IRecurringJobService recurringJobService, [AsParameters] BaseListRequest request) => await recurringJobService.GetRecurringJobs(request));
+        // Recurring jobs are addressed by the NAME they were registered under — the identity
+        // IRecurringJobService keys on, unique-indexed and stable across a delete-and-re-register
+        // (the surrogate Id is not, so a bookmarked id-keyed URL could outlive its definition). A raw
+        // name can hold '/' and spaces, so the {id} segment is its URL-safe base64 (UrlSafeId, the
+        // shared codec the endpoints and applications routes use). RecurringAction decodes it and
+        // maps an unknown name to 404.
+        apiGroup.MapGet("recurring", async ([FromServices] IRecurringJobService svc, [AsParameters] BaseListRequest request) => await svc.GetRecurringJobs(request));
 
-        apiGroup.MapGet("recurring/{id}", async ([FromServices] IRecurringJobService recurringJobService, int id) =>
-        {
-            var model = await recurringJobService.GetRecurringJobById(id);
-            return model is null ? Results.NotFound() : Results.Ok(model);
-        });
+        apiGroup.MapGet("recurring/{id}", async ([FromServices] IRecurringJobService svc, string id) =>
+            await RecurringAction(id, async name =>
+            {
+                var model = await svc.GetRecurringJob(name);
 
-        apiGroup.MapGet("recurring/{id}/jobs", async ([FromServices] IRecurringJobService recurringJobService, int id, [AsParameters] BaseListRequest request) => await recurringJobService.GetRecurringJobHistory(id, request));
+                return model is null ? Results.NotFound() : Results.Ok(model);
+            }));
 
-        apiGroup.MapPost("recurring/{id}/trigger", async ([FromServices] IRecurringJobService recurringJobService, int id) => await recurringJobService.TriggerRecurringJob(id));
+        apiGroup.MapGet("recurring/{id}/jobs", async ([FromServices] IRecurringJobService svc, string id, [AsParameters] BaseListRequest request) =>
+            await RecurringAction(id, async name => Results.Ok(await svc.GetRecurringJobHistory(name, request))));
 
-        apiGroup.MapPost("recurring/{id}/enable", async ([FromServices] IRecurringJobService recurringJobService, int id) => await recurringJobService.EnableRecurringJob(id));
+        apiGroup.MapPost("recurring/{id}/trigger", async ([FromServices] IRecurringJobService svc, string id) =>
+            await RecurringAction(id, async name =>
+            {
+                await svc.TriggerRecurringJob(name);
 
-        apiGroup.MapPost("recurring/{id}/disable", async ([FromServices] IRecurringJobService recurringJobService, int id) => await recurringJobService.DisableRecurringJob(id));
+                return Results.Ok();
+            }));
 
-        apiGroup.MapDelete("recurring/{id}", async ([FromServices] IRecurringJobService recurringJobService, int id) => await recurringJobService.DeleteRecurringJob(id));
+        apiGroup.MapPost("recurring/{id}/enable", async ([FromServices] IRecurringJobService svc, string id) =>
+            await RecurringAction(id, async name =>
+            {
+                await svc.EnableRecurringJob(name);
+
+                return Results.Ok();
+            }));
+
+        apiGroup.MapPost("recurring/{id}/disable", async ([FromServices] IRecurringJobService svc, string id) =>
+            await RecurringAction(id, async name =>
+            {
+                await svc.DisableRecurringJob(name);
+
+                return Results.Ok();
+            }));
+
+        apiGroup.MapDelete("recurring/{id}", async ([FromServices] IRecurringJobService svc, string id) =>
+            await RecurringAction(id, async name =>
+            {
+                await svc.DeleteRecurringJob(name);
+
+                return Results.Ok();
+            }));
 
         apiGroup.MapGet("batches", async ([FromServices] IJobGroupQueryService svc, [AsParameters] BaseListRequest request, string? state) => await svc.GetJobGroups(JobKind.Batch, request, state));
 
@@ -879,6 +912,29 @@ public static class WarpEndpoints
         }
 
         return apiGroup;
+    }
+
+    // Decodes the URL-safe base64 {id} segment back to the recurring job's name and runs the action
+    // against it. A malformed id, an empty name, and a name no definition matches are all the same
+    // answer over HTTP — 404 — so the ArgumentException IRecurringJobService throws for an unknown
+    // name (and its normalizer throws for an unusable one) does not surface as a 500.
+    private static async Task<IResult> RecurringAction(string id, Func<string, Task<IResult>> action)
+    {
+        var name = UrlSafeId.TryDecode(id);
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return Results.NotFound();
+        }
+
+        try
+        {
+            return await action(name);
+        }
+        catch (ArgumentException)
+        {
+            return Results.NotFound();
+        }
     }
 }
 

@@ -15,11 +15,14 @@ import {
   useTriggerRecurringJob,
   useDeleteRecurringJob,
 } from '@/api/hooks/useRecurring';
+import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import type { RecurringJobModel } from '@/types';
 
+// A definition is addressed by its name — the identity the API keys on. It travels URL-encoded in
+// the detail route because a name may hold '/' and spaces.
 type RecurringPending =
-  | { kind: 'trigger'; id: number; name: string }
-  | { kind: 'remove'; id: number; name: string };
+  | { kind: 'trigger'; name: string }
+  | { kind: 'remove'; name: string };
 
 export default function RecurringPage() {
   const [page, setPage] = useState(0);
@@ -35,8 +38,8 @@ export default function RecurringPage() {
 
   const runPending = () => {
     if (!pending) return;
-    if (pending.kind === 'trigger') trigger.mutate(pending.id);
-    else remove.mutate(pending.id);
+    if (pending.kind === 'trigger') trigger.mutate(pending.name);
+    else remove.mutate(pending.name);
     setPending(null);
   };
 
@@ -47,7 +50,7 @@ export default function RecurringPage() {
         header: 'Name',
         cell: ({ row }) => (
           <Link
-            to={`/recurring/${row.original.id}`}
+            to={`/recurring/${encodeUrlSafeId(row.original.name)}`}
             className="font-medium text-primary hover:underline"
           >
             {row.original.name}
@@ -138,18 +141,18 @@ export default function RecurringPage() {
         cell: ({ row }) => (
           <>
             {row.original.disabledAt ? (
-              <Button variant="ghost" size="sm" onClick={() => enable.mutate(row.original.id)}>
+              <Button variant="ghost" size="sm" onClick={() => enable.mutate(row.original.name)}>
                 Enable
               </Button>
             ) : (
-              <Button variant="ghost" size="sm" onClick={() => disable.mutate(row.original.id)}>
+              <Button variant="ghost" size="sm" onClick={() => disable.mutate(row.original.name)}>
                 Disable
               </Button>
             )}
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setPending({ kind: 'trigger', id: row.original.id, name: row.original.name })}
+              onClick={() => setPending({ kind: 'trigger', name: row.original.name })}
             >
               Trigger
             </Button>
@@ -157,7 +160,7 @@ export default function RecurringPage() {
               variant="ghost"
               size="sm"
               className="text-destructive"
-              onClick={() => setPending({ kind: 'remove', id: row.original.id, name: row.original.name })}
+              onClick={() => setPending({ kind: 'remove', name: row.original.name })}
             >
               Remove
             </Button>
@@ -180,7 +183,7 @@ export default function RecurringPage() {
         columns={columns}
         data={data.items}
         emptyMessage="No recurring jobs found"
-        getRowId={(row) => String(row.id)}
+        getRowId={(row) => row.name}
         pagination={{
           page,
           pageSize,

@@ -9,6 +9,7 @@
 // Server instances reuse the existing dashboard server ids (IDS.server1 / IDS.server2) so an
 // instance row that drills into /servers/{id} is consistent with the servers demo data.
 import { FROZEN_NOW } from '@/lib/demoMode';
+import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { IDS } from '@/demo/data';
 import { ApplicationInstanceEventType } from '@/types/applications';
 import type {
@@ -255,16 +256,8 @@ export const demoJobMetrics: JobExecutionMetricsModel = {
   ],
 };
 
-// URL-safe base64 of the application name → the name (mirror of encodeAppId / UrlSafeId.Decode) so
-// the router maps the {id} path segment back to a fixture key.
+// URL-safe base64 of the application name → the name, so the demo router maps the {id} path segment
+// back to a fixture key. One codec shared with the other name-addressed routes (see lib/urlSafeId).
 export function decodeAppId(id: string): string {
-  const b64 = id.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
-
-  return decodeURIComponent(
-    atob(padded)
-      .split('')
-      .map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
-      .join(''),
-  );
+  return decodeUrlSafeId(id);
 }

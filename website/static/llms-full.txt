@@ -571,15 +571,19 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 
 ### Manual trigger
 
+Every single-definition method on `IRecurringJobService` keys on the registered NAME (not the table's surrogate id): `TriggerRecurringJob`, `EnableRecurringJob`, `DisableRecurringJob`, `DeleteRecurringJob`, `GetRecurringJob`, `GetRecurringJobHistory`. Names are trimmed, must be non-empty, and are capped at 200 characters. An unknown name throws `ArgumentException`.
+
 ```csharp
 var svc = serviceProvider.GetRequiredService<IRecurringJobService>();
-await svc.TriggerRecurringJob(id);
+await svc.TriggerRecurringJob("session-cleanup");
 ```
+
+The trigger stages one extra job at `ScheduleTime = now` and fires the JobEnqueued wake; the cron schedule and `NextExecution` are untouched. An explicit trigger ignores `DisabledAt` (operator override).
 
 ### Delete
 
 ```csharp
-await recurringJobService.DeleteRecurringJob(id);
+await recurringJobService.DeleteRecurringJob("session-cleanup");
 ```
 
 ### Deduplication

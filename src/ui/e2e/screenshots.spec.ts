@@ -24,7 +24,9 @@ const pages = [
   { name: '11-login', path: '/' },
   { name: '12-trace', path: `/trace/${traceIdForUrl}` },
   { name: '13-worker-detail', path: `/workers/${DEMO_IDS.worker1}` },
-  { name: '14-recurring-detail', path: '/recurring/1' },
+  // '/recurring/{id}' where id is the URL-safe base64 of the definition's NAME (mirrors UrlSafeId).
+  // RGFpbHkgUmVwb3J0 === base64('Daily Report') — the first demo definition.
+  { name: '14-recurring-detail', path: '/recurring/RGFpbHkgUmVwb3J0' },
   { name: '15-server-detail', path: `/servers/${DEMO_IDS.server1}` },
   { name: '17-counters', path: '/counters' },
   { name: '25-queues', path: '/queues' },
