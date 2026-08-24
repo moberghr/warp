@@ -45,9 +45,11 @@ public sealed class FileEndpointTests
     {
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
 
-        using var content = new MultipartFormDataContent();
-        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("payload")), "File", "data.bin");
-        content.Add(new StringContent("invoices"), "Tag");
+        using var content = new MultipartFormDataContent
+        {
+            { new ByteArrayContent(Encoding.UTF8.GetBytes("payload")), "File", "data.bin" },
+            { new StringContent("invoices"), "Tag" },
+        };
 
         var resp = await app.Client.PostAsync(new Uri("/api/file-echo-tagged", UriKind.Relative), content);
 
@@ -95,8 +97,10 @@ public sealed class FileEndpointTests
     {
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
 
-        using var content = new MultipartFormDataContent();
-        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("contract")), "File", "contract.pdf");
+        using var content = new MultipartFormDataContent
+        {
+            { new ByteArrayContent(Encoding.UTF8.GetBytes("contract")), "File", "contract.pdf" },
+        };
 
         var resp = await app.Client.PostAsync(new Uri("/api/folders/42/files", UriKind.Relative), content);
 
@@ -112,10 +116,12 @@ public sealed class FileEndpointTests
     {
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
 
-        using var content = new MultipartFormDataContent();
-        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("a")), "Files", "a.txt");
-        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("bb")), "Files", "b.txt");
-        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("ccc")), "Files", "c.txt");
+        using var content = new MultipartFormDataContent
+        {
+            { new ByteArrayContent(Encoding.UTF8.GetBytes("a")), "Files", "a.txt" },
+            { new ByteArrayContent(Encoding.UTF8.GetBytes("bb")), "Files", "b.txt" },
+            { new ByteArrayContent(Encoding.UTF8.GetBytes("ccc")), "Files", "c.txt" },
+        };
 
         var resp = await app.Client.PostAsync(new Uri("/api/file-multi", UriKind.Relative), content);
 
@@ -139,8 +145,10 @@ public sealed class FileEndpointTests
                 a.MapWarpHttp();
             });
 
-        using var content = new MultipartFormDataContent();
-        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("x")), "File", "a.txt");
+        using var content = new MultipartFormDataContent
+        {
+            { new ByteArrayContent(Encoding.UTF8.GetBytes("x")), "File", "a.txt" },
+        };
 
         var resp = await app.Client.PostAsync(new Uri("/api/file-echo", UriKind.Relative), content);
 

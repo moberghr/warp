@@ -839,4 +839,146 @@ public abstract class OrchestrationTaskTestsBase : IAsyncLifetime
         contChild.ShouldNotBeNull();
         contChild.CurrentState.ShouldBe(State.Awaiting, "Children of awaiting continuation should also stay Awaiting");
     }
+
+    [TimedFact]
+    public async Task RunOrchestration_MessageWithDeletedAndCompletedChildren_CompletesMessage()
+    {
+        // Addon policy axis: a Skip-mode [Mutex]/[RateLimit] on a message handler deletes the
+        // surplus routed child. Deleted is SETTLED, not pending — treating it as pending left the
+        // parent Processing forever (also reachable via a manual child delete, a latent hang).
+        // Deliberately-skipped work is not failed work, so the message completes.
+        var ctx = _fixture.CreateContext();
+        var messageId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = messageId,
+            Kind = JobKind.Message,
+            CurrentState = State.Processing,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            JobCount = 2,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Completed,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = messageId,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Deleted,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = messageId,
+        });
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var orchCtx = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(orchCtx, TimeProvider.System, TimeSpan.FromDays(1)).RunOrchestrationCoreAsync(CancellationToken.None);
+
+        // Assert
+        var readCtx = _fixture.CreateContext();
+        var message = await readCtx.Set<Job>().FirstOrDefaultAsync(j => j.Id == messageId, Xunit.TestContext.Current.CancellationToken);
+        message.ShouldNotBeNull();
+        message.CurrentState.ShouldBe(State.Completed);
+    }
+
+    [TimedFact]
+    public async Task RunOrchestration_MessageWithAllChildrenDeleted_DeletesMessage()
+    {
+        // Every routed child was policy-skipped (or an operator cancelled a batch's children):
+        // the fan-out is settled so the parent must finalize rather than hang — but with no
+        // Completed child and no Failed child it finalizes DELETED, not Completed. Reporting a
+        // fully-skipped message (or a cancelled batch) as a success would be a false green.
+        var ctx = _fixture.CreateContext();
+        var messageId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = messageId,
+            Kind = JobKind.Message,
+            CurrentState = State.Processing,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            JobCount = 1,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Deleted,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = messageId,
+        });
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var orchCtx = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(orchCtx, TimeProvider.System, TimeSpan.FromDays(1)).RunOrchestrationCoreAsync(CancellationToken.None);
+
+        // Assert
+        var readCtx = _fixture.CreateContext();
+        var message = await readCtx.Set<Job>().FirstOrDefaultAsync(j => j.Id == messageId, Xunit.TestContext.Current.CancellationToken);
+        message.ShouldNotBeNull();
+        message.CurrentState.ShouldBe(State.Deleted);
+    }
+
+    [TimedFact]
+    public async Task RunOrchestration_CancelledBatch_FinalizesDeletedNotCompleted()
+    {
+        // CancelBatch deletes the descendants but leaves the batch row Processing. The batch must
+        // finalize (before the Deleted-children-settle change it hung forever) — and as Deleted:
+        // an operator who cancelled a batch must not see it reported as Completed.
+        var ctx = _fixture.CreateContext();
+        var batchId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = batchId,
+            Kind = JobKind.Batch,
+            CurrentState = State.Processing,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            JobCount = 2,
+        });
+
+        for (var i = 0; i < 2; i++)
+        {
+            ctx.Set<Job>().Add(new Job
+            {
+                Id = Guid.NewGuid(),
+                Kind = JobKind.Job,
+                CurrentState = State.Deleted,
+                CreateTime = DateTime.UtcNow,
+                ScheduleTime = DateTime.UtcNow,
+                Queue = "default",
+                ParentJobId = batchId,
+            });
+        }
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var orchCtx = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(orchCtx, TimeProvider.System, TimeSpan.FromDays(1)).RunOrchestrationCoreAsync(CancellationToken.None);
+
+        // Assert
+        var readCtx = _fixture.CreateContext();
+        var batch = await readCtx.Set<Job>().FirstOrDefaultAsync(j => j.Id == batchId, Xunit.TestContext.Current.CancellationToken);
+        batch.ShouldNotBeNull();
+        batch.CurrentState.ShouldBe(State.Deleted);
+    }
 }

@@ -21,7 +21,11 @@ public static class RetryServiceConfiguration
         }
 
         builder.Services.AddTransient(typeof(IPublishPipelineBehavior<>), typeof(RetryPublishBehavior<>));
-        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RetryPipelineBehavior<,>));
+
+        // Constraint-split shims: only job and message pipelines compose retry. In-memory sends and
+        // stream requests never instantiate the behaviour (see RetryJobPipelineBehavior).
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RetryJobPipelineBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RetryMessagePipelineBehavior<,>));
 
         return builder;
     }

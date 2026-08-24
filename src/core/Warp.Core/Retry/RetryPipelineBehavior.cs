@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-using System.Reflection;
 using Microsoft.Extensions.Options;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
@@ -7,10 +5,8 @@ using Warp.Core.Handlers;
 namespace Warp.Core.Retry;
 
 public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
-    where TRequest : IRequest<TResponse>, IJob
+    where TRequest : IRequest<TResponse>
 {
-    private static readonly ConcurrentDictionary<Type, RetryAttribute?> AttributeCache = new();
-
     private readonly IJobContext _jobContext;
     private readonly IOptions<RetryOptions> _options;
     private readonly TimeProvider _timeProvider;
@@ -24,6 +20,18 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
 
     public async Task<TResponse> HandleAsync(TRequest request, RequestHandlerDelegate<TRequest, TResponse> next, CancellationToken cancellationToken)
     {
+        // Only job-backed executions get retry outcomes: an in-memory Send has no row to reschedule,
+        // and saga proxies (IPolicyExemptHandler) own their busy/version-conflict requeue logic.
+        if (request is not IJob && request is not IMessage)
+        {
+            return await next(request, cancellationToken);
+        }
+
+        if (AddonAttributeResolver.IsPolicyExempt(_jobContext.HandlerType))
+        {
+            return await next(request, cancellationToken);
+        }
+
         try
         {
             return await next(request, cancellationToken);
@@ -70,16 +78,14 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
                 // on what happens next; letting a handler-set outcome survive here would let any handler
                 // that stamps an Outcome and then throws silently disable its own retry policy.
                 //
-                // ClearHandlerType = true is safe despite §8.14 (routed IMessage jobs must keep HandlerType
-                // on requeue): TRequest is constrained to IJob, IMessage does not implement IJob, so DI's
-                // open-generic constraint check skips this behaviour entirely for message-routed jobs. Retry
-                // never runs on the path that needs HandlerType preserved. If that constraint is ever
-                // widened, this line has to become conditional.
+                // Routed message children keep HandlerType on requeue (§8.14): it IS the routing decision,
+                // and re-discovery would look up IJobHandler<T> for a type that only has IMessageHandler<T>
+                // registrations. Direct jobs clear it so the next attempt re-discovers.
                 _jobContext.Outcome = new JobOutcome
                 {
                     State = JobOutcome.RescheduledState(scheduleTime ?? now, now),
                     ScheduleTime = scheduleTime,
-                    ClearHandlerType = true,
+                    ClearHandlerType = request is not IMessage,
                     Reason = OutcomeReason.Retry,
                 };
             }
@@ -118,18 +124,34 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
         }
     }
 
-    private RetryAttribute? GetRetryAttribute()
-    {
-        var handlerType = _jobContext.HandlerType;
-        if (handlerType != null)
-        {
-            var handlerAttr = AttributeCache.GetOrAdd(handlerType, static t => t.GetCustomAttribute<RetryAttribute>());
-            if (handlerAttr != null)
-            {
-                return handlerAttr;
-            }
-        }
+    private RetryAttribute? GetRetryAttribute() =>
+        AddonAttributeResolver.Resolve<RetryAttribute>(_jobContext.HandlerType, typeof(TRequest));
+}
 
-        return AttributeCache.GetOrAdd(typeof(TRequest), static t => t.GetCustomAttribute<RetryAttribute>());
+/// <summary>
+/// DI shim: carries the <c>IJob</c> constraint so the container composes retry only into job pipelines.
+/// The base class is unconstrained (its runtime guard is defense-in-depth and keeps it directly
+/// constructible in tests), but registering it unconstrained would instantiate it — and resolve its
+/// dependencies — for every in-memory <c>Send</c> and stream request. The pair of shims restores the
+/// exact pre-message-support composition cost for non-job paths. A type implementing BOTH IJob and
+/// IMessage would match both shims and be double-wrapped — an unsupported shape (Publisher routes the
+/// two through different entry points).
+/// </summary>
+internal sealed class RetryJobPipelineBehavior<TRequest, TResponse> : RetryPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IJob
+{
+    public RetryJobPipelineBehavior(IJobContext jobContext, IOptions<RetryOptions> options, TimeProvider timeProvider)
+        : base(jobContext, options, timeProvider)
+    {
+    }
+}
+
+/// <summary>DI shim: the <c>IMessage</c> half of the constraint split — see <see cref="RetryJobPipelineBehavior{TRequest, TResponse}"/>.</summary>
+internal sealed class RetryMessagePipelineBehavior<TRequest, TResponse> : RetryPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IMessage
+{
+    public RetryMessagePipelineBehavior(IJobContext jobContext, IOptions<RetryOptions> options, TimeProvider timeProvider)
+        : base(jobContext, options, timeProvider)
+    {
     }
 }

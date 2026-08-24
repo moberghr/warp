@@ -29,12 +29,24 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         RequestHandlerDelegate<TRequest, TResponse> next,
         CancellationToken cancellationToken)
     {
-        if (request is not IJob)
+        if (request is not IJob && request is not IMessage)
+        {
+            return await next(request, cancellationToken);
+        }
+
+        // Saga proxies (and any other IPolicyExemptHandler) manage their own serialization — the
+        // per-correlation saga mutex — and must not contend on an outer concurrency key too.
+        if (AddonAttributeResolver.IsPolicyExempt(_jobContext.HandlerType))
         {
             return await next(request, cancellationToken);
         }
 
         var meta = _jobContext.GetMetadata<IConcurrencyMetadata>();
+        if (meta.ConcurrencyKey == null)
+        {
+            StampResolvedAttribute(meta);
+        }
+
         if (meta.ConcurrencyKey == null)
         {
             return await next(request, cancellationToken);
@@ -67,7 +79,7 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
             var mode = meta.ConcurrencyMode ?? ConcurrencyMode.Skip;
             var now = _timeProvider.GetUtcNow().UtcDateTime;
             _jobContext.Outcome = mode == ConcurrencyMode.Wait
-                ? BuildRequeueOutcome(meta.ConcurrencyKey, effectiveLimit, now)
+                ? BuildRequeueOutcome(meta.ConcurrencyKey, effectiveLimit, now, clearHandlerType: request is not IMessage)
                 : BuildSkipOutcome(meta.ConcurrencyKey, effectiveLimit);
 
             return default!;
@@ -83,12 +95,40 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         }
     }
 
-    private static JobOutcome BuildRequeueOutcome(string key, int effectiveLimit, DateTime now) =>
+    private void StampResolvedAttribute(IConcurrencyMetadata meta)
+    {
+        // Handler-then-contract resolution (addon policy axis). The contract rung also fixes
+        // directly-staged jobs (recurring firings) that bypassed the publish pipeline. Stamp the
+        // full trio together — the execution gate below keys on ConcurrencyKey alone.
+        var mutex = AddonAttributeResolver.Resolve<MutexAttribute>(_jobContext.HandlerType, typeof(TRequest));
+        if (mutex != null)
+        {
+            meta.ConcurrencyKey = mutex.Key;
+            meta.ConcurrencyLimit = 1;
+            meta.ConcurrencyMode = mutex.Mode;
+
+            return;
+        }
+
+        var semaphore = AddonAttributeResolver.Resolve<SemaphoreAttribute>(_jobContext.HandlerType, typeof(TRequest));
+        if (semaphore != null)
+        {
+            meta.ConcurrencyKey = semaphore.Key;
+            meta.ConcurrencyLimit = semaphore.Limit;
+            meta.ConcurrencyMode = semaphore.Mode;
+        }
+    }
+
+    private static JobOutcome BuildRequeueOutcome(string key, int effectiveLimit, DateTime now, bool clearHandlerType) =>
         new()
         {
             State = State.Enqueued,
             ScheduleTime = now,
-            ClearHandlerType = true,
+
+            // Routed message children must keep HandlerType (§8.14): it IS the routing decision, and
+            // re-discovery would look up IJobHandler<T> for a type that only has IMessageHandler<T>
+            // registrations. Direct jobs clear it so the next attempt re-discovers.
+            ClearHandlerType = clearHandlerType,
             Reason = OutcomeReason.Concurrency,
             LogMessage = $"Requeued — '{key}' full ({effectiveLimit} slots)",
         };

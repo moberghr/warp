@@ -1,0 +1,442 @@
+{
+  "slug": "addon-policy-axis",
+  "date": "2026-08-21",
+  "scope": "new-feature",
+  "change_manifest": [
+    {
+      "path": "src/core/Warp.Core/Handlers/AddonAttributeResolver.cs",
+      "action": "create",
+      "purpose": "Shared cached handler-then-contract attribute resolver"
+    },
+    {
+      "path": "src/core/Warp.Core/Handlers/IPolicyExemptHandler.cs",
+      "action": "create",
+      "purpose": "Marker: handler manages its own execution policy; all policy behaviors skip it (saga proxies)"
+    },
+    {
+      "path": "src/core/Warp.Core/Sagas/SagaHandlerProxy.cs",
+      "action": "modify",
+      "purpose": "Implement IPolicyExemptHandler so widened message guards keep saga semantics unchanged"
+    },
+    {
+      "path": "src/core/Warp.Core/ServiceConfiguration.cs",
+      "action": "modify",
+      "purpose": "Rewrite ValidateAddonAttributesOnHandlers: legality map, per-family both-axes conflict, Total-scope rejections"
+    },
+    {
+      "path": "src/core/Warp.Core/Timeout/TimeoutStartupDefaults.cs",
+      "action": "create",
+      "purpose": "Internal marker carrying scratch-read DefaultScope for startup validation"
+    },
+    {
+      "path": "src/core/Warp.Core/Timeout/TimeoutServiceConfiguration.cs",
+      "action": "modify",
+      "purpose": "AddTimeout applies configure to scratch options and registers the marker"
+    },
+    {
+      "path": "src/core/Warp.Core/Timeout/TimeoutPublishBehavior.cs",
+      "action": "modify",
+      "purpose": "Stamp global default only when DefaultScope == Total"
+    },
+    {
+      "path": "src/core/Warp.Core/Timeout/TimeoutPipelineBehavior.cs",
+      "action": "modify",
+      "purpose": "Guard widens to IMessage; resolver rungs; transient PerAttempt default; Total-without-deadline refuse+warn"
+    },
+    {
+      "path": "src/core/Warp.Core/Concurrency/ConcurrencyPipelineBehavior.cs",
+      "action": "modify",
+      "purpose": "Guard widens; resolve+stamp Mutex/Semaphore trio; conditional ClearHandlerType"
+    },
+    {
+      "path": "src/core/Warp.Core/RateLimit/RateLimitPipelineBehavior.cs",
+      "action": "modify",
+      "purpose": "Guard widens; resolve+stamp all five fields or none; conditional ClearHandlerType x2"
+    },
+    {
+      "path": "src/core/Warp.Core/Retry/RetryPipelineBehavior.cs",
+      "action": "modify",
+      "purpose": "Drop IJob constraint; runtime guard; shared resolver; conditional ClearHandlerType"
+    },
+    {
+      "path": "src/core/Warp.Core/CircuitBreaker/CircuitBreakerPipelineBehavior.cs",
+      "action": "modify",
+      "purpose": "Drop IJob constraint; runtime guard; shared resolver"
+    },
+    {
+      "path": "src/core/Warp.Core/Concurrency/MutexAttribute.cs",
+      "action": "modify",
+      "purpose": "XML doc: axis rule replaces #242 wording"
+    },
+    {
+      "path": "src/core/Warp.Core/Concurrency/SemaphoreAttribute.cs",
+      "action": "modify",
+      "purpose": "XML doc: axis rule replaces #242 wording"
+    },
+    {
+      "path": "src/core/Warp.Core/RateLimit/RateLimitAttribute.cs",
+      "action": "modify",
+      "purpose": "XML doc: axis rule replaces #242 wording"
+    },
+    {
+      "path": "src/core/Warp.Core/Timeout/TimeoutAttribute.cs",
+      "action": "modify",
+      "purpose": "XML doc: axis rule + Total contract-only"
+    },
+    {
+      "path": "src/core/Warp.Core/Handlers/RetryAttribute.cs",
+      "action": "modify",
+      "purpose": "XML doc: precedence now true via conflict rejection"
+    },
+    {
+      "path": ".claude/rules/project-specific.md",
+      "action": "modify",
+      "purpose": "S8.8 axis rule; S8.14 enforcement note"
+    },
+    {
+      "path": "website/docs/features/mutex.md",
+      "action": "modify",
+      "purpose": "Where-do-I-declare-a-policy docs"
+    },
+    {
+      "path": "website/docs/features/semaphore.md",
+      "action": "modify",
+      "purpose": "Where-do-I-declare-a-policy docs"
+    },
+    {
+      "path": "website/docs/features/rate-limit.md",
+      "action": "modify",
+      "purpose": "Where-do-I-declare-a-policy docs"
+    },
+    {
+      "path": "website/docs/features/timeout.md",
+      "action": "modify",
+      "purpose": "Scope-split default + axis docs"
+    },
+    {
+      "path": "website/docs/features/recurring-jobs.md",
+      "action": "modify",
+      "purpose": "Recurring jobs now honour contract policies; Total limitation"
+    },
+    {
+      "path": "website/docs/releases.md",
+      "action": "modify",
+      "purpose": "Six behaviour-change release notes"
+    },
+    {
+      "path": "src/core/Warp.Worker/Services/Orchestrator.cs",
+      "action": "modify",
+      "purpose": "Deleted children count as settled in parent readiness; a policy-skipped routed child no longer blocks message finalization"
+    },
+    {
+      "path": "src/core/Warp.UI/Hosting/WarpUIEndpointConventionBuilder.cs",
+      "action": "modify",
+      "purpose": "Out-of-scope build unblock: CA1859 surfaced by local SDK 10.0.110 (shipped green in #271)"
+    },
+    {
+      "path": "src/tests/Warp.Tests/Http/FileEndpointTests.cs",
+      "action": "modify",
+      "purpose": "Out-of-scope build unblock: IDE0028 surfaced by local SDK 10.0.110 (shipped green in #235)"
+    },
+    {
+      "path": "src/tests/Warp.Tests/TestData/Handlers/HandlerPolicyCommands.cs",
+      "action": "create",
+      "purpose": "Handler-axis test fixtures (mutex/rate-limit/recurring)"
+    },
+    {
+      "path": "src/tests/Warp.Tests/TestData/Handlers/MessagePolicyCommands.cs",
+      "action": "create",
+      "purpose": "Message-axis test fixtures"
+    },
+    {
+      "path": "src/core/Warp.Core/Retry/RetryServiceConfiguration.cs",
+      "action": "modify",
+      "purpose": "Register constraint-split DI shims (S9) instead of the unconstrained behavior"
+    },
+    {
+      "path": "src/core/Warp.Core/CircuitBreaker/CircuitBreakerServiceConfiguration.cs",
+      "action": "modify",
+      "purpose": "Register constraint-split DI shims (S9)"
+    },
+    {
+      "path": "src/core/Warp.Core/CircuitBreaker/CircuitBreakerAttribute.cs",
+      "action": "modify",
+      "purpose": "XML doc (S5)"
+    },
+    {
+      "path": "src/tests/Warp.Tests/Fixtures/WarpTestServer.cs",
+      "action": "modify",
+      "purpose": "WaitForCompletion treats Deleted messages as terminal (W1)"
+    }
+  ],
+  "public_contracts": [
+    {
+      "kind": "method",
+      "signature": "AddWarp validation: [Mutex]/[Semaphore]/[RateLimit]/[Timeout(PerAttempt)] legal on IJobHandler/IMessageHandler implementations",
+      "change": "modified"
+    },
+    {
+      "kind": "method",
+      "signature": "AddWarp throws: same policy family on both axes; Scope=Total on handler; handler [Timeout] under Total-scoped global default; [Retry]/[CircuitBreaker] double declaration",
+      "change": "new"
+    },
+    {
+      "kind": "handler",
+      "signature": "Message-routed executions run Concurrency/RateLimit/Timeout/Retry/CircuitBreaker pipeline behaviors",
+      "change": "modified"
+    },
+    {
+      "kind": "handler",
+      "signature": "Recurring-job firings resolve contract-declared policy at execution",
+      "change": "modified"
+    },
+    {
+      "kind": "method",
+      "signature": "TimeoutPublishBehavior stamps global default only for Total scope; PerAttempt default applied at execution",
+      "change": "modified"
+    },
+    {
+      "kind": "method",
+      "signature": "Warp.Core.Handlers.IPolicyExemptHandler (marker interface; SagaHandlerProxy implements it; all policy behaviors skip exempt handlers)",
+      "change": "new"
+    },
+    {
+      "kind": "handler",
+      "signature": "Orchestrator parent finalization: Deleted children count as settled (message/batch with deleted children finalizes; deleted != failed)",
+      "change": "modified"
+    }
+  ],
+  "success_criteria": [
+    {
+      "id": "SC1",
+      "description": "Handler-declared [Mutex] serializes two concurrent jobs (no contract attr), both providers, BarrierSignal N=2",
+      "verification": "MutexIntegrationTests handler-axis test"
+    },
+    {
+      "id": "SC2",
+      "description": "Handler-declared [RateLimit]/[Timeout] produce same outcome, JobLog and OutcomeReason as contract-declared",
+      "verification": "RateLimitIntegrationTests / TimeoutIntegrationTests parity tests"
+    },
+    {
+      "id": "SC3",
+      "description": "Same-family both-axes declaration throws at AddWarp naming both types and family; cross-attribute Mutex+Semaphore included; Retry/CircuitBreaker included; self-handling exempt",
+      "verification": "AddonAttributeHandlerValidationTests"
+    },
+    {
+      "id": "SC4",
+      "description": "Scope=Total on handler throws; handler [Timeout] under Total global default throws; contract Total still stamps deadline at publish",
+      "verification": "AddonAttributeHandlerValidationTests / TimeoutPublishBehaviorTests"
+    },
+    {
+      "id": "SC5",
+      "description": "Recurring job with contract [Mutex] serializes; recurring contract Total logs one-time warning and stamps nothing",
+      "verification": "RecurringJobTests / TimeoutPipelineBehaviorTests"
+    },
+    {
+      "id": "SC6",
+      "description": "Handler [Timeout] wins over PerAttempt global default",
+      "verification": "TimeoutPipelineBehaviorTests"
+    },
+    {
+      "id": "SC7",
+      "description": "Handler-resolved metadata roundtrips and is on the row after first attempt",
+      "verification": "MutexIntegrationTests metadata assertion"
+    },
+    {
+      "id": "SC8",
+      "description": "Dispatcher-mode (UseDispatcher=true) variant of SC1",
+      "verification": "MutexIntegrationTests dispatcher variant"
+    },
+    {
+      "id": "SC9",
+      "description": "Fetch/claim path unchanged; no addon reference added to Warp.Worker",
+      "verification": "construction review + csproj diff"
+    },
+    {
+      "id": "SC10",
+      "description": "Zero attribute resolution per attempt after first per (process, type)",
+      "verification": "AddonAttributeResolverTests caching test"
+    },
+    {
+      "id": "SC11",
+      "description": "Message contract [Mutex] with two handlers: children carry key and serialize against each other",
+      "verification": "MessagePolicyTests"
+    },
+    {
+      "id": "SC12",
+      "description": "Handler [Mutex] on one of two message handlers serializes only that handler's children",
+      "verification": "MessagePolicyTests"
+    },
+    {
+      "id": "SC13",
+      "description": "Wait-mode requeue of routed message child keeps HandlerType and completes on re-fetch",
+      "verification": "MessagePolicyTests"
+    },
+    {
+      "id": "SC14",
+      "description": "Message handler retries per handler [Retry] and global RetryOptions with per-child counting",
+      "verification": "MessagePolicyTests"
+    },
+    {
+      "id": "SC15",
+      "description": "[Mutex] on IStreamRequestHandler and on in-memory request handler still throws #242 error",
+      "verification": "AddonAttributeHandlerValidationTests"
+    },
+    {
+      "id": "SC16",
+      "description": "In-memory Send of request whose handler carries [Retry]/[Mutex] gets no policy outcome and no stamping",
+      "verification": "RetryTests in-memory isolation test"
+    }
+  ],
+  "test_manifest": [
+    {
+      "path": "src/tests/Warp.Tests/Core/AddonAttributeResolverTests.cs",
+      "covers": [
+        "SC10"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Core/AddonAttributeHandlerValidationTests.cs",
+      "covers": [
+        "SC3",
+        "SC4",
+        "SC15"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/Timeout/TimeoutPublishBehaviorTests.cs",
+      "covers": [
+        "SC4"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/Timeout/TimeoutPipelineBehaviorTests.cs",
+      "covers": [
+        "SC5",
+        "SC6"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/Timeout/TimeoutIntegrationTests.cs",
+      "covers": [
+        "SC2",
+        "SC5"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/Concurrency/MutexIntegrationTests.cs",
+      "covers": [
+        "SC1",
+        "SC5",
+        "SC7",
+        "SC8"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/RateLimit/RateLimitIntegrationTests.cs",
+      "covers": [
+        "SC2"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Messaging/MessagePolicyTests.cs",
+      "covers": [
+        "SC11",
+        "SC12",
+        "SC13",
+        "SC14"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/Retry/RetryTests.cs",
+      "covers": [
+        "SC16"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Orchestration/OrchestrationTaskTests.cs",
+      "covers": [
+        "SC11",
+        "SC12"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/Retry/RetryPipelineBehaviorGuardTests.cs",
+      "covers": [
+        "SC16"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/TestData/Handlers/HandlerPolicyCommands.cs",
+      "covers": [
+        "SC1",
+        "SC2",
+        "SC5"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/TestData/Handlers/MessagePolicyCommands.cs",
+      "covers": [
+        "SC11",
+        "SC12",
+        "SC13",
+        "SC14"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/TestData/Handlers/TimeoutCommands.cs",
+      "covers": [
+        "SC2"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/TestData/Handlers/RetryAttributeCommands.cs",
+      "covers": [
+        "SC3"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/Concurrency/ConcurrencyPipelineBehaviorGuardTests.cs",
+      "covers": [
+        "SC16"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/RateLimit/RateLimitPipelineBehaviorGuardTests.cs",
+      "covers": [
+        "SC16"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Features/CircuitBreaker/CircuitBreakerPipelineBehaviorGuardTests.cs",
+      "covers": [
+        "SC16",
+        "SC13"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Core/PolicyBehaviorCompositionTests.cs",
+      "covers": [
+        "SC16"
+      ]
+    }
+  ],
+  "out_of_scope": [
+    "CircuitBreaker stamping its resolved group into metadata",
+    "Compile-time resolution via WarpMediatorGenerator",
+    "Dashboard surfacing of effective policy provenance"
+  ],
+  "security_impact": "none",
+  "assumptions": [
+    "MS.DI skips open-generic IPipelineBehavior registrations whose constraints fail, and includes them once constraints drop",
+    "AddTimeout's configure delegate is pure enough to apply to a scratch instance at registration",
+    "Handler registrations are applied by WarpGeneratedHandlerRegistry.ApplyAll before ValidateAddonAttributesOnHandlers runs"
+  ],
+  "risks": [
+    "Live behaviour activation at upgrade: recurring jobs (change 2), message handlers incl. global defaults (change 3)",
+    "Retry/CircuitBreaker both-axes configs that run today fail at startup after upgrade (change 5)",
+    "Contract-declared key on a message is shared by all its handlers (starvation edge)",
+    "Guard placement now load-bearing in five behaviours (in-memory sends must stay policy-free)",
+    "Saga proxies are policy-exempt via IPolicyExemptHandler; custom handlers can also opt out \u2014 documented, and the exemption skips declared attributes too"
+  ]
+}

@@ -36,6 +36,23 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 `AddConcurrency()` registers the pipeline behavior, the publish behavior, the `IConcurrencyLimitManager` admin layer, and the `ConcurrencyLimit` entity (picked up by `WarpModelCustomizer` — run a fresh `dotnet ef migrations add` to apply the schema change).
 
+## Where do I declare the policy? Contract vs handler
+
+`[Mutex]` and `[Semaphore]` (like `[RateLimit]`, `[Timeout(Scope = PerAttempt)]`, `[Retry]` and `[CircuitBreaker]`) can be declared on **either** of two axes:
+
+- **On the contract** — the job or message type. Resolved at publish and stamped into the job's metadata; every publisher-side process sees the policy without loading any handler assembly. On a **message**, the router copies the stamped policy to *every* handler's child job, so **all handlers of that message contend on the one declared key** — use this when the *event itself* must be processed under a shared constraint.
+- **On the handler** — a job or message handler class. Resolved the first time the job binds to the handler and stamped into metadata from there. This is the natural home for most concurrency constraints: the handler is the code touching the resource ("this handler talks to a single-connection legacy endpoint"), and the contract — every publisher of it — shouldn't need to know that one consumer has such a constraint. On a message, a handler-declared policy applies to **that handler's children only**.
+
+Either way the resolved policy ends up in `Job.Metadata`, so the row always explains why a job was skipped or requeued, and a deploy that changes an attribute never reshapes jobs already bound.
+
+Rules enforced at `AddWarp` startup (loud failures, never silent no-ops):
+
+- The same policy *family* on **both** the contract and its handler throws — `[Mutex]` and `[Semaphore]` count as one family (they fill the same metadata slot). Pick one axis.
+- The four policy attributes on a **stream** handler or on a handler of a plain in-memory `IRequest<T>` still throw (#242) — no execution path can honour them there.
+- A handler attribute covers **every** message/job type that handler class handles, and attributes are not inherited by derived handler classes.
+
+Two exemptions to know about: **recurring jobs** honour contract-declared policy (firings bypass the publish pipeline, so the policy is resolved at execution — see the recurring-jobs page), and **saga handlers are policy-exempt** — the saga proxy serializes on its own per-correlation mutex and manages its own reschedules, so no outer policy (declared or global default) applies to it.
+
 ## Usage — Mutex (limit = 1)
 
 Set the key at publish time using the `.WithMutex()` extension:

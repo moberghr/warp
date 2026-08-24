@@ -48,6 +48,10 @@ Override to `Skip` if you want surplus jobs cancelled instead:
 public class DropOnFull : IJob { }
 ```
 
+## Contract or handler?
+
+`[Semaphore]` can sit on the job/message type (publish-time, shared by all handlers of a message) or on a job/message handler class (execution-time, that handler only). Declaring the concurrency family — `[Mutex]` or `[Semaphore]` — on both axes for the same pair is a startup error. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
+
 ## Related
 
 For full details on modes, the admin-override layer, the `Mutex` vs `Semaphore` namespace split on shared keys, dashboard integration, and edge cases, see [Concurrency control](./mutex.md). That page is the canonical reference for both attributes.

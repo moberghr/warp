@@ -7,7 +7,7 @@ using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Features.RateLimit;
 
-[GenerateDatabaseTests]
+[GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class RateLimitIntegrationTestsBase : IntegrationTestBase
 {
     protected RateLimitIntegrationTestsBase(IDatabaseFixture fixture)
@@ -103,5 +103,34 @@ public abstract class RateLimitIntegrationTestsBase : IntegrationTestBase
         // Cancel the throttled job so the fixture doesn't leave a long-scheduled row behind.
         var cmd = server.CreateCommandService();
         await cmd.DeleteJob(throttled.Id);
+    }
+
+    [TimedFact]
+    public async Task HandlerDeclaredRateLimit_SkipMode_SameOutcomeAndLogAsContractDeclared()
+    {
+        // SC2 (addon policy axis): the REQUEST carries no attribute — [RateLimit("handler-rl", 1,
+        // 3600)] sits on the HANDLER, is resolved at first execution and stamped into metadata.
+        // The first job consumes the window's single token and completes; a second job published
+        // after it must be cancelled with the same outcome and log shape as a contract-declared
+        // rate limit, and its row must carry the stamped policy.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+
+        var job1Id = await publisher.Enqueue(new HandlerRateLimitRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await server.WaitForJobState(job1Id, State.Completed);
+
+        var publisher2 = server.CreatePublisher();
+        var job2Id = await publisher2.Enqueue(new HandlerRateLimitRequest());
+        await publisher2.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await server.WaitForJobState(job2Id, State.Deleted);
+
+        var logs = await server.GetJobLogs(job2Id);
+        logs.ShouldContain(l => l.EventType == "Deleted" && l.Message.Contains("handler-rl", StringComparison.Ordinal));
+
+        var job2 = await server.GetJob(job2Id);
+        job2.Metadata.ShouldNotBeNull();
+        job2.Metadata.ShouldContain("RateLimitKey");
+        job2.Metadata.ShouldContain("handler-rl");
     }
 }

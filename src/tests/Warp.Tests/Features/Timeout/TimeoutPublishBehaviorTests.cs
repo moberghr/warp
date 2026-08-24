@@ -94,8 +94,10 @@ public class TimeoutPublishBehaviorTests
     }
 
     [TimedFact]
-    public async Task NoAttribute_DefaultApplied()
+    public async Task NoAttribute_TotalScopedDefault_StampedWithDeadline()
     {
+        // Only the Total-scoped default keeps publish stamping: its deadline measures from enqueue
+        // and must exist before the first execution (§8.31 attainment reads it pre-execution).
         var options = new TimeoutOptions
         {
             Default = TimeSpan.FromSeconds(45),
@@ -109,6 +111,23 @@ public class TimeoutPublishBehaviorTests
         meta.TimeoutMode.ShouldBe(TimeoutMode.Fail);
         meta.TimeoutScope.ShouldBe(TimeoutScope.Total);
         meta.TimeoutDeadlineUtc.ShouldBe(PublishMoment.UtcDateTime.AddSeconds(45));
+    }
+
+    [TimedFact]
+    public async Task NoAttribute_PerAttemptDefault_NotStampedAtPublish()
+    {
+        // The PerAttempt default moved to execution (TimeoutPipelineBehavior): stamping it here
+        // filled the metadata slot for every job and made a handler-declared [Timeout] unreachable —
+        // the same shadowing Retry fixed as #236. Same effective timeout, applied per attempt from
+        // live options; the value no longer appears in Job.Metadata at enqueue.
+        var options = new TimeoutOptions { Default = TimeSpan.FromSeconds(45) };
+
+        var (meta, _) = await RunBehavior(new UnitRequest(), options: options);
+
+        meta.TimeoutSeconds.ShouldBeNull();
+        meta.TimeoutMode.ShouldBeNull();
+        meta.TimeoutScope.ShouldBeNull();
+        meta.TimeoutDeadlineUtc.ShouldBeNull();
     }
 
     [TimedFact]

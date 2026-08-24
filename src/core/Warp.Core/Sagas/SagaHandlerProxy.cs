@@ -16,7 +16,7 @@ namespace Warp.Core.Sagas;
 /// <item>saves the state (Insert / Update / Remove) and releases the lock.</item>
 /// </list>
 /// </summary>
-public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage>
+public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage>, IPolicyExemptHandler
     where TSaga : Saga, new()
     where TMessage : class, IMessage
 {

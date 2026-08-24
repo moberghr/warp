@@ -60,16 +60,25 @@ public class CallSlowApi : IJob { }
 public class CallPaymentApi : IJob { }
 ```
 
+## Contract or handler?
+
+`[Timeout(Scope = PerAttempt)]` can sit on the job/message type (publish-time) or on a job/message handler class (resolved at first execution) — declaring it on both axes for the same pair is a startup error, and recurring-job firings honour a contract-declared per-attempt timeout. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
+
+**`Scope = Total` stays contract-only.** Its deadline is a wall-clock budget measured from enqueue and must exist before the first execution, so it is stamped at publish — `Scope = Total` on a handler is a startup error, and so is any handler `[Timeout]` while a `Total`-scoped *global default* is configured (the publish-stamped default would permanently shadow it). On a recurring job type a contract `Total` timeout is refused (the scheduler stages firings without a publish step; Warp logs a one-time warning rather than inventing a differently-anchored deadline) — the firing then falls back to the `PerAttempt` global default if one is configured, or runs untimed. Use `PerAttempt` there.
+
 ## Precedence
 
 Most specific wins for both timeout duration and mode/scope:
 
 ```
-WithTimeout(...)            // per-publish, highest priority
-  → [Timeout(...)]          // on the job/request type
-    → opt.AddTimeout(o =>   // global default, lowest priority
+WithTimeout(...)              // per-publish, highest priority
+  → [Timeout(...)]            // on the handler class OR the job/request type
+                              // (never both — startup error)
+    → opt.AddTimeout(o =>     // global default, lowest priority
         o.Default = ...)
 ```
+
+A `PerAttempt`-scoped global default is applied **at execution** from live options and never written into `Job.Metadata` — so it can never shadow an attribute. A `Total`-scoped default is stamped at publish (its deadline must pre-exist execution).
 
 Set a fleet-wide safety net via the addon's options:
 

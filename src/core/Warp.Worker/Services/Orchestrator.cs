@@ -66,16 +66,20 @@ public sealed class Orchestrator<TContext> : IServerTask
         // Bound the candidate set so one iteration can't churn through tens of thousands of
         // parents while holding the orchestration lock. RerunImmediately = true means the
         // outer loop re-ticks instantly, and the next iteration sees the remaining rows.
+        // Deleted counts as SETTLED on both sides of the readiness check: a deleted child is
+        // deliberately-skipped work (a Skip-mode [Mutex]/[RateLimit] rejecting a routed handler job —
+        // reachable since the addon policy axis change — or an operator delete), not pending work.
+        // Treating it as pending left the parent Awaiting/Processing forever with no path out.
         var readyParents = await _context.Set<Job>()
             .Where(p => (p.Kind == JobKind.Message || p.Kind == JobKind.Batch)
                 && (p.CurrentState == State.Awaiting || p.CurrentState == State.Processing))
             .Where(p => !_context.Set<Job>()
                 .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
                     && c.CurrentState != State.Completed && c.CurrentState != State.Failed
-                    && c.CurrentState != State.Awaiting))
+                    && c.CurrentState != State.Deleted && c.CurrentState != State.Awaiting))
             .Where(p => _context.Set<Job>()
                 .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
-                    && (c.CurrentState == State.Completed || c.CurrentState == State.Failed)))
+                    && (c.CurrentState == State.Completed || c.CurrentState == State.Failed || c.CurrentState == State.Deleted)))
             .Take(_configuration.ServerTaskBatchSize)
             .ToListAsync(ct);
 
@@ -98,6 +102,18 @@ public sealed class Orchestrator<TContext> : IServerTask
             .ToListAsync(ct);
         var failedParentIdSet = parentIdsWithFailedChild.ToHashSet();
 
+        // Second id-set, same two-step shape: parents with at least one Completed child. A parent whose
+        // settled children are ALL Deleted (a cancelled batch — CancelBatch deletes the descendants but
+        // not the batch row — or a message whose every routed child was policy-skipped) finalizes as
+        // Deleted, not Completed: reporting a cancelled batch as a success would be a false green.
+        var parentIdsWithCompletedChild = await _context.Set<Job>()
+            .Where(c => c.Kind == JobKind.Job && c.CurrentState == State.Completed)
+            .Where(c => c.ParentJobId != null && parentIds.Contains(c.ParentJobId.Value))
+            .Select(c => c.ParentJobId!.Value)
+            .Distinct()
+            .ToListAsync(ct);
+        var completedParentIdSet = parentIdsWithCompletedChild.ToHashSet();
+
         var now = _time.GetUtcNow().UtcDateTime;
         foreach (var parent in readyParents)
         {
@@ -108,9 +124,13 @@ public sealed class Orchestrator<TContext> : IServerTask
             {
                 parent.CurrentState = State.Failed;
             }
-            else
+            else if (hasFailedChildren || completedParentIdSet.Contains(parent.Id))
             {
                 parent.CurrentState = State.Completed;
+            }
+            else
+            {
+                parent.CurrentState = State.Deleted;
             }
 
             parent.ExpireAt = now.Add(jobExpirationTimeout);

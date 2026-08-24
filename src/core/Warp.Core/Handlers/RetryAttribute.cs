@@ -1,8 +1,10 @@
 namespace Warp.Core.Handlers;
 
 /// <summary>
-/// Declares retry policy for a job or handler. Can be applied to IJob or IJobHandler implementations.
-/// Priority: per-enqueue metadata override > handler attribute > job attribute > global RetryOptions.
+/// Declares retry policy. Can be applied to a job/message type or to a job/message handler class —
+/// but not both for the same pair: <c>AddWarp</c> rejects the double declaration at startup, which is
+/// what makes the priority unambiguous. Priority: per-enqueue metadata override > the declared
+/// attribute (either axis — the other is guaranteed empty) > global RetryOptions.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class, Inherited = false)]
 public sealed class RetryAttribute : Attribute

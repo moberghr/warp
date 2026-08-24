@@ -8,7 +8,7 @@ namespace Warp.UI;
 /// </summary>
 public sealed class WarpUIEndpointConventionBuilder : IEndpointConventionBuilder
 {
-    private readonly IEndpointConventionBuilder _all;
+    private readonly CompositeEndpointConventionBuilder _all;
 
     internal WarpUIEndpointConventionBuilder(IServiceProvider services, IEndpointConventionBuilder shell, IEndpointConventionBuilder api)
     {

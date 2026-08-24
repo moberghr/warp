@@ -20,6 +20,13 @@ public static class TimeoutServiceConfiguration
             builder.Services.AddOptions<TimeoutOptions>();
         }
 
+        // Scratch-read the configured default so ValidateAddonAttributesOnHandlers (which runs before any
+        // provider exists) can reject a handler [Timeout] under a Total-scoped default. Readers take the
+        // LAST registration, so a repeat AddTimeout call simply wins.
+        var scratch = new TimeoutOptions();
+        configure?.Invoke(scratch);
+        builder.Services.AddSingleton(new TimeoutStartupDefaults(scratch.Default != null, scratch.DefaultScope));
+
         builder.Services.AddTransient(typeof(IPublishPipelineBehavior<>), typeof(TimeoutPublishBehavior<>));
         builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(TimeoutPipelineBehavior<,>));
 

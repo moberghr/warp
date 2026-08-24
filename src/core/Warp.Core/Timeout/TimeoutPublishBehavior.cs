@@ -31,11 +31,18 @@ public class TimeoutPublishBehavior<T> : IPublishPipelineBehavior<T>
                 meta.TimeoutMode ??= attr.Mode;
                 meta.TimeoutScope ??= attr.Scope;
             }
-            else if (_options.Value.Default is { } def)
+            else if (_options.Value.Default is { } def && _options.Value.DefaultScope == TimeoutScope.Total)
             {
+                // Only a Total-scoped default is publish-stamped: its deadline is a wall-clock budget
+                // measured from enqueue and must exist before the first execution (the workers read it
+                // pre-execution for deadline attainment). A PerAttempt default is applied at execution by
+                // TimeoutPipelineBehavior instead — stamping it here filled the metadata slot for every
+                // job and made a handler-declared [Timeout] unreachable, the same shadowing Retry fixed
+                // as #236. Handler [Timeout] under a Total default is rejected at AddWarp for the same
+                // reason, so the slot-always-full behaviour is safe in this arm.
                 meta.TimeoutSeconds = (int)Math.Ceiling(def.TotalSeconds);
                 meta.TimeoutMode ??= _options.Value.DefaultMode;
-                meta.TimeoutScope ??= _options.Value.DefaultScope;
+                meta.TimeoutScope ??= TimeoutScope.Total;
             }
         }
 

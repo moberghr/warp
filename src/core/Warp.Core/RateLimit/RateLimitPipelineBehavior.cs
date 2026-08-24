@@ -34,12 +34,24 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
         RequestHandlerDelegate<TRequest, TResponse> next,
         CancellationToken cancellationToken)
     {
-        if (request is not IJob)
+        if (request is not IJob && request is not IMessage)
+        {
+            return await next(request, cancellationToken);
+        }
+
+        // Saga proxies (and any other IPolicyExemptHandler) manage their own execution policy —
+        // their busy/version-conflict reschedules must not additionally contend on a rate limit.
+        if (AddonAttributeResolver.IsPolicyExempt(_jobContext.HandlerType))
         {
             return await next(request, cancellationToken);
         }
 
         var meta = _jobContext.GetMetadata<IRateLimitMetadata>();
+        if (meta.RateLimitKey == null)
+        {
+            StampResolvedAttribute(meta);
+        }
+
         if (meta.RateLimitKey == null || meta.RateLimitCount == null || meta.RateLimitWindowSeconds == null)
         {
             return await next(request, cancellationToken);
@@ -76,7 +88,9 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             {
                 State = JobOutcome.RescheduledState(rescheduleTo, contentionNow),
                 ScheduleTime = rescheduleTo,
-                ClearHandlerType = true,
+
+                // Routed message children keep HandlerType on requeue (§8.14) — it IS the routing decision.
+                ClearHandlerType = request is not IMessage,
                 Reason = OutcomeReason.RateLimit,
                 LogMessage = $"Requeued — rate limit '{key}' lock contention",
             };
@@ -102,7 +116,9 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             {
                 State = JobOutcome.RescheduledState(evaluation.NextAvailable, now),
                 ScheduleTime = evaluation.NextAvailable,
-                ClearHandlerType = true,
+
+                // Routed message children keep HandlerType on requeue (§8.14) — it IS the routing decision.
+                ClearHandlerType = request is not IMessage,
                 Reason = OutcomeReason.RateLimit,
                 LogMessage = $"Throttled — rate limit '{key}' ({effectiveCount}/{windowSeconds}s), rescheduled to {evaluation.NextAvailable:O}",
             };
@@ -120,6 +136,25 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
         }
 
         return default!;
+    }
+
+    private void StampResolvedAttribute(IRateLimitMetadata meta)
+    {
+        // Handler-then-contract resolution (addon policy axis); the contract rung also fixes
+        // directly-staged jobs (recurring firings) that bypassed the publish pipeline. Stamp all
+        // five fields or none — the execution gate above requires Key, Count AND WindowSeconds,
+        // so a partial stamp would silently no-op.
+        var attr = AddonAttributeResolver.Resolve<RateLimitAttribute>(_jobContext.HandlerType, typeof(TRequest));
+        if (attr == null)
+        {
+            return;
+        }
+
+        meta.RateLimitKey = attr.Key;
+        meta.RateLimitCount = attr.Count;
+        meta.RateLimitWindowSeconds = attr.PerSeconds;
+        meta.RateLimitMode = attr.Mode;
+        meta.RateLimitStyle = attr.Style;
     }
 
     private async Task<RateLimitEvaluation> Evaluate(

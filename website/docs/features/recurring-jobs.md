@@ -49,6 +49,12 @@ Standard 5-part cron (minute, hour, day, month, weekday) and 6-part with seconds
 0 9 * * 1-5     Weekdays at 9 AM
 ```
 
+## Policy attributes on recurring job types
+
+Recurring firings are staged directly by the scheduler — they never pass through the publish pipeline — but contract-declared policy is resolved at execution, so `[Mutex]`, `[Semaphore]`, `[RateLimit]`, `[Timeout(Scope = PerAttempt)]`, `[Retry]` and `[CircuitBreaker]` on the job type all apply to firings. A recurring job is the most likely thing you want to mutex: with `[Mutex]` on the type, a firing that starts while the previous one is still running is skipped (`Deleted`) or requeued per the configured `ConcurrencyMode`.
+
+One exception: `[Timeout(Scope = Total)]` measures from enqueue and needs a publish-time deadline, which this path cannot produce — the attribute is refused on recurring firings (Warp logs a one-time warning), and the firing then behaves as if unattributed: a configured `PerAttempt` global default still applies to it. Use `Scope = PerAttempt`.
+
 ## Manual Trigger
 
 Trigger a recurring job immediately from the dashboard or via the API:
