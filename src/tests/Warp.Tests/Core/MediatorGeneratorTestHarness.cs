@@ -24,24 +24,31 @@ internal static class MediatorGeneratorTestHarness
         string primaryAssemblyName = "Worker",
         string referencedAssemblyName = "Contracts")
     {
-        var baseReferences = BuildBaseReferences();
-
-        var references = baseReferences;
-        if (referencedSource is not null)
-        {
-            references = references.Add(CompileToReference(referencedSource, referencedAssemblyName, baseReferences));
-        }
-
-        var compilation = CSharpCompilation.Create(
-            assemblyName: primaryAssemblyName,
-            syntaxTrees: [CSharpSyntaxTree.ParseText(primarySource)],
-            references: references,
-            options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        var compilation = CreateCompilation(primarySource, referencedSource, primaryAssemblyName, referencedAssemblyName);
 
         var driver = CSharpGeneratorDriver.Create(new WarpMediatorGenerator());
         var result = driver.RunGenerators(compilation).GetRunResult();
 
         return string.Join("\n", result.GeneratedTrees.Select(x => x.ToString()));
+    }
+
+    /// <summary>
+    /// Runs the generator and returns the diagnostics IT reported (WARP001-003), as opposed to
+    /// <see cref="RunAndGetCompilationErrors"/>, which returns diagnostics of the resulting compilation.
+    /// Generator diagnostics live on the run result and never appear in <c>Compilation.GetDiagnostics</c>,
+    /// so the two methods see disjoint sets.
+    /// </summary>
+    public static IReadOnlyList<Diagnostic> RunAndGetGeneratorDiagnostics(
+        string primarySource,
+        string? referencedSource = null,
+        string primaryAssemblyName = "Worker",
+        string referencedAssemblyName = "Contracts")
+    {
+        var compilation = CreateCompilation(primarySource, referencedSource, primaryAssemblyName, referencedAssemblyName);
+
+        var driver = CSharpGeneratorDriver.Create(new WarpMediatorGenerator());
+
+        return [.. driver.RunGenerators(compilation).GetRunResult().Diagnostics];
     }
 
     /// <summary>
@@ -55,6 +62,20 @@ internal static class MediatorGeneratorTestHarness
         string primaryAssemblyName = "Worker",
         string referencedAssemblyName = "Contracts")
     {
+        var compilation = CreateCompilation(primarySource, referencedSource, primaryAssemblyName, referencedAssemblyName);
+
+        var driver = CSharpGeneratorDriver.Create(new WarpMediatorGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updated, out _);
+
+        return [.. updated.GetDiagnostics().Where(x => x.Severity == DiagnosticSeverity.Error)];
+    }
+
+    private static CSharpCompilation CreateCompilation(
+        string primarySource,
+        string? referencedSource,
+        string primaryAssemblyName,
+        string referencedAssemblyName)
+    {
         var baseReferences = BuildBaseReferences();
 
         var references = baseReferences;
@@ -63,16 +84,11 @@ internal static class MediatorGeneratorTestHarness
             references = references.Add(CompileToReference(referencedSource, referencedAssemblyName, baseReferences));
         }
 
-        var compilation = CSharpCompilation.Create(
+        return CSharpCompilation.Create(
             assemblyName: primaryAssemblyName,
             syntaxTrees: [CSharpSyntaxTree.ParseText(primarySource)],
             references: references,
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-
-        var driver = CSharpGeneratorDriver.Create(new WarpMediatorGenerator());
-        driver.RunGeneratorsAndUpdateCompilation(compilation, out var updated, out _);
-
-        return [.. updated.GetDiagnostics().Where(x => x.Severity == DiagnosticSeverity.Error)];
     }
 
     private static PortableExecutableReference CompileToReference(

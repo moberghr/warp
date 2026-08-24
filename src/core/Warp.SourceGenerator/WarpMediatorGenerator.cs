@@ -65,6 +65,20 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
             return;
         }
 
+        // Build-time half of the addon policy-axis validation. Reports only; emission continues either
+        // way, so a misplaced attribute surfaces as its own error rather than an avalanche of missing-
+        // handler errors from a suppressed mediator. See PolicyAxisValidator for what stays at runtime.
+        PolicyAxisValidator.Validate(
+            context,
+            compilation,
+            candidates,
+            iJobSymbol,
+            iMessageSymbol,
+            iJobHandlerSymbol,
+            iMessageHandlerSymbol,
+            iRequestHandlerSymbol,
+            iStreamRequestHandlerSymbol);
+
         var allHandlerMap = BuildHandlerMap(compilation, iRequestHandlerSymbol);
         var streamHandlerMap = iStreamRequestHandlerSymbol is not null
             ? BuildHandlerMap(compilation, iStreamRequestHandlerSymbol)
