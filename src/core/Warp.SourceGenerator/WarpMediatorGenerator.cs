@@ -42,7 +42,7 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
         ImmutableArray<INamedTypeSymbol?> candidates)
     {
         // Warp.Core itself has no user-level handlers. Its own open-generic pipeline/publish
-        // behaviors (MutexPipelineBehavior, RetryPublishBehavior, ...) are registered by opt-in
+        // behaviors (ConcurrencyPipelineBehavior, RetryPipelineBehavior, ...) are registered by opt-in
         // addon methods (AddMutex, AddRetry, ...) — auto-registering them here would short-circuit
         // that opt-in. Skip source-generation for Core entirely.
         if (string.Equals(compilation.AssemblyName, "Warp.Core", StringComparison.Ordinal))
@@ -65,9 +65,8 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
             return;
         }
 
-        // Build-time half of the addon policy-axis validation. Reports only; emission continues either
-        // way, so a misplaced attribute surfaces as its own error rather than an avalanche of missing-
-        // handler errors from a suppressed mediator. See PolicyAxisValidator for what stays at runtime.
+        // Reports only — emission continues, so a misplaced attribute surfaces as its own error rather
+        // than an avalanche of missing-handler errors from a suppressed mediator.
         PolicyAxisValidator.Validate(
             context,
             compilation,

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Policies;
 
 namespace Warp.Core.Retry;
 
@@ -27,10 +28,13 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
             return await next(request, cancellationToken);
         }
 
-        if (AddonAttributeResolver.IsPolicyExempt(_jobContext.HandlerType))
+        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
         {
             return await next(request, cancellationToken);
         }
+
+        // Before the handler, not in the catch: the row should carry its budget even when the attempt wins.
+        PolicyResolver.StampRetry(_jobContext.GetMetadata<IRetryMetadata>(), _jobContext.HandlerType, typeof(TRequest));
 
         try
         {
@@ -38,14 +42,15 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
         }
         catch (Exception)
         {
+            // Re-read: GetMetadata COPIES the dictionary and re-points IJobContext.Metadata at the copy, so
+            // a proxy held across next() is orphaned and writes to it (RetriedTimes!) vanish.
             var meta = _jobContext.GetMetadata<IRetryMetadata>();
-            var attr = GetRetryAttribute();
-            var maxRetries = meta.MaxRetries ?? attr?.MaxRetries ?? _options.Value.MaxRetries;
+            var maxRetries = meta.MaxRetries ?? _options.Value.MaxRetries;
             var retriedTimes = meta.RetriedTimes;
 
             if (retriedTimes < maxRetries)
             {
-                var delays = meta.RetryDelays ?? attr?.Delays ?? _options.Value.Delays;
+                var delays = meta.RetryDelays ?? _options.Value.Delays;
                 var now = _timeProvider.GetUtcNow().UtcDateTime;
                 DateTime? scheduleTime = null;
 
@@ -123,9 +128,6 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
             throw;
         }
     }
-
-    private RetryAttribute? GetRetryAttribute() =>
-        AddonAttributeResolver.Resolve<RetryAttribute>(_jobContext.HandlerType, typeof(TRequest));
 }
 
 /// <summary>

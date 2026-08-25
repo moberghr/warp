@@ -107,3 +107,21 @@ public class RetryPolicyMessagePlainHandler : IMessageHandler<RetryPolicyMessage
     public Task HandleAsync(RetryPolicyMessage message, CancellationToken cancellationToken) =>
         Task.CompletedTask;
 }
+
+// Both axes on a MESSAGE: the contract key is the default; the attributed handler overrides it for its
+// own child.
+[Mutex("msg-both-contract")]
+public class BothAxesMessage : IMessage;
+
+[Mutex("msg-both-handler")]
+public class BothAxesMessageOverridingHandler : IMessageHandler<BothAxesMessage>
+{
+    public Task HandleAsync(BothAxesMessage message, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+}
+
+public class BothAxesMessageInheritingHandler : IMessageHandler<BothAxesMessage>
+{
+    public Task HandleAsync(BothAxesMessage message, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+}

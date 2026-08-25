@@ -26,10 +26,8 @@ public class RetryAttributeJobCommand : IJobHandler<RetryAttributeJobRequest>
 [Retry(4)]
 public class RetryAttributeJobRequest : IJob;
 
-// [Retry] on BOTH the request and its handler is a startup error since the addon policy axis change —
-// the publish-stamped contract value would silently shadow the handler attribute, so
-// ValidateAddonAttributesOnHandlers rejects the pair (AddonAttributeHandlerValidationTests covers it).
-// The RetryAttributeBoth* fixture that used to live here is therefore unrepresentable.
+// [Retry] on both the request and its handler is legal since §8.8 — the handler wins. Covered by
+// PolicyResolverTests; BothAxesMutexRequest carries the end-to-end version.
 
 // Handler with [Retry] that includes custom delays
 [Retry(3, Delays = [100, 200, 300])]

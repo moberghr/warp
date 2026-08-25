@@ -79,7 +79,7 @@ Attribute and fluent values resolve at publish; admin overrides are read on ever
 
 ## Contract or handler?
 
-`[RateLimit]` can sit on the job/message type (publish-time; on a message every handler's child carries the key, so all handlers share the budget) or on a job/message handler class (execution-time; that handler's children only — the natural home when the *handler* is what calls the throttled dependency). Declaring it on both axes for the same pair is a startup error, and recurring-job firings honour a contract-declared limit. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
+`[RateLimit]` can sit on the job/message type (the default; on a message every child that declares nothing resolves it, so those handlers share the budget), on a job/message handler class (that handler's children only — the natural home when the *handler* is what calls the throttled dependency), or on both, in which case the handler wins. The resolved limit is written onto the job row at its first execution, and recurring-job firings honour a contract-declared limit. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
 
 ## What the pipeline holds
 

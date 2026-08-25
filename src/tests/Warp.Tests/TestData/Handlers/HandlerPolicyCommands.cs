@@ -5,7 +5,7 @@ using Warp.Core.RateLimit;
 namespace Warp.Tests.TestData.Handlers;
 
 // Addon policy axis fixtures: the REQUEST types carry no policy attribute — the policy sits on the
-// HANDLER and is resolved at first execution via AddonAttributeResolver, then stamped into metadata.
+// HANDLER and is resolved at first execution via PolicyResolver, then stamped into metadata.
 public class HandlerMutexRequest : IJob;
 
 [Mutex("handler-mutex")]
@@ -54,4 +54,15 @@ public class RecurringMutexCommand : IJobHandler<RecurringMutexRequest>
         _signal.Running.Release();
         await _signal.CanFinish.WaitAsync(cancellationToken);
     }
+}
+
+// Both axes on one pair, cross-family: a handler [Semaphore] must beat a contract [Mutex].
+[Mutex("both-axes-contract")]
+public class BothAxesMutexRequest : IJob;
+
+[Semaphore("both-axes-handler", 1)]
+public class BothAxesMutexCommand : IJobHandler<BothAxesMutexRequest>
+{
+    public Task HandleAsync(BothAxesMutexRequest message, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
 }

@@ -374,43 +374,6 @@ public abstract class MutexTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task MutexAttribute_SetsKeyAtPublishTime()
-    {
-        // Arrange: MutexAttributeRequest has [Mutex("static-key")] on the job class
-        var services = new ServiceCollection();
-        services.AddWarpMediator();
-        services.AddLogging();
-        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddTestServerContext<TestContext>();
-        services.AddScoped<JobContext>();
-        services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
-        services.AddSingleton<IWarpSemaphoreProvider>(new FakeSemaphoreProvider());
-        new Warp.Core.WarpBuilder<TestContext>(services).AddConcurrency();
-        services.AddSingleton(TimeProvider.System);
-        services.AddSingleton<IOptions<WarpConfiguration>>(new OptionsWrapper<WarpConfiguration>(new WarpConfiguration()));
-
-        var provider = services.BuildServiceProvider();
-        await using var scope = provider.CreateAsyncScope();
-        var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
-
-        // Act: enqueue a job type that has [Mutex("static-key")]
-        var jobId = await publisher.Enqueue(new MutexAttributeRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Assert: metadata should contain the mutex key from the attribute
-        var readCtx = _fixture.CreateContext();
-        var job = await readCtx.Set<Job>()
-            .Where(x => x.Id == jobId)
-            .FirstAsync(CancellationToken.None);
-
-        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata!);
-        metadata.ShouldNotBeNull();
-        metadata.ShouldContainKey("ConcurrencyKey");
-        metadata["ConcurrencyKey"].ToString().ShouldBe("static-key");
-    }
-
-    [TimedFact]
     public async Task WithMutex_SetsKeyInMetadata()
     {
         // Arrange
@@ -448,43 +411,6 @@ public abstract class MutexTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task MutexAttribute_PopulatesLimitOneInMetadata()
-    {
-        // Arrange
-        var services = new ServiceCollection();
-        services.AddWarpMediator();
-        services.AddLogging();
-        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddTestServerContext<TestContext>();
-        services.AddScoped<JobContext>();
-        services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
-        services.AddSingleton<IWarpSemaphoreProvider>(new FakeSemaphoreProvider());
-        new Warp.Core.WarpBuilder<TestContext>(services).AddConcurrency();
-        services.AddSingleton(TimeProvider.System);
-        services.AddSingleton<IOptions<WarpConfiguration>>(new OptionsWrapper<WarpConfiguration>(new WarpConfiguration()));
-
-        var provider = services.BuildServiceProvider();
-        await using var scope = provider.CreateAsyncScope();
-        var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
-
-        // Act
-        var jobId = await publisher.Enqueue(new MutexAttributeRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Assert: metadata should carry Limit = 1
-        var readCtx = _fixture.CreateContext();
-        var job = await readCtx.Set<Job>()
-            .Where(x => x.Id == jobId)
-            .FirstAsync(CancellationToken.None);
-
-        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata!);
-        metadata.ShouldNotBeNull();
-        metadata.ShouldContainKey("ConcurrencyLimit");
-        ((JsonElement)metadata["ConcurrencyLimit"]).GetInt32().ShouldBe(1);
-    }
-
-    [TimedFact]
     public async Task WithMutex_PopulatesLimitOneInMetadata()
     {
         // Arrange
@@ -519,45 +445,6 @@ public abstract class MutexTestsBase : IAsyncLifetime
         metadata.ShouldNotBeNull();
         metadata.ShouldContainKey("ConcurrencyLimit");
         ((JsonElement)metadata["ConcurrencyLimit"]).GetInt32().ShouldBe(1);
-    }
-
-    [TimedFact]
-    public async Task MutexAttribute_WaitMode_PropagatesToMetadata()
-    {
-        // Arrange: MutexWaitAttributeRequest has [Mutex("static-wait-key", Mode = ConcurrencyMode.Wait)]
-        var services = new ServiceCollection();
-        services.AddWarpMediator();
-        services.AddLogging();
-        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddTestServerContext<TestContext>();
-        services.AddScoped<JobContext>();
-        services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
-        services.AddSingleton<IWarpSemaphoreProvider>(new FakeSemaphoreProvider());
-        new Warp.Core.WarpBuilder<TestContext>(services).AddConcurrency();
-        services.AddSingleton(TimeProvider.System);
-        services.AddSingleton<IOptions<WarpConfiguration>>(new OptionsWrapper<WarpConfiguration>(new WarpConfiguration()));
-
-        var provider = services.BuildServiceProvider();
-        await using var scope = provider.CreateAsyncScope();
-        var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
-
-        // Act
-        var jobId = await publisher.Enqueue(new MutexWaitAttributeRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Assert: metadata should carry both ConcurrencyKey and Mode = Wait
-        var readCtx = _fixture.CreateContext();
-        var job = await readCtx.Set<Job>()
-            .Where(x => x.Id == jobId)
-            .FirstAsync(CancellationToken.None);
-
-        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata!);
-        metadata.ShouldNotBeNull();
-        metadata.ShouldContainKey("ConcurrencyKey");
-        metadata["ConcurrencyKey"].ToString().ShouldBe("static-wait-key");
-        metadata.ShouldContainKey("ConcurrencyMode");
-        ((JsonElement)metadata["ConcurrencyMode"]).GetInt32().ShouldBe((int)ConcurrencyMode.Wait);
     }
 
     private WarpWorkerService<TestContext> CreateWorker(FakeSemaphoreProvider? lockProvider = null)

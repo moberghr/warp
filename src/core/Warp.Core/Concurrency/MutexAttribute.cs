@@ -2,10 +2,8 @@ namespace Warp.Core.Concurrency;
 
 /// <summary>
 /// Serializes jobs sharing a key to a single concurrent execution. Declare on the request/job/message
-/// type (resolved at publish and copied to every routed handler's child) OR on a job/message handler
-/// class (resolved at first execution — the handler is the code touching the resource). Declaring the
-/// concurrency family on both the contract and its handler is a startup error; on stream or in-memory
-/// request handlers it is rejected at startup (#242 — no execution path can honour it there).
+/// type, on a job/message handler class, or on both — the handler wins, including over a contract
+/// <c>[Semaphore]</c> (§8.8). Rejected at build time on stream and in-memory request handlers (#242).
 /// </summary>
 [AttributeUsage(AttributeTargets.Class, Inherited = false)]
 public sealed class MutexAttribute : Attribute

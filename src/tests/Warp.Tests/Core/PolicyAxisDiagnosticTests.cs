@@ -4,9 +4,9 @@ using Shouldly;
 namespace Warp.Tests.Core;
 
 /// <summary>
-/// Build-time half of the policy-axis validation (WARP001-003). Overlaps
-/// <see cref="AddonAttributeHandlerValidationTests"/> deliberately — the runtime check is still the
-/// backstop for handlers the generator cannot see.
+/// Build-time half of the policy axis (§8.8): WARP001 (policy on a handler shape that never reaches a
+/// policy behaviour) and WARP002 (Total-scoped timeout on a handler). Handlers outside the compilation
+/// are <see cref="PolicyResolverTests"/>'s backstop, which fails the job rather than the process.
 /// </summary>
 [Trait("Category", "NoDb")]
 public sealed class PolicyAxisDiagnosticTests
@@ -26,90 +26,21 @@ public sealed class PolicyAxisDiagnosticTests
         """;
 
     [TimedFact]
-    public void SameAttributeOnContractAndHandler_ReportsBothAxesConflict()
+    public void SameFamilyOnBothAxes_IsAccepted()
     {
+        // Used to be a build error: the contract value was stamped at publish and shadowed the handler.
         var diagnostics = Run("""
-            [Mutex("k")]
-            public sealed class MutexJob : IJob;
+            [Mutex("contract")]
+            public sealed class BothAxesJob : IJob;
 
-            [Mutex("k")]
-            public sealed class MutexJobHandler : IJobHandler<MutexJob>
+            [Semaphore("handler", 3)]
+            public sealed class BothAxesJobHandler : IJobHandler<BothAxesJob>
             {
-                public Task HandleAsync(MutexJob message, CancellationToken cancellationToken) => Task.CompletedTask;
+                public Task HandleAsync(BothAxesJob message, CancellationToken cancellationToken) => Task.CompletedTask;
             }
             """);
 
-        diagnostics.Select(x => x.Id).ShouldBe(["WARP001"]);
-
-        // The other declaration is in a different file; the reader needs its name to find it.
-        var message = diagnostics[0].GetMessage();
-        message.ShouldContain("MutexJob");
-        message.ShouldContain("MutexJobHandler");
-    }
-
-    [TimedFact]
-    public void MutexOnContractAndSemaphoreOnHandler_ReportsOneFamilyConflict()
-    {
-        // Same family, different attributes: one conflict, not two.
-        var diagnostics = Run("""
-            [Mutex("k")]
-            public sealed class FamilyJob : IJob;
-
-            [Semaphore("k", 3)]
-            public sealed class FamilyJobHandler : IJobHandler<FamilyJob>
-            {
-                public Task HandleAsync(FamilyJob message, CancellationToken cancellationToken) => Task.CompletedTask;
-            }
-            """);
-
-        diagnostics.Select(x => x.Id).ShouldBe(["WARP001"]);
-        diagnostics[0].GetMessage().ShouldContain("Mutex/Semaphore");
-    }
-
-    [TimedFact]
-    public void RetryOnContractAndHandler_ReportsBothAxesConflict()
-    {
-        var diagnostics = Run("""
-            [Retry(2)]
-            public sealed class RetryJob : IJob;
-
-            [Retry(3)]
-            public sealed class RetryJobHandler : IJobHandler<RetryJob>
-            {
-                public Task HandleAsync(RetryJob message, CancellationToken cancellationToken) => Task.CompletedTask;
-            }
-            """);
-
-        diagnostics.Select(x => x.Id).ShouldBe(["WARP001"]);
-    }
-
-    [TimedFact]
-    public void ContractInReferencedAssembly_StillDetectsConflict()
-    {
-        // The contract's attribute is read from metadata, not syntax.
-        const string contracts = """
-            using Warp.Core.Concurrency;
-            using Warp.Core.Handlers;
-
-            namespace Contracts;
-
-            [Mutex("k")]
-            public sealed class RemoteJob : IJob;
-            """;
-
-        var diagnostics = Run(
-            """
-            using Contracts;
-
-            [Mutex("k")]
-            public sealed class RemoteJobHandler : IJobHandler<RemoteJob>
-            {
-                public Task HandleAsync(RemoteJob message, CancellationToken cancellationToken) => Task.CompletedTask;
-            }
-            """,
-            contracts);
-
-        diagnostics.Select(x => x.Id).ShouldBe(["WARP001"]);
+        diagnostics.ShouldBeEmpty();
     }
 
     [TimedFact]
@@ -125,7 +56,7 @@ public sealed class PolicyAxisDiagnosticTests
             }
             """);
 
-        diagnostics.Select(x => x.Id).ShouldBe(["WARP002"]);
+        diagnostics.Select(x => x.Id).ShouldBe(["WARP001"]);
         diagnostics[0].GetMessage().ShouldContain("[Mutex]");
     }
 
@@ -142,13 +73,14 @@ public sealed class PolicyAxisDiagnosticTests
             }
             """);
 
-        diagnostics.Select(x => x.Id).ShouldBe(["WARP002"]);
+        diagnostics.Select(x => x.Id).ShouldBe(["WARP001"]);
     }
 
     [TimedFact]
     public void RetryOnInMemoryRequestHandler_IsTolerated()
     {
-        // Tolerated by the runtime table too; this test keeps the two tables in step.
+        // Retry/CircuitBreaker have always been tolerated (dead) on non-job shapes; rejecting them
+        // there now would be an unspecced break.
         var diagnostics = Run("""
             public sealed class TolerantRequest : IRequest<string>;
 
@@ -176,7 +108,7 @@ public sealed class PolicyAxisDiagnosticTests
             }
             """);
 
-        diagnostics.Select(x => x.Id).ShouldBe(["WARP003"]);
+        diagnostics.Select(x => x.Id).ShouldBe(["WARP002"]);
     }
 
     [TimedFact]

@@ -30,27 +30,6 @@ public static class ServiceConfiguration
 {
     private static readonly SaveChangesConcurrencyTokenInterceptor _saveChangesInterceptor = new();
 
-    private static readonly Type[] HandlerDefinitions =
-    [
-        typeof(Handlers.IRequestHandler<,>),
-        typeof(Handlers.IJobHandler<>),
-        typeof(Handlers.IMessageHandler<>),
-        typeof(Handlers.IStreamRequestHandler<,>),
-    ];
-
-    // Conflicts are detected per family, not per attribute type — every attribute in a family writes the
-    // same metadata slot. RejectedOnUnsupportedShapes keeps the original #242 loud failure for the four
-    // attributes it covered; Retry/CircuitBreaker were always tolerated on non-job handlers (dead code)
-    // and rejecting them there now would be an unspecced breaking change.
-    private static readonly PolicyFamily[] PolicyFamilies =
-    [
-        new("Mutex/Semaphore", [typeof(Concurrency.MutexAttribute), typeof(Concurrency.SemaphoreAttribute)], RejectedOnUnsupportedShapes: true),
-        new("RateLimit", [typeof(RateLimit.RateLimitAttribute)], RejectedOnUnsupportedShapes: true),
-        new("Timeout", [typeof(Timeout.TimeoutAttribute)], RejectedOnUnsupportedShapes: true),
-        new("Retry", [typeof(RetryAttribute)], RejectedOnUnsupportedShapes: false),
-        new("CircuitBreaker", [typeof(CircuitBreaker.CircuitBreakerAttribute)], RejectedOnUnsupportedShapes: false),
-    ];
-
     /// <summary>
     /// Registers Warp's publish-side services against the user's <typeparamref name="TContext"/>:
     /// <c>IPublisher</c>, <c>IMediator</c>, <c>IRecurringJobPublisher</c>, the query services, and
@@ -137,7 +116,6 @@ public static class ServiceConfiguration
 
         WarpGeneratedHandlerRegistry.ApplyAll(services);
         RemoveExcludedHandlerRegistrations(services);
-        ValidateAddonAttributesOnHandlers(services);
 
         services.AddScoped<IPublisher>(x => new Publisher<TContext>(
             x.GetRequiredService<TContext>(),
@@ -378,126 +356,6 @@ public static class ServiceConfiguration
                 services.RemoveAt(i);
             }
         }
-    }
-
-    // Addon policy axis (supersedes #242): [Timeout] / [Mutex] / [Semaphore] / [RateLimit] may be declared
-    // on the request/contract type OR on the handler — the execution behaviors resolve handler-then-contract
-    // via AddonAttributeResolver and stamp the result into metadata at first execution. Three things are
-    // still rejected loudly here, because each is a silent no-op or a silent shadow at runtime:
-    //   1. A handler attribute on a shape whose execution path cannot honour it (stream handlers, handlers
-    //      of in-memory requests) — the behaviors early-return for non-job-backed requests, so the
-    //      attribute would be dead code. This is the original #242 failure mode, kept for those shapes.
-    //   2. The same POLICY FAMILY on both axes — the publish-stamped contract value fills the metadata slot
-    //      and permanently shadows the handler attribute. Families, not attribute types: a contract [Mutex]
-    //      plus a handler [Semaphore] collide on the same IConcurrencyMetadata slot. Retry and
-    //      CircuitBreaker join this check (their handler side was legal-but-dead before); they are NOT
-    //      rejected on unsupported shapes, where they have always been tolerated.
-    //   3. [Timeout] specifics: Scope = Total on a handler (the deadline must exist at publish, before any
-    //      handler is known), and any handler [Timeout] under a Total-scoped global default (the default
-    //      keeps publish-stamping, so the handler attribute would be unreachable).
-    internal static void ValidateAddonAttributesOnHandlers(IServiceCollection services)
-    {
-        var handlers = services
-            .Where(x => !x.IsKeyedService) // ImplementationType getter throws for keyed descriptors
-            .Where(x => x.ServiceType.IsGenericType)
-            .Where(x => HandlerDefinitions.Contains(x.ServiceType.GetGenericTypeDefinition()))
-            .Where(x => x.ImplementationType is not null)
-            .Select(x =>
-                new
-                {
-                    Definition = x.ServiceType.GetGenericTypeDefinition(),
-                    Handler = x.ImplementationType!,
-                    Request = x.ServiceType.GetGenericArguments()[0],
-                })
-            .Distinct();
-
-        var timeoutDefaults = services
-            .LastOrDefault(x => x.ServiceType == typeof(Timeout.TimeoutStartupDefaults))
-            ?.ImplementationInstance as Timeout.TimeoutStartupDefaults;
-
-        foreach (var entry in handlers)
-        {
-            // Self-handling job (e.g. `class Foo : IJob, IJobHandler<Foo>`): the impl type IS the request
-            // type, so an addon attribute on it is the correct request-axis placement, not a misplaced
-            // handler attribute. Don't reject it.
-            if (entry.Handler == entry.Request)
-            {
-                continue;
-            }
-
-            var handlerAxisSupported = SupportsHandlerAxis(entry.Definition, entry.Request);
-
-            foreach (var family in PolicyFamilies)
-            {
-                if (!family.AttributeTypes.Any(x => entry.Handler.GetCustomAttributes(x, inherit: false).Length > 0))
-                {
-                    continue;
-                }
-
-                if (!handlerAxisSupported)
-                {
-                    if (!family.RejectedOnUnsupportedShapes)
-                    {
-                        continue;
-                    }
-
-                    throw new InvalidOperationException(
-                        $"[{family.Name}] is declared on handler '{entry.Handler.Name}', where it is silently ignored: "
-                        + $"'{entry.Request.Name}' is not an IJob or IMessage, so no execution path can honour a "
-                        + "handler-declared policy there. Declare the policy on a job/message handler, or on the "
-                        + "request/job type. See issue #242.");
-                }
-
-                if (family.AttributeTypes.Any(x => entry.Request.GetCustomAttributes(x, inherit: false).Length > 0))
-                {
-                    throw new InvalidOperationException(
-                        $"{family.Name} policy is declared on BOTH '{entry.Request.Name}' (the contract) and "
-                        + $"'{entry.Handler.Name}' (its handler). The contract declaration is stamped at publish and "
-                        + "would silently shadow the handler one — pick one axis and delete the other declaration.");
-                }
-
-                if (family.AttributeTypes.Contains(typeof(Timeout.TimeoutAttribute)))
-                {
-                    ValidateHandlerTimeout(entry.Handler, timeoutDefaults);
-                }
-            }
-        }
-    }
-
-    private static void ValidateHandlerTimeout(Type handler, Timeout.TimeoutStartupDefaults? timeoutDefaults)
-    {
-        var attribute = (Timeout.TimeoutAttribute)handler.GetCustomAttributes(typeof(Timeout.TimeoutAttribute), inherit: false)[0];
-        if (attribute.Scope == Timeout.TimeoutScope.Total)
-        {
-            throw new InvalidOperationException(
-                $"[Timeout(Scope = Total)] is declared on handler '{handler.Name}', but a Total-scoped timeout is a "
-                + "wall-clock budget measured from enqueue — its deadline must be stamped at publish, before any "
-                + "handler is known. Declare Total-scoped timeouts on the request/job type; PerAttempt timeouts may "
-                + "stay on the handler.");
-        }
-
-        if (timeoutDefaults is { HasDefault: true, DefaultScope: Timeout.TimeoutScope.Total })
-        {
-            throw new InvalidOperationException(
-                $"[Timeout] is declared on handler '{handler.Name}', but the global default timeout is Total-scoped, "
-                + "which is stamped into metadata at publish and would permanently shadow the handler attribute. "
-                + "Move the attribute to the request/job type, or make the global default PerAttempt-scoped.");
-        }
-    }
-
-    private static bool SupportsHandlerAxis(Type definition, Type requestType)
-    {
-        if (definition == typeof(Handlers.IJobHandler<>) || definition == typeof(Handlers.IMessageHandler<>))
-        {
-            return true;
-        }
-
-        if (definition == typeof(Handlers.IRequestHandler<,>))
-        {
-            return typeof(IJob).IsAssignableFrom(requestType) || typeof(IMessage).IsAssignableFrom(requestType);
-        }
-
-        return false;
     }
 
     private static void ConfigureDbContextOptions<TContext>(IServiceCollection services)
@@ -1443,6 +1301,4 @@ public static class ServiceConfiguration
 
         log.Metadata.SetSchema(schema);
     }
-
-    private sealed record PolicyFamily(string Name, Type[] AttributeTypes, bool RejectedOnUnsupportedShapes);
 }

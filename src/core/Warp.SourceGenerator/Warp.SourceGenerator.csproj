@@ -10,8 +10,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <!-- RS2008: This generator's diagnostics aren't published as a stand-alone analyzer
-         package; release tracking would add ceremony with no consumer benefit. -->
+    <!-- RS2008: diagnostics aren't shipped as a stand-alone analyzer package. -->
     <NoWarn>$(NoWarn);RS2008</NoWarn>
   </PropertyGroup>
 

@@ -238,6 +238,25 @@ public abstract class MutexIntegrationTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
+    public async Task BothAxesDeclared_HandlerWins_AndIsWrittenOnTheRow()
+    {
+        // Cross-family on purpose (contract [Mutex] vs handler [Semaphore]): one metadata slot, so
+        // resolving attribute-by-attribute instead of rung-by-rung would let the contract shadow it.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+
+        var jobId = await publisher.Enqueue(new BothAxesMutexRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(jobId, State.Completed);
+
+        var job = await server.GetJob(jobId);
+        job.Metadata.ShouldNotBeNull();
+        job.Metadata.ShouldContain("both-axes-handler");
+        job.Metadata.ShouldNotContain("both-axes-contract");
+    }
+
+    [TimedFact]
     public async Task HandlerDeclaredMutex_DispatcherMode_SecondJobSkipped_PolicyStampedOnRow()
     {
         // SC8: the dispatcher worker (WarpDispatcherWorker) carries HandlerType wiring and metadata

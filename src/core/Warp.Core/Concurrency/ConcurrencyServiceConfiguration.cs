@@ -14,7 +14,6 @@ public static class ConcurrencyServiceConfiguration
         builder.Services.AddScoped<IConcurrencyLimitManager, ConcurrencyLimitManager<TContext>>();
         builder.Services.AddScoped<ConcurrencyLimitResolver>();
         builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ConcurrencyPipelineBehavior<,>));
-        builder.Services.AddTransient(typeof(IPublishPipelineBehavior<>), typeof(ConcurrencyPublishBehavior<>));
 
         return builder;
     }

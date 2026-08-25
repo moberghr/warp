@@ -3,6 +3,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
+using Warp.Core.Policies;
 
 namespace Warp.Core.RateLimit;
 
@@ -41,16 +42,13 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
 
         // Saga proxies (and any other IPolicyExemptHandler) manage their own execution policy —
         // their busy/version-conflict reschedules must not additionally contend on a rate limit.
-        if (AddonAttributeResolver.IsPolicyExempt(_jobContext.HandlerType))
+        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
         {
             return await next(request, cancellationToken);
         }
 
         var meta = _jobContext.GetMetadata<IRateLimitMetadata>();
-        if (meta.RateLimitKey == null)
-        {
-            StampResolvedAttribute(meta);
-        }
+        PolicyResolver.StampRateLimit(meta, _jobContext.HandlerType, typeof(TRequest));
 
         if (meta.RateLimitKey == null || meta.RateLimitCount == null || meta.RateLimitWindowSeconds == null)
         {
@@ -136,25 +134,6 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
         }
 
         return default!;
-    }
-
-    private void StampResolvedAttribute(IRateLimitMetadata meta)
-    {
-        // Handler-then-contract resolution (addon policy axis); the contract rung also fixes
-        // directly-staged jobs (recurring firings) that bypassed the publish pipeline. Stamp all
-        // five fields or none — the execution gate above requires Key, Count AND WindowSeconds,
-        // so a partial stamp would silently no-op.
-        var attr = AddonAttributeResolver.Resolve<RateLimitAttribute>(_jobContext.HandlerType, typeof(TRequest));
-        if (attr == null)
-        {
-            return;
-        }
-
-        meta.RateLimitKey = attr.Key;
-        meta.RateLimitCount = attr.Count;
-        meta.RateLimitWindowSeconds = attr.PerSeconds;
-        meta.RateLimitMode = attr.Mode;
-        meta.RateLimitStyle = attr.Style;
     }
 
     private async Task<RateLimitEvaluation> Evaluate(

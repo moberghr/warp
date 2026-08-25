@@ -2,15 +2,15 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Policies;
 
 namespace Warp.Core.Timeout;
 
 public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
     where TRequest : IRequest<TResponse>
 {
-    // Static on a generic type = one flag per closed generic, i.e. per request type — exactly the
-    // once-per-type dedupe the warning needs. 0 = not yet warned.
-    private static int _warnedTotalWithoutDeadline;
+    // Static on a generic type = one flag per request type, which is the dedupe these warnings want.
+    private static int _warnedInertPolicy;
 
     private readonly IJobContext _jobContext;
     private readonly TimeProvider _timeProvider;
@@ -41,25 +41,40 @@ public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TR
 
         // Saga proxies (and any other IPolicyExemptHandler) manage their own execution policy — an outer
         // timeout would race the saga's mutex hold + SaveChanges (see sagas docs, Limitations).
-        if (AddonAttributeResolver.IsPolicyExempt(_jobContext.HandlerType))
+        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
         {
             return await next(request, cancellationToken);
         }
 
         var meta = _jobContext.GetMetadata<ITimeoutMetadata>();
-        if (meta.TimeoutSeconds == null)
+        switch (PolicyResolver.StampTimeout(meta, _jobContext.HandlerType, typeof(TRequest)))
         {
-            StampResolvedAttribute(meta);
+            case TimeoutStamp.TotalWithoutDeadline:
+                WarnOnce(
+                    "[Timeout(Scope = Total)] on {RequestType} is inert on this execution path: the job was staged "
+                    + "directly (e.g. a recurring firing), so no publish-time deadline exists and none can be "
+                    + "invented without changing what Total means. Use Scope = PerAttempt for this job type.");
+
+                break;
+
+            // The one shape where a handler declaration loses: a Total timeout is stamped at publish, before
+            // any handler is known, and nothing can un-shadow it at execution.
+            case TimeoutStamp.AlreadyResolved when meta.TimeoutScope == TimeoutScope.Total
+                && PolicyResolver.IsDeclaredOnHandler<TimeoutAttribute>(_jobContext.HandlerType):
+                WarnOnce(
+                    "[Timeout] on the handler of {RequestType} is inert: a Total-scoped timeout was already "
+                    + "stamped at publish and a wall-clock budget cannot be replaced mid-flight. Move the "
+                    + "declaration to the contract, or make the Total-scoped default PerAttempt.");
+
+                break;
         }
 
         var mode = meta.TimeoutMode;
         var scope = meta.TimeoutScope;
         if (meta.TimeoutSeconds is not { } seconds)
         {
-            // Last resolver rung: the PerAttempt global default, applied per attempt from live options and
-            // never stamped (the Retry precedent — stamping a default would shadow later declarations). A
-            // Total-scoped default never reaches here unstamped: it is publish-stamped, and applying it at
-            // execution would measure the deadline from first pickup instead of enqueue.
+            // Last rung: the PerAttempt global default, read live and never stamped. A Total default is
+            // publish-stamped and never arrives here.
             if (_options.Value.Default is not { } def || _options.Value.DefaultScope != TimeoutScope.PerAttempt)
             {
                 return await next(request, cancellationToken);
@@ -114,35 +129,13 @@ public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TR
         }
     }
 
-    private void StampResolvedAttribute(ITimeoutMetadata meta)
+    private void WarnOnce(string message)
     {
-        var attr = AddonAttributeResolver.Resolve<TimeoutAttribute>(_jobContext.HandlerType, typeof(TRequest));
-        if (attr == null)
+        if (Interlocked.Exchange(ref _warnedInertPolicy, 1) == 0)
         {
-            return;
+#pragma warning disable CA2254 // Both call sites pass a constant template with the same single placeholder.
+            _logger.LogWarning(message, typeof(TRequest).Name);
+#pragma warning restore CA2254
         }
-
-        if (attr.Scope == TimeoutScope.Total && meta.TimeoutDeadlineUtc == null)
-        {
-            // Only reachable for a directly-staged job (a recurring firing) whose CONTRACT declares
-            // Scope = Total: a published job had its deadline stamped at publish, and a handler-declared
-            // Total is rejected at AddWarp. There is no honest deadline to invent here — computing one now
-            // would measure from first pickup instead of enqueue, a different semantic under the same
-            // attribute — so the policy is refused loudly-once rather than silently redefined.
-            if (Interlocked.Exchange(ref _warnedTotalWithoutDeadline, 1) == 0)
-            {
-                _logger.LogWarning(
-                    "[Timeout(Scope = Total)] on {RequestType} is inert on this execution path: the job was staged "
-                    + "directly (e.g. a recurring firing), so no publish-time deadline exists and none can be "
-                    + "invented without changing what Total means. Use Scope = PerAttempt for this job type.",
-                    typeof(TRequest).Name);
-            }
-
-            return;
-        }
-
-        meta.TimeoutSeconds = attr.Seconds;
-        meta.TimeoutMode ??= attr.Mode;
-        meta.TimeoutScope ??= attr.Scope;
     }
 }

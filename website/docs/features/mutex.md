@@ -40,18 +40,37 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 `[Mutex]` and `[Semaphore]` (like `[RateLimit]`, `[Timeout(Scope = PerAttempt)]`, `[Retry]` and `[CircuitBreaker]`) can be declared on **either** of two axes:
 
-- **On the contract** — the job or message type. Resolved at publish and stamped into the job's metadata; every publisher-side process sees the policy without loading any handler assembly. On a **message**, the router copies the stamped policy to *every* handler's child job, so **all handlers of that message contend on the one declared key** — use this when the *event itself* must be processed under a shared constraint.
-- **On the handler** — a job or message handler class. Resolved the first time the job binds to the handler and stamped into metadata from there. This is the natural home for most concurrency constraints: the handler is the code touching the resource ("this handler talks to a single-connection legacy endpoint"), and the contract — every publisher of it — shouldn't need to know that one consumer has such a constraint. On a message, a handler-declared policy applies to **that handler's children only**.
+- **On the contract** — the job or message type. This is the *default* for everything that runs it. On a **message**, every routed child that declares nothing of its own resolves the contract, so **all those handlers contend on the one declared key** — use this when the *event itself* must be processed under a shared constraint.
+- **On the handler** — a job or message handler class. The natural home for most concurrency constraints: the handler is the code touching the resource ("this handler talks to a single-connection legacy endpoint"), and the contract — every publisher of it — shouldn't need to know that one consumer has such a constraint. On a message, a handler-declared policy applies to **that handler's children only**.
 
-Either way the resolved policy ends up in `Job.Metadata`, so the row always explains why a job was skipped or requeued, and a deploy that changes an attribute never reshapes jobs already bound.
+**Both at once is fine, and the handler wins.** `[Mutex]` and `[Semaphore]` count as one family — they fill the same metadata slot — so a handler `[Semaphore("x", 3)]` overrides a contract `[Mutex("y")]` outright rather than merging with it.
 
-Rules enforced at `AddWarp` startup (loud failures, never silent no-ops):
+### One resolution, written on the row
 
-- The same policy *family* on **both** the contract and its handler throws — `[Mutex]` and `[Semaphore]` count as one family (they fill the same metadata slot). Pick one axis.
-- The four policy attributes on a **stream** handler or on a handler of a plain in-memory `IRequest<T>` still throw (#242) — no execution path can honour them there.
-- A handler attribute covers **every** message/job type that handler class handles, and attributes are not inherited by derived handler classes.
+The policy is resolved **once**, the first time the job runs, in this order:
 
-Two exemptions to know about: **recurring jobs** honour contract-declared policy (firings bypass the publish pipeline, so the policy is resolved at execution — see the recurring-jobs page), and **saga handlers are policy-exempt** — the saga proxy serializes on its own per-correlation mutex and manages its own reschedules, so no outer policy (declared or global default) applies to it.
+```
+explicit metadata at publish (WithMutex/WithSemaphore/...)
+  → the handler class
+    → the contract type
+      → global options (Retry/Timeout only)
+```
+
+The winner is then **written into `Job.Metadata`**, and from that moment the row is the authority: later attempts read it and never re-resolve, so a requeued or retried job cannot quietly change policy mid-flight, and a redeploy never reshapes jobs already running. If a job did not do what you expected, open it and read what it says it will follow — that is the whole point of stamping.
+
+Two consequences worth knowing:
+
+- **A job shows its policy once its first attempt finishes.** Nothing is stamped at publish except metadata you passed explicitly (at publish there is no handler to ask), and the stamp is persisted by the attempt's finalizing write — so a `Scheduled`/`Enqueued` row is blank, and a row still inside its handler has resolved its policy but not yet written it down. This is the price of letting the handler win; Warp does not add a database round-trip to the worker's hot path to close it.
+- **Global defaults are never stamped.** They are process configuration, read live, and identical for every job; an absent value on the row means "the global default applies", not "no policy".
+
+Still rejected — placements no execution path can honour, so they fail the **build** (and, for handlers the generator cannot see, fail the **job** at runtime rather than the process; there is no startup validation):
+
+- A policy attribute on a **stream** handler or on a handler of a plain in-memory `IRequest<T>` (#242).
+- `[Timeout(Scope = Total)]` on a handler — its deadline is wall-clock from enqueue, so it must be stamped before any handler is known.
+
+A handler attribute covers **every** message/job type that handler class handles, and attributes are not inherited by derived handler classes.
+
+Two exemptions to know about: **recurring jobs** honour contract-declared policy (firings bypass the publish pipeline, and resolution happens at execution anyway — see the recurring-jobs page), and **saga handlers are policy-exempt** — the saga proxy serializes on its own per-correlation mutex and manages its own reschedules, so no outer policy (declared or global default) applies to it.
 
 ## Usage — Mutex (limit = 1)
 
@@ -76,8 +95,8 @@ public class ProcessPayment : IJob
 await publisher.Enqueue(new ProcessPayment { CustomerId = 123 });
 ```
 
-:::note Put the attribute on the request, not the handler
-`[Mutex]` / `[Semaphore]` (like `[Timeout]` and `[RateLimit]`) is read off the **request/job type**. When your request and handler are separate types, annotate the request — a misplaced attribute on the handler class used to silently no-op, so `AddWarp` now throws a clear startup error if it finds one there.
+:::note Request or handler — both work
+`[Mutex]` / `[Semaphore]` (like `[Timeout]`, `[RateLimit]`, `[Retry]` and `[CircuitBreaker]`) is read off the **handler class first, then the request/job type**. Put it wherever the constraint actually belongs; if both carry one, the handler wins. See [Where do I declare the policy?](#where-do-i-declare-the-policy-contract-vs-handler).
 :::
 
 You can also set the key via typed metadata:

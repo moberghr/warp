@@ -9,11 +9,10 @@ using Warp.Tests.TestData.Handlers;
 namespace Warp.Tests.Messaging;
 
 /// <summary>
-/// Addon policy axis on MESSAGES: contract-declared policy is copied to every handler's child job
-/// (all handlers contend on the shared key); handler-declared policy applies to that handler's
-/// children only. Routed children must keep <c>HandlerType</c> on policy requeues (§8.14) — it IS
-/// the routing decision, and re-discovery looks up <c>IJobHandler&lt;T&gt;</c> for a type that only
-/// has <c>IMessageHandler&lt;T&gt;</c> registrations.
+/// Addon policy axis on MESSAGES, resolved as it is for jobs (§8.8): every routed child resolves
+/// handler-then-contract at its own first execution, so a contract declaration is the shared default and
+/// a handler declaration overrides it for that handler's children alone. Routed children must keep
+/// <c>HandlerType</c> on policy requeues (§8.14) — it IS the routing decision.
 /// </summary>
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class MessagePolicyTestsBase : IntegrationTestBase
@@ -26,9 +25,7 @@ public abstract class MessagePolicyTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task ContractDeclaredMutex_AllHandlersChildrenShareTheKey()
     {
-        // SC11: [Mutex] on the MESSAGE type — the publish pipeline stamps it, MessageRouter copies
-        // it to both handlers' children, and they contend on ONE lock: whichever child enters the
-        // handler first holds it, the other short-circuits to Deleted (Skip mode).
+        // SC11: neither child declares its own, so both resolve the contract rung and contend on ONE lock.
         var barrier = new BarrierSignal();
         await using var server = await WarpTestServer.StartAsync(Fixture, cfg => cfg.Services.AddSingleton(barrier));
         var publisher = server.CreatePublisher();
@@ -55,16 +52,22 @@ public abstract class MessagePolicyTestsBase : IntegrationTestBase
             .Where(x => x.ParentJobId == messageId)
             .ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Contract-declared policy travels via the router's metadata copy — both children carry the
-        // key from creation, before any execution.
-        allChildren.ShouldAllBe(x => x.Metadata != null && x.Metadata.Contains("msg-contract-mutex", StringComparison.Ordinal));
-
         var deleted = allChildren.Single(x => x.CurrentState == State.Deleted);
+        deleted.Metadata.ShouldNotBeNull();
+        deleted.Metadata.ShouldContain("msg-contract-mutex");
+
         var logs = await server.GetJobLogs(deleted.Id);
         logs.ShouldContain(l => l.EventType == "Deleted" && l.Message.Contains("msg-contract-mutex", StringComparison.Ordinal));
 
         barrier.CanFinish.Release();
         await server.WaitForCompletion();
+
+        // Read after completion: a stamp is persisted with the attempt's finalizing save, so a job still
+        // inside its handler has resolved its policy but not yet written it down.
+        var survivor = allChildren.Single(x => x.CurrentState != State.Deleted);
+        var completed = await server.GetJob(survivor.Id);
+        completed.Metadata.ShouldNotBeNull();
+        completed.Metadata.ShouldContain("msg-contract-mutex");
     }
 
     [TimedFact]
@@ -158,6 +161,27 @@ public abstract class MessagePolicyTestsBase : IntegrationTestBase
         // Two retries granted by the HANDLER attribute (global default is 1) — per-child counting.
         failed.Metadata.ShouldNotBeNull();
         failed.Metadata.ShouldContain("\"RetriedTimes\":2");
+    }
+
+    [TimedFact]
+    public async Task BothAxesDeclaredOnMessage_HandlerWinsForItsChildOnly()
+    {
+        // Different keys ⇒ no contention, so both complete and each row names the key it followed.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+
+        var messageId = await publisher.Publish(new BothAxesMessage());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var overriding = await WaitForChildState(server, messageId, nameof(BothAxesMessageOverridingHandler), State.Completed);
+        var inheriting = await WaitForChildState(server, messageId, nameof(BothAxesMessageInheritingHandler), State.Completed);
+
+        overriding.Metadata.ShouldNotBeNull();
+        overriding.Metadata.ShouldContain("msg-both-handler");
+        overriding.Metadata.ShouldNotContain("msg-both-contract");
+
+        inheriting.Metadata.ShouldNotBeNull();
+        inheriting.Metadata.ShouldContain("msg-both-contract");
     }
 
     private async Task<Job> WaitForChild(Guid messageId, string handlerNameFragment)

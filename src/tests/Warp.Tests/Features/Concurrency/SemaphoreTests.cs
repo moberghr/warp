@@ -49,66 +49,6 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task SemaphoreAttribute_PropagatesKeyLimitAndModeWaitDefault()
-    {
-        // Arrange: SemaphoreAttributeRequest has [Semaphore("static-semaphore-key", 5)]
-        var services = BuildServices();
-        var provider = services.BuildServiceProvider();
-        await using var scope = provider.CreateAsyncScope();
-        var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
-
-        // Act
-        var jobId = await publisher.Enqueue(new SemaphoreAttributeRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Assert: metadata should carry ConcurrencyKey, Limit, and default Mode = Wait
-        var readCtx = _fixture.CreateContext();
-        var job = await readCtx.Set<Job>()
-            .Where(x => x.Id == jobId)
-            .FirstAsync(CancellationToken.None);
-
-        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata!);
-        metadata.ShouldNotBeNull();
-        metadata.ShouldContainKey("ConcurrencyKey");
-        metadata["ConcurrencyKey"].ToString().ShouldBe("static-semaphore-key");
-        metadata.ShouldContainKey("ConcurrencyLimit");
-        ((JsonElement)metadata["ConcurrencyLimit"]).GetInt32().ShouldBe(5);
-        metadata.ShouldContainKey("ConcurrencyMode");
-        ((JsonElement)metadata["ConcurrencyMode"]).GetInt32().ShouldBe((int)ConcurrencyMode.Wait);
-    }
-
-    [TimedFact]
-    public async Task SemaphoreAttribute_ExplicitMode_PropagatesKeyLimitAndExplicitMode()
-    {
-        // Arrange: SemaphoreSkipAttributeRequest has [Semaphore("...", 5, Mode = Skip)]
-        var services = BuildServices();
-        var provider = services.BuildServiceProvider();
-        await using var scope = provider.CreateAsyncScope();
-        var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
-
-        // Act
-        var jobId = await publisher.Enqueue(new SemaphoreSkipAttributeRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Assert: metadata should reflect explicit Mode = Skip
-        var readCtx = _fixture.CreateContext();
-        var job = await readCtx.Set<Job>()
-            .Where(x => x.Id == jobId)
-            .FirstAsync(CancellationToken.None);
-
-        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata!);
-        metadata.ShouldNotBeNull();
-        metadata.ShouldContainKey("ConcurrencyKey");
-        metadata["ConcurrencyKey"].ToString().ShouldBe("static-semaphore-skip-key");
-        metadata.ShouldContainKey("ConcurrencyLimit");
-        ((JsonElement)metadata["ConcurrencyLimit"]).GetInt32().ShouldBe(5);
-        metadata.ShouldContainKey("ConcurrencyMode");
-        ((JsonElement)metadata["ConcurrencyMode"]).GetInt32().ShouldBe((int)ConcurrencyMode.Skip);
-    }
-
-    [TimedFact]
     public async Task WithSemaphore_SetsKeyLimitAndModeInMetadata()
     {
         // Arrange
@@ -291,37 +231,6 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
         var job = await readCtx.Set<Job>().FindAsync([jobId], CancellationToken.None);
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Completed);
-    }
-
-    [TimedFact]
-    public async Task ClassWithBothMutexAndSemaphore_MutexAttributeWins_PopulatesLimitOne()
-    {
-        // Arrange: MutexAndSemaphoreRequest has BOTH [Mutex] and [Semaphore] on the same class
-        // — ConcurrencyPublishBehavior matches [Mutex] first and skips [Semaphore].
-        var services = BuildServices();
-        var provider = services.BuildServiceProvider();
-        await using var scope = provider.CreateAsyncScope();
-        var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
-
-        // Act
-        var jobId = await publisher.Enqueue(new MutexAndSemaphoreRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Assert: metadata reflects the [Mutex] attribute (Limit = 1, Mode = Skip default)
-        var readCtx = _fixture.CreateContext();
-        var job = await readCtx.Set<Job>()
-            .Where(x => x.Id == jobId)
-            .FirstAsync(CancellationToken.None);
-
-        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata!);
-        metadata.ShouldNotBeNull();
-        metadata.ShouldContainKey("ConcurrencyKey");
-        metadata["ConcurrencyKey"].ToString().ShouldBe("dual-attribute-key");
-        metadata.ShouldContainKey("ConcurrencyLimit");
-        ((JsonElement)metadata["ConcurrencyLimit"]).GetInt32().ShouldBe(1);
-        metadata.ShouldContainKey("ConcurrencyMode");
-        ((JsonElement)metadata["ConcurrencyMode"]).GetInt32().ShouldBe((int)ConcurrencyMode.Skip);
     }
 
     [TimedFact]

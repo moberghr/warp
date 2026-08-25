@@ -5,6 +5,11 @@ using Warp.Core.Handlers;
 
 namespace Warp.Core.Timeout;
 
+/// <summary>
+/// The one publish-side policy behaviour left (§8.8). Everything else resolves at execution so a handler
+/// declaration can win; a <see cref="TimeoutScope.Total"/> budget cannot, because its deadline is
+/// wall-clock from enqueue and is read pre-execution by the workers and the SLO attainment counter.
+/// </summary>
 public class TimeoutPublishBehavior<T> : IPublishPipelineBehavior<T>
 {
     private static readonly ConcurrentDictionary<Type, TimeoutAttribute?> AttributeCache = new();
@@ -25,21 +30,15 @@ public class TimeoutPublishBehavior<T> : IPublishPipelineBehavior<T>
         if (meta.TimeoutSeconds == null)
         {
             var attr = AttributeCache.GetOrAdd(typeof(T), static t => t.GetCustomAttribute<TimeoutAttribute>());
-            if (attr != null)
+
+            if (attr is { Scope: TimeoutScope.Total })
             {
                 meta.TimeoutSeconds = attr.Seconds;
                 meta.TimeoutMode ??= attr.Mode;
-                meta.TimeoutScope ??= attr.Scope;
+                meta.TimeoutScope ??= TimeoutScope.Total;
             }
-            else if (_options.Value.Default is { } def && _options.Value.DefaultScope == TimeoutScope.Total)
+            else if (attr == null && _options.Value is { Default: { } def, DefaultScope: TimeoutScope.Total })
             {
-                // Only a Total-scoped default is publish-stamped: its deadline is a wall-clock budget
-                // measured from enqueue and must exist before the first execution (the workers read it
-                // pre-execution for deadline attainment). A PerAttempt default is applied at execution by
-                // TimeoutPipelineBehavior instead — stamping it here filled the metadata slot for every
-                // job and made a handler-declared [Timeout] unreachable, the same shadowing Retry fixed
-                // as #236. Handler [Timeout] under a Total default is rejected at AddWarp for the same
-                // reason, so the slot-always-full behaviour is safe in this arm.
                 meta.TimeoutSeconds = (int)Math.Ceiling(def.TotalSeconds);
                 meta.TimeoutMode ??= _options.Value.DefaultMode;
                 meta.TimeoutScope ??= TimeoutScope.Total;

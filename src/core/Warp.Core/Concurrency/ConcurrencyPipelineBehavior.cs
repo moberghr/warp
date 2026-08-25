@@ -1,6 +1,7 @@
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
+using Warp.Core.Policies;
 
 namespace Warp.Core.Concurrency;
 
@@ -36,16 +37,13 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
 
         // Saga proxies (and any other IPolicyExemptHandler) manage their own serialization — the
         // per-correlation saga mutex — and must not contend on an outer concurrency key too.
-        if (AddonAttributeResolver.IsPolicyExempt(_jobContext.HandlerType))
+        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
         {
             return await next(request, cancellationToken);
         }
 
         var meta = _jobContext.GetMetadata<IConcurrencyMetadata>();
-        if (meta.ConcurrencyKey == null)
-        {
-            StampResolvedAttribute(meta);
-        }
+        PolicyResolver.StampConcurrency(meta, _jobContext.HandlerType, typeof(TRequest));
 
         if (meta.ConcurrencyKey == null)
         {
@@ -92,30 +90,6 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         finally
         {
             await handle.DisposeAsync();
-        }
-    }
-
-    private void StampResolvedAttribute(IConcurrencyMetadata meta)
-    {
-        // Handler-then-contract resolution (addon policy axis). The contract rung also fixes
-        // directly-staged jobs (recurring firings) that bypassed the publish pipeline. Stamp the
-        // full trio together — the execution gate below keys on ConcurrencyKey alone.
-        var mutex = AddonAttributeResolver.Resolve<MutexAttribute>(_jobContext.HandlerType, typeof(TRequest));
-        if (mutex != null)
-        {
-            meta.ConcurrencyKey = mutex.Key;
-            meta.ConcurrencyLimit = 1;
-            meta.ConcurrencyMode = mutex.Mode;
-
-            return;
-        }
-
-        var semaphore = AddonAttributeResolver.Resolve<SemaphoreAttribute>(_jobContext.HandlerType, typeof(TRequest));
-        if (semaphore != null)
-        {
-            meta.ConcurrencyKey = semaphore.Key;
-            meta.ConcurrencyLimit = semaphore.Limit;
-            meta.ConcurrencyMode = semaphore.Mode;
         }
     }
 

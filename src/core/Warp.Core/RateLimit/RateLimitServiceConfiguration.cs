@@ -23,7 +23,6 @@ public static class RateLimitServiceConfiguration
         builder.Services.AddScoped<IRateLimitStore, RateLimitStore<TContext>>();
         builder.Services.AddScoped<RateLimitResolver>();
         builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RateLimitPipelineBehavior<,>));
-        builder.Services.AddTransient(typeof(IPublishPipelineBehavior<>), typeof(RateLimitPublishBehavior<>));
 
         return builder;
     }

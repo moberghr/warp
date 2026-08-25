@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Policies;
 
 namespace Warp.Core.CircuitBreaker;
 
@@ -33,7 +34,7 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
             return await next(request, cancellationToken);
         }
 
-        if (AddonAttributeResolver.IsPolicyExempt(_jobContext.HandlerType))
+        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
         {
             return await next(request, cancellationToken);
         }
@@ -147,7 +148,7 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
     }
 
     private CircuitBreakerAttribute? GetCircuitBreakerAttribute() =>
-        AddonAttributeResolver.Resolve<CircuitBreakerAttribute>(_jobContext.HandlerType, typeof(TRequest));
+        PolicyResolver.ResolveCircuitBreaker(_jobContext.HandlerType, typeof(TRequest));
 }
 
 /// <summary>

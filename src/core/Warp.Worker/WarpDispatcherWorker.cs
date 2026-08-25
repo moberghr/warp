@@ -421,12 +421,17 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 {
                     job.ScheduleTime = outcome.ScheduleTime.Value;
                 }
-
-                job.Metadata = JsonSerializer.Serialize(jobContext!.Metadata);
             }
             else
             {
                 job.CurrentState = State.Failed;
+            }
+
+            // Outside the outcome branch: a throwing handler sets no outcome, and losing the policy stamped
+            // for this attempt (§8.8) would let the next one re-resolve to something else.
+            if (jobContext != null)
+            {
+                job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
             }
 
             handlerScope?.Dispose();

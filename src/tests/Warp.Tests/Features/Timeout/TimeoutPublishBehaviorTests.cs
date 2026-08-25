@@ -7,6 +7,10 @@ using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Features.Timeout;
 
+/// <summary>
+/// Publish stamps one thing: a Total-scoped budget, whose deadline is wall-clock from enqueue (§8.8).
+/// Everything else resolves at execution, where a handler declaration can win over the contract.
+/// </summary>
 [Trait("Category", "NoDb")]
 public class TimeoutPublishBehaviorTests
 {
@@ -45,23 +49,25 @@ public class TimeoutPublishBehaviorTests
     }
 
     [TimedFact]
-    public async Task Attribute_AppliesSecondsAndDefaults()
+    public async Task PerAttemptContractAttribute_NotStampedAtPublish()
     {
+        // Filling the slot here is what used to shadow a handler [Timeout]. Same effective timeout,
+        // resolved one rung later.
         var (meta, _) = await RunBehavior(new TimeoutAttributeRequest());
 
-        meta.TimeoutSeconds.ShouldBe(30);
-        meta.TimeoutMode.ShouldBe(TimeoutMode.Delete);
-        meta.TimeoutScope.ShouldBe(TimeoutScope.PerAttempt);
+        meta.TimeoutSeconds.ShouldBeNull();
+        meta.TimeoutMode.ShouldBeNull();
+        meta.TimeoutScope.ShouldBeNull();
         meta.TimeoutDeadlineUtc.ShouldBeNull();
     }
 
     [TimedFact]
-    public async Task FailModeAttribute_PropagatesMode()
+    public async Task FailModePerAttemptAttribute_NotStampedAtPublish()
     {
         var (meta, _) = await RunBehavior(new TimeoutFailModeRequest());
 
-        meta.TimeoutSeconds.ShouldBe(60);
-        meta.TimeoutMode.ShouldBe(TimeoutMode.Fail);
+        meta.TimeoutSeconds.ShouldBeNull();
+        meta.TimeoutMode.ShouldBeNull();
     }
 
     [TimedFact]
@@ -72,15 +78,6 @@ public class TimeoutPublishBehaviorTests
         meta.TimeoutScope.ShouldBe(TimeoutScope.Total);
         meta.TimeoutDeadlineUtc.ShouldNotBeNull();
         meta.TimeoutDeadlineUtc.Value.ShouldBe(PublishMoment.UtcDateTime.AddSeconds(60));
-    }
-
-    [TimedFact]
-    public async Task PerAttemptScope_DeadlineRemainsNull()
-    {
-        var (meta, _) = await RunBehavior(new TimeoutAttributeRequest());
-
-        meta.TimeoutScope.ShouldBe(TimeoutScope.PerAttempt);
-        meta.TimeoutDeadlineUtc.ShouldBeNull();
     }
 
     [TimedFact]
@@ -131,13 +128,20 @@ public class TimeoutPublishBehaviorTests
     }
 
     [TimedFact]
-    public async Task AttributeBeatsDefault_WhenBothConfigured()
+    public async Task PerAttemptContractAttribute_SuppressesTotalScopedDefault()
     {
-        var options = new TimeoutOptions { Default = TimeSpan.FromSeconds(45) };
+        // A contract declaring PerAttempt has opted out: stamping the default over it would turn a
+        // per-attempt cap into a wall-clock budget.
+        var options = new TimeoutOptions
+        {
+            Default = TimeSpan.FromSeconds(45),
+            DefaultScope = TimeoutScope.Total,
+        };
 
         var (meta, _) = await RunBehavior(new TimeoutAttributeRequest(), options: options);
 
-        meta.TimeoutSeconds.ShouldBe(30);
+        meta.TimeoutSeconds.ShouldBeNull();
+        meta.TimeoutDeadlineUtc.ShouldBeNull();
     }
 
     [TimedFact]
