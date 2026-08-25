@@ -27,6 +27,13 @@ namespace Warp.Adapters.Http;
 /// produces) but is <b>not</b> thrown — the caller receives the response unchanged, matching default
 /// <see cref="HttpClient"/> behaviour. Both paths trigger <c>OnFailure</c> capture.
 /// </para>
+/// <para>
+/// <b>Respond429.</b> A shared-limit refusal is thrown by the innermost rate-limit handler in every
+/// overflow mode; under <c>AdapterRateLimitOverflow.Respond429</c> it is converted <b>here</b> — after
+/// every user handler — into the synthetic 429 the caller receives, recorded <c>Throttled</c> like the
+/// throwing modes. Converting it any deeper would expose Warp's self-throttle to the user's resilience
+/// handler as a retryable status.
+/// </para>
 /// </summary>
 internal sealed class WarpAdapterHandler : DelegatingHandler
 {
@@ -35,6 +42,7 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
     private readonly string _adapterName;
     private readonly WarpAdapterOptions _recording;
     private readonly int _maxDistinctOperations;
+    private readonly bool _respondWith429;
     private readonly IWarpAdapters _adapters;
     private readonly OperationNameResolver _resolver;
 
@@ -52,6 +60,7 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
         _adapterName = adapterName;
         _recording = options.Recording;
         _maxDistinctOperations = options.Recording.MaxDistinctOperations;
+        _respondWith429 = options.SharedRateLimit?.Overflow == AdapterRateLimitOverflow.Respond429;
         _adapters = adapters;
         _resolver = resolver;
     }
@@ -89,6 +98,23 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
 
             response = await base.SendAsync(request, cancellationToken);
         }
+        catch (AdapterRateLimitedException ex) when (_respondWith429)
+        {
+            // Answer the call instead of rethrowing: a client that classifies by status (Refit, which wraps
+            // pipeline exceptions in ApiRequestException, and does not throw at all for ApiResponse<T>) then
+            // sees the refusal on its normal path. No request was sent.
+            //
+            // The conversion belongs HERE, outside every user handler, not at the rate-limit handler that
+            // raised it: a 429 born innermost would be an ordinary retryable status to the resilience
+            // handler nested between us, which would retry Warp's own self-throttle straight back into the
+            // limiter and sample it into its circuit breaker. Thrown, it passes those handlers untouched
+            // (it is not an HttpRequestException), so Respond429 behaves exactly like Wait in the pipeline.
+            var throttled = WarpThrottledResponse.Create(request, ex);
+            await CaptureAsync(scope, request, throttled, requestBody, isFailure: true, forceCapture, cancellationToken);
+            CompleteOutcome(scope, throttled, isFailure: true);
+
+            return throttled;
+        }
         catch (Exception ex)
         {
             await CaptureAsync(scope, request, response: null, requestBody, isFailure: true, forceCapture, cancellationToken);
@@ -108,6 +134,17 @@ internal sealed class WarpAdapterHandler : DelegatingHandler
     // guard in CaptureAsync and again here is safe — the second call is a no-op.
     private static void CompleteOutcome(AdapterCallScope scope, HttpResponseMessage response, bool isFailure)
     {
+        // Warp's own shared-limit refusal (AdapterRateLimitOverflow.Respond429) arrives as a synthetic 429.
+        // It is a non-success status, so the generic branch below would record it Failed — complete it with
+        // the refusal itself instead, which the scope maps to Throttled exactly as the throwing modes do.
+        // A REAL vendor 429 is deliberately left on the Failed branch: its classification is unchanged.
+        if (response is WarpThrottledResponse throttled)
+        {
+            scope.Fail(throttled.Refusal);
+
+            return;
+        }
+
         if (isFailure)
         {
             scope.Fail(new HttpRequestException(

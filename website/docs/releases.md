@@ -42,6 +42,26 @@ These are compile errors on upgrade, and the fix is to pass the name you already
 
 Behavior worth knowing: names are **trimmed** on both the write and the read side, so a padded name still resolves. A name no definition matches **throws `ArgumentException`** from the four command methods and reads as not-found (null / empty page) from the two queries. `AddOrUpdateRecurringJob` now **validates the name** — non-empty after trimming, at most 200 characters (it is also the name of the registration's distributed lock) — instead of accepting an identity nothing could address afterwards. No column facet changed, so this too generates no migration.
 
+### Refit-bound adapters can see a shared-limit refusal
+
+Refit wraps every exception escaping the `HttpClient` pipeline in `ApiRequestException`, so for a Refit-bound adapter using `UseSharedRateLimit`, the natural `catch (AdapterRateLimitedException)` silently never fired — a self-inflicted throttle was indistinguishable from an unknown transport error. Three additive changes, none of them breaking:
+
+**A third overflow mode.** `AdapterRateLimitOverflow.Respond429` waits up to `maxWait` exactly like `Wait`, then answers the call with a synthetic `429 Too Many Requests` carrying `Retry-After` instead of throwing:
+
+```csharp
+a.UseSharedRateLimit(100, 60, AdapterRateLimitOverflow.Respond429, maxWait: TimeSpan.FromSeconds(5));
+```
+
+Refit's normal path then produces `ApiException` with `StatusCode = TooManyRequests`, which existing status-based classification already handles — and a method returning `ApiResponse<T>`, which never throws at all, sees it too. No request is sent; the response is what the vendor would have answered had the call gone out. Pass `maxWait: TimeSpan.Zero` for fail-fast-with-429. The call is still recorded `Throttled`, not `Failed` — and a **real** vendor 429 keeps recording `Failed` exactly as before, so no existing error rate moves.
+
+The response is synthesised at the outermost Warp handler, after your own handlers: inside the pipeline the refusal stays the throw the other modes raise, so a resilience handler never retries a self-throttle back into the limiter or counts it toward a circuit breaker. `Respond429` changes what the caller sees, nothing else.
+
+**The refusal carries the wait.** `AdapterRateLimitedException.RetryAfter` is the remainder of the current window, which the limiter already computed and previously discarded — so a caller no longer retries blind. Under `Respond429` the same value rides the `Retry-After` header (whole seconds, rounded up) plus an `x-warp-retry-after-ms` companion for sub-second waits.
+
+**Chain-walking helpers** for callers staying on `Wait` / `FailFast`: `ex.IsAdapterRateLimited()`, `ex.GetAdapterRetryAfter()`, and `ex.FindAdapterRateLimited()` in `Warp.Core.Adapters` walk `InnerException` and every `AggregateException` branch, so they hold whether or not the refusal arrived wrapped.
+
+No schema change, no migration. Reported in [#284](https://github.com/moberghr/warp/issues/284).
+
 ### Dashboard API routes carry the name
 
 The six routes under `{prefix}/api/recurring/{id}` keep their shape, but `{id}` is now the **URL-safe base64 of the name** rather than an integer — the same codec the endpoints and applications routes already use (base64 of the UTF-8 bytes, `+`→`-`, `/`→`_`, trailing `=` trimmed), because a name may contain `/` and spaces. `session-cleanup` becomes `c2Vzc2lvbi1jbGVhbnVw`. An id that does not decode, and a name no definition matches, both answer **404** — previously an unknown id surfaced as a 500. The bundled dashboard moves with it; only a caller scripting these endpoints directly needs to change. The recurring job detail page drops its "ID" row, which named a value nothing addresses any more.

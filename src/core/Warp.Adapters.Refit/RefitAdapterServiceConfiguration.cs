@@ -11,6 +11,21 @@ namespace Warp.Adapters.Refit;
 /// pipeline (<c>WarpAdapterHandler</c> + optional shared rate limit) and names each outbound
 /// call after the interface method — existing Refit interfaces, DTOs, auth handlers, and
 /// <see cref="RefitSettings"/> (e.g. XML-over-REST serializers) all pass through unchanged.
+/// <para>
+/// <b>Refit wraps pipeline exceptions.</b> Every exception escaping the <see cref="HttpClient"/> pipeline
+/// reaches the caller as <c>ApiRequestException</c> with the real cause on <c>InnerException</c>, so
+/// <c>catch (AdapterRateLimitedException)</c> — or a catch of any exception one of your own handlers
+/// throws — never fires here. A method returning <c>ApiResponse&lt;T&gt;</c> does not throw at all: the
+/// failure lands on the result instead. This is Refit behaviour, not something the
+/// <see cref="RefitSettings"/> exception factory can undo (it builds an exception from a
+/// <see cref="HttpResponseMessage"/>, and a transport-level throw never produces one).
+/// </para>
+/// <para>
+/// For the shared rate limiter this has two answers: configure
+/// <c>UseSharedRateLimit(..., AdapterRateLimitOverflow.Respond429)</c> so a refusal arrives as an
+/// ordinary <c>429</c> (with <c>Retry-After</c>) on both Refit shapes, or keep a throwing mode and match
+/// with <c>ex.IsAdapterRateLimited()</c> / <c>ex.GetAdapterRetryAfter()</c>, which walk the chain.
+/// </para>
 /// </summary>
 public static class RefitAdapterServiceConfiguration
 {

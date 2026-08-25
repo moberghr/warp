@@ -89,8 +89,14 @@ public sealed class WarpAdapterHttpOptions
     /// Enables the cluster-shared, DB-backed rate limiter (token leasing on the shared
     /// <c>RateLimitBucket</c>) for this adapter, keyed <c>warp:adapter:{name}</c>. One token per physical
     /// HTTP attempt. <paramref name="overflow"/> chooses <c>Wait</c> (bounded delay up to
-    /// <paramref name="maxWait"/>) or <c>FailFast</c> (throw immediately). The runtime handler wiring is
-    /// added by the shared rate-limiter batch.
+    /// <paramref name="maxWait"/>, then throw), <c>FailFast</c> (throw immediately), or <c>Respond429</c>
+    /// (wait like <c>Wait</c>, then answer with a synthetic <c>429</c> carrying <c>Retry-After</c> instead
+    /// of throwing). The runtime handler wiring is added by the shared rate-limiter batch.
+    /// <para>
+    /// Prefer <c>Respond429</c> for a client that classifies by HTTP status rather than exception type —
+    /// notably Refit, which wraps pipeline exceptions in <c>ApiRequestException</c> and does not throw at
+    /// all for <c>ApiResponse&lt;T&gt;</c> methods.
+    /// </para>
     /// </summary>
     public void UseSharedRateLimit(int limit, int perSeconds, AdapterRateLimitOverflow overflow, TimeSpan? maxWait = null)
     {
