@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useDashboardStore } from '@/stores/dashboard';
 import * as LucideIcons from 'lucide-react';
@@ -23,6 +23,7 @@ import * as api from '@/api';
 import type { DashboardStatistics, WarpAddonsInfo } from '@/types';
 import type { ExtensionManifest } from '@/extensions/types';
 import {
+  COUNTER_FAMILY_GROUP,
   NAV_GROUPS,
   PANEL_WIDTH,
   TOP_LEVEL_NAV_ITEMS,
@@ -87,7 +88,9 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   // hence preventDefault rather than a listener on the header.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!isPaletteShortcut(e)) {
+      // e.repeat: holding the chord auto-repeats keydown, and a toggle on every repeat
+      // flips the palette open and shut until the key is released.
+      if (!isPaletteShortcut(e) || e.repeat) {
         return;
       }
 
@@ -217,19 +220,29 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   const isBatchesSection = location.pathname.startsWith('/batches');
   const isMessagesSection = location.pathname.startsWith('/messages');
 
-  const navGroups = gateGroups(NAV_GROUPS, addons);
+  const navGroups = useMemo(() => gateGroups(NAV_GROUPS, addons), [addons]);
 
   // Extension pages have no group — they keep their own top-level slot, since
   // their labels are host-supplied and can't be assigned a Warp category.
-  const extensionNavItems: NavItem[] = extensions.flatMap((ext) =>
-    ext.pages.map((page) => ({
-      to: page.path,
-      label: page.label,
-      icon: resolveIcon(page.icon),
-    }))
+  const extensionNavItems = useMemo<NavItem[]>(
+    () => extensions.flatMap((ext) =>
+      ext.pages.map((page) => ({
+        to: page.path,
+        label: page.label,
+        icon: resolveIcon(page.icon),
+      }))
+    ),
+    [extensions]
   );
 
-  const active = resolveActiveLocation(location.pathname, [...TOP_LEVEL_NAV_ITEMS, ...extensionNavItems], navGroups);
+  const active = useMemo(
+    () => resolveActiveLocation(location.pathname, [...TOP_LEVEL_NAV_ITEMS, ...extensionNavItems], navGroups),
+    [location.pathname, extensionNavItems, navGroups]
+  );
+  const paletteTargets = useMemo(
+    () => flattenNavTargets(TOP_LEVEL_NAV_ITEMS, [...navGroups, COUNTER_FAMILY_GROUP], extensionNavItems),
+    [navGroups, extensionNavItems]
+  );
 
   // Clicking the already-active item re-navigates with a fresh key so the page
   // refetches instead of the router treating it as a no-op.
@@ -394,7 +407,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
         )}
         <CommandPalette
           open={paletteOpen}
-          targets={flattenNavTargets(TOP_LEVEL_NAV_ITEMS, navGroups, extensionNavItems)}
+          targets={paletteTargets}
           onClose={() => setPaletteOpen(false)}
         />
         {mobileMenuOpen && (

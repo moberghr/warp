@@ -11,6 +11,7 @@ import {
   flattenNavTargets,
   gateGroups,
   rollUpBadges,
+  COUNTER_FAMILY_GROUP,
   NAV_GROUPS,
   type NavGroup,
   type NavItem,
@@ -285,5 +286,19 @@ describe('filterNavTargets', () => {
 
   it('returns nothing when nothing matches', () => {
     expect(filterNavTargets(targets, 'zzzz')).toEqual([]);
+  });
+});
+
+describe('COUNTER_FAMILY_GROUP', () => {
+  it('lets the palette reach a counter family that has no nav entry of its own', () => {
+    // Queues was a top-level page until 6.0; the name a user learned must still find something.
+    const targets = flattenNavTargets([dashboard, jobs], [...NAV_GROUPS, COUNTER_FAMILY_GROUP], []);
+    const hits = filterNavTargets(targets, 'queues');
+
+    expect(hits.map((x) => [x.item.label, x.item.to, x.group])).toEqual([['Queues', '/counters/queues', 'Counters']]);
+  });
+
+  it('is not part of the rendered nav', () => {
+    expect(NAV_GROUPS.map((x) => x.label)).not.toContain('Counters');
   });
 });

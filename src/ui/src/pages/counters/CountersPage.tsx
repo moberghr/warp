@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, Tooltip as ChartTooltip, Legend } from 'chart.js';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingState, ErrorState } from '@/components/PageState';
@@ -130,12 +130,21 @@ export default function CountersPage() {
   );
 
   // A family the URL names is honoured even when it currently holds no counters, so a shared link
-  // explains itself ("nothing here yet") instead of silently bouncing to another tab. Only an
-  // unrecognised slug falls back.
-  const family = familyBySlug(slug) ?? families[0];
+  // explains itself ("No counters") instead of silently bouncing to another tab. It also joins the
+  // tab strip while it is the one being viewed, so the highlighted tab always matches the URL.
+  const named = familyBySlug(slug);
+  const family = named ?? families[0];
+  const tabs = named && !families.includes(named) ? [...families, named] : families;
 
   if (isError) return <ErrorState message="Unable to load counters" />;
   if (isLoading || !counters) return <LoadingState />;
+
+  // Every rendered tab has a canonical URL. A bare /counters and an unrecognised slug both
+  // redirect to the family actually shown, so the address bar never lies about the content —
+  // a typo'd link shared around would otherwise show Job outcomes under a URL saying "queue".
+  if (family && (!slug || !named)) {
+    return <Navigate to={`/counters/${family.slug}`} replace />;
+  }
 
   return (
     <div>
@@ -154,7 +163,7 @@ export default function CountersPage() {
       ) : (
         <>
           <div className="flex flex-wrap gap-1 mb-4 border-b pb-2">
-            {families.map((f) => (
+            {tabs.map((f) => (
               <button
                 key={f.id}
                 onClick={() => { navigate(`/counters/${f.slug}`); setFilter(''); }}

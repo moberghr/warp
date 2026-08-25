@@ -13,7 +13,7 @@ Warp already tracks how long each job takes to *run* ([execution metrics](./obse
 
 Both are **always on** — no addon opt-in. The dashboard surfaces them in the **Queues** family on the [Counters](/docs/dashboard/health/counters) page; the meters are emitted unconditionally for any OpenTelemetry collector.
 
-<Screenshot light="/img/screenshots/17-counters.png" dark="/img/screenshots/17-counters-dark.png" alt="Counters page, where the Queues family shows per-queue backlog depth, oldest age and queue-wait percentiles" />
+<Screenshot light="/img/screenshots/39-counters-queues.png" dark="/img/screenshots/39-counters-queues-dark.png" alt="The Queues counter tab, showing per-queue backlog depth, oldest age and queue-wait percentiles" />
 
 ## What you get
 

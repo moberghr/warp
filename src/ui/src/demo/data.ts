@@ -326,6 +326,64 @@ function qualified(type: string): string {
   return `${type}, ${assembly}, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null`;
 }
 
+// The demo's job workloads, declared once. The lifetime counters and the hourly history series
+// both read this, so a handler cannot exist in the table with a flat-zero chart (or the reverse)
+// because its name drifted between two copies. A published type maps to one handler — except a
+// routed IMessage, which fans out: Warp spawns one child job per subscribed handler, so the TYPE
+// row is the sum of its handlers' rows and the Job types and Handlers tabs genuinely differ.
+interface WorkloadHandler {
+  name: string;
+  /** Typical execution time, for the history series. */
+  perRunMs: number;
+  succeeded: number;
+  failed: number;
+  durMs: number;
+  buckets: Record<string, number>;
+}
+
+interface Workload {
+  type: string;
+  handlers: WorkloadHandler[];
+}
+
+const WORKLOADS: Workload[] = [
+  {
+    type: 'Acme.Orders.ProcessOrderRequest',
+    handlers: [
+      { name: 'Acme.Orders.ProcessOrderHandler', perRunMs: 175, succeeded: 8214, failed: 21, durMs: 1_437_450, buckets: { 100: 5100, 250: 2600, 500: 420, 2500: 110, 10000: 5 } },
+    ],
+  },
+  {
+    type: 'Acme.Reports.GenerateReportRequest',
+    handlers: [
+      { name: 'Acme.Reports.GenerateReportHandler', perRunMs: 6900, succeeded: 412, failed: 9, durMs: 2_884_300, buckets: { 2500: 90, 5000: 210, 10000: 96, 30000: 25 } },
+    ],
+  },
+  {
+    type: 'Acme.Notifications.SendEmailRequest',
+    handlers: [
+      { name: 'Acme.Notifications.SendEmailCommand', perRunMs: 69, succeeded: 6103, failed: 14, durMs: 421_760, buckets: { 25: 3400, 50: 2100, 100: 560, 250: 57 } },
+    ],
+  },
+  {
+    type: 'Acme.Payments.ProcessPaymentRequest',
+    handlers: [
+      { name: 'Acme.Payments.ProcessPaymentHandler', perRunMs: 540, succeeded: 1118, failed: 3, durMs: 604_920, buckets: { 250: 300, 500: 610, 1000: 190, 2500: 21 } },
+    ],
+  },
+  {
+    // The routed message: one publish, three subscribers. On Job types this is a single row that
+    // looks mildly unhealthy; on Handlers you can see it is ReserveStock specifically — it calls the
+    // inventory adapter, which is the dependency whose breaker opens mid-window.
+    type: 'Acme.Orders.OrderPlacedEvent',
+    handlers: [
+      { name: 'Acme.Inventory.ReserveStockHandler', perRunMs: 640, succeeded: 2960, failed: 184, durMs: 1_894_400, buckets: { 250: 900, 500: 1100, 2500: 780, 10000: 364 } },
+      { name: 'Acme.Notifications.SendConfirmationHandler', perRunMs: 70, succeeded: 3140, failed: 4, durMs: 219_800, buckets: { 25: 1800, 50: 1000, 100: 344 } },
+      { name: 'Acme.Analytics.RecordOrderHandler', perRunMs: 30, succeeded: 3144, failed: 0, durMs: 94_320, buckets: { 10: 2100, 25: 900, 50: 144 } },
+    ],
+  },
+];
+
 // Per-dimension execution stats (§8.23), queue-wait + backlog (§8.26), deadline attainment (§8.31), and the
 // adapter / endpoint / client folds. Every duration is a SUM in ms and every pct entry is a histogram bucket
 // count, so the page's derived Avg and p95 columns have something real to be derived from.
@@ -334,52 +392,6 @@ function perDimensionCounters() {
   // child job per subscribed handler, so the TYPE row is the sum of its handlers' rows and the two
   // tabs genuinely differ. Modelling everything 1:1 made Handlers a verbatim copy of Job types, which
   // is also the one thing the Handlers page is there to disprove.
-  interface ExecutedHandler {
-    name: string;
-    succeeded: number;
-    failed: number;
-    durMs: number;
-    buckets: Record<string, number>;
-  }
-
-  const executed: { type: string; handlers: ExecutedHandler[] }[] = [
-    {
-      type: 'Acme.Orders.ProcessOrderRequest',
-      handlers: [
-        { name: 'Acme.Orders.ProcessOrderHandler', succeeded: 8214, failed: 21, durMs: 1_437_450, buckets: { 100: 5100, 250: 2600, 500: 420, 2500: 110, 10000: 5 } },
-      ],
-    },
-    {
-      type: 'Acme.Reports.GenerateReportRequest',
-      handlers: [
-        { name: 'Acme.Reports.GenerateReportHandler', succeeded: 412, failed: 9, durMs: 2_884_300, buckets: { 2500: 90, 5000: 210, 10000: 96, 30000: 25 } },
-      ],
-    },
-    {
-      type: 'Acme.Notifications.SendEmailRequest',
-      handlers: [
-        { name: 'Acme.Notifications.SendEmailCommand', succeeded: 6103, failed: 14, durMs: 421_760, buckets: { 25: 3400, 50: 2100, 100: 560, 250: 57 } },
-      ],
-    },
-    {
-      type: 'Acme.Payments.ProcessPaymentRequest',
-      handlers: [
-        { name: 'Acme.Payments.ProcessPaymentHandler', succeeded: 1118, failed: 3, durMs: 604_920, buckets: { 250: 300, 500: 610, 1000: 190, 2500: 21 } },
-      ],
-    },
-    {
-      // The routed message: one publish, three subscribers. On Job types this is a single row that
-      // looks mildly unhealthy; on Handlers you can see it is ReserveStock specifically — it calls the
-      // inventory adapter, which is the dependency whose breaker opens mid-window.
-      type: 'Acme.Orders.OrderPlacedEvent',
-      handlers: [
-        { name: 'Acme.Inventory.ReserveStockHandler', succeeded: 2960, failed: 184, durMs: 1_894_400, buckets: { 250: 900, 500: 1100, 2500: 780, 10000: 364 } },
-        { name: 'Acme.Notifications.SendConfirmationHandler', succeeded: 3140, failed: 4, durMs: 219_800, buckets: { 25: 1800, 50: 1000, 100: 344 } },
-        { name: 'Acme.Analytics.RecordOrderHandler', succeeded: 3144, failed: 0, durMs: 94_320, buckets: { 10: 2100, 25: 900, 50: 144 } },
-      ],
-    },
-  ];
-
   const counters: { key: string; value: number }[] = [];
 
   const push = (prefix: string, succeeded: number, failed: number, durMs: number, buckets: Record<string, number>) => {
@@ -392,7 +404,7 @@ function perDimensionCounters() {
     }
   };
 
-  for (const row of executed) {
+  for (const row of WORKLOADS) {
     for (const handler of row.handlers) {
       push(`jobstat:handler:${qualified(handler.name)}`, handler.succeeded, handler.failed, handler.durMs, handler.buckets);
     }
@@ -621,7 +633,7 @@ export function getCountersHistoryDemo(hours: number) {
       520 * office * jitter,
     ];
 
-    HISTORY_WORKLOADS.forEach((workload, w) => {
+    WORKLOADS.forEach((workload, w) => {
       const runs = workloadRuns[w];
 
       workload.handlers.forEach((handler) => {
@@ -696,33 +708,6 @@ export function getCountersHistoryDemo(hours: number) {
   return points;
 }
 
-const HISTORY_WORKLOADS = [
-  {
-    type: 'Acme.Orders.ProcessOrderRequest',
-    handlers: [{ name: 'Acme.Orders.ProcessOrderHandler', perRunMs: 175 }],
-  },
-  {
-    type: 'Acme.Reports.GenerateReportRequest',
-    handlers: [{ name: 'Acme.Reports.GenerateReportHandler', perRunMs: 6900 }],
-  },
-  {
-    type: 'Acme.Notifications.SendEmailRequest',
-    handlers: [{ name: 'Acme.Notifications.SendEmailCommand', perRunMs: 69 }],
-  },
-  {
-    type: 'Acme.Payments.ProcessPaymentRequest',
-    handlers: [{ name: 'Acme.Payments.ProcessPaymentHandler', perRunMs: 540 }],
-  },
-  {
-    // One publish, three subscribers — the reason Job types and Handlers are separate tabs.
-    type: 'Acme.Orders.OrderPlacedEvent',
-    handlers: [
-      { name: 'Acme.Inventory.ReserveStockHandler', perRunMs: 640 },
-      { name: 'Acme.Notifications.SendConfirmationHandler', perRunMs: 70 },
-      { name: 'Acme.Analytics.RecordOrderHandler', perRunMs: 30 },
-    ],
-  },
-];
 
 // ============================================================
 // Concurrency limits

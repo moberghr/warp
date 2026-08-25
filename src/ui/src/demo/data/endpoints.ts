@@ -6,7 +6,7 @@
 // These pages had no demo data at all before: the router had no /endpoints routes, so the list page threw
 // (the unhandled-route fallback returns `{}` and the history chart maps over it) and the docs images had
 // to be captured by hand — which is why they alone kept showing the pre-grouping nav.
-import { FROZEN_NOW } from '@/lib/demoMode';
+import { ago, demoHistory } from './history';
 import { AdapterCallOutcome } from '@/types/adapters';
 import type {
   EndpointListItem,
@@ -14,38 +14,6 @@ import type {
   EndpointCallDetail,
   EndpointHistoryPoint,
 } from '@/types/endpoints';
-
-function ago(minutes: number): string {
-  return new Date(FROZEN_NOW - minutes * 60_000).toISOString();
-}
-
-// Start of the UTC hour `hours` before the pinned demo clock — the x value of a history point.
-function hourAgo(hours: number): string {
-  const d = new Date(FROZEN_NOW - hours * 3_600_000);
-  d.setUTCMinutes(0, 0, 0);
-
-  return d.toISOString();
-}
-
-// Deterministic 24-hour series (oldest first) — no randomness, so the chart renders identically on every
-// screenshot run. Values wobble by index so the bars and the latency line have a realistic shape.
-function demoHistory(baseCalls: number, errorFraction: number, baseLatencyMs: number): EndpointHistoryPoint[] {
-  const hours = 24;
-
-  return Array.from({ length: hours }, (_, i) => {
-    const swell = 1 + Math.round((hours / 2 - Math.abs(hours / 2 - i)) * 0.6);
-    const calls = baseCalls + swell + ((i * 7) % 13);
-    const errors = Math.round(calls * errorFraction * (0.3 + ((i % 4) * 0.4)));
-
-    return {
-      hour: hourAgo(hours - 1 - i),
-      calls,
-      errors,
-      errorRate: calls === 0 ? 0 : errors / calls,
-      avgDurationMs: baseLatencyMs + ((i * 13) % 55) + (i % 5) * 6,
-    };
-  });
-}
 
 function totals(history: EndpointHistoryPoint[]) {
   const calls = history.reduce((sum, x) => sum + x.calls, 0);

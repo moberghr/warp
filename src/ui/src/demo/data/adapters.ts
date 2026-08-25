@@ -5,49 +5,13 @@
 // NOTE: the axios mock router lives in `demo/adapter.ts` (the transport adapter — unrelated to
 // this feature and intentionally not modified). These fixtures are exported for that router / any
 // demo harness to serve; production reads the real REST endpoints via `@/api`.
-import { FROZEN_NOW } from '@/lib/demoMode';
+import { ago, demoHistory } from './history';
 import { AdapterCallOutcome } from '@/types/adapters';
 import type {
   AdapterListItem,
   AdapterDetail,
   AdapterCallDetail,
-  AdapterHistoryPoint,
 } from '@/types/adapters';
-
-function ago(minutes: number): string {
-  return new Date(FROZEN_NOW - minutes * 60_000).toISOString();
-}
-
-// Start of the UTC hour `hours` before the pinned demo clock — the x value of a history point.
-function hourAgo(hours: number): string {
-  const d = new Date(FROZEN_NOW - hours * 3_600_000);
-  d.setUTCMinutes(0, 0, 0);
-
-  return d.toISOString();
-}
-
-// Deterministic 24-hour performance series (oldest first) for the demo chart — no randomness so it
-// renders identically across screenshot runs. Values wobble by index (a slow sine-like swell via modular
-// arithmetic) so the bars/line have realistic shape across the day.
-function demoHistory(baseCalls: number, errorFraction: number, baseLatencyMs: number): AdapterHistoryPoint[] {
-  const hours = 24;
-
-  return Array.from({ length: hours }, (_, i) => {
-    // A daytime swell: busier in the middle of the window, quieter at the edges.
-    const swell = 1 + Math.round((hours / 2 - Math.abs(hours / 2 - i)) * 0.6);
-    const calls = baseCalls + swell + ((i * 7) % 13);
-    const errors = Math.round(calls * errorFraction * (0.3 + ((i % 4) * 0.4)));
-    const avgDurationMs = baseLatencyMs + ((i * 13) % 55) + (i % 5) * 6;
-
-    return {
-      hour: hourAgo(hours - 1 - i),
-      calls,
-      errors,
-      errorRate: calls === 0 ? 0 : errors / calls,
-      avgDurationMs,
-    };
-  });
-}
 
 export const demoAdapters: AdapterListItem[] = [
   {

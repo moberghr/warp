@@ -21,6 +21,7 @@ When you run the same dashboard across several environments, brand it so operato
 ```csharp
 app.MapWarpDashboard(o =>
 {
+    o.BrandName = "Acme Jobs";               // replaces the "Warp" wordmark + names the browser tab
     o.InstanceName = "Production";           // shown in the header + browser tab title
     o.LogoUrl = "/img/acme-logo.svg";        // header logo
     o.PortalUrl = "https://portal.acme.com"; // back-link target
@@ -28,7 +29,7 @@ app.MapWarpDashboard(o =>
 });
 ```
 
-All four are optional. Values are injected into the SPA as JSON-encoded runtime config, so a stray quote or markup in a branding string can't break the page.
+All five are optional. `BrandName` still names the browser tab when `LogoUrl` replaces the wordmark, so a tab reads `Acme Jobs · Production` rather than `Warp · Production`. Values are injected into the SPA as JSON-encoded runtime config, so a stray quote or markup in a branding string can't break the page.
 
 ### The dashboard API ignores your JSON options
 

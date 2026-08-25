@@ -145,6 +145,8 @@ function App() {
             <Route path="/applications/:id/instances/:instanceId" element={<ApplicationInstanceDetailPage />} />
             <Route path="/applications/:id" element={<ApplicationDetailPage />} />
             <Route path="/applications" element={<ApplicationsPage />} />
+            {/* The standalone Queues page folded into the Counters queues family in 6.0. */}
+            <Route path="/queues" element={<Navigate to="/counters/queues" replace />} />
             <Route path="/counters" element={<CountersPage />} />
             <Route path="/counters/:family" element={<CountersPage />} />
             <Route path="/concurrency" element={<ConcurrencyLimitsPage />} />

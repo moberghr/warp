@@ -18,6 +18,7 @@ import {
   Webhook,
 } from 'lucide-react';
 import type { DashboardStatistics, WarpAddonsInfo } from '@/types';
+import { FAMILIES } from '@/pages/counters/counterModel';
 
 export interface NavItem {
   to: string;
@@ -43,6 +44,16 @@ export const TOP_LEVEL_NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/jobs/enqueued', label: 'Jobs', icon: Briefcase },
 ];
+
+/**
+ * The counter families as palette targets. Each is a route (/counters/{slug}) but not a nav
+ * entry — the bar has one Counters item — so the palette is the only place a user can jump
+ * straight to, say, Queues. Passed to flattenNavTargets only; never rendered as a dropdown.
+ */
+export const COUNTER_FAMILY_GROUP: NavGroup = {
+  label: 'Counters',
+  items: FAMILIES.map((x) => ({ to: `/counters/${x.slug}`, label: x.label, icon: Gauge })),
+};
 
 export const NAV_GROUPS: NavGroup[] = [
   {
@@ -209,8 +220,8 @@ export function flattenNavTargets(
 /**
  * Ranked substring search over label, group and hint. A label prefix wins over a
  * label hit anywhere, which wins over reaching the page through its group name or
- * hint — so typing "que" puts Queues above "Recurring / cron schedules". Ties keep
- * the nav's own order, which is the order the user already learned.
+ * hint — so typing "end" puts Endpoints above pages whose hint merely contains it.
+ * Ties keep the nav's own order, which is the order the user already learned.
  */
 export function filterNavTargets(targets: NavTarget[], query: string): NavTarget[] {
   const q = query.trim().toLowerCase();

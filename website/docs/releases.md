@@ -41,6 +41,8 @@ These are hard renames — the old names are gone and you get a compile error, n
 
 The docs section moved to match (`/docs/ui/*` → `/docs/dashboard/*`, redirects in place).
 
+**Also new on `WarpDashboardOptions`: `BrandName`.** It replaces the "Warp" wordmark in the header and names the browser tab, for hosts that surface the dashboard under their own product — `BrandName = "Acme Jobs"` with `InstanceName = "Production"` gives a tab reading `Acme Jobs · Production`. `LogoUrl` still wins for the wordmark when both are set; `BrandName` still names the tab. Null keeps `Warp`.
+
 ### Recurring jobs are keyed by name
 
 `AddOrUpdateRecurringJob(message, name, cron)` has always registered a definition under a name. Everything you could then *do* to that definition took an `int id` — which meant a code caller holding the only identity it ever had (the name) first had to query the `RecurringJob` table for a surrogate key:

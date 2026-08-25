@@ -3,6 +3,7 @@ import * as data from './data';
 import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { demoAdapters, demoAdapterDetails, demoAdapterCalls } from './data/adapters';
 import { demoEndpoints, demoEndpointDetails, demoEndpointCalls } from './data/endpoints';
+import { aggregateHistory } from './data/history';
 import { demoWebhooks, demoWebhookDetails, demoWebhookSummary } from './data/webhooks';
 import {
   demoApplications,
@@ -213,27 +214,7 @@ function routeAdapters(
 
   // GET /adapters/history — global overview, aggregated across every demo adapter's per-hour history.
   if (method === 'get' && url.startsWith('/adapters/history')) {
-    const map = new Map<string, { hour: string; calls: number; errors: number; durSum: number }>();
-    for (const detail of Object.values(demoAdapterDetails)) {
-      for (const p of detail.history) {
-        const g = map.get(p.hour) ?? { hour: p.hour, calls: 0, errors: 0, durSum: 0 };
-        g.calls += p.calls;
-        g.errors += p.errors;
-        g.durSum += p.avgDurationMs * p.calls;
-        map.set(p.hour, g);
-      }
-    }
-    const points = [...map.values()]
-      .sort((a, b) => (a.hour < b.hour ? -1 : 1))
-      .map((g) => ({
-        hour: g.hour,
-        calls: g.calls,
-        errors: g.errors,
-        errorRate: g.calls === 0 ? 0 : g.errors / g.calls,
-        avgDurationMs: g.calls === 0 ? 0 : g.durSum / g.calls,
-      }));
-
-    return resolve(points, config);
+return resolve(aggregateHistory(Object.values(demoAdapterDetails).map((x) => x.history)), config);
   }
 
   // GET /adapters/{name}/calls/{id} — call detail (checked before the {name} detail route)
@@ -280,27 +261,7 @@ function routeEndpoints(
   // GET /endpoints/history — overview series, aggregated across every demo endpoint (checked before
   // the {id} detail route, which would otherwise swallow "history" as an id).
   if (url.startsWith('/endpoints/history')) {
-    const map = new Map<string, { hour: string; calls: number; errors: number; durSum: number }>();
-    for (const detail of Object.values(demoEndpointDetails)) {
-      for (const p of detail.history) {
-        const g = map.get(p.hour) ?? { hour: p.hour, calls: 0, errors: 0, durSum: 0 };
-        g.calls += p.calls;
-        g.errors += p.errors;
-        g.durSum += p.avgDurationMs * p.calls;
-        map.set(p.hour, g);
-      }
-    }
-    const points = [...map.values()]
-      .sort((a, b) => (a.hour < b.hour ? -1 : 1))
-      .map((g) => ({
-        hour: g.hour,
-        calls: g.calls,
-        errors: g.errors,
-        errorRate: g.calls === 0 ? 0 : g.errors / g.calls,
-        avgDurationMs: g.calls === 0 ? 0 : g.durSum / g.calls,
-      }));
-
-    return resolve(points, config);
+return resolve(aggregateHistory(Object.values(demoEndpointDetails).map((x) => x.history)), config);
   }
 
   // GET /endpoints/{id}/calls/{callId} — call detail (checked before the {id} detail route)
