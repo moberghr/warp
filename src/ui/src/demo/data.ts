@@ -475,6 +475,42 @@ function perDimensionCounters() {
   ];
 }
 
+// Every family used to chart `base * factor`, so all eleven tabs drew the same curve at different
+// heights. Real workloads do not share a rhythm: batch jobs run at night, consumers browse in the
+// evening, and a vendor calling your webhook endpoint has never heard of your office hours. These
+// shapes are what make each tab's chart worth looking at. `h` is the UTC hour, `i` the index back
+// from now — both deterministic, so screenshots are reproducible.
+
+/** Internal work: ramps from 08, peaks early afternoon, gone by 19. */
+function officeHours(h: number): number {
+  if (h < 7 || h > 19) {
+    return 0.05;
+  }
+
+  return Math.max(0.12, 1 - Math.abs(h - 13) / 7);
+}
+
+/** Consumer traffic: quiet through the working day, peaks mid-evening. */
+function eveningPeak(h: number): number {
+  const distance = Math.min(Math.abs(h - 21), 24 - Math.abs(h - 21));
+
+  return Math.max(0.08, 1 - distance / 7);
+}
+
+/** A nightly batch window — nothing, then everything, then nothing. */
+function nightlyBatch(h: number): number {
+  if (h >= 2 && h <= 4) {
+    return 1;
+  }
+
+  return h === 1 || h === 5 ? 0.3 : 0;
+}
+
+/** External callers keep their own schedule, not yours. */
+function steadyFlow(i: number): number {
+  return 0.75 + seeded(i + 210) * 0.5;
+}
+
 export function getCountersHistoryDemo(hours: number) {
   const now = new Date(NOW);
   now.setMinutes(0, 0, 0);
@@ -482,64 +518,107 @@ export function getCountersHistoryDemo(hours: number) {
 
   for (let i = hours - 1; i >= 0; i--) {
     const hourDate = new Date(now.getTime() - i * 3600000);
-    const h = hourDate.getHours();
-    const business = h >= 9 && h <= 17;
-    const base = business ? 800 + seeded(i + 10) * 500 : 50 + seeded(i + 40) * 150;
+    const hour = hourDate.toISOString();
+    const h = hourDate.getUTCHours();
+    const at = (key: string, value: number) => points.push({ hour, key, value: Math.max(0, Math.round(value)) });
 
-    const failed = Math.round(base * (0.01 + seeded(i + 50) * 0.04));
-    const deleted = Math.round(base * 0.005);
-    const requeued = Math.round(base * (0.02 + seeded(i + 60) * 0.03));
+    const office = officeHours(h);
+    const evening = eveningPeak(h);
+    const batch = nightlyBatch(h);
+    const jitter = 0.85 + seeded(i + 11) * 0.3;
 
-    points.push({ hour: hourDate.toISOString(), key: 'stats:succeeded', value: Math.round(base) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:failed', value: failed });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:deleted', value: deleted });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued', value: requeued });
+    // The inventory dependency degrades for a stretch mid-window and the breaker takes over. Everything
+    // downstream of that — its failures, the retries they cause, the issue trend — moves with it.
+    const incident = i >= 5 && i <= 11;
 
-    // The dominant reason per state, so the chart shows the breakdown families tinting their parent's hue
-    // (builtInColors in CountersPage) rather than four flat lines. Each stays below its state total.
-    points.push({ hour: hourDate.toISOString(), key: 'stats:failed-retry-exhausted', value: Math.round(failed * 0.6) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:deleted-timeout', value: Math.round(deleted * 0.4) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued-retry', value: Math.round(requeued * 0.65) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued-ratelimit', value: Math.round(requeued * 0.15) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:retried-jobs', value: Math.round(requeued * 0.3) });
+    // --- Job outcomes -------------------------------------------------------
+    const succeeded = 1400 * office * jitter + 30;
+    const failed = succeeded * (0.008 + seeded(i + 50) * 0.015) + (incident ? 55 * jitter : 0);
+    const deleted = succeeded * 0.004 + (h >= 2 && h <= 4 ? 6 : 0);
+    const requeued = succeeded * 0.02 + (incident ? 90 * jitter : 0);
 
-    // The per-dimension series the family tabs chart. Each family plots ONE metric at a time, so a duration sum
-    // in the hundreds of thousands can sit beside a count of 3 in the data without flattening it on screen.
-    const share = [0.52, 0.03, 0.38, 0.07];
+    at('stats:succeeded', succeeded);
+    at('stats:failed', failed);
+    at('stats:deleted', deleted);
+    at('stats:requeued', requeued);
+    at('stats:failed-retry-exhausted', failed * 0.6);
+    at('stats:deleted-timeout', deleted * 0.4);
+    at('stats:requeued-retry', requeued * 0.65);
+    at('stats:requeued-ratelimit', requeued * 0.15);
+    at('stats:retried-jobs', requeued * 0.3);
+
+    // --- Job types and handlers ---------------------------------------------
+    // One profile per type: orders track the office day, reports only run in the batch window, the
+    // email blast goes out at 09:00, payments trail orders by an hour or two.
+    const typeShape = [
+      1400 * office * jitter,
+      420 * batch,
+      h === 9 ? 2600 * jitter : 340 * office * jitter,
+      900 * officeHours(Math.max(0, h - 2)) * jitter,
+    ];
+    const perJobMs = [175, 6900, 69, 540];
+
     HISTORY_TYPES.forEach((type, t) => {
-      const executions = Math.round(base * share[t]);
-      const perJobMs = [175, 6900, 69, 540][t];
-
-      points.push({ hour: hourDate.toISOString(), key: `jobstat:type:${qualified(type)}:hist:succeeded`, value: executions });
-      points.push({ hour: hourDate.toISOString(), key: `jobstat:type:${qualified(type)}:hist:dur`, value: executions * perJobMs });
-      points.push({ hour: hourDate.toISOString(), key: `jobstat:handler:${qualified(HISTORY_HANDLERS[t])}:hist:succeeded`, value: executions });
-      points.push({ hour: hourDate.toISOString(), key: `jobstat:handler:${qualified(HISTORY_HANDLERS[t])}:hist:dur`, value: executions * perJobMs });
+      const executions = typeShape[t];
+      at(`jobstat:type:${qualified(type)}:hist:succeeded`, executions);
+      at(`jobstat:type:${qualified(type)}:hist:dur`, executions * perJobMs[t]);
+      at(`jobstat:handler:${qualified(HISTORY_HANDLERS[t])}:hist:succeeded`, executions);
+      at(`jobstat:handler:${qualified(HISTORY_HANDLERS[t])}:hist:dur`, executions * perJobMs[t]);
     });
 
-    points.push({ hour: hourDate.toISOString(), key: 'qwait:default:hist:count', value: Math.round(base) });
-    points.push({ hour: hourDate.toISOString(), key: 'qwait:default:hist:dur', value: Math.round(base * 70) });
-    points.push({ hour: hourDate.toISOString(), key: 'qwait:reports:hist:count', value: Math.round(base * 0.03) });
-    points.push({ hour: hourDate.toISOString(), key: 'qwait:warp-webhooks:hist:count', value: Math.round(base * 0.18) });
-    points.push({ hour: hourDate.toISOString(), key: 'adapter:payments:hist:success', value: Math.round(base * 0.3) });
-    points.push({ hour: hourDate.toISOString(), key: 'adapter:payments:hist:failed', value: Math.round(failed * 0.2) });
-    points.push({ hour: hourDate.toISOString(), key: 'adapter:shipping:hist:success', value: Math.round(base * 0.13) });
-    points.push({ hour: hourDate.toISOString(), key: 'adapter:shipping:hist:failed', value: Math.round(failed * 0.5) });
-    // The dependency that degrades mid-window: calls fall away as the breaker opens.
-    points.push({ hour: hourDate.toISOString(), key: 'adapter:inventory:hist:success', value: business && i > 6 ? Math.round(base * 0.09) : Math.round(base * 0.01) });
-    points.push({ hour: hourDate.toISOString(), key: 'adapter:inventory:hist:circuitopen', value: business && i <= 6 ? Math.round(base * 0.14) : 0 });
-    points.push({ hour: hourDate.toISOString(), key: 'endpoint:POST /orders:hist:success', value: Math.round(base * 0.6) });
-    points.push({ hour: hourDate.toISOString(), key: 'endpoint:GET /orders/{id}:hist:success', value: Math.round(base * 1.5) });
-    points.push({ hour: hourDate.toISOString(), key: 'endpoint:POST /webhooks/receive:hist:success', value: Math.round(base * 0.16) });
-    points.push({ hour: hourDate.toISOString(), key: 'endpoint:POST /webhooks/receive:hist:failed', value: Math.round(failed * 0.35) });
-    points.push({ hour: hourDate.toISOString(), key: 'endpoint:GET /reports/{id}/download:hist:success', value: Math.round(base * 0.05) });
-    points.push({ hour: hourDate.toISOString(), key: 'deadline:' + qualified('Acme.Reports.GenerateReportRequest') + ':hist:count', value: Math.round(base * 0.03) });
-    points.push({ hour: hourDate.toISOString(), key: 'deadline:' + qualified('Acme.Ledger.NightlyExportRequest') + ':hist:miss', value: business ? 0 : Math.round(2 + seeded(i + 90) * 3) });
-    points.push({ hour: hourDate.toISOString(), key: 'clientevent:total:error:hist', value: Math.round(failed * 0.4) });
-    points.push({ hour: hourDate.toISOString(), key: 'clientevent:total:log:hist', value: Math.round(base * 0.2) });
-    points.push({ hour: hourDate.toISOString(), key: 'clientevent:total:vital:hist', value: Math.round(base * 0.42) });
-    points.push({ hour: hourDate.toISOString(), key: 'errorgroup:job-nullref-processorder', value: Math.round(failed * 0.5) });
-    points.push({ hour: hourDate.toISOString(), key: 'warpsys:records-dropped:adapter', value: business && i % 7 === 0 ? 14 : 0 });
-    points.push({ hour: hourDate.toISOString(), key: 'warpsys:records-dropped:client', value: business && i % 5 === 0 ? 31 : 0 });
+    // --- Queues -------------------------------------------------------------
+    // Three different rhythms on purpose: the default queue follows the office day, reports is a
+    // batch window, and the webhook queue is driven by vendors who call whenever they like.
+    at('qwait:default:hist:count', 1500 * office * jitter);
+    at('qwait:default:hist:dur', 1500 * office * jitter * (incident ? 340 : 70));
+    at('qwait:reports:hist:count', 380 * batch);
+    at('qwait:reports:hist:dur', 380 * batch * 4400);
+    at('qwait:warp-webhooks:hist:count', 120 * steadyFlow(i));
+    at('qwait:warp-webhooks:hist:dur', 120 * steadyFlow(i) * 70);
+
+    // --- Deadlines ----------------------------------------------------------
+    at(`deadline:${qualified('Acme.Reports.GenerateReportRequest')}:hist:count`, 240 * batch);
+    at(`deadline:${qualified('Acme.Ledger.NightlyExportRequest')}:hist:count`, 120 * batch);
+    // The export only misses when it runs, and it runs only at night.
+    at(`deadline:${qualified('Acme.Ledger.NightlyExportRequest')}:hist:miss`, batch > 0 ? 38 * batch * jitter : 0);
+
+    // --- Adapters -----------------------------------------------------------
+    at('adapter:payments:hist:success', 700 * office * jitter);
+    at('adapter:payments:hist:failed', 700 * office * jitter * 0.008);
+    // Shipping is booked in one afternoon push rather than spread across the day.
+    at('adapter:shipping:hist:success', h >= 14 && h <= 17 ? 620 * jitter : 90 * office * jitter);
+    at('adapter:shipping:hist:failed', h >= 14 && h <= 17 ? 28 * jitter : 3);
+    at('adapter:inventory:hist:success', incident ? 40 * jitter : 300 * office * jitter);
+    at('adapter:inventory:hist:failed', incident ? 120 * jitter : 4 * office);
+    at('adapter:inventory:hist:circuitopen', incident ? 260 * jitter : 0);
+
+    // --- Endpoints ----------------------------------------------------------
+    // A mobile app polls the read endpoint around the clock; the write endpoint is office-hours;
+    // the webhook receiver is vendor-driven with retry bursts; the report download is batch-adjacent.
+    at('endpoint:GET /orders/{id}:hist:success', 900 * steadyFlow(i) + 1500 * office * jitter);
+    at('endpoint:POST /orders:hist:success', 800 * office * jitter);
+    at('endpoint:POST /orders:hist:failed', 800 * office * jitter * 0.004);
+    at('endpoint:POST /webhooks/receive:hist:success', 190 * steadyFlow(i));
+    at('endpoint:POST /webhooks/receive:hist:failed', i % 6 === 0 ? 34 * jitter : 2);
+    at('endpoint:GET /reports/{id}/download:hist:success', h >= 5 && h <= 11 ? 70 * jitter : 6);
+    at('endpoint:GET /reports/{id}/download:hist:failed', h >= 5 && h <= 11 ? 7 * jitter : 0);
+
+    // --- Client -------------------------------------------------------------
+    // Browsers are busiest when the office is closed.
+    at('clientevent:total:vital:hist', 480 * evening * jitter);
+    at('clientevent:total:log:hist', 300 * evening * jitter);
+    at('clientevent:total:error:hist', 26 * evening * jitter + (incident ? 40 * jitter : 0));
+
+    // --- Issues -------------------------------------------------------------
+    // A regression that appears at a deploy and keeps going, beside a long-standing low-level one.
+    at('errorgroup:job-nullref-processorder', i <= 14 ? 18 * jitter : 1);
+    at('errorgroup:client-typeerror-checkout', 4 + seeded(i + 71) * 3);
+    at('errorgroup:adapter-timeout-inventory', incident ? 46 * jitter : 0);
+
+    // --- System -------------------------------------------------------------
+    // Drops happen when a pipeline is saturated, which is exactly during the busiest hours.
+    at('warpsys:records-dropped:adapter', incident ? 210 * jitter : 0);
+    at('warpsys:records-dropped:client', evening > 0.8 && i % 3 === 0 ? 120 * jitter : 0);
   }
 
   return points;
