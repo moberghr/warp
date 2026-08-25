@@ -5,15 +5,15 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
-using Warp.UI;
-using Warp.UI.DashboardPush;
+using Warp.Dashboard;
+using Warp.Dashboard.Push;
 using XunitTestContext = Xunit.TestContext;
 
 namespace Warp.Tests.DashboardPush;
 
 /// <summary>
 /// Auth integration tests for the dashboard SignalR hub. The hub is one of the endpoints
-/// <c>MapWarpUI</c> returns, so whatever the host applies covers it too — no parallel auth code path.
+/// <c>MapWarpDashboard</c> returns, so whatever the host applies covers it too — no parallel auth code path.
 /// <see cref="LocalRequests_NegotiateForbidden"/> is the one that earns its keep: endpoint filters do not
 /// run for hub endpoints, so a filter-based gate would have left negotiate wide open.
 /// </summary>
@@ -108,7 +108,7 @@ public class DashboardPushAuthTests
 
     private static async Task<(WebApplication App, HttpClient Client)> StartAsync(
         Action<IServiceCollection>? services = null,
-        Action<WarpUIEndpointConventionBuilder>? gate = null)
+        Action<WarpDashboardEndpointConventionBuilder>? gate = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -117,7 +117,7 @@ public class DashboardPushAuthTests
         services?.Invoke(builder.Services);
 
         var app = builder.Build();
-        var warp = app.MapWarpUI("/warp");
+        var warp = app.MapWarpDashboard("/warp");
         gate?.Invoke(warp);
 
         await app.StartAsync(XunitTestContext.Current.CancellationToken);

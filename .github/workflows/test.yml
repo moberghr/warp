@@ -54,7 +54,7 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Setup Node.js (for Warp.UI npm build)
+      - name: Setup Node.js (for Warp.Dashboard npm build)
         uses: actions/setup-node@v6
         with:
           node-version: 22

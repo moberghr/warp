@@ -7,9 +7,11 @@ interface MetricCardProps {
   icon?: React.ReactNode;
   color?: string;
   href?: string;
+  /** Unit appended to the value, e.g. "%" for a rate. Without it a percentage reads as a bare count. */
+  suffix?: string;
 }
 
-export function MetricCard({ label, value, icon, color, href }: MetricCardProps) {
+export function MetricCard({ label, value, icon, color, href, suffix }: MetricCardProps) {
   const navigate = useNavigate();
 
   return (
@@ -21,7 +23,7 @@ export function MetricCard({ label, value, icon, color, href }: MetricCardProps)
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-muted-foreground">{label}</p>
-            <p className={`text-2xl font-bold ${color ?? ''}`}>{value.toLocaleString()}</p>
+            <p className={`text-2xl font-bold ${color ?? ''}`}>{value.toLocaleString()}{suffix}</p>
           </div>
           {icon && <div className="text-muted-foreground">{icon}</div>}
         </div>

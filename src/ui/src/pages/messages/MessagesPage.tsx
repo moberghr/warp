@@ -9,6 +9,7 @@ import { DataTable } from '@/components/DataTable';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
 import { useMessagesList } from '@/api/hooks/useMessages';
 import type { JobGroupModel } from '@/types';
+import { PageHeading } from '@/components/PageHeading';
 
 export default function MessagesPage() {
   const { state } = useParams<{ state?: string }>();
@@ -71,9 +72,9 @@ export default function MessagesPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-bold">
+        <PageHeading className="">
           {state ? `${state.charAt(0).toUpperCase() + state.slice(1)} Messages` : 'Messages'}
-        </h1>
+        </PageHeading>
         <span className="text-sm text-muted-foreground">{data.totalCount} total</span>
       </div>
 

@@ -4,7 +4,7 @@
 
 Warp provides three patterns — Messages (pub/sub), Jobs (orchestrated background work), and Requests (in-memory mediator) — through a unified pipeline. It uses the transactional outbox pattern: jobs are committed atomically with business data in the same DbContext. No separate message broker required.
 
-Ships as NuGet packages: Moberg.Warp.Core (also includes always-on durable outbound webhook delivery), Moberg.Warp.Worker, Moberg.Warp.UI, and Moberg.Warp.Http (optional). Observability add-ons: Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls the app makes to other services). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
+Ships as NuGet packages: Moberg.Warp.Core (also includes always-on durable outbound webhook delivery), Moberg.Warp.Worker, Moberg.Warp.Dashboard, and Moberg.Warp.Http (optional). Observability add-ons: Moberg.Warp.Adapters.Http and Moberg.Warp.Adapters.Refit (observe outbound calls the app makes to other services). A provider package — Moberg.Warp.Provider.PostgreSql or Moberg.Warp.Provider.SqlServer — is required: it supplies `opt.UsePostgreSql()` / `opt.UseSqlServer()` and the row-locking / DB-push SQL specific to that engine.
 
 ---
 
@@ -14,7 +14,7 @@ Ships as NuGet packages: Moberg.Warp.Core (also includes always-on durable outbo
 dotnet add package Moberg.Warp.Core              # Publishing (required)
 dotnet add package Moberg.Warp.Provider.PostgreSql  # or Moberg.Warp.Provider.SqlServer (required)
 dotnet add package Moberg.Warp.Worker            # Worker service (if processing jobs)
-dotnet add package Moberg.Warp.UI                # Dashboard (optional)
+dotnet add package Moberg.Warp.Dashboard                # Dashboard (optional)
 dotnet add package Moberg.Warp.Http              # HTTP exposure for IRequest<T> / IStreamRequest<T> + inbound observability (optional)
 dotnet add package Moberg.Warp.Adapters.Http     # Observe outbound HttpClient calls (optional)
 dotnet add package Moberg.Warp.Adapters.Refit    # Refit operation-name sugar for adapters (optional)
@@ -88,7 +88,7 @@ await context.Database.EnsureCreatedAsync();
 ### 4. Add Dashboard (Optional)
 
 ```csharp
-app.MapWarpUI("/warp"); // Serves at /warp
+app.MapWarpDashboard("/warp"); // Serves at /warp
 ```
 
 ### 5. Complete Minimal Example
@@ -108,7 +108,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 var app = builder.Build();
 
-app.MapWarpUI("/warp");
+app.MapWarpDashboard("/warp");
 app.Run();
 ```
 
@@ -965,14 +965,14 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 ### Dashboard Configuration
 
 ```csharp
-app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+app.MapWarpDashboard("/warp").RequireAuthorization("WarpDashboard");
 ```
 
 ---
 
 ## Dashboard Authorization
 
-The dashboard is a set of routed ASP.NET Core endpoints. `MapWarpUI` returns an endpoint builder covering
+The dashboard is a set of routed ASP.NET Core endpoints. `MapWarpDashboard` returns an endpoint builder covering
 the SPA shell, the REST API and the SignalR hub, so one convention gates all three. Default (no
 convention) is open access. Because ASP.NET makes the decision, an anonymous caller is CHALLENGED (reaches
 your sign-in) while an authenticated caller lacking the permission is FORBIDDEN (403 / AccessDeniedPath) —
@@ -989,7 +989,7 @@ builder.Services.AddAuthorizationBuilder()
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+app.MapWarpDashboard("/warp").RequireAuthorization("WarpDashboard");
 ```
 
 A DB-backed permission becomes an `AuthorizationHandler<T>`. For XHR, configure your scheme to answer
@@ -1004,7 +1004,7 @@ registers the validator as scoped for you, and `AddDataProtection()` is not need
 ```csharp
 builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>();
 
-app.MapWarpUI("/warp").RequireWarpDashboardLogin();
+app.MapWarpDashboard("/warp").RequireWarpDashboardLogin();
 ```
 
 Registering the built-in login GATES the dashboard on its own — RequireWarpDashboardLogin() is explicit
@@ -1036,7 +1036,7 @@ so mapping it always would bypass the host's gate and answer a constant `true`.
 ```csharp
 builder.Services.AddWarpDashboard();
 
-app.MapWarpUI("/warp").RequireLocalRequests();
+app.MapWarpDashboard("/warp").RequireLocalRequests();
 ```
 
 A remote caller gets 403 — signing in cannot change the answer. Covers shell, API and hub. The same
@@ -1072,7 +1072,7 @@ answer from a sign-in redirect it followed.
 
 ## HTTP Endpoints (Moberg.Warp.Http)
 
-Optional package that exposes `IRequest<TResponse>` and `IStreamRequest<TResponse>` handlers as ASP.NET Minimal API endpoints. Source-generated dispatch (no per-request reflection); independent of `Moberg.Warp.UI`. Handler binding is delegated to ASP.NET Minimal API — full support for `IParsable<T>`, `TryParse`, query arrays, route constraints, etc.
+Optional package that exposes `IRequest<TResponse>` and `IStreamRequest<TResponse>` handlers as ASP.NET Minimal API endpoints. Source-generated dispatch (no per-request reflection); independent of `Moberg.Warp.Dashboard`. Handler binding is delegated to ASP.NET Minimal API — full support for `IParsable<T>`, `TryParse`, query arrays, route constraints, etc.
 
 `IJob` and `IMessage` cannot be HTTP-exposed (compile-time error `WHTTP001`). The pattern for "submit a job via HTTP" is a thin `IRequest<Guid>` wrapper that calls `IPublisher.Enqueue`.
 
@@ -1543,10 +1543,10 @@ opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi
 // extension methods exist. Define a class implementing the handler/behavior interface and build.
 
 // Dashboard
-WebApplication.MapWarpUI(string routePrefix);
-WebApplication.MapWarpUI(Action<WarpUIOptions> setupAction);
-WarpUIEndpointConventionBuilder.RequireWarpDashboardLogin();
-WarpUIEndpointConventionBuilder.RequireLocalRequests();
+WebApplication.MapWarpDashboard(string routePrefix);
+WebApplication.MapWarpDashboard(Action<WarpDashboardOptions> setupAction);
+WarpDashboardEndpointConventionBuilder.RequireWarpDashboardLogin();
+WarpDashboardEndpointConventionBuilder.RequireLocalRequests();
 IServiceCollection.AddWarpDashboard().AddBuiltInLogin<TValidator>();
 
 // Inbound endpoint observability middleware (after UseRouting) — pairs with opt.AddEndpointObservability()
@@ -1681,7 +1681,7 @@ Both apps share the same database. The worker polls for and executes jobs create
 3. **Failed jobs never auto-delete** — they persist until manually handled
 4. **Queue order is alphabetical** — use prefixes like "a-", "b-", "c-" for priority
 5. **AddWarpServer includes AddWarp** — don't call both
-6. **MapWarpUI + RequireAuthorization** — gate the dashboard with an ASP.NET policy, not a bool filter
+6. **MapWarpDashboard + RequireAuthorization** — gate the dashboard with an ASP.NET policy, not a bool filter
 7. **TimeProvider is injectable** — use it for testability, Warp registers TimeProvider.System by default
 8. **Handler ILogger output is captured** — logs are flushed every ~1s and appear in the dashboard in real time
 9. **Job metadata is inherited** — child jobs automatically inherit parent metadata via ambient context

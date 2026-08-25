@@ -16,7 +16,7 @@
     <Project Path="core/Warp.Http/Warp.Http.csproj" />
     <Project Path="core/Warp.Http.SourceGenerator/Warp.Http.SourceGenerator.csproj" />
     <Project Path="core/Warp.SourceGenerator/Warp.SourceGenerator.csproj" />
-    <Project Path="core/Warp.UI/Warp.UI.csproj" />
+    <Project Path="core/Warp.Dashboard/Warp.Dashboard.csproj" />
     <Project Path="core/Warp.Worker/Warp.Worker.csproj" />
   </Folder>
   <Folder Name="/core/providers/">

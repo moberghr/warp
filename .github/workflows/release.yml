@@ -46,8 +46,8 @@ jobs:
     - name: Add local NuGet source
       run: dotnet nuget add source ${{ github.workspace }}/nupkgs --name local
 
-    - name: Pack Moberg.Warp.UI
-      working-directory: src/core/Warp.UI
+    - name: Pack Moberg.Warp.Dashboard
+      working-directory: src/core/Warp.Dashboard
       run: dotnet pack -c Release -p:PackageVersion=${{ env.PACKAGE_VERSION }} -o ${{ github.workspace }}/nupkgs
 
     - name: Pack Moberg.Warp.Worker

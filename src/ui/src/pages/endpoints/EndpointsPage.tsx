@@ -10,6 +10,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import type { EndpointListItem } from '@/types/endpoints';
 import { HealthPill, adapterHealth, formatPercent, formatMs } from '../adapters/shared';
+import { PageHeading } from '@/components/PageHeading';
 
 export default function EndpointsPage() {
   const navigate = useNavigate();
@@ -87,7 +88,7 @@ export default function EndpointsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1">Endpoints</h1>
+      <PageHeading className="mb-1">Endpoints</PageHeading>
       <p className="text-sm text-muted-foreground mb-4">
         Inbound HTTP requests — calls, error rates, and latency across the fleet.
       </p>
@@ -98,6 +99,7 @@ export default function EndpointsPage() {
         <MetricCard
           label="Error rate"
           value={Math.round(summary.errorRate * 1000) / 10}
+          suffix="%"
           color={summary.errorRate > 0 ? 'text-destructive' : undefined}
         />
       </div>

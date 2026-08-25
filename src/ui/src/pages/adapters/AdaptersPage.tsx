@@ -12,6 +12,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import type { AdapterListItem } from '@/types/adapters';
 import { HealthPill, adapterHealth, Sparkline, formatPercent, formatMs } from './shared';
+import { PageHeading } from '@/components/PageHeading';
 
 export default function AdaptersPage() {
   const navigate = useNavigate();
@@ -118,7 +119,7 @@ export default function AdaptersPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1">Adapters</h1>
+      <PageHeading className="mb-1">Adapters</PageHeading>
       <p className="text-sm text-muted-foreground mb-4">
         Outbound service dependencies — calls, error rates, and latency across the fleet.
       </p>
@@ -129,6 +130,7 @@ export default function AdaptersPage() {
         <MetricCard
           label="Error rate"
           value={Math.round(summary.errorRate * 1000) / 10}
+          suffix="%"
           color={summary.errorRate > 0 ? 'text-destructive' : undefined}
         />
       </div>

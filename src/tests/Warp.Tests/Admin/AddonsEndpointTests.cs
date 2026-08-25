@@ -10,9 +10,9 @@ using Warp.Core.Concurrency;
 using Warp.Core.RateLimit;
 using Warp.Core.Sagas;
 using Warp.Core.Services;
-using Warp.UI;
-using Warp.UI.DashboardPush;
-using Warp.UI.Endpoints;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
+using Warp.Dashboard.Push;
 
 namespace Warp.Tests.Admin;
 
@@ -32,7 +32,7 @@ public class AddonsEndpointTests
         configureServices?.Invoke(builder.Services);
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(CancellationToken.None);
         return (app, app.GetTestClient());

@@ -15,8 +15,8 @@ using Warp.Core.Data.Queries;
 using Warp.Core.Endpoints;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
-using Warp.UI;
-using Warp.UI.Endpoints;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
 
 namespace Warp.Tests.Applications;
 
@@ -79,7 +79,7 @@ public class ApplicationAddonFlagTests
         builder.Services.AddWarp<TestContext>();
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await using (var scope = app.Services.CreateAsyncScope())
         {
@@ -133,7 +133,7 @@ public class ApplicationAddonFlagTests
         builder.Services.AddWarp<TestContext>(opt => opt.ApplicationName = applicationName);
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(CancellationToken.None);
         var client = app.GetTestClient();

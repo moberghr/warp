@@ -50,7 +50,7 @@ const HERO_SETUP = `<span class="k-dim">// Register with your existing DbContext
     opt.<span class="k-green">AddMutex</span>();
 });
 
-app.<span class="k-green">MapWarpUI</span>(<span class="k-yellow">"/warp"</span>); <span class="k-dim">// dashboard at /warp</span>`;
+app.<span class="k-green">MapWarpDashboard</span>(<span class="k-yellow">"/warp"</span>); <span class="k-dim">// dashboard at /warp</span>`;
 
 const HERO_USAGE = `<span class="k-dim">// Pub/sub — every handler becomes a job</span>
 <span class="k-blue">await</span> publisher.<span class="k-green">Publish</span>(<span class="k-blue">new</span> <span class="k-purple">OrderCreated</span> { Id = orderId });
@@ -65,7 +65,7 @@ const HERO_USAGE = `<span class="k-dim">// Pub/sub — every handler becomes a j
 const INSTALL_PACKAGES = `<span class="k-dim">$</span> dotnet add package Moberg.Warp.Core
 <span class="k-dim">$</span> dotnet add package Moberg.Warp.Provider.PostgreSql
 <span class="k-dim">$</span> dotnet add package Moberg.Warp.Worker
-<span class="k-dim">$</span> dotnet add package Moberg.Warp.UI
+<span class="k-dim">$</span> dotnet add package Moberg.Warp.Dashboard
 
 <span class="k-green">✓</span> DbContext auto-configured — no manual setup
 <span class="k-green">✓</span> Outbox publisher registered (same transaction)

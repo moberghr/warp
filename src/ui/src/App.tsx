@@ -23,7 +23,6 @@ const ApplicationDetailPage = lazy(() => import('@/pages/applications/Applicatio
 const ApplicationInstanceDetailPage = lazy(() => import('@/pages/applications/ApplicationInstanceDetailPage'));
 const ServerDetailPage = lazy(() => import('@/pages/servers/ServerDetailPage'));
 const CountersPage = lazy(() => import('@/pages/counters/CountersPage'));
-const QueuesPage = lazy(() => import('@/pages/queues/QueuesPage'));
 const ConcurrencyLimitsPage = lazy(() => import('@/pages/concurrency/ConcurrencyLimitsPage'));
 const RateLimitsPage = lazy(() => import('@/pages/ratelimits/RateLimitsPage'));
 const SagasListPage = lazy(() => import('@/pages/sagas/SagasListPage'));
@@ -146,8 +145,10 @@ function App() {
             <Route path="/applications/:id/instances/:instanceId" element={<ApplicationInstanceDetailPage />} />
             <Route path="/applications/:id" element={<ApplicationDetailPage />} />
             <Route path="/applications" element={<ApplicationsPage />} />
+            {/* The standalone Queues page folded into the Counters queues family in 6.0. */}
+            <Route path="/queues" element={<Navigate to="/counters/queues" replace />} />
             <Route path="/counters" element={<CountersPage />} />
-            <Route path="/queues" element={<QueuesPage />} />
+            <Route path="/counters/:family" element={<CountersPage />} />
             <Route path="/concurrency" element={<ConcurrencyLimitsPage />} />
             <Route path="/ratelimits" element={<RateLimitsPage />} />
             <Route path="/sagas/:id" element={<SagaDetailPage />} />

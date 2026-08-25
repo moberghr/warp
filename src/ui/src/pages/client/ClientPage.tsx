@@ -9,6 +9,7 @@ import { RelativeTime } from '@/components/RelativeTime';
 import * as api from '@/api';
 import { ClientEventType } from '@/types/client';
 import type { ClientEventItem, ClientVitalStat } from '@/types/client';
+import { PageHeading } from '@/components/PageHeading';
 
 // Client (browser) observability (§8.27): errors, logs, web vitals and custom events reported by a frontend
 // app through the Warp ingest endpoint. Summary tiles + web-vital p75s (Google-colored) come from the durable
@@ -89,7 +90,7 @@ export default function ClientPage() {
   return (
     <div>
       <div className="mb-4">
-        <h1 className="text-2xl font-bold">Client</h1>
+        <PageHeading className="">Client</PageHeading>
         <p className="text-sm text-muted-foreground mt-1">Errors, logs, web vitals and custom events reported by your frontend apps.</p>
       </div>
 

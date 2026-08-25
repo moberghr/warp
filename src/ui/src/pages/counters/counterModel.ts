@@ -215,6 +215,11 @@ function parseClientEvent(parts: string[], application: string | null): ParsedKe
 
 export interface FamilyDef {
   id: FamilyId;
+  /**
+   * URL segment for /counters/{slug}. Kept separate from `id` so the internal key can be
+   * renamed without breaking a link someone shared.
+   */
+  slug: string;
   label: string;
   description: string;
   /**
@@ -223,8 +228,11 @@ export interface FamilyDef {
    * `count`) or mix in gauges (`depth`) must name theirs explicitly or the average is silently wrong.
    */
   countTokens?: string[];
-  /** Latency percentile read off the `pct` histogram. Web vitals use Google's p75; everything else p95. */
-  percentile?: number;
+  /**
+   * Latency percentiles read off the `pct` histogram, in display order. Web vitals use Google's p75;
+   * queues report p95 AND p99, because a queue's tail is the operational signal; everything else p95.
+   */
+  percentiles?: number[];
   /** Formats the dimension value for display. Falls back to the raw subject. */
   formatSubject?: (subject: string) => { label: string; sub: string | null };
 }
@@ -242,52 +250,65 @@ function formatTypeSubject(subject: string): { label: string; sub: string | null
 export const FAMILIES: FamilyDef[] = [
   {
     id: 'outcomes',
+    slug: 'job-outcomes',
     label: 'Job outcomes',
     description:
       'Global job-outcome totals and their per-reason breakdown. Recorded events — they only ever increase, so a requeue never rewrites history.',
   },
   {
     id: 'jobtypes',
+    slug: 'job-types',
     label: 'Job types',
     description: 'Per-job-type execution counts and latency. One row per published job type.',
     formatSubject: formatTypeSubject,
   },
   {
     id: 'handlers',
+    slug: 'handlers',
     label: 'Handlers',
     description: 'The same execution counts sliced by the handler that ran, which differs from the job type for routed messages.',
     formatSubject: formatTypeSubject,
   },
   {
     id: 'queues',
+    slug: 'queues',
     label: 'Queues',
     description: 'Queue-wait latency (time a job sat eligible-but-unclaimed) alongside the latest backlog gauge.',
     countTokens: ['count'],
+    percentiles: [0.95, 0.99],
   },
   {
     id: 'deadlines',
+    slug: 'deadlines',
     label: 'Deadlines',
     description: 'Total-scope timeout attainment per job type — how often a deadline was met versus missed.',
     countTokens: ['count'],
+    // The dimension is a job type, same as the two tabs above; without this it rendered the raw
+    // assembly-qualified name while they showed the short one.
+    formatSubject: formatTypeSubject,
   },
   {
     id: 'adapters',
+    slug: 'adapters',
     label: 'Adapters',
     description: 'Outbound service calls per adapter, and per operation or group where those axes were recorded.',
   },
   {
     id: 'endpoints',
+    slug: 'endpoints',
     label: 'Endpoints',
     description: 'Inbound calls to Warp HTTP endpoints, keyed by method and route template.',
   },
   {
     id: 'client',
+    slug: 'client',
     label: 'Client',
     description: 'Browser events by type and name, plus web-vital measurements. Vitals report p75, the percentile Core Web Vitals is scored on.',
-    percentile: 0.75,
+    percentiles: [0.75],
   },
   {
     id: 'issues',
+    slug: 'issues',
     label: 'Issues',
     description: 'Hourly occurrence trend per error-group fingerprint. Trend only — the group itself lives on the Issues page.',
     // A fingerprint is 32 hex characters with no information in the tail, so it is truncated. Anything else is
@@ -299,11 +320,13 @@ export const FAMILIES: FamilyDef[] = [
   },
   {
     id: 'system',
+    slug: 'system',
     label: 'System',
     description: 'Records dropped by the lossy recording pipelines when their bounded channel was full.',
   },
   {
     id: 'other',
+    slug: 'other',
     label: 'Other',
     description: 'Keys this page does not recognise, including any an addon writes itself. Shown raw.',
   },
@@ -317,10 +340,21 @@ export interface MetricRow {
   label: string;
   sub: string | null;
   values: Record<string, number>;
+  /**
+   * The latency columns are not milliseconds for this row — CLS is a unitless layout-shift
+   * score. Rendered as a plain number rather than a duration.
+   */
+  unitless: boolean;
   avgMs: number | null;
-  percentileMs: number | null;
-  /** The percentile landed in the catch-all rung, so the real value is only known to be above `percentileMs`. */
-  percentileOverflow: boolean;
+  /** One entry per `FamilyDef.percentiles`, in the same order as `FamilyTable.percentileLabels`. */
+  percentiles: RowPercentile[];
+}
+
+export interface RowPercentile {
+  label: string;
+  ms: number | null;
+  /** The percentile landed in the catch-all rung, so the real value is only known to be above `ms`. */
+  overflow: boolean;
 }
 
 export interface FamilyTable {
@@ -329,7 +363,7 @@ export interface FamilyTable {
   hasApplication: boolean;
   hasAvg: boolean;
   hasPercentile: boolean;
-  percentileLabel: string;
+  percentileLabels: string[];
 }
 
 // Counting tokens first (most-load-bearing on the left), then anything a family invented. `dur` and `pct` never
@@ -341,6 +375,16 @@ function columnRank(token: string): number {
   const index = COLUMN_ORDER.indexOf(token);
 
   return index < 0 ? COLUMN_ORDER.length : index;
+}
+
+// CLS is unitless and folded x1000 so it fits the shared integer histogram (§8.27). Every other
+// latency column genuinely is milliseconds, so the divisor is per-subject rather than per-family.
+const UNITLESS_SCALE: Partial<Record<FamilyId, Record<string, number>>> = {
+  client: { CLS: 1000 },
+};
+
+function percentileLabel(percentile: number): string {
+  return `p${Math.round(percentile * 100)}`;
 }
 
 export function percentileFromBuckets(buckets: Map<number, number>, percentile: number): { ms: number | null; overflow: boolean } {
@@ -401,9 +445,9 @@ export function buildFamilyTable(entries: CounterEntry[], family: FamilyDef): Fa
         label: formatted.label,
         sub: formatted.sub,
         values: {},
+        unitless: false,
         avgMs: null,
-        percentileMs: null,
-        percentileOverflow: false,
+        percentiles: [],
         buckets: new Map(),
       };
       rows.set(id, row);
@@ -427,16 +471,25 @@ export function buildFamilyTable(entries: CounterEntry[], family: FamilyDef): Fa
     columns.add(parsed.token);
   }
 
-  const percentile = family.percentile ?? 0.95;
+  const percentiles = family.percentiles ?? [0.95];
 
   for (const row of rows.values()) {
     const denominator = (family.countTokens ?? [...columns]).reduce((sum, token) => sum + (row.values[token] ?? 0), 0);
     const duration = row.values[DURATION_TOKEN];
     row.avgMs = duration !== undefined && denominator > 0 ? duration / denominator : null;
 
-    const p = percentileFromBuckets(row.buckets, percentile);
-    row.percentileMs = p.ms;
-    row.percentileOverflow = p.overflow;
+    row.percentiles = percentiles.map((q) => {
+      const p = percentileFromBuckets(row.buckets, q);
+
+      return { label: percentileLabel(q), ms: p.ms, overflow: p.overflow };
+    });
+
+    const scale = UNITLESS_SCALE[family.id]?.[row.subject];
+    if (scale !== undefined) {
+      row.unitless = true;
+      row.avgMs = row.avgMs === null ? null : row.avgMs / scale;
+      row.percentiles = row.percentiles.map((x) => ({ ...x, ms: x.ms === null ? null : x.ms / scale }));
+    }
   }
 
   const ordered = [...columns].sort((a, b) => columnRank(a) - columnRank(b) || a.localeCompare(b));
@@ -450,7 +503,7 @@ export function buildFamilyTable(entries: CounterEntry[], family: FamilyDef): Fa
     hasApplication,
     hasAvg,
     hasPercentile,
-    percentileLabel: `p${Math.round(percentile * 100)}`,
+    percentileLabels: percentiles.map(percentileLabel),
   };
 }
 
@@ -649,6 +702,10 @@ export function buildFamilySeries(points: HistoryPointLike[], family: FamilyDef,
 }
 
 /** The families that have at least one counter or one history series, in display order. */
+export function familyBySlug(slug: string | undefined): FamilyDef | undefined {
+  return FAMILIES.find((x) => x.slug === slug);
+}
+
 export function presentFamilies(counters: CounterEntry[], historyKeys: string[]): FamilyDef[] {
   const present = new Set<FamilyId>();
 

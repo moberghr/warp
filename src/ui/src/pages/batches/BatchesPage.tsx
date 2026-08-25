@@ -9,6 +9,7 @@ import { DataTable } from '@/components/DataTable';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
 import { useBatchesList } from '@/api/hooks/useBatches';
 import type { JobGroupModel } from '@/types';
+import { PageHeading } from '@/components/PageHeading';
 
 export default function BatchesPage() {
   const { state } = useParams<{ state?: string }>();
@@ -82,9 +83,9 @@ export default function BatchesPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-bold">
+        <PageHeading className="">
           {state ? `${state.charAt(0).toUpperCase() + state.slice(1)} Batches` : 'Batches'}
-        </h1>
+        </PageHeading>
         <span className="text-sm text-muted-foreground">{data.totalCount} total</span>
       </div>
 

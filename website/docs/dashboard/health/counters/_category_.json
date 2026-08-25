@@ -1,0 +1,5 @@
+{
+  "label": "Counters",
+  "position": 3,
+  "link": { "type": "doc", "id": "dashboard/health/counters/index" }
+}

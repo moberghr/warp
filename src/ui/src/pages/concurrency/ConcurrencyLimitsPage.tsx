@@ -12,6 +12,7 @@ import {
 } from '@/api/hooks/useConcurrencyLimits';
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { ConcurrencyLimitInfo } from '@/types';
+import { PageHeading } from '@/components/PageHeading';
 
 type ConfirmDelete = { name: string } | null;
 
@@ -65,7 +66,7 @@ export default function ConcurrencyLimitsPage() {
     if (unavailable) {
       return (
         <div>
-          <h1 className="text-2xl font-bold mb-2">Concurrency Limits</h1>
+          <PageHeading className="mb-2">Concurrency Limits</PageHeading>
           <Card>
             <CardContent className="py-8 text-center text-muted-foreground">
               Concurrency limits addon not registered. Add <code className="font-mono">opt.AddConcurrency()</code> to enable.
@@ -83,7 +84,7 @@ export default function ConcurrencyLimitsPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <h1 className="text-2xl font-bold">Concurrency Limits</h1>
+        <PageHeading className="">Concurrency Limits</PageHeading>
         <Button onClick={() => setShowAdd(true)}>
           <Plus className="h-4 w-4" />
           Add limit

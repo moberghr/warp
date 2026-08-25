@@ -73,7 +73,7 @@
 		<ProjectReference Include="..\..\core\providers\Warp.Provider.PostgreSql\Warp.Provider.PostgreSql.csproj" />
 		<ProjectReference Include="..\..\core\providers\Warp.Provider.SqlServer\Warp.Provider.SqlServer.csproj" />
 		<ProjectReference Include="..\..\core\Warp.Worker\Warp.Worker.csproj" />
-		<ProjectReference Include="..\..\core\Warp.UI\Warp.UI.csproj" />
+		<ProjectReference Include="..\..\core\Warp.Dashboard\Warp.Dashboard.csproj" />
 		<ProjectReference Include="..\..\core\Warp.SourceGenerator\Warp.SourceGenerator.csproj" OutputItemType="Analyzer" />
 		<!-- OutputItemType=Analyzer runs these as source generators at compile time; the default
 		     ReferenceOutputAssembly=true keeps each assembly bindable so the test project can

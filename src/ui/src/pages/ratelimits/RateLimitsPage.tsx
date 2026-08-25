@@ -12,6 +12,7 @@ import {
 } from '@/api/hooks/useRateLimits';
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { RateLimitInfo } from '@/types';
+import { PageHeading } from '@/components/PageHeading';
 
 type ConfirmDelete = { name: string } | null;
 
@@ -74,7 +75,7 @@ export default function RateLimitsPage() {
     if (unavailable) {
       return (
         <div>
-          <h1 className="text-2xl font-bold mb-2">Rate Limits</h1>
+          <PageHeading className="mb-2">Rate Limits</PageHeading>
           <Card>
             <CardContent className="py-8 text-center text-muted-foreground">
               Rate limits addon not registered. Add <code className="font-mono">opt.AddRateLimit()</code> to enable.
@@ -92,7 +93,7 @@ export default function RateLimitsPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <h1 className="text-2xl font-bold">Rate Limits</h1>
+        <PageHeading className="">Rate Limits</PageHeading>
         <Button onClick={() => setShowAdd(true)}>
           <Plus className="h-4 w-4" />
           Add rate limit

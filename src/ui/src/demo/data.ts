@@ -236,7 +236,10 @@ export function getDashboardStats(): DashboardStatistics {
     endpointRecordsDropped: 0,
     clientRecordsDropped: 0,
     batches: 34,
-    databaseConnection: 'PostgreSQL',
+    // Mirrors the exact shape DashboardStatsService.GetSafeDatabaseConnection builds
+    // ("{provider}: Host: {host}, DB: {db}") rather than a bare provider name, so the
+    // footer in demo mode reads like a real deployment's does.
+    databaseConnection: 'PostgreSQL Server: Host: warp-db-prod-1.internal, DB: orders',
   };
 }
 
@@ -278,6 +281,12 @@ export function getStatsHistoryPoints(hours: number): StatsHistoryPoint[] {
 // it. retried-jobs (61) is below requeued-retry (138) because it counts distinct jobs, not retry events.
 export function getCountersDemo() {
   return [
+    // Keys the page does not recognise, so the "Other" tab has something to show. This is the shape
+    // an addon writing its own counters produces — it needs no per-key wiring to appear.
+    { key: 'acme:invoices:exported', value: 1284 },
+    { key: 'acme:invoices:export-failed', value: 7 },
+    { key: 'acme:ledger:reconciled', value: 903 },
+
     { key: 'stats:succeeded', value: 15847 },
 
     // failed: 29 + 6 attributed, 12 unattributed
@@ -317,30 +326,104 @@ function qualified(type: string): string {
   return `${type}, ${assembly}, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null`;
 }
 
+// The demo's job workloads, declared once. The lifetime counters and the hourly history series
+// both read this, so a handler cannot exist in the table with a flat-zero chart (or the reverse)
+// because its name drifted between two copies. A published type maps to one handler — except a
+// routed IMessage, which fans out: Warp spawns one child job per subscribed handler, so the TYPE
+// row is the sum of its handlers' rows and the Job types and Handlers tabs genuinely differ.
+interface WorkloadHandler {
+  name: string;
+  /** Typical execution time, for the history series. */
+  perRunMs: number;
+  succeeded: number;
+  failed: number;
+  durMs: number;
+  buckets: Record<string, number>;
+}
+
+interface Workload {
+  type: string;
+  handlers: WorkloadHandler[];
+}
+
+const WORKLOADS: Workload[] = [
+  {
+    type: 'Acme.Orders.ProcessOrderRequest',
+    handlers: [
+      { name: 'Acme.Orders.ProcessOrderHandler', perRunMs: 175, succeeded: 8214, failed: 21, durMs: 1_437_450, buckets: { 100: 5100, 250: 2600, 500: 420, 2500: 110, 10000: 5 } },
+    ],
+  },
+  {
+    type: 'Acme.Reports.GenerateReportRequest',
+    handlers: [
+      { name: 'Acme.Reports.GenerateReportHandler', perRunMs: 6900, succeeded: 412, failed: 9, durMs: 2_884_300, buckets: { 2500: 90, 5000: 210, 10000: 96, 30000: 25 } },
+    ],
+  },
+  {
+    type: 'Acme.Notifications.SendEmailRequest',
+    handlers: [
+      { name: 'Acme.Notifications.SendEmailCommand', perRunMs: 69, succeeded: 6103, failed: 14, durMs: 421_760, buckets: { 25: 3400, 50: 2100, 100: 560, 250: 57 } },
+    ],
+  },
+  {
+    type: 'Acme.Payments.ProcessPaymentRequest',
+    handlers: [
+      { name: 'Acme.Payments.ProcessPaymentHandler', perRunMs: 540, succeeded: 1118, failed: 3, durMs: 604_920, buckets: { 250: 300, 500: 610, 1000: 190, 2500: 21 } },
+    ],
+  },
+  {
+    // The routed message: one publish, three subscribers. On Job types this is a single row that
+    // looks mildly unhealthy; on Handlers you can see it is ReserveStock specifically — it calls the
+    // inventory adapter, which is the dependency whose breaker opens mid-window.
+    type: 'Acme.Orders.OrderPlacedEvent',
+    handlers: [
+      { name: 'Acme.Inventory.ReserveStockHandler', perRunMs: 640, succeeded: 2960, failed: 184, durMs: 1_894_400, buckets: { 250: 900, 500: 1100, 2500: 780, 10000: 364 } },
+      { name: 'Acme.Notifications.SendConfirmationHandler', perRunMs: 70, succeeded: 3140, failed: 4, durMs: 219_800, buckets: { 25: 1800, 50: 1000, 100: 344 } },
+      { name: 'Acme.Analytics.RecordOrderHandler', perRunMs: 30, succeeded: 3144, failed: 0, durMs: 94_320, buckets: { 10: 2100, 25: 900, 50: 144 } },
+    ],
+  },
+];
+
 // Per-dimension execution stats (§8.23), queue-wait + backlog (§8.26), deadline attainment (§8.31), and the
 // adapter / endpoint / client folds. Every duration is a SUM in ms and every pct entry is a histogram bucket
 // count, so the page's derived Avg and p95 columns have something real to be derived from.
 function perDimensionCounters() {
-  const executed = [
-    { type: 'Acme.Orders.ProcessOrderRequest', handler: 'Acme.Orders.ProcessOrderHandler', succeeded: 8214, failed: 21, durMs: 1_437_450, buckets: { 100: 5100, 250: 2600, 500: 420, 2500: 110, 10000: 5 } },
-    { type: 'Acme.Reports.GenerateReportRequest', handler: 'Acme.Reports.GenerateReportHandler', succeeded: 412, failed: 9, durMs: 2_884_300, buckets: { 2500: 90, 5000: 210, 10000: 96, 30000: 25 } },
-    { type: 'Acme.Notifications.SendEmailRequest', handler: 'Acme.Notifications.SendEmailCommand', succeeded: 6103, failed: 14, durMs: 421_760, buckets: { 25: 3400, 50: 2100, 100: 560, 250: 57 } },
-    { type: 'Acme.Payments.ProcessPaymentRequest', handler: 'Acme.Payments.ProcessPaymentHandler', succeeded: 1118, failed: 3, durMs: 604_920, buckets: { 250: 300, 500: 610, 1000: 190, 2500: 21 } },
-  ];
-
+  // A published type maps to one handler — except a routed IMessage, which fans out: Warp spawns one
+  // child job per subscribed handler, so the TYPE row is the sum of its handlers' rows and the two
+  // tabs genuinely differ. Modelling everything 1:1 made Handlers a verbatim copy of Job types, which
+  // is also the one thing the Handlers page is there to disprove.
   const counters: { key: string; value: number }[] = [];
 
-  for (const row of executed) {
-    for (const [dimension, id] of [['type', row.type], ['handler', row.handler]] as const) {
-      const prefix = `jobstat:${dimension}:${qualified(id)}`;
-      counters.push({ key: `${prefix}:succeeded`, value: row.succeeded });
-      counters.push({ key: `${prefix}:failed`, value: row.failed });
-      counters.push({ key: `${prefix}:dur`, value: row.durMs });
+  const push = (prefix: string, succeeded: number, failed: number, durMs: number, buckets: Record<string, number>) => {
+    counters.push({ key: `${prefix}:succeeded`, value: succeeded });
+    counters.push({ key: `${prefix}:failed`, value: failed });
+    counters.push({ key: `${prefix}:dur`, value: durMs });
 
-      for (const [bound, count] of Object.entries(row.buckets)) {
-        counters.push({ key: `${prefix}:pct:${bound}`, value: count });
+    for (const [bound, count] of Object.entries(buckets)) {
+      counters.push({ key: `${prefix}:pct:${bound}`, value: count });
+    }
+  };
+
+  for (const row of WORKLOADS) {
+    for (const handler of row.handlers) {
+      push(`jobstat:handler:${qualified(handler.name)}`, handler.succeeded, handler.failed, handler.durMs, handler.buckets);
+    }
+
+    // The type is what the handlers add up to.
+    const buckets: Record<string, number> = {};
+    for (const handler of row.handlers) {
+      for (const [bound, count] of Object.entries(handler.buckets)) {
+        buckets[bound] = (buckets[bound] ?? 0) + count;
       }
     }
+
+    push(
+      `jobstat:type:${qualified(row.type)}`,
+      row.handlers.reduce((sum, x) => sum + x.succeeded, 0),
+      row.handlers.reduce((sum, x) => sum + x.failed, 0),
+      row.handlers.reduce((sum, x) => sum + x.durMs, 0),
+      buckets,
+    );
   }
 
   return [
@@ -370,6 +453,10 @@ function perDimensionCounters() {
     { key: `deadline:${qualified('Acme.Reports.GenerateReportRequest')}:count`, value: 421 },
     { key: `deadline:${qualified('Acme.Reports.GenerateReportRequest')}:miss`, value: 9 },
     { key: `deadline:${qualified('Acme.Payments.ProcessPaymentRequest')}:count`, value: 1118 },
+    { key: `deadline:${qualified('Acme.Payments.ProcessPaymentRequest')}:miss`, value: 4 },
+    // The breaching one: a nightly export whose deadline is plainly too tight.
+    { key: `deadline:${qualified('Acme.Ledger.NightlyExportRequest')}:count`, value: 96 },
+    { key: `deadline:${qualified('Acme.Ledger.NightlyExportRequest')}:miss`, value: 31 },
 
     { key: 'adapter:payments:success', value: 4820 },
     { key: 'adapter:payments:failed', value: 37 },
@@ -383,6 +470,19 @@ function perDimensionCounters() {
     { key: 'adapter:shipping:success', value: 2044 },
     { key: 'adapter:shipping:failed', value: 96 },
     { key: 'adapter:shipping:dur', value: 918_000 },
+    { key: 'adapter:shipping:pct:250', value: 1400 },
+    { key: 'adapter:shipping:pct:1000', value: 620 },
+    { key: 'adapter:shipping:pct:5000', value: 120 },
+    { key: 'adapter:shipping:grp:eu-west:success', value: 1502 },
+    { key: 'adapter:shipping:grp:us-east:success', value: 542 },
+    // The dependency that fell over: the breaker opened and most calls never left the process.
+    { key: 'adapter:inventory:success', value: 611 },
+    { key: 'adapter:inventory:failed', value: 148 },
+    { key: 'adapter:inventory:circuitopen', value: 906 },
+    { key: 'adapter:inventory:dur', value: 447_060 },
+    { key: 'adapter:inventory:pct:500', value: 380 },
+    { key: 'adapter:inventory:pct:2500', value: 190 },
+    { key: 'adapter:inventory:pct:10000', value: 41 },
 
     { key: 'endpoint:POST /orders:success', value: 9210 },
     { key: 'endpoint:POST /orders:failed', value: 18 },
@@ -391,7 +491,25 @@ function perDimensionCounters() {
     { key: 'endpoint:POST /orders:pct:100', value: 2500 },
     { key: 'endpoint:POST /orders:pct:500', value: 328 },
     { key: 'endpoint:GET /orders/{id}:success', value: 24188 },
+    { key: 'endpoint:GET /orders/{id}:failed', value: 41 },
     { key: 'endpoint:GET /orders/{id}:dur', value: 483_760 },
+    { key: 'endpoint:GET /orders/{id}:pct:10', value: 18400 },
+    { key: 'endpoint:GET /orders/{id}:pct:25', value: 5100 },
+    { key: 'endpoint:GET /orders/{id}:pct:100', value: 729 },
+    // Inbound webhooks from two vendors — noisy, as receivers usually are.
+    { key: 'endpoint:POST /webhooks/receive:success', value: 2456 },
+    { key: 'endpoint:POST /webhooks/receive:failed', value: 73 },
+    { key: 'endpoint:POST /webhooks/receive:dur', value: 161_216 },
+    { key: 'endpoint:POST /webhooks/receive:pct:25', value: 1600 },
+    { key: 'endpoint:POST /webhooks/receive:pct:50', value: 700 },
+    { key: 'endpoint:POST /webhooks/receive:pct:250', value: 229 },
+    // The slow one: a synchronous report download that sometimes times out at the gateway.
+    { key: 'endpoint:GET /reports/{id}/download:success', value: 778 },
+    { key: 'endpoint:GET /reports/{id}/download:failed', value: 47 },
+    { key: 'endpoint:GET /reports/{id}/download:dur', value: 763_575 },
+    { key: 'endpoint:GET /reports/{id}/download:pct:1000', value: 520 },
+    { key: 'endpoint:GET /reports/{id}/download:pct:2500', value: 210 },
+    { key: 'endpoint:GET /reports/{id}/download:pct:10000', value: 95 },
 
     { key: 'clientevent:total:error:count', value: 184 },
     { key: 'clientevent:total:log:count', value: 2910 },
@@ -405,7 +523,66 @@ function perDimensionCounters() {
     { key: 'clientevent:vital:LCP:pct:4000', value: 224 },
     { key: 'clientevent:vital:INP:count', value: 2014 },
     { key: 'clientevent:vital:INP:dur', value: 289_000 },
+    { key: 'clientevent:vital:INP:pct:100', value: 1290 },
+    { key: 'clientevent:vital:INP:pct:250', value: 560 },
+    { key: 'clientevent:vital:INP:pct:500', value: 164 },
+    { key: 'clientevent:vital:FCP:count', value: 2014 },
+    { key: 'clientevent:vital:FCP:dur', value: 3_222_400 },
+    { key: 'clientevent:vital:FCP:pct:1000', value: 1100 },
+    { key: 'clientevent:vital:FCP:pct:2500', value: 780 },
+    { key: 'clientevent:vital:FCP:pct:4000', value: 134 },
+    { key: 'clientevent:vital:TTFB:count', value: 2014 },
+    { key: 'clientevent:vital:TTFB:dur', value: 926_440 },
+    { key: 'clientevent:vital:TTFB:pct:250', value: 1240 },
+    { key: 'clientevent:vital:TTFB:pct:500', value: 620 },
+    { key: 'clientevent:vital:TTFB:pct:1000', value: 154 },
+    // CLS is unitless, so it is folded x1000 into the shared integer histogram and unscaled on read:
+    // these buckets are thousandths, and the page renders 0.10 rather than 100.
+    { key: 'clientevent:vital:CLS:count', value: 2014 },
+    { key: 'clientevent:vital:CLS:dur', value: 141_000 },
+    { key: 'clientevent:vital:CLS:pct:50', value: 1420 },
+    { key: 'clientevent:vital:CLS:pct:100', value: 470 },
+    { key: 'clientevent:vital:CLS:pct:250', value: 124 },
+    { key: 'clientevent:name:error:ChunkLoadError:count', value: 34 },
+    { key: 'clientevent:name:event:checkout_started:count', value: 1840 },
+    { key: 'clientevent:name:event:checkout_completed:count', value: 1655 },
   ];
+}
+
+// Every family used to chart `base * factor`, so all eleven tabs drew the same curve at different
+// heights. Real workloads do not share a rhythm: batch jobs run at night, consumers browse in the
+// evening, and a vendor calling your webhook endpoint has never heard of your office hours. These
+// shapes are what make each tab's chart worth looking at. `h` is the UTC hour, `i` the index back
+// from now — both deterministic, so screenshots are reproducible.
+
+/** Internal work: ramps from 08, peaks early afternoon, gone by 19. */
+function officeHours(h: number): number {
+  if (h < 7 || h > 19) {
+    return 0.05;
+  }
+
+  return Math.max(0.12, 1 - Math.abs(h - 13) / 7);
+}
+
+/** Consumer traffic: quiet through the working day, peaks mid-evening. */
+function eveningPeak(h: number): number {
+  const distance = Math.min(Math.abs(h - 21), 24 - Math.abs(h - 21));
+
+  return Math.max(0.08, 1 - distance / 7);
+}
+
+/** A nightly batch window — nothing, then everything, then nothing. */
+function nightlyBatch(h: number): number {
+  if (h >= 2 && h <= 4) {
+    return 1;
+  }
+
+  return h === 1 || h === 5 ? 0.3 : 0;
+}
+
+/** External callers keep their own schedule, not yours. */
+function steadyFlow(i: number): number {
+  return 0.75 + seeded(i + 210) * 0.5;
 }
 
 export function getCountersHistoryDemo(hours: number) {
@@ -415,67 +592,122 @@ export function getCountersHistoryDemo(hours: number) {
 
   for (let i = hours - 1; i >= 0; i--) {
     const hourDate = new Date(now.getTime() - i * 3600000);
-    const h = hourDate.getHours();
-    const business = h >= 9 && h <= 17;
-    const base = business ? 800 + seeded(i + 10) * 500 : 50 + seeded(i + 40) * 150;
+    const hour = hourDate.toISOString();
+    const h = hourDate.getUTCHours();
+    const at = (key: string, value: number) => points.push({ hour, key, value: Math.max(0, Math.round(value)) });
 
-    const failed = Math.round(base * (0.01 + seeded(i + 50) * 0.04));
-    const deleted = Math.round(base * 0.005);
-    const requeued = Math.round(base * (0.02 + seeded(i + 60) * 0.03));
+    const office = officeHours(h);
+    const evening = eveningPeak(h);
+    const batch = nightlyBatch(h);
+    const jitter = 0.85 + seeded(i + 11) * 0.3;
 
-    points.push({ hour: hourDate.toISOString(), key: 'stats:succeeded', value: Math.round(base) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:failed', value: failed });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:deleted', value: deleted });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued', value: requeued });
+    // The inventory dependency degrades for a stretch mid-window and the breaker takes over. Everything
+    // downstream of that — its failures, the retries they cause, the issue trend — moves with it.
+    const incident = i >= 5 && i <= 11;
 
-    // The dominant reason per state, so the chart shows the breakdown families tinting their parent's hue
-    // (builtInColors in CountersPage) rather than four flat lines. Each stays below its state total.
-    points.push({ hour: hourDate.toISOString(), key: 'stats:failed-retry-exhausted', value: Math.round(failed * 0.6) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:deleted-timeout', value: Math.round(deleted * 0.4) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued-retry', value: Math.round(requeued * 0.65) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:requeued-ratelimit', value: Math.round(requeued * 0.15) });
-    points.push({ hour: hourDate.toISOString(), key: 'stats:retried-jobs', value: Math.round(requeued * 0.3) });
+    // --- Job outcomes -------------------------------------------------------
+    const succeeded = 1400 * office * jitter + 30;
+    const failed = succeeded * (0.008 + seeded(i + 50) * 0.015) + (incident ? 55 * jitter : 0);
+    const deleted = succeeded * 0.004 + (h >= 2 && h <= 4 ? 6 : 0);
+    const requeued = succeeded * 0.02 + (incident ? 90 * jitter : 0);
 
-    // The per-dimension series the family tabs chart. Each family plots ONE metric at a time, so a duration sum
-    // in the hundreds of thousands can sit beside a count of 3 in the data without flattening it on screen.
-    const share = [0.52, 0.03, 0.38, 0.07];
-    HISTORY_TYPES.forEach((type, t) => {
-      const executions = Math.round(base * share[t]);
-      const perJobMs = [175, 6900, 69, 540][t];
+    at('stats:succeeded', succeeded);
+    at('stats:failed', failed);
+    at('stats:deleted', deleted);
+    at('stats:requeued', requeued);
+    at('stats:failed-retry-exhausted', failed * 0.6);
+    at('stats:deleted-timeout', deleted * 0.4);
+    at('stats:requeued-retry', requeued * 0.65);
+    at('stats:requeued-ratelimit', requeued * 0.15);
+    at('stats:retried-jobs', requeued * 0.3);
 
-      points.push({ hour: hourDate.toISOString(), key: `jobstat:type:${qualified(type)}:hist:succeeded`, value: executions });
-      points.push({ hour: hourDate.toISOString(), key: `jobstat:type:${qualified(type)}:hist:dur`, value: executions * perJobMs });
-      points.push({ hour: hourDate.toISOString(), key: `jobstat:handler:${qualified(HISTORY_HANDLERS[t])}:hist:succeeded`, value: executions });
-      points.push({ hour: hourDate.toISOString(), key: `jobstat:handler:${qualified(HISTORY_HANDLERS[t])}:hist:dur`, value: executions * perJobMs });
+    // --- Job types and handlers ---------------------------------------------
+    // One profile per workload: orders track the office day, reports only run in the batch window,
+    // the email blast goes out at 09:00, payments trail orders by an hour or two, and OrderPlaced is
+    // a routed message whose three subscribers each run once per publish.
+    const workloadRuns = [
+      1400 * office * jitter,
+      420 * batch,
+      h === 9 ? 2600 * jitter : 340 * office * jitter,
+      900 * officeHours(Math.max(0, h - 2)) * jitter,
+      520 * office * jitter,
+    ];
+
+    WORKLOADS.forEach((workload, w) => {
+      const runs = workloadRuns[w];
+
+      workload.handlers.forEach((handler) => {
+        // ReserveStock slows to a crawl while the inventory breaker is flapping.
+        const perRunMs = handler.name.includes('ReserveStock') && incident ? handler.perRunMs * 6 : handler.perRunMs;
+        at(`jobstat:handler:${qualified(handler.name)}:hist:succeeded`, runs);
+        at(`jobstat:handler:${qualified(handler.name)}:hist:dur`, runs * perRunMs);
+      });
+
+      // Every subscriber runs once per publish, so the type totals its handlers.
+      const typeRuns = runs * workload.handlers.length;
+      const typeMs = workload.handlers.reduce((sum, x) => sum + x.perRunMs, 0) / workload.handlers.length;
+      at(`jobstat:type:${qualified(workload.type)}:hist:succeeded`, typeRuns);
+      at(`jobstat:type:${qualified(workload.type)}:hist:dur`, typeRuns * typeMs);
     });
 
-    points.push({ hour: hourDate.toISOString(), key: 'qwait:default:hist:count', value: Math.round(base) });
-    points.push({ hour: hourDate.toISOString(), key: 'qwait:default:hist:dur', value: Math.round(base * 70) });
-    points.push({ hour: hourDate.toISOString(), key: 'qwait:reports:hist:count', value: Math.round(base * 0.03) });
-    points.push({ hour: hourDate.toISOString(), key: 'adapter:payments:hist:success', value: Math.round(base * 0.3) });
-    points.push({ hour: hourDate.toISOString(), key: 'adapter:payments:hist:failed', value: Math.round(failed * 0.2) });
-    points.push({ hour: hourDate.toISOString(), key: 'endpoint:POST /orders:hist:success', value: Math.round(base * 0.6) });
-    points.push({ hour: hourDate.toISOString(), key: 'clientevent:total:error:hist', value: Math.round(failed * 0.4) });
-    points.push({ hour: hourDate.toISOString(), key: 'errorgroup:job-nullref-processorder', value: Math.round(failed * 0.5) });
-    points.push({ hour: hourDate.toISOString(), key: 'warpsys:records-dropped:adapter', value: business && i % 7 === 0 ? 14 : 0 });
+    // --- Queues -------------------------------------------------------------
+    // Three different rhythms on purpose: the default queue follows the office day, reports is a
+    // batch window, and the webhook queue is driven by vendors who call whenever they like.
+    at('qwait:default:hist:count', 1500 * office * jitter);
+    at('qwait:default:hist:dur', 1500 * office * jitter * (incident ? 340 : 70));
+    at('qwait:reports:hist:count', 380 * batch);
+    at('qwait:reports:hist:dur', 380 * batch * 4400);
+    at('qwait:warp-webhooks:hist:count', 120 * steadyFlow(i));
+    at('qwait:warp-webhooks:hist:dur', 120 * steadyFlow(i) * 70);
+
+    // --- Deadlines ----------------------------------------------------------
+    at(`deadline:${qualified('Acme.Reports.GenerateReportRequest')}:hist:count`, 240 * batch);
+    at(`deadline:${qualified('Acme.Ledger.NightlyExportRequest')}:hist:count`, 120 * batch);
+    // The export only misses when it runs, and it runs only at night.
+    at(`deadline:${qualified('Acme.Ledger.NightlyExportRequest')}:hist:miss`, batch > 0 ? 38 * batch * jitter : 0);
+
+    // --- Adapters -----------------------------------------------------------
+    at('adapter:payments:hist:success', 700 * office * jitter);
+    at('adapter:payments:hist:failed', 700 * office * jitter * 0.008);
+    // Shipping is booked in one afternoon push rather than spread across the day.
+    at('adapter:shipping:hist:success', h >= 14 && h <= 17 ? 620 * jitter : 90 * office * jitter);
+    at('adapter:shipping:hist:failed', h >= 14 && h <= 17 ? 28 * jitter : 3);
+    at('adapter:inventory:hist:success', incident ? 40 * jitter : 300 * office * jitter);
+    at('adapter:inventory:hist:failed', incident ? 120 * jitter : 4 * office);
+    at('adapter:inventory:hist:circuitopen', incident ? 260 * jitter : 0);
+
+    // --- Endpoints ----------------------------------------------------------
+    // A mobile app polls the read endpoint around the clock; the write endpoint is office-hours;
+    // the webhook receiver is vendor-driven with retry bursts; the report download is batch-adjacent.
+    at('endpoint:GET /orders/{id}:hist:success', 900 * steadyFlow(i) + 1500 * office * jitter);
+    at('endpoint:POST /orders:hist:success', 800 * office * jitter);
+    at('endpoint:POST /orders:hist:failed', 800 * office * jitter * 0.004);
+    at('endpoint:POST /webhooks/receive:hist:success', 190 * steadyFlow(i));
+    at('endpoint:POST /webhooks/receive:hist:failed', i % 6 === 0 ? 34 * jitter : 2);
+    at('endpoint:GET /reports/{id}/download:hist:success', h >= 5 && h <= 11 ? 70 * jitter : 6);
+    at('endpoint:GET /reports/{id}/download:hist:failed', h >= 5 && h <= 11 ? 7 * jitter : 0);
+
+    // --- Client -------------------------------------------------------------
+    // Browsers are busiest when the office is closed.
+    at('clientevent:total:vital:hist', 480 * evening * jitter);
+    at('clientevent:total:log:hist', 300 * evening * jitter);
+    at('clientevent:total:error:hist', 26 * evening * jitter + (incident ? 40 * jitter : 0));
+
+    // --- Issues -------------------------------------------------------------
+    // A regression that appears at a deploy and keeps going, beside a long-standing low-level one.
+    at('errorgroup:job-nullref-processorder', i <= 14 ? 18 * jitter : 1);
+    at('errorgroup:client-typeerror-checkout', 4 + seeded(i + 71) * 3);
+    at('errorgroup:adapter-timeout-inventory', incident ? 46 * jitter : 0);
+
+    // --- System -------------------------------------------------------------
+    // Drops happen when a pipeline is saturated, which is exactly during the busiest hours.
+    at('warpsys:records-dropped:adapter', incident ? 210 * jitter : 0);
+    at('warpsys:records-dropped:client', evening > 0.8 && i % 3 === 0 ? 120 * jitter : 0);
   }
 
   return points;
 }
 
-const HISTORY_TYPES = [
-  'Acme.Orders.ProcessOrderRequest',
-  'Acme.Reports.GenerateReportRequest',
-  'Acme.Notifications.SendEmailRequest',
-  'Acme.Payments.ProcessPaymentRequest',
-];
-
-const HISTORY_HANDLERS = [
-  'Acme.Orders.ProcessOrderHandler',
-  'Acme.Reports.GenerateReportHandler',
-  'Acme.Notifications.SendEmailCommand',
-  'Acme.Payments.ProcessPaymentHandler',
-];
 
 // ============================================================
 // Concurrency limits
@@ -1520,17 +1752,6 @@ export const demoSagaActivity = [
     ],
   },
 ];
-
-// === Queue metrics (§8.26) — the Queues page ===
-export function getQueueMetricsDemo() {
-  return {
-    queues: [
-      { queue: 'a-critical', claimedCount: 48213, avgWaitMs: 42, p95WaitMs: 180, p99WaitMs: 420, backlogDepth: 3, oldestAgeSeconds: 8 },
-      { queue: 'b-default', claimedCount: 129004, avgWaitMs: 310, p95WaitMs: 1250, p99WaitMs: 2600, backlogDepth: 27, oldestAgeSeconds: 74 },
-      { queue: 'c-low', claimedCount: 15622, avgWaitMs: 1450, p95WaitMs: 5200, p99WaitMs: 9800, backlogDepth: 141, oldestAgeSeconds: 612 },
-    ],
-  };
-}
 
 // === Client (browser) observability (§8.27) ===
 export function getClientSummaryDemo() {

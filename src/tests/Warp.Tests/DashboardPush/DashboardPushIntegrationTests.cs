@@ -4,9 +4,9 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Shouldly;
 using Warp.Core.Enums;
 using Warp.Core.Models;
+using Warp.Dashboard.Push;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
-using Warp.UI.DashboardPush;
 using Warp.Worker;
 using XunitTestContext = Xunit.TestContext;
 

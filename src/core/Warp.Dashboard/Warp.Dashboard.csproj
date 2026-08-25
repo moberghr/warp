@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<PackageId>Moberg.Warp.Dashboard</PackageId>
+		<Description>Real-time web dashboard for Warp job monitoring and management</Description>
+	</PropertyGroup>
+
+	<!-- Rebuild React UI before embedding. Auto-bootstraps node_modules on first build
+	     so checking out the repo + building doesn't require a separate npm install step. -->
+	<Target Name="InstallUI" BeforeTargets="BuildUI" Condition="'$(BuildingInsideVisualStudio)' != 'true' And !Exists('$(ProjectDir)..\..\ui\node_modules')">
+		<Exec Command="npm install" WorkingDirectory="$(ProjectDir)..\..\ui" />
+	</Target>
+
+	<Target Name="BuildUI" BeforeTargets="BeforeBuild" Condition="'$(BuildingInsideVisualStudio)' != 'true'">
+		<Exec Command="npm run build" WorkingDirectory="$(ProjectDir)..\..\ui" />
+	</Target>
+
+	<!-- Populate the embedded SPA resources AFTER BuildUI has rebuilt dist/ but BEFORE the
+	     resource pipeline names them (AssignTargetPaths). BuildUI runs in the BeforeBuild slot,
+	     which precedes AssignTargetPaths, so by the time this target globs, dist/ holds exactly
+	     the files the rebuild just produced. A static <EmbeddedResource Include="dist/**/*"> is
+	     evaluated before BuildUI runs: it captures the committed (now stale) hashed filenames,
+	     and once npm run build deletes them the compiler fails with CS1566 ("could not find
+	     file"). Hooking BeforeCompile is too late — AssignTargetPaths has already run, so the
+	     items are silently dropped (empty resource set). Inside Visual Studio BuildUI is
+	     skipped, so this globs the committed dist instead — identical to the previous behaviour. -->
+	<Target Name="AddUIResources" BeforeTargets="AssignTargetPaths">
+		<ItemGroup>
+			<EmbeddedResource Include="dist/**/*" />
+			<EmbeddedResource Include="Extensions/Retry/dist/**/*" />
+		</ItemGroup>
+	</Target>
+
+	<ItemGroup>
+		<FrameworkReference Include="Microsoft.AspNetCore.App" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Warp.Core\Warp.Core.csproj" />
+	</ItemGroup>
+
+</Project>

@@ -25,7 +25,7 @@ function bridgeEvent(connection: HubConnection, event: RealtimeEvent) {
   // the only call site, so binding is always exactly-once per instance.
   //
   // Server pushes the current DashboardStatistics DTO as the first argument when
-  // available — see Warp.UI.DashboardPush.DashboardBroadcaster.TryFetchStatsAsync.
+  // available — see Warp.Dashboard.Push.DashboardBroadcaster.TryFetchStatsAsync.
   // Writing it straight to the dashboard store eliminates a GET /api/status per
   // client per event. Pages that consume `useDashboardStore.stats` (navbar
   // badges, DashboardPage cards) rerender automatically. Other surfaces (jobs

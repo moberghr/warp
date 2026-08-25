@@ -17,7 +17,7 @@ Warp is a distributed job processing and message queue library for .NET 10. It p
 dotnet add package Moberg.Warp.Core                  # Publisher + mediator
 dotnet add package Moberg.Warp.Provider.PostgreSql   # PostgreSQL provider (or SqlServer)
 dotnet add package Moberg.Warp.Worker                # Worker service
-dotnet add package Moberg.Warp.UI                    # Dashboard
+dotnet add package Moberg.Warp.Dashboard                    # Dashboard
 dotnet add package Moberg.Warp.Http                  # HTTP exposure for IRequest/IStreamRequest (optional)
 ```
 
@@ -110,13 +110,13 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
 ### 5. Add the dashboard (optional)
 
 ```csharp
-app.MapWarpUI("/warp");
+app.MapWarpDashboard("/warp");
 ```
 
 The dashboard is a set of routed endpoints, so gate it with your own authorization policy:
 
 ```csharp
-app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+app.MapWarpDashboard("/warp").RequireAuthorization("WarpDashboard");
 ```
 
 See [Dashboard Auth](/docs/operations/dashboard-auth) for the built-in login and localhost-only options.
