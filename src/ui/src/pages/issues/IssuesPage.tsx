@@ -9,6 +9,7 @@ import * as api from '@/api';
 import { ErrorSource, ErrorGroupKind, ErrorGroupStatus } from '@/types/issues';
 import type { ErrorGroupSummary } from '@/types/issues';
 import { SourceBadge, StatusChip, IssueFlags } from './shared';
+import { PageHeading } from '@/components/PageHeading';
 
 // Issues (§8.29): errors grouped by fingerprint across all four sources — job exceptions, endpoint
 // 5xx, adapter failures, and client-side errors — with a resolution workflow. By default the list
@@ -88,7 +89,7 @@ export default function IssuesPage() {
   return (
     <div>
       <div className="mb-4">
-        <h1 className="text-2xl font-bold">Issues</h1>
+        <PageHeading className="">Issues</PageHeading>
         <p className="text-sm text-muted-foreground mt-1">
           Errors grouped by fingerprint across jobs, endpoints, outbound calls, and the browser — with a resolution workflow.
         </p>

@@ -34,7 +34,7 @@ describe('issues dashboard navigation', () => {
   it('lists issues across all four sources with clickable rows', async () => {
     renderAt('/issues');
 
-    expect(await screen.findByRole('heading', { name: 'Issues' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Health / Issues' })).toBeTruthy();
 
     // The 4xx (StatusCode) endpoint group is hidden by default — reveal it so every source is visible.
     fireEvent.click(screen.getByRole('checkbox'));

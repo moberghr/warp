@@ -4,10 +4,10 @@ sidebar_position: 3
 
 # Dashboard Authorization
 
-The dashboard is a set of routed endpoints, so you gate it the way you gate any other part of your app — with ASP.NET Core authorization. `MapWarpUI` returns an endpoint builder covering the SPA shell, the REST API and the SignalR hub, so one call protects all three:
+The dashboard is a set of routed endpoints, so you gate it the way you gate any other part of your app — with ASP.NET Core authorization. `MapWarpDashboard` returns an endpoint builder covering the SPA shell, the REST API and the SignalR hub, so one call protects all three:
 
 ```csharp
-app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+app.MapWarpDashboard("/warp").RequireAuthorization("WarpDashboard");
 ```
 
 By default (no convention applied) the dashboard is open to everyone.
@@ -18,8 +18,8 @@ Handing the decision to ASP.NET is what makes the two kinds of "no" behave diffe
 
 | Your situation | What to write |
 |---|---|
-| Local development, no gate | `app.MapWarpUI("/warp");` |
-| The app already has an identity system | `app.MapWarpUI("/warp").RequireAuthorization("YourPolicy");` |
+| Local development, no gate | `app.MapWarpDashboard("/warp");` |
+| The app already has an identity system | `app.MapWarpDashboard("/warp").RequireAuthorization("YourPolicy");` |
 | No identity system — want a login page | `AddWarpDashboard().AddBuiltInLogin<T>()` + `.RequireWarpDashboardLogin()` |
 | Localhost only | `AddWarpDashboard()` + `.RequireLocalRequests()` |
 
@@ -43,7 +43,7 @@ var app = builder.Build();
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+app.MapWarpDashboard("/warp").RequireAuthorization("WarpDashboard");
 ```
 
 A permission that lives in your database becomes an authorization handler — natively async, unit-testable, and identical to how the rest of your app is gated:
@@ -109,7 +109,7 @@ builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>();
 
 var app = builder.Build();
 
-app.MapWarpUI("/warp").RequireWarpDashboardLogin();
+app.MapWarpDashboard("/warp").RequireWarpDashboardLogin();
 ```
 
 Registering the built-in login **gates the dashboard on its own** — `RequireWarpDashboardLogin()` is
@@ -169,7 +169,7 @@ builder.Services.AddWarpDashboard();
 
 var app = builder.Build();
 
-app.MapWarpUI("/warp").RequireLocalRequests();
+app.MapWarpDashboard("/warp").RequireLocalRequests();
 ```
 
 A remote caller gets 403 — signing in cannot change the answer, so there is nothing to challenge. This covers the shell, the API and the hub.
@@ -185,7 +185,7 @@ builder.Services.AddAuthorizationBuilder()
         .RequireAssertion(context => context.Resource is HttpContext http
             && http.Request.Headers["X-Api-Key"] == "…"));
 
-app.MapWarpUI("/warp").RequireAuthorization("WarpApiKey");
+app.MapWarpDashboard("/warp").RequireAuthorization("WarpApiKey");
 ```
 
 ## What is gated
@@ -213,14 +213,18 @@ in your app.
 
 ## Upgrading from 3.x
 
-| 3.x | 4.0 |
+The right column uses today's names. `MapWarpUI` / `WarpUIOptions` / `namespace Warp.UI` were
+renamed to `MapWarpDashboard` / `WarpDashboardOptions` / `namespace Warp.Dashboard` in 6.0 — see the
+[6.0 release notes](/docs/releases).
+
+| 3.x | Now |
 |---|---|
-| `app.UseWarpUI(...)` | `app.MapWarpUI(...)` — returns an endpoint builder |
+| `app.UseWarpUI(...)` | `app.MapWarpDashboard(...)` — returns an endpoint builder |
 | `options.Authorization = new MyFilter()` | an authorization policy + `.RequireAuthorization("...")` |
 | `options.UnauthorizedRedirectUrl = "/login"` | your scheme's `LoginPath` (ASP.NET adds `returnUrl` and an access-denied path) |
 | `options.UseBuiltInLogin<T>()` | `services.AddWarpDashboard().AddBuiltInLogin<T>()` + `.RequireWarpDashboardLogin()` |
 | `new LocalRequestsOnlyAuthorizationFilter()` | `.RequireLocalRequests()` |
-| `using Warp.UI.UIMiddleware;` | `using Warp.UI;` |
+| `using Warp.UI.UIMiddleware;` | `using Warp.Dashboard;` |
 
 ### If you wrote your own `IWarpAuthorizationFilter`
 
@@ -249,7 +253,7 @@ builder.Services.AddAuthorizationBuilder()
         .RequireAuthenticatedUser()
         .AddRequirements(new WarpDashboardRequirement()));
 
-app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+app.MapWarpDashboard("/warp").RequireAuthorization("WarpDashboard");
 ```
 
 with the handler [shown above](#gating-on-your-own-policy) — the `.GetAwaiter().GetResult()` becomes an `await`. Delete your `IsAuthenticated` check: `RequireAuthenticatedUser()` is what makes an anonymous caller *challenge* to your `LoginPath` instead of dead-ending on a 401, and it is the whole point of the upgrade. Delete `UnauthorizedRedirectUrl` too — your scheme's `LoginPath` and `AccessDeniedPath` now cover both answers separately.

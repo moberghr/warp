@@ -236,7 +236,10 @@ export function getDashboardStats(): DashboardStatistics {
     endpointRecordsDropped: 0,
     clientRecordsDropped: 0,
     batches: 34,
-    databaseConnection: 'PostgreSQL',
+    // Mirrors the exact shape DashboardStatsService.GetSafeDatabaseConnection builds
+    // ("{provider}: Host: {host}, DB: {db}") rather than a bare provider name, so the
+    // footer in demo mode reads like a real deployment's does.
+    databaseConnection: 'PostgreSQL Server: Host: warp-db-prod-1.internal, DB: orders',
   };
 }
 
@@ -1520,17 +1523,6 @@ export const demoSagaActivity = [
     ],
   },
 ];
-
-// === Queue metrics (§8.26) — the Queues page ===
-export function getQueueMetricsDemo() {
-  return {
-    queues: [
-      { queue: 'a-critical', claimedCount: 48213, avgWaitMs: 42, p95WaitMs: 180, p99WaitMs: 420, backlogDepth: 3, oldestAgeSeconds: 8 },
-      { queue: 'b-default', claimedCount: 129004, avgWaitMs: 310, p95WaitMs: 1250, p99WaitMs: 2600, backlogDepth: 27, oldestAgeSeconds: 74 },
-      { queue: 'c-low', claimedCount: 15622, avgWaitMs: 1450, p95WaitMs: 5200, p99WaitMs: 9800, backlogDepth: 141, oldestAgeSeconds: 612 },
-    ],
-  };
-}
 
 // === Client (browser) observability (§8.27) ===
 export function getClientSummaryDemo() {

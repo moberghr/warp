@@ -9,7 +9,7 @@ import fs from 'fs'
  * so Playwright screenshot tests can load them via dynamic import().
  */
 function serveExtensions(): Plugin {
-  const extDir = path.resolve(__dirname, '../core/Warp.UI/Extensions')
+  const extDir = path.resolve(__dirname, '../core/Warp.Dashboard/Extensions')
   return {
     name: 'serve-extensions',
     // Use enforce: 'pre' so this runs before Vite's transform pipeline
@@ -63,7 +63,7 @@ export default defineConfig(async ({ mode }) => {
       },
     },
     build: {
-      outDir: '../core/Warp.UI/dist',
+      outDir: '../core/Warp.Dashboard/dist',
       emptyOutDir: true,
     },
     server: isDemo

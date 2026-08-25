@@ -11,6 +11,7 @@ import {
   isRatioKind,
 } from '@/types/slo';
 import { formatObjectiveValue, formatBudget, SloStatePill, inputClass } from './shared';
+import { PageHeading } from '@/components/PageHeading';
 
 const emptyDraft: SloUpsertRequest = {
   id: 0,
@@ -45,7 +46,7 @@ export default function SloPage() {
     <div className="p-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-semibold">Service-level objectives</h1>
+          <PageHeading className="">Service-level objectives</PageHeading>
           <p className="text-sm text-gray-500 mt-1">
             Error-budget tracking with multi-window burn-rate alerting (§8.31).
           </p>

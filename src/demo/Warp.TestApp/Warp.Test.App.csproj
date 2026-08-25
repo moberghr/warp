@@ -23,7 +23,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\core\Warp.Core\Warp.Core.csproj" />
     <ProjectReference Include="..\..\core\Warp.Http\Warp.Http.csproj" />
-    <ProjectReference Include="..\..\core\Warp.UI\Warp.UI.csproj" />
+    <ProjectReference Include="..\..\core\Warp.Dashboard\Warp.Dashboard.csproj" />
     <ProjectReference Include="..\..\core\Warp.Worker\Warp.Worker.csproj" />
     <ProjectReference Include="..\..\core\providers\Warp.Provider.PostgreSql\Warp.Provider.PostgreSql.csproj" />
     <ProjectReference Include="..\Warp.Demo.ServiceDefaults\Warp.Demo.ServiceDefaults.csproj" />

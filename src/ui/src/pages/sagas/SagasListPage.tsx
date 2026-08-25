@@ -9,6 +9,7 @@ import { DataTable } from '@/components/DataTable';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
 import { useSagasList, useSagaTypes, useSagaStats } from '@/api/hooks/useSagas';
 import type { SagaListItem } from '@/types';
+import { PageHeading } from '@/components/PageHeading';
 
 export default function SagasListPage() {
   const [typeFilter, setTypeFilter] = useState<string>('');
@@ -64,7 +65,7 @@ export default function SagasListPage() {
   if (unavailable) {
     return (
       <div>
-        <h1 className="text-2xl font-bold mb-4">Sagas</h1>
+        <PageHeading className="mb-4">Sagas</PageHeading>
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
             Sagas addon is not registered. Call <code className="font-mono text-xs">opt.AddSagas()</code> in your Warp configuration to enable.
@@ -83,7 +84,7 @@ export default function SagasListPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-4">Sagas</h1>
+      <PageHeading className="mb-4">Sagas</PageHeading>
 
       {stats && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">

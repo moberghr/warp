@@ -8,7 +8,6 @@ import type {
   ApplicationDetailModel,
   ApplicationInstanceDetailModel,
   JobExecutionMetricsModel,
-  QueueMetricsModel,
 } from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
 import type { ClientObservabilitySummary, ClientEventPage, ClientEventDetail, ClientSession } from '@/types/client';
@@ -56,8 +55,6 @@ export const getJobsByType = (type: string, page = 0, pageSize = 20, state?: str
 export const getJobMetrics = (application?: string) =>
   api.get<JobExecutionMetricsModel>('/jobs/metrics', { params: application ? { application } : undefined }).then(r => r.data);
 
-export const getQueueMetrics = (application?: string) =>
-  api.get<QueueMetricsModel>('/queues/metrics', { params: application ? { application } : undefined }).then(r => r.data);
 
 export const getClientSummary = (application?: string) =>
   api.get<ClientObservabilitySummary>('/client/summary', { params: application ? { application } : undefined }).then(r => r.data);

@@ -7,6 +7,7 @@ import * as api from '@/api';
 import { encodeAppId } from '@/types/applications';
 import type { ApplicationSummaryModel } from '@/types/applications';
 import { InstancesTable, Spread, formatCpu, formatMem, fromInstanceView, fromServer } from './shared';
+import { PageHeading } from '@/components/PageHeading';
 
 // The renamed Servers surface. When the multi-app roster has data we group instances (server ∪ non-server)
 // per application; otherwise we degrade to a flat server list so single-app deployments keep working.
@@ -27,7 +28,7 @@ export default function ApplicationsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1">Applications</h1>
+      <PageHeading className="mb-1">Applications</PageHeading>
       <p className="text-sm text-muted-foreground mb-4">
         Every running Warp process — servers and non-server processes (publishers, APIs, dashboards) — grouped by application.
       </p>
@@ -98,7 +99,7 @@ function FlatServerList() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1">Applications</h1>
+      <PageHeading className="mb-1">Applications</PageHeading>
       <p className="text-sm text-muted-foreground mb-4">Connected Warp servers.</p>
 
       {instances.length === 0 ? (

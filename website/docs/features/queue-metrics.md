@@ -11,9 +11,9 @@ Warp already tracks how long each job takes to *run* ([execution metrics](./obse
 - **Queue-wait latency** — the time a job spends eligible-but-unclaimed (from the moment it becomes `Enqueued` with `ScheduleTime ≤ now` to the moment a worker claims it). Recorded at the claim site, on the worker hot path, as a single batched Counter write — no extra database round-trip.
 - **Backlog depth + oldest-age** — how many eligible jobs are waiting on each queue, and the age of the oldest one. Sampled periodically off the hot path by the `BacklogSampler` server task.
 
-Both are **always on** — no addon opt-in. A per-queue **Queues** page in the dashboard surfaces them; the meters are emitted unconditionally for any OpenTelemetry collector.
+Both are **always on** — no addon opt-in. The dashboard surfaces them in the **Queues** family on the [Counters](/docs/dashboard/health/counters) page; the meters are emitted unconditionally for any OpenTelemetry collector.
 
-<Screenshot light="/img/screenshots/25-queues.png" dark="/img/screenshots/25-queues-dark.png" alt="Queues page showing per-queue backlog depth, oldest age and queue-wait percentiles" />
+<Screenshot light="/img/screenshots/17-counters.png" dark="/img/screenshots/17-counters-dark.png" alt="Counters page, where the Queues family shows per-queue backlog depth, oldest age and queue-wait percentiles" />
 
 ## What you get
 
@@ -100,7 +100,7 @@ Full EXPLAIN plans, buffer counts and the A/B write measurements are in `docs/pe
 
 Queue-wait respects `WarpConfiguration.JobMetricsSink` ([observability sinks](./observability-sinks.md)) exactly like execution metrics:
 
-- `Database` (default) / `Both` — Counter rows are written; the dashboard Queues page works.
+- `Database` (default) / `Both` — Counter rows are written; the dashboard's Queues counter family works.
 - `Otel` — the Counter writes are **skipped** (the hot-path perf win); the `warp.job.queue.wait` meter still fires, carrying the data to your collector. Use Grafana/Prometheus for percentiles; the dashboard page will have no rows.
 
 The backlog gauges always emit; the `qbacklog:` `Statistic` upsert is likewise skipped under `Otel`.
@@ -113,7 +113,7 @@ When [`ApplicationName`](./applications.md) is set, **queue-wait** is additional
 
 ## API
 
-- `GET {prefix}/api/queues/metrics` — per-queue rows: `claimedCount`, `avgWaitMs`, `p95WaitMs`, `p99WaitMs`, `backlogDepth`, `oldestAgeSeconds`. Optional `?application=` filter. Resolves in any `AddWarp` process (dashboard-only / publisher-only included) since it reads only the durable aggregates.
+- `GET {prefix}/api/queues/metrics` — retained as public read API (the dashboard reads the counter aggregates directly). Per-queue rows: `claimedCount`, `avgWaitMs`, `p95WaitMs`, `p99WaitMs`, `backlogDepth`, `oldestAgeSeconds`. Optional `?application=` filter. Resolves in any `AddWarp` process (dashboard-only / publisher-only included) since it reads only the durable aggregates.
 
 ## Outcome stats: a metric records an event, current state is a query
 

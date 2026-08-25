@@ -6,7 +6,7 @@ namespace Warp.Core.Events;
 /// In-process push → wake plumbing. Producers (workers finalising a job, the notification
 /// listener receiving a remote push, scheduled-job activation) call the named
 /// <c>SignalXxx</c> methods. Consumers — server-task loops in <c>Warp.Worker</c> and the
-/// dashboard broadcaster in <c>Warp.UI</c> — subscribe at host construction and tear down
+/// dashboard broadcaster in <c>Warp.Dashboard</c> — subscribe at host construction and tear down
 /// on shutdown via the returned <see cref="IDisposable"/>.
 /// </summary>
 /// <remarks>

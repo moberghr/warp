@@ -141,8 +141,8 @@ describe('buildFamilyTable', () => {
   it('derives the percentile from the histogram buckets', () => {
     const table = buildFamilyTable(counters, family('jobtypes'));
 
-    expect(table.percentileLabel).toBe('p95');
-    expect(table.rows[0].percentileMs).toBe(250);
+    expect(table.percentileLabels).toEqual(['p95']);
+    expect(table.rows[0].percentiles.map((p) => p.ms)).toEqual([250]);
   });
 
   it('ignores counters belonging to other families', () => {
@@ -180,8 +180,33 @@ describe('buildFamilyTable', () => {
     expect(table.rows[0].values.depth).toBe(96);
   });
 
+  it('reports queues at p95 AND p99 — a queue is judged on its tail, not its middle', () => {
+    const table = buildFamilyTable(
+      [
+        // 96 fast waits and 4 slow ones: p95 lands in the 1s rung, p99 in the 10s rung.
+        { key: 'qwait:default:pct:100', value: 96 },
+        { key: 'qwait:default:pct:1000', value: 3 },
+        { key: 'qwait:default:pct:10000', value: 1 },
+      ],
+      family('queues'),
+    );
+
+    expect(table.percentileLabels).toEqual(['p95', 'p99']);
+    expect(table.rows[0].percentiles).toEqual([
+      { label: 'p95', ms: 100, overflow: false },
+      { label: 'p99', ms: 1000, overflow: false },
+    ]);
+  });
+
+  it('reports each queue percentile independently of the others', () => {
+    const table = buildFamilyTable([{ key: 'qwait:default:pct:250', value: 10 }], family('queues'));
+
+    // One rung holds everything, so both percentiles resolve to it rather than one falling through.
+    expect(table.rows[0].percentiles.map((p) => p.ms)).toEqual([250, 250]);
+  });
+
   it('reads web vitals at p75, the percentile Core Web Vitals scores on', () => {
-    expect(buildFamilyTable([{ key: 'clientevent:vital:LCP:pct:2500', value: 1 }], family('client')).percentileLabel).toBe('p75');
+    expect(buildFamilyTable([{ key: 'clientevent:vital:LCP:pct:2500', value: 1 }], family('client')).percentileLabels).toEqual(['p75']);
   });
 });
 

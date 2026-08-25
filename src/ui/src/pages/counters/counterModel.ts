@@ -223,8 +223,11 @@ export interface FamilyDef {
    * `count`) or mix in gauges (`depth`) must name theirs explicitly or the average is silently wrong.
    */
   countTokens?: string[];
-  /** Latency percentile read off the `pct` histogram. Web vitals use Google's p75; everything else p95. */
-  percentile?: number;
+  /**
+   * Latency percentiles read off the `pct` histogram, in display order. Web vitals use Google's p75;
+   * queues report p95 AND p99, because a queue's tail is the operational signal; everything else p95.
+   */
+  percentiles?: number[];
   /** Formats the dimension value for display. Falls back to the raw subject. */
   formatSubject?: (subject: string) => { label: string; sub: string | null };
 }
@@ -263,6 +266,7 @@ export const FAMILIES: FamilyDef[] = [
     label: 'Queues',
     description: 'Queue-wait latency (time a job sat eligible-but-unclaimed) alongside the latest backlog gauge.',
     countTokens: ['count'],
+    percentiles: [0.95, 0.99],
   },
   {
     id: 'deadlines',
@@ -284,7 +288,7 @@ export const FAMILIES: FamilyDef[] = [
     id: 'client',
     label: 'Client',
     description: 'Browser events by type and name, plus web-vital measurements. Vitals report p75, the percentile Core Web Vitals is scored on.',
-    percentile: 0.75,
+    percentiles: [0.75],
   },
   {
     id: 'issues',
@@ -318,9 +322,15 @@ export interface MetricRow {
   sub: string | null;
   values: Record<string, number>;
   avgMs: number | null;
-  percentileMs: number | null;
-  /** The percentile landed in the catch-all rung, so the real value is only known to be above `percentileMs`. */
-  percentileOverflow: boolean;
+  /** One entry per `FamilyDef.percentiles`, in the same order as `FamilyTable.percentileLabels`. */
+  percentiles: RowPercentile[];
+}
+
+export interface RowPercentile {
+  label: string;
+  ms: number | null;
+  /** The percentile landed in the catch-all rung, so the real value is only known to be above `ms`. */
+  overflow: boolean;
 }
 
 export interface FamilyTable {
@@ -329,7 +339,7 @@ export interface FamilyTable {
   hasApplication: boolean;
   hasAvg: boolean;
   hasPercentile: boolean;
-  percentileLabel: string;
+  percentileLabels: string[];
 }
 
 // Counting tokens first (most-load-bearing on the left), then anything a family invented. `dur` and `pct` never
@@ -341,6 +351,10 @@ function columnRank(token: string): number {
   const index = COLUMN_ORDER.indexOf(token);
 
   return index < 0 ? COLUMN_ORDER.length : index;
+}
+
+function percentileLabel(percentile: number): string {
+  return `p${Math.round(percentile * 100)}`;
 }
 
 export function percentileFromBuckets(buckets: Map<number, number>, percentile: number): { ms: number | null; overflow: boolean } {
@@ -402,8 +416,7 @@ export function buildFamilyTable(entries: CounterEntry[], family: FamilyDef): Fa
         sub: formatted.sub,
         values: {},
         avgMs: null,
-        percentileMs: null,
-        percentileOverflow: false,
+        percentiles: [],
         buckets: new Map(),
       };
       rows.set(id, row);
@@ -427,16 +440,18 @@ export function buildFamilyTable(entries: CounterEntry[], family: FamilyDef): Fa
     columns.add(parsed.token);
   }
 
-  const percentile = family.percentile ?? 0.95;
+  const percentiles = family.percentiles ?? [0.95];
 
   for (const row of rows.values()) {
     const denominator = (family.countTokens ?? [...columns]).reduce((sum, token) => sum + (row.values[token] ?? 0), 0);
     const duration = row.values[DURATION_TOKEN];
     row.avgMs = duration !== undefined && denominator > 0 ? duration / denominator : null;
 
-    const p = percentileFromBuckets(row.buckets, percentile);
-    row.percentileMs = p.ms;
-    row.percentileOverflow = p.overflow;
+    row.percentiles = percentiles.map((q) => {
+      const p = percentileFromBuckets(row.buckets, q);
+
+      return { label: percentileLabel(q), ms: p.ms, overflow: p.overflow };
+    });
   }
 
   const ordered = [...columns].sort((a, b) => columnRank(a) - columnRank(b) || a.localeCompare(b));
@@ -450,7 +465,7 @@ export function buildFamilyTable(entries: CounterEntry[], family: FamilyDef): Fa
     hasApplication,
     hasAvg,
     hasPercentile,
-    percentileLabel: `p${Math.round(percentile * 100)}`,
+    percentileLabels: percentiles.map(percentileLabel),
   };
 }
 

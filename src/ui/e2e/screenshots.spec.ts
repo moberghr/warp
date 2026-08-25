@@ -1,5 +1,6 @@
 import { test } from '@playwright/test';
 import { IDS as DEMO_IDS } from '../src/demo/data';
+import { DEMO_ENDPOINT_IDS } from '../src/demo/data/endpoints';
 
 const traceIdForUrl = DEMO_IDS.traceId.replace(/-/g, '');
 
@@ -29,12 +30,22 @@ const pages = [
   { name: '14-recurring-detail', path: '/recurring/RGFpbHkgUmVwb3J0' },
   { name: '15-server-detail', path: `/servers/${DEMO_IDS.server1}` },
   { name: '17-counters', path: '/counters' },
-  { name: '25-queues', path: '/queues' },
+  // Endpoint observability. These four were hand-captured until the demo router grew /endpoints
+  // routes, which is why they alone kept showing the pre-grouping nav. The endpoint id is the
+  // URL-safe base64 of "{METHOD} {template}" (mirrors EndpointRouteId).
+  { name: '23-endpoints-list', path: '/endpoints' },
+  { name: '24-endpoint-detail', path: `/endpoints/${DEMO_ENDPOINT_IDS.ordersCreate}` },
+  { name: '25-endpoint-call-drawer', path: `/endpoints/${DEMO_ENDPOINT_IDS.ordersCreate}/calls/${DEMO_ENDPOINT_IDS.originCall}` },
+  // The job the call above spawned — its Origin card links back to that same call.
+  { name: '26-job-detail-origin', path: `/detail/${DEMO_IDS.completedJobWithTrace}` },
   { name: '26-client', path: '/client' },
   { name: '27-client-event', path: '/client/events/evt-typeerror' },
   { name: '29-client-session', path: '/client/sessions/sess-8f3a2b1c' },
   { name: '31-issues', path: '/issues' },
   { name: '32-issue-detail', path: '/issues/job-nullref-processorder' },
+  { name: '33-adapters', path: '/adapters' },
+  { name: '34-webhooks', path: '/webhooks' },
+  { name: '35-slo', path: '/slo' },
   { name: '18-concurrency-limits', path: '/concurrency' },
   { name: '19-services-list', path: '/services' },
   { name: '20-services-detail-singleton', path: '/services/JobStatsLoggerService' },

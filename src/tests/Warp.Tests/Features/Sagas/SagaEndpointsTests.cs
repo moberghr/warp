@@ -7,9 +7,9 @@ using Shouldly;
 using Warp.Core;
 using Warp.Core.Models;
 using Warp.Core.Services;
-using Warp.UI;
-using Warp.UI.Endpoints;
-using Warp.UI.Extensions;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
+using Warp.Dashboard.Extensions;
 
 namespace Warp.Tests.Features.Sagas;
 
@@ -128,8 +128,8 @@ public class SagaEndpointsTests
         }
 
         var app = builder.Build();
-        var options = new WarpUIOptions();
-        var extensions = new List<IWarpUIExtension>();
+        var options = new WarpDashboardOptions();
+        var extensions = new List<IWarpDashboardExtension>();
         app.MapWarpApiEndpoints(options, extensions);
 
         await app.StartAsync(CancellationToken.None);

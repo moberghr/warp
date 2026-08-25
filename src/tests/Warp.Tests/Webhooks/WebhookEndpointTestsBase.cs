@@ -12,9 +12,9 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Webhooks;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
-using Warp.UI;
-using Warp.UI.Endpoints;
 
 namespace Warp.Tests.Webhooks;
 
@@ -330,7 +330,7 @@ public abstract class WebhookEndpointTestsBase : IAsyncLifetime
             enqueuers));
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(CancellationToken.None);
 
@@ -349,7 +349,7 @@ public abstract class WebhookEndpointTestsBase : IAsyncLifetime
         }
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(CancellationToken.None);
 

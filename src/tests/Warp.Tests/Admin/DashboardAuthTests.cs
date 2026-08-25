@@ -11,9 +11,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Shouldly;
-using Warp.UI;
-using Warp.UI.Extensions;
-using Warp.UI.Extensions.Retry;
+using Warp.Dashboard;
+using Warp.Dashboard.Extensions;
+using Warp.Dashboard.Extensions.Retry;
 using XunitTestContext = Xunit.TestContext;
 
 namespace Warp.Tests.Admin;
@@ -142,7 +142,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task BuiltInLogin_CookieIsScopedToTheDashboardPrefix()
     {
-        // The prefix isn't known until MapWarpUI runs, which is after DI is built, so the cookie path is
+        // The prefix isn't known until MapWarpDashboard runs, which is after DI is built, so the cookie path is
         // late-bound through a holder. Cookie options resolve on the first request, which is why that works
         // — a non-default prefix is what proves the holder is actually read.
         var builder = WebApplication.CreateBuilder();
@@ -150,7 +150,7 @@ public class DashboardAuthTests
         builder.Services.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
 
         var app = builder.Build();
-        app.MapWarpUI("/admin/warp").RequireWarpDashboardLogin();
+        app.MapWarpDashboard("/admin/warp").RequireWarpDashboardLogin();
         await app.StartAsync(XunitTestContext.Current.CancellationToken);
 
         var server = app.GetTestServer();
@@ -441,7 +441,7 @@ public class DashboardAuthTests
     {
         // Extension assets live in a different assembly and resource namespace than the SPA bundle, so the
         // endpoint has to route /_ext/{name}/ to that extension's own provider.
-        var (app, client) = await StartAsync(x => x.AddSingleton<IWarpUIExtension, RetryUIExtension>());
+        var (app, client) = await StartAsync(x => x.AddSingleton<IWarpDashboardExtension, RetryDashboardExtension>());
         try
         {
             var response = await client.GetAsync("/warp/_ext/retry/index.js", XunitTestContext.Current.CancellationToken);
@@ -555,7 +555,7 @@ public class DashboardAuthTests
         builder.WebHost.UseTestServer();
         await using var app = builder.Build();
 
-        var mapped = app.MapWarpUI("/warp");
+        var mapped = app.MapWarpDashboard("/warp");
 
         Should.Throw<InvalidOperationException>(() => mapped.RequireLocalRequests())
             .Message.ShouldContain("AddWarpDashboard");
@@ -569,7 +569,7 @@ public class DashboardAuthTests
         builder.Services.AddWarpDashboard();
         await using var app = builder.Build();
 
-        var mapped = app.MapWarpUI("/warp");
+        var mapped = app.MapWarpDashboard("/warp");
 
         Should.Throw<InvalidOperationException>(() => mapped.RequireWarpDashboardLogin())
             .Message.ShouldContain("AddBuiltInLogin");
@@ -697,7 +697,7 @@ public class DashboardAuthTests
         builder.WebHost.UseTestServer();
         await using var app = builder.Build();
 
-        Should.Throw<ArgumentException>(() => app.MapWarpUI("/"))
+        Should.Throw<ArgumentException>(() => app.MapWarpDashboard("/"))
             .Message.ShouldContain("RoutePrefix");
     }
 
@@ -743,7 +743,7 @@ public class DashboardAuthTests
     }
 
     [TimedFact]
-    public async Task MapWarpUI_TwiceWithBuiltInLogin_ThrowsRatherThanBreakingSignIn()
+    public async Task MapWarpDashboard_TwiceWithBuiltInLogin_ThrowsRatherThanBreakingSignIn()
     {
         // One scheme, one cookie name, one path: the second map wins the cookie path and sign-in on the
         // first dashboard silently stops working.
@@ -752,9 +752,9 @@ public class DashboardAuthTests
         builder.Services.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
 
         await using var app = builder.Build();
-        app.MapWarpUI("/warp").RequireWarpDashboardLogin();
+        app.MapWarpDashboard("/warp").RequireWarpDashboardLogin();
 
-        Should.Throw<InvalidOperationException>(() => app.MapWarpUI("/admin/warp"))
+        Should.Throw<InvalidOperationException>(() => app.MapWarpDashboard("/admin/warp"))
             .Message.ShouldContain("more than once");
     }
 
@@ -880,7 +880,7 @@ public class DashboardAuthTests
 
     private static async Task<(WebApplication App, HttpClient Client)> StartAsync(
         Action<IServiceCollection>? services = null,
-        Action<WarpUIEndpointConventionBuilder>? gate = null,
+        Action<WarpDashboardEndpointConventionBuilder>? gate = null,
         Action<WebApplication>? pipeline = null,
         string routePrefix = "/warp")
     {
@@ -900,7 +900,7 @@ public class DashboardAuthTests
             app.UseAuthorization();
         }
 
-        var warp = app.MapWarpUI(routePrefix);
+        var warp = app.MapWarpDashboard(routePrefix);
         gate?.Invoke(warp);
 
         await app.StartAsync(XunitTestContext.Current.CancellationToken);

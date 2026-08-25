@@ -13,9 +13,9 @@ using Warp.Core.Data.Queries;
 using Warp.Core.Handlers;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
 using Warp.Tests.TestData.BackgroundServices;
-using Warp.UI;
-using Warp.UI.Endpoints;
 using Warp.Worker;
 using Warp.Worker.BackgroundServices;
 using Warp.Worker.Services;
@@ -84,7 +84,7 @@ public class DeploymentShapeTests
         builder.Services.AddWarp<TestContext>();
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(CancellationToken.None);
         var client = app.GetTestClient();

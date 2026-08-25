@@ -17,6 +17,7 @@ import {
 } from '@/api/hooks/useRecurring';
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import type { RecurringJobModel } from '@/types';
+import { PageHeading } from '@/components/PageHeading';
 
 // A definition is addressed by its name — the identity the API keys on. It travels URL-encoded in
 // the detail route because a name may hold '/' and spaces.
@@ -177,7 +178,7 @@ export default function RecurringPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-4">Recurring Jobs</h1>
+      <PageHeading className="mb-4">Recurring Jobs</PageHeading>
 
       <DataTable
         columns={columns}

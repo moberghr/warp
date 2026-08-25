@@ -50,7 +50,7 @@ The broadcaster is the **third** consumer of `ServerTaskSignals<TContext>`, afte
 
 ## Auth piggybacks on the dashboard's endpoint conventions
 
-The hub is one of the endpoints `MapWarpUI` returns, so whatever you applied — `RequireAuthorization`, `RequireWarpDashboardLogin`, `RequireLocalRequests` — covers the SignalR negotiate (`POST /warp/api/hub/negotiate`) and the WebSocket-upgrade request too. An auth-protected dashboard needs no extra wiring, and there is no parallel auth code path.
+The hub is one of the endpoints `MapWarpDashboard` returns, so whatever you applied — `RequireAuthorization`, `RequireWarpDashboardLogin`, `RequireLocalRequests` — covers the SignalR negotiate (`POST /warp/api/hub/negotiate`) and the WebSocket-upgrade request too. An auth-protected dashboard needs no extra wiring, and there is no parallel auth code path.
 
 ## Connection states
 

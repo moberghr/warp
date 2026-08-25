@@ -8,7 +8,38 @@ sidebar_position: 6
 
 *Unreleased*
 
-Major release, one breaking change: **`IRecurringJobService` now addresses a recurring job by the name it was registered under, not by the table's surrogate id.**
+Major release with two breaking changes: **the dashboard package and its API are renamed from `UI` to `Dashboard`**, and **`IRecurringJobService` now addresses a recurring job by the name it was registered under, not by the table's surrogate id.**
+
+### The dashboard is called the Dashboard
+
+Warp used two names for one thing. The mount API said `UI`; authorization, push and the hub said `Dashboard` — so a `Program.cs` read:
+
+```csharp
+// Before 6.0
+builder.Services.AddWarpDashboard().AddBuiltInLogin<Validator>();
+app.MapWarpUI("/warp").RequireWarpDashboardLogin();
+```
+
+Three "Dashboard" mentions and one "UI", two lines apart. It went deeper than the surface: types named `WarpDashboardLoginOptions` and `WarpDashboardDefaults` lived in `namespace Warp.UI`. Everything now uses the product's own word.
+
+**The NuGet package is renamed.** `Moberg.Warp.UI` is deprecated and replaced by `Moberg.Warp.Dashboard` — update your `PackageReference`, since a package id cannot be aliased the way a type can.
+
+| Before | 6.0 |
+|---|---|
+| `Moberg.Warp.UI` (package) | `Moberg.Warp.Dashboard` |
+| `namespace Warp.UI` | `namespace Warp.Dashboard` |
+| `namespace Warp.UI.DashboardPush` | `namespace Warp.Dashboard.Push` |
+| `app.MapWarpUI(…)` | `app.MapWarpDashboard(…)` |
+| `WarpUIOptions` | `WarpDashboardOptions` |
+| `WarpUIEndpointConventionBuilder` | `WarpDashboardEndpointConventionBuilder` |
+| `IWarpUIExtension` | `IWarpDashboardExtension` |
+| `UIExtensionManifest` / `UIExtensionPage` | `DashboardExtensionManifest` / `DashboardExtensionPage` |
+
+These are hard renames — the old names are gone and you get a compile error, not a silent behaviour change, in the same style as `AddWarpWorker` → `AddWarpServer` in 2.0.
+
+**If you host dashboard extensions**, note that the embedded-resource namespace moved with the assembly: an extension's `ResourceNamespace` built on `Warp.UI.…` must become `Warp.Dashboard.…`. The same applies to any host that overrode `WarpDashboardOptions.IndexStream` with a literal resource name — the SPA now lives at `Warp.Dashboard.dist.index.html`. Both fail at runtime rather than at compile time, so check them explicitly.
+
+The docs section moved to match (`/docs/ui/*` → `/docs/dashboard/*`, redirects in place).
 
 ### Recurring jobs are keyed by name
 
@@ -327,11 +358,11 @@ The page rendered every `Counter` / `Statistic` key as one alphabetical table ov
 
 Each family now gets its own tab, pivoted to one row per dimension (short type name, namespace beneath it) with duration sums and histogram buckets folded into derived **Avg** and **p95** columns rather than shown as raw count-shaped numbers. Web vitals read p75. Charts plot one metric at a time over the top 10 series and state on screen how many were dropped; tooltips drop zero-valued series and sort by value, so hovering answers what moved in that hour. Unrecognised keys fall through to an **Other** tab and render raw, so an addon's keys are never silently dropped. Per-application slices stay separate rows — merging them into the cluster-wide row would double every count.
 
-This also fixes a latent blank chart: the canvas was swapped for a placeholder while loading, so the mount-once creation effect could fire with no canvas and never run again. See [Counters](/docs/ui/counters).
+This also fixes a latent blank chart: the canvas was swapped for a placeholder while loading, so the mount-once creation effect could fire with no canvas and never run again. See [Counters](/docs/dashboard/health/counters).
 
 ### The recurring job list shows the last run outcome
 
-The list carried only `LastExecution`, a timestamp stamped at *enqueue* time, so whether the last firing succeeded was visible only by opening the detail page. A **Last Result** column now shows the state of the most recent real run and links to that job. A skipped firing is not a run, so a disabled definition keeps reporting the outcome of its last actual execution; a definition that has never fired shows `—`, and one whose job row has since been cleaned up says so. No schema change and nothing added to the worker path — the state is reached through `RecurringJobLog` in a two-step fetch. See [Recurring Jobs](/docs/ui/recurring).
+The list carried only `LastExecution`, a timestamp stamped at *enqueue* time, so whether the last firing succeeded was visible only by opening the detail page. A **Last Result** column now shows the state of the most recent real run and links to that job. A skipped firing is not a run, so a disabled definition keeps reporting the outcome of its last actual execution; a definition that has never fired shows `—`, and one whose job row has since been cleaned up says so. No schema change and nothing added to the worker path — the state is reached through `RecurringJobLog` in a two-step fetch. See [Recurring Jobs](/docs/dashboard/workloads/recurring).
 
 ## 3.11.0
 
@@ -836,7 +867,7 @@ Counts, error rate, **and average latency** now come from `Counter`→`Statistic
 - **Job detail leads with the type, not the GUID** — the detail page headline is now the job type (a clickable link to that type's list), with the id demoted to a subline. The job list and detail surface addon-metadata chips (`[Mutex]`, `[Retry]`, `[Timeout]`, …) so you can see a job's applied policies at a glance.
 - **Jobs-by-type list** — click a job type anywhere it appears to get a filtered list of every job of that type, with an optional state filter.
 - **Large trace fan-outs collapse** — a message/batch that spawns hundreds of children no longer renders an unusable trace graph; child slots are capped with a "+N more" affordance.
-- **Host-configurable branding** — `UseWarpUI` accepts an instance name, logo URL, and a portal back-link (label + URL) so a shared dashboard can identify which environment it is and link back to your own portal. See [Dashboard Overview](/docs/ui/overview).
+- **Host-configurable branding** — `UseWarpUI` accepts an instance name, logo URL, and a portal back-link (label + URL) so a shared dashboard can identify which environment it is and link back to your own portal. See [Dashboard Overview](/docs/dashboard/overview).
 
 ### Bug fixes
 
@@ -1055,7 +1086,7 @@ From 1.0.0 onward, Warp follows [semantic versioning](https://semver.org/) as a 
 
 Upgrading from 0.17.2 is **drop-in**: no schema migration, no required code changes for typical applications. Two things to be aware of:
 
-- **`Warp.Core` no longer pulls in the ASP.NET Core shared framework** (see below). Worker- or publisher-only projects that used `Microsoft.AspNetCore.*` types *transitively through Warp.Core* must now add `<FrameworkReference Include="Microsoft.AspNetCore.App" />` themselves. Projects that reference `Warp.UI` / `Warp.Http`, or that are ASP.NET apps already, are unaffected.
+- **`Warp.Core` no longer pulls in the ASP.NET Core shared framework** (see below). Worker- or publisher-only projects that used `Microsoft.AspNetCore.*` types *transitively through Warp.Core* must now add `<FrameworkReference Include="Microsoft.AspNetCore.App" />` themselves. Projects that reference `Warp.Dashboard` / `Warp.Http`, or that are ASP.NET apps already, are unaffected.
 - **A new `WHTTP005` build warning** (see below) may surface on existing `Warp.Http` GET/DELETE handlers. Builds with `TreatWarningsAsErrors` will need the one-line nullable fix it points to.
 
 ### HTTP: all handler-class attributes forwarded to endpoint metadata (#220)
@@ -1064,7 +1095,7 @@ Upgrading from 0.17.2 is **drop-in**: no schema migration, no required code chan
 
 ### `Warp.Core`: dropped the ASP.NET Core framework reference (#221)
 
-`Warp.Core` replaced its `<FrameworkReference Include="Microsoft.AspNetCore.App" />` with granular `Microsoft.Extensions.*` package references (DI, logging, options, configuration). Core, the worker, and the providers no longer drag the entire ASP.NET Core shared framework into hosts that don't need it — only `Warp.UI` and `Warp.Http` depend on ASP.NET now. See the upgrade note above for the rare case this affects.
+`Warp.Core` replaced its `<FrameworkReference Include="Microsoft.AspNetCore.App" />` with granular `Microsoft.Extensions.*` package references (DI, logging, options, configuration). Core, the worker, and the providers no longer drag the entire ASP.NET Core shared framework into hosts that don't need it — only `Warp.Dashboard` and `Warp.Http` depend on ASP.NET now. See the upgrade note above for the rare case this affects.
 
 ### `Warp.Http`: the `[AsParameters]` required-query-param trap is now a build warning (#222)
 
@@ -1698,7 +1729,7 @@ Coalesce window defaults to 100 ms (`WarpDashboardPushConfiguration.CoalesceWind
 - Per-view data (filtered job lists, job detail, logs) stays on event-driven REST refetch. Push is invalidations + the stats DTO, not per-view payloads.
 - Frontend probes `${RoutePrefix}/api/dashboard/push/probe` once at boot and falls back to 30 s polling when the addon is absent (hide-on-404 mirroring `/api/concurrency`).
 
-Auth piggybacks on the existing `WarpUIMiddleware` — both the SignalR negotiate and the WebSocket-upgrade HTTP requests pass through `/api/`, so an auth-protected dashboard requires no extra wiring.
+Auth piggybacks on the existing `WarpDashboardMiddleware` — both the SignalR negotiate and the WebSocket-upgrade HTTP requests pass through `/api/`, so an auth-protected dashboard requires no extra wiring.
 
 See [the Dashboard Push feature page](features/dashboard-push) for telemetry hooks and tuning.
 
@@ -1936,7 +1967,7 @@ public sealed class GetOrderHandler : IRequestHandler<GetOrder, OrderDto>
 }
 ```
 
-Wire it up in `Program.cs` — independent of `Warp.UI`, composes with anything you already have:
+Wire it up in `Program.cs` — independent of `Warp.Dashboard`, composes with anything you already have:
 
 ```csharp
 builder.Services.AddWarpHttp();
@@ -2310,7 +2341,7 @@ Breaking release because of the provider package split and the DI lambda API.
 - **Typed Metadata** — Access job metadata through strongly-typed interfaces. Define an interface extending `IJobMetadata`, and read it in handlers via `ctx.GetMetadata<IMyMetadata>()` or configure it at publish time with `new JobParameters().Configure<IMyMetadata>(m => m.CustomerName = "John")`. The source generator produces dictionary-backed implementations. `MetadataSerializer` uses native JSON deserialization for round-trip fidelity (integers stay as `long`, arrays as `List<object>`).
 - **Recurring Job Enable/Disable** — Disable a recurring job to temporarily stop it from creating new jobs. The scheduler still fires on schedule but records a "Skipped" entry in the execution history. Re-enabling resumes from the next natural cron occurrence with no catchup burst. API: `POST /api/recurring/{id}/enable|disable`. Dashboard shows Enabled/Disabled badges and Skipped entries in history.
 - **Worker Scope Isolation** — Worker and handler now use separate DI scopes. The handler's DbContext lives in its own scope — on failure, the scope is disposed and tracked entities are discarded. No partial handler work leaks into the worker's save. On success, handler changes are committed first (outbox pattern), then Warp state.
-- **Extensible Dashboard UI** — New `IWarpUIExtension` interface lets external NuGet packages extend the dashboard without forking. Extensions ship an ES-module as an embedded resource, served at `/warp/_ext/{name}/`. The SPA dynamically imports each module and calls `install(warp)`. Extensions target `data-warp-slot` elements with `mount` / `append` / `insertBefore` / `insertAfter` operations, or register whole new pages via `addPage()`. React, ReactDOM, Axios, and shadcn components are exposed on `window.Warp` so extensions don't bundle them. The built-in `RetryUIExtension` is the reference implementation — renders a retry progress card with attempts/max and next-delay info on the job detail page.
+- **Extensible Dashboard UI** — New `IWarpUIExtension` interface lets external NuGet packages extend the dashboard without forking. Extensions ship an ES-module as an embedded resource, served at `/warp/_ext/{name}/`. The SPA dynamically imports each module and calls `install(warp)`. Extensions target `data-warp-slot` elements with `mount` / `append` / `insertBefore` / `insertAfter` operations, or register whole new pages via `addPage()`. React, ReactDOM, Axios, and shadcn components are exposed on `window.Warp` so extensions don't bundle them. The built-in `RetryDashboardExtension` is the reference implementation — renders a retry progress card with attempts/max and next-delay info on the job detail page.
 
 ### Improvements
 

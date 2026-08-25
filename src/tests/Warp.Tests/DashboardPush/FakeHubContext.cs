@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 using Microsoft.AspNetCore.SignalR;
-using Warp.UI.DashboardPush;
+using Warp.Dashboard.Push;
 
 namespace Warp.Tests.DashboardPush;
 

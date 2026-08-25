@@ -18,6 +18,7 @@ import {
   type MetricRow,
 } from './counterModel';
 import type { CounterHistoryPoint } from '@/types';
+import { PageHeading } from '@/components/PageHeading';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, ChartTooltip, Legend);
 
@@ -124,7 +125,7 @@ export default function CountersPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-2">Counters</h1>
+      <PageHeading className="mb-2">Counters</PageHeading>
       <p className="text-sm text-muted-foreground mb-4">
         Every durable metric Warp folds through <code>Counter</code> &rarr; <code>Statistic</code>, grouped by the
         subsystem that wrote it. These are recorded events and only ever increase &mdash; a requeue never rewrites
@@ -269,9 +270,9 @@ function FamilyBody({
                   </th>
                 ))}
                 {table.hasAvg && <th className="text-right font-semibold px-4 py-2 w-24">Avg</th>}
-                {table.hasPercentile && (
-                  <th className="text-right font-semibold px-4 py-2 w-24">{table.percentileLabel}</th>
-                )}
+                {table.hasPercentile && table.percentileLabels.map((label) => (
+                  <th key={label} className="text-right font-semibold px-4 py-2 w-24">{label}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -314,11 +315,11 @@ function MetricTableRow({
         </td>
       ))}
       {hasAvg && <td className="px-4 py-2 text-right font-mono tabular-nums">{formatMs(row.avgMs)}</td>}
-      {hasPercentile && (
-        <td className="px-4 py-2 text-right font-mono tabular-nums">
-          {row.percentileOverflow ? `>${formatMs(row.percentileMs)}` : formatMs(row.percentileMs)}
+      {hasPercentile && row.percentiles.map((p) => (
+        <td key={p.label} className="px-4 py-2 text-right font-mono tabular-nums">
+          {p.overflow ? `>${formatMs(p.ms)}` : formatMs(p.ms)}
         </td>
-      )}
+      ))}
     </tr>
   );
 }
