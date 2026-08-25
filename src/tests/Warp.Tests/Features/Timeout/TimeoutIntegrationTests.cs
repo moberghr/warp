@@ -132,11 +132,8 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
         var rjPublisher = new RecurringJobPublisher<TestContext>(server.CreateContext(), TimeProvider.System, new FakeLockProvider());
         await rjPublisher.AddOrUpdateRecurringJob(new RecurringTotalTimeoutRequest(), "recurring-total-timeout", "* * * * *");
 
-        var rj = await server.CreateContext().Set<RecurringJob>()
-            .FirstAsync(x => x.Name == "recurring-total-timeout", Xunit.TestContext.Current.CancellationToken);
-
         var svc = new RecurringJobService<TestContext>(server.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
-        await svc.TriggerRecurringJob(rj.Id);
+        await svc.TriggerRecurringJob("recurring-total-timeout");
 
         var firing = await server.CreateContext().Set<Job>()
             .AsNoTracking()

@@ -312,11 +312,8 @@ public abstract class MutexIntegrationTestsBase : IntegrationTestBase
         var rjPublisher = new RecurringJobPublisher<TestContext>(server.CreateContext(), TimeProvider.System, new FakeLockProvider());
         await rjPublisher.AddOrUpdateRecurringJob(new RecurringMutexRequest(), "recurring-mutex-test", "* * * * *");
 
-        var readCtx = server.CreateContext();
-        var rj = await readCtx.Set<RecurringJob>().FirstAsync(x => x.Name == "recurring-mutex-test", Xunit.TestContext.Current.CancellationToken);
-
         var svc = new RecurringJobService<TestContext>(server.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
-        await svc.TriggerRecurringJob(rj.Id);
+        await svc.TriggerRecurringJob("recurring-mutex-test");
 
         var firing = await server.CreateContext().Set<Job>()
             .AsNoTracking()
