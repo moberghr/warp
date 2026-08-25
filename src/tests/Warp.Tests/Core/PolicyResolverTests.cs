@@ -138,6 +138,35 @@ public class PolicyResolverTests
     }
 
     [TimedFact]
+    public void StampRetry_MaxRetriesFromElsewhere_StillStampsAttributeDelays()
+    {
+        // WithRetry(5) at publish sets MaxRetries only. The attribute's schedule must still apply —
+        // the two fields are independent rungs, or a declared [7, 9] silently becomes the global default.
+        var context = new JobContext();
+        var meta = context.GetMetadata<IRetryMetadata>();
+        meta.MaxRetries = 5;
+
+        PolicyResolver.StampRetry(meta, typeof(HandlerWithRetryDelays), typeof(BareContract));
+
+        meta.MaxRetries.ShouldBe(5);
+        meta.RetryDelays.ShouldBe([7, 9]);
+    }
+
+    [TimedFact]
+    public void StampRetry_ExplicitDelays_AreNotOverwrittenByAttribute()
+    {
+        // Explicit publish metadata outranks every attribute — for Delays as much as for MaxRetries.
+        var context = new JobContext();
+        var meta = context.GetMetadata<IRetryMetadata>();
+        meta.RetryDelays = [1];
+
+        PolicyResolver.StampRetry(meta, typeof(HandlerWithRetryDelays), typeof(BareContract));
+
+        meta.MaxRetries.ShouldBe(3);
+        meta.RetryDelays.ShouldBe([1]);
+    }
+
+    [TimedFact]
     public void StampRetry_ExplicitMetadata_IsNotOverwritten()
     {
         var context = new JobContext();
@@ -163,17 +192,18 @@ public class PolicyResolverTests
     }
 
     [TimedFact]
-    public void StampTimeout_TotalOnHandler_FailsTheJob()
+    public void StampTimeout_TotalOnHandler_IsInertNotThrown()
     {
-        // WARP002 catches this at build time; this is the backstop for handlers it cannot see.
+        // WARP002 catches this at build time. The runtime backstop must NOT throw: the resolver runs
+        // inside the pipeline, where an outer Retry treats the exception as a handler failure and burns
+        // the whole retry budget on a static misconfiguration. Inert + warn-once, like the other shapes.
         var context = new JobContext();
         var meta = context.GetMetadata<ITimeoutMetadata>();
 
-        var ex = Should.Throw<WarpException>(
-            () => PolicyResolver.StampTimeout(meta, typeof(HandlerWithTotalTimeout), typeof(BareContract)));
+        PolicyResolver.StampTimeout(meta, typeof(HandlerWithTotalTimeout), typeof(BareContract))
+            .ShouldBe(TimeoutStamp.TotalOnHandler);
 
-        ex.Message.ShouldContain("Total");
-        ex.Message.ShouldContain(nameof(HandlerWithTotalTimeout));
+        meta.TimeoutSeconds.ShouldBeNull();
     }
 
     [TimedFact]

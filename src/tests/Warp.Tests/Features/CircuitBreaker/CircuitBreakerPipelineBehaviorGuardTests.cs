@@ -87,6 +87,28 @@ public class CircuitBreakerPipelineBehaviorGuardTests
         ctx.Outcome.ClearHandlerType.ShouldBeFalse();
     }
 
+    [TimedFact]
+    public async Task MessageChild_NoGroupDeclared_CircuitIsPerHandlerNotPerMessage()
+    {
+        // A message fans out to N handlers; keying the default circuit on the MESSAGE type would let a
+        // flaky SendEmail handler open the circuit for UpdateInventory too. Each handler is its own
+        // dependency boundary, so the default group for a routed child is the handler type.
+        var ctx = new JobContext { JobId = Guid.NewGuid(), HandlerType = typeof(PlainHandler) };
+        var store = new Mock<ICircuitBreakerStore>(MockBehavior.Strict);
+        store
+            .Setup(x => x.GetAsync(nameof(PlainHandler), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((CircuitBreakerState?)null);
+        var behavior = Build<ExemptShapedMessage, Unit>(ctx, store.Object);
+
+        var result = await behavior.HandleAsync(
+            new ExemptShapedMessage(),
+            (req, ct) => Task.FromResult(Unit.Value),
+            CancellationToken.None);
+
+        result.ShouldBe(Unit.Value);
+        store.Verify(x => x.GetAsync(nameof(PlainHandler), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
     private static CircuitBreakerPipelineBehavior<TRequest, TResponse> Build<TRequest, TResponse>(JobContext ctx, ICircuitBreakerStore store)
         where TRequest : IRequest<TResponse>
     {

@@ -35,14 +35,9 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
         RequestHandlerDelegate<TRequest, TResponse> next,
         CancellationToken cancellationToken)
     {
-        if (request is not IJob && request is not IMessage)
-        {
-            return await next(request, cancellationToken);
-        }
-
-        // Saga proxies (and any other IPolicyExemptHandler) manage their own execution policy —
-        // their busy/version-conflict reschedules must not additionally contend on a rate limit.
-        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
+        // Job-backed executions only. Saga proxies (and any other IPolicyExemptHandler) manage their own
+        // execution policy — their busy/version-conflict reschedules must not also contend on a rate limit.
+        if (PolicyResolver.Bypasses(request, _jobContext))
         {
             return await next(request, cancellationToken);
         }

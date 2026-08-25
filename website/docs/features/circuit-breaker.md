@@ -80,6 +80,8 @@ Circuit Breaker runs inside the handler pipeline after the concurrency behavior 
 
 Per-handler overrides on `[CircuitBreaker]` use `Group`, `Threshold`, `DurationSeconds`, and `ResetJitterSeconds`.
 
+When no `Group` is declared, a job's circuit is keyed on the **job type** and a routed message child's circuit on its **handler type** — a message fans out to several handlers, each its own dependency, so one flaky handler must not open the circuit for its siblings. Declare the same `Group` on the handlers that genuinely share a dependency to make them trip together.
+
 ## Dashboard
 
 Rescheduled jobs appear in the `Enqueued` tab with future `ScheduleTime`. The job's log shows `"Rescheduled due to circuit breaker '<key>' (open|probe-in-progress|probe-lost)"` — the reason disambiguates why a specific job was rescheduled.

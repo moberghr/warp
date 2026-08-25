@@ -88,43 +88,59 @@ public sealed class Orchestrator<TContext> : IServerTask
             return 0;
         }
 
-        // Two-step fetch (§5.2): a single follow-up query collects every parent id that
-        // owns at least one failed child, instead of an `_context.Set<Job>().Any(...)`
-        // subquery inside the Select projection (which EF Core has translated unreliably
-        // across versions). Folds what used to be a per-parent N+1 of AnyAsync calls into
-        // one round-trip without breaking the projection rule.
+        // Two-step fetch (§5.2): one follow-up query collects the distinct (parent, settled state) pairs
+        // instead of an `_context.Set<Job>().Any(...)` subquery inside the Select projection (which EF
+        // Core has translated unreliably across versions). One round-trip yields every per-state id-set.
         var parentIds = readyParents.ConvertAll(p => p.Id);
-        var parentIdsWithFailedChild = await _context.Set<Job>()
-            .Where(c => c.Kind == JobKind.Job && c.CurrentState == State.Failed)
+        var settledChildStates = await _context.Set<Job>()
+            .Where(c => c.Kind == JobKind.Job)
+            .Where(c => c.CurrentState == State.Failed || c.CurrentState == State.Completed || c.CurrentState == State.Deleted)
             .Where(c => c.ParentJobId != null && parentIds.Contains(c.ParentJobId.Value))
-            .Select(c => c.ParentJobId!.Value)
+            .Select(c =>
+                new
+                {
+                    ParentId = c.ParentJobId!.Value,
+                    c.CurrentState,
+                })
             .Distinct()
             .ToListAsync(ct);
-        var failedParentIdSet = parentIdsWithFailedChild.ToHashSet();
+        var failedParentIdSet = settledChildStates
+            .Where(x => x.CurrentState == State.Failed)
+            .Select(x => x.ParentId)
+            .ToHashSet();
+        var completedParentIdSet = settledChildStates
+            .Where(x => x.CurrentState == State.Completed)
+            .Select(x => x.ParentId)
+            .ToHashSet();
+        var deletedParentIdSet = settledChildStates
+            .Where(x => x.CurrentState == State.Deleted)
+            .Select(x => x.ParentId)
+            .ToHashSet();
 
-        // Second id-set, same two-step shape: parents with at least one Completed child. A parent whose
-        // settled children are ALL Deleted (a cancelled batch — CancelBatch deletes the descendants but
-        // not the batch row — or a message whose every routed child was policy-skipped) finalizes as
-        // Deleted, not Completed: reporting a cancelled batch as a success would be a false green.
-        var parentIdsWithCompletedChild = await _context.Set<Job>()
-            .Where(c => c.Kind == JobKind.Job && c.CurrentState == State.Completed)
-            .Where(c => c.ParentJobId != null && parentIds.Contains(c.ParentJobId.Value))
-            .Select(c => c.ParentJobId!.Value)
-            .Distinct()
-            .ToListAsync(ct);
-        var completedParentIdSet = parentIdsWithCompletedChild.ToHashSet();
-
+        // A Deleted child is settled, but what it MEANS depends on the parent's kind. A message fans out
+        // one payload to N handlers, and a Skip-mode [Mutex]/[RateLimit] deleting a surplus routed child is
+        // deliberately-skipped delivery — not failed work — so the message completes when any handler
+        // completed and finalizes Deleted only when every child was skipped. A batch is a set of work
+        // items the caller expects to run, and a Deleted child there is cancelled work (CancelBatch deletes
+        // the descendants but not the batch row): under OnlyOnSucceeded any deleted child makes the batch
+        // Deleted even when siblings completed — reporting it Completed would be a false green that fires
+        // the success continuation over work that never ran. A Failed child still wins (Failed).
+        // OnAnyFinishedState follows the Failed precedent: the parent finalizes Completed so its
+        // continuation activates through the ordinary path instead of being failed as a deleted parent's
+        // orphan in the same tick.
         var now = _time.GetUtcNow().UtcDateTime;
         foreach (var parent in readyParents)
         {
             var continuationOptions = parent.ContinuationOptions ?? ContinuationOptions.OnlyOnSucceeded;
+            var anyFinishedState = continuationOptions == ContinuationOptions.OnAnyFinishedState;
             var hasFailedChildren = failedParentIdSet.Contains(parent.Id);
+            var hasCancelledWork = parent.Kind == JobKind.Batch && deletedParentIdSet.Contains(parent.Id);
 
-            if (hasFailedChildren && continuationOptions != ContinuationOptions.OnAnyFinishedState)
+            if ((hasFailedChildren || hasCancelledWork) && !anyFinishedState)
             {
-                parent.CurrentState = State.Failed;
+                parent.CurrentState = hasFailedChildren ? State.Failed : State.Deleted;
             }
-            else if (hasFailedChildren || completedParentIdSet.Contains(parent.Id))
+            else if (anyFinishedState || completedParentIdSet.Contains(parent.Id))
             {
                 parent.CurrentState = State.Completed;
             }

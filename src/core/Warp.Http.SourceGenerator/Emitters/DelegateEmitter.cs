@@ -91,7 +91,9 @@ internal static class DelegateEmitter
                 + " body-bound targets but at most one is supported. This should have been diagnosed as WHTTP004 before reaching emission.");
         }
 
-        sb.Append("            static async global::System.Threading.Tasks.Task (global::Microsoft.AspNetCore.Http.HttpContext ctx");
+        // The lambda's own locals use a reserved `__` prefix: a bare IFormFile is bound BY PARAMETER NAME
+        // (below), so the user's property name becomes a lambda parameter and must not collide with them.
+        sb.Append("            static async global::System.Threading.Tasks.Task (global::Microsoft.AspNetCore.Http.HttpContext __ctx");
 
         var bodyTarget = plan.Targets.FirstOrDefault(t => t.Source == BindingSource.Body);
         var nonBodyTargets = plan.Targets.Where(t => t.Source != BindingSource.Body).ToArray();
@@ -136,8 +138,8 @@ internal static class DelegateEmitter
         if (bodyTarget is not null)
         {
             var bodyTypeFqn = bodyTarget.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            sb.Append(", [global::Microsoft.AspNetCore.Mvc.FromBody] ").Append(bodyTypeFqn).Append(" body");
-            paramNames[bodyTarget] = "body";
+            sb.Append(", [global::Microsoft.AspNetCore.Mvc.FromBody] ").Append(bodyTypeFqn).Append(" __body");
+            paramNames[bodyTarget] = "__body";
         }
 
         sb.AppendLine(") =>");
@@ -145,12 +147,12 @@ internal static class DelegateEmitter
 
         // Construction expression — order targets by ctor parameter index (records) or just emit
         // a property initializer (parameterless ctor + setters).
-        sb.Append("                var request = ");
+        sb.Append("                var __request = ");
         EmitConstruction(sb, plan, requestFqn, paramNames);
         sb.AppendLine(";");
 
         sb.Append("                await global::Warp.Http.Dispatch.WarpHttpInvocation.").Append(invocation)
-            .Append('<').Append(requestFqn).Append(", ").Append(responseFqn).AppendLine(">(ctx, request).ConfigureAwait(false);");
+            .Append('<').Append(requestFqn).Append(", ").Append(responseFqn).AppendLine(">(__ctx, __request).ConfigureAwait(false);");
         sb.AppendLine("            };");
     }
 
@@ -196,10 +198,15 @@ internal static class DelegateEmitter
     }
 
     // The generated name must be a legal identifier and must not collide with the p{index} names the
-    // other parameters use.
+    // other parameters use or the `__`-prefixed locals the lambda itself declares.
     private static bool CanBindFormFileByName(string key)
     {
         if (!SyntaxFacts.IsValidIdentifier(key))
+        {
+            return false;
+        }
+
+        if (key.StartsWith("__", StringComparison.Ordinal))
         {
             return false;
         }

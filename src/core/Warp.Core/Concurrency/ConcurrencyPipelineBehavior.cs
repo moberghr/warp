@@ -30,14 +30,9 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         RequestHandlerDelegate<TRequest, TResponse> next,
         CancellationToken cancellationToken)
     {
-        if (request is not IJob && request is not IMessage)
-        {
-            return await next(request, cancellationToken);
-        }
-
-        // Saga proxies (and any other IPolicyExemptHandler) manage their own serialization — the
-        // per-correlation saga mutex — and must not contend on an outer concurrency key too.
-        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
+        // Job-backed executions only. Saga proxies (and any other IPolicyExemptHandler) manage their own
+        // serialization — the per-correlation saga mutex — and must not contend on an outer key too.
+        if (PolicyResolver.Bypasses(request, _jobContext))
         {
             return await next(request, cancellationToken);
         }

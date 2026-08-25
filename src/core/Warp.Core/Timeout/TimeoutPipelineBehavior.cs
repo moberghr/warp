@@ -34,14 +34,9 @@ public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TR
         RequestHandlerDelegate<TRequest, TResponse> next,
         CancellationToken cancellationToken)
     {
-        if (request is not IJob && request is not IMessage)
-        {
-            return await next(request, cancellationToken);
-        }
-
-        // Saga proxies (and any other IPolicyExemptHandler) manage their own execution policy — an outer
-        // timeout would race the saga's mutex hold + SaveChanges (see sagas docs, Limitations).
-        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
+        // Job-backed executions only. Saga proxies (and any other IPolicyExemptHandler) manage their own
+        // execution policy — an outer timeout would race the saga's mutex hold + SaveChanges.
+        if (PolicyResolver.Bypasses(request, _jobContext))
         {
             return await next(request, cancellationToken);
         }
@@ -54,6 +49,15 @@ public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TR
                     "[Timeout(Scope = Total)] on {RequestType} is inert on this execution path: the job was staged "
                     + "directly (e.g. a recurring firing), so no publish-time deadline exists and none can be "
                     + "invented without changing what Total means. Use Scope = PerAttempt for this job type.");
+
+                break;
+
+            case TimeoutStamp.TotalOnHandler:
+                WarnOnce(
+                    "[Timeout(Scope = Total)] on the handler of {RequestType} is inert: a Total-scoped timeout is a "
+                    + "wall-clock budget measured from enqueue and must be stamped at publish, before any handler "
+                    + "is known. Declare Total-scoped timeouts on the request/job type; PerAttempt timeouts may "
+                    + "stay on the handler.");
 
                 break;
 

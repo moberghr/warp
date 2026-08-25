@@ -23,12 +23,7 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
     {
         // Only job-backed executions get retry outcomes: an in-memory Send has no row to reschedule,
         // and saga proxies (IPolicyExemptHandler) own their busy/version-conflict requeue logic.
-        if (request is not IJob && request is not IMessage)
-        {
-            return await next(request, cancellationToken);
-        }
-
-        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
+        if (PolicyResolver.Bypasses(request, _jobContext))
         {
             return await next(request, cancellationToken);
         }

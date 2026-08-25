@@ -37,6 +37,28 @@ internal static class PolicyResolver
         return PolicyExemptCache.GetOrAdd(handlerType, static t => typeof(IPolicyExemptHandler).IsAssignableFrom(t));
     }
 
+    /// <summary>
+    /// The shared prologue of every policy behaviour. Policy applies only to a job-backed execution: the
+    /// request must be a job/message shape, the scope must carry a job row (an in-memory
+    /// <c>IMediator.Send</c> of an <c>IJob</c>-shaped type resolves the scoped context with no
+    /// <c>JobId</c> — gating it would turn the caller's result into a silent <c>default!</c>), and the
+    /// handler must not manage its own policy (<see cref="IPolicyExemptHandler"/>).
+    /// </summary>
+    public static bool Bypasses(object request, IJobContext jobContext)
+    {
+        if (request is not IJob && request is not IMessage)
+        {
+            return true;
+        }
+
+        if (jobContext.JobId == Guid.Empty)
+        {
+            return true;
+        }
+
+        return IsPolicyExempt(jobContext.HandlerType);
+    }
+
     public static bool IsDeclaredOnHandler<TAttr>(Type? handlerType)
         where TAttr : Attribute =>
         handlerType != null && Get(typeof(TAttr), handlerType) != null;
@@ -88,7 +110,10 @@ internal static class PolicyResolver
 
     public static void StampRetry(IRetryMetadata meta, Type? handlerType, Type requestType)
     {
-        if (meta.MaxRetries != null)
+        // MaxRetries and Delays are independent rungs: WithRetry(5) at publish sets the count only, and
+        // the attribute's schedule must still apply beneath it — while an explicit publish value for
+        // either field outranks the attribute for that field alone.
+        if (meta.MaxRetries != null && meta.RetryDelays != null)
         {
             return;
         }
@@ -98,10 +123,10 @@ internal static class PolicyResolver
             return;
         }
 
-        meta.MaxRetries = attr.MaxRetries;
+        meta.MaxRetries ??= attr.MaxRetries;
 
         // Left null when the attribute declares none, so the global schedule stays in play.
-        if (attr.Delays is { Length: > 0 })
+        if (meta.RetryDelays == null && attr.Delays is { Length: > 0 })
         {
             meta.RetryDelays = attr.Delays;
         }
@@ -123,14 +148,11 @@ internal static class PolicyResolver
         if (attr.Scope == TimeoutScope.Total)
         {
             // A Total budget is measured from enqueue, so it cannot be resolved once the job is running.
-            // WARP002 catches this at build time; this is the backstop for handlers it cannot see.
+            // WARP002 catches this at build time; both arms below are inert backstops, never throws — a
+            // throw here lands in Retry's catch and burns the whole budget on a static misconfiguration.
             if (fromHandler)
             {
-                throw new WarpException(
-                    $"[Timeout(Scope = Total)] is declared on handler '{handlerType!.Name}', but a Total-scoped "
-                    + "timeout is a wall-clock budget measured from enqueue — its deadline must be stamped at "
-                    + "publish, before any handler is known. Declare Total-scoped timeouts on the request/job "
-                    + "type; PerAttempt timeouts may stay on the handler.");
+                return TimeoutStamp.TotalOnHandler;
             }
 
             if (meta.TimeoutDeadlineUtc == null)

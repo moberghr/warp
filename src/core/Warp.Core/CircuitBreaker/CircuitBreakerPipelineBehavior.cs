@@ -29,18 +29,13 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
     {
         // Only job-backed executions participate: an in-memory Send has no row to reschedule when the
         // circuit is open, and saga proxies (IPolicyExemptHandler) own their own reschedule logic.
-        if (request is not IJob && request is not IMessage)
-        {
-            return await next(request, cancellationToken);
-        }
-
-        if (PolicyResolver.IsPolicyExempt(_jobContext.HandlerType))
+        if (PolicyResolver.Bypasses(request, _jobContext))
         {
             return await next(request, cancellationToken);
         }
 
         var attr = GetCircuitBreakerAttribute();
-        var groupKey = attr?.Group ?? typeof(TRequest).Name;
+        var groupKey = attr?.Group ?? DefaultGroupKey(request);
         var options = _options.Value;
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
@@ -146,6 +141,14 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
             LogMessage = $"Rescheduled due to circuit breaker '{groupKey}' ({reason})",
         };
     }
+
+    // A message fans out to N handlers, each its own dependency boundary: keying the default circuit on
+    // the MESSAGE type would let one flaky handler open the circuit for every sibling. A routed child
+    // therefore defaults to its handler type; a direct job keeps the request type.
+    private string DefaultGroupKey(TRequest request) =>
+        request is IMessage && _jobContext.HandlerType is { } handlerType
+            ? handlerType.Name
+            : typeof(TRequest).Name;
 
     private CircuitBreakerAttribute? GetCircuitBreakerAttribute() =>
         PolicyResolver.ResolveCircuitBreaker(_jobContext.HandlerType, typeof(TRequest));

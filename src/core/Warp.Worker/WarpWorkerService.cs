@@ -200,12 +200,6 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 activity?.SetTag(WarpTelemetryAttributes.WarpJobAttempt, 1);
             }
 
-            if (jobContext.Metadata.TryGetValue(WarpTelemetryAttributes.RetryMetadataMaxRetriesKey, out var maxRetriesObj)
-                && maxRetriesObj is long maxRetries)
-            {
-                activity?.SetTag(WarpTelemetryAttributes.WarpJobMaxAttempts, maxRetries + 1);
-            }
-
             handlerStopwatch = Stopwatch.StartNew();
             await ExecuteJob(job, handlerScope.ServiceProvider, jobCts.Token);
             handlerStopwatch.Stop();
@@ -218,6 +212,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, cancellationToken);
 
             // Read metadata and outcome from handler scope before disposing
+            JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
             job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
             var successOutcome = jobContext.Outcome;
             jobContext.ProgressCollector = null;
@@ -315,6 +310,14 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             job.CurrentWorkerId = null;
             job.LastKeepAlive = null;
 
+            // Same as the success and failure arms: the policy stamped for this attempt (§8.8) lives only
+            // in the handler-scope context until a finalizing write persists it. Dropping it here would
+            // make a cancelled-then-requeued job re-resolve — the one path that broke stamp-once.
+            if (jobContext != null)
+            {
+                job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
+            }
+
             // Match FinalizeJobState (and the dispatcher's cancel arm): emit the hourly bucket alongside the
             // lifetime row, or a cancellation is invisible on the Counters chart and the lifetime total stops
             // reconciling with the sum of its own buckets.
@@ -369,6 +372,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             // for this attempt (§8.8) would let the next one re-resolve to something else.
             if (jobContext != null)
             {
+                JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
                 job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
             }
 

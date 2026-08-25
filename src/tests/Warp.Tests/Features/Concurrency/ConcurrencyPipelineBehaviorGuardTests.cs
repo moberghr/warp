@@ -36,6 +36,33 @@ public class ConcurrencyPipelineBehaviorGuardTests
     }
 
     [TimedFact]
+    public async Task InMemorySendOfJobShapedType_NoJobRow_PassesThroughWithoutAcquiring()
+    {
+        // `mediator.Send(new ReconcileLedger())` where the type is an IJob carrying a contract [Mutex]:
+        // there is no row to Skip or requeue, so gating it would turn the caller's result into a silent
+        // `default!`. The scoped JobContext of a non-worker scope has no JobId — that is the discriminator.
+        var ctx = new JobContext();
+        var semaphore = new Mock<IWarpSemaphoreProvider>(MockBehavior.Strict);
+        var behavior = Build<ContractMutexJob, Unit>(ctx, semaphore.Object);
+
+        var handlerRan = false;
+        var result = await behavior.HandleAsync(
+            new ContractMutexJob(),
+            (req, ct) =>
+            {
+                handlerRan = true;
+                return Task.FromResult(Unit.Value);
+            },
+            CancellationToken.None);
+
+        result.ShouldBe(Unit.Value);
+        handlerRan.ShouldBeTrue();
+        ctx.Outcome.ShouldBeNull();
+        ctx.Metadata.ShouldBeEmpty();
+        semaphore.VerifyNoOtherCalls();
+    }
+
+    [TimedFact]
     public async Task PolicyExemptHandler_WithMutexMetadata_PassesThroughWithoutAcquiring()
     {
         // Saga proxies serialize on their own per-correlation mutex — an outer concurrency slot on
@@ -100,4 +127,7 @@ public class ConcurrencyPipelineBehaviorGuardTests
 
     [Semaphore("guard-sem", 2)]
     private sealed class SemaphoreHandler;
+
+    [Mutex("ledger")]
+    private sealed class ContractMutexJob : IJob;
 }

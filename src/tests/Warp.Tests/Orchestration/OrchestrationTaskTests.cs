@@ -981,4 +981,132 @@ public abstract class OrchestrationTaskTestsBase : IAsyncLifetime
         batch.ShouldNotBeNull();
         batch.CurrentState.ShouldBe(State.Deleted);
     }
+
+    [TimedFact]
+    public async Task RunOrchestration_AllDeletedChildren_OnAnyFinished_ActivatesContinuation()
+    {
+        // OnAnyFinishedState means "run the continuation whatever happened to the work". A parent whose
+        // children were all policy-skipped or cancelled is a finished state; failing its continuation as an
+        // orphan of a deleted parent (in the same tick!) leaves the caller with no path to run it.
+        var ctx = _fixture.CreateContext();
+        var batchId = Guid.NewGuid();
+        var continuationId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = batchId,
+            Kind = JobKind.Batch,
+            CurrentState = State.Processing,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            JobCount = 1,
+            ContinuationOptions = ContinuationOptions.OnAnyFinishedState,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Deleted,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = batchId,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = continuationId,
+            Kind = JobKind.Job,
+            CurrentState = State.Awaiting,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = batchId,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act — finalize the parent, then activate the continuation (two ticks, like the Failed variant)
+        var orchCtx1 = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(orchCtx1, TimeProvider.System, TimeSpan.FromDays(1)).RunOrchestrationCoreAsync(CancellationToken.None);
+        var orchCtx2 = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(orchCtx2, TimeProvider.System, TimeSpan.FromDays(1)).RunOrchestrationCoreAsync(CancellationToken.None);
+
+        // Assert
+        var readCtx = _fixture.CreateContext();
+        var continuation = await readCtx.Set<Job>().FindAsync([continuationId], Xunit.TestContext.Current.CancellationToken);
+        continuation.ShouldNotBeNull();
+        continuation.CurrentState.ShouldBe(State.Enqueued);
+    }
+
+    [TimedFact]
+    public async Task RunOrchestration_PartiallyCancelledBatch_FinalizesDeletedNotCompleted()
+    {
+        // CancelBatch after two of five children completed: three units of work never ran. Reporting the
+        // batch Completed — and firing its OnlyOnSucceeded continuation — is the same false green as the
+        // fully-cancelled case; a Deleted child is not a success, so the parent is Deleted.
+        var ctx = _fixture.CreateContext();
+        var batchId = Guid.NewGuid();
+        var continuationId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = batchId,
+            Kind = JobKind.Batch,
+            CurrentState = State.Processing,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            JobCount = 3,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Completed,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = batchId,
+        });
+        for (var i = 0; i < 2; i++)
+        {
+            ctx.Set<Job>().Add(new Job
+            {
+                Id = Guid.NewGuid(),
+                Kind = JobKind.Job,
+                CurrentState = State.Deleted,
+                CreateTime = DateTime.UtcNow,
+                ScheduleTime = DateTime.UtcNow,
+                Queue = "default",
+                ParentJobId = batchId,
+            });
+        }
+
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = continuationId,
+            Kind = JobKind.Job,
+            CurrentState = State.Awaiting,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = batchId,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var orchCtx1 = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(orchCtx1, TimeProvider.System, TimeSpan.FromDays(1)).RunOrchestrationCoreAsync(CancellationToken.None);
+        var orchCtx2 = _fixture.CreateContext();
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(orchCtx2, TimeProvider.System, TimeSpan.FromDays(1)).RunOrchestrationCoreAsync(CancellationToken.None);
+
+        // Assert
+        var readCtx = _fixture.CreateContext();
+        var batch = await readCtx.Set<Job>().FirstOrDefaultAsync(j => j.Id == batchId, Xunit.TestContext.Current.CancellationToken);
+        batch.ShouldNotBeNull();
+        batch.CurrentState.ShouldBe(State.Deleted);
+
+        // The OnlyOnSucceeded continuation must not run — it follows the deleted-parent path, not activation.
+        var continuation = await readCtx.Set<Job>().FindAsync([continuationId], Xunit.TestContext.Current.CancellationToken);
+        continuation.ShouldNotBeNull();
+        continuation.CurrentState.ShouldBe(State.Failed);
+    }
 }

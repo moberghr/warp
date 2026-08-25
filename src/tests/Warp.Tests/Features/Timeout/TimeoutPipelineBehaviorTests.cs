@@ -249,6 +249,40 @@ public class TimeoutPipelineBehaviorTests
     }
 
     [TimedFact]
+    public async Task HandlerTotalTimeout_IsInertAndWarnsOnce_NeverThrows()
+    {
+        // A handler-declared Scope = Total cannot be honoured at execution (WARP002 is the build-time
+        // gate). The runtime backstop must not throw from inside the pipeline: an outer Retry would
+        // read the WarpException as a handler failure and burn the entire retry budget on a static
+        // misconfiguration. Warn once per request type and run the handler without the timeout.
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid(), HandlerType = typeof(HandlerWithTotalTimeout) };
+        var logger = new CapturingLogger<TimeoutPipelineBehavior<HandlerTotalRequest, Unit>>();
+        var behavior = new TimeoutPipelineBehavior<HandlerTotalRequest, Unit>(
+            ctx, time, Options.Create(new TimeoutOptions()), logger);
+
+        var handlerRuns = 0;
+        for (var i = 0; i < 2; i++)
+        {
+            var result = await behavior.HandleAsync(
+                new HandlerTotalRequest(),
+                (req, ct) =>
+                {
+                    handlerRuns++;
+                    return Task.FromResult(Unit.Value);
+                },
+                CancellationToken.None);
+
+            result.ShouldBe(Unit.Value);
+        }
+
+        handlerRuns.ShouldBe(2);
+        ctx.Outcome.ShouldBeNull();
+        ctx.Metadata.ContainsKey("TimeoutSeconds").ShouldBeFalse();
+        logger.Warnings.ShouldBe(1);
+    }
+
+    [TimedFact]
     public async Task ContractTotalTimeout_NoDeadline_RefusedNotRedefined_WarnsOnce()
     {
         // SC5b: a recurring firing whose CONTRACT declares Scope = Total has no publish-time
@@ -321,6 +355,11 @@ public class TimeoutPipelineBehaviorTests
 
     [Timeout(1)]
     private sealed class ContractTimedRequest : IJob;
+
+    [Timeout(30, Scope = TimeoutScope.Total)]
+    private sealed class HandlerWithTotalTimeout;
+
+    private sealed class HandlerTotalRequest : IJob;
 
     [Timeout(30, Scope = TimeoutScope.Total)]
     private sealed class ContractTotalTimedRequest : IJob;
