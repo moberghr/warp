@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, Tooltip as ChartTooltip, Legend } from 'chart.js';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingState, ErrorState } from '@/components/PageState';
@@ -7,13 +8,13 @@ import {
   buildFamilySeries,
   buildFamilyTable,
   buildOutcomeRows,
+  familyBySlug,
   historyTokens,
   parseCounterKey,
   presentFamilies,
   type CounterEntry,
   type CounterRow,
   type FamilyDef,
-  type FamilyId,
   type FamilySeries,
   type MetricRow,
 } from './counterModel';
@@ -80,6 +81,15 @@ function tokenLabel(token: string): string {
   return TOKEN_LABELS[token] ?? token.charAt(0).toUpperCase() + token.slice(1);
 }
 
+// A unitless row (CLS) is a score, not a duration — rendering it as "70ms" is wrong twice over.
+function formatLatency(value: number | null, unitless: boolean): string {
+  if (unitless) {
+    return value === null ? '—' : value.toFixed(2);
+  }
+
+  return formatMs(value);
+}
+
 function formatMs(ms: number | null): string {
   if (ms === null) return '—';
   if (ms < 1000) return `${Math.round(ms)}ms`;
@@ -105,7 +115,10 @@ function formatCell(token: string, value: number | undefined): string {
 
 export default function CountersPage() {
   const [historyHours, setHistoryHours] = useState(24);
-  const [tab, setTab] = useState<FamilyId>('outcomes');
+  // The active tab lives in the URL, like /jobs/:state and /messages/:state — so a tab can be
+  // linked to, survives a refresh, and the back button steps through tabs.
+  const { family: slug } = useParams<{ family?: string }>();
+  const navigate = useNavigate();
   const [metricByFamily, setMetricByFamily] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState('');
   const { data: counters, isLoading, isError } = useCounters();
@@ -116,9 +129,10 @@ export default function CountersPage() {
     [counters, history],
   );
 
-  // The active tab is derived rather than corrected in an effect: a family can disappear between refetches
-  // (its last counter aged out), and falling back to the first present family keeps the page rendering.
-  const family = families.find((f) => f.id === tab) ?? families[0];
+  // A family the URL names is honoured even when it currently holds no counters, so a shared link
+  // explains itself ("nothing here yet") instead of silently bouncing to another tab. Only an
+  // unrecognised slug falls back.
+  const family = familyBySlug(slug) ?? families[0];
 
   if (isError) return <ErrorState message="Unable to load counters" />;
   if (isLoading || !counters) return <LoadingState />;
@@ -143,7 +157,7 @@ export default function CountersPage() {
             {families.map((f) => (
               <button
                 key={f.id}
-                onClick={() => { setTab(f.id); setFilter(''); }}
+                onClick={() => { navigate(`/counters/${f.slug}`); setFilter(''); }}
                 className={`px-3 py-1 text-sm rounded-md transition-colors ${
                   family.id === f.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'
                 }`}
@@ -314,10 +328,10 @@ function MetricTableRow({
           {formatCell(token, row.values[token])}
         </td>
       ))}
-      {hasAvg && <td className="px-4 py-2 text-right font-mono tabular-nums">{formatMs(row.avgMs)}</td>}
+      {hasAvg && <td className="px-4 py-2 text-right font-mono tabular-nums">{formatLatency(row.avgMs, row.unitless)}</td>}
       {hasPercentile && row.percentiles.map((p) => (
         <td key={p.label} className="px-4 py-2 text-right font-mono tabular-nums">
-          {p.overflow ? `>${formatMs(p.ms)}` : formatMs(p.ms)}
+          {p.overflow ? `>${formatLatency(p.ms, row.unitless)}` : formatLatency(p.ms, row.unitless)}
         </td>
       ))}
     </tr>

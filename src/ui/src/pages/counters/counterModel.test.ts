@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   FAMILIES,
+  familyBySlug,
   OVERFLOW_BUCKET,
   buildFamilySeries,
   buildFamilyTable,
@@ -301,5 +302,60 @@ describe('presentFamilies', () => {
 
   it('routes unrecognised keys to the other family so nothing is hidden', () => {
     expect(presentFamilies([{ key: 'someaddon:thing', value: 1 }], []).map((f) => f.id)).toEqual(['other']);
+  });
+});
+
+describe('familyBySlug', () => {
+  it('resolves every family from its URL slug', () => {
+    for (const family of FAMILIES) {
+      expect(familyBySlug(family.slug)?.id).toBe(family.id);
+    }
+  });
+
+  it('gives every family a distinct, URL-safe slug', () => {
+    const slugs = FAMILIES.map((x) => x.slug);
+
+    expect(new Set(slugs).size).toBe(slugs.length);
+    for (const slug of slugs) {
+      expect(slug).toMatch(/^[a-z][a-z-]*$/);
+    }
+  });
+
+  it('returns undefined for an unknown or missing slug, so the page can fall back', () => {
+    expect(familyBySlug('not-a-family')).toBeUndefined();
+    expect(familyBySlug(undefined)).toBeUndefined();
+  });
+});
+
+describe('unitless vitals', () => {
+  it('unscales CLS and marks it unitless, so it is not rendered as a duration', () => {
+    // CLS is folded x1000 to fit the shared integer histogram; 100 in the bucket is a 0.10 score.
+    const table = buildFamilyTable(
+      [
+        { key: 'clientevent:vital:CLS:count', value: 10 },
+        { key: 'clientevent:vital:CLS:dur', value: 700 },
+        { key: 'clientevent:vital:CLS:pct:100', value: 10 },
+      ],
+      family('client'),
+    );
+
+    expect(table.rows[0].unitless).toBe(true);
+    expect(table.rows[0].avgMs).toBeCloseTo(0.07);
+    expect(table.rows[0].percentiles[0].ms).toBeCloseTo(0.1);
+  });
+
+  it('leaves millisecond vitals alone', () => {
+    const table = buildFamilyTable(
+      [
+        { key: 'clientevent:vital:LCP:count', value: 10 },
+        { key: 'clientevent:vital:LCP:dur', value: 23_000 },
+        { key: 'clientevent:vital:LCP:pct:2500', value: 10 },
+      ],
+      family('client'),
+    );
+
+    expect(table.rows[0].unitless).toBe(false);
+    expect(table.rows[0].avgMs).toBe(2300);
+    expect(table.rows[0].percentiles[0].ms).toBe(2500);
   });
 });

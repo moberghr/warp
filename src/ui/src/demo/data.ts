@@ -281,6 +281,12 @@ export function getStatsHistoryPoints(hours: number): StatsHistoryPoint[] {
 // it. retried-jobs (61) is below requeued-retry (138) because it counts distinct jobs, not retry events.
 export function getCountersDemo() {
   return [
+    // Keys the page does not recognise, so the "Other" tab has something to show. This is the shape
+    // an addon writing its own counters produces — it needs no per-key wiring to appear.
+    { key: 'acme:invoices:exported', value: 1284 },
+    { key: 'acme:invoices:export-failed', value: 7 },
+    { key: 'acme:ledger:reconciled', value: 903 },
+
     { key: 'stats:succeeded', value: 15847 },
 
     // failed: 29 + 6 attributed, 12 unattributed
@@ -373,6 +379,10 @@ function perDimensionCounters() {
     { key: `deadline:${qualified('Acme.Reports.GenerateReportRequest')}:count`, value: 421 },
     { key: `deadline:${qualified('Acme.Reports.GenerateReportRequest')}:miss`, value: 9 },
     { key: `deadline:${qualified('Acme.Payments.ProcessPaymentRequest')}:count`, value: 1118 },
+    { key: `deadline:${qualified('Acme.Payments.ProcessPaymentRequest')}:miss`, value: 4 },
+    // The breaching one: a nightly export whose deadline is plainly too tight.
+    { key: `deadline:${qualified('Acme.Ledger.NightlyExportRequest')}:count`, value: 96 },
+    { key: `deadline:${qualified('Acme.Ledger.NightlyExportRequest')}:miss`, value: 31 },
 
     { key: 'adapter:payments:success', value: 4820 },
     { key: 'adapter:payments:failed', value: 37 },
@@ -386,6 +396,19 @@ function perDimensionCounters() {
     { key: 'adapter:shipping:success', value: 2044 },
     { key: 'adapter:shipping:failed', value: 96 },
     { key: 'adapter:shipping:dur', value: 918_000 },
+    { key: 'adapter:shipping:pct:250', value: 1400 },
+    { key: 'adapter:shipping:pct:1000', value: 620 },
+    { key: 'adapter:shipping:pct:5000', value: 120 },
+    { key: 'adapter:shipping:grp:eu-west:success', value: 1502 },
+    { key: 'adapter:shipping:grp:us-east:success', value: 542 },
+    // The dependency that fell over: the breaker opened and most calls never left the process.
+    { key: 'adapter:inventory:success', value: 611 },
+    { key: 'adapter:inventory:failed', value: 148 },
+    { key: 'adapter:inventory:circuitopen', value: 906 },
+    { key: 'adapter:inventory:dur', value: 447_060 },
+    { key: 'adapter:inventory:pct:500', value: 380 },
+    { key: 'adapter:inventory:pct:2500', value: 190 },
+    { key: 'adapter:inventory:pct:10000', value: 41 },
 
     { key: 'endpoint:POST /orders:success', value: 9210 },
     { key: 'endpoint:POST /orders:failed', value: 18 },
@@ -394,7 +417,25 @@ function perDimensionCounters() {
     { key: 'endpoint:POST /orders:pct:100', value: 2500 },
     { key: 'endpoint:POST /orders:pct:500', value: 328 },
     { key: 'endpoint:GET /orders/{id}:success', value: 24188 },
+    { key: 'endpoint:GET /orders/{id}:failed', value: 41 },
     { key: 'endpoint:GET /orders/{id}:dur', value: 483_760 },
+    { key: 'endpoint:GET /orders/{id}:pct:10', value: 18400 },
+    { key: 'endpoint:GET /orders/{id}:pct:25', value: 5100 },
+    { key: 'endpoint:GET /orders/{id}:pct:100', value: 729 },
+    // Inbound webhooks from two vendors — noisy, as receivers usually are.
+    { key: 'endpoint:POST /webhooks/receive:success', value: 2456 },
+    { key: 'endpoint:POST /webhooks/receive:failed', value: 73 },
+    { key: 'endpoint:POST /webhooks/receive:dur', value: 161_216 },
+    { key: 'endpoint:POST /webhooks/receive:pct:25', value: 1600 },
+    { key: 'endpoint:POST /webhooks/receive:pct:50', value: 700 },
+    { key: 'endpoint:POST /webhooks/receive:pct:250', value: 229 },
+    // The slow one: a synchronous report download that sometimes times out at the gateway.
+    { key: 'endpoint:GET /reports/{id}/download:success', value: 778 },
+    { key: 'endpoint:GET /reports/{id}/download:failed', value: 47 },
+    { key: 'endpoint:GET /reports/{id}/download:dur', value: 763_575 },
+    { key: 'endpoint:GET /reports/{id}/download:pct:1000', value: 520 },
+    { key: 'endpoint:GET /reports/{id}/download:pct:2500', value: 210 },
+    { key: 'endpoint:GET /reports/{id}/download:pct:10000', value: 95 },
 
     { key: 'clientevent:total:error:count', value: 184 },
     { key: 'clientevent:total:log:count', value: 2910 },
@@ -408,6 +449,29 @@ function perDimensionCounters() {
     { key: 'clientevent:vital:LCP:pct:4000', value: 224 },
     { key: 'clientevent:vital:INP:count', value: 2014 },
     { key: 'clientevent:vital:INP:dur', value: 289_000 },
+    { key: 'clientevent:vital:INP:pct:100', value: 1290 },
+    { key: 'clientevent:vital:INP:pct:250', value: 560 },
+    { key: 'clientevent:vital:INP:pct:500', value: 164 },
+    { key: 'clientevent:vital:FCP:count', value: 2014 },
+    { key: 'clientevent:vital:FCP:dur', value: 3_222_400 },
+    { key: 'clientevent:vital:FCP:pct:1000', value: 1100 },
+    { key: 'clientevent:vital:FCP:pct:2500', value: 780 },
+    { key: 'clientevent:vital:FCP:pct:4000', value: 134 },
+    { key: 'clientevent:vital:TTFB:count', value: 2014 },
+    { key: 'clientevent:vital:TTFB:dur', value: 926_440 },
+    { key: 'clientevent:vital:TTFB:pct:250', value: 1240 },
+    { key: 'clientevent:vital:TTFB:pct:500', value: 620 },
+    { key: 'clientevent:vital:TTFB:pct:1000', value: 154 },
+    // CLS is unitless, so it is folded x1000 into the shared integer histogram and unscaled on read:
+    // these buckets are thousandths, and the page renders 0.10 rather than 100.
+    { key: 'clientevent:vital:CLS:count', value: 2014 },
+    { key: 'clientevent:vital:CLS:dur', value: 141_000 },
+    { key: 'clientevent:vital:CLS:pct:50', value: 1420 },
+    { key: 'clientevent:vital:CLS:pct:100', value: 470 },
+    { key: 'clientevent:vital:CLS:pct:250', value: 124 },
+    { key: 'clientevent:name:error:ChunkLoadError:count', value: 34 },
+    { key: 'clientevent:name:event:checkout_started:count', value: 1840 },
+    { key: 'clientevent:name:event:checkout_completed:count', value: 1655 },
   ];
 }
 
@@ -455,12 +519,27 @@ export function getCountersHistoryDemo(hours: number) {
     points.push({ hour: hourDate.toISOString(), key: 'qwait:default:hist:count', value: Math.round(base) });
     points.push({ hour: hourDate.toISOString(), key: 'qwait:default:hist:dur', value: Math.round(base * 70) });
     points.push({ hour: hourDate.toISOString(), key: 'qwait:reports:hist:count', value: Math.round(base * 0.03) });
+    points.push({ hour: hourDate.toISOString(), key: 'qwait:warp-webhooks:hist:count', value: Math.round(base * 0.18) });
     points.push({ hour: hourDate.toISOString(), key: 'adapter:payments:hist:success', value: Math.round(base * 0.3) });
     points.push({ hour: hourDate.toISOString(), key: 'adapter:payments:hist:failed', value: Math.round(failed * 0.2) });
+    points.push({ hour: hourDate.toISOString(), key: 'adapter:shipping:hist:success', value: Math.round(base * 0.13) });
+    points.push({ hour: hourDate.toISOString(), key: 'adapter:shipping:hist:failed', value: Math.round(failed * 0.5) });
+    // The dependency that degrades mid-window: calls fall away as the breaker opens.
+    points.push({ hour: hourDate.toISOString(), key: 'adapter:inventory:hist:success', value: business && i > 6 ? Math.round(base * 0.09) : Math.round(base * 0.01) });
+    points.push({ hour: hourDate.toISOString(), key: 'adapter:inventory:hist:circuitopen', value: business && i <= 6 ? Math.round(base * 0.14) : 0 });
     points.push({ hour: hourDate.toISOString(), key: 'endpoint:POST /orders:hist:success', value: Math.round(base * 0.6) });
+    points.push({ hour: hourDate.toISOString(), key: 'endpoint:GET /orders/{id}:hist:success', value: Math.round(base * 1.5) });
+    points.push({ hour: hourDate.toISOString(), key: 'endpoint:POST /webhooks/receive:hist:success', value: Math.round(base * 0.16) });
+    points.push({ hour: hourDate.toISOString(), key: 'endpoint:POST /webhooks/receive:hist:failed', value: Math.round(failed * 0.35) });
+    points.push({ hour: hourDate.toISOString(), key: 'endpoint:GET /reports/{id}/download:hist:success', value: Math.round(base * 0.05) });
+    points.push({ hour: hourDate.toISOString(), key: 'deadline:' + qualified('Acme.Reports.GenerateReportRequest') + ':hist:count', value: Math.round(base * 0.03) });
+    points.push({ hour: hourDate.toISOString(), key: 'deadline:' + qualified('Acme.Ledger.NightlyExportRequest') + ':hist:miss', value: business ? 0 : Math.round(2 + seeded(i + 90) * 3) });
     points.push({ hour: hourDate.toISOString(), key: 'clientevent:total:error:hist', value: Math.round(failed * 0.4) });
+    points.push({ hour: hourDate.toISOString(), key: 'clientevent:total:log:hist', value: Math.round(base * 0.2) });
+    points.push({ hour: hourDate.toISOString(), key: 'clientevent:total:vital:hist', value: Math.round(base * 0.42) });
     points.push({ hour: hourDate.toISOString(), key: 'errorgroup:job-nullref-processorder', value: Math.round(failed * 0.5) });
     points.push({ hour: hourDate.toISOString(), key: 'warpsys:records-dropped:adapter', value: business && i % 7 === 0 ? 14 : 0 });
+    points.push({ hour: hourDate.toISOString(), key: 'warpsys:records-dropped:client', value: business && i % 5 === 0 ? 31 : 0 });
   }
 
   return points;

@@ -24,45 +24,51 @@ Totals are written independently of their breakdown, so an outcome no addon clai
 
 Each event also writes a parallel `:{yyyy-MM-dd-HH}` hourly key so the chart can break the same metric down by hour.
 
-## Queue health
-
-The **Queues** family is where per-queue health lives (it had its own page until 6.x — the data was always the same two folds, so it now sits beside every other durable metric):
-
-- **Backlog** — how many eligible jobs are waiting right now, and the **oldest_age_seconds** of the frontmost one (sampled every ~60s).
-- **count** — how many jobs have been picked up (the queue-wait sample count).
-- **Queue-wait latency** — **Avg**, **p95** and **p99** between a job becoming eligible and a worker claiming it. Queues is the one family reporting two percentiles: a queue is judged on its tail, not its middle.
-
-Percentiles come from durable aggregates, so they stay meaningful after old job rows are cleaned up. A rising backlog with a growing oldest-age is the classic "not enough worker capacity for this queue" signal.
-
-See the [Queue metrics](/docs/features/queue-metrics) feature page for the meters and how the numbers are computed.
-
 ## The page
 
 One **tab per counter family**, because the families measure different things in different units and reading them as one alphabetical list does not work: a per-job-type duration SUM in the hundreds of thousands of milliseconds sits next to an execution count of 2, and the dimension is an assembly-qualified type name. Only families that actually have data get a tab.
-
-| Tab | Rows | Key family |
-|---|---|---|
-| **Job outcomes** | The global outcome hierarchy | `stats:` |
-| **Job types** / **Handlers** | One row per job type / handler: executions, failures, avg, p95 | `jobstat:` |
-| **Queues** | Queue-wait latency plus the current backlog gauge, one row per queue | `qwait:`, `qbacklog:` |
-| **Deadlines** | Total-scope timeout attainment per job type | `deadline:` |
-| **Adapters** / **Endpoints** | Outbound / inbound call outcomes and latency | `adapter:`, `endpoint:` |
-| **Client** | Browser events by type and name, web vitals at **p75** | `clientevent:` |
-| **Issues** | Hourly occurrence trend per error-group fingerprint (chart only) | `errorgroup:` |
-| **System** | Records dropped by the lossy recording pipelines | `warpsys:` |
-| **Other** | Anything the page does not recognise, rendered raw | addon-defined |
 
 Each tab has:
 
 **Hourly history chart** — one series per dimension, for **one metric at a time** (the metric toggle sits next to 24h / 7d). Plotting a duration sum on the same axis as a count flattens the count to zero, so they are never charted together. The ten largest series are drawn and the rest stay in the table below, which is stated on screen. Hovering shows only the series that actually moved in that hour, largest first — zeros are dropped. Built-in outcome metrics get fixed colors in family hues (succeeded green, failed reds, deleted grays, requeued ambers — breakdown keys tint their parent's hue); everything else gets a deterministic color hashed from the key so it stays the same across reloads.
 
-**Table** — one row per dimension, with a filter box. Names are shortened for display (`ProcessOrderRequest` with `Acme.Orders` beneath it; the full assembly-qualified name is the row's tooltip). Duration sums and latency-histogram buckets are never shown as raw columns — they are folded into derived **Avg** and **p95** (p75 for web vitals) columns instead. A per-application slice is a separate row, never merged into the cluster-wide one.
+**Table** — one row per dimension, with a filter box. Names are shortened for display (`ProcessOrderRequest` with `Acme.Orders` beneath it; the full assembly-qualified name is the row's tooltip). Duration sums and latency-histogram buckets are never shown as raw columns — they are folded into derived **Avg** and **p95** (p75 for web vitals) columns instead.
 
-The **Job outcomes** tab keeps its hierarchy rendering: the derived `unsuccessful` umbrella over `failed` and `deleted`, each state total over its reason rows, with the unattributed remainder (muted) when a total exceeds the sum of its reasons — and a loud `over-attributed` row for the impossible opposite direction. Hourly variants are filtered out of every table; the charts consume them separately.
+Hourly variants are filtered out of every table; the charts consume them separately.
 
 import Screenshot from '@site/src/components/Screenshot';
 
 <Screenshot light="/img/screenshots/17-counters.png" dark="/img/screenshots/17-counters-dark.png" alt="Counters" />
+
+## The tabs
+
+Each tab is its own route — `/counters/{family}` — so a tab can be linked to, survives a refresh, and the
+back button steps through them. They measure different subjects in different units, which is why they are
+separate views rather than one list.
+
+| Tab | Measures | Keys |
+|---|---|---|
+| [Job outcomes](./job-outcomes) | Global outcome totals and their reason breakdown | `stats:` |
+| [Job types](./job-types) | Executions and latency per published job type | `jobstat:` |
+| [Handlers](./handlers) | The same, sliced by the handler that ran | `jobstat:` |
+| [Queues](./queues) | Queue-wait latency and the backlog gauge | `qwait:`, `qbacklog:` |
+| [Deadlines](./deadlines) | Timeout attainment per job type | `deadline:` |
+| [Adapters](./adapters) | Outbound calls per adapter, operation and group | `adapter:` |
+| [Endpoints](./endpoints) | Inbound calls per method and route template | `endpoint:` |
+| [Client](./client) | Browser events and web vitals | `clientevent:` |
+| [Issues](./issues) | Hourly trend per error-group fingerprint | `errorgroup:` |
+| [System](./system) | Records dropped by the lossy pipelines | `warpsys:` |
+| [Other](./other) | Anything unrecognised, including addon counters | addon-defined |
+
+Only families that hold data get a tab. A URL naming a family with no counters still opens — it says so
+rather than bouncing you elsewhere, so a shared link keeps explaining itself.
+
+## Per-application rows
+
+Where a metric is sliced by application, the per-app keys live under their own prefix (`jobstat-app:`,
+`adapter-app:` and so on) and appear as **separate rows**, never merged into the cluster-wide one. Merging
+them would double every count, since a per-app slice is a slice *of* the global figure rather than
+additional work.
 
 ## Counters vs. Dashboard
 

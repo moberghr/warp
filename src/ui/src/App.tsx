@@ -146,6 +146,7 @@ function App() {
             <Route path="/applications/:id" element={<ApplicationDetailPage />} />
             <Route path="/applications" element={<ApplicationsPage />} />
             <Route path="/counters" element={<CountersPage />} />
+            <Route path="/counters/:family" element={<CountersPage />} />
             <Route path="/concurrency" element={<ConcurrencyLimitsPage />} />
             <Route path="/ratelimits" element={<RateLimitsPage />} />
             <Route path="/sagas/:id" element={<SagaDetailPage />} />

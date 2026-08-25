@@ -30,6 +30,18 @@ const pages = [
   { name: '14-recurring-detail', path: '/recurring/RGFpbHkgUmVwb3J0' },
   { name: '15-server-detail', path: `/servers/${DEMO_IDS.server1}` },
   { name: '17-counters', path: '/counters' },
+  // One per counter family — each tab is its own route now, so these are plain URL visits.
+  { name: '36-counters-job-outcomes', path: '/counters/job-outcomes' },
+  { name: '37-counters-job-types', path: '/counters/job-types' },
+  { name: '38-counters-handlers', path: '/counters/handlers' },
+  { name: '39-counters-queues', path: '/counters/queues' },
+  { name: '40-counters-deadlines', path: '/counters/deadlines' },
+  { name: '41-counters-adapters', path: '/counters/adapters' },
+  { name: '42-counters-endpoints', path: '/counters/endpoints' },
+  { name: '43-counters-client', path: '/counters/client' },
+  { name: '44-counters-issues', path: '/counters/issues' },
+  { name: '45-counters-system', path: '/counters/system' },
+  { name: '46-counters-other', path: '/counters/other' },
   // Endpoint observability. These four were hand-captured until the demo router grew /endpoints
   // routes, which is why they alone kept showing the pre-grouping nav. The endpoint id is the
   // URL-safe base64 of "{METHOD} {template}" (mirrors EndpointRouteId).
