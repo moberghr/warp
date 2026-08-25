@@ -105,6 +105,10 @@ internal static class BindingEmitter
             var isWholeFormCollection = source == BindingSource.Form
                 && IsFormType(memberType, formFile: null, formFileCollection, formCollection);
 
+            var isFormFile = source == BindingSource.Form
+                && !isWholeFormCollection
+                && IsFormType(memberType, formFile, formFileCollection: null, formCollection: null);
+
             targets.Add(new BindingTarget(
                 memberName,
                 memberType,
@@ -114,7 +118,8 @@ internal static class BindingEmitter
                 propertyName,
                 HasClrDefault(attributedSymbol),
                 attributedSymbol.Locations.FirstOrDefault(),
-                isWholeFormCollection));
+                isWholeFormCollection,
+                isFormFile));
         }
 
         // Form request: an uploaded file / form fields (plus optional route/query/header). [AsParameters]

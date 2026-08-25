@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 
 namespace Warp.Http.SourceGenerator.Emitters;
 
@@ -99,6 +100,19 @@ internal static class DelegateEmitter
         for (var i = 0; i < nonBodyTargets.Length; i++)
         {
             var target = nonBodyTargets[i];
+
+            // Swashbuckle throws on a [FromForm]-annotated IFormFile, so a single file is emitted bare
+            // and Minimal API binds it from the form by PARAMETER NAME — hence the key becomes the name.
+            if (target.IsFormFile && CanBindFormFileByName(target.SourceKey))
+            {
+                var fileParamName = "@" + target.SourceKey;
+                paramNames[target] = fileParamName;
+                sb.Append(", ").Append(target.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))
+                    .Append(' ').Append(fileParamName);
+
+                continue;
+            }
+
             var attribute = target.Source switch
             {
                 BindingSource.Route => $"[global::Microsoft.AspNetCore.Mvc.FromRoute(Name = \"{Escape(target.SourceKey)}\")]",
@@ -179,6 +193,23 @@ internal static class DelegateEmitter
         }
 
         sb.Append(" }");
+    }
+
+    // The generated name must be a legal identifier and must not collide with the p{index} names the
+    // other parameters use.
+    private static bool CanBindFormFileByName(string key)
+    {
+        if (!SyntaxFacts.IsValidIdentifier(key))
+        {
+            return false;
+        }
+
+        if (key.Length > 1 && key[0] == 'p' && key.Skip(1).All(char.IsDigit))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static string Escape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
