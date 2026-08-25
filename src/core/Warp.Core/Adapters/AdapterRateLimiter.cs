@@ -31,7 +31,10 @@ public interface IAdapterRateLimiter
     /// admin <c>RateLimitOverride</c> (precedence override &gt; persisted &gt; local). On overflow the
     /// behaviour follows <paramref name="overflow"/>: <see cref="AdapterRateLimitOverflow.Wait"/> delays up
     /// to <paramref name="maxWait"/> for the next window then throws; <see cref="AdapterRateLimitOverflow.FailFast"/>
-    /// throws immediately. Both throw <see cref="AdapterRateLimitedException"/>.
+    /// throws immediately. Both throw <see cref="AdapterRateLimitedException"/>, carrying the computed
+    /// <see cref="AdapterRateLimitedException.RetryAfter"/>. <see cref="AdapterRateLimitOverflow.Respond429"/>
+    /// waits exactly like <see cref="AdapterRateLimitOverflow.Wait"/> and also throws — the HTTP binding
+    /// converts that throw into the synthetic <c>429</c>, so the limiter's contract is the same for both.
     /// </summary>
     Task AcquireAsync(string adapter, int limit, int perSeconds, AdapterRateLimitOverflow overflow, TimeSpan maxWait, CancellationToken ct);
 }
@@ -90,14 +93,16 @@ internal sealed class AdapterRateLimiter<TContext> : IAdapterRateLimiter
             if (overflow == AdapterRateLimitOverflow.FailFast)
             {
                 throw new AdapterRateLimitedException(
-                    $"Adapter '{adapter}' shared rate limit exceeded ({limit}/{perSeconds}s); failing fast.");
+                    $"Adapter '{adapter}' shared rate limit exceeded ({limit}/{perSeconds}s); failing fast.",
+                    Nonnegative(attempt.RetryAfter));
             }
 
             var elapsed = _timeProvider.GetElapsedTime(startedAt);
             if (elapsed >= maxWait)
             {
                 throw new AdapterRateLimitedException(
-                    $"Adapter '{adapter}' shared rate limit wait exceeded {maxWait.TotalMilliseconds:F0}ms.");
+                    $"Adapter '{adapter}' shared rate limit wait exceeded {maxWait.TotalMilliseconds:F0}ms.",
+                    Nonnegative(attempt.RetryAfter));
             }
 
             var delay = attempt.RetryAfter <= TimeSpan.Zero ? TimeSpan.FromMilliseconds(25) : attempt.RetryAfter;
@@ -326,6 +331,10 @@ internal sealed class AdapterRateLimiter<TContext> : IAdapterRateLimiter
                 adapter);
         }
     }
+
+    // The refusal carries the wait the limiter already computed (the remainder of the current window) so a
+    // caller need not retry blind. A clock skew could make it negative; report zero rather than a past due.
+    private static TimeSpan Nonnegative(TimeSpan retryAfter) => retryAfter > TimeSpan.Zero ? retryAfter : TimeSpan.Zero;
 
     private static DateTime FloorWindow(DateTime nowUtc, int perSeconds)
     {
