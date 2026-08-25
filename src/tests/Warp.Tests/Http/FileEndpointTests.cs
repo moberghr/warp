@@ -154,4 +154,35 @@ public sealed class FileEndpointTests
 
         resp.StatusCode.ShouldBe(HttpStatusCode.OK);
     }
+
+    [TimedFact]
+    public void FileUpload_GeneratedParameter_CarriesNoFromFormAttribute()
+    {
+        // Swashbuckle throws SwaggerGeneratorException on a [FromForm]-annotated IFormFile, so the
+        // generated parameter must bind by name instead. Runtime binding is covered above; this pins
+        // the emitted SHAPE, which is what OpenAPI generators read.
+        var result = GeneratorTestHarness.Run("""
+            using Microsoft.AspNetCore.Http;
+            using System.Threading;
+            using System.Threading.Tasks;
+            using Warp.Core.Handlers;
+            using Warp.Http;
+
+            namespace Sample;
+
+            public sealed record Upload(IFormFile File) : IRequest<string>;
+
+            [WarpHttpPost("/upload")]
+            public sealed class UploadHandler : IRequestHandler<Upload, string>
+            {
+                public Task<string> HandleAsync(Upload request, CancellationToken cancellationToken) =>
+                    Task.FromResult(request.File.FileName);
+            }
+            """);
+
+        var generated = string.Join("\n", result.GeneratedTrees.Select(x => x.ToString()));
+
+        generated.ShouldContain("IFormFile @File");
+        generated.ShouldNotContain("FromForm");
+    }
 }

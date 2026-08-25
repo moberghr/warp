@@ -4,10 +4,9 @@ using Shouldly;
 namespace Warp.Tests.Core;
 
 /// <summary>
-/// Build-time half of the addon policy-axis validation (<c>PolicyAxisValidator</c>, WARP001-003).
-/// The runtime half is covered by <see cref="AddonAttributeHandlerValidationTests"/> and is NOT
-/// replaced — these two suites overlap deliberately, because the runtime check is still the backstop
-/// for handlers the generator cannot see.
+/// Build-time half of the policy-axis validation (WARP001-003). Overlaps
+/// <see cref="AddonAttributeHandlerValidationTests"/> deliberately — the runtime check is still the
+/// backstop for handlers the generator cannot see.
 /// </summary>
 [Trait("Category", "NoDb")]
 public sealed class PolicyAxisDiagnosticTests
@@ -42,8 +41,7 @@ public sealed class PolicyAxisDiagnosticTests
 
         diagnostics.Select(x => x.Id).ShouldBe(["WARP001"]);
 
-        // Both ends of the conflict must be named — the whole point is that the reader can find the
-        // other declaration, which by definition is in a different file.
+        // The other declaration is in a different file; the reader needs its name to find it.
         var message = diagnostics[0].GetMessage();
         message.ShouldContain("MutexJob");
         message.ShouldContain("MutexJobHandler");
@@ -52,8 +50,7 @@ public sealed class PolicyAxisDiagnosticTests
     [TimedFact]
     public void MutexOnContractAndSemaphoreOnHandler_ReportsOneFamilyConflict()
     {
-        // Cross-attribute, same family: both write the IConcurrencyMetadata slot, so the contract
-        // [Mutex] would silently shadow the handler [Semaphore]. One conflict, not two.
+        // Same family, different attributes: one conflict, not two.
         var diagnostics = Run("""
             [Mutex("k")]
             public sealed class FamilyJob : IJob;
@@ -72,8 +69,6 @@ public sealed class PolicyAxisDiagnosticTests
     [TimedFact]
     public void RetryOnContractAndHandler_ReportsBothAxesConflict()
     {
-        // Retry's handler side was legal-but-dead before the policy axis; it now joins the conflict
-        // check even though it is NOT rejected on unsupported shapes.
         var diagnostics = Run("""
             [Retry(2)]
             public sealed class RetryJob : IJob;
@@ -91,8 +86,7 @@ public sealed class PolicyAxisDiagnosticTests
     [TimedFact]
     public void ContractInReferencedAssembly_StillDetectsConflict()
     {
-        // The contract's attribute is read from METADATA, not syntax — the shared-contracts layout
-        // (Contracts.dll + Worker.dll) is exactly where a shadowed handler policy is hardest to spot.
+        // The contract's attribute is read from metadata, not syntax.
         const string contracts = """
             using Warp.Core.Concurrency;
             using Warp.Core.Handlers;
@@ -121,8 +115,6 @@ public sealed class PolicyAxisDiagnosticTests
     [TimedFact]
     public void MutexOnInMemoryRequestHandler_ReportsUnsupportedShape()
     {
-        // The #242 failure mode: the policy behaviours early-return for a non-job-backed request, so
-        // the attribute is dead code wherever it sits on this handler.
         var diagnostics = Run("""
             public sealed class PlainRequest : IRequest<string>;
 
@@ -156,9 +148,7 @@ public sealed class PolicyAxisDiagnosticTests
     [TimedFact]
     public void RetryOnInMemoryRequestHandler_IsTolerated()
     {
-        // Retry and CircuitBreaker have always been tolerated (as dead code) on non-job handlers.
-        // Rejecting them here now would be an unspecced breaking change — the runtime table says the
-        // same thing, and this test is what keeps the two tables in step.
+        // Tolerated by the runtime table too; this test keeps the two tables in step.
         var diagnostics = Run("""
             public sealed class TolerantRequest : IRequest<string>;
 
@@ -176,8 +166,6 @@ public sealed class PolicyAxisDiagnosticTests
     [TimedFact]
     public void TotalScopedTimeoutOnHandler_ReportsTotalScopeError()
     {
-        // A Total budget is measured from enqueue, so its deadline must be stamped at publish — before
-        // any handler is known.
         var diagnostics = Run("""
             public sealed class TotalJob : IJob;
 
@@ -210,7 +198,6 @@ public sealed class PolicyAxisDiagnosticTests
     [TimedFact]
     public void PolicyOnHandlerAxisAlone_IsAccepted()
     {
-        // The shape the policy axis exists to allow: the handler is the code touching the resource.
         var diagnostics = Run("""
             public sealed class CleanJob : IJob;
 
@@ -235,7 +222,6 @@ public sealed class PolicyAxisDiagnosticTests
     [TimedFact]
     public void SelfHandlingJobWithPolicy_IsExempt()
     {
-        // Handler type == request type: there is only one axis, so there is nothing to shadow.
         var diagnostics = Run("""
             [Mutex("k")]
             public sealed class SelfHandling : IJob, IJobHandler<SelfHandling>

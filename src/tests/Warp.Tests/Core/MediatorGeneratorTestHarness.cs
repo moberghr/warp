@@ -33,10 +33,9 @@ internal static class MediatorGeneratorTestHarness
     }
 
     /// <summary>
-    /// Runs the generator and returns the diagnostics IT reported (WARP001-003), as opposed to
-    /// <see cref="RunAndGetCompilationErrors"/>, which returns diagnostics of the resulting compilation.
-    /// Generator diagnostics live on the run result and never appear in <c>Compilation.GetDiagnostics</c>,
-    /// so the two methods see disjoint sets.
+    /// Returns the diagnostics the GENERATOR reported (WARP001-003). These live on the run result and
+    /// never appear in <c>Compilation.GetDiagnostics</c>, so this and
+    /// <see cref="RunAndGetCompilationErrors"/> see disjoint sets.
     /// </summary>
     public static IReadOnlyList<Diagnostic> RunAndGetGeneratorDiagnostics(
         string primarySource,
