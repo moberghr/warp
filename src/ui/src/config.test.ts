@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { safeUrl } from './config';
 
 describe('safeUrl (branding URL guard)', () => {
@@ -30,5 +30,40 @@ describe('safeUrl (branding URL guard)', () => {
     expect(safeUrl('')).toBeNull();
     expect(safeUrl(null)).toBeNull();
     expect(safeUrl(undefined)).toBeNull();
+  });
+});
+
+describe('brandName (host-supplied product name)', () => {
+  afterEach(() => {
+    delete window.warpBrandName;
+    vi.resetModules();
+  });
+
+  async function loadConfig() {
+    vi.resetModules();
+
+    return (await import('./config')).config;
+  }
+
+  it('defaults to Warp when the host set nothing', async () => {
+    expect((await loadConfig()).brandName).toBe('Warp');
+  });
+
+  it('uses the host value when set', async () => {
+    window.warpBrandName = 'Acme Jobs';
+
+    expect((await loadConfig()).brandName).toBe('Acme Jobs');
+  });
+
+  it('falls back rather than rendering a blank wordmark for an empty or whitespace value', async () => {
+    window.warpBrandName = '   ';
+
+    expect((await loadConfig()).brandName).toBe('Warp');
+  });
+
+  it('falls back when the host explicitly injected null', async () => {
+    window.warpBrandName = null;
+
+    expect((await loadConfig()).brandName).toBe('Warp');
   });
 });

@@ -6,6 +6,7 @@ import { DataTable } from '@/components/DataTable';
 import { useBackgroundServices } from '@/api/hooks/useBackgroundServices';
 import { ServiceScope } from '@/types/backgroundServices';
 import type { BackgroundServiceListItem } from '@/types/backgroundServices';
+import { PageHeading } from '@/components/PageHeading';
 
 export default function BackgroundServicesList() {
   const navigate = useNavigate();
@@ -73,7 +74,7 @@ export default function BackgroundServicesList() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-4">Background Services</h1>
+      <PageHeading className="mb-4">Background Services</PageHeading>
 
       <DataTable
         columns={columns}

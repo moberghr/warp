@@ -1,0 +1,1 @@
+function e(){return new URLSearchParams(window.location.search).has(`demo`)||!1}var t=Date.UTC(2026,4,25,11,0,0);function n(){let e=Date;class n extends e{constructor(...e){e.length===0?super(t):super(...e)}static now(){return t}}globalThis.Date=n}export{n,e as r,t};

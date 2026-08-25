@@ -13,6 +13,10 @@ using Warp.Core.RateLimit;
 using Warp.Core.Retry;
 using Warp.Core.Timeout;
 using Warp.Core.Webhooks;
+using Warp.Dashboard;
+using Warp.Dashboard.Extensions;
+using Warp.Dashboard.Extensions.Retry;
+using Warp.Dashboard.Push;
 using Warp.Demo.ServiceDefaults;
 using Warp.Http;
 using Warp.Http.ClientObservability;
@@ -24,10 +28,6 @@ using Warp.Test.Shared.Handlers.Sagas;
 using Warp.Test.Shared.Shop;
 using Warp.TestApp;
 using Warp.TestApp.Authentication;
-using Warp.UI;
-using Warp.UI.DashboardPush;
-using Warp.UI.Extensions;
-using Warp.UI.Extensions.Retry;
 using Warp.Worker;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -79,7 +79,7 @@ builder.Services.AddCors(options =>
         policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
 });
 
-builder.Services.AddSingleton<IWarpUIExtension, RetryUIExtension>();
+builder.Services.AddSingleton<IWarpDashboardExtension, RetryDashboardExtension>();
 builder.Services.AddWarp<TestContext>(options =>
 {
     options.UsePostgreSql();
@@ -183,7 +183,7 @@ app.UseWarpHttpObservability();
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
-app.MapWarpUI().RequireWarpDashboardLogin();
+app.MapWarpDashboard().RequireWarpDashboardLogin();
 app.MapControllers();
 app.MapWarpHttp();
 

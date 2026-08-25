@@ -74,6 +74,33 @@ opt.AddAdapter<IAcmePaymentsApi>("acme-payments", a => a.BaseUrl = "https://api.
 
 Your existing Refit interface, DTOs, and auth `DelegatingHandler`s are unchanged. Operation names come from the interface method names (`ChargeCard`, `RefundCharge`) — never the URL heuristic, never subject to the cardinality guard. `RefitSettings` (custom serializers for XML-over-REST, auth token getters, exception factories) pass through as an optional third argument.
 
+#### Refit wraps pipeline exceptions
+
+Refit wraps **every** exception escaping the `HttpClient` pipeline in `ApiRequestException`, with the real cause on `InnerException`. So the natural catch is silently never taken:
+
+```csharp
+catch (AdapterRateLimitedException)   // never fires when the call goes through Refit
+{
+}
+```
+
+This is Refit behaviour, not Warp's — it applies to any exception any handler in the chain throws — and the `RefitSettings` exception factory cannot undo it: that builds an exception *from a response* (`Func<HttpResponseMessage, Task<Exception>>`), and a transport-level throw never produces one. Two further shapes to know: a method returning `ApiResponse<T>` does **not** throw at all (the failure lands on `.Error` instead), so an interface mixing `T` and `ApiResponse<T>` returns needs handling in both places.
+
+For the shared rate limiter, pick either:
+
+```csharp
+// 1. Status, not exception — the refusal arrives as an ordinary 429 on both Refit shapes.
+a.UseSharedRateLimit(100, 60, AdapterRateLimitOverflow.Respond429, maxWait: TimeSpan.FromSeconds(5));
+
+// 2. Stay on a throwing mode and match on the chain rather than the type.
+catch (Exception ex) when (ex.IsAdapterRateLimited())
+{
+    var wait = ex.GetAdapterRetryAfter() ?? TimeSpan.FromSeconds(1);
+}
+```
+
+`IsAdapterRateLimited()` / `GetAdapterRetryAfter()` / `FindAdapterRateLimited()` (in `Warp.Core.Adapters`) walk `InnerException` and every `AggregateException` branch, so they stay correct whether or not the refusal arrived wrapped.
+
 ### Manual scope (non-HTTP transports)
 
 Vendor SDKs, SOAP proxies, anything without an `HttpClient` — inject `IWarpAdapters` and wrap the call:
@@ -279,8 +306,15 @@ Overflow behaviour:
 |---|---|
 | `Wait` | bounded async delay for the next lease/window, up to `maxWait`, then throws `AdapterRateLimitedException` |
 | `FailFast` | throws `AdapterRateLimitedException` immediately |
+| `Respond429` | waits like `Wait`, then answers the call with a synthetic `429` carrying `Retry-After` — no throw |
 
-Both surface as a `Throttled` outcome on telemetry, counters, and the call log.
+All three surface as a `Throttled` outcome on telemetry, counters, and the call log.
+
+The refusal carries the wait the limiter computed — `AdapterRateLimitedException.RetryAfter` on the throwing modes, the `Retry-After` header (whole seconds, rounded up, plus an `x-warp-retry-after-ms` companion) under `Respond429` — so a caller retries on the limiter's timing instead of blind.
+
+`Respond429` sends no request; the response is what the vendor would have answered had the call gone out. It exists for clients that classify by HTTP status rather than exception type — see [Refit wraps pipeline exceptions](#refit-wraps-pipeline-exceptions). Pass `maxWait: TimeSpan.Zero` for fail-fast-with-429. A **real** vendor 429 is unaffected and still records `Failed`: the synthetic response is recognised by type, not by status.
+
+The 429 is synthesised at the **outermost** Warp handler, after every handler you added via `ConfigureHttpClientBuilder`. Inside the pipeline a refusal is the same throw all three modes raise, so a resilience handler — which treats 429 as retryable — never retries Warp's own self-throttle back into the limiter, and never counts it toward its circuit breaker. Choosing `Respond429` changes what your *caller* sees and nothing else.
 
 Admin overrides ride the existing `RateLimitOverride` table.
 

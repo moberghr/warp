@@ -554,39 +554,8 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
         return await query.CountAsync();
     }
 
-    private string? GetSafeDatabaseConnection()
-    {
-        var connectionString = _context.Database.GetConnectionString();
-        if (string.IsNullOrEmpty(connectionString))
-        {
-            return null;
-        }
-
-        // A connection string can legally contain the same key twice — ADO.NET's
-        // SqlConnectionStringBuilder resolves this by taking the LAST value. Tests
-        // that scope per-server connection pools by appending `Application Name=...`
-        // to an already-configured base string produce this shape, and a naive
-        // ToDictionary throws on the duplicate. Fold via last-wins.
-        var parts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var raw in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var trimmed = raw.Trim();
-            var eq = trimmed.IndexOf('=', StringComparison.Ordinal);
-            if (eq <= 0)
-            {
-                continue;
-            }
-
-            parts[trimmed[..eq].Trim()] = trimmed[(eq + 1)..].Trim();
-        }
-
-        var isPostgres = parts.ContainsKey("Host");
-        var provider = isPostgres ? "PostgreSQL Server" : "SQL Server";
-        var host = parts.GetValueOrDefault("Host") ?? parts.GetValueOrDefault("Server") ?? parts.GetValueOrDefault("Data Source") ?? "unknown";
-        var db = parts.GetValueOrDefault("Database") ?? parts.GetValueOrDefault("Initial Catalog") ?? string.Empty;
-
-        return $"{provider}: Host: {host}, DB: {db}";
-    }
+    private string? GetSafeDatabaseConnection() =>
+        DatabaseConnectionDescriptor.Describe(_context.Database.ProviderName, _context.Database.GetConnectionString());
 
     public async Task<WorkerDetailModel?> GetWorkerById(Guid workerId)
     {

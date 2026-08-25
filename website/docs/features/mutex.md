@@ -256,15 +256,15 @@ Admin rows are sticky across redeploys — they live in your application's datab
 
 ## Saturation and observability
 
-`Wait`-mode requeues are emitted to the global `stats:requeued` counter — the same one Retry uses. If you see `requeued` outpacing `succeeded` for a given handler over time, the slot count is too low; increase the limit (via attribute, extension, or admin override) until the rate equalizes. The [Counters page](/docs/ui/counters) has the chart.
+`Wait`-mode requeues are emitted to the global `stats:requeued` counter — the same one Retry uses. If you see `requeued` outpacing `succeeded` for a given handler over time, the slot count is too low; increase the limit (via attribute, extension, or admin override) until the rate equalizes. The [Counters page](/docs/dashboard/health/counters) has the chart.
 
 ## Dashboard
 
 Jobs cancelled by Skip-mode appear as `Deleted` with a log entry `Cancelled — '{key}' full ({N} slots)`. Jobs requeued by Wait-mode appear in the audit trail as `Requeued` with a similar message and continue retrying until a slot is free. The concurrency key is visible in the job's metadata section on the detail page.
 
-The [Concurrency limits page](/docs/ui/concurrency-limits) at `/warp/concurrency` lists every admin-managed limit with inline editing, deletion, and creation. The page is hidden from the nav when `opt.AddConcurrency()` is not registered.
+The [Concurrency limits page](/docs/dashboard/runtime/concurrency-limits) at `/warp/concurrency` lists every admin-managed limit with inline editing, deletion, and creation. The page is hidden from the nav when `opt.AddConcurrency()` is not registered.
 
 ## Related
 
 - [Semaphore](./semaphore.md) — short reference for the `[Semaphore]` attribute and `WithSemaphore` extension. Cross-links back here for full details.
-- [Concurrency limits page](/docs/ui/concurrency-limits) — dashboard docs for runtime overrides.
+- [Concurrency limits page](/docs/dashboard/runtime/concurrency-limits) — dashboard docs for runtime overrides.

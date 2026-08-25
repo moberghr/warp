@@ -1,6 +1,9 @@
 import type { InternalAxiosRequestConfig, AxiosResponse } from 'axios';
 import * as data from './data';
+import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { demoAdapters, demoAdapterDetails, demoAdapterCalls } from './data/adapters';
+import { demoEndpoints, demoEndpointDetails, demoEndpointCalls } from './data/endpoints';
+import { aggregateHistory } from './data/history';
 import { demoWebhooks, demoWebhookDetails, demoWebhookSummary } from './data/webhooks';
 import {
   demoApplications,
@@ -72,6 +75,14 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const adapterResult = routeAdapters(method, url, config);
     if (adapterResult !== undefined) {
       return adapterResult;
+    }
+
+    // Endpoints: the inbound counterpart of adapters. /addons reports endpoints:true in demo mode,
+    // so without these the nav offered a page whose history query fell through to the `{}` fallback
+    // and threw inside the chart.
+    const endpointResult = routeEndpoints(method, url, config);
+    if (endpointResult !== undefined) {
+      return endpointResult;
     }
 
     // Webhooks: /addons reports webhooks:true in demo mode (see routeGet), so the nav is visible
@@ -203,27 +214,7 @@ function routeAdapters(
 
   // GET /adapters/history — global overview, aggregated across every demo adapter's per-hour history.
   if (method === 'get' && url.startsWith('/adapters/history')) {
-    const map = new Map<string, { hour: string; calls: number; errors: number; durSum: number }>();
-    for (const detail of Object.values(demoAdapterDetails)) {
-      for (const p of detail.history) {
-        const g = map.get(p.hour) ?? { hour: p.hour, calls: 0, errors: 0, durSum: 0 };
-        g.calls += p.calls;
-        g.errors += p.errors;
-        g.durSum += p.avgDurationMs * p.calls;
-        map.set(p.hour, g);
-      }
-    }
-    const points = [...map.values()]
-      .sort((a, b) => (a.hour < b.hour ? -1 : 1))
-      .map((g) => ({
-        hour: g.hour,
-        calls: g.calls,
-        errors: g.errors,
-        errorRate: g.calls === 0 ? 0 : g.errors / g.calls,
-        avgDurationMs: g.calls === 0 ? 0 : g.durSum / g.calls,
-      }));
-
-    return resolve(points, config);
+return resolve(aggregateHistory(Object.values(demoAdapterDetails).map((x) => x.history)), config);
   }
 
   // GET /adapters/{name}/calls/{id} — call detail (checked before the {name} detail route)
@@ -243,6 +234,51 @@ function routeAdapters(
   if (method === 'get' && detailMatch) {
     const name = decodeURIComponent(detailMatch[1]);
     const detail = demoAdapterDetails[name];
+    if (!detail) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(detail, config);
+  }
+
+  return undefined;
+}
+
+function routeEndpoints(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (method !== 'get' || !url.startsWith('/endpoints')) {
+    return undefined;
+  }
+
+  // GET /endpoints — list
+  if (url === '/endpoints' || url.startsWith('/endpoints?')) {
+    return resolve(demoEndpoints, config);
+  }
+
+  // GET /endpoints/history — overview series, aggregated across every demo endpoint (checked before
+  // the {id} detail route, which would otherwise swallow "history" as an id).
+  if (url.startsWith('/endpoints/history')) {
+return resolve(aggregateHistory(Object.values(demoEndpointDetails).map((x) => x.history)), config);
+  }
+
+  // GET /endpoints/{id}/calls/{callId} — call detail (checked before the {id} detail route)
+  const callMatch = url.match(/^\/endpoints\/([^/?]+)\/calls\/([^/?]+)$/);
+  if (callMatch) {
+    const call = demoEndpointCalls[decodeURIComponent(callMatch[2])];
+    if (!call) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(call, config);
+  }
+
+  // GET /endpoints/{id} — detail
+  const detailMatch = url.match(/^\/endpoints\/([^/?]+)$/);
+  if (detailMatch) {
+    const detail = demoEndpointDetails[decodeURIComponent(detailMatch[1])];
     if (!detail) {
       return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
     }
@@ -741,11 +777,6 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
     return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true };
   }
 
-  // Queue metrics (§8.26) — the Queues page (always-on nav).
-  if (url === '/queues/metrics') {
-    return data.getQueueMetricsDemo();
-  }
-
   // Client (browser) observability (§8.27).
   if (url === '/client/summary') {
     return data.getClientSummaryDemo();
@@ -868,15 +899,16 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   if (url === '/recurring') {
     return data.paginate(data.recurringJobs, page, pageSize);
   }
-  if (/^\/recurring\/\d+\/jobs$/.test(url)) {
-    const id = Number(url.split('/')[2]);
+  // {id} is the URL-safe base64 of the definition's NAME (mirrors UrlSafeId / lib/urlSafeId).
+  if (/^\/recurring\/[^/]+\/jobs$/.test(url)) {
+    const name = decodeUrlSafeId(url.split('/')[2]);
 
-    return data.paginate(data.getRecurringHistory(id), page, pageSize);
+    return data.paginate(data.getRecurringHistory(name), page, pageSize);
   }
-  if (/^\/recurring\/\d+$/.test(url)) {
-    const id = Number(url.split('/').pop());
+  if (/^\/recurring\/[^/]+$/.test(url)) {
+    const name = decodeUrlSafeId(url.split('/').pop()!);
 
-    return data.getRecurringDetail(id);
+    return data.getRecurringDetail(name);
   }
 
   // Servers

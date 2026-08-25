@@ -140,6 +140,42 @@ The tradeoff: 6 unused tables in deployments that don't use these addons. They'r
 
 If you compose your own `IModelCustomizer` chain, the Warp customizer must run **after** your entity registrations (it doesn't depend on yours, but composability is one-directional).
 
+### Naming conventions are honoured; type-changing conventions are not
+
+The distinction matters because Warp's server-internal work runs on its own context (see [Server-internal logging](#server-internal-logging--the-warp-server-context) below). That context mirrors the **resolved table, schema, and column names** from your model — which is why `UseSnakeCaseNamingConvention()` and friends need no re-pinning — but it does not replay your `ConfigureConventions`, and Warp's providers compare against literals of a fixed type in their atomic claim statements. So **no model-wide convention you declare reaches a Warp entity**: `ApplyWarpModel` strips every storage-affecting setting a convention injected into Warp's own properties — conversions *and* facets — and re-declares its own:
+
+| What your convention sets | On your entities | On Warp's entities |
+|---|---|---|
+| Column/table **names** (`UseSnakeCaseNamingConvention()` etc.) | applies | **applies** — honoured by design |
+| Conversions and their value comparers (`Properties<Enum>().HaveConversion<string>()`, `Properties<DateTime>().HaveConversion<TConv, TComparer>()`, `Properties<Guid>()`, `Properties<bool>()`, …) | applies | never applies — enums stay `integer`, timestamps native + Warp's UTC converter, everything else native, change tracking on default comparers |
+| Facets (`HaveMaxLength(n)`, `HaveColumnType(...)`, `AreUnicode(...)`, `HavePrecision(...)`) | applies | never applies — a global length cap cannot truncate `Job.Message` |
+
+That makes model-wide conventions safe to declare — they apply to your entities and stop at Warp's:
+
+```csharp
+protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+{
+    // Your entities get string enums and capped strings. Warp's are untouched.
+    configurationBuilder.Properties<Enum>().HaveConversion<string>();
+    configurationBuilder.Properties<string>().HaveMaxLength(256);
+}
+```
+
+The ownership pass is scoped to Warp's own entity CLR types by assembly, so it never reaches an entity of yours — including one that happens to live in a `Warp.*` namespace, and including entities a third-party addon contributes through `WarpConfiguration.EntityConfigurators` (those live in the addon's assembly; an addon should pin its own storage the same way).
+
+Two edges remain, both deliberate:
+
+- **A hand-written override placed *after* `ApplyWarpModel`** in your `OnModelCreating` still wins for *facets* — the escape hatch if you genuinely need, say, a longer cap or a different collation on one Warp column. It is for **non-type-changing** facets only: an override that changes the column's underlying *type* (`HasColumnType("jsonb")` on `Job.Message`, say) recreates exactly the divergence this section exists to prevent — your migration reshapes the physical column while Warp's internal server context keeps mapping the declared type, and the server tasks fail on their own tables. Overriding a Warp column's **conversion** from any position is rejected by the startup check below.
+- **A runtime convention you add via `ConfigureConventions(c => c.Conventions.Add(...))`** runs at model *finalization*, after `OnModelCreating` entirely, where no build-time ordering can neutralize it. Warp validates the finalized model at host startup instead (and once per model in non-hosted publisher processes): a Warp column whose storage was retyped — through a converter, a provider type, or a foreign `DateTime` round-trip converter that would smuggle local-time semantics — fails fast with an error naming the property, instead of the worker silently never executing a job while server tasks fail every tick with `42883: operator does not exist: text = integer`.
+
+:::info How this behaved in earlier versions
+
+- **4.x and earlier:** conventions applied to Warp's columns unchecked. A global enum→string conversion physically created `Job.Kind`/`Job.CurrentState` as `text`, and Warp silently never executed a job ([#279](https://github.com/moberghr/warp/issues/279)); a global `HaveMaxLength` silently truncated `Job.Message`. A hand-set converter on a Warp property was preserved.
+- **5.0.0:** enum, `DateTime` and `Guid` conversions were pinned; other conversions, comparers and all facets still leaked through, and nothing was validated.
+- **5.1.0 (current):** the full ownership pass above — every conversion, comparer and facet convention stops at Warp's entities, and the startup check catches what model building cannot.
+
+:::
+
 ## Testing handlers that publish
 
 A handler that calls `IPublisher.Enqueue` / `Publish` / `Schedule` doesn't need a database to be unit-testable. Warp ships `InMemoryPublisher` (in `Warp.Core.Testing`) — a drop-in `IPublisher` that records every publish in memory and never touches a `DbContext`:

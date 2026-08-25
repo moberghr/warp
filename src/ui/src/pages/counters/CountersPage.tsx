@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, Tooltip as ChartTooltip, Legend } from 'chart.js';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingState, ErrorState } from '@/components/PageState';
@@ -7,17 +8,18 @@ import {
   buildFamilySeries,
   buildFamilyTable,
   buildOutcomeRows,
+  familyBySlug,
   historyTokens,
   parseCounterKey,
   presentFamilies,
   type CounterEntry,
   type CounterRow,
   type FamilyDef,
-  type FamilyId,
   type FamilySeries,
   type MetricRow,
 } from './counterModel';
 import type { CounterHistoryPoint } from '@/types';
+import { PageHeading } from '@/components/PageHeading';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, ChartTooltip, Legend);
 
@@ -79,6 +81,15 @@ function tokenLabel(token: string): string {
   return TOKEN_LABELS[token] ?? token.charAt(0).toUpperCase() + token.slice(1);
 }
 
+// A unitless row (CLS) is a score, not a duration — rendering it as "70ms" is wrong twice over.
+function formatLatency(value: number | null, unitless: boolean): string {
+  if (unitless) {
+    return value === null ? '—' : value.toFixed(2);
+  }
+
+  return formatMs(value);
+}
+
 function formatMs(ms: number | null): string {
   if (ms === null) return '—';
   if (ms < 1000) return `${Math.round(ms)}ms`;
@@ -104,7 +115,10 @@ function formatCell(token: string, value: number | undefined): string {
 
 export default function CountersPage() {
   const [historyHours, setHistoryHours] = useState(24);
-  const [tab, setTab] = useState<FamilyId>('outcomes');
+  // The active tab lives in the URL, like /jobs/:state and /messages/:state — so a tab can be
+  // linked to, survives a refresh, and the back button steps through tabs.
+  const { family: slug } = useParams<{ family?: string }>();
+  const navigate = useNavigate();
   const [metricByFamily, setMetricByFamily] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState('');
   const { data: counters, isLoading, isError } = useCounters();
@@ -115,16 +129,26 @@ export default function CountersPage() {
     [counters, history],
   );
 
-  // The active tab is derived rather than corrected in an effect: a family can disappear between refetches
-  // (its last counter aged out), and falling back to the first present family keeps the page rendering.
-  const family = families.find((f) => f.id === tab) ?? families[0];
+  // A family the URL names is honoured even when it currently holds no counters, so a shared link
+  // explains itself ("No counters") instead of silently bouncing to another tab. It also joins the
+  // tab strip while it is the one being viewed, so the highlighted tab always matches the URL.
+  const named = familyBySlug(slug);
+  const family = named ?? families[0];
+  const tabs = named && !families.includes(named) ? [...families, named] : families;
 
   if (isError) return <ErrorState message="Unable to load counters" />;
   if (isLoading || !counters) return <LoadingState />;
 
+  // Every rendered tab has a canonical URL. A bare /counters and an unrecognised slug both
+  // redirect to the family actually shown, so the address bar never lies about the content —
+  // a typo'd link shared around would otherwise show Job outcomes under a URL saying "queue".
+  if (family && (!slug || !named)) {
+    return <Navigate to={`/counters/${family.slug}`} replace />;
+  }
+
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-2">Counters</h1>
+      <PageHeading className="mb-2">Counters</PageHeading>
       <p className="text-sm text-muted-foreground mb-4">
         Every durable metric Warp folds through <code>Counter</code> &rarr; <code>Statistic</code>, grouped by the
         subsystem that wrote it. These are recorded events and only ever increase &mdash; a requeue never rewrites
@@ -139,10 +163,10 @@ export default function CountersPage() {
       ) : (
         <>
           <div className="flex flex-wrap gap-1 mb-4 border-b pb-2">
-            {families.map((f) => (
+            {tabs.map((f) => (
               <button
                 key={f.id}
-                onClick={() => { setTab(f.id); setFilter(''); }}
+                onClick={() => { navigate(`/counters/${f.slug}`); setFilter(''); }}
                 className={`px-3 py-1 text-sm rounded-md transition-colors ${
                   family.id === f.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'
                 }`}
@@ -269,9 +293,9 @@ function FamilyBody({
                   </th>
                 ))}
                 {table.hasAvg && <th className="text-right font-semibold px-4 py-2 w-24">Avg</th>}
-                {table.hasPercentile && (
-                  <th className="text-right font-semibold px-4 py-2 w-24">{table.percentileLabel}</th>
-                )}
+                {table.hasPercentile && table.percentileLabels.map((label) => (
+                  <th key={label} className="text-right font-semibold px-4 py-2 w-24">{label}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -313,12 +337,12 @@ function MetricTableRow({
           {formatCell(token, row.values[token])}
         </td>
       ))}
-      {hasAvg && <td className="px-4 py-2 text-right font-mono tabular-nums">{formatMs(row.avgMs)}</td>}
-      {hasPercentile && (
-        <td className="px-4 py-2 text-right font-mono tabular-nums">
-          {row.percentileOverflow ? `>${formatMs(row.percentileMs)}` : formatMs(row.percentileMs)}
+      {hasAvg && <td className="px-4 py-2 text-right font-mono tabular-nums">{formatLatency(row.avgMs, row.unitless)}</td>}
+      {hasPercentile && row.percentiles.map((p) => (
+        <td key={p.label} className="px-4 py-2 text-right font-mono tabular-nums">
+          {p.overflow ? `>${formatLatency(p.ms, row.unitless)}` : formatLatency(p.ms, row.unitless)}
         </td>
-      )}
+      ))}
     </tr>
   );
 }

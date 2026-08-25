@@ -10,11 +10,15 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
 import { shortType, formatDateTime, shortId } from '@/utils/format';
+import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import type { RecurringJobDetailModel, RecurringJobHistoryModel, PagedList } from '@/types';
 import * as api from '@/api';
 
 export default function RecurringDetailPage() {
+  // The route segment is the URL-safe base64 of the definition's NAME (the identity the API keys
+  // on — see lib/urlSafeId). A hand-mangled segment decodes to garbage and the API answers 404.
   const { id } = useParams<{ id: string }>();
+  const name = id ? decodeUrlSafeId(id) : undefined;
   const navigate = useNavigate();
   const [detail, setDetail] = useState<RecurringJobDetailModel | null>(null);
   const [jobs, setJobs] = useState<PagedList<RecurringJobHistoryModel> | null>(null);
@@ -24,21 +28,21 @@ export default function RecurringDetailPage() {
   const [pending, setPending] = useState<'trigger' | 'delete' | 'disable' | null>(null);
 
   useEffect(() => {
-    if (id) {
-      api.getRecurringJobById(Number(id)).then(setDetail).catch(() => setError('Unable to load recurring job'));
+    if (name) {
+      api.getRecurringJob(name).then(setDetail).catch(() => setError('Unable to load recurring job'));
     }
-  }, [id]);
+  }, [name]);
 
   const fetchJobs = useCallback(async () => {
-    if (id) {
+    if (name) {
       try {
-        const result = await api.getRecurringJobJobs(Number(id), page, pageSize);
+        const result = await api.getRecurringJobJobs(name, page, pageSize);
         setJobs(result);
       } catch {
         // Jobs loading failure is non-critical
       }
     }
-  }, [id, page, pageSize]);
+  }, [name, page, pageSize]);
 
   useEffect(() => { fetchJobs(); }, [fetchJobs]);
 
@@ -49,26 +53,23 @@ export default function RecurringDetailPage() {
   // recurring job (billing sweep, reconciliation, etc.) is potentially an outage, so it
   // goes through the confirm dialog like the other destructive actions.
   const handleEnable = async () => {
-    await api.enableRecurringJob(detail.id);
-    const updated = await api.getRecurringJobById(detail.id);
-    setDetail(updated);
+    await api.enableRecurringJob(detail.name);
+    setDetail(await api.getRecurringJob(detail.name));
   };
 
   const handleDisable = async () => {
-    await api.disableRecurringJob(detail.id);
-    const updated = await api.getRecurringJobById(detail.id);
-    setDetail(updated);
+    await api.disableRecurringJob(detail.name);
+    setDetail(await api.getRecurringJob(detail.name));
   };
 
   const handleTrigger = async () => {
-    await api.triggerRecurringJob(detail.id);
-    const updated = await api.getRecurringJobById(detail.id);
-    setDetail(updated);
+    await api.triggerRecurringJob(detail.name);
+    setDetail(await api.getRecurringJob(detail.name));
     fetchJobs();
   };
 
   const handleDelete = async () => {
-    await api.deleteRecurringJob(detail.id);
+    await api.deleteRecurringJob(detail.name);
     navigate('/recurring');
   };
 
@@ -149,7 +150,6 @@ export default function RecurringDetailPage() {
                 <span className="text-muted-foreground">Last Execution:</span>{' '}
                 {detail.lastExecution ? <RelativeTime date={detail.lastExecution} /> : 'Never'}
               </div>
-              <div><span className="text-muted-foreground">ID:</span> <span className="font-mono text-xs">{detail.id}</span></div>
             </CardContent>
           </Card>
 

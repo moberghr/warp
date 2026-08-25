@@ -2,8 +2,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Warp.Core.Events;
+using Warp.Dashboard.Push;
 using Warp.Tests.TestData;
-using Warp.UI.DashboardPush;
 using XunitTestContext = Xunit.TestContext;
 
 namespace Warp.Tests.DashboardPush;

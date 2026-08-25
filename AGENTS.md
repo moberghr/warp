@@ -5,7 +5,7 @@
 
 ## Project
 
-Warp is a distributed job processing and message queue library for .NET 10. Provider-agnostic core (`Warp.Core`) plus Postgres / SQL Server providers, a worker runtime (`Warp.Worker`), a dashboard (`Warp.UI`), and optional HTTP exposure (`Warp.Http`).
+Warp is a distributed job processing and message queue library for .NET 10. Provider-agnostic core (`Warp.Core`) plus Postgres / SQL Server providers, a worker runtime (`Warp.Worker`), a dashboard (`Warp.Dashboard`), and optional HTTP exposure (`Warp.Http`).
 
 ## Critical rules (always apply)
 

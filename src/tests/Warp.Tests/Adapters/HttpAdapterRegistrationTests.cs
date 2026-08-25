@@ -198,6 +198,96 @@ public class HttpAdapterRegistrationTests
     }
 
     [TimedFact]
+    public async Task AddAdapter_Respond429_ReturnsSynthetic429InsteadOfThrowing_AndRecordsThrottled()
+    {
+        // Respond429 answers the call rather than throwing: the caller sees an ordinary 429 carrying the
+        // wait the limiter computed, the transport is never reached, and the outcome stays Throttled (a
+        // bare non-success status would otherwise be recorded Failed).
+        var recorder = new CapturingRecorder();
+        var stub = new CountingStubHandler();
+        var provider = BuildProvider(
+            recorder,
+            "respond-429",
+            a =>
+            {
+                a.UseSharedRateLimit(1, 60, AdapterRateLimitOverflow.Respond429, maxWait: TimeSpan.Zero);
+                a.ConfigureHttpClientBuilder(b => b.ConfigurePrimaryHttpMessageHandler(() => stub));
+            },
+            services => services.AddSingleton<IAdapterRateLimiter>(new RejectingRateLimiter(TimeSpan.FromSeconds(4))));
+
+        await using (provider)
+        {
+            using var client = provider.GetRequiredService<IHttpClientFactory>().CreateClient("respond-429");
+            using var response = await client.GetAsync("https://api.vendor.com/orders", Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+            (response.Headers.RetryAfter?.Delta).ShouldBe(TimeSpan.FromSeconds(4));
+            stub.Invocations.ShouldBe(0);
+            recorder.Records.ShouldHaveSingleItem().Outcome.ShouldBe(AdapterCallOutcome.Throttled);
+        }
+    }
+
+    [TimedFact]
+    public async Task AddAdapter_Respond429_UserHandlersSeeAThrow_NotARetryable429()
+    {
+        // WHERE the conversion happens is load-bearing. A user resilience handler nests INSIDE the Warp
+        // handler and OUTSIDE the rate limiter, and treats 429 as retryable (AddStandardResilienceHandler
+        // does, for both its retry strategy and its circuit breaker). Were the synthetic response born at
+        // the rate-limit handler, every user handler would see Warp's own self-throttle as a retryable
+        // status — retrying it back into the limiter and tripping the breaker on calls the limiter would
+        // have admitted. Converting at the OUTERMOST handler keeps the refusal an exception right up to
+        // the point it leaves Warp, so Respond429 behaves exactly like Wait inside the pipeline.
+        var recorder = new CapturingRecorder();
+        var observer = new OutcomeObservingHandler();
+        var provider = BuildProvider(
+            recorder,
+            "respond-429-inner",
+            a =>
+            {
+                a.ConfigureHttpClientBuilder(b => b.AddHttpMessageHandler(() => observer));
+                a.UseSharedRateLimit(1, 60, AdapterRateLimitOverflow.Respond429, maxWait: TimeSpan.Zero);
+                a.ConfigureHttpClientBuilder(b => b.ConfigurePrimaryHttpMessageHandler(() => new CountingStubHandler()));
+            },
+            services => services.AddSingleton<IAdapterRateLimiter>(new RejectingRateLimiter(TimeSpan.FromSeconds(4))));
+
+        await using (provider)
+        {
+            using var client = provider.GetRequiredService<IHttpClientFactory>().CreateClient("respond-429-inner");
+            using var response = await client.GetAsync("https://api.vendor.com/orders", Ct);
+
+            observer.Invocations.ShouldBe(1);
+            observer.ObservedStatus.ShouldBeNull();
+            observer.ObservedException.ShouldBeOfType<AdapterRateLimitedException>();
+
+            // The caller — outside Warp — still gets the 429.
+            response.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+            recorder.Records.ShouldHaveSingleItem().Outcome.ShouldBe(AdapterCallOutcome.Throttled);
+        }
+    }
+
+    [TimedFact]
+    public async Task AddAdapter_RealVendor429_StaysFailed_NotThrottled()
+    {
+        // The synthetic 429 is recognised by type, not by status — a genuine vendor 429 keeps the
+        // classification it has always had, so existing error rates do not move under this feature.
+        var recorder = new CapturingRecorder();
+        var provider = BuildProvider(
+            recorder,
+            "vendor-429",
+            a => a.ConfigureHttpClientBuilder(b => b.ConfigurePrimaryHttpMessageHandler(
+                () => new StatusStubHandler(HttpStatusCode.TooManyRequests))));
+
+        await using (provider)
+        {
+            using var client = provider.GetRequiredService<IHttpClientFactory>().CreateClient("vendor-429");
+            using var response = await client.GetAsync("https://api.vendor.com/orders", Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+            recorder.Records.ShouldHaveSingleItem().Outcome.ShouldBe(AdapterCallOutcome.Failed);
+        }
+    }
+
+    [TimedFact]
     public async Task AddAdapter_ConfigureHttpClientCalledTwice_ChainsBothDelegatesInOrder()
     {
         // ConfigureHttpClient composes repeated calls manually (existing(client); configure(client)) —
@@ -349,11 +439,64 @@ internal sealed class TypedVendorClient
     }
 }
 
+/// <summary>
+/// A stand-in for a user handler added via <c>ConfigureHttpClientBuilder</c>: records whether the call
+/// came back to it as a response (with what status) or as a throw, and how many times it ran.
+/// </summary>
+internal sealed class OutcomeObservingHandler : DelegatingHandler
+{
+    public int Invocations { get; private set; }
+
+    public HttpStatusCode? ObservedStatus { get; private set; }
+
+    public Exception? ObservedException { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Invocations++;
+
+        try
+        {
+            var response = await base.SendAsync(request, cancellationToken);
+            ObservedStatus = response.StatusCode;
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            ObservedException = ex;
+
+            throw;
+        }
+    }
+}
+
+/// <summary>Returns a fixed status for every request (no network) — used to pin outcome mapping.</summary>
+internal sealed class StatusStubHandler : HttpMessageHandler
+{
+    private readonly HttpStatusCode _status;
+
+    public StatusStubHandler(HttpStatusCode status) => _status = status;
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        => Task.FromResult(new HttpResponseMessage(_status));
+}
+
 /// <summary>Fake <see cref="IAdapterRateLimiter"/> that always rejects — proves the Throttled mapping e2e.</summary>
 internal sealed class RejectingRateLimiter : IAdapterRateLimiter
 {
+    private readonly TimeSpan? _retryAfter;
+
+    public RejectingRateLimiter(TimeSpan? retryAfter = null) => _retryAfter = retryAfter;
+
     public Task AcquireAsync(string adapter, int limit, int perSeconds, AdapterRateLimitOverflow overflow, TimeSpan maxWait, CancellationToken ct)
-        => throw new AdapterRateLimitedException($"Adapter '{adapter}' shared rate limit exceeded; failing fast.");
+    {
+        var message = $"Adapter '{adapter}' shared rate limit exceeded; failing fast.";
+
+        throw _retryAfter is { } retryAfter
+            ? new AdapterRateLimitedException(message, retryAfter)
+            : new AdapterRateLimitedException(message);
+    }
 }
 
 /// <summary>

@@ -10,8 +10,8 @@ using Warp.Core;
 using Warp.Core.Enums;
 using Warp.Core.Models;
 using Warp.Core.Services;
-using Warp.UI;
-using Warp.UI.Endpoints;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
 
 namespace Warp.Tests.Admin;
 
@@ -149,7 +149,7 @@ public class DashboardJsonContractTests
         configureServices(builder.Services);
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(CancellationToken.None);
 

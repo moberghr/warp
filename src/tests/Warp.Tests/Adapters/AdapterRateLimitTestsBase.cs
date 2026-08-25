@@ -125,6 +125,46 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task FailFastOverflow_Throws_CarryingTheComputedRetryAfter()
+    {
+        // The limiter already knows when the window frees up; the refusal must hand that over rather than
+        // leave the caller to retry blind (#284). A 60s window, so the remainder is a large fraction of it.
+        const string adapter = "retryafter-failfast-adapter";
+        const int limit = 1;
+        const int perSeconds = 60;
+
+        var limiter = CreateLimiter();
+
+        await limiter.AcquireAsync(adapter, limit, perSeconds, AdapterRateLimitOverflow.FailFast, TimeSpan.Zero, Ct);
+
+        var refusal = await Should.ThrowAsync<AdapterRateLimitedException>(async () =>
+            await limiter.AcquireAsync(adapter, limit, perSeconds, AdapterRateLimitOverflow.FailFast, TimeSpan.Zero, Ct));
+
+        refusal.RetryAfter.ShouldNotBeNull();
+        refusal.RetryAfter.Value.ShouldBeGreaterThan(TimeSpan.Zero);
+        refusal.RetryAfter.Value.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(perSeconds));
+    }
+
+    [TimedFact]
+    public async Task WaitOverflow_MaxWaitExpires_ThrowsCarryingTheComputedRetryAfter()
+    {
+        const string adapter = "retryafter-wait-adapter";
+        const int limit = 1;
+        const int perSeconds = 60;
+
+        var limiter = CreateLimiter();
+
+        await limiter.AcquireAsync(adapter, limit, perSeconds, AdapterRateLimitOverflow.Wait, TimeSpan.FromMilliseconds(200), Ct);
+
+        var refusal = await Should.ThrowAsync<AdapterRateLimitedException>(async () =>
+            await limiter.AcquireAsync(adapter, limit, perSeconds, AdapterRateLimitOverflow.Wait, TimeSpan.FromMilliseconds(200), Ct));
+
+        refusal.RetryAfter.ShouldNotBeNull();
+        refusal.RetryAfter.Value.ShouldBeGreaterThan(TimeSpan.Zero);
+        refusal.RetryAfter.Value.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(perSeconds));
+    }
+
+    [TimedFact]
     public async Task SharedPolicyConflict_EnforcesPersisted_FlagsDefinition_AndCountsConflict()
     {
         const string adapter = "conflict-adapter";

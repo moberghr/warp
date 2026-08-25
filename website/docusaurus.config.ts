@@ -76,6 +76,32 @@ const config: Config = {
     },
   ],
 
+  // The dashboard docs lived under /docs/ui/ until the section was renamed and grouped to match the
+  // dashboard's own nav. These keep every published URL working instead of 404ing a bookmark.
+  plugins: [
+    [
+      '@docusaurus/plugin-client-redirects',
+      {
+        redirects: [
+          { from: '/docs/ui/overview', to: '/docs/dashboard/overview' },
+          { from: '/docs/ui/jobs', to: '/docs/dashboard/jobs' },
+          { from: '/docs/ui/trace', to: '/docs/dashboard/trace' },
+          { from: '/docs/ui/workers', to: '/docs/dashboard/workers' },
+          { from: '/docs/ui/messages', to: '/docs/dashboard/workloads/messages' },
+          { from: '/docs/ui/batches', to: '/docs/dashboard/workloads/batches' },
+          { from: '/docs/ui/recurring', to: '/docs/dashboard/workloads/recurring' },
+          { from: '/docs/ui/background-services', to: '/docs/dashboard/workloads/background-services' },
+          { from: '/docs/ui/client', to: '/docs/dashboard/traffic/client' },
+          { from: '/docs/ui/concurrency-limits', to: '/docs/dashboard/runtime/concurrency-limits' },
+          { from: '/docs/ui/counters', to: '/docs/dashboard/health/counters' },
+          { from: '/docs/ui/servers', to: '/docs/dashboard/health/applications' },
+          // The Queues page was folded into the Counters page's Queues family.
+          { from: '/docs/ui/queues', to: '/docs/dashboard/health/counters' },
+        ],
+      },
+    ],
+  ],
+
   presets: [
     [
       'classic',
@@ -128,7 +154,7 @@ const config: Config = {
           items: [
             { label: 'Getting Started', to: '/docs/getting-started' },
             { label: 'Patterns', to: '/docs/patterns' },
-            { label: 'UI', to: '/docs/ui/overview' },
+            { label: 'Dashboard', to: '/docs/dashboard/overview' },
             { label: 'Releases', to: '/docs/releases' },
           ],
         },

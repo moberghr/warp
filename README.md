@@ -4,7 +4,7 @@ A distributed job processing, message queue, and in-memory mediator library for 
 
 [![NuGet](https://img.shields.io/nuget/v/Moberg.Warp.Core?label=Warp.Core)](https://www.nuget.org/packages/Moberg.Warp.Core)
 [![NuGet](https://img.shields.io/nuget/v/Moberg.Warp.Worker?label=Warp.Worker)](https://www.nuget.org/packages/Moberg.Warp.Worker)
-[![NuGet](https://img.shields.io/nuget/v/Moberg.Warp.UI?label=Warp.UI)](https://www.nuget.org/packages/Moberg.Warp.UI)
+[![NuGet](https://img.shields.io/nuget/v/Moberg.Warp.Dashboard?label=Warp.Dashboard)](https://www.nuget.org/packages/Moberg.Warp.Dashboard)
 [![NuGet](https://img.shields.io/nuget/v/Moberg.Warp.Http?label=Warp.Http)](https://www.nuget.org/packages/Moberg.Warp.Http)
 [![Docs](https://img.shields.io/badge/docs-moberghr.github.io%2Fwarp-blue)](https://moberghr.github.io/warp/)
 
@@ -31,7 +31,7 @@ A distributed job processing, message queue, and in-memory mediator library for 
 - **Job Metadata** — Attach key-value metadata to jobs via `JobParameters.Metadata`. Metadata inherited by child jobs, accessible in handlers via `IJobContext`. Publish pipeline behaviors (`IPublishPipelineBehavior<T>`) for cross-cutting metadata.
 - **Real-time Handler Logs** — ILogger output flushed to the database every ~1 second during handler execution, visible in dashboard while the job is still processing.
 - **Failed Job Type Filter** — Group failed jobs by type, filter, and bulk delete/requeue all of a specific type.
-- **Dashboard Auth** — The dashboard is routed endpoints, so `MapWarpUI(...).RequireAuthorization("YourPolicy")` gates it with ASP.NET Core authorization: anonymous callers are challenged, unpermitted ones forbidden. Ships a built-in cookie login and a localhost-only convention.
+- **Dashboard Auth** — The dashboard is routed endpoints, so `MapWarpDashboard(...).RequireAuthorization("YourPolicy")` gates it with ASP.NET Core authorization: anonymous callers are challenged, unpermitted ones forbidden. Ships a built-in cookie login and a localhost-only convention.
 - **Configurable Handler Logging** — `EnableHandlerLogging` option (default true) to suppress handler ILogger output from the JobLog table when not needed.
 - **Dashboard** — React-based web UI with realtime graph, historical graph, dark mode, clickable metric cards, bulk actions, batch progress bars, worker detail page.
 - **TimeProvider** — All production code uses injectable `TimeProvider` for testability.
@@ -50,7 +50,7 @@ Warp ships as a small set of NuGet packages — pick the provider package that m
 | `Moberg.Warp.Worker`              | Worker + background tasks (required for processing)       |
 | `Moberg.Warp.Provider.PostgreSql` | PostgreSQL provider (row-lock SQL, LISTEN/NOTIFY, locks)  |
 | `Moberg.Warp.Provider.SqlServer`  | SQL Server provider (row-lock SQL, Service Broker, locks) |
-| `Moberg.Warp.UI`                  | Dashboard UI (optional)                                   |
+| `Moberg.Warp.Dashboard`                  | Dashboard UI (optional)                                   |
 | `Moberg.Warp.Http`                | Expose `IRequest<T>` / `IStreamRequest<T>` over HTTP (optional) |
 
 You only add the provider package for your database; Warp.Core no longer has a hard dependency on either EF provider.
@@ -58,11 +58,11 @@ You only add the provider package for your database; Warp.Core no longer has a h
 > **Pin one coherent version across every Warp package.** The packages have inter-dependencies (e.g. `Warp.Http` requires a matching `Warp.Core`), so floating different floors per package can resolve to an incompatible mix. Set the same explicit version on all of them:
 >
 > ```xml
-> <PackageReference Include="Moberg.Warp.Core" Version="3.1.0" />
-> <PackageReference Include="Moberg.Warp.Worker" Version="3.1.0" />
-> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="3.1.0" />
-> <PackageReference Include="Moberg.Warp.UI" Version="3.1.0" />
-> <PackageReference Include="Moberg.Warp.Http" Version="3.1.0" />
+> <PackageReference Include="Moberg.Warp.Core" Version="6.0.0" />
+> <PackageReference Include="Moberg.Warp.Worker" Version="6.0.0" />
+> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="6.0.0" />
+> <PackageReference Include="Moberg.Warp.Dashboard" Version="6.0.0" />
+> <PackageReference Include="Moberg.Warp.Http" Version="6.0.0" />
 > ```
 
 > **Package IDs are `Moberg.Warp.*`; namespaces are `Warp.*`.** Install `Moberg.Warp.Core`, but write `using Warp.Core;`. The public surface is also split across a few namespaces — here's where the common types live:
@@ -72,7 +72,7 @@ You only add the provider package for your database; Warp.Core no longer has a h
 > | Register Warp / server | `AddWarp`, `AddWarpServer`, `AddBackgroundService`, `IPublisher`, `IBatchPublisher`, `IRecurringJobPublisher` | `Warp.Core` |
 > | Define & handle work | `IJob`, `IMessage`, `IRequest<T>`, `IStreamRequest<T>`, `IJobHandler<>`, `IMessageHandler<>`, `IRequestHandler<,>`, `IStreamRequestHandler<,>`, `IPipelineBehavior<,>`, `IJobContext`, `Unit`, `IMediator` | `Warp.Core.Handlers` |
 > | Addon builder methods | `AddRetry` / `AddConcurrency` / `AddTimeout` / `AddRateLimit` / `AddSagas` | `Warp.Core.Retry` / `.Concurrency` / `.Timeout` / `.RateLimit` / `.Sagas` |
-> | Dashboard | `MapWarpUI`, `AddWarpDashboard` | `Warp.UI` |
+> | Dashboard | `MapWarpDashboard`, `AddWarpDashboard` | `Warp.Dashboard` |
 > | HTTP exposure | `WarpHttpGet`/`Post`/…, `AddWarpHttp`, `MapWarpHttp` | `Warp.Http` |
 > | Provider opt-in | `UsePostgreSql` / `UseSqlServer` | `Warp.Provider.PostgreSql` / `Warp.Provider.SqlServer` |
 
@@ -113,7 +113,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 var app = builder.Build();
 
 // Dashboard UI (serves at /warp)
-app.MapWarpUI("/warp");
+app.MapWarpDashboard("/warp");
 
 app.Run();
 ```
@@ -347,7 +347,7 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 
 ### 10. Dashboard Authorization
 
-`MapWarpUI` returns an endpoint builder covering the SPA shell, the REST API and the SignalR hub, so one
+`MapWarpDashboard` returns an endpoint builder covering the SPA shell, the REST API and the SignalR hub, so one
 convention gates all three — and ASP.NET decides how to say no: a signed-out visitor is challenged
 (reaching your sign-in), a signed-in one without the permission is forbidden.
 
@@ -355,7 +355,7 @@ convention gates all three — and ASP.NET decides how to say no: a signed-out v
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy("WarpDashboard", policy => policy.RequireRole("Admin"));
 
-app.MapWarpUI("/warp").RequireAuthorization("WarpDashboard");
+app.MapWarpDashboard("/warp").RequireAuthorization("WarpDashboard");
 ```
 
 No identity system? Warp serves its own login page off a real cookie scheme:
@@ -363,7 +363,7 @@ No identity system? Warp serves its own login page off a real cookie scheme:
 ```csharp
 builder.Services.AddWarpDashboard().AddBuiltInLogin<MyCredentialValidator>();
 
-app.MapWarpUI("/warp").RequireWarpDashboardLogin();
+app.MapWarpDashboard("/warp").RequireWarpDashboardLogin();
 ```
 
 Localhost-only access:
@@ -371,7 +371,7 @@ Localhost-only access:
 ```csharp
 builder.Services.AddWarpDashboard();
 
-app.MapWarpUI("/warp").RequireLocalRequests();
+app.MapWarpDashboard("/warp").RequireLocalRequests();
 ```
 
 ### 10. Configuration
@@ -475,7 +475,7 @@ opt.AddDashboardPush(cfg =>
 
 **Addon discovery**: the dashboard reads `GET /warp/api/addons` once at boot. If `AddDashboardPush()` is not registered the response sets `push: false` and the SPA keeps using its existing polling fallback (at the safety-net interval of 30 s — coarser than the previous 2–5 s, which is the intended cost of not opting in).
 
-**Auth**: the hub is one of the endpoints `MapWarpUI` returns, so whatever convention the host applied gates negotiate and the WebSocket upgrade alongside the REST API. No parallel auth code path.
+**Auth**: the hub is one of the endpoints `MapWarpDashboard` returns, so whatever convention the host applied gates negotiate and the WebSocket upgrade alongside the REST API. No parallel auth code path.
 
 **Multi-server fanout**: when `opt.UseDatabasePush()` is also configured, an event on server A fans out to dashboard clients connected to every server. The DB-push transport already routes `JobFinalized` and `MessageEnqueued` notifications to all `NotificationListenerTask` instances; the dashboard broadcaster on each server picks them up via the same `ServerTaskSignals<TContext>` surface that wakes the orchestrator. Without `UseDatabasePush()`, push is single-server only: events from server B reach a client connected to server A only via the safety-net 30 s refetch.
 
@@ -485,7 +485,7 @@ opt.AddDashboardPush(cfg =>
 
 ## HTTP Exposure (Warp.Http)
 
-`Moberg.Warp.Http` is an optional package that exposes Warp `IRequest<TResponse>` and `IStreamRequest<TResponse>` handlers as ASP.NET Minimal API endpoints — annotate the **handler class**, run `MapWarpHttp()`, you have an HTTP endpoint. Source-generated dispatch (no per-request reflection); independent of `Warp.UI`. Full docs at [features/http](https://moberghr.github.io/warp/docs/features/http).
+`Moberg.Warp.Http` is an optional package that exposes Warp `IRequest<TResponse>` and `IStreamRequest<TResponse>` handlers as ASP.NET Minimal API endpoints — annotate the **handler class**, run `MapWarpHttp()`, you have an HTTP endpoint. Source-generated dispatch (no per-request reflection); independent of `Warp.Dashboard`. Full docs at [features/http](https://moberghr.github.io/warp/docs/features/http).
 
 `IJob` and `IMessage` cannot be HTTP-exposed — write a thin `IRequest<Guid>` wrapper that calls `IPublisher.Enqueue` if you need "submit a job via HTTP".
 
@@ -682,7 +682,7 @@ src/
 ├── core/
 │   ├── Warp.Core/                      # Entities, handlers, publisher, services, logging
 │   ├── Warp.Worker/                    # Worker service, background tasks, dispatcher
-│   ├── Warp.UI/                        # Dashboard API endpoints + embedded SPA
+│   ├── Warp.Dashboard/                        # Dashboard API endpoints + embedded SPA
 │   ├── Warp.SourceGenerator/           # Mediator & worker-dispatch source generator
 │   └── providers/
 │       ├── Warp.Provider.PostgreSql/   # PG provider (LISTEN/NOTIFY, row-lock SQL, locks)

@@ -7,9 +7,9 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Core.Concurrency;
-using Warp.UI;
-using Warp.UI.Endpoints;
-using Warp.UI.Extensions;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
+using Warp.Dashboard.Extensions;
 
 namespace Warp.Tests.Features.Concurrency;
 
@@ -32,8 +32,8 @@ public class ConcurrencyEndpointsTests
         builder.Services.AddSingleton<IConcurrencyLimitManager>(mgr);
 
         var app = builder.Build();
-        var options = new WarpUIOptions();
-        var extensions = new List<IWarpUIExtension>();
+        var options = new WarpDashboardOptions();
+        var extensions = new List<IWarpDashboardExtension>();
         app.MapWarpApiEndpoints(options, extensions);
 
         await app.StartAsync(CancellationToken.None);
@@ -47,8 +47,8 @@ public class ConcurrencyEndpointsTests
         builder.WebHost.UseTestServer();
 
         var app = builder.Build();
-        var options = new WarpUIOptions();
-        var extensions = new List<IWarpUIExtension>();
+        var options = new WarpDashboardOptions();
+        var extensions = new List<IWarpDashboardExtension>();
         app.MapWarpApiEndpoints(options, extensions);
 
         await app.StartAsync(CancellationToken.None);

@@ -10,9 +10,12 @@ namespace Warp.Core;
 public interface IRecurringJobPublisher
 {
     /// <summary>
-    /// Registers or updates a recurring job definition. Does not create job instances — that is
-    /// handled by <c>RecurringJobScheduler</c>. Acquires a distributed lock on the job name
-    /// and saves changes immediately (callers should NOT call SaveChanges after this method).
+    /// Registers or updates a recurring job definition, keyed on <paramref name="name"/> — the
+    /// identity <see cref="Warp.Core.Services.IRecurringJobService"/> triggers/enables/deletes by.
+    /// The name is trimmed and must be non-empty and at most 200 characters. Does not create job
+    /// instances — that is handled by <c>RecurringJobScheduler</c>. Acquires a distributed lock on
+    /// the job name and saves changes immediately (callers should NOT call SaveChanges after this
+    /// method).
     /// </summary>
     Task AddOrUpdateRecurringJob<T>(T message, string name, string cron)
         where T : class, IJob;
@@ -41,10 +44,11 @@ public class RecurringJobPublisher<TContext> : IRecurringJobPublisher
     public async Task AddOrUpdateRecurringJob<T>(T message, string name, string cron)
         where T : class, IJob
     {
+        var jobName = RecurringJobName.Normalize(name);
         ValidateCronExpression(cron);
 
-        var handle = await _lockProvider.TryAcquireAsync($"warp:recurring:{name}", RecurringJobPublisherConstants.LockTimeout, CancellationToken.None)
-            ?? throw new TimeoutException($"Could not acquire lock for recurring job '{name}' within {RecurringJobPublisherConstants.LockTimeout.TotalSeconds}s.");
+        var handle = await _lockProvider.TryAcquireAsync($"warp:recurring:{jobName}", RecurringJobPublisherConstants.LockTimeout, CancellationToken.None)
+            ?? throw new TimeoutException($"Could not acquire lock for recurring job '{jobName}' within {RecurringJobPublisherConstants.LockTimeout.TotalSeconds}s.");
 
         await using (handle)
         {
@@ -54,7 +58,7 @@ public class RecurringJobPublisher<TContext> : IRecurringJobPublisher
             var jobType = message.GetType().AssemblyQualifiedName!;
 
             var recurringJob = await _context.Set<RecurringJob>()
-                .Where(x => x.Name == name)
+                .Where(x => x.Name == jobName)
                 .FirstOrDefaultAsync();
 
             if (recurringJob != null)
@@ -69,7 +73,7 @@ public class RecurringJobPublisher<TContext> : IRecurringJobPublisher
             {
                 recurringJob = new RecurringJob
                 {
-                    Name = name,
+                    Name = jobName,
                     Message = jobMessage,
                     Type = jobType,
                     Cron = cron,

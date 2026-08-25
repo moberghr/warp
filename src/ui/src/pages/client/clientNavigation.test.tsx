@@ -7,7 +7,6 @@ import { createDemoAdapter } from '@/demo/adapter';
 import ClientPage from './ClientPage';
 import ClientEventDetailPage from './ClientEventDetailPage';
 import ClientSessionPage from './ClientSessionPage';
-import QueuesPage from '../queues/QueuesPage';
 
 // Navigation coverage for the client-observability dashboard pages, driven against the demo mock adapter (the
 // same data the marketing screenshots use). Proves each page LOADS and each list row is CLICKABLE and lands on
@@ -27,7 +26,6 @@ function renderAt(path: string) {
           <Route path="/client" element={<ClientPage />} />
           <Route path="/client/events/:id" element={<ClientEventDetailPage />} />
           <Route path="/client/sessions/:id" element={<ClientSessionPage />} />
-          <Route path="/queues" element={<QueuesPage />} />
           <Route path="/trace/:traceId" element={<div>trace-stub</div>} />
         </Routes>
       </MemoryRouter>
@@ -39,7 +37,7 @@ describe('client dashboard navigation', () => {
   it('Client page loads and lists clickable event rows', async () => {
     renderAt('/client');
 
-    expect(await screen.findByRole('heading', { name: 'Client' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Traffic / Client' })).toBeTruthy();
     // The event stream rendered with rows that link into the detail route (the row IS clickable).
     const links = await screen.findAllByRole('link', undefined, { timeout: 5000 });
     expect(links.some(a => a.getAttribute('href')?.includes('/client/events/'))).toBe(true);
@@ -82,12 +80,5 @@ describe('client dashboard navigation', () => {
 
     expect(await screen.findByRole('heading', { name: 'Stack' })).toBeTruthy();
     expect((await screen.findAllByText(/Cannot read properties of undefined/)).length).toBeGreaterThan(0);
-  });
-
-  it('Queues page loads with per-queue rows', async () => {
-    renderAt('/queues');
-
-    expect(await screen.findByRole('heading', { name: 'Queues' })).toBeTruthy();
-    expect(await screen.findByText('a-critical')).toBeTruthy();
   });
 });

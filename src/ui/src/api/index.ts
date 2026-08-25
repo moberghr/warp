@@ -1,5 +1,6 @@
 import axios from 'axios';
 import api from './client';
+import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
 import type { AdapterListItem, AdapterDetail, AdapterCallDetail, AdapterHistoryPoint } from '@/types/adapters';
 import type {
@@ -7,7 +8,6 @@ import type {
   ApplicationDetailModel,
   ApplicationInstanceDetailModel,
   JobExecutionMetricsModel,
-  QueueMetricsModel,
 } from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
 import type { ClientObservabilitySummary, ClientEventPage, ClientEventDetail, ClientSession } from '@/types/client';
@@ -55,8 +55,6 @@ export const getJobsByType = (type: string, page = 0, pageSize = 20, state?: str
 export const getJobMetrics = (application?: string) =>
   api.get<JobExecutionMetricsModel>('/jobs/metrics', { params: application ? { application } : undefined }).then(r => r.data);
 
-export const getQueueMetrics = (application?: string) =>
-  api.get<QueueMetricsModel>('/queues/metrics', { params: application ? { application } : undefined }).then(r => r.data);
 
 export const getClientSummary = (application?: string) =>
   api.get<ClientObservabilitySummary>('/client/summary', { params: application ? { application } : undefined }).then(r => r.data);
@@ -126,20 +124,22 @@ export const getMessageJobCounts = (messageId: string) =>
 export const getMessageJobs = (messageId: string, page = 0, pageSize = 20, state?: string) =>
   api.get<PagedList<JobModel>>(`/messages/${messageId}/jobs`, { params: { page, pageSize, state } }).then(r => r.data);
 
-// Recurring jobs
+// Recurring jobs — addressed by the NAME the definition was registered under (the identity
+// IRecurringJobService keys on; the surrogate id is not stable across a delete-and-re-register).
+// A name may hold '/' and spaces, so it travels as its URL-safe base64 (mirrors UrlSafeId).
 export const getRecurringJobs = (page = 0, pageSize = 20) =>
   api.get<PagedList<RecurringJobModel>>('/recurring', { params: { page, pageSize } }).then(r => r.data);
 
-export const getRecurringJobById = (id: number) =>
-  api.get<RecurringJobDetailModel>(`/recurring/${id}`).then(r => r.data);
+export const getRecurringJob = (name: string) =>
+  api.get<RecurringJobDetailModel>(`/recurring/${encodeUrlSafeId(name)}`).then(r => r.data);
 
-export const getRecurringJobJobs = (id: number, page = 0, pageSize = 20) =>
-  api.get<PagedList<RecurringJobHistoryModel>>(`/recurring/${id}/jobs`, { params: { page, pageSize } }).then(r => r.data);
+export const getRecurringJobJobs = (name: string, page = 0, pageSize = 20) =>
+  api.get<PagedList<RecurringJobHistoryModel>>(`/recurring/${encodeUrlSafeId(name)}/jobs`, { params: { page, pageSize } }).then(r => r.data);
 
-export const triggerRecurringJob = (id: number) => api.post(`/recurring/${id}/trigger`);
-export const enableRecurringJob = (id: number) => api.post(`/recurring/${id}/enable`);
-export const disableRecurringJob = (id: number) => api.post(`/recurring/${id}/disable`);
-export const deleteRecurringJob = (id: number) => api.delete(`/recurring/${id}`);
+export const triggerRecurringJob = (name: string) => api.post(`/recurring/${encodeUrlSafeId(name)}/trigger`);
+export const enableRecurringJob = (name: string) => api.post(`/recurring/${encodeUrlSafeId(name)}/enable`);
+export const disableRecurringJob = (name: string) => api.post(`/recurring/${encodeUrlSafeId(name)}/disable`);
+export const deleteRecurringJob = (name: string) => api.delete(`/recurring/${encodeUrlSafeId(name)}`);
 
 // Bulk actions
 export const bulkDeleteJobs = (jobIds: string[]) =>

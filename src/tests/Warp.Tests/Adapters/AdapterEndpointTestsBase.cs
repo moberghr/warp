@@ -12,9 +12,9 @@ using Warp.Core.Adapters;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Services;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
-using Warp.UI;
-using Warp.UI.Endpoints;
 
 namespace Warp.Tests.Adapters;
 
@@ -512,7 +512,7 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
         builder.Services.AddScoped<IAdapterQueryService>(_ => new AdapterQueryService<TestContext>(fixture.CreateContext()));
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(CancellationToken.None);
 
@@ -533,7 +533,7 @@ public abstract class AdapterEndpointTestsBase : IAsyncLifetime
         }
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(CancellationToken.None);
 

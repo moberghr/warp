@@ -11,6 +11,7 @@ import { WebhookDeliveryChart } from '@/components/WebhookDeliveryChart';
 import * as api from '@/api';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { WebhookDeliveryListItem, WebhookDeliveryFilter, WebhookGroupModel } from '@/types/webhooks';
+import { PageHeading } from '@/components/PageHeading';
 
 const PAGE_SIZE = 20;
 
@@ -136,7 +137,7 @@ export default function WebhooksPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1">Webhooks</h1>
+      <PageHeading className="mb-1">Webhooks</PageHeading>
       <p className="text-sm text-muted-foreground mb-4">
         Durable outbound delivery — the delivery is the state machine; attempts are recorded as adapter calls.
       </p>

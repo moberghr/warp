@@ -1,0 +1,1 @@
+import{Wt as e}from"./api-RzzNVS9y.js";var t={Registered:1,HeartbeatLost:2,Recovered:3,Stopped:4,StaleSwept:5};function n(t){return e(t)}export{n,t};

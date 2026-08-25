@@ -9,6 +9,15 @@ namespace Warp.Adapters.Http;
 /// counts attempts, not logical calls, so it sits inside the resilience handler). On overflow it throws
 /// <see cref="AdapterRateLimitedException"/>, which the outermost <c>WarpAdapterHandler</c> maps onto the
 /// scope as a <c>Throttled</c> outcome (telemetry + counters + call-log row).
+/// <para>
+/// The refusal is thrown for <b>every</b> overflow mode, including
+/// <see cref="AdapterRateLimitOverflow.Respond429"/>: converting it to a 429 here would put a synthetic
+/// response inside the chain, where the user's own resilience handler (which nests OUTSIDE this one) would
+/// see Warp's self-throttle as a retryable status — retrying it straight back into the limiter and feeding
+/// its circuit breaker. The conversion therefore happens in the OUTERMOST
+/// <see cref="WarpAdapterHandler"/>, after every user handler, so <c>Respond429</c> behaves exactly like
+/// <see cref="AdapterRateLimitOverflow.Wait"/> inside the pipeline and differs only at the caller.
+/// </para>
 /// </summary>
 internal sealed class WarpAdapterRateLimitHandler : DelegatingHandler
 {

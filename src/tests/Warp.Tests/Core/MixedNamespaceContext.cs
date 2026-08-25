@@ -17,6 +17,6 @@ internal sealed class MixedNamespaceContext : DbContext
     {
         base.OnModelCreating(modelBuilder);
         modelBuilder.AddOutboxStateEntity("warp");
-        modelBuilder.ApplyWarpUtcDateTimeConverters();
+        modelBuilder.PinWarpStorageTypes();
     }
 }

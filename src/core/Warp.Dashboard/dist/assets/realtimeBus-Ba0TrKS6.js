@@ -1,0 +1,1 @@
+var e=new Map;function t(t){let n=e.get(t);if(n)for(let e of n)try{e()}catch(e){console.warn(`[realtime] subscriber threw for`,t,e)}}function n(t,n){let r=e.get(t);return r||(r=new Set,e.set(t,r)),r.add(n),()=>{r?.delete(n)}}export{n,t};

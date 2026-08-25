@@ -4,7 +4,102 @@ sidebar_position: 6
 
 # Releases
 
-## Unreleased
+## 6.0.0
+
+*Unreleased*
+
+Major release with three breaking changes — the two below, and **the addon policy axis** (last section): **the dashboard package and its API are renamed from `UI` to `Dashboard`**, and **`IRecurringJobService` now addresses a recurring job by the name it was registered under, not by the table's surrogate id.**
+
+### The dashboard is called the Dashboard
+
+Warp used two names for one thing. The mount API said `UI`; authorization, push and the hub said `Dashboard` — so a `Program.cs` read:
+
+```csharp
+// Before 6.0
+builder.Services.AddWarpDashboard().AddBuiltInLogin<Validator>();
+app.MapWarpUI("/warp").RequireWarpDashboardLogin();
+```
+
+Three "Dashboard" mentions and one "UI", two lines apart. It went deeper than the surface: types named `WarpDashboardLoginOptions` and `WarpDashboardDefaults` lived in `namespace Warp.UI`. Everything now uses the product's own word.
+
+**The NuGet package is renamed.** `Moberg.Warp.UI` is deprecated and replaced by `Moberg.Warp.Dashboard` — update your `PackageReference`, since a package id cannot be aliased the way a type can.
+
+| Before | 6.0 |
+|---|---|
+| `Moberg.Warp.UI` (package) | `Moberg.Warp.Dashboard` |
+| `namespace Warp.UI` | `namespace Warp.Dashboard` |
+| `namespace Warp.UI.DashboardPush` | `namespace Warp.Dashboard.Push` |
+| `app.MapWarpUI(…)` | `app.MapWarpDashboard(…)` |
+| `WarpUIOptions` | `WarpDashboardOptions` |
+| `WarpUIEndpointConventionBuilder` | `WarpDashboardEndpointConventionBuilder` |
+| `IWarpUIExtension` | `IWarpDashboardExtension` |
+| `UIExtensionManifest` / `UIExtensionPage` | `DashboardExtensionManifest` / `DashboardExtensionPage` |
+
+These are hard renames — the old names are gone and you get a compile error, not a silent behaviour change, in the same style as `AddWarpWorker` → `AddWarpServer` in 2.0.
+
+**If you host dashboard extensions**, note that the embedded-resource namespace moved with the assembly: an extension's `ResourceNamespace` built on `Warp.UI.…` must become `Warp.Dashboard.…`. The same applies to any host that overrode `WarpDashboardOptions.IndexStream` with a literal resource name — the SPA now lives at `Warp.Dashboard.dist.index.html`. Both fail at runtime rather than at compile time, so check them explicitly.
+
+The docs section moved to match (`/docs/ui/*` → `/docs/dashboard/*`, redirects in place).
+
+**Also new on `WarpDashboardOptions`: `BrandName`.** It replaces the "Warp" wordmark in the header and names the browser tab, for hosts that surface the dashboard under their own product — `BrandName = "Acme Jobs"` with `InstanceName = "Production"` gives a tab reading `Acme Jobs · Production`. `LogoUrl` still wins for the wordmark when both are set; `BrandName` still names the tab. Null keeps `Warp`.
+
+### Recurring jobs are keyed by name
+
+`AddOrUpdateRecurringJob(message, name, cron)` has always registered a definition under a name. Everything you could then *do* to that definition took an `int id` — which meant a code caller holding the only identity it ever had (the name) first had to query the `RecurringJob` table for a surrogate key:
+
+```csharp
+// Before 6.0
+var id = await ctx.Set<RecurringJob>()
+    .Where(x => x.Name == "session-cleanup")
+    .Select(x => x.Id)
+    .FirstAsync();
+
+await svc.TriggerRecurringJob(id);
+
+// 6.0
+await svc.TriggerRecurringJob("session-cleanup");
+```
+
+The rename is not only ergonomics. The name is unique-indexed and **stable across a delete-and-re-register**; the identity column is not, so an id captured in code, stored in config, or bookmarked from the dashboard could silently outlive the definition it named and land on a different one. Six methods changed:
+
+| Before | 6.0 |
+|---|---|
+| `TriggerRecurringJob(int id)` | `TriggerRecurringJob(string name)` |
+| `EnableRecurringJob(int id)` | `EnableRecurringJob(string name)` |
+| `DisableRecurringJob(int id)` | `DisableRecurringJob(string name)` |
+| `DeleteRecurringJob(int id)` | `DeleteRecurringJob(string name)` |
+| `GetRecurringJobById(int id)` | `GetRecurringJob(string name)` |
+| `GetRecurringJobHistory(int id, …)` | `GetRecurringJobHistory(string name, …)` |
+
+These are compile errors on upgrade, and the fix is to pass the name you already register with. `GetRecurringJobs(BaseListRequest)` is unchanged, and `RecurringJobModel` still carries `Id` — nothing about the schema or the stored rows changed, so **there is no migration**.
+
+Behavior worth knowing: names are **trimmed** on both the write and the read side, so a padded name still resolves. A name no definition matches **throws `ArgumentException`** from the four command methods and reads as not-found (null / empty page) from the two queries. `AddOrUpdateRecurringJob` now **validates the name** — non-empty after trimming, at most 200 characters (it is also the name of the registration's distributed lock) — instead of accepting an identity nothing could address afterwards. No column facet changed, so this too generates no migration.
+
+### Refit-bound adapters can see a shared-limit refusal
+
+Refit wraps every exception escaping the `HttpClient` pipeline in `ApiRequestException`, so for a Refit-bound adapter using `UseSharedRateLimit`, the natural `catch (AdapterRateLimitedException)` silently never fired — a self-inflicted throttle was indistinguishable from an unknown transport error. Three additive changes, none of them breaking:
+
+**A third overflow mode.** `AdapterRateLimitOverflow.Respond429` waits up to `maxWait` exactly like `Wait`, then answers the call with a synthetic `429 Too Many Requests` carrying `Retry-After` instead of throwing:
+
+```csharp
+a.UseSharedRateLimit(100, 60, AdapterRateLimitOverflow.Respond429, maxWait: TimeSpan.FromSeconds(5));
+```
+
+Refit's normal path then produces `ApiException` with `StatusCode = TooManyRequests`, which existing status-based classification already handles — and a method returning `ApiResponse<T>`, which never throws at all, sees it too. No request is sent; the response is what the vendor would have answered had the call gone out. Pass `maxWait: TimeSpan.Zero` for fail-fast-with-429. The call is still recorded `Throttled`, not `Failed` — and a **real** vendor 429 keeps recording `Failed` exactly as before, so no existing error rate moves.
+
+The response is synthesised at the outermost Warp handler, after your own handlers: inside the pipeline the refusal stays the throw the other modes raise, so a resilience handler never retries a self-throttle back into the limiter or counts it toward a circuit breaker. `Respond429` changes what the caller sees, nothing else.
+
+**The refusal carries the wait.** `AdapterRateLimitedException.RetryAfter` is the remainder of the current window, which the limiter already computed and previously discarded — so a caller no longer retries blind. Under `Respond429` the same value rides the `Retry-After` header (whole seconds, rounded up) plus an `x-warp-retry-after-ms` companion for sub-second waits.
+
+**Chain-walking helpers** for callers staying on `Wait` / `FailFast`: `ex.IsAdapterRateLimited()`, `ex.GetAdapterRetryAfter()`, and `ex.FindAdapterRateLimited()` in `Warp.Core.Adapters` walk `InnerException` and every `AggregateException` branch, so they hold whether or not the refusal arrived wrapped.
+
+No schema change, no migration. Reported in [#284](https://github.com/moberghr/warp/issues/284).
+
+### Dashboard API routes carry the name
+
+The six routes under `{prefix}/api/recurring/{id}` keep their shape, but `{id}` is now the **URL-safe base64 of the name** rather than an integer — the same codec the endpoints and applications routes already use (base64 of the UTF-8 bytes, `+`→`-`, `/`→`_`, trailing `=` trimmed), because a name may contain `/` and spaces. `session-cleanup` becomes `c2Vzc2lvbi1jbGVhbnVw`. An id that does not decode, and a name no definition matches, both answer **404** — previously an unknown id surfaced as a 500. The bundled dashboard moves with it; only a caller scripting these endpoints directly needs to change. The recurring job detail page drops its "ID" row, which named a value nothing addresses any more.
+
+### The addon policy axis
 
 **The addon policy axis: `[Mutex]` / `[Semaphore]` / `[RateLimit]` / `[Timeout]` / `[Retry]` / `[CircuitBreaker]` on handler classes as well as contracts, resolved once and written onto the job.** No schema change. Several changes below alter behaviour a running deployment may be relying on — read 2, 3 and 4 before upgrading.
 
@@ -15,6 +110,120 @@ sidebar_position: 6
 5. **Recurring jobs now honour contract-declared `[Mutex]` / `[Semaphore]` / `[RateLimit]` / `[Timeout(Scope = PerAttempt)]`.** They silently did not before (firings bypass the publish pipeline). If you added `[Mutex]` to a recurring job type and never noticed it was inert, serialization begins at upgrade — including `Skip`-mode surplus firings landing in `Deleted`. `[Timeout(Scope = Total)]` on a recurring type remains inert, now with a one-time warning.
 6. **`Timeout` is the only policy still stamped at publish, and only for `Scope = Total`.** Its deadline is wall-clock from enqueue and must pre-exist the first execution. A consequence: a handler `[Timeout]` under a `Total`-scoped global default is **inert** rather than a startup error — the default fills the slot before any handler is known. Warp logs that once per request type; move the declaration to the contract or make the default `PerAttempt`. A `PerAttempt` default is applied at execution from live options and never stamped. `Scope = Total` **on a handler** is a build error (`WARP002`); for handlers the generator cannot see it is **inert** at runtime and logged once per request type — never a thrown exception, which an outer `AddRetry()` would read as a handler failure and retry until the budget was spent.
 7. **`ConcurrencyPublishBehavior`, `RateLimitPublishBehavior` and `RetryPublishBehavior` were removed** (public types). They existed only to stamp contract attributes at publish, which is what made the handler axis unreachable. Explicit `WithMutex` / `WithSemaphore` / `WithRetry` / `WithRateLimit` / `WithTimeout` at publish are unaffected and still outrank every attribute — **per field**: `WithRetry(5)` sets the count and a `[Retry(3, Delays = [...])]` attribute still supplies the schedule beneath it, while an explicit `RetryDelays` is never overwritten by an attribute. Policy is applied to **job-backed executions only**: an in-memory `IMediator.Send` of a type that happens to implement `IJob`/`IMessage` runs its handler directly, as before — there is no row to skip or reschedule.
+
+
+## 5.1.0
+
+*2026-08-22*
+
+Minor release, completing what 5.0.0 started: **Warp is now in full control of its own model — no model-wide EF Core convention you declare reaches a Warp entity.** 5.0.0 pinned three conversion families (enum, `DateTime`, `Guid`); this release closes the rest of the class in one mechanism instead of family-by-family, and adds a startup check for the one surface that cannot be neutralized at model-build time.
+
+**If your `DbContext` declares no model-wide convention, this release is a no-op** — verified byte-for-byte: every Warp property (store type, name, nullability, facets, converters) and every index comes out identical, so `dotnet ef migrations add` after upgrading produces an empty migration.
+
+### No consumer convention applies to a Warp entity
+
+What now stops at Warp's entities, on top of 5.0.0's three families:
+
+- **All remaining conversion conventions** — `Properties<bool>().HaveConversion<string>()` (the `char(1)` Y/N habit), `Properties<int>()`, `Properties<long>()`, `Properties<double>()`, and any other scalar retype. Each of these physically retyped Warp's columns while Warp's claim SQL and server context kept the native type — the same total execution failure as the 5.0.0 enum case (#279), just rarer conventions.
+- **Facet conventions** — `HaveMaxLength(n)`, `HaveColumnType(...)`, `AreUnicode(...)`, `HavePrecision(...)`. These were documented as unsupported in 5.0.0; they are now neutralized. The dangerous one was silent rather than loud: a model-wide `HaveMaxLength(50)` put a 50-character cap on `Job.Message` — **truncating job payloads** — and on 45 other Warp columns.
+- **Convention-supplied value comparers** — `Properties<T>().HaveConversion<TConverter, TComparer>()` welded the comparer onto Warp's properties, where a coarse equality could make change tracking skip Warp's own small updates (a requeue's `ScheduleTime` reset, a heartbeat bump). Warp's properties keep default comparers.
+
+Naming conventions (`UseSnakeCaseNamingConvention()` and friends) are untouched and keep applying — they were always honoured by design.
+
+The mechanism is ordering, not per-family pins: EF applies `ConfigureConventions` settings to each property at creation, indistinguishable from explicit configuration — so `ApplyWarpModel` now declares its model, strips the full set of storage-affecting settings EF exposes (converter, comparer, provider type, column type, max length, unicode, precision/scale, fixed length, collation) from its own properties, re-declares (restoring Warp's own facets and converters), and pins the storage types. Scoped by assembly to Warp's entity CLR types: your entities keep every convention you declared, including one living in a `Warp.*` namespace.
+
+### Startup check for the one unbeatable surface
+
+A runtime convention added via `ConfigureConventions(c => c.Conventions.Add(...))` runs at model *finalization* — after `OnModelCreating` entirely, past any build-time ordering. If such a convention retypes a Warp column — through a converter, a provider type, or a foreign `DateTime` round-trip converter that would smuggle local-time semantics past a shape check — the host now **fails at startup** with an error naming the property and the fix, instead of what previously happened: publishing works, the dashboard works, and no job is ever executed while server tasks fail every tick in the worker logs. The check runs as a hosted service in any `AddWarp` host and once per model from the publisher's constructor, so non-hosted (raw `ServiceProvider`) publisher processes are covered too. A boot error is strictly better than that silent shape — but it is a new throw for a configuration that previously *appeared* to run, which is the reason this is 5.1.0 and not 5.0.1.
+
+This supersedes one sentence in the 5.0.0 notes: a hand-set *conversion* on a Warp entity property was described there as overridden and harmless to keep. From 5.1.0 it is reclaimed when declared before `ApplyWarpModel`, and a conversion that survives to the finalized model (declared after it, or injected by a runtime convention) is a startup error. The four-property `HasConversion<int>()` workaround from #279 is unaffected either way — it declares exactly what Warp declares and passes the check.
+
+### What you need to do
+
+| Your `ConfigureConventions` | On upgrade |
+|---|---|
+| Nothing model-wide | **Nothing.** Empty migration, byte-identical model. |
+| A conversion convention (`bool`/`int`/`long`/`double`/…) | Warp never executed a job for you (see the 5.0.0 notes below — same situation, same procedure): rebuild Warp's tables, or convert the affected columns. |
+| A facet convention (`HaveMaxLength`, `AreUnicode`, …) | Your Warp columns exist capped (e.g. `varchar(50)`). The generated migration **widens** them (`varchar(50)` → `text`) — widening converts automatically on both providers, so it runs as generated. Already-truncated payloads are not recoverable. |
+| A `HaveColumnType(...)` convention | As above if the type differs only in width; rebuild the Warp tables if it changed the underlying type. |
+| A runtime convention (`Conventions.Add(...)`) touching Warp entities | The host now refuses to start, naming the property. Scope the convention to your own entity types. |
+
+To deliberately override a **non-type-changing facet** on a Warp column (a longer cap or a collation, say), configure it **after** `ApplyWarpModel` in `OnModelCreating` — that explicit per-property override is the supported escape hatch and still wins. Changing a Warp column's underlying *type* that way (`HasColumnType`) recreates the server-context divergence this release eliminates and is unsupported; overriding a *conversion* is rejected by the startup check, because Warp's claim SQL physically depends on those types.
+
+See **[EF Core integration](./operations/ef-core-integration.md#naming-conventions-are-honoured-type-changing-conventions-are-not)** for the full table of what applies where.
+
+## 5.0.0
+
+*2026-08-22*
+
+Major release. **One change, one cause, and the reason it is breaking:** Warp now pins the storage types of its own columns, so a model-wide EF Core conversion convention in the consuming `DbContext` can no longer retype them.
+
+**If your `DbContext` declares no model-wide conversion convention** — no `configurationBuilder.Properties<Enum>()`, `Properties<DateTime>()` or `Properties<Guid>()` in `ConfigureConventions`, and no hand-written converter on a Warp entity property — **this release is a no-op for you.** Warp's model comes out byte-for-byte identical (verified property by property: same store types, same nullability, same converters), `dotnet ef migrations add` after upgrading produces an **empty** migration, and nothing below applies.
+
+**If it does declare one, Warp was not working for you before this release** — not degraded, not working — and the upgrade needs Warp's tables rebuilt. The [what you need to do](#what-you-need-to-do) section is the whole procedure.
+
+### Warp's columns keep Warp's types
+
+A consuming context is free to write this, and plenty do:
+
+```csharp
+protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+{
+    configurationBuilder.Properties<Enum>().HaveConversion<string>();
+}
+```
+
+Your context owns the schema, so that convention created `Job.Kind`, `Job.CurrentState`, `Job.CancellationMode` and `Job.ContinuationOptions` as `text` — the four enum properties Warp had left to convention, while its other 19 were pinned. Two independent surfaces then broke, and between them nothing ran:
+
+- The providers' atomic claim statements compare against **integer literals** — `"current_state" = 1` — because a claim has to be a single statement. `WarpWorkerService` never claimed a job and `ScheduledJobActivation` never activated one.
+- The Warp **server context** — the runtime-only mirror that carries all server-internal DB work — reflects your model's resolved table and column **names**, not its value converters. It kept mapping those columns as `int` and emitted integer literals against `text`, so `Orchestrator`, `MessageRouter` and `StaleJobRecovery` failed every tick with `42883: operator does not exist: text = integer` (SQL Server: a conversion failure on the same comparison).
+
+Publishing, the outbox and the entire dashboard kept working throughout, because on your own context EF knows about the converter. The symptom was jobs piling up in `Enqueued` forever, with the errors only in the worker's logs.
+
+The same hole existed for two more families, with the same two consequences: `Properties<DateTime>().HaveConversion<long>()` stored every Warp timestamp as `bigint` (and, incidentally, discarded Warp's UTC `Kind` stamp), and `Properties<Guid>().HaveConversion<string>()` stored every Warp key as `character varying(36)` while the server context read `uuid`.
+
+`ApplyWarpModel` now finishes by pinning all three families on its own entity types — enums to `integer`, `DateTime` to the provider's native timestamp with Warp's UTC converter, `Guid` to the native `uuid`/`uniqueidentifier`. The pass is scoped by assembly to Warp's own entities, so **your** entities keep every convention you declared; a Warp entity's storage is no longer influenced by them.
+
+**Why this is a major version rather than a patch:** in 4.x, a converter already present on a Warp entity property was deliberately preserved, and that is documented behaviour. It is now overridden. If you set one by hand — `modelBuilder.Entity<Job>().Property(x => x.CreateTime).HasConversion<long>()` — it stops taking effect. That is the intended outcome: how Warp stores its own columns is a contract its claim SQL depends on, not a preference. Remove such a converter; keeping it is now a no-op rather than an error.
+
+**Scope:** the pass covers Warp's own entity types. An entity a third-party addon contributes through `WarpConfiguration.EntityConfigurators` is outside it and can still be retyped by a convention; no in-tree package uses that seam.
+
+**What is still not neutralised:** conventions that change a *facet* rather than a type — `Properties<string>().HaveMaxLength(n)`, `HaveColumnType(...)`, `HavePrecision(...)` — continue to reach Warp's columns, and Warp cannot tell them apart from its own explicit facets. A model-wide string length cap in particular will truncate job payloads. Scope facet conventions to your own types.
+
+### What you need to do
+
+| Your `ConfigureConventions` | On upgrade |
+|---|---|
+| No model-wide conversion convention | **Nothing.** Empty migration, no behaviour change. |
+| `Properties<Enum>().HaveConversion<string>()` | Rebuild Warp's tables, or convert 4 columns (SQL below). |
+| `Properties<DateTime>()` / `Properties<Guid>()` conversion | Rebuild Warp's tables. |
+| A hand-set converter on a Warp entity property | Remove it; rebuild the tables if the database already has that shape. |
+
+**Generate a migration after upgrading and inspect it.** An empty migration means you are in the first row and done. If instead it contains `AlterColumn` operations against Warp's tables, you are in one of the others — and note that the generated migration **will not run**: it emits bare `ALTER TABLE warp.job ALTER COLUMN kind TYPE integer` statements, which Postgres rejects (`42804` — it wants a `USING` clause, and it rejects them even when the table is empty) and which SQL Server fails on converting `'Enqueued'` to `int`. That failure is expected, not a bug to work around.
+
+**The recommended path is to rebuild Warp's tables** — revert the Warp migration, or drop the `warp` schema, then re-migrate on 5.0.0. Warp never executed a job for you, so the only rows that can exist are jobs that never ran and dashboard residue. For a `DateTime` or `Guid` convention this is the only sane path: the wrong physical type is on every timestamp and key column across ~30 tables.
+
+If you have queued work you must keep **and** the enum convention is the only one you declared, the conversion is four columns in one table (every other Warp enum column was always an integer). Hand-edit the generated migration — on Postgres, replace the four `AlterColumn` calls with the cast spelled out (column names follow your own naming convention; snake_case shown, and the dependent indexes are rebuilt automatically):
+
+```sql
+ALTER TABLE warp.job ALTER COLUMN kind TYPE integer
+  USING CASE kind WHEN 'Job' THEN 1 WHEN 'Message' THEN 2 WHEN 'Batch' THEN 3 END;
+ALTER TABLE warp.job ALTER COLUMN current_state TYPE integer
+  USING CASE current_state WHEN 'Enqueued' THEN 1 WHEN 'Awaiting' THEN 2 WHEN 'Processing' THEN 3
+    WHEN 'Completed' THEN 4 WHEN 'Failed' THEN 5 WHEN 'Deleted' THEN 6 WHEN 'Scheduled' THEN 7 END;
+ALTER TABLE warp.job ALTER COLUMN cancellation_mode TYPE integer
+  USING CASE cancellation_mode WHEN 'None' THEN 0 WHEN 'Graceful' THEN 1 END;
+ALTER TABLE warp.job ALTER COLUMN continuation_options TYPE integer
+  USING CASE continuation_options WHEN 'OnlyOnSucceeded' THEN 1 WHEN 'OnAnyFinishedState' THEN 2 END;
+```
+
+On SQL Server, keep EF's `AlterColumn` calls — they drop and recreate the dependent indexes for you — and prepend a `migrationBuilder.Sql` that rewrites the names to their numeric form first (`SET [CurrentState] = CASE [CurrentState] WHEN 'Enqueued' THEN '1' ... END`), after which the type change converts cleanly. Run `SELECT DISTINCT kind, current_state FROM warp.job` first either way: a value the map does not cover becomes `NULL`, and the alter then fails on the non-nullable column.
+
+The workaround posted on the issue — re-pinning the four properties in your own `OnModelCreating` — is no longer needed and can be removed. Leaving it in place is harmless; it declares exactly what Warp now declares.
+
+Model-level tests now assert that every enum, `DateTime` and `Guid` property in the Warp model keeps its pinned storage under a context that retypes all three, that the server context and your context agree on every Warp column type, and that your own entities keep their convention — so a new entity cannot reopen the hole. See **[EF Core integration](./operations/ef-core-integration.md#naming-conventions-are-honoured-type-changing-conventions-are-not)**.
+
+Reported in [#279](https://github.com/moberghr/warp/issues/279).
 
 ## 4.1.0
 
@@ -184,11 +393,11 @@ The page rendered every `Counter` / `Statistic` key as one alphabetical table ov
 
 Each family now gets its own tab, pivoted to one row per dimension (short type name, namespace beneath it) with duration sums and histogram buckets folded into derived **Avg** and **p95** columns rather than shown as raw count-shaped numbers. Web vitals read p75. Charts plot one metric at a time over the top 10 series and state on screen how many were dropped; tooltips drop zero-valued series and sort by value, so hovering answers what moved in that hour. Unrecognised keys fall through to an **Other** tab and render raw, so an addon's keys are never silently dropped. Per-application slices stay separate rows — merging them into the cluster-wide row would double every count.
 
-This also fixes a latent blank chart: the canvas was swapped for a placeholder while loading, so the mount-once creation effect could fire with no canvas and never run again. See [Counters](/docs/ui/counters).
+This also fixes a latent blank chart: the canvas was swapped for a placeholder while loading, so the mount-once creation effect could fire with no canvas and never run again. See [Counters](/docs/dashboard/health/counters).
 
 ### The recurring job list shows the last run outcome
 
-The list carried only `LastExecution`, a timestamp stamped at *enqueue* time, so whether the last firing succeeded was visible only by opening the detail page. A **Last Result** column now shows the state of the most recent real run and links to that job. A skipped firing is not a run, so a disabled definition keeps reporting the outcome of its last actual execution; a definition that has never fired shows `—`, and one whose job row has since been cleaned up says so. No schema change and nothing added to the worker path — the state is reached through `RecurringJobLog` in a two-step fetch. See [Recurring Jobs](/docs/ui/recurring).
+The list carried only `LastExecution`, a timestamp stamped at *enqueue* time, so whether the last firing succeeded was visible only by opening the detail page. A **Last Result** column now shows the state of the most recent real run and links to that job. A skipped firing is not a run, so a disabled definition keeps reporting the outcome of its last actual execution; a definition that has never fired shows `—`, and one whose job row has since been cleaned up says so. No schema change and nothing added to the worker path — the state is reached through `RecurringJobLog` in a two-step fetch. See [Recurring Jobs](/docs/dashboard/workloads/recurring).
 
 ## 3.11.0
 
@@ -693,7 +902,7 @@ Counts, error rate, **and average latency** now come from `Counter`→`Statistic
 - **Job detail leads with the type, not the GUID** — the detail page headline is now the job type (a clickable link to that type's list), with the id demoted to a subline. The job list and detail surface addon-metadata chips (`[Mutex]`, `[Retry]`, `[Timeout]`, …) so you can see a job's applied policies at a glance.
 - **Jobs-by-type list** — click a job type anywhere it appears to get a filtered list of every job of that type, with an optional state filter.
 - **Large trace fan-outs collapse** — a message/batch that spawns hundreds of children no longer renders an unusable trace graph; child slots are capped with a "+N more" affordance.
-- **Host-configurable branding** — `UseWarpUI` accepts an instance name, logo URL, and a portal back-link (label + URL) so a shared dashboard can identify which environment it is and link back to your own portal. See [Dashboard Overview](/docs/ui/overview).
+- **Host-configurable branding** — `UseWarpUI` accepts an instance name, logo URL, and a portal back-link (label + URL) so a shared dashboard can identify which environment it is and link back to your own portal. See [Dashboard Overview](/docs/dashboard/overview).
 
 ### Bug fixes
 
@@ -912,7 +1121,7 @@ From 1.0.0 onward, Warp follows [semantic versioning](https://semver.org/) as a 
 
 Upgrading from 0.17.2 is **drop-in**: no schema migration, no required code changes for typical applications. Two things to be aware of:
 
-- **`Warp.Core` no longer pulls in the ASP.NET Core shared framework** (see below). Worker- or publisher-only projects that used `Microsoft.AspNetCore.*` types *transitively through Warp.Core* must now add `<FrameworkReference Include="Microsoft.AspNetCore.App" />` themselves. Projects that reference `Warp.UI` / `Warp.Http`, or that are ASP.NET apps already, are unaffected.
+- **`Warp.Core` no longer pulls in the ASP.NET Core shared framework** (see below). Worker- or publisher-only projects that used `Microsoft.AspNetCore.*` types *transitively through Warp.Core* must now add `<FrameworkReference Include="Microsoft.AspNetCore.App" />` themselves. Projects that reference `Warp.Dashboard` / `Warp.Http`, or that are ASP.NET apps already, are unaffected.
 - **A new `WHTTP005` build warning** (see below) may surface on existing `Warp.Http` GET/DELETE handlers. Builds with `TreatWarningsAsErrors` will need the one-line nullable fix it points to.
 
 ### HTTP: all handler-class attributes forwarded to endpoint metadata (#220)
@@ -921,7 +1130,7 @@ Upgrading from 0.17.2 is **drop-in**: no schema migration, no required code chan
 
 ### `Warp.Core`: dropped the ASP.NET Core framework reference (#221)
 
-`Warp.Core` replaced its `<FrameworkReference Include="Microsoft.AspNetCore.App" />` with granular `Microsoft.Extensions.*` package references (DI, logging, options, configuration). Core, the worker, and the providers no longer drag the entire ASP.NET Core shared framework into hosts that don't need it — only `Warp.UI` and `Warp.Http` depend on ASP.NET now. See the upgrade note above for the rare case this affects.
+`Warp.Core` replaced its `<FrameworkReference Include="Microsoft.AspNetCore.App" />` with granular `Microsoft.Extensions.*` package references (DI, logging, options, configuration). Core, the worker, and the providers no longer drag the entire ASP.NET Core shared framework into hosts that don't need it — only `Warp.Dashboard` and `Warp.Http` depend on ASP.NET now. See the upgrade note above for the rare case this affects.
 
 ### `Warp.Http`: the `[AsParameters]` required-query-param trap is now a build warning (#222)
 
@@ -1555,7 +1764,7 @@ Coalesce window defaults to 100 ms (`WarpDashboardPushConfiguration.CoalesceWind
 - Per-view data (filtered job lists, job detail, logs) stays on event-driven REST refetch. Push is invalidations + the stats DTO, not per-view payloads.
 - Frontend probes `${RoutePrefix}/api/dashboard/push/probe` once at boot and falls back to 30 s polling when the addon is absent (hide-on-404 mirroring `/api/concurrency`).
 
-Auth piggybacks on the existing `WarpUIMiddleware` — both the SignalR negotiate and the WebSocket-upgrade HTTP requests pass through `/api/`, so an auth-protected dashboard requires no extra wiring.
+Auth piggybacks on the existing `WarpDashboardMiddleware` — both the SignalR negotiate and the WebSocket-upgrade HTTP requests pass through `/api/`, so an auth-protected dashboard requires no extra wiring.
 
 See [the Dashboard Push feature page](features/dashboard-push) for telemetry hooks and tuning.
 
@@ -1793,7 +2002,7 @@ public sealed class GetOrderHandler : IRequestHandler<GetOrder, OrderDto>
 }
 ```
 
-Wire it up in `Program.cs` — independent of `Warp.UI`, composes with anything you already have:
+Wire it up in `Program.cs` — independent of `Warp.Dashboard`, composes with anything you already have:
 
 ```csharp
 builder.Services.AddWarpHttp();
@@ -2167,7 +2376,7 @@ Breaking release because of the provider package split and the DI lambda API.
 - **Typed Metadata** — Access job metadata through strongly-typed interfaces. Define an interface extending `IJobMetadata`, and read it in handlers via `ctx.GetMetadata<IMyMetadata>()` or configure it at publish time with `new JobParameters().Configure<IMyMetadata>(m => m.CustomerName = "John")`. The source generator produces dictionary-backed implementations. `MetadataSerializer` uses native JSON deserialization for round-trip fidelity (integers stay as `long`, arrays as `List<object>`).
 - **Recurring Job Enable/Disable** — Disable a recurring job to temporarily stop it from creating new jobs. The scheduler still fires on schedule but records a "Skipped" entry in the execution history. Re-enabling resumes from the next natural cron occurrence with no catchup burst. API: `POST /api/recurring/{id}/enable|disable`. Dashboard shows Enabled/Disabled badges and Skipped entries in history.
 - **Worker Scope Isolation** — Worker and handler now use separate DI scopes. The handler's DbContext lives in its own scope — on failure, the scope is disposed and tracked entities are discarded. No partial handler work leaks into the worker's save. On success, handler changes are committed first (outbox pattern), then Warp state.
-- **Extensible Dashboard UI** — New `IWarpUIExtension` interface lets external NuGet packages extend the dashboard without forking. Extensions ship an ES-module as an embedded resource, served at `/warp/_ext/{name}/`. The SPA dynamically imports each module and calls `install(warp)`. Extensions target `data-warp-slot` elements with `mount` / `append` / `insertBefore` / `insertAfter` operations, or register whole new pages via `addPage()`. React, ReactDOM, Axios, and shadcn components are exposed on `window.Warp` so extensions don't bundle them. The built-in `RetryUIExtension` is the reference implementation — renders a retry progress card with attempts/max and next-delay info on the job detail page.
+- **Extensible Dashboard UI** — New `IWarpUIExtension` interface lets external NuGet packages extend the dashboard without forking. Extensions ship an ES-module as an embedded resource, served at `/warp/_ext/{name}/`. The SPA dynamically imports each module and calls `install(warp)`. Extensions target `data-warp-slot` elements with `mount` / `append` / `insertBefore` / `insertAfter` operations, or register whole new pages via `addPage()`. React, ReactDOM, Axios, and shadcn components are exposed on `window.Warp` so extensions don't bundle them. The built-in `RetryDashboardExtension` is the reference implementation — renders a retry progress card with attempts/max and next-delay info on the job detail page.
 
 ### Improvements
 

@@ -19,13 +19,13 @@ using Warp.Core.Handlers;
 using Warp.Core.Models;
 using Warp.Core.Services;
 using Warp.Core.Webhooks;
+using Warp.Dashboard;
+using Warp.Dashboard.Endpoints;
 using Warp.Http;
 using Warp.Http.Observability;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
 using Warp.Tests.Fixtures;
-using Warp.UI;
-using Warp.UI.Endpoints;
 using Warp.Worker;
 
 namespace Warp.Tests.EndToEnd;
@@ -558,7 +558,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         app.UseRouting();
         app.UseWarpHttpObservability();
         app.MapWarpHttp();
-        app.MapWarpApiEndpoints(new WarpUIOptions(), []);
+        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
 
         await app.StartAsync(Ct);
 

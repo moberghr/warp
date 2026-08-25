@@ -10,19 +10,19 @@ export function useRecurringList(page: number, pageSize: number) {
   });
 }
 
-export function useRecurringDetail(id: number | undefined) {
+export function useRecurringDetail(name: string | undefined) {
   return useQuery({
-    queryKey: queryKeys.recurringDetail(id ?? -1),
-    queryFn: () => api.getRecurringJobById(id!),
-    enabled: id !== undefined && !Number.isNaN(id),
+    queryKey: queryKeys.recurringDetail(name ?? ''),
+    queryFn: () => api.getRecurringJob(name!),
+    enabled: !!name,
   });
 }
 
-export function useRecurringJobs(id: number | undefined, page: number, pageSize: number) {
+export function useRecurringJobs(name: string | undefined, page: number, pageSize: number) {
   return useQuery({
-    queryKey: queryKeys.recurringJobs(id ?? -1, page, pageSize),
-    queryFn: () => api.getRecurringJobJobs(id!, page, pageSize),
-    enabled: id !== undefined && !Number.isNaN(id),
+    queryKey: queryKeys.recurringJobs(name ?? '', page, pageSize),
+    queryFn: () => api.getRecurringJobJobs(name!, page, pageSize),
+    enabled: !!name,
   });
 }
 
@@ -34,7 +34,7 @@ export function useEnableRecurringJob() {
   const qc = useQueryClient();
 
   return useMutation({
-    mutationFn: (id: number) => api.enableRecurringJob(id),
+    mutationFn: (name: string) => api.enableRecurringJob(name),
     onSuccess: () => {
       invalidateRecurring(qc);
       toast.success('Recurring job enabled');
@@ -47,7 +47,7 @@ export function useDisableRecurringJob() {
   const qc = useQueryClient();
 
   return useMutation({
-    mutationFn: (id: number) => api.disableRecurringJob(id),
+    mutationFn: (name: string) => api.disableRecurringJob(name),
     onSuccess: () => {
       invalidateRecurring(qc);
       toast.success('Recurring job disabled');
@@ -60,7 +60,7 @@ export function useTriggerRecurringJob() {
   const qc = useQueryClient();
 
   return useMutation({
-    mutationFn: (id: number) => api.triggerRecurringJob(id),
+    mutationFn: (name: string) => api.triggerRecurringJob(name),
     onSuccess: () => {
       invalidateRecurring(qc);
       qc.invalidateQueries({ queryKey: queryScopes.jobs });
@@ -74,7 +74,7 @@ export function useDeleteRecurringJob() {
   const qc = useQueryClient();
 
   return useMutation({
-    mutationFn: (id: number) => api.deleteRecurringJob(id),
+    mutationFn: (name: string) => api.deleteRecurringJob(name),
     onSuccess: () => {
       invalidateRecurring(qc);
       toast.success('Recurring job deleted');

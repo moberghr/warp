@@ -4,7 +4,7 @@ sidebar_position: 11
 
 # HTTP Endpoints (Warp.Http)
 
-`Moberg.Warp.Http` is an optional package that exposes Warp `IRequest<TResponse>` and `IStreamRequest<TResponse>` handlers as ASP.NET Minimal API endpoints — annotate the **handler class**, run `MapWarpHttp()`, you have an HTTP endpoint. Source-generated dispatch (no per-request reflection); independent of `Warp.UI`.
+`Moberg.Warp.Http` is an optional package that exposes Warp `IRequest<TResponse>` and `IStreamRequest<TResponse>` handlers as ASP.NET Minimal API endpoints — annotate the **handler class**, run `MapWarpHttp()`, you have an HTTP endpoint. Source-generated dispatch (no per-request reflection); independent of `Warp.Dashboard`.
 
 `IJob` and `IMessage` cannot be HTTP-exposed — background-work types have async fire-and-forget semantics that don't fit synchronous request/response. The pattern for "submit a job via HTTP" is a thin `IRequest<Guid>` wrapper that calls `IPublisher.Enqueue` (see [§ Submit a job via HTTP](#submit-a-job-via-http)).
 
@@ -367,6 +367,6 @@ This logs every `IRequest<T>` whether dispatched in-memory or via HTTP.
 | `WHTTP004` | Error    | Body verb (POST / PUT / PATCH) handler has more than one body-bound parameter. Minimal API accepts at most one — wrap the body fields in a single `[FromBody]` sub-record. |
 | `WHTTP005` | Warning  | A non-nullable value-typed query parameter on a GET / DELETE handler carries a C# default. `[AsParameters]` binding ignores the default and makes the parameter required, so omitting it returns 400. Make it nullable and apply the default in the handler. |
 
-## Independence from Warp.UI
+## Independence from Warp.Dashboard
 
-`Moberg.Warp.Http` is structurally independent of `Moberg.Warp.UI`. The dashboard ships its own endpoints under `/warp` and is unrelated to this feature. You can use Warp.Http without Warp.UI, and vice versa.
+`Moberg.Warp.Http` is structurally independent of `Moberg.Warp.Dashboard`. The dashboard ships its own endpoints under `/warp` and is unrelated to this feature. You can use Warp.Http without Warp.Dashboard, and vice versa.
