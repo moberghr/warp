@@ -110,10 +110,10 @@ internal static class PolicyResolver
 
     public static void StampRetry(IRetryMetadata meta, Type? handlerType, Type requestType)
     {
-        // MaxRetries and Delays are independent rungs: WithRetry(5) at publish sets the count only, and
-        // the attribute's schedule must still apply beneath it — while an explicit publish value for
-        // either field outranks the attribute for that field alone.
-        if (meta.MaxRetries != null && meta.RetryDelays != null)
+        // A retry policy is atomic per rung — the winning rung supplies count AND schedule. Fields are
+        // never merged across rungs, so WithRetry(5) at publish takes the global schedule beneath it,
+        // not the attribute's.
+        if (meta.MaxRetries != null)
         {
             return;
         }
@@ -123,10 +123,10 @@ internal static class PolicyResolver
             return;
         }
 
-        meta.MaxRetries ??= attr.MaxRetries;
+        meta.MaxRetries = attr.MaxRetries;
 
         // Left null when the attribute declares none, so the global schedule stays in play.
-        if (meta.RetryDelays == null && attr.Delays is { Length: > 0 })
+        if (attr.Delays is { Length: > 0 })
         {
             meta.RetryDelays = attr.Delays;
         }

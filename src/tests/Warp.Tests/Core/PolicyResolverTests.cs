@@ -138,10 +138,10 @@ public class PolicyResolverTests
     }
 
     [TimedFact]
-    public void StampRetry_MaxRetriesFromElsewhere_StillStampsAttributeDelays()
+    public void StampRetry_ExplicitMaxRetries_DoesNotMergeAttributeDelays()
     {
-        // WithRetry(5) at publish sets MaxRetries only. The attribute's schedule must still apply —
-        // the two fields are independent rungs, or a declared [7, 9] silently becomes the global default.
+        // A retry policy is atomic per rung: WithRetry(5) at publish claims the WHOLE policy, so the
+        // attribute's [7, 9] does not seep in beneath it — the global schedule applies instead.
         var context = new JobContext();
         var meta = context.GetMetadata<IRetryMetadata>();
         meta.MaxRetries = 5;
@@ -149,13 +149,14 @@ public class PolicyResolverTests
         PolicyResolver.StampRetry(meta, typeof(HandlerWithRetryDelays), typeof(BareContract));
 
         meta.MaxRetries.ShouldBe(5);
-        meta.RetryDelays.ShouldBe([7, 9]);
+        meta.RetryDelays.ShouldBeNull();
     }
 
     [TimedFact]
-    public void StampRetry_ExplicitDelays_AreNotOverwrittenByAttribute()
+    public void StampRetry_DelaysWithoutMaxRetries_TakesWholeAttributePolicy()
     {
-        // Explicit publish metadata outranks every attribute — for Delays as much as for MaxRetries.
+        // MaxRetries is the sentinel for "the explicit rung claimed this policy" — WithRetry always sets
+        // it, so a delays-only row is unreachable from the public API and the attribute rung wins whole.
         var context = new JobContext();
         var meta = context.GetMetadata<IRetryMetadata>();
         meta.RetryDelays = [1];
@@ -163,7 +164,7 @@ public class PolicyResolverTests
         PolicyResolver.StampRetry(meta, typeof(HandlerWithRetryDelays), typeof(BareContract));
 
         meta.MaxRetries.ShouldBe(3);
-        meta.RetryDelays.ShouldBe([1]);
+        meta.RetryDelays.ShouldBe([7, 9]);
     }
 
     [TimedFact]
