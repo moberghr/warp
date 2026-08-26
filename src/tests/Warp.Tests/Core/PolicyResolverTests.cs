@@ -4,6 +4,7 @@ using Warp.Core.CircuitBreaker;
 using Warp.Core.Concurrency;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Helper;
 using Warp.Core.Policies;
 using Warp.Core.RateLimit;
 using Warp.Core.Retry;
@@ -153,18 +154,38 @@ public class PolicyResolverTests
     }
 
     [TimedFact]
-    public void StampRetry_DelaysWithoutMaxRetries_TakesWholeAttributePolicy()
+    public void StampRetry_ExplicitDelays_ClaimTheRung_AttributeContributesNothing()
     {
-        // MaxRetries is the sentinel for "the explicit rung claimed this policy" — WithRetry always sets
-        // it, so a delays-only row is unreachable from the public API and the attribute rung wins whole.
+        // The mirror of the case above, and the reason the sentinel is not MaxRetries alone: a delays-only
+        // row IS reachable (Configure<IRetryMetadata> / JobParameters.Metadata are public), and keying on
+        // MaxRetries let the attribute overwrite the caller's explicit [1]. Either field claims the whole
+        // policy, so the global count applies beneath the explicit schedule.
         var context = new JobContext();
         var meta = context.GetMetadata<IRetryMetadata>();
         meta.RetryDelays = [1];
 
         PolicyResolver.StampRetry(meta, typeof(HandlerWithRetryDelays), typeof(BareContract));
 
-        meta.MaxRetries.ShouldBe(3);
-        meta.RetryDelays.ShouldBe([7, 9]);
+        meta.RetryDelays.ShouldBe([1]);
+        meta.MaxRetries.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public void StampRetry_DelaysOnlyRowFromThePublicApi_SurvivesTheAttribute()
+    {
+        // Guards the premise the sentinel rests on. A delays-only row was once documented as unreachable
+        // because WithRetry always sets both — but Configure<IRetryMetadata> is public and reaches it
+        // directly, which is exactly how an explicit schedule got silently replaced by the attribute's.
+        var parameters = new JobParameters().Configure<IRetryMetadata>(x => x.RetryDelays = [1]);
+
+        var context = new JobContext { Metadata = parameters.Metadata! };
+        var meta = context.GetMetadata<IRetryMetadata>();
+
+        meta.MaxRetries.ShouldBeNull();
+
+        PolicyResolver.StampRetry(meta, typeof(HandlerWithRetryDelays), typeof(BareContract));
+
+        meta.RetryDelays.ShouldBe([1]);
     }
 
     [TimedFact]

@@ -110,10 +110,13 @@ internal static class PolicyResolver
 
     public static void StampRetry(IRetryMetadata meta, Type? handlerType, Type requestType)
     {
-        // A retry policy is atomic per rung — the winning rung supplies count AND schedule. Fields are
-        // never merged across rungs, so WithRetry(5) at publish takes the global schedule beneath it,
-        // not the attribute's.
-        if (meta.MaxRetries != null)
+        // A retry policy is atomic per rung — the winning rung supplies count AND schedule, and fields are
+        // never merged across rungs. EITHER explicit field claims the rung, symmetrically: WithRetry(5)
+        // takes the global schedule beneath it rather than the attribute's, and an explicit RetryDelays
+        // likewise takes the global count. Keying the sentinel on MaxRetries alone would let the attribute
+        // overwrite a caller's explicit schedule — a delays-only row is reachable through the public
+        // Configure<IRetryMetadata> / JobParameters.Metadata surface, not just through WithRetry.
+        if (meta.MaxRetries != null || meta.RetryDelays != null)
         {
             return;
         }
