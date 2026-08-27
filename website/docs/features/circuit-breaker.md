@@ -80,8 +80,21 @@ Circuit Breaker runs inside the handler pipeline after the concurrency behavior 
 
 Per-handler overrides on `[CircuitBreaker]` use `Group`, `Threshold`, `DurationSeconds`, and `ResetJitterSeconds`.
 
+### Contract or handler
+
 `[CircuitBreaker]` can sit on the job/message type, on a job/message handler class, or on both — the
-handler wins, and the resolved threshold is read at the job's first execution. Unlike the other policies
+handler wins, and the resolved threshold is read at the job's first execution:
+
+```
+[CircuitBreaker(...)]        // on the handler class, highest priority
+  → [CircuitBreaker(...)]    // on the job/message type
+    → opt.AddCircuitBreaker( // global options, lowest priority
+        o => o.Threshold = ...)
+```
+
+Unlike the other families there is **no enqueue rung** — there is no `WithCircuitBreaker`, deliberately: a
+circuit describes a shared dependency group, and letting one caller set the threshold for a group would put
+two jobs in one group disagreeing about when it opens. Unlike the other policies
 the breaker is **never stamped onto the job row**: its threshold and duration describe a shared dependency
 group whose live state is a `CircuitBreakerState` row, and two jobs in one group must not disagree about
 when the circuit opens. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
