@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 6.0.0
 
-*Unreleased*
+*2026-08-27*
 
 Major release with three breaking changes — the two below, and **the addon policy axis** (last section): **the dashboard package and its API are renamed from `UI` to `Dashboard`**, and **`IRecurringJobService` now addresses a recurring job by the name it was registered under, not by the table's surrogate id.**
 
@@ -98,6 +98,12 @@ No schema change, no migration. Reported in [#284](https://github.com/moberghr/w
 ### Dashboard API routes carry the name
 
 The six routes under `{prefix}/api/recurring/{id}` keep their shape, but `{id}` is now the **URL-safe base64 of the name** rather than an integer — the same codec the endpoints and applications routes already use (base64 of the UTF-8 bytes, `+`→`-`, `/`→`_`, trailing `=` trimmed), because a name may contain `/` and spaces. `session-cleanup` becomes `c2Vzc2lvbi1jbGVhbnVw`. An id that does not decode, and a name no definition matches, both answer **404** — previously an unknown id surfaced as a 500. The bundled dashboard moves with it; only a caller scripting these endpoints directly needs to change. The recurring job detail page drops its "ID" row, which named a value nothing addresses any more.
+
+### The dashboard nav is grouped, and the Queues page is gone
+
+Twenty-odd flat nav entries had outgrown a single list. They are now grouped by what you go there to do — **Workloads** (messages, batches, recurring, background services), **Traffic** (endpoints, adapters, webhooks, client), **Health** (applications, issues, SLOs, counters) and **Runtime** (concurrency limits, rate limits, sagas) — with jobs, workers and the dashboard itself staying at the top level. Nothing was renamed and no route changed; the docs section was reorganised to match, with redirects from every previous URL.
+
+One page was **removed**: the standalone **Queues** page. Its two numbers already lived on the Counters page's `queues` family — that family folds queue-wait latency together with backlog depth and oldest-age onto one row per queue, so the page was a second rendering of the same data. The one thing it had that the family lacked, **p99**, moved across: a counter family can now report several percentiles off one histogram, and `queues` reports p95 and p99. `GET {prefix}/api/queues/metrics` is **unchanged and still public** — only the page is gone. `/docs/ui/queues` redirects to the Counters docs.
 
 ### The addon policy axis
 

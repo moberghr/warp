@@ -50,7 +50,20 @@ public class DropOnFull : IJob { }
 
 ## Contract or handler?
 
-`[Semaphore]` can sit on the job/message type (the default for everything that runs it — shared by all handlers of a message), on a job/message handler class (that handler only), or on both, in which case the handler wins. `[Mutex]` and `[Semaphore]` are one family, so a handler `[Semaphore]` overrides a contract `[Mutex]` outright. The resolved policy is written onto the job row at first execution. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
+`[Semaphore]` can sit on the job/message type (the default for everything that runs it — shared by all handlers of a message), on a job/message handler class (that handler only), or on both, in which case the handler wins. `[Mutex]` and `[Semaphore]` are one family, so a handler `[Semaphore]` overrides a contract `[Mutex]` outright. The resolved policy is written onto the job row at first execution.
+
+### Precedence
+
+```
+WithSemaphore(...) / WithMutex(...)   // passed at enqueue, highest priority
+  → [Semaphore] / [Mutex]            // on the handler class
+    → [Semaphore] / [Mutex]          // on the job/message type
+```
+
+There is no global default — a concurrency policy without a key is not a policy — and a rung supplies the
+key, limit and mode together, never a field of one. An `IConcurrencyLimitManager` **admin row** sits above
+all of it for the *limit* only (see [Admin overrides](./mutex.md#admin-overrides)); it never changes which
+key a job contends on. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
 
 ## Related
 

@@ -50,11 +50,18 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 The policy is resolved **once**, the first time the job runs, in this order:
 
 ```
-explicit metadata at publish (WithMutex/WithSemaphore/...)
-  → the handler class
-    → the contract type
-      → global options (Retry/Timeout only)
+explicit metadata passed at enqueue (WithMutex / WithSemaphore / WithRateLimit / WithTimeout / WithRetry)
+  → the handler class          ([Mutex] on IJobHandler<T> / IMessageHandler<T>)
+    → the contract type        ([Mutex] on the IJob / IMessage)
+      → global options         (opt.AddRetry / opt.AddTimeout — Retry and Timeout only)
 ```
+
+This is the same chain for every policy family, and the four rungs are the same four everywhere: what the
+caller passed at enqueue, then the handler, then the contract, then the process-wide default. Two families
+have fewer rungs, because they have nothing to put there: **concurrency and rate limit have no global
+default** (a keyless policy is not a policy), and **the circuit breaker has no enqueue rung** (no
+`WithCircuitBreaker` — its threshold describes a shared dependency group, not one job). Each addon page
+repeats its own chain in a **Precedence** section.
 
 The winner is then **written into `Job.Metadata`**, and from that moment the row is the authority: later attempts read it and never re-resolve, so a requeued or retried job cannot quietly change policy mid-flight, and a redeploy never reshapes jobs already running. If a job did not do what you expected, open it and read what it says it will follow — that is the whole point of stamping.
 

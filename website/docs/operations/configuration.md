@@ -57,7 +57,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 | `Delays` | `int[]` | `[15, 60, 300]` | Delay in seconds between retries. Last value is reused if fewer delays than retries |
 | `JitterFactor` | `double` | `0.0` | Multiplicative jitter applied to each delay: `delay * (1 + JitterFactor * rand(-1, 1))`. Clamped to `[0, 1]`. Global only — no per-job override. Helps avoid retry thundering herds |
 
-Per-job override via `[Retry]` attribute on handler or job class, or per-enqueue via metadata. See [Jobs](/docs/patterns/jobs#retries).
+Per-job override via `[Retry]` on the handler class or the job class, or per-enqueue via metadata — `enqueue-time metadata > handler > job type > these global options`, resolved once at the job's first execution and written onto the row. A retry policy is atomic per rung: the winning rung supplies both `MaxRetries` and `Delays`. See [Jobs](/docs/patterns/jobs#retries) and [Where do I declare the policy?](/docs/features/mutex#where-do-i-declare-the-policy-contract-vs-handler).
 
 ## Concurrency Configuration
 
@@ -70,7 +70,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 });
 ```
 
-No options — just register and use `.WithMutex("key")` / `[Mutex("key")]` for at-most-one, or `.WithSemaphore("key", N)` / `[Semaphore("key", N)]` for at-most-N concurrent jobs at publish time. See [Concurrency control](/docs/features/mutex) for details.
+No options — just register and use `.WithMutex("key")` / `[Mutex("key")]` for at-most-one, or `.WithSemaphore("key", N)` / `[Semaphore("key", N)]` for at-most-N concurrent jobs. The attributes go on the job/message type, on the handler class, or on both (the handler wins) — every policy addon resolves the same way, `enqueue-time metadata > handler > contract > global default`, once at the job's first execution. See [Where do I declare the policy?](/docs/features/mutex#where-do-i-declare-the-policy-contract-vs-handler) and [Concurrency control](/docs/features/mutex) for details.
 
 ## Circuit Breaker Configuration
 
@@ -94,7 +94,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 | `Duration` | `TimeSpan` | `1 minute` | How long the circuit stays open before the half-open probe window |
 | `ResetJitter` | `TimeSpan` | `10 seconds` | Jitter added to each rescheduled `ScheduleTime` so rescheduled jobs don't all hit the downstream at the exact moment the circuit expires |
 
-Per-handler overrides on `[CircuitBreaker]` use `Group`, `Threshold`, `DurationSeconds`, and `ResetJitterSeconds`. The `CircuitBreakerState` entity is part of Warp's base schema (registered by `AddWarp` unconditionally), so no separate migration is required when you turn the addon on. See [Circuit Breaker](/docs/features/circuit-breaker) for details.
+Overrides on `[CircuitBreaker]` — on the handler class or on the job/message type, handler first — use `Group`, `Threshold`, `DurationSeconds`, and `ResetJitterSeconds`; there is no enqueue-time rung for the breaker (see [Precedence](/docs/features/circuit-breaker#contract-or-handler)). The `CircuitBreakerState` entity is part of Warp's base schema (registered by `AddWarp` unconditionally), so no separate migration is required when you turn the addon on. See [Circuit Breaker](/docs/features/circuit-breaker) for details.
 
 ## NoRestart Configuration
 

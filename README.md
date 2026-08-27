@@ -16,6 +16,7 @@ A distributed job processing, message queue, and in-memory mediator library for 
 - **In-Memory Streams** — `IStreamRequest<TResponse>` with `IMediator.CreateStream()` for lazy, item-by-item streaming via `IAsyncEnumerable<TResponse>`. No database persistence.
 - **Sagas** — `Saga` base class + `ISagaHandler<TSaga, TMessage>` for long-lived, correlated state across multiple message arrivals. Opt-in via `opt.AddSagas()`. Distributed mutex serialization, optimistic concurrency defense-in-depth. See `website/docs/features/sagas.md`.
 - **Background Services** — `WarpBackgroundService` base class for dashboard-visible long-running services. First-class part of Warp (always available); register your services with `opt.AddBackgroundService<T>()`. Automatic restart-on-fault with exponential backoff, cluster-singleton coordination via database lease, captured log output in the dashboard, and orphan-definition cleanup for renamed services. See `website/docs/features/background-services.md`.
+- **Execution Policy — Contract or Handler** — `[Mutex]` / `[Semaphore]`, `[RateLimit]`, `[Timeout]`, `[Retry]` and `[CircuitBreaker]` sit on the job/message type, on the handler class, or on both (the handler wins). The policy is resolved once, at the job's first execution, and written onto the job row — so a retry or a redeploy never reshapes a job mid-flight, and the row always says what it will follow. Applies to message handlers too. See `website/docs/features/mutex.md`.
 - **Unified Pipeline** — `IPipelineBehavior<T, TResponse>` wraps all four patterns. `IStreamPipelineBehavior<T, TResponse>` adds enumeration-level wrapping for streams.
 - **Named Queues** — Assign jobs to queues. Workers subscribe to specific queues. Alphabetical order = priority.
 - **Execution Logs** — ILogger output automatically captured and flushed to the database every ~1 second during handler execution, viewable in dashboard in real time. Each log entry tracks which worker produced it.
@@ -344,6 +345,12 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 ```
 
 `AddOrUpdateRecurringJob` registers the definition. The `RecurringJobScheduler` task creates jobs when the cron time arrives. Execution history is tracked in `RecurringJobLog` and survives job cleanup.
+
+Every single-definition method on `IRecurringJobService` addresses a definition by the **name** it was registered under — `TriggerRecurringJob`, `EnableRecurringJob`, `DisableRecurringJob`, `DeleteRecurringJob`, `GetRecurringJob`, `GetRecurringJobHistory`:
+
+```csharp
+await recurringJobService.TriggerRecurringJob("session-cleanup");
+```
 
 ### 10. Dashboard Authorization
 
