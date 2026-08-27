@@ -110,3 +110,34 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
             LogMessage = $"Cancelled — '{key}' full ({effectiveLimit} slots)",
         };
 }
+
+/// <summary>
+/// DI shim: carries the <c>IJob</c> constraint so an in-memory <c>Send</c> never resolves
+/// <see cref="ConcurrencyLimitResolver"/> and its scoped DbContext. See the retry shims.
+/// </summary>
+internal sealed class ConcurrencyJobPipelineBehavior<TRequest, TResponse> : ConcurrencyPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IJob
+{
+    public ConcurrencyJobPipelineBehavior(
+        IJobContext jobContext,
+        IWarpSemaphoreProvider semaphoreProvider,
+        ConcurrencyLimitResolver limitResolver,
+        TimeProvider timeProvider)
+        : base(jobContext, semaphoreProvider, limitResolver, timeProvider)
+    {
+    }
+}
+
+/// <summary>DI shim: the <c>IMessage</c> half of the constraint split — see <see cref="ConcurrencyJobPipelineBehavior{TRequest, TResponse}"/>.</summary>
+internal sealed class ConcurrencyMessagePipelineBehavior<TRequest, TResponse> : ConcurrencyPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IMessage
+{
+    public ConcurrencyMessagePipelineBehavior(
+        IJobContext jobContext,
+        IWarpSemaphoreProvider semaphoreProvider,
+        ConcurrencyLimitResolver limitResolver,
+        TimeProvider timeProvider)
+        : base(jobContext, semaphoreProvider, limitResolver, timeProvider)
+    {
+    }
+}
