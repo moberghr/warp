@@ -111,7 +111,9 @@ internal static class WarpModelGuard
         }
 
         EnsureWarpStorageContract(context);
-        ValidatedModels.Add(model, ValidatedSentinel);
+
+        // AddOrUpdate, not Add: two scopes can race past the TryGetValue above and Add throws for the loser.
+        ValidatedModels.AddOrUpdate(model, ValidatedSentinel);
     }
 
     private static readonly ConditionalWeakTable<IModel, object> ValidatedModels = [];
