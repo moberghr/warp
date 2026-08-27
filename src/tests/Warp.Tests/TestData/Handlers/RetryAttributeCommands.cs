@@ -26,8 +26,18 @@ public class RetryAttributeJobCommand : IJobHandler<RetryAttributeJobRequest>
 [Retry(4)]
 public class RetryAttributeJobRequest : IJob;
 
-// [Retry] on both the request and its handler is legal since §8.8 — the handler wins. Covered by
-// PolicyResolverTests; BothAxesMutexRequest carries the end-to-end version.
+// [Retry] on both the request and its handler — the handler wins (§8.8), driven end-to-end by RetryTests.
+[Retry(7)]
+public class RetryAttributeBothCommand : IJobHandler<RetryAttributeBothRequest>
+{
+    public Task HandleAsync(RetryAttributeBothRequest message, CancellationToken cancellationToken)
+    {
+        throw new InvalidOperationException("Always fails");
+    }
+}
+
+[Retry(2)]
+public class RetryAttributeBothRequest : IJob;
 
 // Handler with [Retry] that includes custom delays
 [Retry(3, Delays = [100, 200, 300])]

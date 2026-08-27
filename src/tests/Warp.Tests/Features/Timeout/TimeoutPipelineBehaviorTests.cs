@@ -288,8 +288,9 @@ public class TimeoutPipelineBehaviorTests
         // SC5b: a recurring firing whose CONTRACT declares Scope = Total has no publish-time
         // deadline. Inventing one at execution would measure from first pickup instead of enqueue,
         // so the resolver refuses the stamp and the job runs without a timeout from the attribute.
-        // The Warning fires exactly ONCE per request type — the dedupe rides the per-closed-generic
-        // static flag, so this test owns ContractTotalTimedRequest exclusively.
+        // The Warning fires exactly ONCE per request type — the dedupe rides a per-closed-generic
+        // static flag scoped to this warning kind, so this test still needs its own request type
+        // for this warning (other warning kinds have their own flags and don't collide here).
         var time = new FakeTimeProvider();
         var ctx = new JobContext { JobId = Guid.NewGuid() };
         var logger = new CapturingLogger<TimeoutPipelineBehavior<ContractTotalTimedRequest, Unit>>();

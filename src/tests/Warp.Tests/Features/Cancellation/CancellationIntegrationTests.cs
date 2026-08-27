@@ -138,6 +138,9 @@ public abstract class CancellationIntegrationTestsBase : IntegrationTestBase
         job.Metadata.ShouldNotBeNull();
         var meta = MetadataSerializer.Deserialize(job.Metadata);
         Convert.ToInt32(meta["MaxRetries"]).ShouldBe(2);
+
+        // ...but a cancelled attempt is not a spent retry.
+        meta.ShouldNotContainKey("RetriedTimes");
     }
 
     [TimedFact]
@@ -169,5 +172,8 @@ public abstract class CancellationIntegrationTestsBase : IntegrationTestBase
         job.Metadata.ShouldNotBeNull();
         var meta = MetadataSerializer.Deserialize(job.Metadata);
         Convert.ToInt32(meta["MaxRetries"]).ShouldBe(2);
+
+        // ...but a cancelled attempt is not a spent retry.
+        meta.ShouldNotContainKey("RetriedTimes");
     }
 }

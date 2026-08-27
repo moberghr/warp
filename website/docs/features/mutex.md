@@ -34,7 +34,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 });
 ```
 
-`AddConcurrency()` registers the pipeline behavior, the publish behavior, the `IConcurrencyLimitManager` admin layer, and the `ConcurrencyLimit` entity (picked up by `WarpModelCustomizer` — run a fresh `dotnet ef migrations add` to apply the schema change).
+`AddConcurrency()` registers the pipeline behavior, the `IConcurrencyLimitManager` admin layer, and the `ConcurrencyLimit` entity (picked up by `WarpModelCustomizer` — run a fresh `dotnet ef migrations add` to apply the schema change).
 
 ## Where do I declare the policy? Contract vs handler
 

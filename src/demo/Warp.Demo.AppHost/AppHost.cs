@@ -11,8 +11,8 @@ var builder = DistributedApplication.CreateBuilder(args);
 
 // Postgres, provisioned by Aspire. The database resource is named "TestContext" so its injected
 // connection string lands under ConnectionStrings:TestContext — exactly what the demo apps read.
-// Port and credentials pinned so the container is always at 127.0.0.1:5442 — the address the standalone
-// appsettings point at. 5442 is clear of 5432-5434 and of Docker's ephemeral published-port range.
+// Port and credentials pinned so the container is always published on host port 5442 — the port the
+// standalone appsettings point at. 5442 is clear of 5432-5434 and of Docker's ephemeral published-port range.
 // Demo-only, non-secret defaults (§1.1).
 var postgresUser = builder.AddParameter("postgres-user", "postgres");
 var postgresPassword = builder.AddParameter("postgres-password", "admin", secret: true);

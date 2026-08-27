@@ -49,6 +49,43 @@ public class RetryPipelineBehaviorGuardTests
     }
 
     [TimedFact]
+    public async Task InMemorySendOfJobShapedType_NoJobRow_PassesThroughWithoutRetryOutcome()
+    {
+        // The JobId == Guid.Empty rung of PolicyResolver.Bypasses: no row to reschedule.
+        var ctx = new JobContext();
+        var behavior = Build<ContractRetryJob, Unit>(ctx, maxRetries: 5);
+
+        await Should.ThrowAsync<InvalidOperationException>(
+            behavior.HandleAsync(
+                new ContractRetryJob(),
+                (req, ct) => throw new InvalidOperationException("boom"),
+                CancellationToken.None));
+
+        ctx.Outcome.ShouldBeNull();
+        ctx.Metadata.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task CancelledAttempt_DoesNotBurnARetry()
+    {
+        // A graceful DeleteJob cancels the token the worker handed the pipeline; the cancel arm then
+        // persists Metadata, so a RetriedTimes bump here would survive on the Deleted row.
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var ctx = new JobContext { JobId = Guid.NewGuid() };
+        var behavior = Build<ExemptShapedMessage, Unit>(ctx, maxRetries: 5);
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            behavior.HandleAsync(
+                new ExemptShapedMessage(),
+                (req, ct) => throw new OperationCanceledException(ct),
+                cts.Token));
+
+        ctx.Outcome.ShouldBeNull();
+        ctx.Metadata.ShouldNotContainKey("RetriedTimes");
+    }
+
+    [TimedFact]
     public async Task MessageRequest_HandlerThrows_GetsRetryOutcome()
     {
         // The counter-case: an ordinary routed message child IS retried per the global options.
@@ -79,4 +116,7 @@ public class RetryPipelineBehaviorGuardTests
     private sealed class ExemptHandler : IPolicyExemptHandler;
 
     private sealed class ExemptShapedMessage : IMessage;
+
+    [Retry(3)]
+    private sealed class ContractRetryJob : IJob;
 }

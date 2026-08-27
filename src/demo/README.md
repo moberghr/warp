@@ -56,7 +56,9 @@ curl -X POST http://localhost:<warp-app-port>/seed/webhooks
   signed with Standard Webhooks; the partner receiver verifies the signature.
 - **Postgres** — provisioned by the AppHost (`AddPostgres("postgres").AddDatabase("TestContext")`); the
   connection string is injected as `ConnectionStrings:TestContext`. No manual DB setup. The container is
-  pinned to `127.0.0.1:5442` with the demo credentials `postgres`/`admin`, so you can attach `psql` or a
+  published on host port 5442 with the demo credentials `postgres`/`admin` — Docker publishes it on
+  all host interfaces, so it is reachable from the LAN, not just loopback (demo-only; do not run this on
+  an untrusted network) — so you can attach `psql` or a
   GUI client to the running demo database (`psql -h 127.0.0.1 -p 5442 -U postgres -d TestContext`). The
   standalone `appsettings.json` of `Warp.TestApp` / `Warp.TestWorker` — used when you run those projects
   WITHOUT the AppHost — points at that same **server**, but at its own `warp` database, which you create

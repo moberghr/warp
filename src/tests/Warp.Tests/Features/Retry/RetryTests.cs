@@ -561,6 +561,49 @@ public abstract class RetryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetAndProcessJob_WithRetryAttributeOnBothHandlerAndJob_HandlerWins()
+    {
+        // #236's shape: both axes, retry, real worker — asserts the count actually TAKEN.
+        // Arrange — handler has [Retry(7)], job has [Retry(2)], global has 0
+        var ctx = _fixture.CreateContext();
+        var jobId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(RetryAttributeBothRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new RetryAttributeBothRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var worker = CreateWorker(maxRetries: 0);
+
+        // Act — exhaust all retries from the handler attribute (7), one attempt per iteration
+        for (var i = 0; i < 8; i++)
+        {
+            var resetCtx = _fixture.CreateContext();
+            await resetCtx.Set<Job>()
+                .Where(x => x.Id == jobId)
+                .Where(x => x.CurrentState == State.Enqueued)
+                .ExecuteUpdateAsync(
+                    x => x.SetProperty(p => p.ScheduleTime, DateTime.UtcNow),
+                    Xunit.TestContext.Current.CancellationToken);
+
+            await worker.GetAndProcessJob(CancellationToken.None);
+        }
+
+        // Assert — the handler's 7 retries were taken, not the contract's 2
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Failed);
+        GetRetriedTimes(job).ShouldBe(7);
+    }
+
+    [TimedFact]
     public async Task GetAndProcessJob_MetadataOverridesRetryAttribute()
     {
         // Arrange — handler has [Retry(5)], but metadata overrides to 1

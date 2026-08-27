@@ -103,6 +103,34 @@ public class PolicyResolverTests
     }
 
     [TimedFact]
+    public void StampRateLimit_ExplicitCountWithoutKey_AttributeStillClaimsTheWholePolicy()
+    {
+        // RateLimitKey alone is the sentinel: a keyless partial row is inert, so the attribute takes all five.
+        var context = new JobContext { HandlerType = typeof(HandlerWithRateLimit) };
+        var meta = context.GetMetadata<IRateLimitMetadata>();
+        meta.RateLimitCount = 99;
+
+        PolicyResolver.StampRateLimit(meta, context.HandlerType, typeof(ContractWithRateLimit));
+
+        meta.RateLimitKey.ShouldBe("handler-rl");
+        meta.RateLimitCount.ShouldBe(2);
+    }
+
+    [TimedFact]
+    public void StampConcurrency_ExplicitLimitWithoutKey_AttributeStillClaimsTheWholePolicy()
+    {
+        // ConcurrencyKey alone is the sentinel, all-three-or-none.
+        var context = new JobContext { HandlerType = typeof(HandlerWithSemaphore) };
+        var meta = context.GetMetadata<IConcurrencyMetadata>();
+        meta.ConcurrencyLimit = 99;
+
+        PolicyResolver.StampConcurrency(meta, context.HandlerType, typeof(ContractWithMutex));
+
+        meta.ConcurrencyKey.ShouldBe("handler-sema");
+        meta.ConcurrencyLimit.ShouldBe(4);
+    }
+
+    [TimedFact]
     public void StampRetry_HandlerDeclaration_WinsOverContract()
     {
         var meta = Stamp<IRetryMetadata>(typeof(HandlerWithRetry), typeof(ContractWithRetry));

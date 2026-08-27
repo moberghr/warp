@@ -119,6 +119,29 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
+    public async Task HandlerDeclaredTimeout_HandlerThrowsWithNoOutcome_StampSurvivesOnFailedRow()
+    {
+        // §8.8: the stamp is persisted on the failure path too. A throwing handler under a zero retry
+        // budget sets no outcome at all — the one shape that keeps the metadata write outside that branch.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(
+            new HandlerTimeoutThrowingRequest(),
+            new JobParameters().Configure<IRetryMetadata>(m => m.MaxRetries = 0));
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(jobId, State.Failed);
+
+        var ctx = Fixture.CreateContext();
+        var job = await ctx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Failed);
+        job.Metadata.ShouldNotBeNull();
+
+        var meta = MetadataSerializer.Deserialize(job.Metadata);
+        Convert.ToInt32(meta["TimeoutSeconds"]).ShouldBe(60);
+    }
+
+    [TimedFact]
     public async Task RecurringFiring_ContractTotalTimeout_RefusedNotStamped()
     {
         // SC5 (second half), through the REAL recurring path: TriggerRecurringJob stages the firing
