@@ -50,23 +50,22 @@ internal static class PolicyAxisValidator
             iRequestHandlerSymbol,
             iStreamRequestHandlerSymbol);
 
-        foreach (var pair in pairs)
+        // Judged per HANDLER, not per pair: the attribute is honoured if ANY of the handler's interfaces
+        // supports the axis, and grouping also collapses duplicate reports on the one attribute syntax.
+        foreach (var group in GroupByHandler(pairs))
         {
-            // Self-handling job: the declaration is on the contract, which happens to be the handler too.
-            if (SymbolEqualityComparer.Default.Equals(pair.Handler, pair.Request))
-            {
-                continue;
-            }
+            var handler = group[0].Handler;
+            var anySupported = group.Exists(x => x.HandlerAxisSupported);
 
             foreach (var family in families)
             {
-                var declared = FindAttribute(pair.Handler, family);
+                var declared = FindAttribute(handler, family);
                 if (declared == null)
                 {
                     continue;
                 }
 
-                if (!pair.HandlerAxisSupported)
+                if (!anySupported)
                 {
                     if (!family.RejectedOnUnsupportedShapes)
                     {
@@ -77,10 +76,10 @@ internal static class PolicyAxisValidator
                         context,
                         Diagnostics.PolicyOnUnsupportedHandler,
                         declared,
-                        pair.Handler,
+                        handler,
                         ShortAttributeName(declared),
-                        pair.Handler.Name,
-                        pair.Request.Name);
+                        handler.Name,
+                        group[0].Request.Name);
 
                     continue;
                 }
@@ -89,10 +88,38 @@ internal static class PolicyAxisValidator
                     && SymbolEqualityComparer.Default.Equals(declared.AttributeClass, timeoutAttributeSymbol)
                     && IsTotalScope(declared, totalScopeValue))
                 {
-                    Report(context, Diagnostics.TotalTimeoutOnHandler, declared, pair.Handler, pair.Handler.Name);
+                    Report(context, Diagnostics.TotalTimeoutOnHandler, declared, handler, handler.Name);
                 }
             }
         }
+    }
+
+    // `order` keeps emission deterministic across runs.
+    private static List<List<HandlerPair>> GroupByHandler(IEnumerable<HandlerPair> pairs)
+    {
+        var byHandler = new Dictionary<string, List<HandlerPair>>(StringComparer.Ordinal);
+        var order = new List<string>();
+
+        foreach (var pair in pairs)
+        {
+            // Self-handling job: the declaration is on the contract, which happens to be the handler too.
+            if (SymbolEqualityComparer.Default.Equals(pair.Handler, pair.Request))
+            {
+                continue;
+            }
+
+            var key = pair.Handler.ToDisplayString();
+            if (!byHandler.TryGetValue(key, out var bucket))
+            {
+                bucket = [];
+                byHandler.Add(key, bucket);
+                order.Add(key);
+            }
+
+            bucket.Add(pair);
+        }
+
+        return order.ConvertAll(x => byHandler[x]);
     }
 
     private static IEnumerable<HandlerPair> EnumerateHandlerPairs(

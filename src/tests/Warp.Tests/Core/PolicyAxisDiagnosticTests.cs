@@ -152,6 +152,68 @@ public sealed class PolicyAxisDiagnosticTests
     }
 
     [TimedFact]
+    public void PolicyOnHandlerServingBothAJobAndAStream_IsAccepted()
+    {
+        // The attribute IS honoured for the job half, so the stream half must not fail the build.
+        var diagnostics = Run("""
+            public sealed class MixedJob : IJob;
+
+            public sealed class MixedStream : IStreamRequest<string>;
+
+            [Mutex("k")]
+            public sealed class MixedHandler : IJobHandler<MixedJob>, IStreamRequestHandler<MixedStream, string>
+            {
+                public Task HandleAsync(MixedJob message, CancellationToken cancellationToken) => Task.CompletedTask;
+
+                public IAsyncEnumerable<string> HandleAsync(MixedStream request, CancellationToken cancellationToken) => null!;
+            }
+            """);
+
+        diagnostics.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public void PolicyOnHandlerServingTwoUnsupportedShapes_ReportsOnce()
+    {
+        // The same attribute syntax must not produce one diagnostic per unsupported pair.
+        var diagnostics = Run("""
+            public sealed class FirstPlain : IRequest<string>;
+
+            public sealed class SecondPlain : IRequest<string>;
+
+            [Mutex("k")]
+            public sealed class TwoPlainHandler : IRequestHandler<FirstPlain, string>, IRequestHandler<SecondPlain, string>
+            {
+                public Task<string> HandleAsync(FirstPlain request, CancellationToken cancellationToken) => Task.FromResult("x");
+
+                public Task<string> HandleAsync(SecondPlain request, CancellationToken cancellationToken) => Task.FromResult("x");
+            }
+            """);
+
+        diagnostics.Select(x => x.Id).ShouldBe(["WARP001"]);
+    }
+
+    [TimedFact]
+    public void TotalScopedTimeoutOnHandlerServingTwoJobs_ReportsOnce()
+    {
+        var diagnostics = Run("""
+            public sealed class FirstTotalJob : IJob;
+
+            public sealed class SecondTotalJob : IJob;
+
+            [Timeout(30, Scope = TimeoutScope.Total)]
+            public sealed class TwoJobHandler : IJobHandler<FirstTotalJob>, IJobHandler<SecondTotalJob>
+            {
+                public Task HandleAsync(FirstTotalJob message, CancellationToken cancellationToken) => Task.CompletedTask;
+
+                public Task HandleAsync(SecondTotalJob message, CancellationToken cancellationToken) => Task.CompletedTask;
+            }
+            """);
+
+        diagnostics.Select(x => x.Id).ShouldBe(["WARP002"]);
+    }
+
+    [TimedFact]
     public void SelfHandlingJobWithPolicy_IsExempt()
     {
         var diagnostics = Run("""

@@ -72,11 +72,12 @@ public abstract class RetryIntegrationTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task GivenJobClassRetryAttribute_PublishedWithoutMetadata_HonorsAttributeNotGlobalDefault()
     {
-        // #236 regression: RetryPublishBehavior used to stamp the global default (MaxRetries=1) into
-        // every job's metadata, so at execution `metadata ?? attribute ?? options` never reached the
-        // [Retry] attribute — the job retried once, not per the attribute. Publishing through the REAL
-        // publisher (so the publish behavior runs) is what triggered it; the direct-insert unit tests
-        // bypass publish and never saw the bug. Global default here is 1 (WarpTestServer), attribute is 3.
+        // #236 regression: the deleted RetryPublishBehavior used to stamp the global default
+        // (MaxRetries=1) into every job's metadata, so at execution `metadata ?? attribute ?? options`
+        // never reached the [Retry] attribute — the job retried once, not per the attribute. Publishing
+        // through the REAL publisher is what triggered it; the direct-insert unit tests bypass publish and
+        // never saw the bug. Nothing stamps at publish any more (§8.8), so this now guards the shape
+        // rather than the bug. Global default here is 1 (WarpTestServer), attribute is 3.
         await using var server = await WarpTestServer.StartAsync(Fixture);
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new RetryAttributeThreeJobRequest());
