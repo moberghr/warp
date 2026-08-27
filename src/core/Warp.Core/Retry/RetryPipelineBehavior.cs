@@ -35,6 +35,11 @@ public class RetryPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TReq
         {
             return await next(request, cancellationToken);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // A cancelled attempt is not a spent retry.
+            throw;
+        }
         catch (Exception)
         {
             // Re-read: GetMetadata COPIES the dictionary and re-points IJobContext.Metadata at the copy, so
