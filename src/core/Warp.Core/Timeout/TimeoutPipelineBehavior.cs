@@ -9,8 +9,10 @@ namespace Warp.Core.Timeout;
 public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
     where TRequest : IRequest<TResponse>
 {
-    // Static on a generic type = one flag per request type, which is the dedupe these warnings want.
-    private static int _warnedInertPolicy;
+    // Static on a generic type = one flag per request type per warning, which is the dedupe these warnings want.
+    private static int _warnedTotalWithoutDeadline;
+    private static int _warnedTotalOnHandler;
+    private static int _warnedHandlerUnderTotalStamp;
 
     private readonly IJobContext _jobContext;
     private readonly TimeProvider _timeProvider;
@@ -45,19 +47,21 @@ public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TR
         switch (PolicyResolver.StampTimeout(meta, _jobContext.HandlerType, typeof(TRequest)))
         {
             case TimeoutStamp.TotalWithoutDeadline:
-                WarnOnce(
+                const string totalWithoutDeadlineMessage =
                     "[Timeout(Scope = Total)] on {RequestType} is inert on this execution path: the job was staged "
                     + "directly (e.g. a recurring firing), so no publish-time deadline exists and none can be "
-                    + "invented without changing what Total means. Use Scope = PerAttempt for this job type.");
+                    + "invented without changing what Total means. Use Scope = PerAttempt for this job type.";
+                WarnOnce(ref _warnedTotalWithoutDeadline, totalWithoutDeadlineMessage);
 
                 break;
 
             case TimeoutStamp.TotalOnHandler:
-                WarnOnce(
+                const string totalOnHandlerMessage =
                     "[Timeout(Scope = Total)] on the handler of {RequestType} is inert: a Total-scoped timeout is a "
                     + "wall-clock budget measured from enqueue and must be stamped at publish, before any handler "
                     + "is known. Declare Total-scoped timeouts on the request/job type; PerAttempt timeouts may "
-                    + "stay on the handler.");
+                    + "stay on the handler.";
+                WarnOnce(ref _warnedTotalOnHandler, totalOnHandlerMessage);
 
                 break;
 
@@ -65,10 +69,11 @@ public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TR
             // any handler is known, and nothing can un-shadow it at execution.
             case TimeoutStamp.AlreadyResolved when meta.TimeoutScope == TimeoutScope.Total
                 && PolicyResolver.IsDeclaredOnHandler<TimeoutAttribute>(_jobContext.HandlerType):
-                WarnOnce(
+                const string handlerUnderTotalStampMessage =
                     "[Timeout] on the handler of {RequestType} is inert: a Total-scoped timeout was already "
                     + "stamped at publish and a wall-clock budget cannot be replaced mid-flight. Move the "
-                    + "declaration to the contract, or make the Total-scoped default PerAttempt.");
+                    + "declaration to the contract, or make the Total-scoped default PerAttempt.";
+                WarnOnce(ref _warnedHandlerUnderTotalStamp, handlerUnderTotalStampMessage);
 
                 break;
         }
@@ -133,11 +138,11 @@ public class TimeoutPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TR
         }
     }
 
-    private void WarnOnce(string message)
+    private void WarnOnce(ref int flag, string message)
     {
-        if (Interlocked.Exchange(ref _warnedInertPolicy, 1) == 0)
+        if (Interlocked.Exchange(ref flag, 1) == 0)
         {
-#pragma warning disable CA2254 // Both call sites pass a constant template with the same single placeholder.
+#pragma warning disable CA2254 // All three call sites pass a constant template with the same single placeholder.
             _logger.LogWarning(message, typeof(TRequest).Name);
 #pragma warning restore CA2254
         }
