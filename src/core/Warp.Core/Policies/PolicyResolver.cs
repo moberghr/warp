@@ -70,7 +70,8 @@ internal static class PolicyResolver
             return;
         }
 
-        // All three fields or none — the execution gate keys on ConcurrencyKey alone.
+        // All three fields or none — the execution gate keys on ConcurrencyKey alone. Not StampRetry's
+        // any-explicit-field sentinel: concurrency has no global default, so a keyless row is inert.
         switch (Find(ConcurrencyFamily, handlerType, requestType).Attribute)
         {
             case MutexAttribute mutex:
@@ -96,6 +97,7 @@ internal static class PolicyResolver
             return;
         }
 
+        // All five fields or none, keyed on RateLimitKey — same rule as StampConcurrency.
         if (Resolve<RateLimitAttribute>(handlerType, requestType) is not { } attr)
         {
             return;

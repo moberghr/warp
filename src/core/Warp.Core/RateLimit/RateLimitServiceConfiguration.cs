@@ -22,7 +22,10 @@ public static class RateLimitServiceConfiguration
         builder.Services.AddScoped<IRateLimitManager, RateLimitManager<TContext>>();
         builder.Services.AddScoped<IRateLimitStore, RateLimitStore<TContext>>();
         builder.Services.AddScoped<RateLimitResolver>();
-        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RateLimitPipelineBehavior<,>));
+
+        // Constraint-split shims: only job and message pipelines compose rate limiting.
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RateLimitJobPipelineBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RateLimitMessagePipelineBehavior<,>));
 
         return builder;
     }

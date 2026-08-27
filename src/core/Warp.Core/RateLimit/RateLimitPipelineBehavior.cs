@@ -326,3 +326,36 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
 
     private readonly record struct RateLimitEvaluation(bool Allowed, DateTime NextAvailable);
 }
+
+/// <summary>
+/// DI shim: carries the <c>IJob</c> constraint so an in-memory <c>Send</c> never resolves
+/// <see cref="IRateLimitStore"/> and its scoped DbContext. See the retry shims.
+/// </summary>
+internal sealed class RateLimitJobPipelineBehavior<TRequest, TResponse> : RateLimitPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IJob
+{
+    public RateLimitJobPipelineBehavior(
+        IJobContext jobContext,
+        IWarpLockProvider lockProvider,
+        IRateLimitStore store,
+        RateLimitResolver resolver,
+        TimeProvider timeProvider)
+        : base(jobContext, lockProvider, store, resolver, timeProvider)
+    {
+    }
+}
+
+/// <summary>DI shim: the <c>IMessage</c> half of the constraint split — see <see cref="RateLimitJobPipelineBehavior{TRequest, TResponse}"/>.</summary>
+internal sealed class RateLimitMessagePipelineBehavior<TRequest, TResponse> : RateLimitPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IMessage
+{
+    public RateLimitMessagePipelineBehavior(
+        IJobContext jobContext,
+        IWarpLockProvider lockProvider,
+        IRateLimitStore store,
+        RateLimitResolver resolver,
+        TimeProvider timeProvider)
+        : base(jobContext, lockProvider, store, resolver, timeProvider)
+    {
+    }
+}
