@@ -78,7 +78,11 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 });
 ```
 
-Priority: per-enqueue metadata > handler attribute > job attribute > global `RetryOptions`.
+Priority: per-enqueue metadata > handler attribute > job attribute > global `RetryOptions`. A retry policy
+is **atomic per rung** — whichever rung wins supplies both `MaxRetries` and `Delays`, and fields are never
+merged across rungs, so `WithRetry(5)` at publish takes the global schedule beneath it rather than an
+attribute's. The winner is resolved once, at the job's first execution, and written onto the row; see
+[Where do I declare the policy?](/docs/features/mutex#where-do-i-declare-the-policy-contract-vs-handler).
 
 Failed jobs are retried automatically. Crash requeues (server died mid-execution) do **not** count against the retry limit.
 

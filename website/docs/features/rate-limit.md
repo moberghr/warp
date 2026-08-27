@@ -67,15 +67,21 @@ Use `Fixed`/`Sliding` to enforce a **ceiling** (reject/defer once the count is h
 
 ## Precedence
 
-Most specific wins:
+The **key** — which bucket a job contends on — is resolved from the declaration rungs, most specific first:
 
 ```
-WithRateLimit(...)         // per-publish, highest priority
-  → [RateLimit(...)]       // per-handler-type attribute
-    → admin override       // IRateLimitOverrideManager — runtime tunable
+explicit metadata at publish (WithRateLimit / IRateLimitMetadata)
+  → the handler class ([RateLimit])
+    → the contract type ([RateLimit])
 ```
 
-Attribute and fluent values resolve at publish; admin overrides are read on every check (no caching at the limit boundary), so raising or lowering N takes effect on the next acquire attempt.
+Resolution happens at the job's **first execution**, and the winner is written onto the row (see
+[Contract or handler?](#contract-or-handler) below) — not at publish, which is where it happened before 6.0.
+
+An **admin override** (`IRateLimitOverrideManager`) sits above all of them, but only for the *size* of the
+bucket: it replaces `count` and `perSeconds` for a key on every check, and never changes which key a job
+uses. Overrides are read on each acquire attempt with no caching at the limit boundary, so raising or
+lowering N takes effect on the next one — including for jobs whose row was stamped long ago.
 
 ## Contract or handler?
 
@@ -110,7 +116,7 @@ Rate-limit keys appear in `JobLog.Message` rows and on the dashboard `/warp/rate
 
 ## Admin overrides
 
-Live limits are runtime-tunable via `IRateLimitOverrideManager` and exposed on the dashboard at `/warp/ratelimits` (hide-on-404 nav probe). Set / clear / list endpoints sit under `/api/ratelimits`. Override precedence: `admin row > attribute > publish-time`.
+Live limits are runtime-tunable via `IRateLimitOverrideManager` and exposed on the dashboard at `/warp/ratelimits` (hide-on-404 nav probe). Set / clear / list endpoints sit under `/api/ratelimits`. An admin row replaces the `count` and `perSeconds` of whatever the job resolved — see [Precedence](#precedence).
 
 ## OpenTelemetry
 
@@ -124,8 +130,14 @@ Each acquire attempt emits a `warp.rate_limit_check` span (Internal kind) with t
 
 `acquired` is the green path; `skipped` is the `Skip` rejection; `throttled` is the `Wait` reschedule; `lock_contention` is the brief retry path after a failed `TryAcquire` on the distributed lock.
 
-## Out of scope (v1)
+## Counters
 
-- **`stats:ratelimit` counter** — first attempt saturated the PG connection pool under load (fresh DbContext scope per fire). Deferred to v1.1 with worker-side wiring.
-- **`[RateLimit]` on `IMessage` types / handler classes** — same `request is not IJob` bail-out as Timeout; planned cross-addon refactor reads attributes at pipeline time from `_jobContext.HandlerType`.
+Throttled outcomes are counted like every other job outcome: a `Skip` rejection lands in
+`stats:deleted-ratelimit` and a `Wait` reschedule in `stats:requeued-ratelimit`, beneath the `deleted` /
+`requeued` totals on the [Job outcomes](/docs/dashboard/health/counters/job-outcomes) counter tab. A
+`Wait` reschedule also emits `warp.job.requeued` with `reason=ratelimit` (no key tag — keys are unbounded
+and PII-adjacent, so they stay on spans).
+
+## Out of scope
+
 - **Multi-key composition** — one `[RateLimit]` per handler. Multiple distinct keys on one job is a planned extension.

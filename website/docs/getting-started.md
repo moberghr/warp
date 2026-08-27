@@ -17,7 +17,7 @@ Warp is a distributed job processing and message queue library for .NET 10. It p
 dotnet add package Moberg.Warp.Core                  # Publisher + mediator
 dotnet add package Moberg.Warp.Provider.PostgreSql   # PostgreSQL provider (or SqlServer)
 dotnet add package Moberg.Warp.Worker                # Worker service
-dotnet add package Moberg.Warp.Dashboard                    # Dashboard
+dotnet add package Moberg.Warp.Dashboard             # Dashboard
 dotnet add package Moberg.Warp.Http                  # HTTP exposure for IRequest/IStreamRequest (optional)
 ```
 

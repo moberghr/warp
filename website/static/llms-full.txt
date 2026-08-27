@@ -247,7 +247,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 All addon opt-ins (`AddRetry`, `AddTimeout`, `AddConcurrency`, `AddCircuitBreaker`, `AddRateLimit`, `AddNoRestart`, `AddSagas`, `UseDatabasePush`, `AddDashboardPush`) are extension methods on the `IWarpBuilder<TContext>` lambda parameter (`opt`), not service-collection extensions.
 
-Priority: per-enqueue metadata > handler attribute > job attribute > global RetryOptions. Failed jobs are retried automatically. Crash requeues do NOT count against the retry limit.
+Priority: per-enqueue metadata > handler attribute > job attribute > global RetryOptions — resolved once at the job's first execution and written onto the row (see [Addon Policy Placement](#addon-policy-placement-contract-vs-handler)). A retry policy is **atomic per rung**: the winning rung supplies both `MaxRetries` and `Delays`, never merged across rungs. Failed jobs are retried automatically. Crash requeues do NOT count against the retry limit, and a graceful cancel mid-attempt is not a spent retry.
 
 `JitterFactor` (global only, default `0.0`, clamped to `[0, 1]`) applies multiplicative random jitter to each computed delay: `delay * (1 + JitterFactor * rand(-1, 1))`. Spreads retries to avoid thundering herds when many jobs fail at the same time.
 
@@ -769,10 +769,35 @@ The `RunJobMonitor` task runs alongside each handler execution, periodically dra
 
 ---
 
+## Addon Policy Placement (contract vs handler)
+
+`[Mutex]` / `[Semaphore]`, `[RateLimit]`, `[Timeout]`, `[Retry]` and `[CircuitBreaker]` may be declared on the **contract** (the job/message type), on the **handler class**, or on both — **the handler wins**. Resolution happens in one place (`PolicyResolver`) at the job's first execution, rung-major:
+
+```
+explicit metadata at publish (WithMutex / WithRetry / WithRateLimit / WithTimeout / ...)
+  → the handler class
+    → the contract type
+      → global options (Retry / Timeout only)
+```
+
+- **Rung-major, not attribute-major:** the whole family is searched on the handler before the contract, so a handler `[Semaphore]` overrides a contract `[Mutex]` outright — they fill one metadata slot.
+- **The winner is stamped into `Job.Metadata` and never re-resolved.** From then on the row is the authority: a retry or requeue cannot change policy mid-flight, and a redeploy never reshapes jobs already running. Debugging contract: open the job and read its policy.
+- **A job shows its policy only after its first attempt finishes.** Nothing is stamped at publish except metadata you passed explicitly; the stamp rides the attempt's finalizing write (success, failure and graceful cancellation alike), so an `Enqueued` row is blank and a `Processing` row has resolved but not yet written.
+- **Stamp-once is per family, not per job.** A behaviour that short-circuits (Skip/Wait concurrency, a throttled rate limit) returns before the behaviours nested inside it resolve, so a requeued row carries the family that decided its fate and resolves the rest next attempt.
+- **Global defaults are never stamped** — process config, read live; an absent value means "the default applies".
+- **A retry policy is atomic per rung:** `MaxRetries` and `Delays` both come from whichever rung wins, never merged across rungs.
+- **`CircuitBreaker` is resolved but never stamped** — its threshold describes a shared dependency group whose live state is a DB row.
+- **Messages behave exactly like jobs.** Each routed child resolves handler-then-contract at its own first execution: a contract declaration is the shared default across the fan-out (children declaring nothing contend on the one key), a handler declaration overrides it for that handler's children only, and global defaults reach message handlers too. A `Deleted` child (Skip-mode concurrency / rate limit) counts as settled for parent finalization.
+- **Exemptions:** in-memory `IMediator.Send` of an `IJob`-shaped type (no row to skip or reschedule), and `IPolicyExemptHandler` — the saga proxy, which owns its own serialization and reschedules.
+- **Build-time diagnostics** (no startup validation — a misconfigured policy fails its own job, not the process): `WARP001` = policy attribute on a stream / in-memory-request handler; `WARP002` = `[Timeout(Scope = Total)]` on a handler. Where the generator cannot see the handler, `Scope = Total` is inert at runtime and logged once per request type.
+- **`Timeout(Scope = Total)` is the one publish-stamped, contract-only policy** — a wall-clock budget from enqueue must exist before any handler is known.
+- **Recurring jobs** honour contract-declared policy (firings bypass the publish pipeline, but resolution is at execution anyway); a contract `Scope = Total` timeout is refused with a one-time warning.
+
 ## Concurrency Control: Mutex & Semaphore
 
 Opt-in addon: `opt.AddConcurrency()`. One primitive (`IWarpSemaphoreProvider`, Medallion distributed locks), two attributes. At most N jobs per key run at any moment across all workers/servers. Zero overhead for jobs without a key.
 
+- Declarable on the contract, the handler class, or both (handler wins) — see [Addon Policy Placement](#addon-policy-placement-contract-vs-handler). Applies to messages as well as jobs.
 - `[Mutex("key")]` — limit fixed at 1, default `ConcurrencyMode.Skip`. Also `.WithMutex("key", mode?)` on `JobParameters`.
 - `[Semaphore("key", limit: N)]` — N slots, default `ConcurrencyMode.Wait`. Also `.WithSemaphore("key", limit, mode?)`.
 - `ConcurrencyMode` (from 1): `Skip` → surplus short-circuited to `Deleted`; `Wait` → surplus requeued (`Enqueued`, `ScheduleTime = now`).
@@ -788,6 +813,7 @@ Opt-in addon: `opt.AddTimeout(o => { o.Default; o.DefaultMode; o.DefaultScope; }
 - `[Timeout(seconds: N, Mode =, Scope =)]` or `.WithTimeout(TimeSpan)` (per-publish wins).
 - `TimeoutMode` (from 1): `Delete` (default) → `Deleted`, **not** retried by `AddRetry`; `Fail` → throws `TimeoutException`, **caught** by `AddRetry`.
 - `TimeoutScope` (from 1): `PerAttempt` (default) → fresh budget per retry; `Total` → `DeadlineUtc` stamped at publish, bounds the whole chain (only useful with `Fail`).
+- `Scope = PerAttempt` is declarable on the contract, the handler class, or both (handler wins). `Scope = Total` is **contract-only and publish-stamped**; on a handler it is a build error (`WARP002`) and, where the generator cannot see it, inert at runtime with a one-time warning. A handler `[Timeout]` under a `Total`-scoped global default is likewise inert.
 - **Ordering: `AddRetry()` before `AddTimeout()`** (DI order = outer → inner; retry must wrap timeout to catch its `TimeoutException`).
 
 ## Rate Limit
@@ -798,14 +824,14 @@ Opt-in addon: `opt.AddRateLimit()`. Throttles jobs sharing a key to N starts per
 - `RateLimitMode` (from 1): `Skip` (default) → `Deleted`; `Wait` → rescheduled via `JobOutcome.RescheduledState` (100–500 ms jitter).
 - `RateLimitStyle` (from 1): `Fixed` (default) → wall-clock window floor-aligned to UTC ticks; `Sliding` → rolling window over last N starts; `TokenBucket` → paces (not caps): tokens refill continuously at `count/perSeconds`/s up to a burst of `count`, `Wait`-mode reschedules to the next token-refill instant so a backlog trickles at the steady rate.
 - `perSeconds` capped at 7 days. Live state in `RateLimitBucket`. Lock held only for the brief check-and-increment (**not** during handler execution, unlike Mutex).
-- Admin overrides via `IRateLimitOverrideManager`; precedence admin row > attribute > publish-time. Dashboard `/warp/ratelimits`.
+- Key resolution is `explicit publish metadata > handler class > contract type`, at first execution. An admin override (`IRateLimitOverrideManager`) sits above all of them but only replaces `count` / `perSeconds`, never the key; it is re-read on every acquire. Dashboard `/warp/ratelimits`.
 - **Ordering: `AddConcurrency()` before `AddRateLimit()`** so a mutex rejection doesn't waste a token. DB push does **not** accelerate `Wait` reschedules (they ride `ScheduledJobActivation`).
 
 ## Circuit Breaker
 
 Opt-in addon: `opt.AddCircuitBreaker(o => { o.Threshold = 3; o.Duration = 1m; o.ResetJitter = 10s; })`. `CircuitBreakerState` entity is in the base schema.
 
-- `[CircuitBreaker(Group =, Threshold =, DurationSeconds =, ResetJitterSeconds =)]`. Default key = `typeof(TRequest).Name`; `Group` shares one circuit across handlers.
+- `[CircuitBreaker(Group =, Threshold =, DurationSeconds =, ResetJitterSeconds =)]`, on the contract or the handler class. With no `Group`, a job's circuit keys on the **job type** and a routed message child's on its **handler type** (a message fans out to several handlers, each its own dependency); `Group` shares one circuit across handlers. Resolved but never stamped onto the row.
 - Three states: `Closed` (runs; failure count resets on success, opens at `Threshold` consecutive failures) → `Open` (`OpenUntil > now`; jobs rescheduled to `OpenUntil + jitter` without running) → `HalfOpen` (one worker wins a CAS probe; success → Closed, failure → Open).
 - Short-circuits **before** Retry — a job blocked by an open circuit does not increment `RetriedTimes` (retry budget preserved). Runs after the concurrency behavior.
 
@@ -1258,6 +1284,8 @@ Observes calls your app **makes to** other services — the mirror of the inboun
 
 **Cluster-shared rate limiter** — the differentiator per-process Polly cannot provide: same adapter name across the fleet shares one DB-backed token limit (`RateLimitBucket`, key `warp:adapter:{name}`). Shared-policy persistence is first-writer-wins; a later process whose local policy differs enforces the persisted policy, logs a Warning, and sets `HasPolicyConflict`. Change a shared limit via a `RateLimitOverride` admin row or by clearing the persisted policy — not by redeploying.
 
+**Seeing a shared-limit refusal.** `AdapterRateLimitOverflow` (from 1): `Wait` (default — wait up to `maxWait`, then throw `AdapterRateLimitedException`), `FailFast` (throw immediately), `Respond429` (wait like `Wait`, then answer the call with a synthetic `429 Too Many Requests` carrying `Retry-After` + `x-warp-retry-after-ms` — no request is sent, no throw). `Respond429` exists because **Refit wraps every exception escaping the `HttpClient` pipeline in `ApiRequestException`**, so `catch (AdapterRateLimitedException)` never fires on a Refit-bound adapter and an `ApiResponse<T>` method never throws at all; a status-classifying client sees `429` instead. The synthetic response is produced at the **outermost** Warp handler, after your own handlers, so a resilience handler never retries Warp's own self-throttle back into the limiter; inside the pipeline the refusal is the same throw the other modes raise. It is recognised **by type, not status**, so it records `Throttled` while a real vendor 429 keeps recording `Failed`. `AdapterRateLimitedException.RetryAfter` carries the window remainder, and `ex.IsAdapterRateLimited()` / `GetAdapterRetryAfter()` / `FindAdapterRateLimited()` (in `Warp.Core.Adapters`) walk `InnerException` and every `AggregateException` branch for callers staying on the throwing modes.
+
 **Capture is opt-in and PII-owned:** metadata always; request bodies, response bodies, and headers each independently `None` / `OnFailure` / `Always`, truncated (`MaxCapturedBodySize` 8 KB / `MaxCapturedHeaderSize` 4 KB) and passed through the user-owned `RedactedHeaders` denylist (prepopulated with `Authorization`/`Cookie`/`X-Api-Key`/etc., fully overridable). Enums from 1: `CallRecording { All, FailuresOnly }`, `CaptureMode { None, OnFailure, Always }`, `AdapterCallOutcome { Success, Failed, Throttled, CircuitOpen }`.
 
 ```csharp
@@ -1545,6 +1573,8 @@ opt.ExcludeHandlersFromAssembly(Assembly);   // multi-host opt-out — see Multi
 // Dashboard
 WebApplication.MapWarpDashboard(string routePrefix);
 WebApplication.MapWarpDashboard(Action<WarpDashboardOptions> setupAction);
+// WarpDashboardOptions branding (all optional): BrandName (replaces the "Warp" wordmark + names the
+// browser tab), InstanceName, LogoUrl (wins over BrandName for the wordmark), PortalUrl, PortalLabel
 WarpDashboardEndpointConventionBuilder.RequireWarpDashboardLogin();
 WarpDashboardEndpointConventionBuilder.RequireLocalRequests();
 IServiceCollection.AddWarpDashboard().AddBuiltInLogin<TValidator>();

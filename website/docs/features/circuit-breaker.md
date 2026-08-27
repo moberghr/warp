@@ -80,6 +80,12 @@ Circuit Breaker runs inside the handler pipeline after the concurrency behavior 
 
 Per-handler overrides on `[CircuitBreaker]` use `Group`, `Threshold`, `DurationSeconds`, and `ResetJitterSeconds`.
 
+`[CircuitBreaker]` can sit on the job/message type, on a job/message handler class, or on both — the
+handler wins, and the resolved threshold is read at the job's first execution. Unlike the other policies
+the breaker is **never stamped onto the job row**: its threshold and duration describe a shared dependency
+group whose live state is a `CircuitBreakerState` row, and two jobs in one group must not disagree about
+when the circuit opens. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
+
 When no `Group` is declared, a job's circuit is keyed on the **job type** and a routed message child's circuit on its **handler type** — a message fans out to several handlers, each its own dependency, so one flaky handler must not open the circuit for its siblings. Declare the same `Group` on the handlers that genuinely share a dependency to make them trip together.
 
 ## Dashboard

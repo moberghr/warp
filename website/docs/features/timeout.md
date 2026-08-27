@@ -126,11 +126,13 @@ public class GenerateReport : IJobHandler<GenerateReportRequest>
 
 Each timeout produces a job log entry with the `Timed out after Xs` message. In `Delete` mode it lands on the final `Deleted` row; in `Fail` mode it appears on the `Failed` row (`TimeoutException` message).
 
-A dedicated `stats:timeout` counter is on the v1.1 roadmap — for now, operators query the audit log per-job.
+Timeouts are counted as job outcomes: a `Delete`-mode timeout lands in `stats:deleted-timeout` beneath the
+`deleted` total on the [Job outcomes](/docs/dashboard/health/counters/job-outcomes) counter tab. A
+`Fail`-mode timeout is an ordinary handler failure and is counted as one: `failed`, plus `requeued-retry` per
+intermediate attempt and `failed-retry-exhausted` on the terminal one when `AddRetry()` is in play.
 
 ## Out of scope (v1)
 
 - **Hard kill** — see the cancellation note above.
-- **Timeout on `IRequest<T>` / `IStreamRequest<T>`** — addon is `IJob`-only (`request is not IJob` bail-out). In-memory callers wrap their own `CancellationToken`.
-- **Timeout on `IMessage` handlers** — same bail-out; handler-attribute placement is a planned design refactor (see roadmap). For now, put `[Timeout]` on `IJob` request types.
+- **Timeout on `IRequest<T>` / `IStreamRequest<T>`** — policy applies to job-backed executions only: there is no row to delete or reschedule, so an in-memory `IMediator.Send` runs its handler directly (the attribute on such a handler fails the build, `WARP001`). In-memory callers wrap their own `CancellationToken`.
 - **Dedicated "Timeouts" job-list tab** — defer until operators ask. The `Deleted`/`Failed` tabs already host timed-out jobs.
