@@ -2,19 +2,23 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Time.Testing;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Helper;
+using Warp.Core.Notifications;
 using Warp.Core.Retry;
+using Warp.Core.Services;
 using Warp.Core.Timeout;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Features.Timeout;
 
-[GenerateDatabaseTests]
+[GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
 {
     protected TimeoutIntegrationTestsBase(IDatabaseFixture fixture)
@@ -83,6 +87,87 @@ public abstract class TimeoutIntegrationTestsBase : IntegrationTestBase
             .Where(x => x.JobId == jobId)
             .ToListAsync(Xunit.TestContext.Current.CancellationToken);
         logs.ShouldContain(x => x.Message != null && x.Message.Contains("Timed out after 60s", StringComparison.Ordinal));
+    }
+
+    [TimedFact]
+    public async Task HandlerDeclaredTimeout_SameOutcomeAndLogAsContractDeclared()
+    {
+        // SC2 (addon policy axis): the REQUEST carries no attribute — [Timeout(60)] sits on the
+        // HANDLER and is resolved at first execution. Outcome, JobLog message and row-stamped
+        // metadata must match the contract-declared equivalent byte-for-byte.
+        var time = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        await using var server = await StartWithFakeTime(Fixture, time);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new HandlerTimeoutRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await WaitForJobStateWithFakeTime(server, time, jobId, State.Deleted);
+
+        var ctx = Fixture.CreateContext();
+        var job = await ctx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Deleted);
+
+        // Handler-resolved policy is stamped into metadata and persisted by the worker's existing
+        // write-back — the row explains why the job was deleted (SC7, pinning property).
+        job.Metadata.ShouldNotBeNull();
+        job.Metadata.ShouldContain("TimeoutSeconds");
+
+        var logs = await ctx.Set<JobLog>()
+            .Where(x => x.JobId == jobId)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        logs.ShouldContain(x => x.Message != null && x.Message.Contains("Timed out after 60s", StringComparison.Ordinal));
+    }
+
+    [TimedFact]
+    public async Task HandlerDeclaredTimeout_HandlerThrowsWithNoOutcome_StampSurvivesOnFailedRow()
+    {
+        // §8.8: the stamp is persisted on the failure path too. A throwing handler under a zero retry
+        // budget sets no outcome at all — the one shape that keeps the metadata write outside that branch.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(
+            new HandlerTimeoutThrowingRequest(),
+            new JobParameters().Configure<IRetryMetadata>(m => m.MaxRetries = 0));
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(jobId, State.Failed);
+
+        var ctx = Fixture.CreateContext();
+        var job = await ctx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Failed);
+        job.Metadata.ShouldNotBeNull();
+
+        var meta = MetadataSerializer.Deserialize(job.Metadata);
+        Convert.ToInt32(meta["TimeoutSeconds"]).ShouldBe(60);
+    }
+
+    [TimedFact]
+    public async Task RecurringFiring_ContractTotalTimeout_RefusedNotStamped()
+    {
+        // SC5 (second half), through the REAL recurring path: TriggerRecurringJob stages the firing
+        // with Metadata = null, so no publish-time deadline exists. The execution-side resolver must
+        // refuse the contract [Timeout(Scope = Total)] — no seconds, no invented deadline on the
+        // row — and the firing runs to completion untimed. (The one-time Warning and its dedupe are
+        // pinned at unit level in TimeoutPipelineBehaviorTests — a per-process static makes a
+        // count assertion here order-dependent across the two provider classes.)
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+
+        var rjPublisher = new RecurringJobPublisher<TestContext>(server.CreateContext(), TimeProvider.System, new FakeLockProvider());
+        await rjPublisher.AddOrUpdateRecurringJob(new RecurringTotalTimeoutRequest(), "recurring-total-timeout", "* * * * *");
+
+        var svc = new RecurringJobService<TestContext>(server.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
+        await svc.TriggerRecurringJob("recurring-total-timeout");
+
+        var firing = await server.CreateContext().Set<Job>()
+            .AsNoTracking()
+            .Where(x => x.Type == typeof(RecurringTotalTimeoutRequest).AssemblyQualifiedName)
+            .SingleAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(firing.Id, State.Completed);
+
+        var row = await server.GetJob(firing.Id);
+        (row.Metadata ?? string.Empty).ShouldNotContain("TimeoutSeconds");
+        (row.Metadata ?? string.Empty).ShouldNotContain("TimeoutDeadlineUtc");
     }
 
     [TimedFact]

@@ -20,6 +20,7 @@ public static class TimeoutServiceConfiguration
             builder.Services.AddOptions<TimeoutOptions>();
         }
 
+        // Total-scoped budgets need a publish-time deadline (§8.8); everything else resolves at execution.
         builder.Services.AddTransient(typeof(IPublishPipelineBehavior<>), typeof(TimeoutPublishBehavior<>));
         builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(TimeoutPipelineBehavior<,>));
 

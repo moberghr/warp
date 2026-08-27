@@ -5,7 +5,7 @@ A one-command, runnable demo of Warp's **outbound adapters** and **durable webho
 
 | Resource | What it is |
 |---|---|
-| `postgres` | A Postgres container Aspire provisions; its connection string is injected into the apps. |
+| `postgres` | A Postgres container Aspire provisions on the fixed local port **5442**; its connection string is injected into the apps. |
 | `partner-api` | An **external** service the demo calls — a vendor API (`/api/orders`, `/api/payments`, `/api/inventory`) **and** a webhook receiver (`/partner/webhooks*`) that verifies Standard Webhooks signatures. |
 | `warp-app` | The Warp dashboard app. Registers two outbound adapters (`partner-http`, `partner-refit`) and `AddWebhooks`, runs the worker, and serves `/warp` + the seed endpoints. |
 | `warp-worker` | A second Warp server on the same database — shows multi-host job processing. |
@@ -55,4 +55,12 @@ curl -X POST http://localhost:<warp-app-port>/seed/webhooks
   are sent both from an endpoint (`/seed/webhooks`) and from inside a job (`NotifyPartnerWebhookRequest`),
   signed with Standard Webhooks; the partner receiver verifies the signature.
 - **Postgres** — provisioned by the AppHost (`AddPostgres("postgres").AddDatabase("TestContext")`); the
-  connection string is injected as `ConnectionStrings:TestContext`. No manual DB setup.
+  connection string is injected as `ConnectionStrings:TestContext`. No manual DB setup. The container is
+  published on host port 5442 with the demo credentials `postgres`/`admin` — Docker publishes it on
+  all host interfaces, so it is reachable from the LAN, not just loopback (demo-only; do not run this on
+  an untrusted network) — so you can attach `psql` or a
+  GUI client to the running demo database (`psql -h 127.0.0.1 -p 5442 -U postgres -d TestContext`). The
+  standalone `appsettings.json` of `Warp.TestApp` / `Warp.TestWorker` — used when you run those projects
+  WITHOUT the AppHost — points at that same **server**, but at its own `warp` database, which you create
+  yourself as before; the AppHost provisions `TestContext`. 5442 is deliberately clear of the usual
+  5432-5434 range and of the ephemeral range Docker draws random published ports from.

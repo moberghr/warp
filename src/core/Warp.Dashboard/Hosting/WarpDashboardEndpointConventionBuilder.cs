@@ -8,7 +8,7 @@ namespace Warp.Dashboard;
 /// </summary>
 public sealed class WarpDashboardEndpointConventionBuilder : IEndpointConventionBuilder
 {
-    private readonly IEndpointConventionBuilder _all;
+    private readonly CompositeEndpointConventionBuilder _all;
 
     internal WarpDashboardEndpointConventionBuilder(IServiceProvider services, IEndpointConventionBuilder shell, IEndpointConventionBuilder api)
     {

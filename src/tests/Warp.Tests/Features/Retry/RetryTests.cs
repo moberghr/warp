@@ -563,6 +563,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task GetAndProcessJob_WithRetryAttributeOnBothHandlerAndJob_HandlerWins()
     {
+        // #236's shape: both axes, retry, real worker — asserts the count actually TAKEN.
         // Arrange — handler has [Retry(7)], job has [Retry(2)], global has 0
         var ctx = _fixture.CreateContext();
         var jobId = Guid.NewGuid();
@@ -581,7 +582,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         var worker = CreateWorker(maxRetries: 0);
 
-        // Act — exhaust all retries from handler attribute (7)
+        // Act — exhaust all retries from the handler attribute (7), one attempt per iteration
         for (var i = 0; i < 8; i++)
         {
             var resetCtx = _fixture.CreateContext();
@@ -595,7 +596,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
             await worker.GetAndProcessJob(CancellationToken.None);
         }
 
-        // Assert — should have used handler's 7 retries (not job's 2)
+        // Assert — the handler's 7 retries were taken, not the contract's 2
         var readCtx = _fixture.CreateContext();
         var job = await readCtx.Set<Job>().FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
         job.CurrentState.ShouldBe(State.Failed);

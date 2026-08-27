@@ -11,7 +11,14 @@ var builder = DistributedApplication.CreateBuilder(args);
 
 // Postgres, provisioned by Aspire. The database resource is named "TestContext" so its injected
 // connection string lands under ConnectionStrings:TestContext — exactly what the demo apps read.
-var database = builder.AddPostgres("postgres")
+// Port and credentials pinned so the container is always published on host port 5442 — the port the
+// standalone appsettings point at. 5442 is clear of 5432-5434 and of Docker's ephemeral published-port range.
+// Demo-only, non-secret defaults (§1.1).
+var postgresUser = builder.AddParameter("postgres-user", "postgres");
+var postgresPassword = builder.AddParameter("postgres-password", "admin", secret: true);
+
+var database = builder.AddPostgres("postgres", postgresUser, postgresPassword)
+    .WithHostPort(5442)
     .AddDatabase("TestContext");
 
 // The one-shot schema provisioner. It wipes + recreates a fresh schema (EnsureCreated) and seeds the
@@ -34,6 +41,9 @@ var partner = builder.AddProject<Projects.Warp_Demo_PartnerApi>("partner-api")
 // starts only after the schema exists. Non-proxied so /warp is directly reachable (http://localhost:5104/warp).
 builder.AddProject<Projects.Warp_Test_App>("warp-app")
     .WithEndpoint("http", e => e.IsProxied = false)
+
+    // Relative URL follows the endpoint's port. The Func overload ADDS a link; Action would replace it.
+    .WithUrlForEndpoint("http", _ => new() { Url = "/warp", DisplayText = "Warp dashboard" })
     .WithReference(database)
     .WaitForCompletion(migrator)
     .WithEnvironment("PartnerApi__BaseUrl", partner.GetEndpoint("http"));

@@ -116,7 +116,6 @@ public static class ServiceConfiguration
 
         WarpGeneratedHandlerRegistry.ApplyAll(services);
         RemoveExcludedHandlerRegistrations(services);
-        ValidateAddonAttributesOnHandlers(services);
 
         services.AddScoped<IPublisher>(x => new Publisher<TContext>(
             x.GetRequiredService<TContext>(),
@@ -355,66 +354,6 @@ public static class ServiceConfiguration
             if (excluded.Contains(implType.Assembly))
             {
                 services.RemoveAt(i);
-            }
-        }
-    }
-
-    // #242: [Timeout] / [Mutex] / [Semaphore] / [RateLimit] are read only from the request/job type — the
-    // publish behavior stamps them into metadata at enqueue, where the handler type is not yet known, and
-    // the execution behaviors read only that metadata. Placed on a handler class they compile (the
-    // attributes target Class) but are a SILENT no-op. Fail loudly at registration so the misplacement is
-    // obvious instead of a job that quietly never times out / never serializes. (Retry and CircuitBreaker
-    // additionally resolve a handler-level attribute at execution, so they are not rejected here; the
-    // universally-safe placement for every addon is the request/job type.)
-    internal static void ValidateAddonAttributesOnHandlers(IServiceCollection services)
-    {
-        var handlerDefinitions = new[]
-        {
-            typeof(Handlers.IRequestHandler<,>),
-            typeof(Handlers.IJobHandler<>),
-            typeof(Handlers.IMessageHandler<>),
-            typeof(Handlers.IStreamRequestHandler<,>),
-        };
-
-        var requestOnlyAttributes = new[]
-        {
-            typeof(Timeout.TimeoutAttribute),
-            typeof(Concurrency.MutexAttribute),
-            typeof(Concurrency.SemaphoreAttribute),
-            typeof(RateLimit.RateLimitAttribute),
-        };
-
-        var handlers = services
-            .Where(x => !x.IsKeyedService) // ImplementationType getter throws for keyed descriptors
-            .Where(x => x.ServiceType.IsGenericType)
-            .Where(x => handlerDefinitions.Contains(x.ServiceType.GetGenericTypeDefinition()))
-            .Where(x => x.ImplementationType is not null)
-            .Select(x => new { Handler = x.ImplementationType!, Request = x.ServiceType.GetGenericArguments()[0] })
-            .Distinct();
-
-        foreach (var entry in handlers)
-        {
-            // Self-handling job (e.g. `class Foo : IJob, IJobHandler<Foo>`): the impl type IS the request
-            // type, so an addon attribute on it is the correct request-axis placement, not a misplaced
-            // handler attribute. Don't reject it.
-            if (entry.Handler == entry.Request)
-            {
-                continue;
-            }
-
-            foreach (var attribute in requestOnlyAttributes)
-            {
-                if (entry.Handler.GetCustomAttributes(attribute, inherit: false).Length == 0)
-                {
-                    continue;
-                }
-
-                var name = attribute.Name.Replace("Attribute", string.Empty, StringComparison.Ordinal);
-
-                throw new InvalidOperationException(
-                    $"[{name}] is declared on handler '{entry.Handler.Name}', where it is silently ignored: {name} is "
-                    + "read only from the request/job type (stamped into metadata at publish, before the handler "
-                    + "is known). Move the attribute to the request/job type. See issue #242.");
             }
         }
     }

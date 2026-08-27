@@ -835,33 +835,6 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task RateLimitAttribute_SetsMetadataAtPublishTime()
-    {
-        var services = BuildPublisherServices();
-        var provider = services.BuildServiceProvider();
-        await using var scope = provider.CreateAsyncScope();
-        var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
-
-        var jobId = await publisher.Enqueue(new RateLimitAttributeRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var readCtx = _fixture.CreateContext();
-        var job = await readCtx.Set<Job>()
-            .Where(x => x.Id == jobId)
-            .FirstAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata!);
-        metadata.ShouldNotBeNull();
-        metadata.ShouldContainKey("RateLimitKey");
-        metadata["RateLimitKey"].ToString().ShouldBe("rl-static");
-        metadata.ShouldContainKey("RateLimitCount");
-        ((JsonElement)metadata["RateLimitCount"]).GetInt32().ShouldBe(2);
-        metadata.ShouldContainKey("RateLimitWindowSeconds");
-        ((JsonElement)metadata["RateLimitWindowSeconds"]).GetInt32().ShouldBe(60);
-    }
-
-    [TimedFact]
     public async Task WithRateLimit_SetsMetadata()
     {
         var services = BuildPublisherServices();
@@ -885,29 +858,6 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         metadata["RateLimitKey"].ToString().ShouldBe("dynamic-key");
         ((JsonElement)metadata["RateLimitCount"]).GetInt32().ShouldBe(5);
         ((JsonElement)metadata["RateLimitWindowSeconds"]).GetInt32().ShouldBe(30);
-    }
-
-    [TimedFact]
-    public async Task RateLimitAttribute_WaitMode_PropagatesToMetadata()
-    {
-        var services = BuildPublisherServices();
-        var provider = services.BuildServiceProvider();
-        await using var scope = provider.CreateAsyncScope();
-        var publisherCtx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        var publisher = new Publisher<TestContext>(publisherCtx, Options.Create(new WarpConfiguration()), TimeProvider.System, scope.ServiceProvider, TestTasks.NullTransport, TestTasks.NullSignals);
-
-        var jobId = await publisher.Enqueue(new RateLimitWaitAttributeRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var readCtx = _fixture.CreateContext();
-        var job = await readCtx.Set<Job>()
-            .Where(x => x.Id == jobId)
-            .FirstAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata!);
-        metadata.ShouldNotBeNull();
-        metadata.ShouldContainKey("RateLimitMode");
-        ((JsonElement)metadata["RateLimitMode"]).GetInt32().ShouldBe((int)RateLimitMode.Wait);
     }
 
     private ServiceCollection BuildPublisherServices()

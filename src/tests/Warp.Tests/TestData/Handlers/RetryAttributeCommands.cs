@@ -26,7 +26,7 @@ public class RetryAttributeJobCommand : IJobHandler<RetryAttributeJobRequest>
 [Retry(4)]
 public class RetryAttributeJobRequest : IJob;
 
-// Both handler and job have [Retry] — handler should win
+// [Retry] on both the request and its handler — the handler wins (§8.8), driven end-to-end by RetryTests.
 [Retry(7)]
 public class RetryAttributeBothCommand : IJobHandler<RetryAttributeBothRequest>
 {

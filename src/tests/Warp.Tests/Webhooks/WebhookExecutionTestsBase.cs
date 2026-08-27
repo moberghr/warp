@@ -146,7 +146,16 @@ public abstract class WebhookExecutionTestsBase : IntegrationTestBase
         delivery.AttemptCount.ShouldBe(1);
         delivery.NextAttemptAt.ShouldNotBeNull();
 
-        // WSC3: a Scheduled executor job exists with ScheduleTime == NextAttemptAt.
+        // WSC3: a Scheduled executor job exists with ScheduleTime == NextAttemptAt. Polled, not read
+        // inline — AttemptCount commits in the claim transaction, the retry job in the next one (§8.20).
+        await WarpTestServer.WaitUntil(
+            async () => await server.CreateContext().Set<Job>()
+                .Where(x => x.Queue == "warp:webhooks")
+                .Where(x => x.CurrentState == State.Scheduled)
+                .AnyAsync(Ct),
+            timeout: TimeSpan.FromSeconds(5),
+            ct: Ct);
+
         var scheduled = await server.CreateContext().Set<Job>()
             .Where(x => x.Queue == "warp:webhooks")
             .Where(x => x.CurrentState == State.Scheduled)

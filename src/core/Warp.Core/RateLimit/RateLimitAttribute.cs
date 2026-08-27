@@ -1,9 +1,10 @@
 namespace Warp.Core.RateLimit;
 
 /// <summary>
-/// Throttles jobs sharing a key to N starts per window. <b>Declare on the request/job type, not the
-/// handler</b> — it is read from the request type at publish; on a handler it is a silent no-op and
-/// <c>AddWarp</c> rejects it at startup (#242).
+/// Throttles jobs sharing a key to N starts per window. Declare on the request/job/message type, on a
+/// job/message handler class, or on both — the handler wins (§8.8). On a message, a contract declaration
+/// covers every routed child that declares none of its own. Rejected at build time on stream and
+/// in-memory request handlers (#242).
 /// </summary>
 [AttributeUsage(AttributeTargets.Class, Inherited = false)]
 public sealed class RateLimitAttribute : Attribute

@@ -1,15 +1,21 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Concurrency;
 using Warp.Core.Data.Entities;
+using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Helper;
+using Warp.Core.Notifications;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Features.Concurrency;
 
-[GenerateDatabaseTests]
+[GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class MutexIntegrationTestsBase : IntegrationTestBase
 {
     protected MutexIntegrationTestsBase(IDatabaseFixture fixture)
@@ -194,5 +200,139 @@ public abstract class MutexIntegrationTestsBase : IntegrationTestBase
             var job = await server.GetJob(id);
             job.CurrentState.ShouldBe(State.Completed);
         }
+    }
+
+    [TimedFact]
+    public async Task HandlerDeclaredMutex_SecondJobSkipped_PolicyStampedOnRow()
+    {
+        // SC1/SC7 (addon policy axis): the REQUEST carries no attribute — [Mutex("handler-mutex")]
+        // sits on the HANDLER, is resolved at first execution and stamped into metadata. Two jobs,
+        // barrier-pinned (§0.4/§4.7): the first holds the slot inside the handler, the second must
+        // short-circuit to Deleted exactly like a contract-declared mutex.
+        var barrier = new BarrierSignal();
+        await using var server = await WarpTestServer.StartAsync(Fixture, cfg => cfg.Services.AddSingleton(barrier));
+        var publisher = server.CreatePublisher();
+
+        _ = await publisher.Enqueue(new HandlerMutexRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await barrier.Running.WaitAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var publisher2 = server.CreatePublisher();
+        var job2Id = await publisher2.Enqueue(new HandlerMutexRequest());
+        await publisher2.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(job2Id, State.Deleted);
+
+        var logs = await server.GetJobLogs(job2Id);
+        logs.ShouldContain(l => l.EventType == "Deleted" && l.Message.Contains("handler-mutex", StringComparison.Ordinal));
+
+        // Handler-resolved policy is stamped into metadata and persisted by the existing worker
+        // write-back — the row explains why the job was skipped (pinning, SC7).
+        var job2 = await server.GetJob(job2Id);
+        job2.Metadata.ShouldNotBeNull();
+        job2.Metadata.ShouldContain("ConcurrencyKey");
+        job2.Metadata.ShouldContain("handler-mutex");
+
+        barrier.CanFinish.Release();
+        await server.WaitForCompletion();
+    }
+
+    [TimedFact]
+    public async Task BothAxesDeclared_HandlerWins_AndIsWrittenOnTheRow()
+    {
+        // Cross-family on purpose (contract [Mutex] vs handler [Semaphore]): one metadata slot, so
+        // resolving attribute-by-attribute instead of rung-by-rung would let the contract shadow it.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+
+        var jobId = await publisher.Enqueue(new BothAxesMutexRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(jobId, State.Completed);
+
+        var job = await server.GetJob(jobId);
+        job.Metadata.ShouldNotBeNull();
+        job.Metadata.ShouldContain("both-axes-handler");
+        job.Metadata.ShouldNotContain("both-axes-contract");
+    }
+
+    [TimedFact]
+    public async Task HandlerDeclaredMutex_DispatcherMode_SecondJobSkipped_PolicyStampedOnRow()
+    {
+        // SC8: the dispatcher worker (WarpDispatcherWorker) carries HandlerType wiring and metadata
+        // write-back separately from WarpWorkerService — §8.29/§8.33 both record a path being missed
+        // once, so the handler-axis resolution is guarded on this path explicitly.
+        var barrier = new BarrierSignal();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            cfg =>
+            {
+                cfg.UseDispatcher = true;
+                cfg.WorkerCount = 2;
+                cfg.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
+                cfg.Services.AddSingleton(barrier);
+            });
+        var publisher = server.CreatePublisher();
+
+        _ = await publisher.Enqueue(new HandlerMutexRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await barrier.Running.WaitAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var publisher2 = server.CreatePublisher();
+        var job2Id = await publisher2.Enqueue(new HandlerMutexRequest());
+        await publisher2.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(job2Id, State.Deleted);
+
+        var job2 = await server.GetJob(job2Id);
+        job2.Metadata.ShouldNotBeNull();
+        job2.Metadata.ShouldContain("handler-mutex");
+
+        barrier.CanFinish.Release();
+        await server.WaitForCompletion();
+    }
+
+    [TimedFact]
+    public async Task RecurringFiring_ContractDeclaredMutex_IsSerialized()
+    {
+        // SC5 — the regression guard for the recurring-job gap: TriggerRecurringJob (like the
+        // scheduler) stages the firing row DIRECTLY with Metadata = null, bypassing the publish
+        // pipeline, so before the addon policy axis change a contract [Mutex] was silently inert on
+        // recurring firings. The execution-side contract rung must stamp and enforce it: while a
+        // published job of the same type holds the mutex inside the handler, a triggered firing
+        // must short-circuit to Deleted.
+        var barrier = new BarrierSignal();
+        await using var server = await WarpTestServer.StartAsync(Fixture, cfg => cfg.Services.AddSingleton(barrier));
+        var publisher = server.CreatePublisher();
+
+        var holderId = await publisher.Enqueue(new RecurringMutexRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await barrier.Running.WaitAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var rjPublisher = new RecurringJobPublisher<TestContext>(server.CreateContext(), TimeProvider.System, new FakeLockProvider());
+        await rjPublisher.AddOrUpdateRecurringJob(new RecurringMutexRequest(), "recurring-mutex-test", "* * * * *");
+
+        var svc = new RecurringJobService<TestContext>(server.CreateContext(), TimeProvider.System, new NullNotificationTransport(), TestTasks.NullSignals);
+        await svc.TriggerRecurringJob("recurring-mutex-test");
+
+        var firing = await server.CreateContext().Set<Job>()
+            .AsNoTracking()
+            .Where(x => x.Type == typeof(RecurringMutexRequest).AssemblyQualifiedName)
+            .Where(x => x.Id != holderId)
+            .SingleAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(firing.Id, State.Deleted);
+
+        var logs = await server.GetJobLogs(firing.Id);
+        logs.ShouldContain(l => l.EventType == "Deleted" && l.Message.Contains("recurring-mutex", StringComparison.Ordinal));
+
+        // The contract rung stamped the policy at execution — the firing row carries it even though
+        // it was staged with Metadata = null.
+        var firingRow = await server.GetJob(firing.Id);
+        firingRow.Metadata.ShouldNotBeNull();
+        firingRow.Metadata.ShouldContain("recurring-mutex");
+
+        barrier.CanFinish.Release();
+        await server.WaitForCompletion();
     }
 }

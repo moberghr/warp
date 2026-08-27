@@ -41,10 +41,10 @@ public abstract class MetadataPropagationIntegrationTestsBase : IntegrationTestB
     }
 
     [TimedFact]
-    public async Task GivenPublishPipelineAndHandler_WhenCompleted_ThenBothMetadataKeysPersisted()
+    public async Task GivenAddonStampAndHandlerWrite_WhenCompleted_ThenBothMetadataKeysPersisted()
     {
-        // RetryPublishBehavior sets MaxRetries at publish time
-        // Handler sets HandlerWrote at execution time
+        // The resolver stamps MaxRetries from the request's retry attribute during the first attempt
+        // (§8.8) and the handler writes HandlerWrote in that same attempt — both must reach the row.
         await using var server = await WarpTestServer.StartAsync(Fixture);
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new MetadataWriterRequest());
@@ -59,7 +59,7 @@ public abstract class MetadataPropagationIntegrationTestsBase : IntegrationTestB
 
         var metadata = MetadataSerializer.Deserialize(job.Metadata);
 
-        // From RetryPublishBehavior (publish time)
+        // Addon-stamped by PolicyResolver at execution
         metadata.ShouldContainKey("MaxRetries");
 
         // From handler (execution time)
@@ -91,7 +91,7 @@ public abstract class MetadataPropagationIntegrationTestsBase : IntegrationTestB
         metadata.ShouldContainKey("UserKey");
         metadata["UserKey"].ShouldBe("user-value");
 
-        // Addon-set at publish time (RetryPublishBehavior)
+        // Addon-stamped by PolicyResolver at execution
         metadata.ShouldContainKey("MaxRetries");
 
         // Handler-set at execution time

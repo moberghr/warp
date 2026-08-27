@@ -435,7 +435,7 @@ app.MapPost("/seed/simple-job", async (IPublisher publisher) =>
 
 app.MapPost("/seed/failing-job", async (IPublisher publisher) =>
 {
-    var id = await publisher.Enqueue(new ThrowExceptionRequest(), new JobParameters().Configure<IRetryMetadata>(m => m.MaxRetries = 2));
+    var id = await publisher.Enqueue(new ThrowExceptionRequest(), new JobParameters().WithRetry(2));
     await publisher.SaveChangesAsync();
     return Results.Ok(new { detail = $"/warp/detail/{id}" });
 });

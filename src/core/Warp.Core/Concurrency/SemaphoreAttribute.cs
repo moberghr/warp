@@ -1,9 +1,9 @@
 namespace Warp.Core.Concurrency;
 
 /// <summary>
-/// Caps jobs sharing a key to N concurrent executions. <b>Declare on the request/job type, not the
-/// handler</b> — it is read from the request type at publish; on a handler it is a silent no-op and
-/// <c>AddWarp</c> rejects it at startup (#242).
+/// Caps jobs sharing a key to N concurrent executions. Declare on the request/job/message type, on a
+/// job/message handler class, or on both — the handler wins, including over a contract <c>[Mutex]</c>
+/// (§8.8). Rejected at build time on stream and in-memory request handlers (#242).
 /// </summary>
 [AttributeUsage(AttributeTargets.Class, Inherited = false)]
 public sealed class SemaphoreAttribute : Attribute

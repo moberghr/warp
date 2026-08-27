@@ -1,16 +1,13 @@
-using System.Collections.Concurrent;
-using System.Reflection;
 using Microsoft.Extensions.Options;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Policies;
 
 namespace Warp.Core.CircuitBreaker;
 
 public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
-    where TRequest : IRequest<TResponse>, IJob
+    where TRequest : IRequest<TResponse>
 {
-    private static readonly ConcurrentDictionary<Type, CircuitBreakerAttribute?> AttributeCache = new();
-
     private readonly IJobContext _jobContext;
     private readonly IOptions<CircuitBreakerOptions> _options;
     private readonly TimeProvider _timeProvider;
@@ -30,8 +27,15 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
 
     public async Task<TResponse> HandleAsync(TRequest request, RequestHandlerDelegate<TRequest, TResponse> next, CancellationToken cancellationToken)
     {
+        // Only job-backed executions participate: an in-memory Send has no row to reschedule when the
+        // circuit is open, and saga proxies (IPolicyExemptHandler) own their own reschedule logic.
+        if (PolicyResolver.Bypasses(request, _jobContext))
+        {
+            return await next(request, cancellationToken);
+        }
+
         var attr = GetCircuitBreakerAttribute();
-        var groupKey = attr?.Group ?? typeof(TRequest).Name;
+        var groupKey = attr?.Group ?? DefaultGroupKey(request);
         var options = _options.Value;
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
@@ -138,18 +142,39 @@ public class CircuitBreakerPipelineBehavior<TRequest, TResponse> : IPipelineBeha
         };
     }
 
-    private CircuitBreakerAttribute? GetCircuitBreakerAttribute()
-    {
-        var handlerType = _jobContext.HandlerType;
-        if (handlerType != null)
-        {
-            var handlerAttr = AttributeCache.GetOrAdd(handlerType, static t => t.GetCustomAttribute<CircuitBreakerAttribute>());
-            if (handlerAttr != null)
-            {
-                return handlerAttr;
-            }
-        }
+    // A message fans out to N handlers, each its own dependency boundary: keying the default circuit on
+    // the MESSAGE type would let one flaky handler open the circuit for every sibling. A routed child
+    // therefore defaults to its handler type; a direct job keeps the request type.
+    private string DefaultGroupKey(TRequest request) =>
+        request is IMessage && _jobContext.HandlerType is { } handlerType
+            ? handlerType.Name
+            : typeof(TRequest).Name;
 
-        return AttributeCache.GetOrAdd(typeof(TRequest), static t => t.GetCustomAttribute<CircuitBreakerAttribute>());
+    private CircuitBreakerAttribute? GetCircuitBreakerAttribute() =>
+        PolicyResolver.ResolveCircuitBreaker(_jobContext.HandlerType, typeof(TRequest));
+}
+
+/// <summary>
+/// DI shim: carries the <c>IJob</c> constraint so the container composes the breaker only into job
+/// pipelines. Registering the unconstrained base would resolve <see cref="ICircuitBreakerStore"/> (and
+/// through it the scoped DbContext) for every in-memory <c>Send</c> — a real per-request cost for
+/// Warp.Http hosts — before the runtime guard could early-return. See the retry shims for the pattern.
+/// </summary>
+internal sealed class CircuitBreakerJobPipelineBehavior<TRequest, TResponse> : CircuitBreakerPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IJob
+{
+    public CircuitBreakerJobPipelineBehavior(IJobContext jobContext, IOptions<CircuitBreakerOptions> options, TimeProvider timeProvider, ICircuitBreakerStore store)
+        : base(jobContext, options, timeProvider, store)
+    {
+    }
+}
+
+/// <summary>DI shim: the <c>IMessage</c> half of the constraint split — see <see cref="CircuitBreakerJobPipelineBehavior{TRequest, TResponse}"/>.</summary>
+internal sealed class CircuitBreakerMessagePipelineBehavior<TRequest, TResponse> : CircuitBreakerPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IMessage
+{
+    public CircuitBreakerMessagePipelineBehavior(IJobContext jobContext, IOptions<CircuitBreakerOptions> options, TimeProvider timeProvider, ICircuitBreakerStore store)
+        : base(jobContext, options, timeProvider, store)
+    {
     }
 }

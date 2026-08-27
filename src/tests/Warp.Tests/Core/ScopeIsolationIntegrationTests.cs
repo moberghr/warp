@@ -123,9 +123,9 @@ public abstract class ScopeIsolationIntegrationTestsBase : IntegrationTestBase
             .FirstAsync(Xunit.TestContext.Current.CancellationToken);
         job.CurrentState.ShouldBe(State.Completed);
 
-        // Metadata should be persisted even on success. MetadataWriterRequest carries [Retry(3)], so the
-        // publish pipeline stamps MaxRetries into metadata at publish (RetryPublishBehavior no longer
-        // stamps the global default — #236 — it freezes the job-type [Retry] attribute).
+        // Metadata should be persisted even on success. MetadataWriterRequest carries [Retry(3)], so
+        // PolicyResolver stamps MaxRetries during the attempt and the finalizing write persists it (§8.8).
+        // The global default is never stamped (#236).
         job.Metadata.ShouldNotBeNull();
         var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(job.Metadata);
         metadata.ShouldNotBeNull();

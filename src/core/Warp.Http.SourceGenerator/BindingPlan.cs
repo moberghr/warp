@@ -29,7 +29,7 @@ internal enum BindingShape
 
 internal sealed class BindingTarget
 {
-    public BindingTarget(string memberName, ITypeSymbol type, BindingSource source, string sourceKey, int? ctorParameterIndex, string? propertyName, bool hasClrDefault, Location? location, bool isWholeFormCollection = false)
+    public BindingTarget(string memberName, ITypeSymbol type, BindingSource source, string sourceKey, int? ctorParameterIndex, string? propertyName, bool hasClrDefault, Location? location, bool isWholeFormCollection = false, bool isFormFile = false)
     {
         MemberName = memberName;
         Type = type;
@@ -40,6 +40,7 @@ internal sealed class BindingTarget
         HasClrDefault = hasClrDefault;
         Location = location;
         IsWholeFormCollection = isWholeFormCollection;
+        IsFormFile = isFormFile;
     }
 
     public string MemberName { get; }
@@ -73,6 +74,12 @@ internal sealed class BindingTarget
     /// <c>[FromForm]</c> fields, which bind by name.
     /// </summary>
     public bool IsWholeFormCollection { get; }
+
+    /// <summary>
+    /// True for a single <c>IFormFile</c> member. Swashbuckle throws on a <c>[FromForm]</c>-annotated
+    /// <c>IFormFile</c>, so the emitter binds these by parameter name instead of by attribute.
+    /// </summary>
+    public bool IsFormFile { get; }
 }
 
 internal sealed class BindingPlan

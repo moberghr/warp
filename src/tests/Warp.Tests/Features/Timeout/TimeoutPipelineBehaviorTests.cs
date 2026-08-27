@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core.Enums;
@@ -11,23 +12,33 @@ namespace Warp.Tests.Features.Timeout;
 [Trait("Category", "NoDb")]
 public class TimeoutPipelineBehaviorTests
 {
-    private static TimeoutPipelineBehavior<UnitRequest, Unit> Build(FakeTimeProvider time, JobContext context)
+    private static TimeoutPipelineBehavior<UnitRequest, Unit> Build(FakeTimeProvider time, JobContext context, TimeoutOptions? options = null)
     {
-        return new TimeoutPipelineBehavior<UnitRequest, Unit>(context, time);
+        return Build<UnitRequest, Unit>(time, context, options);
+    }
+
+    private static TimeoutPipelineBehavior<TRequest, TResponse> Build<TRequest, TResponse>(FakeTimeProvider time, JobContext context, TimeoutOptions? options = null)
+        where TRequest : IRequest<TResponse>
+    {
+        return new TimeoutPipelineBehavior<TRequest, TResponse>(
+            context,
+            time,
+            Options.Create(options ?? new TimeoutOptions()),
+            NullLogger<TimeoutPipelineBehavior<TRequest, TResponse>>.Instance);
     }
 
     [TimedFact]
     public async Task NonJobRequest_PassesThroughWithoutTimeout()
     {
-        // request is not IJob → bail immediately. Timeout addon is job-only; in-memory
-        // IRequest<T> callers wrap their own CancellationToken if they need a deadline.
-        // Even with TimeoutSeconds metadata set, the behavior must be a no-op.
+        // request is neither IJob nor IMessage → bail immediately. In-memory IRequest<T> callers
+        // wrap their own CancellationToken if they need a deadline. Even with TimeoutSeconds
+        // metadata set, the behavior must be a no-op.
         var time = new FakeTimeProvider();
         var ctx = new JobContext { JobId = Guid.NewGuid() };
         ctx.Metadata["TimeoutSeconds"] = 1L;
         ctx.Metadata["TimeoutMode"] = (int)TimeoutMode.Delete;
 
-        var behavior = new TimeoutPipelineBehavior<GetGreetingRequest, string>(ctx, time);
+        var behavior = Build<GetGreetingRequest, string>(time, ctx);
 
         var result = await behavior.HandleAsync(
             new GetGreetingRequest { Name = "test" },
@@ -39,18 +50,51 @@ public class TimeoutPipelineBehaviorTests
     }
 
     [TimedFact]
-    public async Task IMessageRequest_PassesThroughWithoutTimeout()
+    public async Task IMessageRequest_WithTimeoutMetadata_TimesOut()
     {
-        // Saga messages are IMessage, not IJob. The Timeout addon must skip them — sagas
-        // serialize on their own mutex inside SagaHandlerProxy and applying a timeout to
-        // the proxy's HandleAsync would race the mutex hold + SaveChanges. The Limitations
-        // section of website/docs/features/sagas.md documents this; this test pins it.
+        // Messages joined the policy axes: a routed message child with timeout metadata is enforced
+        // exactly like a job. (Saga proxies stay exempt — see the policy-exempt test below.)
         var time = new FakeTimeProvider();
         var ctx = new JobContext { JobId = Guid.NewGuid() };
         ctx.Metadata["TimeoutSeconds"] = 1L;
         ctx.Metadata["TimeoutMode"] = (int)TimeoutMode.Delete;
 
-        var behavior = new TimeoutPipelineBehavior<SagaShapedMessage, Unit>(ctx, time);
+        var behavior = Build<SagaShapedMessage, Unit>(time, ctx);
+
+        var handlerStarted = new TaskCompletionSource();
+        var handlerTask = behavior.HandleAsync(
+            new SagaShapedMessage(),
+            async (req, ct) =>
+            {
+                handlerStarted.SetResult();
+                await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, ct);
+                return Unit.Value;
+            },
+            CancellationToken.None);
+
+        await handlerStarted.Task;
+        time.Advance(TimeSpan.FromSeconds(2));
+
+        await handlerTask;
+
+        ctx.Outcome.ShouldNotBeNull();
+        ctx.Outcome!.State.ShouldBe(State.Deleted);
+    }
+
+    [TimedFact]
+    public async Task PolicyExemptHandler_PassesThroughWithoutTimeout()
+    {
+        // Saga proxies implement IPolicyExemptHandler: they serialize on their own mutex inside
+        // SagaHandlerProxy and applying a timeout to the proxy's HandleAsync would race the mutex
+        // hold + SaveChanges. The Limitations section of website/docs/features/sagas.md documents
+        // this; this test pins it — even with timeout metadata set, the behavior must be a no-op
+        // when the bound handler is exempt.
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid(), HandlerType = typeof(ExemptHandler) };
+        ctx.Metadata["TimeoutSeconds"] = 1L;
+        ctx.Metadata["TimeoutMode"] = (int)TimeoutMode.Delete;
+
+        var behavior = Build<SagaShapedMessage, Unit>(time, ctx);
 
         var result = await behavior.HandleAsync(
             new SagaShapedMessage(),
@@ -61,7 +105,291 @@ public class TimeoutPipelineBehaviorTests
         ctx.Outcome.ShouldBeNull();
     }
 
+    [TimedFact]
+    public async Task HandlerDeclaredTimeout_ResolvedAndStamped_Enforced()
+    {
+        // Handler axis: empty metadata, [Timeout(1)] on the bound handler type. The behavior
+        // resolves it, stamps it into metadata (pinning — visible on the row after write-back)
+        // and enforces it in the same attempt.
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid(), HandlerType = typeof(HandlerWithTimeout) };
+        var behavior = Build(time, ctx);
+
+        var handlerStarted = new TaskCompletionSource();
+        var handlerTask = behavior.HandleAsync(
+            new UnitRequest(),
+            async (req, ct) =>
+            {
+                handlerStarted.SetResult();
+                await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, ct);
+                return Unit.Value;
+            },
+            CancellationToken.None);
+
+        await handlerStarted.Task;
+        time.Advance(TimeSpan.FromSeconds(2));
+
+        await handlerTask;
+
+        ctx.Outcome.ShouldNotBeNull();
+        ctx.Outcome!.State.ShouldBe(State.Deleted);
+        ctx.Metadata["TimeoutSeconds"].ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task ContractTimeout_EmptyMetadata_ResolvedAtExecution()
+    {
+        // Contract rung at execution: a directly-staged job (recurring firing) bypassed the publish
+        // pipeline, so metadata is empty even though the REQUEST type declares [Timeout(1)]. The
+        // execution-side resolver must find and enforce it — the recurring-job fix.
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid() };
+        var behavior = Build<ContractTimedRequest, Unit>(time, ctx);
+
+        var handlerStarted = new TaskCompletionSource();
+        var handlerTask = behavior.HandleAsync(
+            new ContractTimedRequest(),
+            async (req, ct) =>
+            {
+                handlerStarted.SetResult();
+                await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, ct);
+                return Unit.Value;
+            },
+            CancellationToken.None);
+
+        await handlerStarted.Task;
+        time.Advance(TimeSpan.FromSeconds(2));
+
+        await handlerTask;
+
+        ctx.Outcome.ShouldNotBeNull();
+        ctx.Outcome!.State.ShouldBe(State.Deleted);
+        ctx.Metadata["TimeoutSeconds"].ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task PerAttemptGlobalDefault_AppliedTransiently_NeverStamped()
+    {
+        // The PerAttempt global default moved from publish-stamping to execution (the #236 shape,
+        // for Timeout): it is enforced from live options and never written into metadata, so a
+        // later handler/contract declaration is not shadowed by a frozen default.
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid() };
+        var behavior = Build(time, ctx, new TimeoutOptions { Default = TimeSpan.FromSeconds(1) });
+
+        var handlerStarted = new TaskCompletionSource();
+        var handlerTask = behavior.HandleAsync(
+            new UnitRequest(),
+            async (req, ct) =>
+            {
+                handlerStarted.SetResult();
+                await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, ct);
+                return Unit.Value;
+            },
+            CancellationToken.None);
+
+        await handlerStarted.Task;
+        time.Advance(TimeSpan.FromSeconds(2));
+
+        await handlerTask;
+
+        ctx.Outcome.ShouldNotBeNull();
+        ctx.Outcome!.State.ShouldBe(State.Deleted);
+        ctx.Metadata.ContainsKey("TimeoutSeconds").ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task HandlerDeclaredTimeout_WinsOverPerAttemptGlobalDefault()
+    {
+        // SC6: with a 60s global default configured, the handler's [Timeout(1)] must win — the
+        // exact shadowing Retry fixed as #236.
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid(), HandlerType = typeof(HandlerWithTimeout) };
+        var behavior = Build(time, ctx, new TimeoutOptions { Default = TimeSpan.FromSeconds(60) });
+
+        var handlerStarted = new TaskCompletionSource();
+        var handlerTask = behavior.HandleAsync(
+            new UnitRequest(),
+            async (req, ct) =>
+            {
+                handlerStarted.SetResult();
+                await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, ct);
+                return Unit.Value;
+            },
+            CancellationToken.None);
+
+        await handlerStarted.Task;
+        time.Advance(TimeSpan.FromSeconds(2));
+
+        await handlerTask;
+
+        ctx.Outcome.ShouldNotBeNull();
+        ctx.Outcome!.State.ShouldBe(State.Deleted);
+        ctx.Outcome.LogMessage.ShouldBe("Timed out after 1s");
+    }
+
+    [TimedFact]
+    public async Task TotalScopedGlobalDefault_NotAppliedAtExecution()
+    {
+        // A Total-scoped default is publish-stamped (its deadline measures from enqueue); applying
+        // it at execution would measure from first pickup. An unstamped job under a Total default
+        // (a directly-staged row) therefore runs without a timeout rather than with a redefined one.
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid() };
+        var behavior = Build(time, ctx, new TimeoutOptions { Default = TimeSpan.FromSeconds(1), DefaultScope = TimeoutScope.Total });
+
+        var result = await behavior.HandleAsync(
+            new UnitRequest(),
+            (req, ct) => Task.FromResult(Unit.Value),
+            CancellationToken.None);
+
+        result.ShouldBe(Unit.Value);
+        ctx.Outcome.ShouldBeNull();
+        ctx.Metadata.ContainsKey("TimeoutSeconds").ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task HandlerTotalTimeout_IsInertAndWarnsOnce_NeverThrows()
+    {
+        // A handler-declared Scope = Total cannot be honoured at execution (WARP002 is the build-time
+        // gate). The runtime backstop must not throw from inside the pipeline: an outer Retry would
+        // read the WarpException as a handler failure and burn the entire retry budget on a static
+        // misconfiguration. Warn once per request type and run the handler without the timeout.
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid(), HandlerType = typeof(HandlerWithTotalTimeout) };
+        var logger = new CapturingLogger<TimeoutPipelineBehavior<HandlerTotalRequest, Unit>>();
+        var behavior = new TimeoutPipelineBehavior<HandlerTotalRequest, Unit>(
+            ctx, time, Options.Create(new TimeoutOptions()), logger);
+
+        var handlerRuns = 0;
+        for (var i = 0; i < 2; i++)
+        {
+            var result = await behavior.HandleAsync(
+                new HandlerTotalRequest(),
+                (req, ct) =>
+                {
+                    handlerRuns++;
+                    return Task.FromResult(Unit.Value);
+                },
+                CancellationToken.None);
+
+            result.ShouldBe(Unit.Value);
+        }
+
+        handlerRuns.ShouldBe(2);
+        ctx.Outcome.ShouldBeNull();
+        ctx.Metadata.ContainsKey("TimeoutSeconds").ShouldBeFalse();
+        logger.Warnings.ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task ContractTotalTimeout_NoDeadline_RefusedNotRedefined_WarnsOnce()
+    {
+        // SC5b: a recurring firing whose CONTRACT declares Scope = Total has no publish-time
+        // deadline. Inventing one at execution would measure from first pickup instead of enqueue,
+        // so the resolver refuses the stamp and the job runs without a timeout from the attribute.
+        // The Warning fires exactly ONCE per request type — the dedupe rides a per-closed-generic
+        // static flag scoped to this warning kind, so this test still needs its own request type
+        // for this warning (other warning kinds have their own flags and don't collide here).
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid() };
+        var logger = new CapturingLogger<TimeoutPipelineBehavior<ContractTotalTimedRequest, Unit>>();
+        var behavior = new TimeoutPipelineBehavior<ContractTotalTimedRequest, Unit>(
+            ctx, time, Options.Create(new TimeoutOptions()), logger);
+
+        var result = await behavior.HandleAsync(
+            new ContractTotalTimedRequest(),
+            (req, ct) => Task.FromResult(Unit.Value),
+            CancellationToken.None);
+
+        await behavior.HandleAsync(
+            new ContractTotalTimedRequest(),
+            (req, ct) => Task.FromResult(Unit.Value),
+            CancellationToken.None);
+
+        result.ShouldBe(Unit.Value);
+        ctx.Outcome.ShouldBeNull();
+        ctx.Metadata.ContainsKey("TimeoutSeconds").ShouldBeFalse();
+        ctx.Metadata.ContainsKey("TimeoutDeadlineUtc").ShouldBeFalse();
+        logger.Warnings.ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task ContractTotalTimeout_NoDeadline_FallsBackToPerAttemptGlobalDefault()
+    {
+        // The refusal declines the ATTRIBUTE, after which the job is effectively attribute-less —
+        // so a configured PerAttempt global default still applies, exactly as it would to any other
+        // unattributed job. Pins the combination the docs describe ("inert" means the Total policy,
+        // not a timeout exemption).
+        var time = new FakeTimeProvider();
+        var ctx = new JobContext { JobId = Guid.NewGuid() };
+        var behavior = Build<ContractTotalFallbackRequest, Unit>(time, ctx, new TimeoutOptions { Default = TimeSpan.FromSeconds(1) });
+
+        var handlerStarted = new TaskCompletionSource();
+        var handlerTask = behavior.HandleAsync(
+            new ContractTotalFallbackRequest(),
+            async (req, ct) =>
+            {
+                handlerStarted.SetResult();
+                await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, ct);
+                return Unit.Value;
+            },
+            CancellationToken.None);
+
+        await handlerStarted.Task;
+        time.Advance(TimeSpan.FromSeconds(2));
+
+        await handlerTask;
+
+        ctx.Outcome.ShouldNotBeNull();
+        ctx.Outcome!.State.ShouldBe(State.Deleted);
+        ctx.Outcome.LogMessage.ShouldBe("Timed out after 1s");
+        ctx.Metadata.ContainsKey("TimeoutSeconds").ShouldBeFalse();
+    }
+
     private sealed class SagaShapedMessage : IMessage;
+
+    private sealed class ExemptHandler : IPolicyExemptHandler;
+
+    [Timeout(1)]
+    private sealed class HandlerWithTimeout;
+
+    [Timeout(1)]
+    private sealed class ContractTimedRequest : IJob;
+
+    [Timeout(30, Scope = TimeoutScope.Total)]
+    private sealed class HandlerWithTotalTimeout;
+
+    private sealed class HandlerTotalRequest : IJob;
+
+    [Timeout(30, Scope = TimeoutScope.Total)]
+    private sealed class ContractTotalTimedRequest : IJob;
+
+    [Timeout(30, Scope = TimeoutScope.Total)]
+    private sealed class ContractTotalFallbackRequest : IJob;
+
+    private sealed class CapturingLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
+    {
+        public int Warnings { get; private set; }
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+            {
+                Warnings++;
+            }
+        }
+    }
 
     [TimedFact]
     public async Task NoTimeoutMetadata_PassesThrough()

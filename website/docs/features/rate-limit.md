@@ -77,6 +77,10 @@ WithRateLimit(...)         // per-publish, highest priority
 
 Attribute and fluent values resolve at publish; admin overrides are read on every check (no caching at the limit boundary), so raising or lowering N takes effect on the next acquire attempt.
 
+## Contract or handler?
+
+`[RateLimit]` can sit on the job/message type (the default; on a message every child that declares nothing resolves it, so those handlers share the budget), on a job/message handler class (that handler's children only — the natural home when the *handler* is what calls the throttled dependency), or on both, in which case the handler wins. The resolved limit is written onto the job row at its first execution, and recurring-job firings honour a contract-declared limit. See [Where do I declare the policy?](./mutex.md#where-do-i-declare-the-policy-contract-vs-handler).
+
 ## What the pipeline holds
 
 The distributed lock is held only for the brief **check-and-increment** — never during handler execution (unlike `[Mutex]` / `[Semaphore]`, where the lock spans the whole handler). That keeps rate limits friendly to long-running jobs: a single 10-minute job doesn't block other tokens for the duration of its run.

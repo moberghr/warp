@@ -277,12 +277,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 activity?.SetTag(WarpTelemetryAttributes.WarpJobAttempt, 1);
             }
 
-            if (jobContext.Metadata.TryGetValue(WarpTelemetryAttributes.RetryMetadataMaxRetriesKey, out var maxRetriesObj)
-                && maxRetriesObj is long maxRetries)
-            {
-                activity?.SetTag(WarpTelemetryAttributes.WarpJobMaxAttempts, maxRetries + 1);
-            }
-
             handlerStopwatch = Stopwatch.StartNew();
             await ExecuteJob(job, handlerScope.ServiceProvider, jobCts.Token);
             handlerStopwatch.Stop();
@@ -299,6 +293,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, CancellationToken.None);
 
             // Read metadata and outcome from handler scope before disposing
+            JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
             job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
             var successOutcome = jobContext.Outcome;
             jobContext.ProgressCollector = null;
@@ -381,6 +376,14 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             job.CurrentWorkerId = null;
             job.LastKeepAlive = null;
 
+            // Same as the success and failure arms: the policy stamped for this attempt (§8.8) lives only
+            // in the handler-scope context until a finalizing write persists it. Dropping it here would
+            // make a cancelled-then-requeued job re-resolve — the one path that broke stamp-once.
+            if (jobContext != null)
+            {
+                job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
+            }
+
             // Match BuildFinalization: emit both the aggregate and per-hour counters so cancellations
             // show up in the dashboard's hourly graph alongside other terminal states.
             var hourSuffix = cancelNow.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
@@ -421,12 +424,18 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 {
                     job.ScheduleTime = outcome.ScheduleTime.Value;
                 }
-
-                job.Metadata = JsonSerializer.Serialize(jobContext!.Metadata);
             }
             else
             {
                 job.CurrentState = State.Failed;
+            }
+
+            // Outside the outcome branch: a throwing handler sets no outcome, and losing the policy stamped
+            // for this attempt (§8.8) would let the next one re-resolve to something else.
+            if (jobContext != null)
+            {
+                JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
+                job.Metadata = JsonSerializer.Serialize(jobContext.Metadata);
             }
 
             handlerScope?.Dispose();

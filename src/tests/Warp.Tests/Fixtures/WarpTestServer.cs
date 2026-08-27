@@ -499,7 +499,11 @@ public class WarpTestServer : IAsyncDisposable
 
             var activeMessages = await ctx.Set<Job>()
                 .Where(j => j.Kind == JobKind.Message)
-                .CountAsync(m => m.CurrentState != State.Completed && m.CurrentState != State.Failed, Xunit.TestContext.Current.CancellationToken);
+                .CountAsync(
+                    m => m.CurrentState != State.Completed
+                        && m.CurrentState != State.Failed
+                        && m.CurrentState != State.Deleted,
+                    Xunit.TestContext.Current.CancellationToken);
 
             if (activeJobs == 0 && activeMessages == 0)
             {

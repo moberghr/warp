@@ -33,7 +33,7 @@ public class MutexAndSemaphoreCommand : IJobHandler<MutexAndSemaphoreRequest>
     }
 }
 
-// When both attributes are present, [Mutex] wins (registration order in ConcurrencyPublishBehavior).
+// When both attributes are present, [Mutex] wins (family order in PolicyResolver.ConcurrencyFamily).
 [Mutex("dual-attribute-key")]
 [Semaphore("dual-attribute-key", 5)]
 public class MutexAndSemaphoreRequest : IJob;

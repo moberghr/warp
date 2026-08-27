@@ -15,7 +15,13 @@ namespace Warp.Tests.Http;
 /// </summary>
 internal static class GeneratorTestHarness
 {
-    public static GeneratorDriverRunResult Run(string sourceCode)
+    public static GeneratorDriverRunResult Run(string sourceCode) => RunWithOutput(sourceCode).Result;
+
+    /// <summary>
+    /// Runs the generator and also returns the compilation WITH the generated trees added, so a test can
+    /// assert that emitted code compiles (name collisions in generated lambdas surface only there).
+    /// </summary>
+    public static (GeneratorDriverRunResult Result, Compilation Output) RunWithOutput(string sourceCode)
     {
         var syntaxTree = CSharpSyntaxTree.ParseText(sourceCode);
 
@@ -61,7 +67,9 @@ internal static class GeneratorTestHarness
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
         var generator = new WarpHttpGenerator();
-        var driver = CSharpGeneratorDriver.Create(generator);
-        return driver.RunGenerators(compilation).GetRunResult();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var output, out _);
+
+        return (driver.GetRunResult(), output);
     }
 }

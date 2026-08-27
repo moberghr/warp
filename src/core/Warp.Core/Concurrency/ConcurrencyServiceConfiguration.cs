@@ -13,8 +13,10 @@ public static class ConcurrencyServiceConfiguration
         // This opt-in only wires the runtime behavior + admin manager service.
         builder.Services.AddScoped<IConcurrencyLimitManager, ConcurrencyLimitManager<TContext>>();
         builder.Services.AddScoped<ConcurrencyLimitResolver>();
-        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ConcurrencyPipelineBehavior<,>));
-        builder.Services.AddTransient(typeof(IPublishPipelineBehavior<>), typeof(ConcurrencyPublishBehavior<>));
+
+        // Constraint-split shims: only job and message pipelines compose concurrency.
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ConcurrencyJobPipelineBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ConcurrencyMessagePipelineBehavior<,>));
 
         return builder;
     }

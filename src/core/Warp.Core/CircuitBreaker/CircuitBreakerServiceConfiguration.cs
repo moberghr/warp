@@ -22,7 +22,11 @@ public static class CircuitBreakerServiceConfiguration
         // multi-host migrations don't have to mirror addon opt-ins across hosts. Behaviors
         // and services below remain opt-in.
         builder.Services.AddScoped<ICircuitBreakerStore, CircuitBreakerStore<TContext>>();
-        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(CircuitBreakerPipelineBehavior<,>));
+
+        // Constraint-split shims: only job and message pipelines compose the breaker. In-memory sends
+        // never resolve ICircuitBreakerStore (see CircuitBreakerJobPipelineBehavior).
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(CircuitBreakerJobPipelineBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(CircuitBreakerMessagePipelineBehavior<,>));
 
         return builder;
     }

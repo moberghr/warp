@@ -3,6 +3,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Logging;
+using Warp.Core.Policies;
 
 namespace Warp.Core.RateLimit;
 
@@ -34,12 +35,16 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
         RequestHandlerDelegate<TRequest, TResponse> next,
         CancellationToken cancellationToken)
     {
-        if (request is not IJob)
+        // Job-backed executions only. Saga proxies (and any other IPolicyExemptHandler) manage their own
+        // execution policy — their busy/version-conflict reschedules must not also contend on a rate limit.
+        if (PolicyResolver.Bypasses(request, _jobContext))
         {
             return await next(request, cancellationToken);
         }
 
         var meta = _jobContext.GetMetadata<IRateLimitMetadata>();
+        PolicyResolver.StampRateLimit(meta, _jobContext.HandlerType, typeof(TRequest));
+
         if (meta.RateLimitKey == null || meta.RateLimitCount == null || meta.RateLimitWindowSeconds == null)
         {
             return await next(request, cancellationToken);
@@ -76,7 +81,9 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             {
                 State = JobOutcome.RescheduledState(rescheduleTo, contentionNow),
                 ScheduleTime = rescheduleTo,
-                ClearHandlerType = true,
+
+                // Routed message children keep HandlerType on requeue (§8.14) — it IS the routing decision.
+                ClearHandlerType = request is not IMessage,
                 Reason = OutcomeReason.RateLimit,
                 LogMessage = $"Requeued — rate limit '{key}' lock contention",
             };
@@ -102,7 +109,9 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             {
                 State = JobOutcome.RescheduledState(evaluation.NextAvailable, now),
                 ScheduleTime = evaluation.NextAvailable,
-                ClearHandlerType = true,
+
+                // Routed message children keep HandlerType on requeue (§8.14) — it IS the routing decision.
+                ClearHandlerType = request is not IMessage,
                 Reason = OutcomeReason.RateLimit,
                 LogMessage = $"Throttled — rate limit '{key}' ({effectiveCount}/{windowSeconds}s), rescheduled to {evaluation.NextAvailable:O}",
             };
@@ -316,4 +325,37 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
     private static string SerializeTokens(double tokens) => JsonSerializer.Serialize(tokens);
 
     private readonly record struct RateLimitEvaluation(bool Allowed, DateTime NextAvailable);
+}
+
+/// <summary>
+/// DI shim: carries the <c>IJob</c> constraint so an in-memory <c>Send</c> never resolves
+/// <see cref="IRateLimitStore"/> and its scoped DbContext. See the retry shims.
+/// </summary>
+internal sealed class RateLimitJobPipelineBehavior<TRequest, TResponse> : RateLimitPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IJob
+{
+    public RateLimitJobPipelineBehavior(
+        IJobContext jobContext,
+        IWarpLockProvider lockProvider,
+        IRateLimitStore store,
+        RateLimitResolver resolver,
+        TimeProvider timeProvider)
+        : base(jobContext, lockProvider, store, resolver, timeProvider)
+    {
+    }
+}
+
+/// <summary>DI shim: the <c>IMessage</c> half of the constraint split — see <see cref="RateLimitJobPipelineBehavior{TRequest, TResponse}"/>.</summary>
+internal sealed class RateLimitMessagePipelineBehavior<TRequest, TResponse> : RateLimitPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>, IMessage
+{
+    public RateLimitMessagePipelineBehavior(
+        IJobContext jobContext,
+        IWarpLockProvider lockProvider,
+        IRateLimitStore store,
+        RateLimitResolver resolver,
+        TimeProvider timeProvider)
+        : base(jobContext, lockProvider, store, resolver, timeProvider)
+    {
+    }
 }

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Handlers;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
 
@@ -112,5 +113,67 @@ public abstract class CancellationIntegrationTestsBase : IntegrationTestBase
         // Should complete within a few seconds (CancellationCheckInterval=1s)
         // NOT the full 30s of CancellableRequest
         sw.Elapsed.TotalSeconds.ShouldBeLessThan(10);
+    }
+
+    [TimedFact]
+    public async Task GivenProcessingJobWithHandlerPolicy_WhenCancelled_ThenStampedPolicySurvivesOnTheRow()
+    {
+        // The policy resolved for this attempt (§8.8) is stamped into the in-memory JobContext and only
+        // reaches the row through the finalizing write. Success and failure persist it; a graceful cancel
+        // must too, or a cancelled-then-requeued job re-resolves — the stamp-once invariant.
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new CancellableStampedRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(jobId, State.Processing);
+
+        var cmd = server.CreateCommandService();
+        await cmd.DeleteJob(jobId);
+
+        await server.WaitForJobLog(jobId, "Cancelled", timeout: TimeSpan.FromSeconds(5));
+
+        var job = await server.GetJob(jobId);
+        job.CurrentState.ShouldBe(State.Deleted);
+        job.Metadata.ShouldNotBeNull();
+        var meta = MetadataSerializer.Deserialize(job.Metadata);
+        Convert.ToInt32(meta["MaxRetries"]).ShouldBe(2);
+
+        // ...but a cancelled attempt is not a spent retry.
+        meta.ShouldNotContainKey("RetriedTimes");
+    }
+
+    [TimedFact]
+    public async Task GivenDispatcherMode_WhenStampedJobIsCancelled_ThenStampedPolicySurvivesOnTheRow()
+    {
+        // Both worker paths must move in lockstep (§8.33) — the dispatcher keeps its own cancel arm.
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            cfg =>
+            {
+                cfg.UseDispatcher = true;
+                cfg.WorkerCount = 2;
+                cfg.CompletionBatchSize = 10;
+                cfg.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
+            });
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new CancellableStampedRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(jobId, State.Processing);
+
+        var cmd = server.CreateCommandService();
+        await cmd.DeleteJob(jobId);
+
+        await server.WaitForJobLog(jobId, "Cancelled", timeout: TimeSpan.FromSeconds(10));
+
+        var job = await server.GetJob(jobId);
+        job.CurrentState.ShouldBe(State.Deleted);
+        job.Metadata.ShouldNotBeNull();
+        var meta = MetadataSerializer.Deserialize(job.Metadata);
+        Convert.ToInt32(meta["MaxRetries"]).ShouldBe(2);
+
+        // ...but a cancelled attempt is not a spent retry.
+        meta.ShouldNotContainKey("RetriedTimes");
     }
 }

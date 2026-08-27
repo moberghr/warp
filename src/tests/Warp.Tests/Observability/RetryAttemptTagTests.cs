@@ -105,4 +105,34 @@ public abstract class RetryAttemptTagTestsBase : IntegrationTestBase
             span.GetTagItem(WarpTelemetryAttributes.WarpJobMaxAttempts).ShouldBe(3L);
         }
     }
+
+    [TimedFact]
+    public async Task GivenHandlerRetryAttribute_WhenProcessed_ThenEveryConsumerSpanCarriesMaxAttemptsTag()
+    {
+        // Nothing is stamped at publish any more (§8.8): the budget is resolved by the pipeline during
+        // the attempt. Reading the metadata BEFORE the handler ran left the first attempt's span without
+        // max_attempts while attempts 2+ carried it — the tag must be read after the pipeline resolved.
+        using var harness = new ActivityListenerHarness();
+
+        await using var server = await WarpTestServer.StartAsync(Fixture);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new RetryAttributeHandlerRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForJobState(jobId, State.Failed, TimeSpan.FromSeconds(20));
+
+        var jobIdString = jobId.ToString();
+        var consumerSpans = harness.AllByName("process default")
+            .Where(a => string.Equals(a.GetTagItem(WarpTelemetryAttributes.MessagingMessageId)?.ToString(), jobIdString, StringComparison.Ordinal))
+            .OrderBy(a => a.StartTimeUtc)
+            .ToList();
+
+        consumerSpans.Count.ShouldBeGreaterThanOrEqualTo(2);
+
+        // [Retry(5)] on the handler → 6 attempts, on the FIRST span as much as on the retries.
+        foreach (var span in consumerSpans)
+        {
+            span.GetTagItem(WarpTelemetryAttributes.WarpJobMaxAttempts).ShouldBe(6L);
+        }
+    }
 }

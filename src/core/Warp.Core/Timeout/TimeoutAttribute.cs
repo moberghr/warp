@@ -1,9 +1,10 @@
 namespace Warp.Core.Timeout;
 
 /// <summary>
-/// Caps how long a job's handler may run. <b>Declare on the request/job type, not the handler</b> — it is
-/// read from the request type at publish; on a handler it is a silent no-op and <c>AddWarp</c> rejects it
-/// at startup (#242).
+/// Caps how long a job's handler may run. Declare on the request/job/message type, on a job/message
+/// handler class, or on both — the handler wins (§8.8). <see cref="TimeoutScope.Total"/> is the
+/// exception: its deadline is wall-clock from enqueue and must be stamped at publish, so it stays
+/// contract-only, and a handler <c>[Timeout]</c> under a Total-scoped global default is inert.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class, Inherited = false)]
 public sealed class TimeoutAttribute : Attribute
