@@ -44,7 +44,17 @@ export default defineConfig({
     // serving, which the AppHost gates on WaitForCompletion(migrator).
     command: 'dotnet run --project ../demo/Warp.Demo.AppHost',
     url: 'http://localhost:5104/warp',
-    reuseExistingServer: !process.env.CI,
+    // Reuse is now EXPLICIT rather than "anywhere but CI". `!process.env.CI` silently adopted whatever
+    // was already serving 5104 — a stack from another branch, or one whose migrator ran against an
+    // older schema — and these tests assert on counters the worker wrote, so a stale stack produces a
+    // confident pass or a failure that describes the wrong code. The ports are fixed by the AppHost
+    // (IsProxied = false), so a second checkout cannot simply move out of the way.
+    //
+    // Booting the stack takes minutes, so keeping the fast path matters — it is just opt-in now, for
+    // when you know the running stack is this checkout:
+    //
+    //   WARP_REUSE_STACK=1 npm run test:e2e:live
+    reuseExistingServer: process.env.WARP_REUSE_STACK === '1',
     timeout: 300_000,
     stdout: 'pipe',
     stderr: 'pipe',
