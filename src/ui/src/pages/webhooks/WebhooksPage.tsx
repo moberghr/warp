@@ -12,6 +12,8 @@ import * as api from '@/api';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { WebhookDeliveryListItem, WebhookDeliveryFilter, WebhookGroupModel } from '@/types/webhooks';
 import { PageHeading } from '@/components/PageHeading';
+import { Hint } from '@/components/ui/tooltip';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 const PAGE_SIZE = 20;
 
@@ -143,12 +145,12 @@ export default function WebhooksPage() {
       </p>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <Tile label="Deliveries" value={summaryError ? '—' : (summary?.total ?? 0).toLocaleString()} />
+        <Tile label="Deliveries" value={summaryError ? '—' : (summary?.total ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
         <Tile label="Delivered" value={summaryError ? '—' : `${deliveredPercent}%`} />
-        <Tile label="Pending" value={summaryError ? '—' : (summary?.pending ?? 0).toLocaleString()} />
+        <Tile label="Pending" value={summaryError ? '—' : (summary?.pending ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
         <Tile
           label="Exhausted"
-          value={summaryError ? '—' : (summary?.exhausted ?? 0).toLocaleString()}
+          value={summaryError ? '—' : (summary?.exhausted ?? 0).toLocaleString(DASHBOARD_LOCALE)}
           emphasis={!summaryError && summary && summary.exhausted > 0 ? 'text-destructive' : undefined}
         />
       </div>
@@ -253,18 +255,18 @@ function GroupCard({
               </TableRow>
             ) : (
               groups.map((g) => (
+                <Hint key={g.key} text="Open this group">
                 <TableRow
-                  key={g.key}
                   className="cursor-pointer"
                   onClick={() => onOpen(g.key)}
-                  title="Open this group"
                 >
                   <TableCell className="font-mono text-xs truncate max-w-[16rem] text-primary">{g.key}</TableCell>
-                  <TableCell className="text-right tabular-nums">{g.total.toLocaleString()}</TableCell>
-                  <TableCell className="text-right tabular-nums text-green-600 dark:text-green-400">{g.delivered.toLocaleString()}</TableCell>
-                  <TableCell className="text-right tabular-nums text-amber-600 dark:text-amber-400">{g.pending.toLocaleString()}</TableCell>
-                  <TableCell className={`text-right tabular-nums ${g.exhausted > 0 ? 'text-destructive' : ''}`}>{g.exhausted.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{g.total.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
+                  <TableCell className="text-right tabular-nums text-green-600 dark:text-green-400">{g.delivered.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
+                  <TableCell className="text-right tabular-nums text-amber-600 dark:text-amber-400">{g.pending.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
+                  <TableCell className={`text-right tabular-nums ${g.exhausted > 0 ? 'text-destructive' : ''}`}>{g.exhausted.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                 </TableRow>
+                </Hint>
               ))
             )}
           </TableBody>

@@ -530,6 +530,7 @@ public static class ServiceConfiguration
         log.Property(p => p.RecurringJobId);
         log.Property(p => p.JobId);
         log.Property(p => p.Skipped);
+        log.Property(p => p.FinalState).HasConversion<int>();
         log.Property(p => p.CreatedAt);
 
         log.HasIndex(p => p.RecurringJobId);

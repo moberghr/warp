@@ -943,35 +943,44 @@ export const recurringJobs: RecurringJobModel[] = [
     type: 'Acme.Reports.GenerateReportRequest',
     nextExecution: future(3600), lastExecution: ago(82800), createdAt: ago(86400 * 30),
     disabledAt: null,
-    hasLastRun: true, lastJobId: uid(901), lastState: State.Completed,
+    hasLastRun: true, lastJobId: uid(901), lastState: State.Completed, lastRunCleanedUp: false,
   },
   {
     id: 2, name: 'Inventory Sync', cron: '*/15 * * * *',
     type: 'Acme.Inventory.SyncInventoryRequest',
     nextExecution: future(600), lastExecution: ago(300), createdAt: ago(86400 * 60),
     disabledAt: null,
-    hasLastRun: true, lastJobId: uid(902), lastState: State.Processing,
+    hasLastRun: true, lastJobId: uid(902), lastState: State.Processing, lastRunCleanedUp: false,
   },
   {
     id: 3, name: 'Email Digest', cron: '0 18 * * 1-5',
     type: 'Acme.Notifications.SendEmailRequest',
     nextExecution: future(86400), lastExecution: ago(86400), createdAt: ago(86400 * 90),
     disabledAt: ago(3600),
-    hasLastRun: true, lastJobId: uid(903), lastState: State.Failed,
+    hasLastRun: true, lastJobId: uid(903), lastState: State.Failed, lastRunCleanedUp: false,
   },
   {
     id: 4, name: 'Tax Calculation', cron: '0 0 1 * *',
     type: 'Acme.Billing.CalculateTaxRequest',
     nextExecution: future(86400 * 15), lastExecution: ago(86400 * 15), createdAt: ago(86400 * 180),
     disabledAt: null,
-    hasLastRun: true, lastJobId: null, lastState: null,
+    hasLastRun: true, lastJobId: null, lastState: State.Completed, lastRunCleanedUp: true,
+  },
+  {
+    // A deliberately verbose schedule: its plain-English reading is far longer than the fixed
+    // Schedule column, so this row is what exercises the truncate-plus-full-text-in-the-hint path.
+    id: 6, name: 'Business Hours Sync', cron: '5 9-17 * * 1-5',
+    type: 'Acme.Inventory.SyncInventoryRequest',
+    nextExecution: future(1800), lastExecution: ago(3600), createdAt: ago(86400 * 12),
+    disabledAt: null,
+    hasLastRun: true, lastJobId: uid(906), lastState: State.Completed, lastRunCleanedUp: false,
   },
   {
     id: 5, name: 'Order Cleanup', cron: '0 3 * * *',
     type: 'Acme.Orders.ProcessOrderRequest',
     nextExecution: future(28800), lastExecution: ago(57600), createdAt: ago(86400 * 7),
     disabledAt: null,
-    hasLastRun: true, lastJobId: uid(905), lastState: State.Completed,
+    hasLastRun: true, lastJobId: null, lastState: null, lastRunCleanedUp: true,
   },
 ];
 
@@ -994,7 +1003,9 @@ export function getRecurringHistory(name: string): RecurringJobHistoryModel[] {
     createdAt: ago(i * 86400 + seed * 3600),
     jobExists: i < 12,
     type: rj?.type ?? null,
-    currentState: i < 12 ? (i === 3 ? State.Failed : State.Completed) : null,
+    // i < 12: live job row. i 12-13: skipped (nothing ran). i 14: the job row was swept but
+    // ExpirationCleanup stamped FinalState, so the outcome outlived it.
+    currentState: i < 12 ? (i === 3 ? State.Failed : State.Completed) : i === 14 ? State.Completed : null,
     skipped: i >= 12 && i < 14,
   }));
 }

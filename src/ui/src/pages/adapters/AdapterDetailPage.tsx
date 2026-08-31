@@ -10,6 +10,8 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import { PerformanceChart } from '@/components/PerformanceChart';
 import * as api from '@/api';
 import { HealthPill, adapterHealth, OutcomeBadge, HttpStatus, formatPercent, formatMs, parseTags } from './shared';
+import { Hint } from '@/components/ui/tooltip';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 const PAGE_SIZE = 15;
 
@@ -86,20 +88,19 @@ export default function AdapterDetailPage() {
           <h1 className="text-2xl font-bold">{detail.name}</h1>
           <HealthPill health={adapterHealth(detail)} />
           {detail.hasPolicyConflict && (
-            <span
-              className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 px-2 py-0.5 text-xs font-medium"
-              title="This process reported a shared rate-limit policy that differs from the persisted definition; the persisted policy is being enforced."
-            >
-              <AlertTriangle className="h-3 w-3" />
-              Policy conflict
-            </span>
+            <Hint text="This process reported a shared rate-limit policy that differs from the persisted definition; the persisted policy is being enforced.">
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 px-2 py-0.5 text-xs font-medium">
+                <AlertTriangle className="h-3 w-3" />
+                Policy conflict
+              </span>
+            </Hint>
           )}
         </div>
       </div>
 
       {/* Stat tiles */}
       <div className="grid grid-cols-3 gap-4 mb-4">
-        <StatTile label="Total calls" value={detail.totalCalls.toLocaleString()} />
+        <StatTile label="Total calls" value={detail.totalCalls.toLocaleString(DASHBOARD_LOCALE)} />
         <StatTile
           label="Error rate"
           value={formatPercent(detail.errorRate)}
@@ -145,20 +146,20 @@ export default function AdapterDetailPage() {
                 </TableRow>
               ) : (
                 detail.operations.map((op) => (
+                  <Hint key={op.operation} text="Filter recent calls by this operation">
                   <TableRow
-                    key={op.operation}
                     className={`cursor-pointer ${operationFilter === op.operation ? 'bg-accent' : ''}`}
                     onClick={() => setOperationFilter(operationFilter === op.operation ? null : op.operation)}
-                    title="Filter recent calls by this operation"
                   >
                     <TableCell className="font-mono text-sm">{op.operation}</TableCell>
-                    <TableCell className="text-right tabular-nums">{op.calls.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">{op.errors.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{op.calls.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{op.errors.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                     <TableCell className={`text-right tabular-nums ${op.errorRate > 0 ? 'text-destructive' : ''}`}>
                       {formatPercent(op.errorRate)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{formatMs(op.avgDurationMs)}</TableCell>
                   </TableRow>
+                  </Hint>
                 ))
               )}
             </TableBody>
@@ -183,14 +184,13 @@ export default function AdapterDetailPage() {
               </TableHeader>
               <TableBody>
                 {detail.groups.map((g) => (
+                  <Hint key={g.group} text="Filter recent calls by this group">
                   <TableRow
-                    key={g.group}
                     className={`cursor-pointer ${groupFilter === g.group ? 'bg-accent' : ''}`}
                     onClick={() => setGroupFilter(groupFilter === g.group ? null : g.group)}
-                    title="Filter recent calls by this group"
                   >
                     <TableCell className="font-mono text-sm">{g.group}</TableCell>
-                    <TableCell className="text-right tabular-nums">{g.calls.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{g.calls.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                     <TableCell className={`text-right tabular-nums ${g.errorRate > 0 ? 'text-destructive' : ''}`}>
                       {formatPercent(g.errorRate)}
                     </TableCell>
@@ -199,6 +199,7 @@ export default function AdapterDetailPage() {
                       {g.lastFailureAt ? <RelativeTime date={g.lastFailureAt} /> : '—'}
                     </TableCell>
                   </TableRow>
+                  </Hint>
                 ))}
               </TableBody>
             </Table>
@@ -417,9 +418,11 @@ function FilterChip({ label, onClear }: { label: string; onClear: () => void }) 
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 text-primary px-2 py-0.5 text-xs font-medium">
       {label}
-      <button type="button" onClick={onClear} className="rounded-full hover:bg-primary/20 p-0.5" title="Clear filter">
-        <X className="h-3 w-3" />
-      </button>
+      <Hint text="Clear filter">
+        <button type="button" onClick={onClear} className="rounded-full hover:bg-primary/20 p-0.5" aria-label="Clear filter">
+          <X className="h-3 w-3" />
+        </button>
+      </Hint>
     </span>
   );
 }

@@ -545,7 +545,17 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 
 `AddOrUpdateRecurringJob` only registers the definition — it does NOT create a job. The `RecurringJobScheduler` background task creates jobs when the cron time arrives.
 
+### Execution outcomes outlive their jobs
+
+`RecurringJobLog` is the immutable audit trail, but deleting a `Job` nulls its `JobId` (`DeleteBehavior.SetNull`), and `JobExpirationTimeout` defaults to 1 day — so for anything less frequent than daily the job row is gone before the next firing. `ExpirationCleanup` therefore stamps the firing's outcome onto `RecurringJobLog.FinalState` immediately before deleting the job, in BOTH delete paths (the age sweep and the `MaxExpirableJobCount` count sweep). Read surfaces use the live `Job.CurrentState` while the row exists and fall back to `FinalState` once it does not, so the dashboard renders e.g. `Completed (cleaned up)` — outcome shown, but not a link, since there is no job detail page left to open.
+
+This is stamped at cleanup rather than at finalization on purpose: recording it when the job finishes would put a lookup on the worker's fetch/execute hot path. `FinalState` stays null for a skipped firing (nothing ran) and for runs swept before 6.1, which still read as a bare `Cleaned up`. `RecurringJobModel` carries `LastState` plus `LastRunCleanedUp`; `RecurringJobHistoryModel.CurrentState` is the outcome and `JobExists` is the "is there a page to link to" flag. Migration is one additive nullable column.
+
+Failed jobs never auto-expire, so everything reaching the sweep was `Completed` or `Deleted` — which is why this also un-hides `Deleted` recurring runs (a skip-mode concurrency/rate-limit refusal, or a graceful cancellation) that the old bare `Cleaned up` label made indistinguishable from a success.
+
 ### Cron expressions
+
+The dashboard's Schedule column shows the expression read back in plain English (`0 8 * * *` = "At 08:00 AM") with the raw expression on hover; the column header names whichever half is in the cell (Schedule / Cron) and clicking it swaps them, persisted per browser. Next/Last Execution show relative text ("in 10 minutes") with the exact instant on hover. Cron-derived timestamps render to the minute, since an occurrence is only ever minute-aligned. An expression that cannot be parsed has no reading and displays as itself. The detail page header shows expression and reading together.
 
 Standard 5-part (minute, hour, day, month, weekday) and 6-part with seconds:
 

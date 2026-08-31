@@ -20,6 +20,8 @@ import {
 } from './counterModel';
 import type { CounterHistoryPoint } from '@/types';
 import { PageHeading } from '@/components/PageHeading';
+import { Hint } from '@/components/ui/tooltip';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, ChartTooltip, Legend);
 
@@ -110,7 +112,7 @@ function formatCell(token: string, value: number | undefined): string {
   if (value === undefined) return '—';
   if (token === 'oldest_age_seconds') return formatSeconds(value);
 
-  return value.toLocaleString();
+  return value.toLocaleString(DASHBOARD_LOCALE);
 }
 
 export default function CountersPage() {
@@ -257,7 +259,7 @@ function FamilyBody({
                     <td
                       className={`px-4 py-2 text-right font-mono tabular-nums ${r.muted ? 'text-muted-foreground' : ''} ${r.warn ? 'text-destructive' : ''}`}
                     >
-                      {r.value.toLocaleString()}
+                      {r.value.toLocaleString(DASHBOARD_LOCALE)}
                     </td>
                   </tr>
                 ))}
@@ -325,10 +327,12 @@ function MetricTableRow({
 }) {
   return (
     <tr className="border-b last:border-b-0 hover:bg-muted/30">
-      <td className="px-4 py-2" title={row.subject}>
-        <div className="font-mono font-medium">{row.label}</div>
-        {row.sub && <div className="font-mono text-xs text-muted-foreground">{row.sub}</div>}
-      </td>
+      <Hint text={row.subject}>
+        <td className="px-4 py-2">
+          <div className="font-mono font-medium">{row.label}</div>
+          {row.sub && <div className="font-mono text-xs text-muted-foreground">{row.sub}</div>}
+        </td>
+      </Hint>
       {hasApplication && (
         <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{row.application ?? 'all'}</td>
       )}
@@ -359,7 +363,7 @@ function TableHeaderBar({
   return (
     <CardHeader className="pb-2 flex-row items-center justify-between space-y-0 gap-4">
       <CardTitle className="text-base">
-        {count.toLocaleString()} {count === 1 ? 'row' : 'rows'}
+        {count.toLocaleString(DASHBOARD_LOCALE)} {count === 1 ? 'row' : 'rows'}
       </CardTitle>
       <input
         value={filter}
@@ -481,8 +485,8 @@ function HistoryChart({ series, hours, loading }: { series: FamilySeries[]; hour
       const d = new Date(t);
       labels.push(
         hours <= 24
-          ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-          : `${d.toLocaleDateString([], { weekday: 'short' })} ${String(d.getDate()).padStart(2, '0')}`
+          ? d.toLocaleTimeString(DASHBOARD_LOCALE, { hour: '2-digit', minute: '2-digit', hour12: false })
+          : `${d.toLocaleDateString(DASHBOARD_LOCALE, { weekday: 'short' })} ${String(d.getDate()).padStart(2, '0')}`
       );
     }
 

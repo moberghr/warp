@@ -10,6 +10,7 @@ import { ErrorSource, ErrorGroupKind, ErrorGroupStatus } from '@/types/issues';
 import type { ErrorGroupSummary } from '@/types/issues';
 import { SourceBadge, StatusChip, IssueFlags } from './shared';
 import { PageHeading } from '@/components/PageHeading';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 // Issues (§8.29): errors grouped by fingerprint across all four sources — job exceptions, endpoint
 // 5xx, adapter failures, and client-side errors — with a resolution workflow. By default the list
@@ -61,7 +62,7 @@ export default function IssuesPage() {
       {
         accessorKey: 'count',
         header: 'Events',
-        cell: ({ row }) => row.original.count.toLocaleString(),
+        cell: ({ row }) => row.original.count.toLocaleString(DASHBOARD_LOCALE),
         meta: { headerClassName: 'text-right w-24', cellClassName: 'text-right tabular-nums' },
       },
       {

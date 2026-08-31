@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   shortType, shortId, stateName, formatBytes, isServerStale,
-  formatRelativeTime, formatDateTime, formatDateTimeExact, stateColor, serverStatusDotColor,
+  formatRelativeTime, formatDateTime, formatDateTimeExact, formatDateTimeMinute, DASHBOARD_LOCALE,
+  stateColor, serverStatusDotColor,
   httpStatusName,
 } from './format';
 import { State } from '@/types';
@@ -56,6 +57,22 @@ describe('date formatters', () => {
     const shape = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/;
     expect(formatDateTime('2026-01-02T03:04:05.678Z')).toMatch(shape);
     expect(formatDateTimeExact('2026-01-02T03:04:05.678Z')).toMatch(shape);
+  });
+
+  it('formatRelativeTime renders English regardless of the host locale', () => {
+    // luxon's toRelative defaults to the host locale; this test machine is hr-HR, which produced
+    // "za 10 minuta" before the locale was pinned. The dashboard is hardcoded English everywhere
+    // else, and this label is now the primary content of the next/last execution columns.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-02T03:00:00.000Z'));
+
+    expect(formatRelativeTime('2026-01-02T03:10:00.000Z')).toBe('in 10 minutes');
+    expect(formatRelativeTime('2026-01-02T02:55:00.000Z')).toBe('5 minutes ago');
+  });
+
+  it('formatDateTimeMinute drops seconds and milliseconds', () => {
+    // Cron occurrences are minute-aligned, so the recurring surfaces render to the minute.
+    expect(formatDateTimeMinute('2026-01-02T03:04:05.678Z')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
 
   it('formatRelativeTime is relative to the current clock', () => {
@@ -125,5 +142,42 @@ describe('serverStatusDotColor', () => {
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
     expect(serverStatusDotColor('2026-01-01T00:00:00Z', null)).toBe('bg-green-500');
     expect(serverStatusDotColor('2025-12-31T23:59:00Z', null)).toBe('bg-red-500');
+  });
+});
+
+const NEWLINE = String.fromCharCode(10);
+
+describe('locale pinning', () => {
+  it('every locale-sensitive call site passes DASHBOARD_LOCALE', () => {
+    // The dashboard must render identically for every viewer, so a bare toLocaleString() /
+    // toLocaleDateString() / toLocaleTimeString() — which follows the HOST locale — is a defect:
+    // one machine reads "1,234" and "Mon", another "1.234" and "pon". Caught here rather than in
+    // review, because the default is silent and only shows up on someone else's machine.
+    //
+    // Sources come from Vite's import.meta.glob rather than node:fs, so the project keeps its
+    // "types": ["vite/client"] tsconfig with no @types/node dependency.
+    const sources = import.meta.glob('/src/**/*.{ts,tsx}', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+    const offenders: string[] = [];
+
+    for (const [path, source] of Object.entries(sources)) {
+      if (path.includes('.test.')) {
+        continue;
+      }
+
+      source.split(NEWLINE).forEach((line, index) => {
+        const call = /\.toLocale(String|DateString|TimeString)\(([^)]*)\)/.exec(line);
+        if (call && !call[2].includes('DASHBOARD_LOCALE')) {
+          offenders.push(path + ':' + (index + 1));
+        }
+      });
+    }
+
+    expect(Object.keys(sources).length).toBeGreaterThan(50); // the glob actually matched something
+    expect(offenders).toEqual([]);
+  });
+
+  it('pins a concrete English locale', () => {
+    expect(DASHBOARD_LOCALE).toBe('en-US');
+    expect((1234.5).toLocaleString(DASHBOARD_LOCALE)).toBe('1,234.5');
   });
 });

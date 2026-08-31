@@ -117,6 +117,8 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             return 0;
         }
 
+        await StampRecurringFinalStatesAsync(expiredJobIds, ct);
+
         await _context.Set<JobLog>()
             .Where(x => expiredJobIds.Contains(x.JobId))
             .ExecuteDeleteAsync(ct);
@@ -180,6 +182,10 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 break;
             }
 
+            // Both delete paths must stamp, or MaxExpirableJobCount silently loses the outcome the
+            // age-based sweep preserves.
+            await StampRecurringFinalStatesAsync(jobIds, ct);
+
             await _context.Set<JobLog>()
                 .Where(x => jobIds.Contains(x.JobId))
                 .ExecuteDeleteAsync(ct);
@@ -192,6 +198,46 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         }
 
         return totalDeleted;
+    }
+
+    // Preserves a recurring firing's outcome on its audit row before the Job it points at is deleted
+    // (§8.9). Deleting a Job nulls RecurringJobLog.JobId (DeleteBehavior.SetNull), so the dashboard
+    // could otherwise only report "cleaned up" — and with JobExpirationTimeout at 1 day, that is every
+    // run a monthly definition ever made. It also hid Deleted outcomes (a skip-mode concurrency or
+    // rate-limit refusal, a graceful cancel) behind the same label as a success. Stamped here rather
+    // than at finalization so the worker never pays a lookup on the hot path (§0.2/§6.1).
+    //
+    // Bounded by construction: the ids are already in hand, RecurringJobLog.JobId is indexed, and a
+    // tick with no recurring firing among its expired jobs issues no UPDATE at all. Failed jobs never
+    // reach here (ExpireAt stays null, §8.2), so in practice the states are Completed and Deleted.
+    private async Task StampRecurringFinalStatesAsync(List<Guid> expiredJobIds, CancellationToken ct)
+    {
+        var firings = await _context.Set<RecurringJobLog>()
+            .Where(x => x.JobId != null)
+            .Where(x => expiredJobIds.Contains(x.JobId!.Value))
+            .Select(x =>
+                new
+                {
+                    JobId = x.JobId!.Value,
+                    State = x.Job!.CurrentState,
+                })
+            .ToListAsync(ct);
+
+        if (firings.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var group in firings.GroupBy(x => x.State))
+        {
+            var ids = group.Select(x => x.JobId).ToList();
+            var state = group.Key;
+
+            await _context.Set<RecurringJobLog>()
+                .Where(x => x.JobId != null)
+                .Where(x => ids.Contains(x.JobId!.Value))
+                .ExecuteUpdateAsync(x => x.SetProperty(p => p.FinalState, state), ct);
+        }
     }
 
     internal async Task CleanupRecurringJobLogsAsync(CancellationToken ct)

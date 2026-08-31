@@ -13,6 +13,8 @@ import * as api from '@/api';
 import type { AdapterListItem } from '@/types/adapters';
 import { HealthPill, adapterHealth, Sparkline, formatPercent, formatMs } from './shared';
 import { PageHeading } from '@/components/PageHeading';
+import { Hint } from '@/components/ui/tooltip';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 export default function AdaptersPage() {
   const navigate = useNavigate();
@@ -49,13 +51,12 @@ export default function AdaptersPage() {
             <span className="font-medium flex items-center gap-2">
               {row.original.name}
               {row.original.hasPolicyConflict && (
-                <span
-                  className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 px-1.5 py-0.5 text-[11px] font-medium"
-                  title="This process reported a shared rate-limit policy that differs from the persisted definition; the persisted policy is being enforced."
-                >
-                  <AlertTriangle className="h-3 w-3" />
-                  Conflict
-                </span>
+                <Hint text="This process reported a shared rate-limit policy that differs from the persisted definition; the persisted policy is being enforced.">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 px-1.5 py-0.5 text-[11px] font-medium">
+                    <AlertTriangle className="h-3 w-3" />
+                    Conflict
+                  </span>
+                </Hint>
               )}
             </span>
             {row.original.configSummary && (
@@ -76,7 +77,7 @@ export default function AdaptersPage() {
         accessorKey: 'totalCalls',
         header: 'Calls',
         meta: { headerClassName: 'text-right w-24', cellClassName: 'text-right tabular-nums' },
-        cell: ({ row }) => row.original.totalCalls.toLocaleString(),
+        cell: ({ row }) => row.original.totalCalls.toLocaleString(DASHBOARD_LOCALE),
       },
       {
         accessorKey: 'errorRate',

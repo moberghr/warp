@@ -14,6 +14,7 @@ import { useRealtimeRefetch } from '@/hooks/useRealtimeRefetch';
 import { State } from '@/types';
 import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
 import * as api from '@/api';
+import { Hint } from '@/components/ui/tooltip';
 
 type DetailPendingAction = 'cancel' | 'requeue' | 'delete' | 'cancelBatch';
 
@@ -167,7 +168,7 @@ export default function DetailPage() {
       <div data-warp-slot="detail.header" data-warp-context={jobContext} key={`header-${job.id}`} className="flex items-center gap-4 mb-6">
         <h1 className="text-2xl font-bold">
           {job.type
-            ? <Link to={`/jobs/by-type/${encodeURIComponent(job.type)}`} className="hover:underline" title="See all jobs of this type">{shortType(job.type)}</Link>
+            ? <Hint text="See all jobs of this type"><Link to={`/jobs/by-type/${encodeURIComponent(job.type)}`} className="hover:underline">{shortType(job.type)}</Link></Hint>
             : kindLabel(job.kind)}{' '}
           <span className="font-mono text-base font-normal text-muted-foreground">{kindLabel(job.kind)} · {shortId(job.id)}</span>
         </h1>

@@ -4,7 +4,11 @@ sidebar_position: 3
 
 # Recurring Jobs
 
-Cron-based scheduled jobs with name, cron expression, type, next/last execution times, and the outcome of the last run.
+Cron-based scheduled jobs with name, schedule, type, next/last execution times, and the outcome of the last run.
+
+The list is built to be **scanned**: the **Schedule** column reads the cron expression back in plain English ("Every 15 minutes"), and **Next / Last Execution** answer "when, roughly?" ("in 10 minutes", "5 minutes ago"). In both cases the precise value — the raw expression, the exact timestamp — is on hover, and the timestamps render **to the minute**, since a cron occurrence is only ever minute-aligned.
+
+The **Schedule** header doubles as a switch: it names whichever half is in the cell (**Schedule** or **Cron**) and clicking it swaps them, persisted per browser. Relative times follow the viewer's locale.
 
 ## How Recurring Jobs Work
 
@@ -14,10 +18,21 @@ Cron-based scheduled jobs with name, cron expression, type, next/last execution 
 
 Each recurring job tracks its executions via `RecurringJobLog` entries. The history table shows the outcome of each scheduled run:
 - Normal executions link to the job and show its current state
-- If the underlying job has been deleted, the entry displays **"Cleaned up"**
+- If the underlying job has been cleaned up, the entry still shows its outcome, followed by a muted **"(cleaned up)"** — the result is preserved even though there is no job detail page left to open
 - If the recurring job was disabled at the time, the entry displays an orange **"Skipped"** badge
 
-The list page condenses this into a **Last Result** column showing the state of the most recent *real* run (skipped firings are not runs, so a disabled job keeps showing the outcome of its last actual execution). The badge links to that job. A definition that has never fired shows `—`; one whose job row has since been cleaned up shows **"Cleaned up"**.
+The list page condenses this into a **Last Result** column showing the state of the most recent *real* run (skipped firings are not runs, so a disabled job keeps showing the outcome of its last actual execution). The **Last Execution** timestamp links to that run's job too, so either half of the row gets you there.
+
+Four states are distinguishable:
+
+| Display | Meaning |
+|---|---|
+| `—` | the definition has never actually fired |
+| badge, linked | the job row is still there — click through to it |
+| badge + `(cleaned up)` | the job row was swept, but its outcome was preserved |
+| `Cleaned up` | swept by a deployment older than 6.1, before outcomes were preserved |
+
+That third state matters most for low-frequency definitions: with the default 1-day job retention, a monthly job's rows are long gone before the next firing, so before 6.1 its entire history read `Cleaned up`. See [Recurring Jobs](/docs/features/recurring-jobs) for how the outcome is preserved.
 
 ## Dashboard Actions
 

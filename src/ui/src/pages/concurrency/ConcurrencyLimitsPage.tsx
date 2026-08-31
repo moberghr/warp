@@ -13,6 +13,7 @@ import {
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { ConcurrencyLimitInfo } from '@/types';
 import { PageHeading } from '@/components/PageHeading';
+import { Hint } from '@/components/ui/tooltip';
 
 type ConfirmDelete = { name: string } | null;
 
@@ -137,25 +138,30 @@ export default function ConcurrencyLimitsPage() {
                               }}
                               className="w-20 rounded-md border border-input bg-background px-2 py-1 text-sm"
                             />
-                            <Button variant="ghost" size="icon-sm" onClick={() => saveEdit(limit.name)} title="Save">
-                              <Check className="h-4 w-4" />
-                            </Button>
-                            <Button variant="ghost" size="icon-sm" onClick={cancelEdit} title="Cancel">
-                              <X className="h-4 w-4" />
-                            </Button>
+                            <Hint text="Save">
+                              <Button variant="ghost" size="icon-sm" onClick={() => saveEdit(limit.name)} aria-label="Save">
+                                <Check className="h-4 w-4" />
+                              </Button>
+                            </Hint>
+                            <Hint text="Cancel">
+                              <Button variant="ghost" size="icon-sm" onClick={cancelEdit} aria-label="Cancel">
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </Hint>
                             {editError && (
                               <span className="text-xs text-destructive ml-2">{editError}</span>
                             )}
                           </div>
                         ) : (
-                          <button
-                            type="button"
-                            onClick={() => startEdit(limit)}
-                            className="font-mono hover:underline focus:outline-none"
-                            title="Click to edit"
-                          >
-                            {limit.limit}
-                          </button>
+                          <Hint text="Click to edit">
+                            <button
+                              type="button"
+                              onClick={() => startEdit(limit)}
+                              className="font-mono hover:underline focus:outline-none"
+                            >
+                              {limit.limit}
+                            </button>
+                          </Hint>
                         )}
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground">

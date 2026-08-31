@@ -6,6 +6,7 @@
 import type { ReactNode } from 'react';
 import { AdapterCallOutcome } from '@/types/adapters';
 import { httpStatusName } from '@/utils/format';
+import { Hint } from '@/components/ui/tooltip';
 
 export function formatPercent(rate: number): string {
   if (rate <= 0) {
@@ -92,9 +93,11 @@ export function HttpStatus({ code, className }: { code: number | null | undefine
   }
 
   return (
-    <span className={`cursor-help ${className ?? ''}`.trim()} title={`${code} ${httpStatusName(code)}`}>
-      {code}
-    </span>
+    <Hint text={`${code} ${httpStatusName(code)}`}>
+      <span className={`cursor-help ${className ?? ''}`.trim()}>
+        {code}
+      </span>
+    </Hint>
   );
 }
 

@@ -10,6 +10,8 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import { PerformanceChart } from '@/components/PerformanceChart';
 import * as api from '@/api';
 import { HealthPill, adapterHealth, OutcomeBadge, HttpStatus, formatPercent, formatMs } from '../adapters/shared';
+import { Hint } from '@/components/ui/tooltip';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 const PAGE_SIZE = 15;
 
@@ -90,7 +92,7 @@ export default function EndpointDetailPage() {
 
       {/* Stat tiles */}
       <div className="grid grid-cols-3 gap-4 mb-4">
-        <StatTile label="Total calls" value={detail.totalCalls.toLocaleString()} />
+        <StatTile label="Total calls" value={detail.totalCalls.toLocaleString(DASHBOARD_LOCALE)} />
         <StatTile
           label="Error rate"
           value={formatPercent(detail.errorRate)}
@@ -127,14 +129,13 @@ export default function EndpointDetailPage() {
               </TableHeader>
               <TableBody>
                 {detail.groups.map((g) => (
+                  <Hint key={g.group} text="Filter recent calls by this caller">
                   <TableRow
-                    key={g.group}
                     className={`cursor-pointer ${groupFilter === g.group ? 'bg-accent' : ''}`}
                     onClick={() => setGroupFilter(groupFilter === g.group ? null : g.group)}
-                    title="Filter recent calls by this caller"
                   >
                     <TableCell className="font-mono text-sm">{g.group}</TableCell>
-                    <TableCell className="text-right tabular-nums">{g.calls.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{g.calls.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                     <TableCell className={`text-right tabular-nums ${g.errorRate > 0 ? 'text-destructive' : ''}`}>
                       {formatPercent(g.errorRate)}
                     </TableCell>
@@ -143,6 +144,7 @@ export default function EndpointDetailPage() {
                       {g.lastFailureAt ? <RelativeTime date={g.lastFailureAt} /> : '—'}
                     </TableCell>
                   </TableRow>
+                  </Hint>
                 ))}
               </TableBody>
             </Table>
@@ -256,9 +258,11 @@ function FilterChip({ label, onClear }: { label: string; onClear: () => void }) 
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 text-primary px-2 py-0.5 text-xs font-medium">
       {label}
-      <button type="button" onClick={onClear} className="rounded-full hover:bg-primary/20 p-0.5" title="Clear filter">
-        <X className="h-3 w-3" />
-      </button>
+      <Hint text="Clear filter">
+        <button type="button" onClick={onClear} className="rounded-full hover:bg-primary/20 p-0.5" aria-label="Clear filter">
+          <X className="h-3 w-3" />
+        </button>
+      </Hint>
     </span>
   );
 }

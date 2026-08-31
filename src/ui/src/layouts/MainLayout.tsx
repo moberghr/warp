@@ -19,6 +19,7 @@ import { useRealtimeInvalidation } from '@/hooks/useRealtimeInvalidation';
 import { useRealtimeStore } from '@/stores/realtime';
 import { startRealtimeFeed, stopRealtimeFeed } from '@/lib/realtimeFeed';
 import { config } from '@/config';
+import { Hint } from '@/components/ui/tooltip';
 import * as api from '@/api';
 import type { DashboardStatistics, WarpAddonsInfo } from '@/types';
 import type { ExtensionManifest } from '@/extensions/types';
@@ -262,24 +263,24 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
     const isActive = isNavItemActive(item.to, location.pathname);
 
     return (
-      <Link
-        key={item.to}
-        to={item.to}
-        onClick={handleNavClick(item, isActive)}
-        aria-current={isActive ? 'page' : undefined}
-        // Between md and lg the label is sr-only, so a sighted user gets the
-        // name from the tooltip instead.
-        title={item.label}
-        className={`flex items-center gap-2 ${alwaysLabel ? 'px-3' : 'px-2 lg:px-3'} py-2 rounded-md text-sm font-medium transition-colors shrink-0 whitespace-nowrap ${
-          isActive
-            ? 'bg-primary text-primary-foreground'
-            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-        }`}
-      >
-        <Icon className="h-4 w-4 shrink-0" />
-        <span className={alwaysLabel ? undefined : 'sr-only lg:not-sr-only'}>{item.label}</span>
-        <NavBadges item={item} stats={stats} leading />
-      </Link>
+      // Between md and lg the label is sr-only, so a sighted user gets the name from the tooltip
+      // instead. In the mobile sheet (alwaysLabel) the label is always visible, so no tooltip.
+      <Hint key={item.to} text={alwaysLabel ? null : item.label}>
+        <Link
+          to={item.to}
+          onClick={handleNavClick(item, isActive)}
+          aria-current={isActive ? 'page' : undefined}
+          className={`flex items-center gap-2 ${alwaysLabel ? 'px-3' : 'px-2 lg:px-3'} py-2 rounded-md text-sm font-medium transition-colors shrink-0 whitespace-nowrap ${
+            isActive
+              ? 'bg-primary text-primary-foreground'
+              : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+          }`}
+        >
+          <Icon className="h-4 w-4 shrink-0" />
+          <span className={alwaysLabel ? undefined : 'sr-only lg:not-sr-only'}>{item.label}</span>
+          <NavBadges item={item} stats={stats} leading />
+        </Link>
+      </Hint>
     );
   };
 
@@ -348,10 +349,10 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
               {/* The one element in the row that shrinks: it wants 20rem and gives
                   width back down to 9rem as the row tightens, so the nav — not the
                   search — sets the row's minimum. */}
+            <Hint text={`Search — ${shortcutHint()}`}>
             <button
               type="button"
               onClick={() => setPaletteOpen(true)}
-              title={`Search — ${shortcutHint()}`}
               aria-label="Search pages"
               className="hidden md:flex shrink-0 xl:shrink xl:min-w-36 items-center justify-center xl:justify-start gap-2 h-9 w-9 xl:w-80 xl:px-3 mr-3 rounded-md border border-border text-[13px] text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
             >
@@ -359,31 +360,35 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
               <span className="hidden xl:block flex-1 min-w-0 truncate text-left">Search pages…</span>
               <kbd className="hidden xl:block shrink-0 text-[11px] px-1.5 py-0.5 rounded-[5px] bg-muted">{shortcutHint()}</kbd>
             </button>
+            </Hint>
           {config.portalUrl && (
-            <a
-              href={config.portalUrl}
-              title={config.portalLabel}
-              className="hidden md:flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mr-3"
-            >
-              <ExternalLink className="h-4 w-4" />
-              <span className="hidden xl:inline">{config.portalLabel}</span>
-            </a>
+            <Hint text={config.portalLabel}>
+              <a
+                href={config.portalUrl}
+                className="hidden md:flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mr-3"
+              >
+                <ExternalLink className="h-4 w-4" />
+                <span className="hidden xl:inline">{config.portalLabel}</span>
+              </a>
+            </Hint>
           )}
           <RealtimeStatusIndicator status={realtimeStatus} />
           <button onClick={toggle} className="p-2 rounded-md hover:bg-accent text-muted-foreground">
             {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
           {config.hasBuiltInLogin && (
-            <button
-              onClick={async () => {
-                await fetch(`${config.apiPath}auth/logout`, { method: 'POST' });
-                window.location.reload();
-              }}
-              className="p-2 rounded-md hover:bg-accent text-muted-foreground ml-1"
-              title="Logout"
-            >
-              <LogOut className="h-4 w-4" />
-            </button>
+            <Hint text="Logout">
+              <button
+                onClick={async () => {
+                  await fetch(`${config.apiPath}auth/logout`, { method: 'POST' });
+                  window.location.reload();
+                }}
+                className="p-2 rounded-md hover:bg-accent text-muted-foreground ml-1"
+                aria-label="Logout"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            </Hint>
           )}
           <button
             onClick={() => setMobileMenuOpen((open) => !open)}
@@ -671,10 +676,12 @@ function RealtimeStatusIndicator({ status }: { status: ReturnType<typeof useReal
   if (!s) return null;
 
   return (
-    <span className="flex items-center justify-end gap-1.5 xl:min-w-28 px-2 py-1 mr-1 text-xs text-muted-foreground shrink-0" title={s.title}>
-      <span className={`h-2 w-2 rounded-full ${s.dot}`} />
-      <span className="hidden xl:inline">{s.label}</span>
-    </span>
+    <Hint text={s.title}>
+      <span className="flex items-center justify-end gap-1.5 xl:min-w-28 px-2 py-1 mr-1 text-xs text-muted-foreground shrink-0">
+        <span className={`h-2 w-2 rounded-full ${s.dot}`} />
+        <span className="hidden xl:inline">{s.label}</span>
+      </span>
+    </Hint>
   );
 }
 

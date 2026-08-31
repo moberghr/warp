@@ -41,8 +41,12 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         const int perSeconds = 60;
 
         var barrier = new BarrierSignal();
-        var processOne = CreateLimiter();
-        var processTwo = CreateLimiter();
+
+        // One clock shared by both "processes": two independently pinned clocks could straddle a window
+        // boundary and hand each process its own budget.
+        var clock = new FrozenWallClock();
+        var processOne = CreateLimiter(clock);
+        var processTwo = CreateLimiter(clock);
 
         var taskOne = AttemptAsync(processOne, adapter, limit, perSeconds, attempts: 2, barrier);
         var taskTwo = AttemptAsync(processTwo, adapter, limit, perSeconds, attempts: 2, barrier);
@@ -98,7 +102,7 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         const int limit = 1;
         const int perSeconds = 60;
 
-        var limiter = CreateLimiter();
+        var limiter = CreateLimiter(new FrozenWallClock());
 
         // Exhaust the single token in a 60s window that cannot reset within the wait budget.
         await limiter.AcquireAsync(adapter, limit, perSeconds, AdapterRateLimitOverflow.Wait, TimeSpan.FromMilliseconds(200), Ct);
@@ -116,7 +120,7 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         const int limit = 1;
         const int perSeconds = 60;
 
-        var limiter = CreateLimiter();
+        var limiter = CreateLimiter(new FrozenWallClock());
 
         await limiter.AcquireAsync(adapter, limit, perSeconds, AdapterRateLimitOverflow.FailFast, TimeSpan.Zero, Ct);
 
@@ -133,7 +137,7 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         const int limit = 1;
         const int perSeconds = 60;
 
-        var limiter = CreateLimiter();
+        var limiter = CreateLimiter(new FrozenWallClock());
 
         await limiter.AcquireAsync(adapter, limit, perSeconds, AdapterRateLimitOverflow.FailFast, TimeSpan.Zero, Ct);
 
@@ -152,7 +156,7 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         const int limit = 1;
         const int perSeconds = 60;
 
-        var limiter = CreateLimiter();
+        var limiter = CreateLimiter(new FrozenWallClock());
 
         await limiter.AcquireAsync(adapter, limit, perSeconds, AdapterRateLimitOverflow.Wait, TimeSpan.FromMilliseconds(200), Ct);
 
@@ -186,7 +190,7 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         var conflicts = 0L;
         using var listener = AdapterTestHarness.StartCounterListener("warp.adapter.config_conflicts", adapter, value => conflicts += value);
 
-        var limiter = CreateLimiter();
+        var limiter = CreateLimiter(new FrozenWallClock());
 
         // Local limit is 1, but the persisted limit (3) is enforced: all three attempts admit.
         for (var i = 0; i < persistedLimit; i++)
@@ -252,7 +256,7 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         const int limit = 50;
         const int perSeconds = 60;
 
-        var limiter = CreateLimiter();
+        var limiter = CreateLimiter(new FrozenWallClock());
 
         for (var i = 0; i < 5; i++)
         {
@@ -323,7 +327,7 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         });
         await seed.SaveChangesAsync(Ct);
 
-        var limiter = CreateLimiter();
+        var limiter = CreateLimiter(new FrozenWallClock());
 
         // Local policy says 10, persisted says 5 — the override's single token is what's enforced.
         await limiter.AcquireAsync(adapter, 10, 60, AdapterRateLimitOverflow.FailFast, TimeSpan.Zero, Ct);
@@ -379,11 +383,36 @@ public abstract class AdapterRateLimitTestsBase : IAsyncLifetime
         return (admitted, throttled);
     }
 
-    private AdapterRateLimiter<TestContext> CreateLimiter()
+    private AdapterRateLimiter<TestContext> CreateLimiter(TimeProvider? time = null)
         => new(
             new FixtureScopeFactory(_fixture),
-            TimeProvider.System,
+            time ?? TimeProvider.System,
             NullLogger<AdapterRateLimiter<TestContext>>.Instance);
+
+    /// <summary>
+    /// A real-time <see cref="TimeProvider"/> with a FROZEN wall clock: <see cref="GetUtcNow"/> is pinned,
+    /// while <c>GetTimestamp</c>, <c>GetElapsedTime</c> and <c>CreateTimer</c> keep the base class's
+    /// real-time behaviour.
+    /// <para>
+    /// Fixed rate-limit windows are floor-aligned to global UTC ticks (<c>AdapterRateLimiter.WindowStart</c>),
+    /// so with <c>perSeconds = 60</c> the boundary is the top of each UTC minute. A test that exhausts the
+    /// budget and then asserts a refusal fails outright when that boundary lands between the two calls: the
+    /// window rolls, a fresh token appears, and nothing throws. Seen in CI at 11:11:00.042Z, 42ms past a
+    /// minute boundary.
+    /// </para>
+    /// <para>
+    /// Pinning only the wall clock puts both calls in the same window by construction. The wait path still
+    /// measures its budget with <c>GetElapsedTime</c> (Stopwatch-based) and still delays on a real timer, so
+    /// what these tests assert — the wait bounds at maxWait, then throws — is unchanged, not weakened
+    /// (§0.3: root-cause the race, never loosen the test).
+    /// </para>
+    /// </summary>
+    private sealed class FrozenWallClock : TimeProvider
+    {
+        private readonly DateTimeOffset _now = DateTimeOffset.UtcNow;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+    }
 
     private TestContext SingleContext() => _fixture.CreateContext();
 

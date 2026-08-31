@@ -30,13 +30,36 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 
 ## Execution History
 
-Each job created by the scheduler is logged in `RecurringJobLog`. The dashboard shows execution history on the recurring job detail page — including jobs that have been cleaned up (shown as "Cleaned up").
+Each job created by the scheduler is logged in `RecurringJobLog`. The dashboard shows execution history on the recurring job detail page, and the **list** condenses it into a **Last Result** column — the outcome of the most recent real run, carried on `RecurringJobModel` as `HasLastRun` / `LastJobId` / `LastState` / `LastRunCleanedUp`. A skipped firing is not a run, so a disabled recurring job keeps showing the outcome of its last actual execution rather than blanking out. The **Last Execution** timestamp links to that run's job, alongside the Last Result badge.
 
 The `RecurringJobLog` has a FK to `Job` with `SET NULL` cascade. When a job expires and is cleaned up, the log entry survives with `JobId = null`. The last 100 entries per recurring job are retained.
 
-The recurring job **list** condenses this into a **Last Result** column — the state of the most recent real run, carried on `RecurringJobModel` as `HasLastRun` / `LastJobId` / `LastState`. A skipped firing is not a run, so a disabled recurring job keeps showing the outcome of its last actual execution rather than blanking out. `HasLastRun = false` means the definition has never fired; `HasLastRun = true` with a null `LastState` means it fired but the job row has since been cleaned up.
+### Outcomes outlive their jobs
+
+`JobExpirationTimeout` defaults to **1 day**, so for anything less frequent than daily the job row is normally gone before the next firing. To keep the history meaningful, `ExpirationCleanup` **stamps the outcome onto `RecurringJobLog.FinalState` immediately before deleting the job** — both in the age-based sweep and in the count-based one (`MaxExpirableJobCount`). The dashboard then reads the live `Job.CurrentState` while the row exists and falls back to `FinalState` once it doesn't, rendering e.g. **`Completed` (cleaned up)**: the result is shown, but it is not a link, because there is no job detail page left to open.
+
+The stamp happens at cleanup time rather than at finalization deliberately — recording it when the job finishes would put a lookup on the worker's hot path.
+
+This also un-hides a case the old bare "Cleaned up" label conflated with success: **failed jobs never auto-expire**, so anything swept was either `Completed` or `Deleted` — and a `Deleted` recurring run (a skip-mode concurrency or rate-limit refusal, or a graceful cancellation) used to be indistinguishable from a clean success.
+
+Four states are distinguishable on the list:
+
+| Last Result | Meaning |
+|---|---|
+| `—` | `HasLastRun = false` — the definition has never actually fired |
+| badge, linked | the job row is still there; click through to its detail page |
+| badge + `(cleaned up)` | the job row was swept, but its outcome was preserved |
+| `Cleaned up` | swept before 6.1, when outcomes were not yet preserved — unrecoverable |
+
+`FinalState` is one nullable column, so the upgrade is additive: run your usual `dotnet ef migrations add` / `database update` (added in **6.1**). Runs swept before the upgrade keep reading as the bare `Cleaned up` — nothing backfills them, because the information is genuinely gone.
 
 ## Cron Expressions
+
+The dashboard's **Schedule** column reads the expression back in plain English — `0 8 * * *` shows as "At 08:00 AM" — with the raw expression on hover. Scanning a list of schedules is what that column is for, and the prose answers it faster; the expression is what you need when reading or copying the real thing, which is a hover away.
+
+**The column header is the switch.** It names whichever half is in the cell (**Schedule** for the reading, **Cron** for the expression) and clicking it swaps the two, so it can never label the wrong one. The choice persists per browser, so anyone who thinks in cron flips it once. Neither half is ever unreachable — whichever is not in the cell is the hint.
+
+An expression that cannot be parsed has no reading, so it always displays as the expression itself. The detail page header shows both at once, no hover needed.
 
 Standard 5-part cron (minute, hour, day, month, weekday) and 6-part with seconds:
 

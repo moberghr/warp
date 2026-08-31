@@ -1,13 +1,16 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ArrowLeftRight } from 'lucide-react';
 import type { ColumnDef } from '@tanstack/react-table';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { RelativeTime } from '@/components/RelativeTime';
 import { StateBadge } from '@/components/StateBadge';
+import { Hint } from '@/components/ui/tooltip';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { DataTable } from '@/components/DataTable';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { usePersistedCronDisplay } from '@/hooks/usePersistedCronDisplay';
 import {
   useRecurringList,
   useEnableRecurringJob,
@@ -15,7 +18,9 @@ import {
   useTriggerRecurringJob,
   useDeleteRecurringJob,
 } from '@/api/hooks/useRecurring';
+import { formatRelativeTime, absoluteLabel } from '@/utils/format';
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
+import { lastRunHref, isLastRunCleanedUp, isLastRunOutcomeUnknown, describeCron } from './recurringModel';
 import type { RecurringJobModel } from '@/types';
 import { PageHeading } from '@/components/PageHeading';
 
@@ -28,6 +33,8 @@ type RecurringPending =
 export default function RecurringPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = usePersistedPageSize();
+  const [cronDisplay, setCronDisplay] = usePersistedCronDisplay();
+  const showCronExpression = cronDisplay === 'expression';
   const { data, isLoading, isError } = useRecurringList(page, pageSize);
 
   const enable = useEnableRecurringJob();
@@ -60,8 +67,59 @@ export default function RecurringPage() {
       },
       {
         accessorKey: 'cron',
-        header: 'Cron',
-        cell: ({ row }) => <span className="font-mono text-xs">{row.original.cron}</span>,
+        // The header names what the column is CURRENTLY showing and doubles as the switch between
+        // the two halves of a schedule, so it can never label the wrong one. Default is the
+        // plain-English reading: scanning a list of schedules is this column's job, and "Every 15
+        // minutes" answers it faster than "*/15 * * * *". Whichever half is not in the cell is the
+        // hover hint, so nothing is ever hidden — and someone who thinks in cron flips it once and
+        // the choice sticks.
+        header: () => (
+          <Hint text={showCronExpression ? 'Show schedules in plain English' : 'Show the raw cron expressions'}>
+            <button
+              type="button"
+              onClick={() => setCronDisplay(showCronExpression ? 'description' : 'expression')}
+              className="inline-flex items-center gap-1 hover:text-foreground"
+            >
+              {showCronExpression ? 'Cron' : 'Schedule'}
+              <ArrowLeftRight className="h-3 w-3 opacity-60" />
+            </button>
+          </Hint>
+        ),
+        // An unparseable cron has no reading, so it always falls back to the expression itself.
+        cell: ({ row }) => {
+          const description = describeCron(row.original.cron);
+
+          if (!description) {
+            return <span className="block truncate font-mono text-xs">{row.original.cron}</span>;
+          }
+
+          // The hint carries BOTH halves, not just the hidden one: the column is a fixed width, so a
+          // long reading ellipsizes, and hovering has to be able to give back the full text of what
+          // is on screen as well as the half that is not.
+          const hint = (
+            <span className="block">
+              {description}
+              <br />
+              <span className="font-mono">{row.original.cron}</span>
+            </span>
+          );
+
+          return (
+            <Hint text={hint}>
+              <span
+                className={`block truncate text-xs decoration-dotted underline-offset-4 hover:underline ${showCronExpression ? 'font-mono' : ''}`}
+              >
+                {showCronExpression ? row.original.cron : description}
+              </span>
+            </Hint>
+          );
+        },
+        // A FIXED width, so switching halves cannot resize the column — and with it the whole table.
+        // The two halves are naturally different widths ("*/15 * * * *" against "Every 15 minutes"),
+        // and under `table-auto` that difference propagated: flipping the switch moved every other
+        // column too (Name 149→166px, Actions 278→310px). Reserving the space once keeps the layout
+        // still, at the cost of ellipsizing a very long reading — which the hint gives back.
+        meta: { headerClassName: 'w-72', cellClassName: 'w-72 max-w-72' },
       },
       {
         accessorKey: 'type',
@@ -87,15 +145,12 @@ export default function RecurringPage() {
         header: 'Next Execution',
         cell: ({ row }) =>
           row.original.disabledAt ? (
-            <span
-              className="text-sm text-muted-foreground"
-              title="Disabled — this recurring job will not execute"
-            >
-              —
-            </span>
+            <Hint text="Disabled — this recurring job will not execute">
+              <span className="text-sm text-muted-foreground">—</span>
+            </Hint>
           ) : row.original.nextExecution ? (
             <span className="text-sm">
-              <RelativeTime date={row.original.nextExecution} />
+              <RelativeTime date={row.original.nextExecution} precision="minute" display="relative" />
             </span>
           ) : (
             <span className="text-sm">N/A</span>
@@ -104,35 +159,72 @@ export default function RecurringPage() {
       {
         accessorKey: 'lastExecution',
         header: 'Last Execution',
-        cell: ({ row }) =>
-          row.original.lastExecution ? (
-            <span className="text-sm text-muted-foreground">
-              <RelativeTime date={row.original.lastExecution} />
-            </span>
-          ) : (
-            <span className="text-sm text-muted-foreground">Never</span>
-          ),
+        // Shown whether or not the definition is disabled — the run happened, and the scheduler's
+        // skip branch deliberately never advances LastExecution. The timestamp links to that run's
+        // job (the Last Result badge links to the same place) unless the job has been cleaned up.
+        cell: ({ row }) => {
+          const { lastExecution } = row.original;
+
+          if (!lastExecution) {
+            return <span className="text-sm text-muted-foreground">Never</span>;
+          }
+
+          // One hint per element, never a hint inside a hint: the timestamp and the swept-job note
+          // share this cell's single tooltip rather than nesting two triggers.
+          const swept = isLastRunCleanedUp(row.original) || isLastRunOutcomeUnknown(row.original);
+          const stamp = absoluteLabel(lastExecution, 'minute');
+          const hint = swept ? `${stamp} · the job for this run has been cleaned up` : stamp;
+          const href = lastRunHref(row.original);
+
+          return (
+            <Hint text={hint}>
+              {href ? (
+                <Link to={href} className="text-sm text-primary hover:underline">
+                  {formatRelativeTime(lastExecution)}
+                </Link>
+              ) : (
+                <span className="text-sm text-muted-foreground decoration-dotted underline-offset-4 hover:underline">
+                  {formatRelativeTime(lastExecution)}
+                </span>
+              )}
+            </Hint>
+          );
+        },
       },
       {
         id: 'lastResult',
         header: 'Last Result',
         cell: ({ row }) => {
-          const { hasLastRun, lastJobId, lastState } = row.original;
+          const { hasLastRun, lastState } = row.original;
 
           if (!hasLastRun) {
             return <span className="text-sm text-muted-foreground">—</span>;
           }
 
+          // No outcome to show: swept before ExpirationCleanup started stamping FinalState. The null
+          // check also narrows lastState for the badge below.
           if (lastState == null) {
             return <span className="text-xs text-muted-foreground">Cleaned up</span>;
           }
 
-          return lastJobId ? (
-            <Link to={`/detail/${lastJobId}`}>
+          const href = lastRunHref(row.original);
+
+          if (!href) {
+            // Outcome preserved, job row gone — show the result, say why it is not clickable.
+            return (
+              <Hint text="The job for this run has been cleaned up">
+                <span className="inline-flex items-center gap-1">
+                  <StateBadge state={lastState} />
+                  <span className="text-xs text-muted-foreground">(cleaned up)</span>
+                </span>
+              </Hint>
+            );
+          }
+
+          return (
+            <Link to={href}>
               <StateBadge state={lastState} />
             </Link>
-          ) : (
-            <StateBadge state={lastState} />
           );
         },
       },
@@ -170,7 +262,7 @@ export default function RecurringPage() {
         meta: { headerClassName: 'text-right', cellClassName: 'text-right' },
       },
     ],
-    [enable, disable],
+    [enable, disable, showCronExpression, setCronDisplay],
   );
 
   if (isError) return <ErrorState message="Unable to load recurring jobs" />;

@@ -7,6 +7,7 @@ import { useBackgroundServices } from '@/api/hooks/useBackgroundServices';
 import { ServiceScope } from '@/types/backgroundServices';
 import type { BackgroundServiceListItem } from '@/types/backgroundServices';
 import { PageHeading } from '@/components/PageHeading';
+import { Hint } from '@/components/ui/tooltip';
 
 export default function BackgroundServicesList() {
   const navigate = useNavigate();
@@ -21,12 +22,11 @@ export default function BackgroundServicesList() {
           <span className="flex items-center gap-2 font-medium">
             {row.original.name}
             {row.original.configurationMismatchCount > 0 && (
-              <span
-                className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
-                title={`${row.original.configurationMismatchCount} instance(s) have a configuration mismatch`}
-              >
-                Mismatch
-              </span>
+              <Hint text={`${row.original.configurationMismatchCount} instance(s) have a configuration mismatch`}>
+                <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+                  Mismatch
+                </span>
+              </Hint>
             )}
           </span>
         ),
