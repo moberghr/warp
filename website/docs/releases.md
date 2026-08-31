@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 6.1.0
 
-*Unreleased*
+*2026-08-31*
 
 Minor release, no breaking changes: **a recurring job's execution history now keeps each firing's outcome after the job row is cleaned up**, plus a set of readability fixes to the recurring surfaces.
 
