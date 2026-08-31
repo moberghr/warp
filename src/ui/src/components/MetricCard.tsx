@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 interface MetricCardProps {
   label: string;
@@ -23,7 +24,7 @@ export function MetricCard({ label, value, icon, color, href, suffix }: MetricCa
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-muted-foreground">{label}</p>
-            <p className={`text-2xl font-bold ${color ?? ''}`}>{value.toLocaleString()}{suffix}</p>
+            <p className={`text-2xl font-bold ${color ?? ''}`}>{value.toLocaleString(DASHBOARD_LOCALE)}{suffix}</p>
           </div>
           {icon && <div className="text-muted-foreground">{icon}</div>}
         </div>

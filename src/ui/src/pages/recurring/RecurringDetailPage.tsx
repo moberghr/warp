@@ -150,14 +150,14 @@ export default function RecurringDetailPage() {
                 {detail.disabledAt ? (
                   <Hint text="Disabled — this recurring job will not execute"><span>—</span></Hint>
                 ) : detail.nextExecution ? (
-                  <RelativeTime date={detail.nextExecution} precision="minute" />
+                  <RelativeTime date={detail.nextExecution} precision="minute" display="relative" />
                 ) : (
                   'N/A'
                 )}
               </div>
               <div>
                 <span className="text-muted-foreground">Last Execution:</span>{' '}
-                {detail.lastExecution ? <RelativeTime date={detail.lastExecution} precision="minute" /> : 'Never'}
+                {detail.lastExecution ? <RelativeTime date={detail.lastExecution} precision="minute" display="relative" /> : 'Never'}
               </div>
             </CardContent>
           </Card>

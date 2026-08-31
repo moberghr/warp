@@ -1,1 +1,0 @@
-import{t as e}from"./jsx-runtime-DREnUpxT.js";import{a as t,i as n,r}from"./format-rhKPaFox.js";var i=e();function a({date:e,precision:a=`exact`}){let o=a===`minute`?n(e):r(e);return(0,i.jsxs)(`span`,{children:[o,` `,(0,i.jsxs)(`span`,{className:`text-muted-foreground`,children:[`(`,t(e),`)`]})]})}export{a as t};

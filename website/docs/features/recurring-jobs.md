@@ -55,7 +55,11 @@ Four states are distinguishable on the list:
 
 ## Cron Expressions
 
-The dashboard shows the raw expression — it is what the definition was registered with — with its plain-English reading beside it: a tooltip on the list, and shown outright in the detail page header (`0 8 * * *` → "At 08:00 AM"). An expression that cannot be parsed simply gets no description; the raw value still displays.
+The dashboard's **Schedule** column reads the expression back in plain English — `0 8 * * *` shows as "At 08:00 AM" — with the raw expression on hover. Scanning a list of schedules is what that column is for, and the prose answers it faster; the expression is what you need when reading or copying the real thing, which is a hover away.
+
+**The column header is the switch.** It names whichever half is in the cell (**Schedule** for the reading, **Cron** for the expression) and clicking it swaps the two, so it can never label the wrong one. The choice persists per browser, so anyone who thinks in cron flips it once. Neither half is ever unreachable — whichever is not in the cell is the hint.
+
+An expression that cannot be parsed has no reading, so it always displays as the expression itself. The detail page header shows both at once, no hover needed.
 
 Standard 5-part cron (minute, hour, day, month, weekday) and 6-part with seconds:
 

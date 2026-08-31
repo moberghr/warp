@@ -6,6 +6,7 @@ import { RealtimeChart } from '@/components/RealtimeChart';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { getStatsHistory } from '@/api';
 import type { StatsHistoryPoint } from '@/types';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 import {
   Briefcase,
   XCircle,
@@ -27,7 +28,7 @@ function padHistory(data: StatsHistoryPoint[], hours: number) {
       const hourDate = new Date(now.getTime() - i * 3600000);
       const point = dataMap.get(hourDate.getTime());
       result.push({
-        label: hourDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        label: hourDate.toLocaleTimeString(DASHBOARD_LOCALE, { hour: '2-digit', minute: '2-digit', hour12: false }),
         succeeded: point?.succeeded ?? 0,
         failed: point?.failed ?? 0,
       });
@@ -52,7 +53,7 @@ function padHistory(data: StatsHistoryPoint[], hours: number) {
       }
     }
     result.push({
-      label: `${dayStart.toLocaleDateString([], { weekday: 'short' })} ${String(dayStart.getDate()).padStart(2, '0')}.${String(dayStart.getMonth() + 1).padStart(2, '0')}`,
+      label: `${dayStart.toLocaleDateString(DASHBOARD_LOCALE, { weekday: 'short' })} ${String(dayStart.getDate()).padStart(2, '0')}.${String(dayStart.getMonth() + 1).padStart(2, '0')}`,
       succeeded,
       failed,
     });

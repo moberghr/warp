@@ -11,6 +11,7 @@ import { PerformanceChart } from '@/components/PerformanceChart';
 import * as api from '@/api';
 import { HealthPill, adapterHealth, OutcomeBadge, HttpStatus, formatPercent, formatMs, parseTags } from './shared';
 import { Hint } from '@/components/ui/tooltip';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 const PAGE_SIZE = 15;
 
@@ -99,7 +100,7 @@ export default function AdapterDetailPage() {
 
       {/* Stat tiles */}
       <div className="grid grid-cols-3 gap-4 mb-4">
-        <StatTile label="Total calls" value={detail.totalCalls.toLocaleString()} />
+        <StatTile label="Total calls" value={detail.totalCalls.toLocaleString(DASHBOARD_LOCALE)} />
         <StatTile
           label="Error rate"
           value={formatPercent(detail.errorRate)}
@@ -151,8 +152,8 @@ export default function AdapterDetailPage() {
                     onClick={() => setOperationFilter(operationFilter === op.operation ? null : op.operation)}
                   >
                     <TableCell className="font-mono text-sm">{op.operation}</TableCell>
-                    <TableCell className="text-right tabular-nums">{op.calls.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">{op.errors.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{op.calls.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{op.errors.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                     <TableCell className={`text-right tabular-nums ${op.errorRate > 0 ? 'text-destructive' : ''}`}>
                       {formatPercent(op.errorRate)}
                     </TableCell>
@@ -189,7 +190,7 @@ export default function AdapterDetailPage() {
                     onClick={() => setGroupFilter(groupFilter === g.group ? null : g.group)}
                   >
                     <TableCell className="font-mono text-sm">{g.group}</TableCell>
-                    <TableCell className="text-right tabular-nums">{g.calls.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{g.calls.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                     <TableCell className={`text-right tabular-nums ${g.errorRate > 0 ? 'text-destructive' : ''}`}>
                       {formatPercent(g.errorRate)}
                     </TableCell>

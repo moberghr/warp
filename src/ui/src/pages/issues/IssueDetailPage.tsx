@@ -9,6 +9,7 @@ import { ErrorGroupStatus, ErrorSource } from '@/types/issues';
 import type { ErrorGroupTrendPoint, ErrorSample } from '@/types/issues';
 import { SourceBadge, StatusChip, IssueFlags } from './shared';
 import { HttpStatus } from '@/pages/adapters/shared';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 // Detail for one issue (error group, §8.29): the grouped identity, the most recent captured sample,
 // an hourly volume trend, a jump to a representative trace, and the resolve/ignore workflow — the
@@ -98,7 +99,7 @@ export default function IssueDetailPage() {
         <CardContent className="p-4 grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-sm">
           <Field label="First seen" value={data.firstSeenAt} relative />
           <Field label="Last seen" value={data.lastSeenAt} relative />
-          <Field label="Events" value={data.count.toLocaleString()} />
+          <Field label="Events" value={data.count.toLocaleString(DASHBOARD_LOCALE)} />
           <div className="flex gap-2">
             <span className="text-muted-foreground w-28 shrink-0">Status code</span>
             <HttpStatus code={data.statusCode} />

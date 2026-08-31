@@ -8,7 +8,15 @@ sidebar_position: 6
 
 *Unreleased*
 
-Minor release, no breaking changes and one additive nullable column: **a recurring job's execution history now keeps each firing's outcome after the job row is cleaned up**, plus a set of readability fixes to the recurring surfaces.
+Minor release, no breaking changes: **a recurring job's execution history now keeps each firing's outcome after the job row is cleaned up**, plus a set of readability fixes to the recurring surfaces.
+
+:::warning Schema change — a migration is required
+This release adds **one nullable column**, `RecurringJobLog.FinalState`. It is additive — no drops, no renames — and is picked up by the standard `dotnet ef migrations add <name>` + `dotnet ef database update`.
+
+**Do not skip it.** Unlike an unused new table, this column is read on every recurring-job query and written by `ExpirationCleanup`, so upgrading the packages without applying the migration fails those paths at runtime (the recurring list and detail pages, and the expiration sweep) with an undefined-column error from the provider.
+
+Rolling deploys are safe once the column exists: a pre-6.1 process neither reads nor writes it. Rows swept before the upgrade keep reading as a bare `Cleaned up` — nothing backfills them, because the outcome is genuinely gone.
+:::
 
 ### A recurring job's outcomes outlive its jobs
 
@@ -33,10 +41,11 @@ The stamp happens at cleanup rather than at finalization deliberately: recording
 
 ### Recurring surfaces read better
 
+- **Next / Last Execution answer "when, roughly?"** — "in 10 minutes", "5 minutes ago" — with the exact instant on hover. That is the question those columns are read for; the timestamp is the follow-up.
 - **Times render to the minute.** A cron occurrence is only ever minute-aligned, so `2026-05-25 14:00:00.000` was three units of noise. Only the recurring pages changed — job logs keep their milliseconds, where they earn their place.
 - **The Last Execution timestamp links to that run's job**, so either half of the row gets you there rather than only the Last Result badge.
 - **Last Execution stays visible while a definition is disabled.** The run happened, and the scheduler's skip branch never advances it, so the value is accurate — unlike Next Execution, which is correctly dashed out.
-- **Cron expressions carry a plain-English reading.** `0 18 * * 1-5` reads "At 06:00 PM, Monday through Friday" — a tooltip on the list, shown outright in the detail header. The raw expression stays the display, since that is what the definition was registered with. An expression that cannot be parsed simply gets no description.
+- **The Schedule column reads the cron back in plain English.** `0 18 * * 1-5` shows as "At 06:00 PM, Monday through Friday", with the raw expression on hover — and **the column header is the switch**: it names whichever half is in the cell (**Schedule** or **Cron**) and clicking it swaps them, persisted per browser. Neither half is ever unreachable, since whichever is not in the cell is the hint. An expression that cannot be parsed has no reading and always shows as itself. The detail page shows both at once.
 
 ### Dashboard tooltips
 

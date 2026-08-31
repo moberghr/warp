@@ -11,6 +11,7 @@ import { PerformanceChart } from '@/components/PerformanceChart';
 import * as api from '@/api';
 import { HealthPill, adapterHealth, OutcomeBadge, HttpStatus, formatPercent, formatMs } from '../adapters/shared';
 import { Hint } from '@/components/ui/tooltip';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 const PAGE_SIZE = 15;
 
@@ -91,7 +92,7 @@ export default function EndpointDetailPage() {
 
       {/* Stat tiles */}
       <div className="grid grid-cols-3 gap-4 mb-4">
-        <StatTile label="Total calls" value={detail.totalCalls.toLocaleString()} />
+        <StatTile label="Total calls" value={detail.totalCalls.toLocaleString(DASHBOARD_LOCALE)} />
         <StatTile
           label="Error rate"
           value={formatPercent(detail.errorRate)}
@@ -134,7 +135,7 @@ export default function EndpointDetailPage() {
                     onClick={() => setGroupFilter(groupFilter === g.group ? null : g.group)}
                   >
                     <TableCell className="font-mono text-sm">{g.group}</TableCell>
-                    <TableCell className="text-right tabular-nums">{g.calls.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{g.calls.toLocaleString(DASHBOARD_LOCALE)}</TableCell>
                     <TableCell className={`text-right tabular-nums ${g.errorRate > 0 ? 'text-destructive' : ''}`}>
                       {formatPercent(g.errorRate)}
                     </TableCell>

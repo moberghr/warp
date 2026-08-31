@@ -10,6 +10,7 @@ import { WebhookDeliveryChart } from '@/components/WebhookDeliveryChart';
 import * as api from '@/api';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { WebhookDeliveryListItem, WebhookDeliveryFilter } from '@/types/webhooks';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 const PAGE_SIZE = 20;
 
@@ -120,12 +121,12 @@ export default function WebhookGroupDetailPage() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-        <Tile label="Deliveries" value={total.toLocaleString()} />
-        <Tile label="Delivered" value={(group?.delivered ?? 0).toLocaleString()} />
-        <Tile label="Pending" value={(group?.pending ?? 0).toLocaleString()} />
+        <Tile label="Deliveries" value={total.toLocaleString(DASHBOARD_LOCALE)} />
+        <Tile label="Delivered" value={(group?.delivered ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
+        <Tile label="Pending" value={(group?.pending ?? 0).toLocaleString(DASHBOARD_LOCALE)} />
         <Tile
           label="Exhausted"
-          value={(group?.exhausted ?? 0).toLocaleString()}
+          value={(group?.exhausted ?? 0).toLocaleString(DASHBOARD_LOCALE)}
           emphasis={group && group.exhausted > 0 ? 'text-destructive' : undefined}
         />
       </div>

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
@@ -13,6 +13,12 @@ import RecurringDetailPage from './RecurringDetailPage';
 // list — except when its job row has been cleaned up, where it must not be a link.
 beforeAll(() => {
   api.defaults.adapter = createDemoAdapter(false);
+});
+
+// The cron-display preference persists, so one test's flip would otherwise decide the next test's
+// starting state — order-dependent and invisible until someone reorders the file.
+beforeEach(() => {
+  localStorage.removeItem('warp:cronDisplay');
 });
 
 function renderAt(path: string) {
@@ -41,6 +47,15 @@ async function rowFor(name: string) {
 // RelativeTime keeps the "(x ago)" suffix in a child span. Anchored, so any seconds fail the match.
 const minuteShape = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
 
+// Relative labels are LOCALE-dependent (luxon's toRelative renders "za 9 minuta" on a Croatian
+// machine) and drift while the test runs, so never assert their wording. Assert the structure
+// instead: the cell holds a relative label, and the exact instant is one hover away.
+const CellIndex = { nextExecution: 4, lastExecution: 5 } as const;
+
+function cell(row: HTMLElement, index: number) {
+  return row.querySelectorAll('td')[index] as HTMLElement;
+}
+
 // Tooltips are Base UI popups now, not native title attributes, so a description is only in the
 // DOM while its trigger is hovered.
 function hover(el: HTMLElement) {
@@ -55,30 +70,98 @@ function encode(name: string) {
 }
 
 describe('recurring list', () => {
-  it('renders cron-derived instants to the minute, without seconds or milliseconds', async () => {
+  it('shows next/last execution as relative text, with the exact instant on hover', async () => {
     renderAt('/recurring');
 
     // 'Inventory Sync' is enabled with both a next and a last execution in the fixtures.
     const row = await rowFor('Inventory Sync');
 
-    // Both stamps present at minute precision; the anchored shape rejects a seconds component.
-    expect(within(row).getAllByText(minuteShape).length).toBe(2);
+    // "when, roughly?" is the answer in the cell; no timestamp is on screen until hovered.
+    const next = cell(row, CellIndex.nextExecution);
+    expect(next.textContent).not.toMatch(minuteShape);
+    expect(within(row).queryByText(minuteShape)).toBeNull();
+
+    // The hovered stamp is minute-precision — the anchored shape rejects a seconds component.
+    hover(next.querySelector('[data-slot="tooltip-trigger"]') as HTMLElement);
+    expect(await screen.findByText(minuteShape)).toBeTruthy();
   });
 
-  it('the raw cron is a tooltip trigger that reveals its plain-English reading on hover', async () => {
+  it('shows the schedule in plain English by default, with the raw cron on hover', async () => {
     renderAt('/recurring');
 
     const row = await rowFor('Inventory Sync');
-    const trigger = within(row).getByText('*/15 * * * *');
 
-    // The raw expression stays the display; the description only appears on hover.
-    expect(screen.queryByText('Every 15 minutes')).toBeNull();
+    // The reading is the cell; the expression is a hover away.
+    expect(within(row).getByText('Every 15 minutes')).toBeTruthy();
+    expect(within(row).queryByText('*/15 * * * *')).toBeNull();
 
-    fireEvent.pointerEnter(trigger);
-    fireEvent.mouseOver(trigger);
-    fireEvent.focus(trigger);
+    hover(within(row).getByText('Every 15 minutes'));
+    expect(await screen.findByText('*/15 * * * *')).toBeTruthy();
+  });
 
+  it('the column header switches which half is shown, and the header names it', async () => {
+    renderAt('/recurring');
+
+    // Header labels what the cell currently holds, so it can never label the wrong one.
+    const header = await screen.findByRole('button', { name: /Schedule/ });
+    fireEvent.click(header);
+
+    const row = await rowFor('Inventory Sync');
+
+    expect(within(row).getByText('*/15 * * * *')).toBeTruthy();
+    expect(within(row).queryByText('Every 15 minutes')).toBeNull();
+    expect(screen.getByRole('button', { name: /Cron/ })).toBeTruthy();
+
+    // Flipped, the reading becomes the hint — neither half is ever unreachable.
+    hover(within(row).getByText('*/15 * * * *'));
     expect(await screen.findByText('Every 15 minutes')).toBeTruthy();
+  });
+
+  it('a reading too long for the column truncates, with the full text in the hint', async () => {
+    renderAt('/recurring');
+
+    // 'Business Hours Sync' is the verbose fixture: its reading is far wider than the column.
+    const row = await rowFor('Business Hours Sync');
+    const trigger = cell(row, 1).querySelector('[data-slot="tooltip-trigger"]') as HTMLElement;
+
+    // truncate is what ellipsizes it; the hint then has to carry BOTH halves in full, since the
+    // visible half is the one that got cut. (truncate is CSS-only, so the cell still holds the whole
+    // string in the DOM — hence anchoring on the expression, which appears only in the popup.)
+    expect(trigger.className).toContain('truncate');
+
+    hover(trigger);
+
+    const popup = (await screen.findByText('5 9-17 * * 1-5')).closest('[data-slot="tooltip-content"]');
+
+    expect(popup).not.toBeNull();
+    expect(popup!.textContent).toContain('At 5 minutes past the hour, between 09:00 AM and 05:59 PM, Monday through Friday');
+  });
+
+  it('reserves a fixed width for the schedule column in both modes', async () => {
+    // jsdom has no layout engine, so the guard is the reserved-width class rather than a measured
+    // pixel value. Without it the two halves size the column differently and flipping the switch
+    // moves every other column with it (measured: Name 149→166px, Actions 278→310px).
+    renderAt('/recurring');
+
+    const scheduleHeader = (await screen.findByRole('button', { name: /Schedule/ })).closest('th')!;
+    expect(scheduleHeader.className).toContain('w-72');
+
+    fireEvent.click(screen.getByRole('button', { name: /Schedule/ }));
+
+    expect(screen.getByRole('button', { name: /Cron/ }).closest('th')!.className).toContain('w-72');
+    expect(cell(await rowFor('Inventory Sync'), 1).className).toContain('w-72');
+  });
+
+  it('remembers the choice across a remount', async () => {
+    const first = renderAt('/recurring');
+    fireEvent.click(await screen.findByRole('button', { name: /Schedule/ }));
+
+    first.unmount();
+    renderAt('/recurring');
+
+    // A reading preference, not a per-visit one: someone who thinks in cron flips it once.
+    expect(await screen.findByRole('button', { name: /Cron/ })).toBeTruthy();
+    expect(within(await rowFor('Inventory Sync')).getByText('*/15 * * * *')).toBeTruthy();
   });
 
   it('a disabled definition shows no next execution but keeps its last one, linked', async () => {
@@ -97,8 +180,12 @@ describe('recurring list', () => {
       .getAllByRole('link')
       .filter((a) => a.getAttribute('href')?.startsWith('/detail/'));
 
-    expect(lastRunLinks.length).toBe(2); // the timestamp and the Last Result badge
-    expect(within(lastRunLinks[0]).getByText(minuteShape)).toBeTruthy();
+    expect(lastRunLinks.length).toBe(2); // the relative timestamp and the Last Result badge
+
+    // The linked cell reads relatively and reveals its exact instant on hover.
+    expect(lastRunLinks[0].textContent).not.toMatch(minuteShape);
+    hover(lastRunLinks[0]);
+    expect(await screen.findByText(minuteShape)).toBeTruthy();
   });
 
   it('a cleaned-up run keeps its outcome and stops being a link', async () => {
@@ -126,11 +213,10 @@ describe('recurring list', () => {
     expect(within(row).getByText('Cleaned up')).toBeTruthy();
     expect(within(row).queryByText('(cleaned up)')).toBeNull();
 
-    // The timestamp still shows, and explains on hover why it is not a link. The row holds two
-    // minute stamps (next + last execution); the LAST cell is the one carrying the note.
-    const stamp = within(row).getAllByText(minuteShape).at(-1)!;
-    hover(stamp);
-    expect(await screen.findByText('The job for this run has been cleaned up')).toBeTruthy();
+    // The run still shows when it happened, and one combined hint carries both the exact instant
+    // and why it is not a link — a single tooltip per element, never a hint inside a hint.
+    hover(cell(row, CellIndex.lastExecution).querySelector('[data-slot="tooltip-trigger"]') as HTMLElement);
+    expect(await screen.findByText(/the job for this run has been cleaned up/)).toBeTruthy();
     expect(
       within(row)
         .queryAllByRole('link')

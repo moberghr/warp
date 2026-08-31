@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { StateBadge } from '@/components/StateBadge';
 import { Card, CardContent } from '@/components/ui/card';
-import { shortType, shortId } from '@/utils/format';
+import { shortType, shortId, DASHBOARD_LOCALE } from '@/utils/format';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { DataTable } from '@/components/DataTable';
@@ -136,7 +136,7 @@ function MetricsHeader({
 
       {stat ? (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-          <MetricTile label="Executed" value={stat.executedCount.toLocaleString()} />
+          <MetricTile label="Executed" value={stat.executedCount.toLocaleString(DASHBOARD_LOCALE)} />
           <MetricTile
             label="Error rate"
             value={`${(Math.round(stat.errorRate * 1000) / 10).toFixed(1)}%`}

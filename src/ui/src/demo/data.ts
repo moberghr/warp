@@ -967,6 +967,15 @@ export const recurringJobs: RecurringJobModel[] = [
     hasLastRun: true, lastJobId: null, lastState: State.Completed, lastRunCleanedUp: true,
   },
   {
+    // A deliberately verbose schedule: its plain-English reading is far longer than the fixed
+    // Schedule column, so this row is what exercises the truncate-plus-full-text-in-the-hint path.
+    id: 6, name: 'Business Hours Sync', cron: '5 9-17 * * 1-5',
+    type: 'Acme.Inventory.SyncInventoryRequest',
+    nextExecution: future(1800), lastExecution: ago(3600), createdAt: ago(86400 * 12),
+    disabledAt: null,
+    hasLastRun: true, lastJobId: uid(906), lastState: State.Completed, lastRunCleanedUp: false,
+  },
+  {
     id: 5, name: 'Order Cleanup', cron: '0 3 * * *',
     type: 'Acme.Orders.ProcessOrderRequest',
     nextExecution: future(28800), lastExecution: ago(57600), createdAt: ago(86400 * 7),

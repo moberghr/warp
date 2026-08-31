@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getSlo, ackSlo } from '@/api';
 import { SloKind, SloKindLabel, SloState } from '@/types/slo';
 import { formatObjectiveValue, formatBudget, SloStatePill } from './shared';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 export default function SloDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -85,8 +86,8 @@ export default function SloDetailPage() {
 
       <div className="mt-6 text-xs text-gray-500 space-y-1">
         <div>Window: {Math.round(o.windowSeconds / 60)} min · fast-burn window: {Math.max(5, Math.round(o.windowSeconds / 12 / 60))} min</div>
-        {o.lastEvaluatedAt && <div>Last evaluated: {new Date(o.lastEvaluatedAt).toLocaleString()}</div>}
-        {o.acknowledgedUntil && <div>Acknowledged until: {new Date(o.acknowledgedUntil).toLocaleString()}</div>}
+        {o.lastEvaluatedAt && <div>Last evaluated: {new Date(o.lastEvaluatedAt).toLocaleString(DASHBOARD_LOCALE)}</div>}
+        {o.acknowledgedUntil && <div>Acknowledged until: {new Date(o.acknowledgedUntil).toLocaleString(DASHBOARD_LOCALE)}</div>}
         {isThreshold(o.kind) && <div>Latency/depth objectives compare the windowed observed value to the target (lower is better).</div>}
       </div>
     </div>

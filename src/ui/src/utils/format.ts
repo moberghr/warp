@@ -6,9 +6,19 @@ import { State } from '@/types';
 // labels stable across screenshot runs. Luxon (already pulled in by
 // chartjs-adapter-luxon) replaces date-fns here so the bundle ships a single
 // date library instead of two.
+// The dashboard renders identically for every viewer. Every locale-sensitive call site passes this
+// rather than defaulting to the host locale — a number, a weekday or a relative label that changes
+// per machine makes two people looking at the same deployment see different text, and turns a
+// screenshot in a bug report into something that cannot be compared against your own screen.
+//
+// Nothing here is translated: headers, badges and labels are hardcoded English, so a localised
+// "za 10 minuta" or "1.234" was mixed-language output, not localisation. If the dashboard is ever
+// really localised, this constant is the seam to make configurable.
+export const DASHBOARD_LOCALE = 'en-US';
+
 export function formatRelativeTime(dateString: string): string {
   return DateTime.fromJSDate(new Date(dateString))
-    .toRelative({ base: DateTime.fromMillis(Date.now()) }) ?? '';
+    .toRelative({ base: DateTime.fromMillis(Date.now()), locale: DASHBOARD_LOCALE }) ?? '';
 }
 
 export function formatDateTime(dateString: string): string {
@@ -24,6 +34,14 @@ export function formatDateTimeExact(dateString: string): string {
 // are noise on those surfaces. Job/log timestamps keep the exact formatter.
 export function formatDateTimeMinute(dateString: string): string {
   return DateTime.fromJSDate(new Date(dateString)).toFormat('yyyy-MM-dd HH:mm');
+}
+
+export type TimePrecision = 'exact' | 'minute';
+
+// The absolute half of a timestamp, at whichever precision the surface asked for. Lives here rather
+// than in RelativeTime so that component file only exports components (fast-refresh rule).
+export function absoluteLabel(dateString: string, precision: TimePrecision = 'exact'): string {
+  return precision === 'minute' ? formatDateTimeMinute(dateString) : formatDateTimeExact(dateString);
 }
 
 export function shortType(fullType: string | null | undefined): string {

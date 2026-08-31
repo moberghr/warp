@@ -43,7 +43,7 @@ function TooltipContent({ className, children, sideOffset = 6, ...props }: Toolt
 // A null/empty text renders the child bare — no empty popup, and no hover affordance on an element
 // that has nothing to say. Note for ICON-ONLY triggers: a native title doubles as the accessible
 // name, but a tooltip only sets aria-describedby, so those need their own aria-label.
-function Hint({ text, children }: { text?: string | null; children: React.ReactElement }) {
+function Hint({ text, children }: { text?: React.ReactNode; children: React.ReactElement }) {
   if (!text) {
     return children
   }

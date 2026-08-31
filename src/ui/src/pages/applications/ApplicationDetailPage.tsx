@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { Spread, InstancesTable, fromInstanceView } from './shared';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 export default function ApplicationDetailPage() {
   const { id: rawId } = useParams<{ id: string }>();
@@ -79,13 +80,13 @@ export default function ApplicationDetailPage() {
       {/* Rolled-up job activity — only shown when this application has executed jobs */}
       {activity.executed > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
-          <StatTile label="Jobs executed" value={activity.executed.toLocaleString()} />
+          <StatTile label="Jobs executed" value={activity.executed.toLocaleString(DASHBOARD_LOCALE)} />
           <StatTile
             label="Error rate"
             value={`${(Math.round(activity.errorRate * 1000) / 10).toFixed(1)}%`}
             emphasis={activity.errorRate > 0 ? 'text-destructive' : undefined}
           />
-          <StatTile label="Errors" value={activity.errors.toLocaleString()} />
+          <StatTile label="Errors" value={activity.errors.toLocaleString(DASHBOARD_LOCALE)} />
         </div>
       )}
 

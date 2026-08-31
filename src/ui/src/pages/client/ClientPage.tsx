@@ -10,6 +10,7 @@ import * as api from '@/api';
 import { ClientEventType } from '@/types/client';
 import type { ClientEventItem, ClientVitalStat } from '@/types/client';
 import { PageHeading } from '@/components/PageHeading';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 // Client (browser) observability (§8.27): errors, logs, web vitals and custom events reported by a frontend
 // app through the Warp ingest endpoint. Summary tiles + web-vital p75s (Google-colored) come from the durable
@@ -96,10 +97,10 @@ export default function ClientPage() {
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
         <MetricTile label="Error rate" value={`${(Math.round(s.errorRate * 1000) / 10).toFixed(1)}%`} emphasis={s.errorRate > 0 ? 'text-destructive' : undefined} />
-        <MetricTile label="Errors" value={s.errorCount.toLocaleString()} />
-        <MetricTile label="Logs" value={s.logCount.toLocaleString()} />
-        <MetricTile label="Events" value={s.eventCount.toLocaleString()} />
-        <MetricTile label="Vitals" value={s.vitalCount.toLocaleString()} />
+        <MetricTile label="Errors" value={s.errorCount.toLocaleString(DASHBOARD_LOCALE)} />
+        <MetricTile label="Logs" value={s.logCount.toLocaleString(DASHBOARD_LOCALE)} />
+        <MetricTile label="Events" value={s.eventCount.toLocaleString(DASHBOARD_LOCALE)} />
+        <MetricTile label="Vitals" value={s.vitalCount.toLocaleString(DASHBOARD_LOCALE)} />
       </div>
 
       {s.vitals.length > 0 && (
@@ -121,7 +122,7 @@ export default function ClientPage() {
               {s.topErrors.map((e) => (
                 <div key={e.name} className="flex justify-between text-sm">
                   <span className="font-mono truncate">{e.name}</span>
-                  <span className="tabular-nums text-muted-foreground">{e.count.toLocaleString()}</span>
+                  <span className="tabular-nums text-muted-foreground">{e.count.toLocaleString(DASHBOARD_LOCALE)}</span>
                 </div>
               ))}
             </CardContent>
@@ -170,7 +171,7 @@ function VitalTile({ vital }: { vital: ClientVitalStat }) {
       <CardContent className="p-3">
         <div className="text-xs text-muted-foreground">{vital.name}</div>
         <div className={`text-xl font-bold tabular-nums ${color}`}>{display}</div>
-        <div className="text-xs text-muted-foreground">{vital.sampleCount.toLocaleString()} samples</div>
+        <div className="text-xs text-muted-foreground">{vital.sampleCount.toLocaleString(DASHBOARD_LOCALE)} samples</div>
       </CardContent>
     </Card>
   );

@@ -11,6 +11,7 @@ import * as api from '@/api';
 import type { EndpointListItem } from '@/types/endpoints';
 import { HealthPill, adapterHealth, formatPercent, formatMs } from '../adapters/shared';
 import { PageHeading } from '@/components/PageHeading';
+import { DASHBOARD_LOCALE } from '@/utils/format';
 
 export default function EndpointsPage() {
   const navigate = useNavigate();
@@ -55,7 +56,7 @@ export default function EndpointsPage() {
         accessorKey: 'totalCalls',
         header: 'Calls',
         meta: { headerClassName: 'text-right w-24', cellClassName: 'text-right tabular-nums' },
-        cell: ({ row }) => row.original.totalCalls.toLocaleString(),
+        cell: ({ row }) => row.original.totalCalls.toLocaleString(DASHBOARD_LOCALE),
       },
       {
         accessorKey: 'errorRate',

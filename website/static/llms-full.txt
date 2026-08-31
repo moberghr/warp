@@ -555,7 +555,7 @@ Failed jobs never auto-expire, so everything reaching the sweep was `Completed` 
 
 ### Cron expressions
 
-The dashboard shows the raw expression with its plain-English reading beside it (a tooltip on the list, shown outright in the detail header): `0 8 * * *` reads "At 08:00 AM". Cron-derived times render to the minute, since an occurrence is only ever minute-aligned. An expression that cannot be parsed simply gets no description — the raw value still displays.
+The dashboard's Schedule column shows the expression read back in plain English (`0 8 * * *` = "At 08:00 AM") with the raw expression on hover; the column header names whichever half is in the cell (Schedule / Cron) and clicking it swaps them, persisted per browser. Next/Last Execution show relative text ("in 10 minutes") with the exact instant on hover. Cron-derived timestamps render to the minute, since an occurrence is only ever minute-aligned. An expression that cannot be parsed has no reading and displays as itself. The detail page header shows expression and reading together.
 
 Standard 5-part (minute, hour, day, month, weekday) and 6-part with seconds:
 
