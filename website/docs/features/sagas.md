@@ -25,11 +25,11 @@ builder.Services.AddSagaHandler<OrderWorkflow>();
 
 `AddSagaHandler<>()` reflects over the handler's implemented `ISagaHandler<TSaga, TMessage>` interfaces and registers a `SagaHandlerProxy<TSaga, TMessage>` as `IMessageHandler<TMessage>` for each.
 
-:::note Prerequisite — a lock provider
+:::note[Prerequisite — a lock provider]
 `AddSagas()` **requires `IWarpLockProvider`** (used to serialize concurrent messages per correlation key), so a provider must be opted in **before** it: call `opt.UsePostgreSql()` / `opt.UseSqlServer()` first. Without it, `AddSagas()` throws a clear startup exception (`"AddSagas() requires IWarpLockProvider… Call opt.UsePostgreSql() or opt.UseSqlServer() BEFORE opt.AddSagas()."`). This is why sagas cannot run on a mediator-only / in-process-only host — they need the cross-process lock the provider supplies. To exercise sagas **in tests without a provider or a worker**, use the in-memory saga test harness (see [Testing sagas](#testing-sagas)).
 :::
 
-:::tip Need a "wait N then act" timeout?
+:::tip[Need a "wait N then act" timeout?]
 Don't hand-roll a scheduled job — Warp ships it as a first-class primitive. See [Timeouts (`ITimeoutMessage`)](#timeouts-itimeoutmessage) below: a message class with a `Delay` that auto-schedules itself and self-cleans if the saga already completed.
 :::
 
@@ -98,7 +98,7 @@ public class OrderWorkflow(IPublisher publisher) :
 }
 ```
 
-:::warning Do not call `publisher.SaveChangesAsync` inside a saga handler
+:::warning[Do not call `publisher.SaveChangesAsync` inside a saga handler]
 
 The saga proxy commits everything in one transaction after `HandleAsync` returns — your saga state changes, any jobs/messages you enqueued via the publisher, and (on completion) the row deletion. Calling `publisher.SaveChangesAsync(ct)` inside the handler commits the publisher's pending rows **early**, which means by the time the proxy runs its own `SaveChanges` those rows are `Unchanged` and **push notifications are silently dropped** — the children fall back to polling. Let the proxy save for you.
 
@@ -261,7 +261,7 @@ Any other type (`decimal`, `DateTime`, strong-typed wrappers) throws `SagaConfig
 
 ## Operational notes
 
-:::warning Correlation keys appear in logs — don't use PII
+:::warning[Correlation keys appear in logs — don't use PII]
 
 The correlation key is interpolated into `JobLog.Message` rows whenever the proxy logs a saga outcome (`"Requeued — saga 'X' busy for '{key}'"`, `"No saga of type 'X' for correlation key '{key}'"`, etc.). It also appears in the saga's distributed-lock name and in OpenTelemetry tags. **Use opaque identifiers (Guid, integer) as correlation keys, not email addresses, account numbers, or other PII.** If you must correlate on PII, hash it before publishing the message.
 

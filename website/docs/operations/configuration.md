@@ -305,7 +305,7 @@ This creates 7 workers total: 5 polling `critical` every 100ms, and 2 polling `r
 | `ExpirationBatchSize` | `int` | `1000` | Batch size for cleanup operations |
 | `MaxExpirableJobCount` | `int?` | `null` | Max jobs with `ExpireAt` to retain. Oldest deleted first. `null` = disabled (no cap). |
 
-:::info Failed jobs never expire
+:::info[Failed jobs never expire]
 Failed jobs have `ExpireAt = null` and are never automatically deleted. They must be manually deleted or requeued from the dashboard.
 :::
 

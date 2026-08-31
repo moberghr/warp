@@ -10,7 +10,7 @@ sidebar_position: 6
 
 Minor release, no breaking changes: **a recurring job's execution history now keeps each firing's outcome after the job row is cleaned up**, plus a set of readability fixes to the recurring surfaces.
 
-:::warning Schema change — a migration is required
+:::warning[Schema change — a migration is required]
 This release adds **one nullable column**, `RecurringJobLog.FinalState`. It is additive — no drops, no renames — and is picked up by the standard `dotnet ef migrations add <name>` + `dotnet ef database update`.
 
 **Do not skip it.** Unlike an unused new table, this column is read on every recurring-job query and written by `ExpirationCleanup`, so upgrading the packages without applying the migration fails those paths at runtime (the recurring list and detail pages, and the expiration sweep) with an undefined-column error from the provider.
@@ -462,7 +462,7 @@ The list carried only `LastExecution`, a timestamp stamped at *enqueue* time, so
 
 Additive, but **this release requires a migration** — one new index on `job`. Everything else is additive with no schema impact: the new metric keys are new rows in the existing `Counter` / `Statistic` tables. Two deliberate behaviour changes affect **what numbers you see**, not how jobs execute; a third relaxes several background-task intervals, trading latency for a much quieter idle server.
 
-:::warning Migration required — read before upgrading
+:::warning[Migration required — read before upgrading]
 
 Earlier drafts of these notes said "no migration". **That is no longer true.** See [Migration: one new index on `job`](#migration-one-new-index-on-job) below, including the note on building it without a write outage.
 
@@ -483,7 +483,7 @@ The cost is **+17.8% on a bulk insert and +8.9% on a bulk state transition** —
 
 **The SQL Server provider's activation statement has the identical predicate**, so the index applies there too and is emitted by the same migration.
 
-:::danger Building the index locks the table
+:::danger[Building the index locks the table]
 
 A plain `CREATE INDEX` takes a lock that **blocks writes to `job` for the whole build**. On a large `job` table that is a write outage — jobs cannot be published or claimed while it runs. If that matters, hand-edit the generated migration before applying it:
 
@@ -857,7 +857,7 @@ Additive minor release — no breaking API changes, no schema change. Saga ergon
 
 Additive minor release. Multi-application observability for **shared-database** deployments — opt-in via `WarpConfiguration.ApplicationName` (null ⇒ unchanged behavior). Distinguish and filter by which application created a job, made an adapter call, owns an endpoint, or sent a webhook, and see every process (server or not) in one **Applications** view — without changing execution or routing.
 
-:::warning Schema change — generate a migration
+:::warning[Schema change — generate a migration]
 This release adds two tables (`application_instance`, `application_instance_log`) and seven nullable columns. It is **100% additive** — no drops or renames — picked up by the standard `dotnet ef migrations add / database update`. Legacy rows read as "(unassigned)"; rolling-deploy safe (old processes ignore the new columns/tables).
 :::
 
@@ -873,7 +873,7 @@ This release adds two tables (`application_instance`, `application_instance_log`
 
 Additive minor release — no breaking API changes. Three new observability surfaces turn Warp into a one-stop shop for HTTP traffic in both directions, plus durable outbound webhook delivery. Ships two new packages (`Moberg.Warp.Adapters.Http`, `Moberg.Warp.Adapters.Refit`); inbound endpoint observability lands inside the existing `Moberg.Warp.Http`, and durable webhook delivery is built into `Moberg.Warp.Core` (always on, no opt-in). Adds new dashboard sections.
 
-:::warning Schema change — generate a migration
+:::warning[Schema change — generate a migration]
 This release adds new tables (`AdapterDefinition`, `AdapterCallLog`, `WebhookDelivery`, `EndpointCallLog`). They are added to the model **unconditionally** (so the migration story doesn't depend on which hosts opt into which feature) and sit empty until a feature is enabled. Run `dotnet ef migrations add` against your `DbContext` and apply it when upgrading from 3.1.x.
 :::
 

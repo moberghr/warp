@@ -280,7 +280,7 @@ Any `DelegatingHandler` works the same way — a hand-rolled retry, a vendor SDK
 
 Handler ordering is fixed (not configurable) and lands your handler in exactly the right place: the Warp observing handler is **outermost** — it times the whole logical call and records one row with the final outcome and total attempt count — so a call that succeeds on retry #3 is one green row, not three rows. The shared rate limiter is **innermost**, inside your retry handler, so each physical attempt spends its own token. Per-attempt latency lives in your resilience library's own OTel telemetry.
 
-:::note Changed in 4.1
+:::note[Changed in 4.1]
 `a.UseResilience(...)` was removed along with the `Microsoft.Extensions.Http.Resilience` package reference. Replace it with `a.ConfigureHttpClientBuilder(b => b.AddStandardResilienceHandler())` and add that package to your own project — the handler lands in the same position in the chain, so behaviour is unchanged. See the [4.1 release notes](../releases.md).
 :::
 

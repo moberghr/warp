@@ -44,7 +44,7 @@ Warp uses a **sibling-table** model: *every server is an application instance; n
 
 Each process writes exactly **one** physical row — no double-writes. To make non-server processes visible, `AddWarp` now starts a lightweight heartbeat `IHostedService` **when `ApplicationName` is set** — it registers the instance, heartbeats CPU/RAM on `ApplicationHeartbeatInterval`, and deregisters on graceful `StopAsync`. It uses no provider and takes no distributed lock (each instance owns its row by `Id`).
 
-:::note A deliberate contract change
+:::note[A deliberate contract change]
 `AddWarp` has historically been passive — it registers services and never starts a background loop. When `ApplicationName` is set, it now runs this one lightweight heartbeat host. This is intentional and narrowly scoped: gated on `ApplicationName`, no provider or lock required, and it deregisters cleanly on shutdown. With `ApplicationName == null` (the default) nothing starts and `AddWarp` stays passive exactly as before.
 :::
 
@@ -121,7 +121,7 @@ dotnet ef database update
 - **Rolling-deploy safe.** Old-version processes ignore the new columns/tables (EF never `SELECT *`s), write `null`, and don't register instances. New-version processes write the full set. Legacy `null`-application rows read as **"(unassigned)"**.
 - **Metrics reads are cross-version-safe.** The per-app metrics use a **disjoint** counter-key namespace, so the existing keys are byte-for-byte unchanged and old readers never see the new ones.
 
-:::note Who owns migrations in a shared schema
+:::note[Who owns migrations in a shared schema]
 Warp deliberately never touches the schema itself (no `Database.Migrate()`-on-boot). In a shared-database deployment, deciding *which* application runs `dotnet ef migrations add / database update` against the shared schema is a pre-existing operational concern — this feature doesn't change it. Coordinate schema migrations through whichever app you already designate as the schema owner.
 :::
 

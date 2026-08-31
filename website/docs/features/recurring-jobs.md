@@ -17,7 +17,7 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 
 `AddOrUpdateRecurringJob` only registers (or updates) the definition — it does **not** create a job. The `RecurringJobScheduler` background task creates jobs when the cron time arrives.
 
-:::info Saves immediately
+:::info[Saves immediately]
 `AddOrUpdateRecurringJob` acquires a distributed lock on the job name and calls `SaveChanges` internally. You do **not** need to call `SaveChanges` after this method. The lock prevents race conditions when multiple app instances register the same recurring job concurrently.
 :::
 
@@ -93,7 +93,7 @@ An explicit trigger deliberately **ignores `DisabledAt`** — it is an operator 
 
 A name no definition matches throws `ArgumentException`. The name is trimmed before lookup, so surrounding whitespace never causes a miss.
 
-:::info The name is the identity
+:::info[The name is the identity]
 Every single-definition method on `IRecurringJobService` — `TriggerRecurringJob`, `EnableRecurringJob`, `DisableRecurringJob`, `DeleteRecurringJob`, `GetRecurringJob`, `GetRecurringJobHistory` — takes the registered name. It is unique, it is what your code already holds, and unlike the table's surrogate id it survives a delete-and-re-register unchanged. Names are trimmed, must be non-empty, and are capped at 200 characters (the name also names the registration's distributed lock).
 :::
 
@@ -108,7 +108,7 @@ POST /api/recurring/{id}/enable
 
 Or use the Enable/Disable button on the dashboard.
 
-:::note `{id}` in the dashboard API
+:::note[`{id}` in the dashboard API]
 A recurring job name may contain `/` and spaces, so the REST routes carry it as its URL-safe base64 (the same encoding the endpoints and applications routes use): base64 of the UTF-8 bytes with `+`→`-`, `/`→`_`, and trailing `=` trimmed. `session-cleanup` becomes `c2Vzc2lvbi1jbGVhbnVw`. An id that does not decode, or a name no definition matches, answers `404`.
 :::
 

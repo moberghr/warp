@@ -34,7 +34,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 Warp automatically adds its interceptors (row locking) and entity configuration (Job, Message, Batch, etc.) when you register Warp services in the next step. All Warp tables are placed in the `warp` schema by default.
 
-:::tip Naming Conventions
+:::tip[Naming Conventions]
 Warp respects EF Core naming conventions. If you use `UseSnakeCaseNamingConvention()`, Warp's tables and columns will follow your convention automatically.
 :::
 
@@ -65,7 +65,7 @@ var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 await context.Database.EnsureCreatedAsync();
 ```
 
-:::warning EnsureCreated doesn't support upgrades
+:::warning[EnsureCreated doesn't support upgrades]
 `EnsureCreatedAsync()` creates the schema from scratch but cannot apply incremental changes. Use EF migrations for production deployments where you need to upgrade Warp versions without dropping the database.
 :::
 
@@ -79,11 +79,11 @@ builder.Services.AddWarp<AppDbContext>(opt =>
 });
 ```
 
-:::tip Handler registration is automatic
+:::tip[Handler registration is automatic]
 Handlers are discovered and registered automatically via the Warp source generator — no `AddHandlers()` call needed.
 :::
 
-:::tip TimeProvider
+:::tip[TimeProvider]
 Warp automatically registers `TimeProvider.System` if one is not already registered. Override it in tests to control time.
 :::
 
@@ -193,6 +193,6 @@ public class OrderController : ControllerBase
 }
 ```
 
-:::info Transactional Outbox
+:::info[Transactional Outbox]
 Warp uses the [outbox pattern](/docs/features/outbox-pattern) — jobs are written to the same DbContext as your business data and committed in a single `SaveChangesAsync()`. This guarantees atomicity: if the transaction fails, both your data and the jobs roll back. No orphaned jobs, no lost work.
 :::

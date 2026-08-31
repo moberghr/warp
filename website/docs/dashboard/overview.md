@@ -46,7 +46,7 @@ reshaped Warp's payloads as a side effect: `currentState` arrived as `"Failed"` 
 
 Nothing is required of you, and there is no setting to get wrong: configure JSON however your own API needs it. Your endpoints keep your options; the dashboard keeps its own.
 
-:::note Inbound Warp HTTP endpoints are different
+:::note[Inbound Warp HTTP endpoints are different]
 
 [`Warp.Http`](/docs/features/http) exposes **your** handlers as **your** public API, so those endpoints deliberately keep honouring your `ConfigureHttpJsonOptions` — your callers see the format you chose. Only Warp's own dashboard API is pinned.
 

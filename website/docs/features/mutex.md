@@ -102,7 +102,7 @@ public class ProcessPayment : IJob
 await publisher.Enqueue(new ProcessPayment { CustomerId = 123 });
 ```
 
-:::note Request or handler — both work
+:::note[Request or handler — both work]
 `[Mutex]` / `[Semaphore]` (like `[Timeout]`, `[RateLimit]`, `[Retry]` and `[CircuitBreaker]`) is read off the **handler class first, then the request/job type**. Put it wherever the constraint actually belongs; if both carry one, the handler wins. See [Where do I declare the policy?](#where-do-i-declare-the-policy-contract-vs-handler).
 :::
 

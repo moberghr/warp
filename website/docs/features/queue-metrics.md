@@ -72,7 +72,7 @@ So the predicate stays broad — `CurrentState` and `ScheduleTime` only — and 
 job.HasIndex(p => new { p.CurrentState, p.ScheduleTime });
 ```
 
-:::note Requires a migration
+:::note[Requires a migration]
 
 This index is picked up by a standard `dotnet ef migrations add` / `database update`. On a large `job` table, note that a plain `CREATE INDEX` blocks writes for the duration of the build — see the [release notes](../releases.md) for the `CONCURRENTLY` / `ONLINE = ON` workaround.
 
