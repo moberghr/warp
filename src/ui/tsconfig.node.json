@@ -25,5 +25,10 @@
   // e2e-live is here, not in tsconfig.app.json: it runs in Node under Playwright, not in the browser
   // bundle. Without it the spec is type-checked by nothing — `tsc -b` would pass while the spec had
   // errors, which is how a spec asserting on a key the API no longer returns went unnoticed.
-  "include": ["vite.config.ts", "playwright.aspire.config.ts", "e2e-live"]
+  //
+  // playwright.config.ts is here for the same reason — it reads process.env and decides which server
+  // the published screenshots are captured from. Its SPEC (e2e/) is deliberately still absent: it
+  // imports the browser-side demo fixtures through the `@/` alias, so type-checking it here would
+  // need this project to carry the app's paths and DOM lib. Worth doing, but as its own change.
+  "include": ["vite.config.ts", "playwright.config.ts", "playwright.aspire.config.ts", "e2e-live"]
 }
