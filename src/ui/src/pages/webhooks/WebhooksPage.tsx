@@ -12,6 +12,7 @@ import * as api from '@/api';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { WebhookDeliveryListItem, WebhookDeliveryFilter, WebhookGroupModel } from '@/types/webhooks';
 import { PageHeading } from '@/components/PageHeading';
+import { Hint } from '@/components/ui/tooltip';
 
 const PAGE_SIZE = 20;
 
@@ -253,11 +254,10 @@ function GroupCard({
               </TableRow>
             ) : (
               groups.map((g) => (
+                <Hint key={g.key} text="Open this group">
                 <TableRow
-                  key={g.key}
                   className="cursor-pointer"
                   onClick={() => onOpen(g.key)}
-                  title="Open this group"
                 >
                   <TableCell className="font-mono text-xs truncate max-w-[16rem] text-primary">{g.key}</TableCell>
                   <TableCell className="text-right tabular-nums">{g.total.toLocaleString()}</TableCell>
@@ -265,6 +265,7 @@ function GroupCard({
                   <TableCell className="text-right tabular-nums text-amber-600 dark:text-amber-400">{g.pending.toLocaleString()}</TableCell>
                   <TableCell className={`text-right tabular-nums ${g.exhausted > 0 ? 'text-destructive' : ''}`}>{g.exhausted.toLocaleString()}</TableCell>
                 </TableRow>
+                </Hint>
               ))
             )}
           </TableBody>

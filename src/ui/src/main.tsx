@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 import { isDemoMode, freezeClock } from '@/lib/demoMode'
+import { TooltipProvider } from '@/components/ui/tooltip'
 
 async function boot() {
   if (isDemoMode()) {
@@ -22,9 +23,14 @@ async function boot() {
   // fires before subscribers exist, leaving the dashboard stale until the 30s
   // safety-net interval.
 
+  // TooltipProvider owns the shared hover delay for every Tooltip in the app — in this version of
+  // Base UI the delay lives on the provider, not on the individual Tooltip, so mounting it here
+  // means a tooltip anywhere gets the same 300ms rather than opening instantly.
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <App />
+      <TooltipProvider>
+        <App />
+      </TooltipProvider>
     </StrictMode>,
   )
 }

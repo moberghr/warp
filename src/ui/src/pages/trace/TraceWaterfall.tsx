@@ -5,6 +5,7 @@ import { isAxiosError } from 'axios';
 import { Card, CardContent } from '@/components/ui/card';
 import * as api from '@/api';
 import type { TraceSpan, TraceSpanSource } from '@/types/trace';
+import { Hint } from '@/components/ui/tooltip';
 
 // The unified trace waterfall (§8.28): everything for a trace id — browser request, server endpoint call, the
 // jobs it spawned, and the outbound calls those jobs made — on one time axis. Built from the rows Warp already
@@ -110,11 +111,12 @@ function WaterfallRow({ row }: { row: Row }) {
         {detail ? <Link to={detail} className="text-primary hover:underline">{name}</Link> : name}
       </div>
       <div className="relative flex-1 h-4">
-        <div
-          className={`absolute top-0.5 h-3 rounded ${span.isError ? 'bg-destructive' : s.bar}`}
-          style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-          title={`${span.status}${span.durationMs != null ? ` · ${Math.round(span.durationMs)}ms` : ''}`}
-        />
+        <Hint text={`${span.status}${span.durationMs != null ? ` · ${Math.round(span.durationMs)}ms` : ''}`}>
+          <div
+            className={`absolute top-0.5 h-3 rounded ${span.isError ? 'bg-destructive' : s.bar}`}
+            style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+          />
+        </Hint>
       </div>
       <div className="w-20 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
         {span.durationMs != null ? `${Math.round(span.durationMs)}ms` : '—'}

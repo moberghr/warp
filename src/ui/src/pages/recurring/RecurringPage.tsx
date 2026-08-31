@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { RelativeTime } from '@/components/RelativeTime';
 import { StateBadge } from '@/components/StateBadge';
+import { Hint } from '@/components/ui/tooltip';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { DataTable } from '@/components/DataTable';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
@@ -16,6 +17,7 @@ import {
   useDeleteRecurringJob,
 } from '@/api/hooks/useRecurring';
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
+import { lastRunHref, isLastRunCleanedUp, isLastRunOutcomeUnknown, describeCron } from './recurringModel';
 import type { RecurringJobModel } from '@/types';
 import { PageHeading } from '@/components/PageHeading';
 
@@ -61,7 +63,23 @@ export default function RecurringPage() {
       {
         accessorKey: 'cron',
         header: 'Cron',
-        cell: ({ row }) => <span className="font-mono text-xs">{row.original.cron}</span>,
+        // The raw expression stays the display; its plain-English reading is the tooltip. An
+        // unparseable cron gets no description, so it renders as bare text with no hover target.
+        cell: ({ row }) => {
+          const description = describeCron(row.original.cron);
+
+          if (!description) {
+            return <span className="font-mono text-xs">{row.original.cron}</span>;
+          }
+
+          return (
+            <Hint text={description}>
+              <span className="font-mono text-xs decoration-dotted underline-offset-4 hover:underline">
+                {row.original.cron}
+              </span>
+            </Hint>
+          );
+        },
       },
       {
         accessorKey: 'type',
@@ -87,15 +105,12 @@ export default function RecurringPage() {
         header: 'Next Execution',
         cell: ({ row }) =>
           row.original.disabledAt ? (
-            <span
-              className="text-sm text-muted-foreground"
-              title="Disabled — this recurring job will not execute"
-            >
-              —
-            </span>
+            <Hint text="Disabled — this recurring job will not execute">
+              <span className="text-sm text-muted-foreground">—</span>
+            </Hint>
           ) : row.original.nextExecution ? (
             <span className="text-sm">
-              <RelativeTime date={row.original.nextExecution} />
+              <RelativeTime date={row.original.nextExecution} precision="minute" />
             </span>
           ) : (
             <span className="text-sm">N/A</span>
@@ -104,35 +119,70 @@ export default function RecurringPage() {
       {
         accessorKey: 'lastExecution',
         header: 'Last Execution',
-        cell: ({ row }) =>
-          row.original.lastExecution ? (
-            <span className="text-sm text-muted-foreground">
-              <RelativeTime date={row.original.lastExecution} />
-            </span>
-          ) : (
-            <span className="text-sm text-muted-foreground">Never</span>
-          ),
+        // Shown whether or not the definition is disabled — the run happened, and the scheduler's
+        // skip branch deliberately never advances LastExecution. The timestamp links to that run's
+        // job (the Last Result badge links to the same place) unless the job has been cleaned up.
+        cell: ({ row }) => {
+          const { lastExecution } = row.original;
+
+          if (!lastExecution) {
+            return <span className="text-sm text-muted-foreground">Never</span>;
+          }
+
+          const stamp = <RelativeTime date={lastExecution} precision="minute" />;
+          const href = lastRunHref(row.original);
+
+          if (href) {
+            return (
+              <Link to={href} className="text-sm text-primary hover:underline">
+                {stamp}
+              </Link>
+            );
+          }
+
+          const swept = isLastRunCleanedUp(row.original) || isLastRunOutcomeUnknown(row.original);
+
+          return (
+            <Hint text={swept ? 'The job for this run has been cleaned up' : null}>
+              <span className="text-sm text-muted-foreground">{stamp}</span>
+            </Hint>
+          );
+        },
       },
       {
         id: 'lastResult',
         header: 'Last Result',
         cell: ({ row }) => {
-          const { hasLastRun, lastJobId, lastState } = row.original;
+          const { hasLastRun, lastState } = row.original;
 
           if (!hasLastRun) {
             return <span className="text-sm text-muted-foreground">—</span>;
           }
 
+          // No outcome to show: swept before ExpirationCleanup started stamping FinalState. The null
+          // check also narrows lastState for the badge below.
           if (lastState == null) {
             return <span className="text-xs text-muted-foreground">Cleaned up</span>;
           }
 
-          return lastJobId ? (
-            <Link to={`/detail/${lastJobId}`}>
+          const href = lastRunHref(row.original);
+
+          if (!href) {
+            // Outcome preserved, job row gone — show the result, say why it is not clickable.
+            return (
+              <Hint text="The job for this run has been cleaned up">
+                <span className="inline-flex items-center gap-1">
+                  <StateBadge state={lastState} />
+                  <span className="text-xs text-muted-foreground">(cleaned up)</span>
+                </span>
+              </Hint>
+            );
+          }
+
+          return (
+            <Link to={href}>
               <StateBadge state={lastState} />
             </Link>
-          ) : (
-            <StateBadge state={lastState} />
           );
         },
       },

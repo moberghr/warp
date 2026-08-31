@@ -19,6 +19,7 @@ import type {
 } from '@/types/backgroundServices';
 import type { GetBackgroundServiceLogsOptions } from '@/api/backgroundServices';
 import * as api from '@/api';
+import { Hint } from '@/components/ui/tooltip';
 
 export default function BackgroundServiceDetail() {
   const { name } = useParams<{ name: string }>();
@@ -359,9 +360,11 @@ function LogRow({ log }: { log: BackgroundServiceLogDto }) {
         <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
           {formatTs(log.timestamp)}
         </TableCell>
-        <TableCell className="text-xs text-muted-foreground truncate" title={log.serverId}>
-          {log.serverName ?? shortServerId(log.serverId)}
-        </TableCell>
+        <Hint text={log.serverId}>
+          <TableCell className="text-xs text-muted-foreground truncate">
+            {log.serverName ?? shortServerId(log.serverId)}
+          </TableCell>
+        </Hint>
         <TableCell>
           <LevelBadge level={log.level} />
         </TableCell>

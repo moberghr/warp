@@ -9,6 +9,7 @@ import { useRefreshKey } from '@/hooks/useRefreshKey';
 import { useRealtimeRefetch } from '@/hooks/useRealtimeRefetch';
 import type { SagaDetail, SagaActivityResponse } from '@/types';
 import * as api from '@/api';
+import { Hint } from '@/components/ui/tooltip';
 
 export default function SagaDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -215,14 +216,16 @@ function prettyJson(json: string): string {
 
 function CopyButton({ onClick }: { onClick: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title="Copy to clipboard"
-      className="ml-2 text-xs text-muted-foreground hover:text-foreground"
-    >
-      ⧉
-    </button>
+    <Hint text="Copy to clipboard">
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label="Copy to clipboard"
+        className="ml-2 text-xs text-muted-foreground hover:text-foreground"
+      >
+        ⧉
+      </button>
+    </Hint>
   );
 }
 

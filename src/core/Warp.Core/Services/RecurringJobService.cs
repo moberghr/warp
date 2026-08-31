@@ -119,7 +119,7 @@ public class RecurringJobService<TContext> : IRecurringJobService
                 CreatedAt = l.CreatedAt,
                 JobExists = l.Job != null,
                 Type = l.Job != null ? l.Job.Type : null,
-                CurrentState = l.Job != null ? l.Job.CurrentState : null,
+                CurrentState = l.Job != null ? l.Job.CurrentState : l.FinalState,
                 Skipped = l.Skipped,
             })
             .ToPagedListAsync(request);
@@ -220,7 +220,11 @@ public class RecurringJobService<TContext> : IRecurringJobService
                 {
                     x.RecurringJobId,
                     x.JobId,
-                    State = x.Job != null ? x.Job.CurrentState : (State?)null,
+
+                    // Live state while the Job row is there, otherwise the outcome stamped onto the
+                    // audit row when it was swept — so a low-frequency definition keeps its result.
+                    State = x.Job != null ? x.Job.CurrentState : x.FinalState,
+                    CleanedUp = x.Job == null,
                 })
             .ToListAsync();
 
@@ -236,6 +240,7 @@ public class RecurringJobService<TContext> : IRecurringJobService
             item.HasLastRun = true;
             item.LastJobId = run.JobId;
             item.LastState = run.State;
+            item.LastRunCleanedUp = run.CleanedUp;
         }
     }
 }

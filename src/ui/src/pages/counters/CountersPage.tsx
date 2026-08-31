@@ -20,6 +20,7 @@ import {
 } from './counterModel';
 import type { CounterHistoryPoint } from '@/types';
 import { PageHeading } from '@/components/PageHeading';
+import { Hint } from '@/components/ui/tooltip';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, ChartTooltip, Legend);
 
@@ -325,10 +326,12 @@ function MetricTableRow({
 }) {
   return (
     <tr className="border-b last:border-b-0 hover:bg-muted/30">
-      <td className="px-4 py-2" title={row.subject}>
-        <div className="font-mono font-medium">{row.label}</div>
-        {row.sub && <div className="font-mono text-xs text-muted-foreground">{row.sub}</div>}
-      </td>
+      <Hint text={row.subject}>
+        <td className="px-4 py-2">
+          <div className="font-mono font-medium">{row.label}</div>
+          {row.sub && <div className="font-mono text-xs text-muted-foreground">{row.sub}</div>}
+        </td>
+      </Hint>
       {hasApplication && (
         <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{row.application ?? 'all'}</td>
       )}

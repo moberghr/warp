@@ -1,9 +1,13 @@
-import { formatRelativeTime, formatDateTimeExact } from '@/utils/format';
+import { formatRelativeTime, formatDateTimeExact, formatDateTimeMinute } from '@/utils/format';
 
-export function RelativeTime({ date }: { date: string }) {
+// `minute` drops seconds/milliseconds for cron-derived instants (recurring jobs),
+// where a sub-minute figure is noise. Defaults to the exact shape everywhere else.
+export function RelativeTime({ date, precision = 'exact' }: { date: string; precision?: 'exact' | 'minute' }) {
+  const absolute = precision === 'minute' ? formatDateTimeMinute(date) : formatDateTimeExact(date);
+
   return (
     <span>
-      {formatDateTimeExact(date)} <span className="text-muted-foreground">({formatRelativeTime(date)})</span>
+      {absolute} <span className="text-muted-foreground">({formatRelativeTime(date)})</span>
     </span>
   );
 }

@@ -162,7 +162,10 @@ export interface RecurringJobModel {
   disabledAt: string | null;
   hasLastRun: boolean;
   lastJobId: string | null;
+  // Live while the job row exists, then the outcome ExpirationCleanup stamped on the audit row.
   lastState: State | null;
+  // lastState came from the stamp: the outcome is known, but there is no job detail page to open.
+  lastRunCleanedUp: boolean;
 }
 
 export interface RecurringJobDetailModel extends RecurringJobModel {
@@ -173,6 +176,7 @@ export interface RecurringJobDetailModel extends RecurringJobModel {
 export interface RecurringJobHistoryModel {
   jobId: string | null;
   createdAt: string;
+  // Whether there is still a job detail page to link to — the outcome below can outlive it.
   jobExists: boolean;
   type: string | null;
   currentState: State | null;

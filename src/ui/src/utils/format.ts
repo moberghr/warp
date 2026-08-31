@@ -19,6 +19,13 @@ export function formatDateTimeExact(dateString: string): string {
   return DateTime.fromJSDate(new Date(dateString)).toFormat('yyyy-MM-dd HH:mm:ss.SSS');
 }
 
+// Minute precision for cron-derived instants (recurring next/last execution, firing
+// history): a cron occurrence is only ever minute-aligned, so seconds and milliseconds
+// are noise on those surfaces. Job/log timestamps keep the exact formatter.
+export function formatDateTimeMinute(dateString: string): string {
+  return DateTime.fromJSDate(new Date(dateString)).toFormat('yyyy-MM-dd HH:mm');
+}
+
 export function shortType(fullType: string | null | undefined): string {
   if (!fullType) return '—';
   const parts = fullType.split(',')[0].split('.');

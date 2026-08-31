@@ -9,7 +9,9 @@ import { Pagination } from '@/components/Pagination';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
-import { shortType, formatDateTime, shortId } from '@/utils/format';
+import { shortType, formatDateTimeMinute, shortId } from '@/utils/format';
+import { describeCron } from './recurringModel';
+import { Hint } from '@/components/ui/tooltip';
 import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import type { RecurringJobDetailModel, RecurringJobHistoryModel, PagedList } from '@/types';
 import * as api from '@/api';
@@ -49,6 +51,8 @@ export default function RecurringDetailPage() {
   if (error) return <ErrorState message={error} />;
   if (!detail) return <LoadingState />;
 
+  const cronDescription = describeCron(detail.cron);
+
   // Enable is reversible and harmless — apply immediately. Disable on a production
   // recurring job (billing sweep, reconciliation, etc.) is potentially an outage, so it
   // goes through the confirm dialog like the other destructive actions.
@@ -78,10 +82,15 @@ export default function RecurringDetailPage() {
       {/* Header */}
       <div className="flex items-center gap-4 mb-6">
         <h1 className="text-2xl font-bold">{detail.name}</h1>
-        <span className="font-mono text-sm bg-muted px-2 py-1 rounded">{detail.cron}</span>
+        <Hint text={cronDescription}>
+          <span className="font-mono text-sm bg-muted px-2 py-1 rounded">{detail.cron}</span>
+        </Hint>
+        {/* The detail page has the room, so the plain-English reading is shown outright here rather
+            than hidden behind the tooltip the list has to rely on. */}
+        {cronDescription && <span className="text-sm text-muted-foreground">{cronDescription}</span>}
         {detail.disabledAt ? (
           <span className="inline-flex items-center rounded-full bg-orange-100 px-2.5 py-0.5 text-xs font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
-            Disabled <RelativeTime date={detail.disabledAt} />
+            Disabled <RelativeTime date={detail.disabledAt} precision="minute" />
           </span>
         ) : (
           <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400">Enabled</span>
@@ -134,21 +143,21 @@ export default function RecurringDetailPage() {
             <CardHeader className="pb-2"><CardTitle className="text-sm">Details</CardTitle></CardHeader>
             <CardContent className="space-y-2 text-sm">
               <div><span className="text-muted-foreground">Type:</span> {shortType(detail.type)}</div>
-              <div><span className="text-muted-foreground">Created:</span> {formatDateTime(detail.createdAt)}</div>
-              {detail.updatedAt && <div><span className="text-muted-foreground">Updated:</span> {formatDateTime(detail.updatedAt)}</div>}
+              <div><span className="text-muted-foreground">Created:</span> {formatDateTimeMinute(detail.createdAt)}</div>
+              {detail.updatedAt && <div><span className="text-muted-foreground">Updated:</span> {formatDateTimeMinute(detail.updatedAt)}</div>}
               <div>
                 <span className="text-muted-foreground">Next Execution:</span>{' '}
                 {detail.disabledAt ? (
-                  <span title="Disabled — this recurring job will not execute">—</span>
+                  <Hint text="Disabled — this recurring job will not execute"><span>—</span></Hint>
                 ) : detail.nextExecution ? (
-                  <RelativeTime date={detail.nextExecution} />
+                  <RelativeTime date={detail.nextExecution} precision="minute" />
                 ) : (
                   'N/A'
                 )}
               </div>
               <div>
                 <span className="text-muted-foreground">Last Execution:</span>{' '}
-                {detail.lastExecution ? <RelativeTime date={detail.lastExecution} /> : 'Never'}
+                {detail.lastExecution ? <RelativeTime date={detail.lastExecution} precision="minute" /> : 'Never'}
               </div>
             </CardContent>
           </Card>
@@ -196,13 +205,23 @@ export default function RecurringDetailPage() {
                           <TableCell>
                             {entry.skipped ? (
                               <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">Skipped</span>
-                            ) : entry.jobExists && entry.currentState != null ? (
-                              <StateBadge state={entry.currentState} />
+                            ) : entry.currentState != null ? (
+                              // The outcome survives the job row (ExpirationCleanup stamps FinalState
+                              // before deleting it), so an old firing still reports its result — with
+                              // a "(cleaned up)" note, since there is no detail page left to open.
+                              <span className="inline-flex items-center gap-1">
+                                <StateBadge state={entry.currentState} />
+                                {!entry.jobExists && (
+                                  <Hint text="The job for this run has been cleaned up">
+                                    <span className="text-xs text-muted-foreground">(cleaned up)</span>
+                                  </Hint>
+                                )}
+                              </span>
                             ) : (
                               <span className="text-xs text-muted-foreground">Cleaned up</span>
                             )}
                           </TableCell>
-                          <TableCell className="text-sm"><RelativeTime date={entry.createdAt} /></TableCell>
+                          <TableCell className="text-sm"><RelativeTime date={entry.createdAt} precision="minute" /></TableCell>
                         </TableRow>
                       ))}
                     </TableBody>

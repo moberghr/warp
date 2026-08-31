@@ -11,6 +11,7 @@ import { shortId, formatBytes, serverStatusDotColor, isServerStale } from '@/uti
 import { ChevronDown, ChevronRight, RefreshCw, Pause, Play } from 'lucide-react';
 import type { ServerModel, WorkerModel, ServerTaskSummary, ServerLogModel, PagedList } from '@/types';
 import * as api from '@/api';
+import { Hint } from '@/components/ui/tooltip';
 
 const statusColors: Record<string, string> = {
   Completed: 'text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950/30',
@@ -52,12 +53,16 @@ export default function ServerDetailPage() {
         <h1 className="text-2xl font-bold">{server.serverName}</h1>
         {server.pausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300">Paused</Badge>}
         {isServerStale(server.lastHeartbeatTime) && <Badge variant="outline" className="text-red-600 border-red-300">Inactive</Badge>}
-        <button onClick={fetchData} className="p-2 rounded-md hover:bg-accent text-muted-foreground" title="Refresh">
-          <RefreshCw className="h-4 w-4" />
-        </button>
-        <Button variant="outline" size="sm" onClick={handleTogglePause} title={server.pausedAt ? 'Resume server' : 'Pause server'}>
-          {server.pausedAt ? <><Play className="h-4 w-4 mr-1" /> Resume</> : <><Pause className="h-4 w-4 mr-1" /> Pause</>}
-        </Button>
+        <Hint text="Refresh">
+          <button onClick={fetchData} className="p-2 rounded-md hover:bg-accent text-muted-foreground" aria-label="Refresh">
+            <RefreshCw className="h-4 w-4" />
+          </button>
+        </Hint>
+        <Hint text={server.pausedAt ? 'Resume server' : 'Pause server'}>
+          <Button variant="outline" size="sm" onClick={handleTogglePause}>
+            {server.pausedAt ? <><Play className="h-4 w-4 mr-1" /> Resume</> : <><Pause className="h-4 w-4 mr-1" /> Pause</>}
+          </Button>
+        </Hint>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
@@ -177,15 +182,17 @@ function WorkerGroupSection({ queues, pollingMs, workers, activeCount, groupId, 
           <span className="text-xs text-muted-foreground">Polling: {pollingMs >= 1000 ? `${(pollingMs / 1000).toFixed(pollingMs % 1000 === 0 ? 0 : 1)}s` : `${pollingMs}ms`}</span>
           <span className="ml-auto">
             {groupId && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleToggleGroupPause}
-                title={groupPausedAt ? 'Resume group' : 'Pause group'}
-                className="h-7 px-2"
-              >
-                {groupPausedAt ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
-              </Button>
+              <Hint text={groupPausedAt ? 'Resume group' : 'Pause group'}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleToggleGroupPause}
+                  aria-label={groupPausedAt ? 'Resume group' : 'Pause group'}
+                  className="h-7 px-2"
+                >
+                  {groupPausedAt ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+                </Button>
+              </Hint>
             )}
           </span>
         </div>

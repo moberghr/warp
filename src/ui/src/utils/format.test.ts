@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   shortType, shortId, stateName, formatBytes, isServerStale,
-  formatRelativeTime, formatDateTime, formatDateTimeExact, stateColor, serverStatusDotColor,
+  formatRelativeTime, formatDateTime, formatDateTimeExact, formatDateTimeMinute,
+  stateColor, serverStatusDotColor,
   httpStatusName,
 } from './format';
 import { State } from '@/types';
@@ -56,6 +57,11 @@ describe('date formatters', () => {
     const shape = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/;
     expect(formatDateTime('2026-01-02T03:04:05.678Z')).toMatch(shape);
     expect(formatDateTimeExact('2026-01-02T03:04:05.678Z')).toMatch(shape);
+  });
+
+  it('formatDateTimeMinute drops seconds and milliseconds', () => {
+    // Cron occurrences are minute-aligned, so the recurring surfaces render to the minute.
+    expect(formatDateTimeMinute('2026-01-02T03:04:05.678Z')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
 
   it('formatRelativeTime is relative to the current clock', () => {
