@@ -1,0 +1,18 @@
+{
+  // The screenshot spec sits between the two other projects and fits neither: it runs in Node under
+  // Playwright, but it imports the browser-side demo fixtures through the `@/` alias and its
+  // addInitScript callbacks are browser code touching `window` and `localStorage`. tsconfig.node.json
+  // has neither the alias nor the DOM lib; tsconfig.app.json has both but no Node types and only
+  // includes `src`. Rather than loosen either, this project inherits the app's options — alias, DOM,
+  // jsx, the same strictness — and adds Node.
+  //
+  // Without it the spec was type-checked by nothing, the same hole the node project's comment
+  // describes for e2e-live: `tsc -b` passed while the spec could reference a demo id that no longer
+  // exists, and the failure surfaced only as a screenshot run breaking later.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.e2e.tsbuildinfo",
+    "types": ["vite/client", "node"]
+  },
+  "include": ["e2e"]
+}
