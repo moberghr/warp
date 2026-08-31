@@ -59,11 +59,11 @@ You only add the provider package for your database; Warp.Core no longer has a h
 > **Pin one coherent version across every Warp package.** The packages have inter-dependencies (e.g. `Warp.Http` requires a matching `Warp.Core`), so floating different floors per package can resolve to an incompatible mix. Set the same explicit version on all of them:
 >
 > ```xml
-> <PackageReference Include="Moberg.Warp.Core" Version="6.0.0" />
-> <PackageReference Include="Moberg.Warp.Worker" Version="6.0.0" />
-> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="6.0.0" />
-> <PackageReference Include="Moberg.Warp.Dashboard" Version="6.0.0" />
-> <PackageReference Include="Moberg.Warp.Http" Version="6.0.0" />
+> <PackageReference Include="Moberg.Warp.Core" Version="6.1.0" />
+> <PackageReference Include="Moberg.Warp.Worker" Version="6.1.0" />
+> <PackageReference Include="Moberg.Warp.Provider.PostgreSql" Version="6.1.0" />
+> <PackageReference Include="Moberg.Warp.Dashboard" Version="6.1.0" />
+> <PackageReference Include="Moberg.Warp.Http" Version="6.1.0" />
 > ```
 
 > **Package IDs are `Moberg.Warp.*`; namespaces are `Warp.*`.** Install `Moberg.Warp.Core`, but write `using Warp.Core;`. The public surface is also split across a few namespaces — here's where the common types live:
@@ -344,7 +344,7 @@ await recurringPublisher.AddOrUpdateRecurringJob(
     new CleanupSessions(), name: "session-cleanup", cron: "0 * * * *");
 ```
 
-`AddOrUpdateRecurringJob` registers the definition. The `RecurringJobScheduler` task creates jobs when the cron time arrives. Execution history is tracked in `RecurringJobLog` and survives job cleanup.
+`AddOrUpdateRecurringJob` registers the definition. The `RecurringJobScheduler` task creates jobs when the cron time arrives. Execution history is tracked in `RecurringJobLog` and survives job cleanup — including each firing's **outcome**, which `ExpirationCleanup` stamps onto the audit row before deleting the job, so a monthly definition still reports its results long after the job rows are gone.
 
 Every single-definition method on `IRecurringJobService` addresses a definition by the **name** it was registered under — `TriggerRecurringJob`, `EnableRecurringJob`, `DisableRecurringJob`, `DeleteRecurringJob`, `GetRecurringJob`, `GetRecurringJobHistory`:
 

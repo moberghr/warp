@@ -4,6 +4,48 @@ sidebar_position: 6
 
 # Releases
 
+## 6.1.0
+
+*Unreleased*
+
+Minor release, no breaking changes and one additive nullable column: **a recurring job's execution history now keeps each firing's outcome after the job row is cleaned up**, plus a set of readability fixes to the recurring surfaces.
+
+### A recurring job's outcomes outlive its jobs
+
+`RecurringJobLog` is the immutable audit trail, but deleting a `Job` nulls its `JobId` (`DeleteBehavior.SetNull`), and `JobExpirationTimeout` defaults to **1 day**. For anything less frequent than daily, that meant the job row was long gone before the next firing — so a monthly definition's entire execution history read `Cleaned up`, a list of dates with no results. Exactly backwards: the lower the frequency, the more the history matters and the less of it survived.
+
+Worse, it hid a real outcome. **Failed jobs never auto-expire**, so anything reaching the sweep was `Completed` **or `Deleted`** — and a `Deleted` recurring run (a skip-mode `[Mutex]`/`[RateLimit]` refusal, or a graceful cancellation) was indistinguishable from a clean success.
+
+`ExpirationCleanup` now stamps the outcome onto a new nullable `RecurringJobLog.FinalState` immediately before deleting the job, in **both** delete paths — the age sweep and the `MaxExpirableJobCount` count sweep. Read surfaces use the live `Job.CurrentState` while the row exists and fall back to `FinalState` once it doesn't:
+
+| Last Result | Meaning |
+|---|---|
+| `—` | the definition has never actually fired |
+| badge, linked | the job row is still there — click through to it |
+| badge + `(cleaned up)` | the job row was swept, but its outcome was preserved |
+| `Cleaned up` | swept before this release — the outcome is unrecoverable |
+
+The stamp happens at cleanup rather than at finalization deliberately: recording it when the job finishes would mean a lookup on the worker's fetch/execute path. It is bounded by construction — the expired ids are already in hand, `RecurringJobLog.JobId` is already indexed, and a tick with no recurring firing among its expired jobs issues no `UPDATE` at all.
+
+`RecurringJobModel` gains `LastRunCleanedUp` beside `LastState` ("the outcome is known, but there is no detail page to open"), and `RecurringJobHistoryModel.CurrentState` is now the outcome while `JobExists` stays the link-or-not flag.
+
+**Migration is one additive nullable column** — picked up by your standard `dotnet ef migrations add` / `database update`. Rows swept before upgrading keep reading as the bare `Cleaned up`; nothing backfills them, because the information is genuinely gone.
+
+### Recurring surfaces read better
+
+- **Times render to the minute.** A cron occurrence is only ever minute-aligned, so `2026-05-25 14:00:00.000` was three units of noise. Only the recurring pages changed — job logs keep their milliseconds, where they earn their place.
+- **The Last Execution timestamp links to that run's job**, so either half of the row gets you there rather than only the Last Result badge.
+- **Last Execution stays visible while a definition is disabled.** The run happened, and the scheduler's skip branch never advances it, so the value is accurate — unlike Next Execution, which is correctly dashed out.
+- **Cron expressions carry a plain-English reading.** `0 18 * * 1-5` reads "At 06:00 PM, Monday through Friday" — a tooltip on the list, shown outright in the detail header. The raw expression stays the display, since that is what the definition was registered with. An expression that cannot be parsed simply gets no description.
+
+### Dashboard tooltips
+
+The dashboard had ~19 hover hints on the browser's native `title` attribute: an OS-drawn box that ignores your theme, waits a second, and does nothing at all on touch. They now use a real tooltip built on the `@base-ui/react` already in the tree — themed, positioned, 300ms, keyboard-reachable. Icon-only buttons (logout, refresh, save, cancel, copy, clear-filter) gained explicit `aria-label`s in the process, since a native `title` doubled as their accessible name and a tooltip does not.
+
+### Fixed
+
+- **A flaky shared rate-limit test.** Fixed rate-limit windows floor-align to global UTC ticks, so at `perSeconds = 60` the boundary is the top of each UTC minute. Eight tests exhausted a 60-second budget and then asserted a refusal; when that boundary landed between the two calls the window rolled, a fresh token appeared, and nothing threw. They now pin the wall clock while leaving elapsed-time measurement and timers on the real clock, so the assertions are unchanged rather than loosened. Test-only — the limiter itself was always correct.
+
 ## 6.0.0
 
 *2026-08-27*

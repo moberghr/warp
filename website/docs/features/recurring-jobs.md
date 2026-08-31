@@ -42,16 +42,16 @@ The stamp happens at cleanup time rather than at finalization deliberately — r
 
 This also un-hides a case the old bare "Cleaned up" label conflated with success: **failed jobs never auto-expire**, so anything swept was either `Completed` or `Deleted` — and a `Deleted` recurring run (a skip-mode concurrency or rate-limit refusal, or a graceful cancellation) used to be indistinguishable from a clean success.
 
-Three states remain distinguishable on the list:
+Four states are distinguishable on the list:
 
 | Last Result | Meaning |
 |---|---|
 | `—` | `HasLastRun = false` — the definition has never actually fired |
 | badge, linked | the job row is still there; click through to its detail page |
 | badge + `(cleaned up)` | the job row was swept, but its outcome was preserved |
-| `Cleaned up` | swept by a deployment that predates `FinalState` stamping — the outcome is unrecoverable |
+| `Cleaned up` | swept before 6.1, when outcomes were not yet preserved — unrecoverable |
 
-`FinalState` is one nullable column, so the upgrade is additive: run your usual `dotnet ef migrations add` / `database update`. Runs swept before the upgrade keep reading as the bare `Cleaned up`.
+`FinalState` is one nullable column, so the upgrade is additive: run your usual `dotnet ef migrations add` / `database update` (added in **6.1**). Runs swept before the upgrade keep reading as the bare `Cleaned up` — nothing backfills them, because the information is genuinely gone.
 
 ## Cron Expressions
 
