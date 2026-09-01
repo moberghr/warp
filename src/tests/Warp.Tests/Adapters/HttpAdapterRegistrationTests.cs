@@ -332,6 +332,27 @@ public class HttpAdapterRegistrationTests
     }
 
     [TimedFact]
+    public async Task AddAdapter_AddTypedClientWithImplementation_ResolvesInterfaceThroughAdapterPipeline()
+    {
+        // The arity IHttpClientBuilder itself offers: bind an interface to its implementation. The
+        // interface must resolve from DI and ride the same named-client handler chain as the one-arity form.
+        var recorder = new CapturingRecorder();
+        var provider = BuildProvider(recorder, "typed-impl", a =>
+        {
+            a.AddTypedClient<IVendorClient, TypedVendorClient>();
+            a.ConfigureHttpClientBuilder(b => b.ConfigurePrimaryHttpMessageHandler(() => new RefitStubHandler()));
+        });
+
+        await using (provider)
+        {
+            var typed = provider.GetRequiredService<IVendorClient>();
+            await typed.PingAsync(Ct);
+
+            recorder.Records.ShouldHaveSingleItem().AdapterName.ShouldBe("typed-impl");
+        }
+    }
+
+    [TimedFact]
     public void AddAdapter_NameContainsColon_Throws()
     {
         var builder = new WarpBuilder<TestContext>(new ServiceCollection());
@@ -426,8 +447,14 @@ internal sealed class CountingStubHandler : HttpMessageHandler
     }
 }
 
+/// <summary>Contract for the two-arity <c>AddTypedClient&lt;TClient, TImplementation&gt;</c> binding.</summary>
+internal interface IVendorClient
+{
+    Task PingAsync(CancellationToken ct);
+}
+
 /// <summary>Typed client bound to the adapter's named <see cref="HttpClient"/> via <c>AddTypedClient</c>.</summary>
-internal sealed class TypedVendorClient
+internal sealed class TypedVendorClient : IVendorClient
 {
     private readonly HttpClient _client;
 

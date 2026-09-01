@@ -87,6 +87,10 @@ Handlers are discovered and registered automatically via the Warp source generat
 Warp automatically registers `TimeProvider.System` if one is not already registered. Override it in tests to control time.
 :::
 
+:::tip[Adapters don't need a worker]
+The outbound [adapter pipeline](./features/adapters.md) and the other observability addons register on `AddWarp` — `opt.AddAdapter("vendor", …)`, `opt.AddEndpointObservability(…)` and `opt.AddClientObservability(…)` all work in a publisher-only, API-only or dashboard-only process. The split between `AddWarp` and `AddWarpServer` is job execution, not observability.
+:::
+
 ### 4. Add a worker (optional)
 
 For apps that process jobs, use `AddWarpServer` instead (includes `AddWarp` internally):

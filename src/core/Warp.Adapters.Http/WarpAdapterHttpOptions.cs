@@ -86,6 +86,19 @@ public sealed class WarpAdapterHttpOptions
         => _builderConfigurators.Add(builder => builder.AddTypedClient<TClient>());
 
     /// <summary>
+    /// Registers a typed client <typeparamref name="TClient"/> implemented by
+    /// <typeparamref name="TImplementation"/>, bound to this adapter's named client (passthrough to
+    /// <see cref="HttpClientBuilderExtensions.AddTypedClient{TClient, TImplementation}(IHttpClientBuilder)"/>).
+    /// This is the arity <see cref="IHttpClientBuilder"/> itself offers: binding an interface to its
+    /// implementation is the common case for a hand-written client — which is exactly the client that
+    /// cannot be a Refit interface.
+    /// </summary>
+    public void AddTypedClient<TClient, TImplementation>()
+        where TClient : class
+        where TImplementation : class, TClient
+        => _builderConfigurators.Add(builder => builder.AddTypedClient<TClient, TImplementation>());
+
+    /// <summary>
     /// Enables the cluster-shared, DB-backed rate limiter (token leasing on the shared
     /// <c>RateLimitBucket</c>) for this adapter, keyed <c>warp:adapter:{name}</c>. One token per physical
     /// HTTP attempt. <paramref name="overflow"/> chooses <c>Wait</c> (bounded delay up to

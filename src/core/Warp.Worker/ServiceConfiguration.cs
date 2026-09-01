@@ -34,6 +34,11 @@ public static class ServiceConfiguration
     /// (<c>opt.AddBackgroundService&lt;T&gt;()</c>), and worker-side addons (<c>opt.UseDatabasePush()</c>).
     /// For a service-only server (no job processing) call <c>opt.DisableWorker()</c>.
     /// </para>
+    /// <para>
+    /// Adapters are <em>not</em> a server-side concern. <c>opt.AddAdapter(...)</c> and the other
+    /// observability addons register on plain <c>AddWarp</c> just as well — reach for a server when a
+    /// process must execute jobs, host background services, or drain the webhook queue.
+    /// </para>
     /// </summary>
     public static IServiceCollection AddWarpServer<TContext>(
         this IServiceCollection services,
