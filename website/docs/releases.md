@@ -4,6 +4,36 @@ sidebar_position: 6
 
 # Releases
 
+## 6.1.1
+
+*2026-09-02*
+
+Patch release, **no breaking changes and no schema change**: one additive API overload and a documentation gap closed. Both come from the same place — a report from a consumer who had just upgraded a 28-adapter production application from 5.1 to 6.1.
+
+### `AddTypedClient` now offers the arity you expect
+
+`WarpAdapterHttpOptions.AddTypedClient<TClient>()` took one type argument, while `IHttpClientBuilder.AddTypedClient<TClient, TImplementation>()` — the method every .NET developer already knows — takes two. So the natural call did not compile, and the form that worked routed around Warp's own sugar:
+
+```csharp
+// 6.1.0 — does not compile
+a.AddTypedClient<IFeedFetcher, HttpFeedFetcher>();
+
+// 6.1.0 — what you had to write instead
+a.ConfigureHttpClientBuilder(b => b.AddTypedClient<IFeedFetcher, HttpFeedFetcher>());
+```
+
+Both now work. Binding an interface to an implementation is the common case for a hand-written client — which is exactly the client that cannot be a Refit interface, and therefore the one most likely to reach for this method. The overload forwards to the same builder-configurator list as the one-arity form, so handler ordering, recording, and the shared rate limit are all unchanged.
+
+### Adapters do not need a server, and the docs now say so where you look
+
+`AddAdapter(...)`, `AddAdapters()`, `AddEndpointObservability(...)` and `AddClientObservability(...)` all extend the non-generic `IWarpBuilder`, which the `AddWarp` builder implements — so a publisher-only, API-only or dashboard-only process has always had the full outbound adapter pipeline, with no server and no worker. Nothing changed here; the discoverability did.
+
+The adapters page said this in its opening paragraph. The `AddWarp` / `AddWarpServer` reference did not, and that pair reads as a publish-side versus execute-side split with the adapter question orthogonal to it — so a reader guesses, and half of them guess wrong.
+
+The cost of guessing wrong is worth naming, because the reporter paid it: believing `AddWarp` had no adapter pipeline to hang them on, they registered adapters only outside the test environment. The components they most wanted under observation were then wired one way in production and another way in tests — the arrangement that lets a registration bug survive a green suite.
+
+`AddWarp` and `AddWarpServer` now state the rule in their own XML docs, and Getting Started carries it beside the registration snippet.
+
 ## 6.1.0
 
 *2026-08-31*

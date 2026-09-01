@@ -40,6 +40,14 @@ public static class ServiceConfiguration
     /// or <c>opt.UseSqlServer()</c> — and any addons from the <paramref name="configure"/> lambda.
     /// Handlers and pipeline behaviors are discovered by the source generator; there is no
     /// <c>AddHandlers</c> call.
+    /// <para>
+    /// <b>Adapters and observability register here too.</b> <c>opt.AddAdapter(...)</c>,
+    /// <c>opt.AddAdapters()</c>, <c>opt.AddEndpointObservability(...)</c> and
+    /// <c>opt.AddClientObservability(...)</c> take the non-generic <c>IWarpBuilder</c> that this builder
+    /// implements, so a publisher-only, API-only or dashboard-only process gets the full outbound
+    /// adapter pipeline with no server and no worker. Nothing about adapters requires
+    /// <c>AddWarpServer</c>; the split between the two entry points is job execution, not observability.
+    /// </para>
     /// </summary>
     public static IServiceCollection AddWarp<TContext>(
         this IServiceCollection services,
