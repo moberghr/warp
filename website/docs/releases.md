@@ -4,6 +4,37 @@ sidebar_position: 6
 
 # Releases
 
+## 6.1.2
+
+*2026-09-09*
+
+Patch release, **no breaking changes and no schema change**: a failed lock *release* no longer fails the work it guarded, the documentation that explains when that happens, and a security bump. It comes from a report of `Attempted to release a lock that was not held` thrown out of `AddOrUpdateRecurringJob` on a Neon database.
+
+### Releasing a distributed lock no longer throws
+
+Warp releases its session-scoped locks in a `finally` / `await using`, which runs **after** the guarded work has already committed. Propagating a failure from there cannot undo anything — it could only do damage:
+
+- `AddOrUpdateRecurringJob` took down host startup even though the definition had saved successfully;
+- in `SagaHandlerProxy` and `ServerTaskLoop`, a throwing release **replaced** the exception the guarded body had thrown, so a handler failure surfaced as a lock error and the real cause was lost.
+
+Every handle returned by the database-backed lock and semaphore providers is now wrapped in `SafeReleaseLockHandle`. The contract is set once at the provider rather than at each call site: **acquiring a lock can fail, releasing one cannot.** A release failure is logged at `Warning` with the lock name instead.
+
+This is a behaviour change, so it is worth stating plainly: an exception you could previously catch around one of these operations will no longer be raised. Nothing is being hidden — swallowing does not change the lock's fate, because throwing released nothing either.
+
+### Why that exception happens: transaction-mode connection poolers
+
+`pg_advisory_unlock` returning `false` — which is what Medallion turns into that exception — almost always means the release ran on a different backend session than the acquire. That is the defining behaviour of a connection pooler in **transaction mode**: Neon's `-pooler` endpoint, Supabase's port `6543`, Azure's built-in PgBouncer on `6432`, or any PgBouncer with `pool_mode = transaction`.
+
+The exception is only the symptom. The real problem is that the **acquire never provided mutual exclusion**, and `UseDatabasePush()` is broken the same way, since `LISTEN`/`NOTIFY` is also session-scoped.
+
+It is worth checking even if you have never seen the exception, because most of Warp keeps working. Only a handful of sites take a session-scoped lock; the server tasks use a transaction-scoped one that a pooler cannot break. So a transaction-pooled deployment looks healthy — jobs run, the heartbeat ticks, the dashboard populates — while `MessageRouter` silently skips every tick and messages stop fanning out to child jobs, cluster-wide, with no error at all.
+
+The new [Connection Pooling](/docs/operations/connection-pooling) page covers the two lock kinds, why session mode (not the absence of a pooler) is what matters, a per-provider table, a two-round-trip test for any connection string, and what a stranded lock costs at each site.
+
+### `Microsoft.SourceLink.GitHub` bumped to 10.0.303
+
+Addresses CVE-2026-62900 (GHSA-23fw-v26w-5fgq, moderate) in the transitive `Microsoft.Build.Tasks.Git` 8.0.0. Build-time only — `PrivateAssets="all"` means it never reached your application — but it failed `dotnet restore` under `NuGetAuditMode=all`.
+
 ## 6.1.1
 
 *2026-09-02*

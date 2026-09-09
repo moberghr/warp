@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data;
@@ -39,10 +40,14 @@ public static class SqlServerServiceConfiguration
         builder.Services.TryAddSingleton<IWarpNotificationTransportFactory, SqlServerNotificationTransportFactory>();
 
         builder.Services.TryAddSingleton<IWarpLockProvider>(sp =>
-            new SqlServerLockProvider(ResolveConnectionString<TContext>(sp)));
+            new SqlServerLockProvider(
+                ResolveConnectionString<TContext>(sp),
+                sp.GetRequiredService<ILogger<SqlServerLockProvider>>()));
 
         builder.Services.TryAddSingleton<IWarpSemaphoreProvider>(sp =>
-            new SqlServerSemaphoreProvider(ResolveConnectionString<TContext>(sp)));
+            new SqlServerSemaphoreProvider(
+                ResolveConnectionString<TContext>(sp),
+                sp.GetRequiredService<ILogger<SqlServerSemaphoreProvider>>()));
 
         // Points the Warp server context at the same database as TContext.
         builder.Services.TryAddSingleton<IWarpServerContextConfigurator>(new SqlServerServerContextConfigurator<TContext>());

@@ -21,6 +21,10 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 `AddOrUpdateRecurringJob` acquires a distributed lock on the job name and calls `SaveChanges` internally. You do **not** need to call `SaveChanges` after this method. The lock prevents race conditions when multiple app instances register the same recurring job concurrently.
 :::
 
+:::note[`Attempted to release a lock that was not held`]
+`AddOrUpdateRecurringJob` takes a session-scoped advisory lock on the job name. If registration throws that exception, the connection is behind a pooler in transaction mode — see [Connection Pooling](/docs/operations/connection-pooling).
+:::
+
 ## How It Works
 
 1. **Registration**: `AddOrUpdateRecurringJob` stores the cron expression, message payload, and type. Sets `NextExecution` to the next cron occurrence.

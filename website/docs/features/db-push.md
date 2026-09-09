@@ -6,6 +6,10 @@ sidebar_position: 11
 
 Replaces polling wake-up with push notifications — PostgreSQL `LISTEN`/`NOTIFY` or SQL Server Service Broker. The dispatcher, `MessageRouter`, and `Orchestrator` wake instantly on relevant events instead of waiting for their next poll. Opt-in; default behavior (polling) is unchanged if you don't call `opt.UseDatabasePush()`.
 
+:::note[Requires a session-mode connection]
+Postgres `LISTEN`/`NOTIFY` is session-scoped, so a pooler in transaction mode drops the registration and push silently never fires. See [Connection Pooling](/docs/operations/connection-pooling).
+:::
+
 ## Setup
 
 ```csharp

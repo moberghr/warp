@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Infrastructure.Internal;
@@ -44,13 +45,13 @@ public static class PostgreSqlServiceConfiguration
 
         builder.Services.TryAddSingleton<IWarpLockProvider>(sp =>
             ResolveDataSource<TContext>(sp) is { } dataSource
-                ? new PostgresLockProvider(dataSource)
-                : new PostgresLockProvider(ResolveConnectionString<TContext>(sp)));
+                ? new PostgresLockProvider(dataSource, sp.GetRequiredService<ILogger<PostgresLockProvider>>())
+                : new PostgresLockProvider(ResolveConnectionString<TContext>(sp), sp.GetRequiredService<ILogger<PostgresLockProvider>>()));
 
         builder.Services.TryAddSingleton<IWarpSemaphoreProvider>(sp =>
             ResolveDataSource<TContext>(sp) is { } dataSource
-                ? new PostgresSemaphoreProvider(dataSource)
-                : new PostgresSemaphoreProvider(ResolveConnectionString<TContext>(sp)));
+                ? new PostgresSemaphoreProvider(dataSource, sp.GetRequiredService<ILogger<PostgresSemaphoreProvider>>())
+                : new PostgresSemaphoreProvider(ResolveConnectionString<TContext>(sp), sp.GetRequiredService<ILogger<PostgresSemaphoreProvider>>()));
 
         // Points the Warp server context at the same database as TContext (data source if the user
         // registered one, else the connection string), inheriting auth/SSL settings.

@@ -880,6 +880,40 @@ Base feature (no addon opt-in for the schema — `AddWarp<TContext>` always adds
 - `opt.DisableWorker()` → service-only server (background services + `Heartbeat`/`ServerCleanup`/`ExpirationCleanup`, no job worker or job tasks; provider still required).
 - Log capture auto-wired (`MinLogLevel` default Information, 100/s cap, 4 KB truncation, 1000-row/7-day retention). Dashboard `/warp/services`.
 
+## Connection Pooling (session mode required)
+
+Warp takes two kinds of database lock, and only one survives transaction pooling:
+
+- **Transaction-scoped** (`pg_try_advisory_xact_lock` / `sp_getapplock` in a transaction, released at `COMMIT`) — most server tasks: `Heartbeat`, `Orchestrator`, `ScheduledJobActivation`, `RecurringJobScheduler`, `StaleJobRecovery`, `CounterAggregator`, `ServerCleanup`, `ExpirationCleanup`, `ErrorGroupAggregator`, `StatisticRollup`. Safe through any pooling mode.
+- **Session-scoped** (`pg_advisory_lock`, released by an explicit unlock on the same backend session) — work spanning more than one transaction: recurring-job registration, `MessageRouter`, sagas, rate limiting, concurrency slots. **Broken by transaction pooling.**
+
+A pooler in transaction mode gives a different backend session per transaction, so acquire and release land on different sessions: `pg_advisory_unlock` returns false and Medallion throws `InvalidOperationException: Attempted to release a lock that was not held`. The exception is the symptom — the real bug is that the acquire never provided mutual exclusion. Transaction pooling also breaks `UseDatabasePush()` on Postgres (`LISTEN`/`NOTIFY` is session-scoped).
+
+Because most server tasks use the transaction-scoped lock, a transaction-pooled deployment looks *mostly* healthy: jobs run and the heartbeat ticks while message routing silently stops and sagas requeue forever.
+
+**It is the pool mode, not the pooler.** `pool_mode = session` behaves exactly like a direct connection and is fully supported. Open-source PgBouncer defaults to session mode; managed poolers usually default to transaction mode.
+
+- Neon: the `-pooler` host is transaction mode with no session option — use the direct host. Vercel's integration puts the pooled host in `DATABASE_URL` / `POSTGRES_URL`; the direct one is `DATABASE_URL_UNPOOLED` / `POSTGRES_URL_NON_POOLING`.
+- Supabase: port `6543` is transaction mode but switchable to session mode; port `5432` is direct.
+- Azure Flexible Server: built-in PgBouncer on `6432` is transaction mode — set `pgbouncer.default_pool_mode = session` or use `5432`.
+
+Only the connection Warp opens has to be session-scoped; keep a pooled string for ordinary request-scoped queries.
+
+**Verify rather than infer** — two separate round trips (not one semicolon-joined batch, which is a single transaction and passes either way):
+
+```sql
+SELECT pg_try_advisory_lock(4242);
+SELECT pg_advisory_unlock(4242);
+```
+
+Both must return `t`. A `f` on the unlock means the connection is transaction-pooled and unusable for Warp.
+
+**Releasing a lock never throws.** Every DB-backed lock handle is wrapped in `SafeReleaseLockHandle`, so acquiring a lock can fail but releasing one cannot — the failure is logged at Warning with the lock name instead. Release runs after the guarded work has already committed, so propagating it could only fail a completed operation or mask the guarded body's own exception; swallowing does not change the lock's fate, since throwing releases nothing either. A stranded lock (release routed to another backend) stays held until the pooler recycles that server connection, and Warp cannot reclaim it.
+
+If Warp does run behind a session-mode pooler, size `default_pool_size` for its long-lived connections: the worker pool, the server context, the lock connections, and the `LISTEN` connection under push. Under-sizing surfaces as client-login timeouts, not lock errors.
+
+Scale-to-zero Postgres (Neon autosuspend, 5 min default) terminates sessions, dropping held session locks and `LISTEN` registrations. A continuously running server stays inside the window; an idling publisher/dashboard host can see release warnings after a suspend.
+
 ## Database Push
 
 Opt-in addon: call the provider first, then `opt.UseDatabasePush()`. Replaces polling wake-up with PostgreSQL `LISTEN`/`NOTIFY` or SQL Server Service Broker.
@@ -1727,4 +1761,5 @@ Both apps share the same database. The worker polls for and executes jobs create
 9. **Job metadata is inherited** — child jobs automatically inherit parent metadata via ambient context
 10. **Pause is propagated via heartbeat** — there may be a ~3s delay between pause command and workers stopping
 11. **Warp tables use the `warp` schema by default** — configurable via `WarpConfiguration.Schema`, set to `null` for default schema
-12. **Naming conventions are respected** — entity configs don't hardcode table/column names, so `UseSnakeCaseNamingConvention()` works
+12. **Warp needs a session-mode connection** — a transaction-mode pooler (Neon `-pooler`, Supabase `6543`, Azure `6432`) breaks session-scoped advisory locks and `LISTEN`/`NOTIFY`
+13. **Naming conventions are respected** — entity configs don't hardcode table/column names, so `UseSnakeCaseNamingConvention()` works
