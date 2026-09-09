@@ -137,8 +137,10 @@ public class PostgresSemaphoreProviderTests
         first.ShouldNotBeNull();
         spy.NamesRequested.Length.ShouldBe(1, "first acquire probes one slot before succeeding");
 
-        // Inner DisposeAsync throws; the SlotHandle's finally must still clear the cache entry.
-        await Should.ThrowAsync<InvalidOperationException>(async () => await first.DisposeAsync());
+        // Inner DisposeAsync throws; the SlotHandle's finally must still clear the cache entry,
+        // and SafeReleaseLockHandle (wrapped around the SlotHandle) must swallow the throw —
+        // releasing a Warp lock never surfaces to the caller, it only logs a Warning.
+        await Should.NotThrowAsync(async () => await first.DisposeAsync());
 
         // Now force every subsequent inner acquire to fail. If the cache was cleared in the
         // finally, the next TryAcquireAsync probes BOTH slots (cache hit on neither). If the

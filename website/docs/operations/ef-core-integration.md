@@ -226,6 +226,10 @@ Both work. If a runtime uses an `NpgsqlDataSource` (Aspire's `AddAzureNpgsqlData
 
 Warp picks up the data source whether it's attached to the `DbContext` (`UseNpgsql(dataSource)`) **or** registered in DI (`AddNpgsqlDataSource()` / Aspire, with `UseNpgsql()` resolving it from the container). The options-attached one wins when both are present. *(Prior to 3.6.0 only the `DbContext`-attached data source was consulted; a DI-only registration was silently ignored and Warp fell back to the connection string.)*
 
+## Connection poolers
+
+Warp needs a **session-mode** connection. A pooler in transaction mode — Neon's `-pooler` host, Supabase's `6543`, Azure's `6432`, any PgBouncer with `pool_mode = transaction` — silently breaks session-scoped advisory locks and `LISTEN`/`NOTIFY`, which surfaces as `InvalidOperationException: Attempted to release a lock that was not held`. See [Connection Pooling](/docs/operations/connection-pooling) for the full picture, a two-line test for any connection string, and what a stranded lock costs you.
+
 ## What lives in the database, what lives in DI
 
 Everything Warp persists is in your `DbContext`. Everything Warp orchestrates (workers, server tasks, background services, dashboard push, distributed locks) is in DI. There is no out-of-band state — no Redis, no message broker, no separate service catalog. A consequence: `EnsureCreatedAsync()` is sufficient for getting started, but migrations are still mandatory for production (so that schema changes ship with your application code, not as a tooling step).

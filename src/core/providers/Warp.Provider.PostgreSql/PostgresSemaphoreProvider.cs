@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using Medallion.Threading;
 using Medallion.Threading.Postgres;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Warp.Core;
 
@@ -15,25 +17,27 @@ namespace Warp.Provider.PostgreSql;
 internal sealed class PostgresSemaphoreProvider : IWarpSemaphoreProvider
 {
     private readonly IDistributedLockProvider _inner;
+    private readonly ILogger _logger;
     private readonly ConcurrentDictionary<(string Name, int Slot), byte> _heldInProcess = new();
 
-    public PostgresSemaphoreProvider(string connectionString)
-        : this(new PostgresDistributedSynchronizationProvider(connectionString))
+    public PostgresSemaphoreProvider(string connectionString, ILogger<PostgresSemaphoreProvider> logger)
+        : this(new PostgresDistributedSynchronizationProvider(connectionString), logger)
     {
     }
 
     // Data-source overload — same rationale as PostgresLockProvider: callers using
     // NpgsqlDataSource (Aspire / Managed Identity / pre-configured SSL) get the same
     // authentication and encryption settings on the lock connections that EF Core uses.
-    public PostgresSemaphoreProvider(NpgsqlDataSource dataSource)
-        : this(new PostgresDistributedSynchronizationProvider(dataSource))
+    public PostgresSemaphoreProvider(NpgsqlDataSource dataSource, ILogger<PostgresSemaphoreProvider> logger)
+        : this(new PostgresDistributedSynchronizationProvider(dataSource), logger)
     {
     }
 
     // Test-only — lets unit tests spy on the underlying lock-name construction.
-    internal PostgresSemaphoreProvider(IDistributedLockProvider inner)
+    internal PostgresSemaphoreProvider(IDistributedLockProvider inner, ILogger? logger = null)
     {
         _inner = inner;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     public async Task<IAsyncDisposable?> TryAcquireAsync(string name, int maxCount, TimeSpan timeout, CancellationToken ct)
@@ -42,7 +46,11 @@ internal sealed class PostgresSemaphoreProvider : IWarpSemaphoreProvider
 
         if (maxCount == 1)
         {
-            return await _inner.CreateLock(name).TryAcquireAsync(timeout, ct);
+            // Releasing must never throw — see SafeReleaseLockHandle.
+            return SafeReleaseLockHandle.Wrap(
+                await _inner.CreateLock(name).TryAcquireAsync(timeout, ct),
+                name,
+                _logger);
         }
 
         var start = Random.Shared.Next(maxCount);
@@ -63,7 +71,12 @@ internal sealed class PostgresSemaphoreProvider : IWarpSemaphoreProvider
 
             _heldInProcess.TryAdd((name, i), 0);
 
-            return new SlotHandle(handle, () => _heldInProcess.TryRemove((name, i), out _));
+            // Wrapped OUTSIDE SlotHandle so a failing release still frees the in-process slot
+            // (SlotHandle's finally) and then gets swallowed rather than surfacing to the caller.
+            return SafeReleaseLockHandle.Wrap(
+                new SlotHandle(handle, () => _heldInProcess.TryRemove((name, i), out _)),
+                name,
+                _logger);
         }
 
         return null;

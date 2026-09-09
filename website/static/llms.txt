@@ -35,6 +35,7 @@ Warp ships as core packages — Moberg.Warp.Core (publishing; also includes alwa
 - [Durable Webhooks](https://moberghr.github.io/warp/docs/features/webhooks): Durable outbound webhook delivery — retries, signing, redelivery, exhaustion (built into Core, always on; AddWebhooks only for optional custom signer / exhausted-handler)
 - [Configuration](https://moberghr.github.io/warp/docs/operations/configuration): Worker, polling, retention (age + count), dispatcher mode, worker groups, schema, naming conventions
 - [EF Core Integration](https://moberghr.github.io/warp/docs/operations/ef-core-integration): DbContext setup, server-internal context, migrations, naming conventions
+- [Connection Pooling](https://moberghr.github.io/warp/docs/operations/connection-pooling): Warp needs a session-mode connection — transaction-mode poolers (Neon -pooler, Supabase 6543, Azure 6432) break advisory locks and LISTEN/NOTIFY
 - [Crash Recovery](https://moberghr.github.io/warp/docs/operations/crash-recovery): Sliding invisibility timeout, keep-alive, stale job recovery
 - [Dashboard Auth](https://moberghr.github.io/warp/docs/operations/dashboard-auth): MapWarpDashboard + RequireAuthorization, built-in cookie login, localhost-only
 - [Releases](https://moberghr.github.io/warp/docs/releases): Version history and upgrade notes
