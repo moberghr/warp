@@ -1,0 +1,1 @@
+var e=new Set,t=null;function n(t){return e.add(t),()=>{e.delete(t)}}function r(){t===null&&(t=setTimeout(()=>{t=null;for(let t of e)t()},1e3))}export{n,r as t};

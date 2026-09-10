@@ -19,6 +19,10 @@ separated from the states above it.
 The list adds two columns: **Attempt** (`#3 (2 failed)` — the attempt about to run, and how many have
 already failed) and **Next attempt**, the instant the retry is scheduled for.
 
+**Next attempt** counts down live and reads `due now` once it passes — the attempt is waiting to be
+activated and claimed, not finished. The same is true of the **Scheduled** column on the Scheduled
+list. See [Timestamps and countdowns](/docs/dashboard/overview#timestamps-and-countdowns).
+
 The tab is shown by default. A deployment that never retries can hide it:
 
 ```csharp

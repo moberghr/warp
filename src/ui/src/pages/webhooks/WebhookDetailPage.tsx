@@ -126,7 +126,7 @@ export default function WebhookDetailPage() {
           </Field>
           <Field label="Attempts">{detail.attemptCount}</Field>
           <Field label="Next attempt">
-            {detail.nextAttemptAt ? <RelativeTime date={detail.nextAttemptAt} /> : <Dash />}
+            {detail.nextAttemptAt ? <RelativeTime date={detail.nextAttemptAt} tense="countdown" /> : <Dash />}
           </Field>
           <Field label="Created"><RelativeTime date={detail.createdAt} /></Field>
           <Field label="Expires">

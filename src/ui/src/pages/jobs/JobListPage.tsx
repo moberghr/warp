@@ -193,7 +193,7 @@ export default function JobListPage() {
               header: activeState === 'retrying' ? 'Next attempt' : 'Scheduled',
               cell: ({ row }) => (
                 <span className="text-sm text-muted-foreground">
-                  <RelativeTime date={row.original.scheduleTime ?? row.original.createTime} />
+                  <RelativeTime date={row.original.scheduleTime ?? row.original.createTime} tense="countdown" />
                 </span>
               ),
             } as ColumnDef<JobModel>,

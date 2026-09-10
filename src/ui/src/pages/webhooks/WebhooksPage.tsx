@@ -118,7 +118,7 @@ export default function WebhooksPage() {
         cell: ({ row }) =>
           row.original.nextAttemptAt ? (
             <span className="text-sm text-muted-foreground">
-              <RelativeTime date={row.original.nextAttemptAt} />
+              <RelativeTime date={row.original.nextAttemptAt} tense="countdown" />
             </span>
           ) : (
             <span className="text-muted-foreground/40">—</span>

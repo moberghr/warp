@@ -6,7 +6,10 @@ sidebar_position: 3
 
 Cron-based scheduled jobs with name, schedule, type, next/last execution times, and the outcome of the last run.
 
-The list is built to be **scanned**: the **Schedule** column reads the cron expression back in plain English ("Every 15 minutes"), and **Next / Last Execution** answer "when, roughly?" ("in 10 minutes", "5 minutes ago"). In both cases the precise value — the raw expression, the exact timestamp — is on hover, and the timestamps render **to the minute**, since a cron occurrence is only ever minute-aligned.
+The list is built to be **scanned**: the **Schedule** column reads the cron expression back in plain English ("Every 15 minutes"), and **Next / Last Execution** answer "when, roughly?" ("in 10 minutes", "5 minutes ago"). Both
+[tick live](/docs/dashboard/overview#timestamps-and-countdowns); **Next Execution** is a countdown,
+so a definition whose scheduler has stopped reads `overdue by 5 minutes` rather than quietly
+flipping to the past tense. In both cases the precise value — the raw expression, the exact timestamp — is on hover, and the timestamps render **to the minute**, since a cron occurrence is only ever minute-aligned.
 
 The **Schedule** header doubles as a switch: it names whichever half is in the cell (**Schedule** or **Cron**) and clicking it swaps them, persisted per browser. Relative times follow the viewer's locale.
 

@@ -240,7 +240,10 @@ export default function DetailPage() {
                 <div><span className="text-muted-foreground">Type:</span> {shortType(job.type)}</div>
                 {job.handlerType && <div><span className="text-muted-foreground">Handler:</span> {shortType(job.handlerType)}</div>}
                 <div><span className="text-muted-foreground">Created:</span> <RelativeTime date={job.createTime} /></div>
-                {job.scheduleTime && <div><span className="text-muted-foreground">Scheduled:</span> <RelativeTime date={job.scheduleTime} /></div>}
+                {/* Countdown only while the job is still waiting for that instant. Every job keeps its
+                    ScheduleTime after it runs (a requeue resets it, §8.4), so on a finished job the
+                    same value is a past fact and "due now" would be a lie. */}
+                {job.scheduleTime && <div><span className="text-muted-foreground">Scheduled:</span> <RelativeTime date={job.scheduleTime} tense={job.currentState === State.Scheduled ? 'countdown' : 'past'} /></div>}
                 {job.metadata?.['ConcurrencyKey'] && <div><span className="text-muted-foreground">Mutex:</span> <span className="font-mono text-xs">{String(job.metadata['ConcurrencyKey'])}</span></div>}
                 <div><span className="text-muted-foreground">ID:</span> <span className="font-mono text-xs">{job.id}</span></div>
               </CardContent>

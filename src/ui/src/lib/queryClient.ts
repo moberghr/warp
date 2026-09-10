@@ -71,11 +71,18 @@ export const queryKeys = {
  * Top-level "scope" keys used by realtime invalidation. Invalidating by prefix
  * here matches every paginated/filtered variant (e.g. `['jobs', 'failed', 0, 20]`).
  */
+// Instance liveness (`InstanceView.isLive`) is computed by the API against the server's configured
+// ApplicationInstanceStaleGrace, which the client cannot re-derive — so these rosters stay fresh by
+// asking again rather than by ticking a local clock (hooks/useTicking). Slower than the servers
+// list's 10s because a page renders one detail read per application.
+export const INSTANCE_ROSTER_POLL_MS = 15_000;
+
 export const queryScopes = {
   jobs: ['jobs'] as const,
   messages: ['messages'] as const,
   batches: ['batches'] as const,
   recurring: ['recurring'] as const,
+  webhooks: ['webhooks'] as const,
   servers: ['servers'] as const,
   workers: ['workers'] as const,
   counters: ['counters'] as const,

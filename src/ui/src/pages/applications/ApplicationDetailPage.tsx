@@ -7,6 +7,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { Spread, InstancesTable, fromInstanceView } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
+import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
 
 export default function ApplicationDetailPage() {
   const { id: rawId } = useParams<{ id: string }>();
@@ -16,6 +17,7 @@ export default function ApplicationDetailPage() {
     queryKey: ['applications', 'detail', 'byId', id] as const,
     queryFn: () => api.getApplicationDetail(id),
     enabled: !!id,
+    refetchInterval: INSTANCE_ROSTER_POLL_MS,
   });
 
   // Rolled-up per-type execution metrics for this application (durable, survive Job-row cleanup).

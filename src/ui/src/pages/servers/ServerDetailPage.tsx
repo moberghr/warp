@@ -7,7 +7,8 @@ import { Badge } from '@/components/ui/badge';
 import { Pagination } from '@/components/Pagination';
 import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
-import { shortId, formatBytes, serverStatusDotColor, isServerStale } from '@/utils/format';
+import { shortId, formatBytes } from '@/utils/format';
+import { useHeartbeatStale, useServerStatusDotColor } from '@/hooks/useTicking';
 import { ChevronDown, ChevronRight, RefreshCw, Pause, Play } from 'lucide-react';
 import type { ServerModel, WorkerModel, ServerTaskSummary, ServerLogModel, PagedList } from '@/types';
 import * as api from '@/api';
@@ -31,7 +32,16 @@ export default function ServerDetailPage() {
     }
   }, [id]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  // Same 10s cadence as useServers()/useServerDetail(). This page is a live status readout — CPU,
+  // memory, task history — and it was fetching once and then only on the manual refresh button.
+  // Keyed on fetchData rather than driven by usePolling so switching to another server's page,
+  // which changes the route param without remounting, still fetches immediately.
+  useEffect(() => {
+    fetchData();
+    const id = setInterval(fetchData, 10_000);
+
+    return () => clearInterval(id);
+  }, [fetchData]);
 
   const handleTogglePause = async () => {
     if (!server || !id) return;
@@ -49,10 +59,10 @@ export default function ServerDetailPage() {
   return (
     <div>
       <div className="flex items-center gap-4 mb-6">
-        <span className={`inline-block w-3 h-3 rounded-full ${serverStatusDotColor(server.lastHeartbeatTime, server.pausedAt)}`} />
+        <StatusDot lastHeartbeatTime={server.lastHeartbeatTime} pausedAt={server.pausedAt} />
         <h1 className="text-2xl font-bold">{server.serverName}</h1>
         {server.pausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300">Paused</Badge>}
-        {isServerStale(server.lastHeartbeatTime) && <Badge variant="outline" className="text-red-600 border-red-300">Inactive</Badge>}
+        <InactiveBadge lastHeartbeatTime={server.lastHeartbeatTime} />
         <Hint text="Refresh">
           <button onClick={fetchData} className="p-2 rounded-md hover:bg-accent text-muted-foreground" aria-label="Refresh">
             <RefreshCw className="h-4 w-4" />
@@ -323,4 +333,24 @@ function TaskSection({ serverId, task }: { serverId: string; task: ServerTaskSum
       )}
     </Card>
   );
+}
+
+// Leaves, so the clock re-renders a dot and a badge rather than this whole page. Both read the
+// dashboard's own 30s stale threshold and re-evaluate it every second: a server that stops checking
+// in goes red while you are looking at it, without waiting for a poll to bring the same timestamp
+// back and re-render it by accident.
+function StatusDot({ lastHeartbeatTime, pausedAt }: { lastHeartbeatTime: string; pausedAt: string | null }) {
+  const color = useServerStatusDotColor(lastHeartbeatTime, pausedAt);
+
+  return <span className={`inline-block w-3 h-3 rounded-full ${color}`} />;
+}
+
+function InactiveBadge({ lastHeartbeatTime }: { lastHeartbeatTime: string }) {
+  const stale = useHeartbeatStale(lastHeartbeatTime);
+
+  if (!stale) {
+    return null;
+  }
+
+  return <Badge variant="outline" className="text-red-600 border-red-300">Inactive</Badge>;
 }

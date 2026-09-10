@@ -32,6 +32,18 @@ builder.Services.AddWarp<AppDbContext>(options =>
 `ApplicationName` gates all of it: leave it `null` and the behaviour is exactly as before — only servers
 appear, and nothing new is written.
 
+### Liveness
+
+Each instance carries a status dot: green live, amber paused, red silent. On this page liveness is
+computed by the API against `ApplicationInstanceStaleGrace` (2 minutes by default) — the same
+threshold that decides when a stale instance row is swept and an `InstanceDown` notification fires —
+and the page refetches every 15 seconds to pick up the answer.
+
+A **server's own** detail page asks a tighter question and answers it in the browser: silent for more
+than 30 seconds (six missed heartbeats at the default 5-second `HealthCheckInterval`) turns the dot
+red and adds an **Inactive** badge, without waiting for a refetch. The two can therefore disagree for
+up to that grace: "should I worry?" is not the same question as "should this row be deleted?".
+
 Click an application to see its instances, and an instance to see its detail.
 
 <Screenshot light="/img/screenshots/27-application-detail.png" dark="/img/screenshots/27-application-detail-dark.png" alt="Application detail showing instances and job execution stats" />

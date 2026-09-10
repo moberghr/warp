@@ -1,9 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { renderHook } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useRealtimeInvalidation } from './useRealtimeInvalidation';
 import { emit } from '@/lib/realtimeBus';
+import { signalDue, resetDueSignalForTests, DUE_SIGNAL_COALESCE_MS } from '@/lib/dueSignal';
 import { queryScopes } from '@/lib/queryClient';
 
 function setup() {
@@ -34,5 +35,27 @@ describe('useRealtimeInvalidation', () => {
     expect(spy).toHaveBeenCalledWith({ queryKey: queryScopes.jobs });
     expect(spy).toHaveBeenCalledWith({ queryKey: queryScopes.dashboard });
     expect(spy).not.toHaveBeenCalledWith({ queryKey: queryScopes.counters });
+  });
+
+  describe('countdown crossings', () => {
+    afterEach(() => {
+      resetDueSignalForTests();
+      vi.useRealTimers();
+    });
+
+    it('refetches the scopes that carry a countdown when one comes due', () => {
+      vi.useFakeTimers();
+      const spy = setup();
+
+      signalDue();
+      vi.advanceTimersByTime(DUE_SIGNAL_COALESCE_MS);
+
+      for (const scope of [queryScopes.jobs, queryScopes.detail, queryScopes.recurring, queryScopes.webhooks]) {
+        expect(spy).toHaveBeenCalledWith({ queryKey: scope });
+      }
+
+      // A label ticking over says one row moved — it is not the broad sweep a finalized job warrants.
+      expect(spy).not.toHaveBeenCalledWith({ queryKey: queryScopes.stats });
+    });
   });
 });
