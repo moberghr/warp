@@ -31,6 +31,49 @@ app.MapWarpDashboard(o =>
 
 All five are optional. `BrandName` still names the browser tab when `LogoUrl` replaces the wordmark, so a tab reads `Acme Jobs · Production` rather than `Warp · Production`. Values are injected into the SPA as JSON-encoded runtime config, so a stray quote or markup in a branding string can't break the page.
 
+### Menu layout
+
+The nav bar ships with its own grouping (Workloads, Traffic, Runtime, Health). Override it when a deployment leads with different pages, and name each page from the `WarpDashboardPage` enum:
+
+```csharp
+app.MapWarpDashboard(o => o.ConfigureMenu(m => m
+    .Pages(WarpDashboardPage.Dashboard, WarpDashboardPage.Jobs)
+    .Divider()
+    .Group("Delivery", WarpDashboardPage.Webhooks, WarpDashboardPage.Adapters)
+    .Group("Health", WarpDashboardPage.Issues, WarpDashboardPage.Slo)));
+```
+
+**The bar is one ordered sequence.** `Pages`, `Group` and `Divider` all append to it, and it renders left to right exactly as declared — so a page can sit between two groups, and nothing is pinned to either end:
+
+```csharp
+o.ConfigureMenu(m => m
+    .Pages(WarpDashboardPage.Dashboard)
+    .Group("Ops", WarpDashboardPage.Recurring, WarpDashboardPage.Issues)
+    .Divider()
+    .Pages(WarpDashboardPage.Jobs));          // renders after the Ops dropdown
+```
+
+Because everything appends, calls may be split across helpers and interleaved freely, and `ConfigureMenu` itself accumulates across calls rather than replacing what an earlier one declared.
+
+**A page you leave out is not hidden.** Everything the layout doesn't place collects in one trailing group (`OverflowLabel`, default "More"), in the order the built-in nav declares it. So a partial layout is always safe, and a page added by a later Warp upgrade shows up in the overflow rather than disappearing because your layout predates it. Declare nothing but `Pages(...)` and you get exactly that — your pages up front, one dropdown holding the rest:
+
+```csharp
+app.MapWarpDashboard(o => o.ConfigureMenu(m => m.Pages(
+    WarpDashboardPage.Dashboard,
+    WarpDashboardPage.Jobs,
+    WarpDashboardPage.Issues,
+    WarpDashboardPage.Recurring,
+    WarpDashboardPage.Applications)));
+```
+
+Three rules are enforced at startup rather than silently: a page may appear in only one place, a group label may be declared only once, and no group may take the overflow group's own label (the nav keys its open dropdown on the label, so two groups sharing one would leave the overflow's pages unreachable). The first two throw from the offending call; the label collision is checked by `MapWarpDashboard`, so it catches an `OverflowLabel` set after the group too.
+
+Addon gating is unchanged and runs after your layout: a page whose addon this process didn't register is dropped wherever you put it, and a group left empty by that gets no trigger. A divider that gating strands — leading, trailing, or beside another — is dropped too, so a rule can never dangle off the end of the bar. Extension pages keep their own slot after the declared entries; their labels are host-supplied and have no enum member to name them by.
+
+:::note
+The layout is a rendering concern only. It doesn't gate access — every page is still routable by URL, and the command palette (`Ctrl`/`Cmd`+`K`) reaches all of them regardless of grouping. Use [Dashboard Auth](/docs/operations/dashboard-auth) to actually restrict the dashboard.
+:::
+
 ### The dashboard API ignores your JSON options
 
 The dashboard's REST API (everything under `{RoutePrefix}/api`) and the bundled SPA ship together as one closed contract, so Warp pins its own response format — camelCase property names, enums as numbers — regardless of what the host process configures.

@@ -31,5 +31,25 @@ public class WarpDashboardOptions
     /// <summary>Optional logo image URL shown in the dashboard nav header. Null = the default Warp wordmark.</summary>
     public string? LogoUrl { get; set; }
 
+    /// <summary>
+    /// Lays the dashboard nav out — which pages sit on the bar and which groups hold the rest, in the
+    /// order you declare them. Call it and the layout is yours; leave it alone and the dashboard renders
+    /// its own default nav.
+    /// </summary>
+    /// <remarks>
+    /// Pages a layout leaves out are not hidden: they collect in one trailing overflow group, so
+    /// everything stays reachable. Calling this more than once keeps adding to the same layout.
+    /// </remarks>
+    public WarpDashboardOptions ConfigureMenu(Action<WarpDashboardMenu> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+
+        configure(Menu);
+
+        return this;
+    }
+
+    internal WarpDashboardMenu Menu { get; } = new();
+
     public Func<Stream> IndexStream { get; set; } = () => typeof(WarpDashboardOptions).GetTypeInfo().Assembly.GetManifestResourceStream("Warp.Dashboard.dist.index.html")!;
 }
