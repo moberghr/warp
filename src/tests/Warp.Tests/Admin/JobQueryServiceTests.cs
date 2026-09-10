@@ -417,4 +417,99 @@ public abstract class JobQueryServiceTestsBase : IAsyncLifetime
         result.Items[1].Id.ShouldBe(midJobMidFailure);
         result.Items[2].Id.ShouldBe(newJobEarliestFailure);
     }
+
+    /// <summary>
+    /// The retrying listing keys on the PRESENCE of the <c>RetriedTimes</c> metadata key, so the rows
+    /// that matter are the near misses: a job carrying a retry POLICY it has never spent
+    /// (<c>StampRetry</c> writes <c>MaxRetries</c>/<c>RetryDelays</c> before the first attempt, so most
+    /// of the backlog looks like this), and a key that merely ends in the same word. Both must stay out,
+    /// or the tab becomes "jobs that could retry" instead of "jobs that are retrying".
+    /// </summary>
+    [TimedFact]
+    public async Task GetRetryingJobs_ReturnsOnlyWaitingJobsThatHaveSpentAnAttempt()
+    {
+        var ctx = _fixture.CreateContext();
+        var now = DateTime.UtcNow;
+
+        var retryingScheduled = Guid.NewGuid();
+        var retryingEnqueued = Guid.NewGuid();
+
+        ctx.Set<Job>().Add(new Job { Id = retryingScheduled, Kind = JobKind.Job, CurrentState = State.Scheduled, CreateTime = now, ScheduleTime = now.AddMinutes(1), Queue = "default", Metadata = """{"MaxRetries":3,"RetryDelays":[15,60,300],"RetriedTimes":2}""" });
+        ctx.Set<Job>().Add(new Job { Id = retryingEnqueued, Kind = JobKind.Job, CurrentState = State.Enqueued, CreateTime = now, ScheduleTime = now, Queue = "default", Metadata = """{"RetriedTimes":1}""" });
+
+        // Has a retry budget but has never used it.
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Scheduled, CreateTime = now, ScheduleTime = now.AddMinutes(1), Queue = "default", Metadata = """{"MaxRetries":3,"RetryDelays":[15,60,300]}""" });
+
+        // A user metadata key that ends in the same word — the quoted token must not match it.
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Scheduled, CreateTime = now, ScheduleTime = now.AddMinutes(1), Queue = "default", Metadata = """{"LastRetriedTimes":4}""" });
+
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Scheduled, CreateTime = now, ScheduleTime = now.AddMinutes(1), Queue = "default", Metadata = null });
+
+        // Settled: retried in the past, but no longer waiting on an attempt.
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Failed, CreateTime = now, ScheduleTime = now, Queue = "default", Metadata = """{"RetriedTimes":3}""" });
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Completed, CreateTime = now, ScheduleTime = now, Queue = "default", Metadata = """{"RetriedTimes":1}""" });
+
+        // Messages are routed, not executed — the jobs listing is Kind=Job only.
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Message, CurrentState = State.Scheduled, CreateTime = now, ScheduleTime = now.AddMinutes(1), Queue = "default", Metadata = """{"RetriedTimes":1}""" });
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var result = await svc.GetRetryingJobs(new BaseListRequest { Page = 0, PageSize = 20 });
+
+        result.TotalCount.ShouldBe(2);
+        result.Items.Select(x => x.Id).ShouldBe([retryingScheduled, retryingEnqueued], ignoreOrder: true);
+    }
+
+    [TimedFact]
+    public async Task GetRetryingJobs_ProjectsRetryCountWithoutLeakingMetadata()
+    {
+        var ctx = _fixture.CreateContext();
+        var now = DateTime.UtcNow;
+
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Scheduled,
+            CreateTime = now,
+            ScheduleTime = now.AddMinutes(1),
+            Queue = "default",
+
+            // ConcurrencyKey is the §1.2 case: it rides the same dictionary and must not reach the model.
+            Metadata = """{"ConcurrencyKey":"tenant-42","MaxRetries":5,"RetriedTimes":2}""",
+        });
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var result = await svc.GetRetryingJobs(new BaseListRequest { Page = 0, PageSize = 20 });
+
+        var job = result.Items.ShouldHaveSingleItem();
+        job.RetryCount.ShouldBe(2);
+        job.Message.ShouldBeNull();
+    }
+
+    /// <summary>
+    /// The badge count must agree with the listing exactly — they share one filter precisely so a
+    /// future change cannot move the list without moving the number beside it.
+    /// </summary>
+    [TimedFact]
+    public async Task CountRetryingJobs_MatchesTheListing()
+    {
+        var ctx = _fixture.CreateContext();
+        var now = DateTime.UtcNow;
+
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Scheduled, CreateTime = now, ScheduleTime = now.AddMinutes(1), Queue = "default", Metadata = """{"RetriedTimes":1}""" });
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Enqueued, CreateTime = now, ScheduleTime = now, Queue = "default", Metadata = """{"RetriedTimes":4}""" });
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Scheduled, CreateTime = now, ScheduleTime = now.AddMinutes(1), Queue = "default", Metadata = """{"MaxRetries":3}""" });
+        ctx.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Failed, CreateTime = now, ScheduleTime = now, Queue = "default", Metadata = """{"RetriedTimes":3}""" });
+
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new JobQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var count = await svc.CountRetryingJobs();
+
+        count.ShouldBe(2);
+    }
 }

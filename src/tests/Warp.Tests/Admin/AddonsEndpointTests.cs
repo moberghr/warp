@@ -20,7 +20,8 @@ namespace Warp.Tests.Admin;
 public class AddonsEndpointTests
 {
     private static async Task<(WebApplication App, HttpClient Client)> CreateApp(
-        Action<IServiceCollection>? configureServices = null)
+        Action<IServiceCollection>? configureServices = null,
+        Action<WarpDashboardOptions>? configureDashboard = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -32,7 +33,9 @@ public class AddonsEndpointTests
         configureServices?.Invoke(builder.Services);
 
         var app = builder.Build();
-        app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);
+        var dashboardOptions = new WarpDashboardOptions();
+        configureDashboard?.Invoke(dashboardOptions);
+        app.MapWarpApiEndpoints(dashboardOptions, []);
 
         await app.StartAsync(CancellationToken.None);
         return (app, app.GetTestClient());
@@ -159,6 +162,63 @@ public class AddonsEndpointTests
             info.RateLimits.ShouldBe(rateLimits);
             info.Push.ShouldBe(push);
             info.Sagas.ShouldBe(sagas);
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Retry is the one flag with no marker behind it: retrying jobs are read out of <c>Job.Metadata</c>,
+    /// which any dashboard can do. So it reports true with nothing registered, unlike every other flag.
+    /// </summary>
+    [TimedFact]
+    public async Task GetAddons_NoDeclaration_RetryDefaultsTrue()
+    {
+        var (app, client) = await CreateApp();
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+            info!.Retry.ShouldBeTrue();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// The point of the declaration: a dashboard-only host holds none of the addons, so marker detection
+    /// hides pages over data that is in the database. An explicit <c>ShowX()</c> outranks the marker.
+    /// </summary>
+    [TimedFact]
+    public async Task GetAddons_HostDeclaresSurfaces_OverridesMarkerDetection()
+    {
+        var (app, client) = await CreateApp(configureDashboard: o => o
+            .ShowRetries(false)
+            .ShowAdapters());
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+
+            // Declared off despite defaulting on.
+            info!.Retry.ShouldBeFalse();
+
+            // Declared on despite no IAdapterRecordingMarker here. Safe because AddWarp registers
+            // IAdapterQueryService, so /api/adapters* serves data in a dashboard-only host.
+            info.Adapters.ShouldBeTrue();
+
+            // Undeclared surfaces keep auto-detecting, so nothing changes for hosts that never call ShowX().
+            info.Sagas.ShouldBeFalse();
+            info.Concurrency.ShouldBeFalse();
+            info.Endpoints.ShouldBeFalse();
         }
         finally
         {

@@ -29,6 +29,14 @@ export function formatDateTimeExact(dateString: string): string {
   return DateTime.fromJSDate(new Date(dateString)).toFormat('yyyy-MM-dd HH:mm:ss.SSS');
 }
 
+// Second precision — the default for every surface. Milliseconds are three digits of noise in a
+// table column: they widen it, they compete with the relative label beside them, and nobody scans a
+// list by fractions of a second. The full instant stays one hover away (see RelativeTime), so the
+// precision is not lost, just not spent on the default read.
+export function formatDateTimeSecond(dateString: string): string {
+  return DateTime.fromJSDate(new Date(dateString)).toFormat('yyyy-MM-dd HH:mm:ss');
+}
+
 // Minute precision for cron-derived instants (recurring next/last execution, firing
 // history): a cron occurrence is only ever minute-aligned, so seconds and milliseconds
 // are noise on those surfaces. Job/log timestamps keep the exact formatter.
@@ -36,12 +44,16 @@ export function formatDateTimeMinute(dateString: string): string {
   return DateTime.fromJSDate(new Date(dateString)).toFormat('yyyy-MM-dd HH:mm');
 }
 
-export type TimePrecision = 'exact' | 'minute';
+export type TimePrecision = 'exact' | 'second' | 'minute';
 
 // The absolute half of a timestamp, at whichever precision the surface asked for. Lives here rather
 // than in RelativeTime so that component file only exports components (fast-refresh rule).
-export function absoluteLabel(dateString: string, precision: TimePrecision = 'exact'): string {
-  return precision === 'minute' ? formatDateTimeMinute(dateString) : formatDateTimeExact(dateString);
+export function absoluteLabel(dateString: string, precision: TimePrecision = 'second'): string {
+  if (precision === 'minute') {
+    return formatDateTimeMinute(dateString);
+  }
+
+  return precision === 'exact' ? formatDateTimeExact(dateString) : formatDateTimeSecond(dateString);
 }
 
 export function shortType(fullType: string | null | undefined): string {

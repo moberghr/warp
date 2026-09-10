@@ -768,6 +768,20 @@ export const scheduledJobs = Array.from({ length: 12 }, (_, i) =>
   makeJob(i, State.Enqueued, 120 + i * 30, true),
 );
 
+// Retrying is a filter over Scheduled + Enqueued, so these are deliberately drawn from the same
+// pool as scheduledJobs — in the real dashboard the identical rows appear on both tabs.
+export const retryingJobs: JobModel[] = Array.from({ length: 7 }, (_, i) => {
+  const retryCount = (i % 3) + 1;
+
+  return {
+    ...makeJob(i + 40, State.Scheduled, 45 + i * 30, true),
+    retryCount,
+    // Next attempt follows the default retry schedule [15, 60, 300] seconds — makeJob's
+    // scheduled-job offset is hours out, which would read as a delayed publish, not a backoff.
+    scheduleTime: future([15, 60, 300][retryCount - 1] + i * 7),
+  };
+});
+
 export const completedJobs: JobModel[] = [
   {
     ...makeJob(0, State.Completed, 180),

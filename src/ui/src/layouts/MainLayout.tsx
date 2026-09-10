@@ -21,6 +21,7 @@ import { startRealtimeFeed, stopRealtimeFeed } from '@/lib/realtimeFeed';
 import { config } from '@/config';
 import { Hint } from '@/components/ui/tooltip';
 import * as api from '@/api';
+import { useRetryingJobsCount } from '@/api/hooks/useJobs';
 import type { DashboardStatistics, WarpAddonsInfo } from '@/types';
 import type { ExtensionManifest } from '@/extensions/types';
 import {
@@ -474,7 +475,17 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
       )}
 
       <div className="flex flex-1">
-        {isJobsSection && <JobsSidebar stats={stats} />}
+        {isJobsSection && (
+          <JobsSidebar
+            stats={stats}
+            showRetrying={addons?.retry ?? true}
+            // Separate from showRetrying on purpose: the tab renders optimistically before the addons
+            // probe lands (so it does not flicker in), but the backlog scan behind its badge must not
+            // fire until we know the host actually wants it — otherwise a host that called
+            // ShowRetries(false) still pays for one scan on every /jobs/* load.
+            countReady={addons !== null}
+          />
+        )}
         {isBatchesSection && <BatchesSidebar stats={stats} />}
         {isMessagesSection && <MessagesSidebar stats={stats} />}
 
@@ -712,9 +723,22 @@ function RealtimeStatusIndicator({ status }: { status: ReturnType<typeof useReal
   );
 }
 
-function JobsSidebar({ stats }: { stats: DashboardStatistics | null }) {
+function JobsSidebar({
+  stats,
+  showRetrying,
+  countReady,
+}: {
+  stats: DashboardStatistics | null;
+  showRetrying: boolean;
+  countReady: boolean;
+}) {
   const location = useLocation();
   const navigate = useNavigate();
+
+  // Not just hidden — the count query is skipped too, so a host that turned the tab off never pays
+  // for the metadata scan behind it (docs/perf-results.md). Gated on countReady as well, or the
+  // optimistic render would fire that scan once before the addons probe answers.
+  const retrying = useRetryingJobsCount(showRetrying && countReady);
 
   const sidebarItems = [
     { to: '/jobs/enqueued', label: 'Enqueued', count: stats?.created ?? 0, color: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300' },
@@ -726,38 +750,59 @@ function JobsSidebar({ stats }: { stats: DashboardStatistics | null }) {
     { to: '/jobs/deleted', label: 'Deleted', count: stats?.deleted ?? 0, color: 'bg-gray-100 text-gray-700 dark:bg-gray-900 dark:text-gray-300' },
   ];
 
+  // Retrying is a FILTER over Scheduled + Enqueued, not a state — a job waiting on its next attempt
+  // is listed here AND on the state page it actually sits in, so these counts deliberately do not
+  // sum to the total. Rendered below a separator to signal that, rather than as a seventh state.
+  //
+  // Gated on the `retry` addon flag, which is an explicit host declaration
+  // (AddWarpDashboard().ShowRetries(false)) rather than DI-marker detection — a marker would describe
+  // this process's container, and a dashboard-only host would hide a tab whose rows are in the
+  // database. Defaults true, so the tab is visible until a host says it never retries.
+  const retryingItem = {
+    to: '/jobs/retrying',
+    label: 'Retrying',
+    count: retrying.data ?? 0,
+    color: 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300',
+  };
+
+  const renderItem = (item: { to: string; label: string; count: number; color: string }) => {
+    const isActive = location.pathname === item.to;
+
+    return (
+      <Link
+        key={item.to}
+        to={item.to}
+        onClick={(e) => {
+          if (isActive) {
+            e.preventDefault();
+            navigate(item.to, { replace: true, state: { refreshKey: Date.now() } });
+          }
+        }}
+        className={`flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors ${
+          isActive
+            ? 'bg-accent text-accent-foreground font-medium'
+            : 'text-muted-foreground hover:bg-accent/50'
+        }`}
+      >
+        <span>{item.label}</span>
+        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+          item.count > 0 ? item.color : 'text-muted-foreground/50'
+        }`}>
+          {item.count}
+        </span>
+      </Link>
+    );
+  };
+
   return (
     <aside className="hidden md:block w-64 shrink-0 border-r bg-card min-h-[calc(100vh-3.5rem)] p-4">
       <h3 className="text-xs font-semibold text-muted-foreground uppercase mb-3">Jobs</h3>
-      <nav className="space-y-1">
-        {sidebarItems.map((item) => {
-          const isActive = location.pathname === item.to;
-          return (
-            <Link
-              key={item.to}
-              to={item.to}
-              onClick={(e) => {
-                if (isActive) {
-                  e.preventDefault();
-                  navigate(item.to, { replace: true, state: { refreshKey: Date.now() } });
-                }
-              }}
-              className={`flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors ${
-                isActive
-                  ? 'bg-accent text-accent-foreground font-medium'
-                  : 'text-muted-foreground hover:bg-accent/50'
-              }`}
-            >
-              <span>{item.label}</span>
-              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                item.count > 0 ? item.color : 'text-muted-foreground/50'
-              }`}>
-                {item.count}
-              </span>
-            </Link>
-          );
-        })}
-      </nav>
+      <nav className="space-y-1">{sidebarItems.map(renderItem)}</nav>
+      {showRetrying && (
+        <nav className="space-y-1 mt-2 pt-2 border-t" title="Filtered view — these jobs are also listed under Scheduled or Enqueued">
+          {renderItem(retryingItem)}
+        </nav>
+      )}
     </aside>
   );
 }

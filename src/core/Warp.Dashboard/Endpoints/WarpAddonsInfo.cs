@@ -4,6 +4,13 @@ namespace Warp.Dashboard.Endpoints;
 // 200 round-trip instead of probing each per-addon route and treating the 404 as the signal.
 public sealed class WarpAddonsInfo
 {
+    /// <summary>
+    /// The Jobs section's Retrying tab. The only flag here with no DI marker behind it: retrying jobs are
+    /// read out of <c>Job.Metadata</c>, which any dashboard can do whether or not <c>AddRetry()</c> ran in
+    /// this process. Defaults true; turned off with <c>MapWarpDashboard(o =&gt; o.ShowRetries(false))</c>.
+    /// </summary>
+    public bool Retry { get; init; }
+
     public bool Concurrency { get; init; }
 
     public bool Push { get; init; }

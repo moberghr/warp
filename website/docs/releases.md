@@ -4,6 +4,49 @@ sidebar_position: 6
 
 # Releases
 
+## Unreleased
+
+Dashboard-only release, **no schema change and no migration**: a new Retrying view for jobs waiting on
+their next attempt, explicit host declarations for nav items the dashboard cannot infer, and one
+default change to how timestamps render.
+
+### Retrying jobs
+
+The Jobs section gains a **Retrying** entry — jobs whose last attempt threw and which are waiting to
+run again — with **Attempt** (`#3 (2 failed)`) and **Next attempt** columns.
+
+It is a filtered view, not a state. There is no `State.Retrying`: the retry pipeline reschedules into
+`Scheduled` (or `Enqueued` when the schedule is empty), so every job here is also listed under the
+state it actually sits in, and the sidebar counts deliberately do not sum to the job total. It is
+rendered under a separator to signal that.
+
+Shown by default; `app.MapWarpDashboard(o => o.ShowRetries(false))` turns it off. Nothing is added to
+the schema or the worker hot path — the view reads the retry counter already present in
+`Job.Metadata`. The cost of that read, and why no index ships with it, is recorded in
+`docs/perf-results.md`.
+
+### Declaring nav items the dashboard cannot infer
+
+Nav items have been shown when the matching addon is registered *in the dashboard's own process*.
+That inference is wrong for a dashboard-only host (`AddWarp` + a provider, no `AddWarpServer`), where
+the addons live in the worker processes: pages were hidden over data that exists in the database.
+
+`MapWarpDashboard` now takes explicit declarations — `ShowAdapters()`, `ShowEndpoints()`,
+`ShowClient()`, `ShowSlo()`, `ShowRetries()` — each of which outranks detection. They sit on the same
+options object as `ConfigureMenu` from 6.2: that one decides *where* a nav item sits, these decide
+*whether* it exists. **Without a declaration nothing changes**, so no existing host is affected.
+
+There is deliberately no `ShowSagas`, `ShowConcurrency` or `ShowRateLimits`: for those three the
+probed service *is* the page's query service, registered only by the addon, so forcing the nav item on
+would produce a page whose every request answers 404.
+
+### Timestamps render to the second, not the millisecond
+
+`2026-05-25 12:59:15 (45 seconds ago)` instead of `2026-05-25 12:59:15.000 (…)`, in **every** list and
+detail surface. Milliseconds were three digits of noise in a column nobody scans by fractions of a
+second; the full instant is now on hover, so no precision is lost. Cron-derived surfaces (recurring
+next/last run) keep their minute precision. This is a display default only — no API or data change.
+
 ## 6.1.2
 
 *2026-09-09*

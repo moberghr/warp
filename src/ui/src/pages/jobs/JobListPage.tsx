@@ -167,11 +167,30 @@ export default function JobListPage() {
           </span>
         ),
       },
-      ...(activeState === 'scheduled'
+      // Only the retrying listing computes retryCount — everywhere else it is null, which means
+      // "not computed", not "never retried", so the column is not offered there.
+      ...(activeState === 'retrying'
+        ? [
+            {
+              id: 'attempt',
+              header: 'Attempt',
+              cell: ({ row }) =>
+                row.original.retryCount == null ? (
+                  <span className="text-sm text-muted-foreground">—</span>
+                ) : (
+                  <span className="text-sm">
+                    #{row.original.retryCount + 1}
+                    <span className="text-muted-foreground"> ({row.original.retryCount} failed)</span>
+                  </span>
+                ),
+            } as ColumnDef<JobModel>,
+          ]
+        : []),
+      ...(activeState === 'scheduled' || activeState === 'retrying'
         ? [
             {
               id: 'scheduled',
-              header: 'Scheduled',
+              header: activeState === 'retrying' ? 'Next attempt' : 'Scheduled',
               cell: ({ row }) => (
                 <span className="text-sm text-muted-foreground">
                   <RelativeTime date={row.original.scheduleTime ?? row.original.createTime} />

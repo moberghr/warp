@@ -200,7 +200,7 @@ describe('clampPanelLeft', () => {
 
 describe('gateGroups', () => {
   const addons: WarpAddonsInfo = {
-    concurrency: false, rateLimits: false, push: false, sagas: false, adapters: false,
+    retry: false, concurrency: false, rateLimits: false, push: false, sagas: false, adapters: false,
     endpoints: false, client: false, webhooks: false, applications: false, slo: false,
   };
 

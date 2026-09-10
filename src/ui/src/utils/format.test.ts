@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   shortType, shortId, stateName, formatBytes, isServerStale,
-  formatRelativeTime, formatDateTime, formatDateTimeExact, formatDateTimeMinute, DASHBOARD_LOCALE,
+  formatRelativeTime, formatDateTime, formatDateTimeExact, formatDateTimeMinute, formatDateTimeSecond,
+  absoluteLabel, DASHBOARD_LOCALE,
   stateColor, serverStatusDotColor,
   httpStatusName,
 } from './format';
@@ -73,6 +74,18 @@ describe('date formatters', () => {
   it('formatDateTimeMinute drops seconds and milliseconds', () => {
     // Cron occurrences are minute-aligned, so the recurring surfaces render to the minute.
     expect(formatDateTimeMinute('2026-01-02T03:04:05.678Z')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+  });
+
+  it('formatDateTimeSecond drops milliseconds but keeps seconds', () => {
+    expect(formatDateTimeSecond('2026-01-02T03:04:05.678Z')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  it('absoluteLabel defaults to second precision', () => {
+    // The default drives every RelativeTime in the app, so a regression here silently puts
+    // milliseconds back into every table column.
+    expect(absoluteLabel('2026-01-02T03:04:05.678Z')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(absoluteLabel('2026-01-02T03:04:05.678Z', 'exact')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/);
+    expect(absoluteLabel('2026-01-02T03:04:05.678Z', 'minute')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
 
   it('formatRelativeTime is relative to the current clock', () => {

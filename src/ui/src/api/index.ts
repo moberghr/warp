@@ -83,6 +83,12 @@ export const getProcessingJobs = (page = 0, pageSize = 20) =>
 export const getScheduledJobs = (page = 0, pageSize = 20) =>
   api.get<PagedList<JobModel>>('/jobs/scheduled', { params: { page, pageSize } }).then(r => r.data);
 
+export const getRetryingJobs = (page = 0, pageSize = 20) =>
+  api.get<PagedList<JobModel>>('/jobs/retrying', { params: { page, pageSize } }).then(r => r.data);
+
+export const getRetryingJobsCount = () =>
+  api.get<number>('/jobs/retrying/count').then(r => r.data);
+
 export const getAwaitingJobs = (page = 0, pageSize = 20) =>
   api.get<PagedList<JobModel>>('/jobs/awaiting', { params: { page, pageSize } }).then(r => r.data);
 

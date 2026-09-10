@@ -2,6 +2,8 @@ using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Handlers;
+using Warp.Core.Logging;
 using Warp.Core.Models;
 
 namespace Warp.Core.Services;
@@ -11,6 +13,10 @@ public interface IJobQueryService
     Task<PagedList<JobModel>> GetJobsList(BaseListRequest request, State state, string? application = null);
 
     Task<PagedList<JobModel>> GetScheduledJobs(BaseListRequest request);
+
+    Task<PagedList<JobModel>> GetRetryingJobs(BaseListRequest request);
+
+    Task<int> CountRetryingJobs();
 
     Task<PagedList<JobModel>> GetJobStatesInProcess(BaseListRequest request);
 
@@ -42,6 +48,14 @@ public interface IJobQueryService
 public class JobQueryService<TContext> : IJobQueryService
     where TContext : DbContext
 {
+    /// <summary>
+    /// LIKE pattern matching a job that has spent at least one retry attempt. Quoted so a user-defined
+    /// metadata key that merely ENDS in the same word (<c>LastRetriedTimes</c>) cannot match, and built
+    /// from the pinned constant the worker already reads the key by, so the key name stays a single
+    /// contract rather than a second literal that could drift from it.
+    /// </summary>
+    private const string RetriedTimesPattern = "%\"" + WarpTelemetryAttributes.RetryMetadataRetriedTimesKey + "\"%";
+
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
 
@@ -63,6 +77,37 @@ public class JobQueryService<TContext> : IJobQueryService
             .ToPagedListAsync(request);
 
         return jobs;
+    }
+
+    /// <summary>
+    /// Jobs whose last attempt threw and which are waiting to run again.
+    /// </summary>
+    /// <remarks>
+    /// A FILTER over Scheduled + Enqueued, not a state of its own — <c>RetryPipelineBehavior</c>
+    /// reschedules into Scheduled (or Enqueued when <c>RetryDelays</c> is empty) and the same rows stay
+    /// listed on those pages, so these counts deliberately do not sum with the per-state ones.
+    /// </remarks>
+    public async Task<PagedList<JobModel>> GetRetryingJobs(BaseListRequest request)
+    {
+        var rows = await GetRetryingJobsQuery()
+            .ToPagedListAsync(request);
+
+        return new PagedList<JobModel>(rows.TotalCount, [.. rows.Items.ConvertAll(ToJobModel)], rows.PageCount);
+    }
+
+    /// <summary>
+    /// How many jobs are waiting on a retry, for the dashboard's sidebar badge.
+    /// </summary>
+    /// <remarks>
+    /// A dedicated count rather than reading <c>TotalCount</c> off a one-row page:
+    /// <c>ToPagedListAsync</c> issues its <c>CountAsync</c> AND the <c>Skip</c>/<c>Take</c> query, so
+    /// asking the list endpoint for a badge runs this scan twice and materialises a row that is thrown
+    /// away. Since the scan is the expensive part of the feature (docs/perf-results.md), the badge gets
+    /// its own single-scan path.
+    /// </remarks>
+    public async Task<int> CountRetryingJobs()
+    {
+        return await RetryingJobs().CountAsync();
     }
 
     public async Task<int> CountProcessingJobs()
@@ -465,6 +510,91 @@ public class JobQueryService<TContext> : IJobQueryService
     private static bool IsTerminalState(State state)
         => state is State.Completed or State.Failed or State.Deleted;
 
+    /// <summary>
+    /// The retrying-jobs filter, shared by the listing and the badge count so the two cannot diverge.
+    /// </summary>
+    private IQueryable<Job> RetryingJobs()
+    {
+        return Jobs()
+            .Where(x => x.CurrentState == State.Scheduled || x.CurrentState == State.Enqueued)
+            .Where(x => x.Metadata != null)
+            .Where(x => EF.Functions.Like(x.Metadata!, RetriedTimesPattern));
+    }
+
+    /// <summary>
+    /// The retrying-jobs query: live rows carrying a spent-attempt count, newest first.
+    /// </summary>
+    /// <remarks>
+    /// The PRESENCE of the <c>RetriedTimes</c> key is the exact test and no value comparison is needed:
+    /// <c>PolicyResolver.StampRetry</c> writes only <c>MaxRetries</c>/<c>RetryDelays</c>, the generated
+    /// metadata getter is a pure read (<c>TryGetValue ... : default!</c>, so reading never inserts), and
+    /// the single writer is <c>RetryPipelineBehavior</c>'s <c>meta.RetriedTimes = retriedTimes + 1</c> —
+    /// always >= 1. There is therefore no <c>"RetriedTimes":0</c> row to exclude.
+    /// <para>
+    /// Metadata is an open <c>Dictionary&lt;string, object&gt;</c> serialized into a text column, so this
+    /// is a substring match no index covers: ~24 ms warm / 160 ms cold against an 86k live backlog, and
+    /// the cost is set by the backlog size, NOT by how many jobs are actually retrying (the scan examines
+    /// every backlog row and discards non-matches). That is affordable only because the query is
+    /// triggered by navigation. Never wire this count into <c>DashboardStatsService.GetWarpStatus</c>,
+    /// and keep its client-side query key out of the <c>['jobs']</c> invalidation scope — either puts the
+    /// scan on a repeating trigger. See <c>docs/perf-results.md</c> (2026-09-10) for the numbers, the
+    /// rejected jsonb variant, and the partial-index escape hatch.
+    /// </para>
+    /// <para>
+    /// <c>EF.Functions.Like</c> rather than <c>string.Contains</c> so the emitted operator is LIKE on both
+    /// providers (Contains can translate to <c>strpos</c> on Npgsql), which is what that partial index
+    /// matches.
+    /// </para>
+    /// </remarks>
+    private IQueryable<RetryingJobRow> GetRetryingJobsQuery()
+    {
+        return OrderByCreateTimeDescending(RetryingJobs())
+            .Select(x =>
+                new RetryingJobRow
+                {
+                    Id = x.Id,
+                    CurrentState = x.CurrentState,
+                    CancellationMode = x.CancellationMode,
+                    HandlerType = x.HandlerType,
+                    CreateTime = x.CreateTime,
+                    Message = x.Message,
+                    ScheduleTime = x.ScheduleTime,
+                    Type = x.Type,
+                    Metadata = x.Metadata,
+                });
+    }
+
+    /// <summary>
+    /// Maps a paged row to the dashboard model, parsing the attempt count out of the metadata blob.
+    /// </summary>
+    /// <remarks>
+    /// Metadata is read here and never projected onto <see cref="JobModel"/> — it carries mutex and
+    /// rate-limit keys that must not reach the dashboard (§1.2). The raw dictionary entry is read through
+    /// the pinned key constant rather than <c>IRetryMetadata</c>, mirroring the worker, so the read path
+    /// takes no dependency on the Retry addon. Numbers come back from <c>MetadataSerializer</c> as long.
+    /// </remarks>
+    private static JobModel ToJobModel(RetryingJobRow row)
+    {
+        var metadata = MetadataSerializer.Deserialize(row.Metadata);
+        int? retryCount = metadata.TryGetValue(WarpTelemetryAttributes.RetryMetadataRetriedTimesKey, out var value)
+            && value is long retriedTimes
+                ? (int)retriedTimes
+                : null;
+
+        return new JobModel
+        {
+            Id = row.Id,
+            CurrentState = row.CurrentState,
+            CancellationMode = row.CancellationMode,
+            HandlerType = row.HandlerType,
+            CreateTime = row.CreateTime,
+            Message = row.Message,
+            ScheduleTime = row.ScheduleTime,
+            Type = row.Type,
+            RetryCount = retryCount,
+        };
+    }
+
     private IQueryable<JobModel> GetScheduledJobsQuery()
     {
         var jobs = Jobs().Where(x => x.CurrentState == State.Scheduled);
@@ -805,6 +935,32 @@ public class JobQueryService<TContext> : IJobQueryService
     }
 
     private readonly record struct KeyValueRow(string Key, long Value);
+
+    /// <summary>
+    /// Carries <c>Metadata</c> out of the paged query so the attempt count can be parsed in memory (one
+    /// page, 20 rows) instead of in SQL. Kept off <see cref="JobModel"/> deliberately: the raw blob holds
+    /// mutex and rate-limit keys that must never reach the dashboard (§1.2).
+    /// </summary>
+    private sealed class RetryingJobRow
+    {
+        public Guid Id { get; set; }
+
+        public State CurrentState { get; set; }
+
+        public CancellationMode CancellationMode { get; set; }
+
+        public string? HandlerType { get; set; }
+
+        public DateTime CreateTime { get; set; }
+
+        public string? Message { get; set; }
+
+        public DateTime ScheduleTime { get; set; }
+
+        public string? Type { get; set; }
+
+        public string? Metadata { get; set; }
+    }
 }
 
 // Terminal-state event types written by the worker on job finalization. Sourced from

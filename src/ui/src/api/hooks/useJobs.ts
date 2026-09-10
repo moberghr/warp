@@ -10,6 +10,7 @@ const stateEndpoints: Record<string, StateFetcher> = {
   enqueued: api.getEnqueuedJobs,
   processing: api.getProcessingJobs,
   scheduled: api.getScheduledJobs,
+  retrying: api.getRetryingJobs,
   completed: api.getCompletedJobs,
   failed: api.getFailedJobs,
   awaiting: api.getAwaitingJobs,
@@ -28,6 +29,27 @@ export function useJobsList(state: string, page: number, pageSize: number) {
       return fetcher(page, pageSize);
     },
     enabled: state in stateEndpoints,
+  });
+}
+
+/**
+ * Count for the Retrying sidebar badge, taken from the list endpoint's totalCount rather than from
+ * dashboard stats. Deliberate: the predicate is a metadata scan over the live backlog (~24ms warm,
+ * see docs/perf-results.md), and DashboardStatistics is refetched on a timer for every open
+ * dashboard. Here it rides the jobs section only — the sidebar renders under /jobs — with a long
+ * staleTime so switching tabs inside the section doesn't refire the scan.
+ */
+export function useRetryingJobsCount(enabled: boolean) {
+  return useQuery({
+    // Deliberately OUTSIDE the ['jobs'] scope. useRealtimeInvalidation invalidates that whole prefix
+    // on every JobFinalized event, and invalidateQueries refetches ACTIVE queries immediately,
+    // ignoring staleTime — this query is active on every /jobs/* page, so a ['jobs', ...] key would
+    // fire the backlog scan on every completion (~10/sec under push's 100ms coalesce window). That is
+    // the same mistake as putting it on the dashboard poll, only worse.
+    queryKey: queryKeys.retryingJobsCount,
+    queryFn: () => api.getRetryingJobsCount(),
+    staleTime: 30_000,
+    enabled,
   });
 }
 

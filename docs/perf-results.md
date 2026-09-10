@@ -245,3 +245,151 @@ The more idle gaps your workload has, the bigger the push advantage. This two-bu
   everything, so the two sections aren't apples-to-apples on raw counts.
 - The `EmptyRequest` handler is a no-op — real handlers that do their own DB work will shift the ratios.
 - Tested on PostgreSQL only. SQL Server Service Broker has different overhead characteristics; rerun against SQL Server to get comparable numbers.
+
+---
+
+## Retrying-jobs listing: why there is no index (PostgreSQL, 2026-09-10)
+
+The dashboard's **Retrying** tab (`/jobs/retrying`) lists jobs whose last attempt threw and which are
+waiting to run again. There is no `State.Retrying` — the retry pipeline reschedules into
+`Scheduled`/`Enqueued` and bumps `RetriedTimes` in `Job.Metadata` — so the predicate is:
+
+```sql
+kind = 1 AND current_state IN (1, 7) AND metadata LIKE '%"RetriedTimes"%'
+```
+
+`Metadata` is an unbounded `text` column holding an open `Dictionary<string, object>`, so the match is
+a substring test that no index covers. This section records what that actually costs, and why the
+answer is **ship it without an index**.
+
+### Why the presence test is exact
+
+The generated metadata getter is a pure read (`WarpMetadataGenerator`: `TryGetValue(...) ? ... : default!`),
+and `PolicyResolver.StampRetry` writes only `MaxRetries`/`RetryDelays`. The sole writer of
+`RetriedTimes` is `RetryPipelineBehavior` (`meta.RetriedTimes = retriedTimes + 1`), always ≥ 1. So the
+key is present **iff the job has actually been retried** — there are no `"RetriedTimes":0` rows to
+exclude, and the token match needs no value comparison.
+
+### Method
+
+500,000 `job` rows, real column set, all six production indexes, `VACUUM ANALYZE` before each
+measurement, `EXPLAIN (ANALYZE, BUFFERS)`, warm unless stated. The metadata mix puts ~53% of rows on
+`MaxRetries`/`RetryDelays` **without** `RetriedTimes`, so the match does real discriminating work.
+`parent_job_id` is populated on 20% of rows — the 2026-08-07 seed trap above.
+
+### Correction to the first measurement
+
+The first seed assigned `current_state` independently of `create_time` and inserted with
+`ORDER BY random()`. That scatters the live backlog across **28,655 heap blocks**. A real job table is
+append-mostly — the backlog is the recent tail — which puts the same rows in **7,553 blocks**. The
+scattered seed overstated the scan by **3.6× on buffers and ~40% on time** (38.7 ms → 24.4 ms). The
+numbers below use the age-correlated seed. Truth sits between the two: a fresh table starts near the
+clustered case and drifts toward the scattered one as update churn and vacuum-reused space accumulate.
+
+### Results (age-correlated seed, 500k rows)
+
+| | backlog 86,199 | backlog 7,787 |
+|---|---:|---:|
+| `LIKE`, no index — COUNT | 24.4 ms / 7,911 buf | 6.6 ms / 1,351 buf |
+| `LIKE`, no index — LIST (page of 20) | 32.1 ms / 7,914 buf | 9.9 ms / 1,354 buf |
+| *cold* (`shared_buffers` cleared) — COUNT | **160.3 ms** / 7,754 read | — |
+| partial index — COUNT | 1.32 ms / 26 buf | 0.13 ms |
+| partial index — LIST | 0.12 ms / 14 buf | 0.07 ms |
+| partial index size | 216 kB | 40 kB |
+
+For scale, the existing **Scheduled** tab (same page size, no metadata predicate) is 0.08 ms / 23 buffers.
+
+**Scan cost is independent of how many jobs are retrying.** The bitmap heap scan examines the whole
+live backlog and discards non-matches (`Rows Removed by Filter: 80,134`). The retrying fraction sets
+the *index's* size, not the *scan's* cost — which is why this result is robust to the seed's 7% guess.
+The deciding variable is the **live backlog** (`Enqueued` + `Scheduled`), the same quantity that drives
+the `(CurrentState, ScheduleTime)` index above.
+
+### Why no index ships
+
+24 ms warm / 160 ms cold, on a query a human triggers by clicking a tab, does not justify:
+
+- a schema migration and the §5.12 storage-ownership machinery;
+- `HasFilter` being raw provider SQL, so the index cannot live in `Warp.Core` (§5.1/§1.6) and would
+  need provider-package or `EntityConfigurators` plumbing;
+- **+8% bulk-insert cost** per partial index (measured: 20k-row inserts, alternating rounds);
+- and above all, it does not port: **SQL Server filtered indexes do not permit `LIKE`** in the
+  predicate. The design would be indexed on one provider and a scan on the other, against §4.2.
+
+Quoting the ratio against the 0.08 ms Scheduled tab ("500× slower") is the misleading framing — the
+baseline is the cheapest query in the dashboard, and ratios against tiny numbers inflate. The absolute
+cost is what matters, and per §6.6 the measurement says don't optimize.
+
+**The one rule that does matter: never put this scan on a repeating trigger.** `GetWarpStatus` runs
+every few seconds for every open dashboard whether or not anyone is on the Jobs page. 24 ms on a timer
+is pointless load and keeps ~7,900 heap pages resident, competing with the worker's working set. The
+badge therefore reads `PagedList.TotalCount` from the list endpoint (`?pageSize=1`) on the Jobs
+section only, with a 30s `staleTime`.
+
+Traps found in review, all of which reintroduce the timer in a less obvious form:
+
+- **A paged request costs *two* scans, not one.** `ToPagedListAsync` issues its `CountAsync` and then
+  the `Skip`/`Take` query, and both need the full filter (the `ORDER BY CreateTime DESC` prevents any
+  short-circuit). So the budget above is **per scan**; a page load is ~2×. The badge therefore has its
+  own count-only route (`GET {prefix}/api/jobs/retrying/count` → `CountRetryingJobs`) rather than
+  reading `TotalCount` off a one-row page, which would have cost two scans plus a materialised row
+  that is thrown away. Both paths share one `RetryingJobs()` filter so they cannot diverge.
+- **The badge must not fire before `/api/addons` answers.** `addons` starts null, so a
+  `?? true` fallback on the *query* would run one scan on the first `/jobs/*` render even for a host
+  that called `ShowRetries(false)`. The tab still renders optimistically (no flicker); only the query
+  waits for the declaration.
+- **Its React Query key must stay outside the `['jobs']` scope.** `useRealtimeInvalidation`
+  invalidates that whole prefix on every `JobFinalized` event, and `invalidateQueries` refetches
+  *active* queries immediately, ignoring `staleTime`. Since the badge is active on every `/jobs/*`
+  page, a `['jobs', …]` key would fire the scan on every job completion — roughly 10×/sec under
+  DashboardPush's 100 ms coalesce window, which is strictly worse than the poll this rule forbids.
+
+### Escape hatch for a very large backlog
+
+Not shipped, but this is the fix if a deployment's backlog makes the tab slow. Postgres only,
+applied by the operator — no rewrite, no exclusive lock:
+
+```sql
+CREATE INDEX CONCURRENTLY job_retrying
+  ON warp.job (kind, create_time DESC)
+  WHERE metadata LIKE '%"RetriedTimes"%' AND current_state IN (1, 7);
+```
+
+Postgres matches that partial predicate against the identical `LIKE` in the query. The count then runs
+**index-only, zero heap fetches**; the list stops after 20 index entries. Column and schema names
+follow the host's naming convention.
+
+Two things make that match work, and both were verified rather than assumed:
+
+- `GetRetryingJobsQuery` uses **`EF.Functions.Like`, not `string.Contains`** — Npgsql can translate
+  `Contains` to `strpos(...) > 0`, which the planner cannot prove implies the index's `LIKE` predicate,
+  so the index would be silently ignored.
+- EF passes the pattern as a **parameter**, not a literal. Measured over seven executions (past the
+  point where Postgres switches from custom to generic plans): the partial index is chosen every time.
+
+### jsonb was measured and is worse
+
+Retyping the column to `jsonb` with a composite GIN (`btree_gin` over `kind, current_state,
+metadata_jsonb`) does push the `?` key-exists operator into the index cond — but lands at **13.0 ms
+COUNT / 14.0 ms LIST**, ~100× worse than the partial B-tree on the existing `text` column. Two
+structural reasons: GIN cannot supply ordering (so the list fetches every match and top-N sorts), and
+GIN cannot do index-only scans (so every match is a heap fetch). The partial B-tree wins because the
+selectivity is baked into the index *predicate* and B-tree gives `create_time DESC` for free.
+
+Two traps worth recording:
+
+- **`jsonb_path_ops` does not support `?`.** A GIN index built with it silently degrades to a heap
+  filter — the plan still says "Bitmap Index Scan" while `Rows Removed by Filter` stays in the tens of
+  thousands. Use the default `jsonb_ops` for key-existence.
+- **The migration is not additive.** `ALTER COLUMN metadata TYPE jsonb USING metadata::jsonb` took
+  **3.05 s on 580k rows** under `ACCESS EXCLUSIVE` — a full table-and-index rewrite on the busiest
+  table, scaling to ~a minute at 10M jobs, and it hard-fails on any row that is not valid JSON.
+
+### Caveats
+
+- PostgreSQL 18 only. SQL Server is unmeasured; see the filtered-index note above.
+- Warm numbers throughout except the one cold row. "Cold" cleared `shared_buffers` only — the host
+  page cache still held the file, so 160 ms is the optimistic cold figure.
+- Rows average 520 B (~12 rows/block), driven by the `message` payload. Deployments with smaller
+  payloads get a denser heap and a proportionally cheaper scan; this lever was reasoned about, not
+  measured.
