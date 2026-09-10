@@ -77,6 +77,15 @@ export const queryKeys = {
 // list's 10s because a page renders one detail read per application.
 export const INSTANCE_ROSTER_POLL_MS = 15_000;
 
+// A page rendering a countdown needs a live data source, not just a live label. The cross-zero
+// signal (lib/dueSignal) fires once, ~1s after the instant — before ScheduledActivationInterval
+// (10s) or the recurring scheduler has moved anything — and the recurring and webhook surfaces have
+// no other refresh at all: no hub event touches their scopes and neither uses useRealtimeRefetch's
+// safety net. Without this poll a healthy hourly cron reads "overdue by 20 minutes" and keeps
+// counting, which is precisely the stopped-scheduler accusation the label is meant to reserve for a
+// real fault. Only the surfaces that carry a countdown pay for it.
+export const COUNTDOWN_POLL_MS = 15_000;
+
 export const queryScopes = {
   jobs: ['jobs'] as const,
   messages: ['messages'] as const,

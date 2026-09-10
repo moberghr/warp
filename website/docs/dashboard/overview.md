@@ -144,10 +144,14 @@ count down instead:
   path, not a fault: a scheduled job becomes eligible on the `ScheduledJobActivation` cadence
   (10 seconds by default) and then waits for a worker to claim it. The label deliberately does not
   flip to "3 seconds ago", which would read as a run that already happened.
-- **`overdue by 5 minutes`** — past due by more than 30 seconds, which usually means something is
-  not running: a stopped server, a drained worker pool, a paused queue.
+- **`overdue by 5 minutes`** — past due by more than a minute, which usually means something is
+  not running: a stopped server, a drained worker pool, a paused queue. The grace covers the
+  worst-case healthy latency — up to `ScheduledActivationInterval` (10s) to be activated, plus up to
+  `MaxPollingInterval` (30s) for a peer server's worker to poll when push is off — so it is quiet
+  while a working deployment catches up.
 
-When a countdown reaches zero the page refetches, so the row moves to its new state on its own.
+Pages carrying a countdown refresh every 15 seconds, and a countdown reaching zero refetches
+immediately, so the row moves to its new state on its own rather than sitting at `due now`.
 
 :::note
 Relative labels are computed from the **browser's** clock. A workstation whose clock is minutes off

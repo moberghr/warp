@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { RelativeTime } from '@/components/RelativeTime';
+import { COUNTDOWN_POLL_MS } from '@/lib/queryClient';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { WebhookDeliveryStatus, WebhookSigning } from '@/types/webhooks';
@@ -19,6 +20,7 @@ export default function WebhookDetailPage() {
     queryKey: ['webhooks', 'detail', id] as const,
     queryFn: () => api.getWebhookDetail(id!),
     enabled: !!id,
+    refetchInterval: COUNTDOWN_POLL_MS,
   });
 
   const notFound =

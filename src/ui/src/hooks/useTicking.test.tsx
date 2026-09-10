@@ -3,6 +3,7 @@ import { act, renderHook } from '@testing-library/react';
 import { useCountdownLabel, useHeartbeatStale, useRelativeLabel, useServerStatusDotColor, useTickingValue } from './useTicking';
 import { resetClockTickForTests } from '@/lib/clockTick';
 import { resetDueSignalForTests, subscribeDue, DUE_SIGNAL_COALESCE_MS } from '@/lib/dueSignal';
+import { DUE_GRACE_MS } from '@/utils/format';
 
 const NOW = '2026-05-25T11:00:00Z';
 
@@ -65,6 +66,23 @@ describe('useTicking', () => {
     act(() => vi.advanceTimersByTime(DUE_SIGNAL_COALESCE_MS));
 
     expect(onDue).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again when the grace runs out, before the label calls the row overdue', () => {
+    const onDue = vi.fn();
+    subscribeDue(onDue);
+    renderHook(() => useCountdownLabel('2026-05-25T11:00:03Z'));
+
+    act(() => vi.advanceTimersByTime(4_000));
+    act(() => vi.advanceTimersByTime(DUE_SIGNAL_COALESCE_MS));
+    expect(onDue).toHaveBeenCalledTimes(1);
+
+    // due → overdue: the first refetch landed a second after the instant, before the server had its
+    // activation interval to act, so this is the one worth re-reading.
+    act(() => vi.advanceTimersByTime(DUE_GRACE_MS));
+    act(() => vi.advanceTimersByTime(DUE_SIGNAL_COALESCE_MS));
+
+    expect(onDue).toHaveBeenCalledTimes(2);
   });
 
   it('does not refetch for a row that was already due when it mounted', () => {

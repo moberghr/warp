@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as api from '@/api';
-import { queryKeys, queryScopes } from '@/lib/queryClient';
+import { COUNTDOWN_POLL_MS, queryKeys, queryScopes } from '@/lib/queryClient';
 
 export function useRecurringList(page: number, pageSize: number) {
   return useQuery({
     queryKey: queryKeys.recurring(page, pageSize),
     queryFn: () => api.getRecurringJobs(page, pageSize),
+    refetchInterval: COUNTDOWN_POLL_MS,
   });
 }
 
@@ -15,6 +16,7 @@ export function useRecurringDetail(name: string | undefined) {
     queryKey: queryKeys.recurringDetail(name ?? ''),
     queryFn: () => api.getRecurringJob(name!),
     enabled: !!name,
+    refetchInterval: COUNTDOWN_POLL_MS,
   });
 }
 

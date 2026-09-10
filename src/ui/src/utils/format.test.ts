@@ -228,8 +228,18 @@ describe('countdown labels', () => {
   });
 
   it('calls out a real overrun once the grace is spent', () => {
-    expect(formatCountdown(at(-DUE_GRACE_MS), base)).toBe('overdue by 30 seconds');
+    expect(formatCountdown(at(-DUE_GRACE_MS), base)).toBe('overdue by 1 minute');
     expect(formatCountdown(at(-5 * 60_000), base)).toBe('overdue by 5 minutes');
+  });
+
+  it('covers the worst-case healthy latency before crying overdue', () => {
+    // ScheduledActivationInterval (10s) + a peer worker's MaxPollingInterval backoff (30s).
+    expect(formatCountdown(at(-40_000), base)).toBe('due now');
+  });
+
+  it('degrades to empty on an unparseable timestamp instead of rendering NaN', () => {
+    expect(formatCountdown('not-a-timestamp', base)).toBe('');
+    expect(countdownPhase('not-a-timestamp', base)).toBe('future');
   });
 
   it('exposes the same three phases the cross-zero refetch keys on', () => {

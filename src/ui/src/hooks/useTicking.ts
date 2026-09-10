@@ -45,9 +45,13 @@ export function useCountdownLabel(dateString: string): string {
   const previousPhase = useRef<CountdownPhase | null>(null);
 
   useEffect(() => {
-    // Null on mount, so a row that was already due when the page loaded does not ask for a refetch
-    // of data it just fetched.
-    if (previousPhase.current === 'future' && phase !== 'future') {
+    // Both transitions ask, not just the first: the refetch at zero lands ~1s in, before the server
+    // has had its ScheduledActivationInterval to act, so the row that is still counting when the
+    // grace runs out is exactly the one worth re-reading before calling it overdue. Never on mount
+    // (previousPhase is null), so a row already due when the page loaded does not ask for a refetch
+    // of data it just fetched. Convergence past that belongs to the pages' own poll
+    // (COUNTDOWN_POLL_MS), not to a label re-arming itself.
+    if (previousPhase.current !== null && previousPhase.current !== phase && phase !== 'future') {
       signalDue();
     }
 

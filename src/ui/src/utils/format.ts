@@ -24,17 +24,22 @@ export function formatRelativeTime(dateString: string, now: number = Date.now())
     .toRelative({ base: DateTime.fromMillis(now), locale: DASHBOARD_LOCALE }) ?? '';
 }
 
-// How far past its instant a pending row may sit before the label stops saying "due now". A scheduled
-// job becomes eligible on ScheduledJobActivation's cadence (10s by default) and then waits for a
-// worker to claim it, so a few seconds past due is the normal path, not a symptom.
-export const DUE_GRACE_MS = 30_000;
+// How far past its instant a pending row may sit before the label stops saying "due now" — and it
+// has to cover the worst-case HEALTHY latency, or "overdue" accuses a working deployment. A
+// scheduled job waits up to ScheduledActivationInterval (10s) to be flipped to Enqueued, and then,
+// on a multi-server deployment without UseDatabasePush(), up to MaxPollingInterval (30s) for a peer
+// server's worker backoff — the activating server's own workers get the in-process JobEnqueued
+// signal, its peers do not. 40s of normal, so 30s was too tight.
+export const DUE_GRACE_MS = 60_000;
 
 export type CountdownPhase = 'future' | 'due' | 'overdue';
 
 export function countdownPhase(dateString: string, now: number = Date.now()): CountdownPhase {
   const delta = new Date(dateString).getTime() - now;
 
-  if (delta >= 1_000) {
+  // An unparseable timestamp reads as 'future' so it neither claims to be overdue nor asks the page
+  // to refetch; formatCountdown renders it as empty, the way Luxon degrades for the same input.
+  if (Number.isNaN(delta) || delta >= 1_000) {
     return 'future';
   }
 
@@ -72,6 +77,10 @@ export function formatDurationRough(ms: number): string {
 // actually wrong (a stopped scheduler, a drained worker pool) instead of quietly claiming a run.
 export function formatCountdown(dateString: string, now: number = Date.now()): string {
   const delta = new Date(dateString).getTime() - now;
+
+  if (Number.isNaN(delta)) {
+    return '';
+  }
 
   switch (countdownPhase(dateString, now)) {
     case 'future':

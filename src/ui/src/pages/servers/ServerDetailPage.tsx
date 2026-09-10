@@ -61,11 +61,18 @@ export default function ServerDetailPage() {
     fetchData();
   };
 
-  if (error) return <ErrorState message={error} />;
+  // Only when there is nothing to show. Now that this polls, replacing a loaded page with the error
+  // state every 10s through a rolling restart would unmount every TaskSection on each flip, losing
+  // whatever the operator had expanded and whichever page of server logs they were reading.
+  if (error && !server) return <ErrorState message={error} />;
   if (!server) return <LoadingState />;
 
   return (
     <div>
+      {error && (
+        <p className="mb-4 text-sm text-amber-600 dark:text-amber-400">{error} — showing the last successful read.</p>
+      )}
+
       <div className="flex items-center gap-4 mb-6">
         <StatusDot lastHeartbeatTime={server.lastHeartbeatTime} pausedAt={server.pausedAt} />
         <h1 className="text-2xl font-bold">{server.serverName}</h1>

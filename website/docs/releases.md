@@ -68,12 +68,16 @@ now count down, and past their instant they read `due now` rather than flipping 
 
 That flip was wrong, not just ugly. A `ScheduleTime` in the past means the row is eligible and
 waiting: `ScheduledJobActivation` has to flip it (10s cadence by default) and a worker has to claim
-it. Reading "3 seconds ago" there claims a run that has not happened. Past 30 seconds the label
-becomes `overdue by 5 minutes`, which is the shape of a real problem — a stopped scheduler, a
-drained worker pool, a paused queue — and is now visible without opening anything.
+it. Reading "3 seconds ago" there claims a run that has not happened. Past a minute — the grace
+covers the worst-case *healthy* latency, `ScheduledActivationInterval` plus a peer server's worker
+backoff — the label becomes `overdue by 5 minutes`, which is the shape of a real problem — a stopped
+scheduler, a drained worker pool, a paused queue — and is now visible without opening anything.
 
-Reaching zero also refetches the page, so the row moves to its new state on its own instead of
-sitting at `due now` until the next event arrives.
+Reaching zero refetches immediately, and the surfaces carrying a countdown — the Scheduled and
+Retrying job lists, Recurring, Webhooks — now refresh every 15 seconds, so the row moves to its new
+state on its own instead of sitting at `due now`. Recurring and Webhooks previously had no refresh
+of any kind: no event invalidated them and neither used the safety-net interval, so a page left open
+showed whatever it first loaded.
 
 ### Server status dots update on their own
 
