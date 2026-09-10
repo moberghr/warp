@@ -37,7 +37,9 @@ appear, and nothing new is written.
 Each instance carries a status dot: green live, amber paused, red silent. On this page liveness is
 computed by the API against `ApplicationInstanceStaleGrace` (2 minutes by default) — the same
 threshold that decides when a stale instance row is swept and an `InstanceDown` notification fires —
-and the page refetches every 15 seconds to pick up the answer.
+and the page refetches every 15 seconds to pick up the answer. The flat server list this page falls
+back to when no `ApplicationName` is set has no such API answer to read, and applies the dashboard's
+own 30-second rule instead, refreshed on the same 15-second cadence.
 
 A **server's own** detail page asks a tighter question and answers it in the browser: silent for more
 than 30 seconds (six missed heartbeats at the default 5-second `HealthCheckInterval`) turns the dot

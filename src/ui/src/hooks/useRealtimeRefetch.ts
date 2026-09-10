@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { subscribeRealtime } from '@/lib/realtimeBus';
+import { subscribeDue } from '@/lib/dueSignal';
 import type { RealtimeEvent } from '@/api/realtime';
 
 /**
@@ -9,6 +10,12 @@ import type { RealtimeEvent } from '@/api/realtime';
  * multiple event kinds (e.g. messages page reacts to both `MessageEnqueued` and
  * `JobFinalized`), otherwise each call would stack its own interval and halve the
  * effective cadence.
+ *
+ * A countdown on the page reaching zero (lib/dueSignal) refetches too. The React Query bridge in
+ * MainLayout cannot cover these pages — they own their own fetch, and the job detail page's
+ * ['detail'] scope has no live query behind it — and `JobFinalized` is the wrong event to wait for:
+ * a Scheduled job crossing its instant becomes Enqueued, which finalizes nothing. Pages with no
+ * countdown mounted never see the signal, since only a rendered countdown label raises it.
  *
  * The hook does NOT fetch on mount — consumers own their initial fetch via their
  * existing `useEffect(() => fetchData(), [deps])`. Mount-fetching here would cause
@@ -30,12 +37,15 @@ export function useRealtimeRefetch(
   useEffect(() => {
     const fire = () => savedRefetch.current();
     const unsubs = eventList.map((event) => subscribeRealtime(event, fire));
+    const unsubDue = subscribeDue(fire);
     const id = setInterval(fire, safetyMs);
 
     return () => {
       for (const unsub of unsubs) {
         unsub();
       }
+
+      unsubDue();
       clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

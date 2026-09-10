@@ -84,8 +84,10 @@ detail page also refreshes on a 10s cadence instead of only on its manual refres
 
 The **Applications** roster answers liveness from the API instead, against the server's configured
 `ApplicationInstanceStaleGrace` (2 minutes) — the client cannot re-derive that threshold, so those
-pages refetch every 15 seconds rather than guessing. The flat server list on that page previously had
-no refresh at all: a process could die and keep a green dot for as long as the page stayed open.
+pages refetch every 15 seconds rather than guessing. Its fallback flat server list (no
+`ApplicationName` set) keeps the 30-second rule, since there is no API answer to read there. That
+list previously had no refresh at all: a process could die and keep a green dot for as long as the
+page stayed open.
 
 ## 6.1.2
 

@@ -19,9 +19,11 @@ separated from the states above it.
 The list adds two columns: **Attempt** (`#3 (2 failed)` — the attempt about to run, and how many have
 already failed) and **Next attempt**, the instant the retry is scheduled for.
 
-**Next attempt** counts down live and reads `due now` once it passes — the attempt is waiting to be
-activated and claimed, not finished. The same is true of the **Scheduled** column on the Scheduled
-list. See [Timestamps and countdowns](/docs/dashboard/overview#timestamps-and-countdowns).
+**Next attempt** counts down live for a job still waiting on its scheduled instant, and reads
+`due now` once it passes — the attempt is waiting to be activated and claimed, not finished. A retry
+with an empty schedule goes straight to `Enqueued` and has no instant left to wait for, so its
+timestamp reads as elapsed. The **Scheduled** column on the Scheduled list counts down the same way.
+See [Timestamps and countdowns](/docs/dashboard/overview#timestamps-and-countdowns).
 
 The tab is shown by default. A deployment that never retries can hide it:
 

@@ -27,7 +27,15 @@ export default function ServerDetailPage() {
 
   const fetchData = useCallback(() => {
     if (id) {
-      api.getServerById(id).then(setServer).catch(() => setError('Unable to load server'));
+      // Clearing the error on success matters now that this polls: the error state replaces the whole
+      // page, including its Refresh button, so without this one transient failure would strand the
+      // page on <ErrorState/> while the interval kept fetching successfully behind it.
+      api.getServerById(id)
+        .then((x) => {
+          setServer(x);
+          setError(null);
+        })
+        .catch(() => setError('Unable to load server'));
       api.getServerTaskSummaries(id).then(setTasks).catch(() => {});
     }
   }, [id]);
@@ -38,9 +46,9 @@ export default function ServerDetailPage() {
   // which changes the route param without remounting, still fetches immediately.
   useEffect(() => {
     fetchData();
-    const id = setInterval(fetchData, 10_000);
+    const timer = setInterval(fetchData, 10_000);
 
-    return () => clearInterval(id);
+    return () => clearInterval(timer);
   }, [fetchData]);
 
   const handleTogglePause = async () => {

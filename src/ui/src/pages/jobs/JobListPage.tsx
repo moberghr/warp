@@ -20,6 +20,7 @@ import {
   useRequeueFailedJobsByType,
   useDeleteFailedJobsByType,
 } from '@/api/hooks/useJobs';
+import { State } from '@/types';
 import type { JobModel } from '@/types';
 
 type PendingAction =
@@ -191,9 +192,17 @@ export default function JobListPage() {
             {
               id: 'scheduled',
               header: activeState === 'retrying' ? 'Next attempt' : 'Scheduled',
+              // Countdown only for a row still waiting on its instant. The Retrying listing spans
+              // Scheduled AND Enqueued (an empty retry schedule requeues straight to Enqueued), and
+              // an Enqueued row is already released — its ScheduleTime is in the past by definition,
+              // so a countdown would read "overdue by 5 minutes" over an ordinary queue backlog and
+              // accuse a healthy system. Same gate as the job detail page.
               cell: ({ row }) => (
                 <span className="text-sm text-muted-foreground">
-                  <RelativeTime date={row.original.scheduleTime ?? row.original.createTime} tense="countdown" />
+                  <RelativeTime
+                    date={row.original.scheduleTime ?? row.original.createTime}
+                    tense={row.original.currentState === State.Scheduled ? 'countdown' : 'past'}
+                  />
                 </span>
               ),
             } as ColumnDef<JobModel>,

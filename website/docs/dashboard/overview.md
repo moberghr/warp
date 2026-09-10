@@ -164,4 +164,6 @@ while you are watching the page, without waiting for a refresh.
 The **Applications** roster answers the same question from the server instead: an instance is live
 until its heartbeat is older than `ApplicationInstanceStaleGrace` (2 minutes by default), which is
 also when the row is swept and an `InstanceDown` notification fires. Those pages refresh every 15
-seconds to pick up the answer, so a dot there can trail a dead process by that much.
+seconds to pick up the answer, so a dot there can trail a dead process by that much. Its fallback
+flat server list — what you see when no `ApplicationName` is set — has no API answer to read and
+uses the 30-second rule, refreshed on the same cadence.
