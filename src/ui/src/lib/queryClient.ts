@@ -27,6 +27,11 @@ export const queryKeys = {
   statsHistory: (hours: number) => ['stats', 'history', hours] as const,
   jobs: (state: string, page: number, pageSize: number) =>
     ['jobs', state, page, pageSize] as const,
+  /**
+   * Intentionally not under the 'jobs' prefix — see useRetryingJobsCount. Realtime invalidation
+   * sweeps queryScopes.jobs on every finalized job, and this query backs an unindexed backlog scan.
+   */
+  retryingJobsCount: ['jobs-retrying-count'] as const,
   failedJobsByType: (type: string, page: number, pageSize: number) =>
     ['jobs', 'failed', 'by-type', type, page, pageSize] as const,
   failedJobTypes: ['jobs', 'failed', 'types'] as const,

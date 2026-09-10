@@ -774,7 +774,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true };
+    return { retry: true, concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true };
   }
 
   // Client (browser) observability (§8.27).
@@ -820,6 +820,12 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   }
   if (url === '/jobs/scheduled') {
     return data.paginate(data.scheduledJobs, page, pageSize);
+  }
+  if (url === '/jobs/retrying') {
+    return data.paginate(data.retryingJobs, page, pageSize);
+  }
+  if (url === '/jobs/retrying/count') {
+    return data.retryingJobs.length;
   }
   if (url === '/jobs/completed') {
     return data.paginate(data.completedJobs, page, pageSize, 15692);

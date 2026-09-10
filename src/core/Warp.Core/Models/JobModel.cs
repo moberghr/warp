@@ -21,4 +21,11 @@ public class JobModel
     public CancellationMode CancellationMode { get; set; }
 
     public string? HandlerType { get; set; }
+
+    /// <summary>
+    /// Attempts already spent, read from <c>Job.Metadata</c>. Null means "not computed for this
+    /// listing" rather than "never retried" — only the retrying list populates it, so a zero here
+    /// would be a claim the other listings have not checked.
+    /// </summary>
+    public int? RetryCount { get; set; }
 }

@@ -58,6 +58,12 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("jobs/scheduled", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetScheduledJobs(request));
 
+        apiGroup.MapGet("jobs/retrying", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetRetryingJobs(request));
+
+        // Count-only sibling for the sidebar badge: the paged route would run the backlog scan twice
+        // (CountAsync + the page query) and materialise a row the badge discards.
+        apiGroup.MapGet("jobs/retrying/count", async ([FromServices] IJobQueryService jobQueryService) => await jobQueryService.CountRetryingJobs());
+
         apiGroup.MapGet("jobs/awaiting", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request) => await jobQueryService.GetAwaitingJobs(request));
 
         apiGroup.MapGet("jobs/deleted", async ([FromServices] IJobQueryService jobQueryService, [AsParameters] BaseListRequest request, [FromQuery] string? application) => await jobQueryService.GetJobsList(request, State.Deleted, application));
@@ -194,6 +200,11 @@ public static class WarpEndpoints
             [FromServices] IOptions<WarpConfiguration> configuration) =>
             Results.Ok(new WarpAddonsInfo
             {
+                // Every marker below answers "is the addon registered in THIS process", which is the wrong
+                // question for a dashboard-only host (AddWarp + a provider, no AddWarpServer): the workers
+                // hold the addons and the page gets hidden over data that is in the database. So an explicit
+                // MapWarpDashboard(o => o.ShowX()) declaration wins over the marker wherever one was made.
+                Retry = options.Ui.Retry ?? true,
                 Concurrency = concurrency is not null,
                 Push = push is not null,
                 RateLimits = rateLimits is not null,
@@ -201,16 +212,16 @@ public static class WarpEndpoints
 
                 // IWarpAdapters is registered only by AddAdapters(); IAdapterQueryService (always
                 // registered by AddWarp for dashboard-only processes) can't gate the flag.
-                Adapters = adapters is not null,
+                Adapters = options.Ui.Adapters ?? adapters is not null,
 
                 // IEndpointObservabilityMarker is registered only by AddEndpointObservability() (regardless of
                 // sink); IEndpointQueryService (always registered by AddWarp for dashboard-only processes)
                 // can't gate the flag. The endpoints nav shows wherever inbound requests are being observed.
-                Endpoints = endpoints is not null,
+                Endpoints = options.Ui.Endpoints ?? endpoints is not null,
 
                 // IClientObservabilityMarker is registered only by AddClientObservability() (regardless of
                 // sink); IClientEventQueryService (always registered by AddWarp) can't gate the flag.
-                Client = client is not null,
+                Client = options.Ui.Client ?? client is not null,
 
                 // IWebhookRedeliveryEnqueuer is registered only by AddWebhooks(); IWebhookQueryService /
                 // IWebhookCommandService (always registered by AddWarp for dashboard-only processes) can't
@@ -219,7 +230,7 @@ public static class WarpEndpoints
 
                 // ISloMarker is registered only by AddSlo(); the SLO query/command services are always
                 // registered by AddWarp, so this gates the nav, not the API.
-                Slo = slo is not null,
+                Slo = options.Ui.Slo ?? slo is not null,
 
                 // Multi-app observability (§8.19). Unlike the other flags (which gate on a DI service), this
                 // reads config: the feature is on when this process set an ApplicationName. The Applications

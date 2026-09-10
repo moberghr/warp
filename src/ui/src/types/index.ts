@@ -57,6 +57,8 @@ export interface JobModel {
   currentState: State;
   cancellationMode: CancellationMode;
   handlerType: string | null;
+  /** Attempts already spent. Null/absent means the listing didn't compute it, not "never retried". */
+  retryCount?: number | null;
 }
 
 export interface JobLogModel {
@@ -343,6 +345,8 @@ export interface AuthStatus {
 }
 
 export interface WarpAddonsInfo {
+  /** Jobs > Retrying tab. Explicit host declaration, not marker detection — defaults true. */
+  retry: boolean;
   concurrency: boolean;
   rateLimits: boolean;
   push: boolean;
