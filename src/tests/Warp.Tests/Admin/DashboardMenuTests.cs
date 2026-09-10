@@ -162,6 +162,43 @@ public class DashboardMenuTests
         }));
     }
 
+    /// <summary>
+    /// Blanking the label does not escape the collision check. Serialize() substitutes "More" for a
+    /// blank OverflowLabel, so validating the RAW value let this shape through and then shipped an
+    /// overflow group sharing a name with a declared one — the very collision the check exists to
+    /// prevent, and unreachable-by-nav pages in the SPA. Both sides read the effective label now.
+    /// </summary>
+    [TimedTheory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Group_NamedLikeTheOverflowGroupDefault_ThrowsEvenWhenOverflowLabelIsBlank(string blank)
+    {
+        var mapping = MapAsync(o => o.ConfigureMenu(m =>
+        {
+            m.OverflowLabel = blank;
+            m.Group("More", WarpDashboardPage.Counters);
+        }));
+
+        var ex = await Should.ThrowAsync<InvalidOperationException>(mapping);
+        ex.Message.ShouldContain("OverflowLabel");
+    }
+
+    /// <summary>
+    /// The blank fallback is also what the SPA receives, so the rendered label and the validated one
+    /// are the same string.
+    /// </summary>
+    [TimedFact]
+    public async Task Menu_BlankOverflowLabel_SerializesTheDefault()
+    {
+        var menu = ReadMenu(await GetShellAsync(o => o.ConfigureMenu(m =>
+        {
+            m.OverflowLabel = "  ";
+            m.Group("Ops", WarpDashboardPage.Issues);
+        })));
+
+        menu.GetProperty("overflowLabel").GetString().ShouldBe("More");
+    }
+
     [TimedFact]
     public void Group_WithADuplicateLabel_Throws()
     {

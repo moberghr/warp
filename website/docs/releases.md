@@ -23,7 +23,7 @@ rendered under a separator to signal that.
 Shown by default; `app.MapWarpDashboard(o => o.ShowRetries(false))` turns it off. Nothing is added to
 the schema or the worker hot path — the view reads the retry counter already present in
 `Job.Metadata`. The cost of that read, and why no index ships with it, is recorded in
-`docs/perf-results.md`.
+`docs/perf-results.md`. See [Retrying](/docs/dashboard/retrying).
 
 ### Declaring nav items the dashboard cannot infer
 
@@ -39,6 +39,14 @@ options object as `ConfigureMenu` from 6.2: that one decides *where* a nav item 
 There is deliberately no `ShowSagas`, `ShowConcurrency` or `ShowRateLimits`: for those three the
 probed service *is* the page's query service, registered only by the addon, so forcing the nav item on
 would produce a page whose every request answers 404.
+
+### Menu overflow label validated as rendered
+
+The startup check that stops a group taking the overflow group's label compared the raw
+`OverflowLabel`, while serialization substituted the default for a blank one. Setting
+`OverflowLabel = ""` alongside `Group("More", ...)` therefore passed validation and then shipped two
+dropdowns sharing a label — and because the nav keys its open dropdown on the label, the overflow
+group's pages became unreachable. Both sides now read the same effective label.
 
 ### Timestamps render to the second, not the millisecond
 

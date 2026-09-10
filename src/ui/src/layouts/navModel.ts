@@ -303,16 +303,6 @@ export function gateItems(items: NavItem[], addons: WarpAddonsInfo | null): NavI
   return items.filter((x) => !x.addon || (addons?.[x.addon] ?? false));
 }
 
-/**
- * Drops addon-gated items the host hasn't registered, then drops any group left
- * with nothing in it — an empty dropdown must never get a trigger.
- */
-export function gateGroups(groups: NavGroup[], addons: WarpAddonsInfo | null): NavGroup[] {
-  return groups
-    .map((group) => ({ ...group, items: gateItems(group.items, addons) }))
-    .filter((x) => x.items.length > 0);
-}
-
 /** One entry in the host's declared bar, mirroring the shapes `WarpDashboardMenu` serializes. */
 export type MenuEntrySpec =
   | { kind: 'page'; page: string }

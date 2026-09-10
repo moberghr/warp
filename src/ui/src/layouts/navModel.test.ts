@@ -11,12 +11,12 @@ import {
   flattenNavTargets,
   applyMenuLayout,
   gateEntries,
-  gateGroups,
   gateItems,
   groupsOf,
   itemsOf,
   rollUpBadges,
   COUNTER_FAMILY_GROUP,
+  NAV_ENTRIES,
   NAV_GROUPS,
   TOP_LEVEL_NAV_ITEMS,
   type NavEntry,
@@ -198,41 +198,38 @@ describe('clampPanelLeft', () => {
   });
 });
 
-describe('gateGroups', () => {
+describe('gateEntries — group gating', () => {
   const addons: WarpAddonsInfo = {
     retry: false, concurrency: false, rateLimits: false, push: false, sagas: false, adapters: false,
     endpoints: false, client: false, webhooks: false, applications: false, slo: false,
   };
 
-  it('drops Traffic and Runtime entirely when no addons are registered', () => {
-    const groups = gateGroups(NAV_GROUPS, addons);
+  // These assertions used to run against gateGroups, which MainLayout no longer calls. Pointed at the
+  // live path so group gating cannot silently diverge from what the nav actually renders.
+  const gatedGroups = (a: WarpAddonsInfo | null) => groupsOf(gateEntries(NAV_ENTRIES, a));
 
-    expect(groups.map((x) => x.label)).toEqual(['Workloads', 'Health']);
+  it('drops Traffic and Runtime entirely when no addons are registered', () => {
+    expect(gatedGroups(addons).map((x) => x.label)).toEqual(['Workloads', 'Health']);
   });
 
   it('keeps only the Core pages in Health when SLOs are off', () => {
-    const groups = gateGroups(NAV_GROUPS, addons);
-    const health = groups.find((x) => x.label === 'Health');
+    const health = gatedGroups(addons).find((x) => x.label === 'Health');
 
     expect(health?.items.map((x) => x.label)).toEqual(['Issues', 'Counters', 'Applications']);
   });
 
   it('renders a group as soon as one of its items is registered', () => {
-    const groups = gateGroups(NAV_GROUPS, { ...addons, sagas: true });
-    const runtime = groups.find((x) => x.label === 'Runtime');
+    const runtime = gatedGroups({ ...addons, sagas: true }).find((x) => x.label === 'Runtime');
 
     expect(runtime?.items.map((x) => x.label)).toEqual(['Sagas']);
   });
 
   it('shows only Core pages before the addon probe has answered', () => {
-    const groups = gateGroups(NAV_GROUPS, null);
-
-    expect(groups.map((x) => x.label)).toEqual(['Workloads', 'Health']);
+    expect(gatedGroups(null).map((x) => x.label)).toEqual(['Workloads', 'Health']);
   });
 
   it('never gates an ungated group', () => {
-    const groups = gateGroups(NAV_GROUPS, addons);
-    const workloads = groups.find((x) => x.label === 'Workloads');
+    const workloads = gatedGroups(addons).find((x) => x.label === 'Workloads');
 
     expect(workloads?.items).toHaveLength(4);
   });
