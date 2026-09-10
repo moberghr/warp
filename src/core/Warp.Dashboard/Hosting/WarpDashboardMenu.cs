@@ -32,12 +32,31 @@ public sealed class WarpDashboardMenu
     };
 
     /// <summary>
-    /// Label for the trailing group collecting every page the layout did not place. Defaults to "More".
+    /// The label used when the host leaves <see cref="OverflowLabel"/> unset or blank.
     /// </summary>
-    public string OverflowLabel { get; set; } = "More";
+    private const string DefaultOverflowLabel = "More";
+
+    /// <summary>
+    /// Label for the trailing group collecting every page the layout did not place. Defaults to "More";
+    /// blank or whitespace falls back to it too, and the fallback is what the collision check validates.
+    /// </summary>
+    public string OverflowLabel { get; set; } = DefaultOverflowLabel;
 
     /// <summary>Whether the host defined a layout at all. False means the SPA keeps its default nav.</summary>
     internal bool IsConfigured => _entries.Count > 0;
+
+    /// <summary>
+    /// The label the overflow group actually renders under, with the blank fallback applied.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Validate"/> and <see cref="Serialize"/> must both read THIS rather than
+    /// <see cref="OverflowLabel"/> directly, or they disagree about what the overflow group is called:
+    /// blanking the label and declaring a group named "More" passed validation against the raw empty
+    /// string and then shipped a group colliding with the substituted default — the exact collision the
+    /// check exists to prevent.
+    /// </remarks>
+    private string EffectiveOverflowLabel =>
+        string.IsNullOrWhiteSpace(OverflowLabel) ? DefaultOverflowLabel : OverflowLabel;
 
     /// <summary>
     /// Appends pages that sit directly on the bar rather than inside a group, in the order given.
@@ -118,10 +137,10 @@ public sealed class WarpDashboardMenu
         // nav, which is the one guarantee this whole design makes. Reserved unconditionally rather than
         // only when something is actually left over, so the rule doesn't depend on how many pages a
         // future Warp version ships.
-        if (_labels.Contains(OverflowLabel))
+        if (_labels.Contains(EffectiveOverflowLabel))
         {
             throw new InvalidOperationException(
-                $"Group \"{OverflowLabel}\" collides with the menu's overflow group, which every unplaced page falls into. "
+                $"Group \"{EffectiveOverflowLabel}\" collides with the menu's overflow group, which every unplaced page falls into. "
                 + $"Rename the group or set {nameof(OverflowLabel)} to something else.");
         }
     }
@@ -139,7 +158,7 @@ public sealed class WarpDashboardMenu
         var spec = new MenuSpec
         {
             Entries = _entries,
-            OverflowLabel = string.IsNullOrWhiteSpace(OverflowLabel) ? "More" : OverflowLabel,
+            OverflowLabel = EffectiveOverflowLabel,
         };
 
         // Web defaults for camelCase, and their HTML-safe encoder so a host-supplied group label
