@@ -9,10 +9,17 @@ import {
   resolveActiveLocation,
   filterNavTargets,
   flattenNavTargets,
+  applyMenuLayout,
+  gateEntries,
   gateGroups,
+  gateItems,
+  groupsOf,
+  itemsOf,
   rollUpBadges,
   COUNTER_FAMILY_GROUP,
   NAV_GROUPS,
+  TOP_LEVEL_NAV_ITEMS,
+  type NavEntry,
   type NavGroup,
   type NavItem,
 } from './navModel';
@@ -300,5 +307,222 @@ describe('COUNTER_FAMILY_GROUP', () => {
 
   it('is not part of the rendered nav', () => {
     expect(NAV_GROUPS.map((x) => x.label)).not.toContain('Counters');
+  });
+});
+
+describe('page ids', () => {
+  it('gives every built-in nav item a unique id a host can name', () => {
+    // The id is the join key for a host-defined layout (WarpDashboardPage on the C# side). An item
+    // without one can only ever reach the overflow group; a duplicate would make a layout ambiguous.
+    const pages = [...TOP_LEVEL_NAV_ITEMS, ...NAV_GROUPS.flatMap((x) => x.items)].map((x) => x.page);
+
+    expect(pages.filter((x) => !x)).toEqual([]);
+    expect(new Set(pages).size).toBe(pages.length);
+  });
+});
+
+describe('applyMenuLayout', () => {
+  const kinds = (entries: NavEntry[]) => entries.map((x) => x.kind);
+  const labels = (entries: NavEntry[]) =>
+    entries.map((x) => (x.kind === 'divider' ? '|' : x.kind === 'item' ? x.item.label : `[${x.group.label}]`));
+
+  it('reproduces the built-in bar when the host declared no layout', () => {
+    const entries = applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, null);
+
+    expect(labels(entries)).toEqual([
+      'Dashboard', 'Jobs', '|', '[Workloads]', '[Traffic]', '[Runtime]', '[Health]',
+    ]);
+  });
+
+  it('renders pages, groups and dividers in the one order the host declared them', () => {
+    // The bar is a sequence, not "direct pages, then dropdowns": a page declared after a group renders
+    // after that group's trigger.
+    const entries = applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, {
+      entries: [
+        { kind: 'page', page: 'dashboard' },
+        { kind: 'group', label: 'Ops', pages: ['issues', 'recurring'] },
+        { kind: 'divider' },
+        { kind: 'page', page: 'jobs' },
+        { kind: 'group', label: 'Delivery', pages: ['webhooks'] },
+      ],
+      overflowLabel: 'More',
+    });
+
+    expect(labels(entries).slice(0, 5)).toEqual(['Dashboard', '[Ops]', '|', 'Jobs', '[Delivery]']);
+  });
+
+  it('supports a bar-only layout: some pages up front, everything else in the overflow group', () => {
+    // No groups declared at all. The nav is then N bar items plus one dropdown holding the rest, which
+    // is a layout a host may well want and must not need a token group to reach.
+    const entries = applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, {
+      entries: [
+        { kind: 'page', page: 'dashboard' },
+        { kind: 'page', page: 'jobs' },
+        { kind: 'page', page: 'issues' },
+        { kind: 'page', page: 'recurring' },
+        { kind: 'page', page: 'applications' },
+      ],
+      overflowLabel: 'More',
+    });
+
+    expect(labels(entries)).toEqual([
+      'Dashboard', 'Jobs', 'Issues', 'Recurring', 'Applications', '[More]',
+    ]);
+    expect(groupsOf(entries)[0].items.map((x) => x.page)).toEqual([
+      'messages', 'batches', 'services', 'adapters', 'endpoints',
+      'client', 'webhooks', 'concurrency', 'ratelimits', 'sagas', 'slo', 'counters',
+    ]);
+  });
+
+  it('collects every page the layout did not place into one trailing overflow group', () => {
+    const entries = applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, {
+      entries: [
+        { kind: 'page', page: 'dashboard' },
+        { kind: 'group', label: 'Ops', pages: ['issues'] },
+      ],
+      overflowLabel: 'Everything else',
+    });
+
+    const all = [...TOP_LEVEL_NAV_ITEMS, ...NAV_GROUPS.flatMap((x) => x.items)];
+    const placed = [...itemsOf(entries), ...groupsOf(entries).flatMap((x) => x.items)];
+
+    expect(groupsOf(entries).at(-1)!.label).toBe('Everything else');
+    // Nothing lost and nothing duplicated: a layout can never make a page unreachable.
+    expect(placed.map((x) => x.page).sort()).toEqual(all.map((x) => x.page).sort());
+  });
+
+  it('keeps the built-in declaration order inside the overflow group', () => {
+    const entries = applyMenuLayout(
+      [{ ...dashboard, page: 'dashboard' as const }, { ...jobs, page: 'jobs' as const }],
+      [{ label: 'G', items: [{ ...messages, page: 'messages' as const }, { ...batches, page: 'batches' as const }] }],
+      { entries: [{ kind: 'page', page: 'jobs' }], overflowLabel: 'More' }
+    );
+
+    expect(labels(entries)).toEqual(['Jobs', '[More]']);
+    expect(groupsOf(entries)[0].items.map((x) => x.label)).toEqual(['Dashboard', 'Messages', 'Batches']);
+  });
+
+  it('adds no overflow group when the layout placed everything', () => {
+    const all = [...TOP_LEVEL_NAV_ITEMS, ...NAV_GROUPS.flatMap((x) => x.items)].map((x) => x.page!);
+    const entries = applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, {
+      entries: [{ kind: 'group', label: 'One', pages: all }],
+      overflowLabel: 'More',
+    });
+
+    expect(labels(entries)).toEqual(['[One]']);
+  });
+
+  it('skips a page id this bundle does not ship', () => {
+    // A host on a newer Warp can name a page an older dashboard bundle has no item for. It has to be
+    // dropped rather than rendered as an entry that navigates nowhere.
+    const entries = applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, {
+      entries: [
+        { kind: 'page', page: 'not-a-page' },
+        { kind: 'group', label: 'Ops', pages: ['issues', 'not-a-page'] },
+      ],
+      overflowLabel: 'More',
+    });
+
+    expect(kinds(entries).filter((x) => x === 'item')).toEqual([]);
+    expect(groupsOf(entries)[0].items.map((x) => x.label)).toEqual(['Issues']);
+  });
+
+  it('drops a group whose pages all failed to resolve', () => {
+    const entries = applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, {
+      entries: [{ kind: 'group', label: 'Ghost', pages: ['not-a-page'] }],
+      overflowLabel: 'More',
+    });
+
+    expect(groupsOf(entries).map((x) => x.label)).not.toContain('Ghost');
+  });
+
+  it('places a page named twice only where it was named first', () => {
+    const entries = applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, {
+      entries: [
+        { kind: 'page', page: 'issues' },
+        { kind: 'group', label: 'Ops', pages: ['issues', 'recurring'] },
+      ],
+      overflowLabel: 'More',
+    });
+
+    expect(labels(entries).slice(0, 2)).toEqual(['Issues', '[Ops]']);
+    expect(groupsOf(entries)[0].items.map((x) => x.label)).toEqual(['Recurring']);
+  });
+});
+
+describe('gateEntries', () => {
+  const labels = (entries: NavEntry[]) =>
+    entries.map((x) => (x.kind === 'divider' ? '|' : x.kind === 'item' ? x.item.label : `[${x.group.label}]`));
+
+  const sagas: NavItem = { ...item('/sagas', 'Sagas'), addon: 'sagas', page: 'sagas' };
+  const issues: NavItem = { ...item('/issues', 'Issues'), page: 'issues' };
+
+  it('drops an addon page the host has not registered, on the bar as well as in a group', () => {
+    const entries: NavEntry[] = [
+      { kind: 'item', item: sagas },
+      { kind: 'item', item: issues },
+      { kind: 'group', group: { label: 'Ops', items: [sagas, issues] } },
+    ];
+    const gated = gateEntries(entries, {} as WarpAddonsInfo);
+
+    expect(labels(gated)).toEqual(['Issues', '[Ops]']);
+    expect(groupsOf(gated)[0].items.map((x) => x.label)).toEqual(['Issues']);
+  });
+
+  it('drops a group gating emptied', () => {
+    const entries: NavEntry[] = [
+      { kind: 'item', item: issues },
+      { kind: 'group', group: { label: 'Sagas only', items: [sagas] } },
+    ];
+
+    expect(labels(gateEntries(entries, {} as WarpAddonsInfo))).toEqual(['Issues']);
+  });
+
+  it('drops a divider left leading or trailing by gating', () => {
+    // The rule separates what is on either side of it. Gating can take one side away, and an
+    // unconditional rule then hangs off the end of the bar with nothing to separate.
+    const leading: NavEntry[] = [{ kind: 'item', item: sagas }, { kind: 'divider' }, { kind: 'item', item: issues }];
+    const trailing: NavEntry[] = [{ kind: 'item', item: issues }, { kind: 'divider' }, { kind: 'item', item: sagas }];
+
+    expect(labels(gateEntries(leading, {} as WarpAddonsInfo))).toEqual(['Issues']);
+    expect(labels(gateEntries(trailing, {} as WarpAddonsInfo))).toEqual(['Issues']);
+  });
+
+  it('collapses dividers left adjacent by gating', () => {
+    const entries: NavEntry[] = [
+      { kind: 'item', item: issues },
+      { kind: 'divider' },
+      { kind: 'item', item: sagas },
+      { kind: 'divider' },
+      { kind: 'item', item: issues },
+    ];
+
+    expect(labels(gateEntries(entries, {} as WarpAddonsInfo))).toEqual(['Issues', '|', 'Issues']);
+  });
+
+  it('keeps a divider that still has something on both sides', () => {
+    const entries: NavEntry[] = [{ kind: 'item', item: issues }, { kind: 'divider' }, { kind: 'item', item: issues }];
+
+    expect(labels(gateEntries(entries, {} as WarpAddonsInfo))).toEqual(['Issues', '|', 'Issues']);
+  });
+
+  it('keeps the built-in bar intact once its addons are registered', () => {
+    const addons = {
+      adapters: true, endpoints: true, client: true, webhooks: true,
+      concurrency: true, rateLimits: true, sagas: true, slo: true,
+    } as WarpAddonsInfo;
+
+    expect(labels(gateEntries(applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, null), addons))).toEqual([
+      'Dashboard', 'Jobs', '|', '[Workloads]', '[Traffic]', '[Runtime]', '[Health]',
+    ]);
+  });
+});
+
+describe('gateItems', () => {
+  it('drops a promoted addon page the host has not registered', () => {
+    const promoted = [dashboard, { ...item('/sagas', 'Sagas'), addon: 'sagas' as const }];
+
+    expect(gateItems(promoted, {} as WarpAddonsInfo).map((x) => x.label)).toEqual(['Dashboard']);
+    expect(gateItems(promoted, { sagas: true } as WarpAddonsInfo).map((x) => x.label)).toEqual(['Dashboard', 'Sagas']);
   });
 });

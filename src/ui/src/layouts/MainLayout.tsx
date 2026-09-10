@@ -25,14 +25,15 @@ import type { DashboardStatistics, WarpAddonsInfo } from '@/types';
 import type { ExtensionManifest } from '@/extensions/types';
 import {
   COUNTER_FAMILY_GROUP,
-  NAV_GROUPS,
+  NAV_ENTRIES,
   PANEL_WIDTH,
-  TOP_LEVEL_NAV_ITEMS,
   badgesForItem,
   clampPanelLeft,
   flattenNavTargets,
-  gateGroups,
+  gateEntries,
+  groupsOf,
   isNavItemActive,
+  itemsOf,
   resolveActiveLocation,
   rollUpBadges,
   type NavGroup,
@@ -221,7 +222,11 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   const isBatchesSection = location.pathname.startsWith('/batches');
   const isMessagesSection = location.pathname.startsWith('/messages');
 
-  const navGroups = useMemo(() => gateGroups(NAV_GROUPS, addons), [addons]);
+  // The host's layout is already applied (NAV_ENTRIES); gating runs on top of it, so it sees items where
+  // the layout put them — a page promoted onto the bar is addon-gated there just as it was in a group.
+  const navEntries = useMemo(() => gateEntries(NAV_ENTRIES, addons), [addons]);
+  const navGroups = useMemo(() => groupsOf(navEntries), [navEntries]);
+  const topLevelNavItems = useMemo(() => itemsOf(navEntries), [navEntries]);
 
   // Extension pages have no group — they keep their own top-level slot, since
   // their labels are host-supplied and can't be assigned a Warp category.
@@ -237,12 +242,12 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
   );
 
   const active = useMemo(
-    () => resolveActiveLocation(location.pathname, [...TOP_LEVEL_NAV_ITEMS, ...extensionNavItems], navGroups),
-    [location.pathname, extensionNavItems, navGroups]
+    () => resolveActiveLocation(location.pathname, [...topLevelNavItems, ...extensionNavItems], navGroups),
+    [location.pathname, extensionNavItems, navGroups, topLevelNavItems]
   );
   const paletteTargets = useMemo(
-    () => flattenNavTargets(TOP_LEVEL_NAV_ITEMS, [...navGroups, COUNTER_FAMILY_GROUP], extensionNavItems),
-    [navGroups, extensionNavItems]
+    () => flattenNavTargets(topLevelNavItems, [...navGroups, COUNTER_FAMILY_GROUP], extensionNavItems),
+    [navGroups, extensionNavItems, topLevelNavItems]
   );
 
   // Clicking the already-active item re-navigates with a fresh key so the page
@@ -318,21 +323,31 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
               min-w-0 and scrolls as a last resort, so an addon-heavy deployment
               degrades by scrolling its own nav rather than clipping the row. */}
           <nav ref={navRef} className="hidden md:flex gap-1 items-center min-w-0 overflow-x-auto xl:overflow-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            {TOP_LEVEL_NAV_ITEMS.map((x) => renderNavItem(x))}
-            {/* Separates the always-visible destinations from the group
-                triggers. shrink-0 is load-bearing: a 1px flex child with the
+            {/* One ordered sequence, not "pages then triggers": a host layout can
+                put a page between two groups, and it renders there. Dividers are
+                entries too, already normalised so none can dangle off an end.
+                shrink-0 on the rule is load-bearing: a 1px flex child with the
                 default flex-shrink collapses to nothing and silently vanishes. */}
-            <div className="w-px h-6 bg-border mx-1 xl:mx-2 shrink-0" />
-            {navGroups.map((group) => (
-              <GroupTrigger
-                key={group.label}
-                group={group}
-                stats={stats}
-                isOpen={openGroup === group.label}
-                activeItem={active.group?.label === group.label ? active.item : null}
-                onToggle={toggleGroup}
-              />
-            ))}
+            {navEntries.map((entry, i) => {
+              if (entry.kind === 'divider') {
+                return <div key={`divider-${i}`} className="w-px h-6 bg-border mx-1 xl:mx-2 shrink-0" />;
+              }
+
+              if (entry.kind === 'item') {
+                return renderNavItem(entry.item);
+              }
+
+              return (
+                <GroupTrigger
+                  key={entry.group.label}
+                  group={entry.group}
+                  stats={stats}
+                  isOpen={openGroup === entry.group.label}
+                  activeItem={active.group?.label === entry.group.label ? active.item : null}
+                  onToggle={toggleGroup}
+                />
+              );
+            })}
             {extensionNavItems.map((x) => renderNavItem(x))}
           </nav>
           {/* Grows to take the slack, with a 24px floor so the search can never
@@ -426,13 +441,25 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
               onClick={() => setMobileMenuOpen(false)}
             />
             <nav className="md:hidden absolute inset-x-0 top-14 z-30 flex flex-col gap-1 border-t bg-card shadow-lg px-3 py-2 max-h-[75vh] overflow-y-auto">
-              {TOP_LEVEL_NAV_ITEMS.map((x) => renderNavItem(x, true))}
-              {navGroups.map((group) => (
-                <div key={group.label} className="flex flex-col gap-1">
-                  <h3 className="text-xs font-semibold text-muted-foreground uppercase px-3 pt-3 pb-1">{group.label}</h3>
-                  {group.items.map((x) => renderNavItem(x, true))}
-                </div>
-              ))}
+              {/* Same sequence as the bar, so the sheet's order matches what the
+                  host declared. Dividers are the bar's own geometry and have
+                  nothing to separate in a stacked list, so they're skipped. */}
+              {navEntries.map((entry) => {
+                if (entry.kind === 'divider') {
+                  return null;
+                }
+
+                if (entry.kind === 'item') {
+                  return renderNavItem(entry.item, true);
+                }
+
+                return (
+                  <div key={entry.group.label} className="flex flex-col gap-1">
+                    <h3 className="text-xs font-semibold text-muted-foreground uppercase px-3 pt-3 pb-1">{entry.group.label}</h3>
+                    {entry.group.items.map((x) => renderNavItem(x, true))}
+                  </div>
+                );
+              })}
               {extensionNavItems.map((x) => renderNavItem(x, true))}
             </nav>
           </>

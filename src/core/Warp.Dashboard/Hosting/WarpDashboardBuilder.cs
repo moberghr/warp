@@ -49,6 +49,7 @@ public static class WarpDashboardBuilder
         ArgumentNullException.ThrowIfNull(options);
 
         options.RoutePrefix = NormalizeRoutePrefix(options.RoutePrefix);
+        options.Menu.Validate();
 
         var extensions = app.Services.GetServices<IWarpDashboardExtension>().ToList();
 

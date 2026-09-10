@@ -92,7 +92,11 @@ internal static class WarpSpaEndpoints
             + $" window.warpInstanceName = {JsonValue(options.InstanceName)};"
             + $" window.warpPortalUrl = {JsonValue(options.PortalUrl)};"
             + $" window.warpPortalLabel = {JsonValue(options.PortalLabel)};"
-            + $" window.warpLogoUrl = {JsonValue(options.LogoUrl)};</script>";
+            + $" window.warpLogoUrl = {JsonValue(options.LogoUrl)};"
+
+            // Already a JSON document (or the literal null when the host defined no layout), and
+            // serialized with the same HTML-safe encoder, so it needs no second encoding pass.
+            + $" window.warpMenu = {options.Menu.Serialize() ?? "null"};</script>";
 
         return htmlString.Insert(headEndIndex, appSettingsString);
     }

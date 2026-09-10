@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { safeUrl } from './config';
+import { parseMenuLayout, safeUrl } from './config';
 
 describe('safeUrl (branding URL guard)', () => {
   it('allows http(s) URLs', () => {
@@ -65,5 +65,74 @@ describe('brandName (host-supplied product name)', () => {
     window.warpBrandName = null;
 
     expect((await loadConfig()).brandName).toBe('Warp');
+  });
+});
+
+describe('parseMenuLayout (host-supplied nav layout)', () => {
+  it('reads an ordered layout of pages, groups and dividers', () => {
+    const spec = parseMenuLayout({
+      entries: [
+        { kind: 'page', page: 'dashboard' },
+        { kind: 'group', label: 'Ops', pages: ['issues', 'recurring'] },
+        { kind: 'divider' },
+      ],
+      overflowLabel: 'Everything else',
+    });
+
+    expect(spec).toEqual({
+      entries: [
+        { kind: 'page', page: 'dashboard' },
+        { kind: 'group', label: 'Ops', pages: ['issues', 'recurring'] },
+        { kind: 'divider' },
+      ],
+      overflowLabel: 'Everything else',
+    });
+  });
+
+  it('defaults a missing or blank overflow label', () => {
+    const entries = [{ kind: 'page', page: 'jobs' }];
+
+    expect(parseMenuLayout({ entries })!.overflowLabel).toBe('More');
+    expect(parseMenuLayout({ entries, overflowLabel: '  ' })!.overflowLabel).toBe('More');
+    expect(parseMenuLayout({ entries, overflowLabel: 7 })!.overflowLabel).toBe('More');
+  });
+
+  it('reads no layout at all as null, so the SPA keeps its built-in nav', () => {
+    // The host declaring nothing is the common case — it injects a literal null.
+    expect(parseMenuLayout(null)).toBeNull();
+    expect(parseMenuLayout(undefined)).toBeNull();
+    expect(parseMenuLayout('menu')).toBeNull();
+    expect(parseMenuLayout({})).toBeNull();
+    expect(parseMenuLayout({ entries: 'nope' })).toBeNull();
+    expect(parseMenuLayout({ entries: [] })).toBeNull();
+  });
+
+  it('drops malformed entries rather than throwing on the first render', () => {
+    const spec = parseMenuLayout({
+      entries: [
+        null,
+        'divider',
+        { kind: 'page' },
+        { kind: 'page', page: 12 },
+        { kind: 'group', label: 'Ops' },
+        { kind: 'group', pages: ['issues'] },
+        { kind: 'nonsense' },
+        { kind: 'page', page: 'jobs' },
+      ],
+    });
+
+    expect(spec!.entries).toEqual([{ kind: 'page', page: 'jobs' }]);
+  });
+
+  it('keeps only the string page ids inside a group', () => {
+    const spec = parseMenuLayout({
+      entries: [{ kind: 'group', label: 'Ops', pages: ['issues', 3, null, 'recurring'] }],
+    });
+
+    expect(spec!.entries).toEqual([{ kind: 'group', label: 'Ops', pages: ['issues', 'recurring'] }]);
+  });
+
+  it('degrades to the built-in nav when every entry was malformed', () => {
+    expect(parseMenuLayout({ entries: [{ kind: 'nonsense' }] })).toBeNull();
   });
 });
