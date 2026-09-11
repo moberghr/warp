@@ -1,14 +1,8 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import { subscribeTick, tickNow } from '@/lib/clockTick';
 import { signalDue } from '@/lib/dueSignal';
-import {
-  countdownPhase,
-  formatCountdown,
-  formatRelativeTime,
-  isServerStale,
-  serverStatusDotColor,
-  type CountdownPhase,
-} from '@/utils/format';
+import { countdownPhase, formatCountdown, formatRelativeTime, type CountdownPhase } from '@/utils/format';
+import { hasServerGrace, isStale, statusDotColor } from '@/lib/liveness';
 
 /**
  * Re-renders on the shared clock tick, but only when the value it derives from "now" actually
@@ -61,21 +55,46 @@ export function useCountdownLabel(dateString: string): string {
   return label;
 }
 
-// Liveness the CLIENT owns: elapsed time against the dashboard's own stale threshold. It flips
-// exactly once, at the second the heartbeat goes quiet, and never again — the bail-out means a
-// roomful of healthy dots costs one boolean comparison each per tick and zero re-renders.
-//
-// Deliberately not applied to the `isLive` the API computes for an application instance: that one
-// is measured against the server's configured ApplicationInstanceStaleGrace, which the client has
-// no way to know, so re-deriving it here would contradict the backend. A server-computed fact is
-// refreshed by refetching it, not by re-deriving it — those pages poll instead.
+// Elapsed silence against the threshold the server sent (lib/liveness). It flips exactly once, at
+// the second the grace expires, and never again — the bail-out means a roomful of healthy dots costs
+// one comparison each per tick and zero re-renders.
 export function useHeartbeatStale(lastHeartbeatTime: string): boolean {
-  return useTickingValue(useCallback((now: number) => isServerStale(lastHeartbeatTime, now), [lastHeartbeatTime]));
+  return useTickingValue(useCallback((now: number) => isStale(lastHeartbeatTime, now), [lastHeartbeatTime]));
 }
 
 /** The status dot's Tailwind colour, re-evaluated on the clock: amber paused, red stale, green live. */
 export function useServerStatusDotColor(lastHeartbeatTime: string, pausedAt: string | null): string {
   return useTickingValue(
-    useCallback((now: number) => serverStatusDotColor(lastHeartbeatTime, pausedAt, now), [lastHeartbeatTime, pausedAt]),
+    useCallback((now: number) => statusDotColor(isStale(lastHeartbeatTime, now), pausedAt), [lastHeartbeatTime, pausedAt]),
+  );
+}
+
+/**
+ * Liveness for a roster row, where the API already answered once.
+ *
+ * With the server's threshold in hand the browser re-derives it — same rule, same number, now decaying
+ * correctly as the page sits open. Without it (an older backend) the API's answer stands: guessing a
+ * threshold is what made one silent process render red on one page and green on another.
+ */
+export function useInstanceLive(lastHeartbeatTime: string, reportedLive: boolean): boolean {
+  return useTickingValue(
+    useCallback(
+      (now: number) => (hasServerGrace() ? !isStale(lastHeartbeatTime, now) : reportedLive),
+      [lastHeartbeatTime, reportedLive],
+    ),
+  );
+}
+
+/**
+ * "3 of 4 live" for a whole roster, on one subscription and one snapshot — the count re-renders when
+ * it changes, not once per instance per second.
+ */
+export function useLiveInstanceCount(instances: readonly { lastHeartbeatAt: string; isLive: boolean }[]): number {
+  return useTickingValue(
+    useCallback(
+      (now: number) =>
+        instances.filter((x) => (hasServerGrace() ? !isStale(x.lastHeartbeatAt, now) : x.isLive)).length,
+      [instances],
+    ),
   );
 }

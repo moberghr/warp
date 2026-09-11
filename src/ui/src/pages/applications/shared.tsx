@@ -2,7 +2,9 @@ import { Link } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { RelativeTime } from '@/components/RelativeTime';
-import { formatBytes, isServerStale } from '@/utils/format';
+import { formatBytes } from '@/utils/format';
+import { isStale, statusDotColor } from '@/lib/liveness';
+import { useInstanceLive } from '@/hooks/useTicking';
 import type { InstanceView } from '@/types/applications';
 import type { ServerModel } from '@/types';
 
@@ -31,11 +33,23 @@ export function formatMem(bytes: number | null): string {
   return bytes != null ? formatBytes(bytes) : 'N/A';
 }
 
-/** Green when live, amber when paused, red when stale/dead. */
-export function StatusDot({ isLive, pausedAt }: { isLive: boolean; pausedAt?: string | null }) {
-  const color = pausedAt ? 'bg-amber-500' : isLive ? 'bg-green-500' : 'bg-red-500';
+/**
+ * Green when live, amber when paused, red when stale/dead — re-derived every second from the heartbeat
+ * so a process that dies while the page is open goes red on its own, instead of holding the answer the
+ * API gave when the row was fetched.
+ */
+export function StatusDot({
+  isLive,
+  pausedAt,
+  lastHeartbeatAt,
+}: {
+  isLive: boolean;
+  pausedAt?: string | null;
+  lastHeartbeatAt: string;
+}) {
+  const live = useInstanceLive(lastHeartbeatAt, isLive);
 
-  return <span className={`inline-block w-2 h-2 rounded-full ${color}`} />;
+  return <span className={`inline-block w-2 h-2 rounded-full ${statusDotColor(!live, pausedAt ?? null)}`} />;
 }
 
 /** Server vs non-server kind badge. */
@@ -69,11 +83,9 @@ export function fromInstanceView(instance: InstanceView, appId: string): Normali
 
 /** Map a (fallback) ServerModel onto the shared row shape — every server is a live-or-stale instance. */
 export function fromServer(server: ServerModel): NormalizedInstance {
-  // One definition of the dashboard's stale threshold — this used to carry its own copy of the 30s.
-  // Unlike ServerDetailPage's dot this one is not re-derived on the clock: the same table also
-  // renders rows whose liveness the API computed against its own grace, and two liveness rules in
-  // one column would mean two colours for the same silence. The page polls instead.
-  const stale = isServerStale(server.lastHeartbeatTime);
+  // Seeds the row; StatusDot re-derives it every second from the same threshold the API uses, so
+  // this and the application path no longer disagree about what silence means.
+  const stale = isStale(server.lastHeartbeatTime);
 
   return {
     id: server.id,
@@ -115,7 +127,7 @@ export function InstancesTable({ instances }: { instances: NormalizedInstance[] 
           <TableRow key={x.id}>
             <TableCell>
               <Link to={x.href} className="flex items-center gap-2 text-primary hover:underline font-medium">
-                <StatusDot isLive={x.isLive} pausedAt={x.pausedAt} />
+                <StatusDot isLive={x.isLive} pausedAt={x.pausedAt} lastHeartbeatAt={x.lastHeartbeatAt} />
                 {x.machineName}
                 {x.pausedAt && <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">Paused</Badge>}
               </Link>

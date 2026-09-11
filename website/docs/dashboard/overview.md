@@ -193,14 +193,20 @@ from the servers will show every label shifted by that much.
 
 ### Status dots
 
-A server's status dot and its **Inactive** badge follow the same clock. Green means the server has
-checked in within the last 30 seconds (six missed heartbeats at the default 5-second
-`HealthCheckInterval`), amber means paused, red means silent — and the dot turns red on its own
-while you are watching the page, without waiting for a refresh.
+Green means the process has checked in recently, amber means paused, red means silent — and a dot
+turns red on its own while you are watching the page, without waiting for a refresh.
 
-The **Applications** roster answers the same question from the server instead: an instance is live
-until its heartbeat is older than `ApplicationInstanceStaleGrace` (2 minutes by default), which is
-also when the row is swept and an `InstanceDown` notification fires. Those pages refresh every 15
-seconds to pick up the answer, so a dot there can trail a dead process by that much. Its fallback
-flat server list — what you see when no `ApplicationName` is set — has no API answer to read and
-uses the 30-second rule, refreshed on the same cadence.
+Every surface uses **one** threshold: `ApplicationInstanceStaleGrace` (2 minutes by default), the
+same value the API uses to answer `isLive` and the same one that decides when a stale instance row
+is swept and an `InstanceDown` notification fires. The dashboard reads it from
+`GET {prefix}/api/addons` at boot and re-derives liveness in the browser, so a server's own page and
+the Applications roster cannot disagree about what a given silence means, and a dot goes red the
+second the grace expires rather than when a refresh happens to land.
+
+:::note
+Liveness decays, so the browser has to be able to compute it. A dashboard pointed at a pre-6.2
+backend gets no threshold to read and falls back to the older behaviour: a 30-second rule of its own
+on a server's page, and the API's `isLive` as fetched on the roster. Set
+`ApplicationInstanceStaleGrace` consistently across your processes — the dashboard reports the value
+configured in **its** process.
+:::

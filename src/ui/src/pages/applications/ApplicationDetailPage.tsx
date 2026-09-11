@@ -8,6 +8,7 @@ import * as api from '@/api';
 import { Spread, InstancesTable, fromInstanceView } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
+import { useLiveInstanceCount } from '@/hooks/useTicking';
 
 export default function ApplicationDetailPage() {
   const { id: rawId } = useParams<{ id: string }>();
@@ -33,6 +34,10 @@ export default function ApplicationDetailPage() {
     () => (detail?.instances ?? []).map((x) => fromInstanceView(x, id)),
     [detail, id],
   );
+
+  // Above the early returns, as every hook must be — and re-derived on the clock, so the headline
+  // count drops on its own when an instance stops checking in.
+  const liveCount = useLiveInstanceCount(instances);
 
   const activity = useMemo(() => {
     const byType = statsQuery.data?.byType ?? [];
@@ -64,8 +69,6 @@ export default function ApplicationDetailPage() {
 
   if (detailQuery.isError) return <ErrorState message="Unable to load application" />;
   if (detailQuery.isLoading || !detail) return <LoadingState />;
-
-  const liveCount = detail.instances.filter((x) => x.isLive).length;
 
   return (
     <div>

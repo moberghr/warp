@@ -1,9 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import { useCountdownLabel, useHeartbeatStale, useRelativeLabel, useServerStatusDotColor, useTickingValue } from './useTicking';
+import {
+  useCountdownLabel,
+  useHeartbeatStale,
+  useInstanceLive,
+  useLiveInstanceCount,
+  useRelativeLabel,
+  useServerStatusDotColor,
+  useTickingValue,
+} from './useTicking';
 import { resetClockTickForTests } from '@/lib/clockTick';
 import { resetDueSignalForTests, subscribeDue, DUE_SIGNAL_COALESCE_MS } from '@/lib/dueSignal';
 import { DUE_GRACE_MS } from '@/utils/format';
+import { resetLivenessForTests, setInstanceStaleGrace } from '@/lib/liveness';
 
 const NOW = '2026-05-25T11:00:00Z';
 
@@ -13,11 +22,13 @@ describe('useTicking', () => {
     vi.setSystemTime(new Date(NOW));
     resetClockTickForTests();
     resetDueSignalForTests();
+    resetLivenessForTests();
   });
 
   afterEach(() => {
     resetClockTickForTests();
     resetDueSignalForTests();
+    resetLivenessForTests();
     vi.useRealTimers();
   });
 
@@ -127,5 +138,40 @@ describe('useTicking', () => {
     // would send the operator looking for a problem they created.
     const paused = renderHook(() => useServerStatusDotColor('2020-01-01T00:00:00Z', '2026-05-25T10:00:00Z'));
     expect(paused.result.current).toBe('bg-amber-500');
+  });
+
+  it('re-derives instance liveness against the threshold the server sent', () => {
+    setInstanceStaleGrace(120);
+    // The API answered "live" 119s ago; one more second of silence and the same rule says otherwise.
+    const { result } = renderHook(() => useInstanceLive('2026-05-25T10:58:01Z', true));
+    expect(result.current).toBe(true);
+
+    act(() => vi.advanceTimersByTime(2_000));
+
+    expect(result.current).toBe(false);
+  });
+
+  it('trusts the API when no threshold was sent, rather than guessing one', () => {
+    // A pre-6.2 backend. Guessing 30s here is what made one silent process render red on the server
+    // page and green on the roster.
+    const { result } = renderHook(() => useInstanceLive('2026-05-25T10:50:00Z', true));
+
+    act(() => vi.advanceTimersByTime(60_000));
+
+    expect(result.current).toBe(true);
+  });
+
+  it('drops the roster headcount as instances go quiet', () => {
+    setInstanceStaleGrace(60);
+    const instances = [
+      { lastHeartbeatAt: '2026-05-25T10:59:30Z', isLive: true },
+      { lastHeartbeatAt: '2026-05-25T10:59:55Z', isLive: true },
+    ];
+    const { result } = renderHook(() => useLiveInstanceCount(instances));
+    expect(result.current).toBe(2);
+
+    act(() => vi.advanceTimersByTime(31_000));
+
+    expect(result.current).toBe(1);
   });
 });

@@ -35,4 +35,18 @@ public sealed class WarpAddonsInfo
     // always available; this flag only toggles the app-grouping columns / app filter, and is true when this
     // process opted in by setting WarpConfiguration.ApplicationName.
     public bool Applications { get; init; }
+
+    /// <summary>
+    /// Seconds of silence after which an instance stops counting as live — this process's
+    /// <see cref="Warp.Core.WarpConfiguration.ApplicationInstanceStaleGrace"/>, the same value
+    /// <c>ApplicationQueryService</c> uses to compute <c>InstanceView.IsLive</c>.
+    /// </summary>
+    /// <remarks>
+    /// The one non-boolean here, and it is on this payload because the dashboard already reads it once at
+    /// boot. Liveness is a fact that DECAYS: a row fetched as live goes stale while the page sits open, and
+    /// a client that cannot see the threshold can only re-ask the server or guess. It guessed — 30s, against
+    /// a 2 minute grace — so the same silent process rendered red on one page and green on another. With the
+    /// number here the browser re-derives exactly what the server would answer at any later instant.
+    /// </remarks>
+    public int InstanceStaleAfterSeconds { get; init; }
 }

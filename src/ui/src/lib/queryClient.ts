@@ -71,10 +71,10 @@ export const queryKeys = {
  * Top-level "scope" keys used by realtime invalidation. Invalidating by prefix
  * here matches every paginated/filtered variant (e.g. `['jobs', 'failed', 0, 20]`).
  */
-// Instance liveness (`InstanceView.isLive`) is computed by the API against the server's configured
-// ApplicationInstanceStaleGrace, which the client cannot re-derive — so these rosters stay fresh by
-// asking again rather than by ticking a local clock (hooks/useTicking). Slower than the servers
-// list's 10s because a page renders one detail read per application.
+// Liveness no longer needs this — the server sends its threshold and every dot re-derives the answer
+// on the clock (lib/liveness). What still does is everything else on the row: CPU, memory, and an
+// instance that started after the page was opened. Slower than the servers list's 10s because a page
+// renders one detail read per application.
 export const INSTANCE_ROSTER_POLL_MS = 15_000;
 
 // A page rendering a countdown needs a live data source, not just a live label. The cross-zero
