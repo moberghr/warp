@@ -4,12 +4,18 @@ sidebar_position: 6
 
 # Releases
 
-## Unreleased
+## 6.2.0
+
+*2026-09-11*
 
 Dashboard-only release, **no schema change and no migration**: a new Retrying view for jobs waiting on
 their next attempt, explicit host declarations for nav items the dashboard cannot infer, one default
 change to how timestamps render — and timestamps that now keep themselves current, including
-countdowns on the columns that point at work still to come.
+countdowns on the columns that point at work still to come and status dots that go red on their own,
+against one threshold the server publishes rather than two the dashboard disagreed about.
+
+The only API addition is `instanceStaleAfterSeconds` on `GET {prefix}/api/addons`. Nothing else
+changes shape, so upgrading is a package bump.
 
 ### Retrying jobs
 
