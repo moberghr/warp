@@ -89,17 +89,24 @@ showed whatever it first loaded.
 
 ### Server status dots update on their own
 
-A server's status dot and its **Inactive** badge are computed in the browser from the last heartbeat,
-so they now flip while you are watching: green while the server has checked in within 30 seconds
-(six missed ticks at the default 5s `HealthCheckInterval`), amber paused, red silent. The server
-detail page also refreshes on a 10s cadence instead of only on its manual refresh button.
+Status dots are computed in the browser from the last heartbeat, so they flip while you are
+watching: green while the process has checked in, amber paused, red silent. The server detail page
+also refreshes on a 10s cadence instead of only on its manual refresh button, and the Applications
+roster's flat server list previously had no refresh at all — a process could die and keep a green
+dot for as long as the page stayed open.
 
-The **Applications** roster answers liveness from the API instead, against the server's configured
-`ApplicationInstanceStaleGrace` (2 minutes) — the client cannot re-derive that threshold, so those
-pages refetch every 15 seconds rather than guessing. Its fallback flat server list (no
-`ApplicationName` set) keeps the 30-second rule, since there is no API answer to read there. That
-list previously had no refresh at all: a process could die and keep a green dot for as long as the
-page stayed open.
+**One threshold, and the server picks it.** `GET {prefix}/api/addons` gains
+`instanceStaleAfterSeconds`, this process's `ApplicationInstanceStaleGrace` — the same value the API
+uses to answer `isLive`, and the one that decides when an instance row is swept and an
+`InstanceDown` notification fires. The dashboard reads it at boot and re-derives liveness from it
+everywhere, rather than the server page applying a 30-second rule of its own while the roster
+waited on the API's two-minute answer: the same silent process could render red on one page and
+green on another. A dashboard against an older backend gets no threshold and keeps the previous
+behaviour.
+
+This makes a server's **Inactive** badge slower to appear — two minutes rather than thirty seconds
+— and that is the point: red now means what the platform means by down, and lines up with the alert
+it fires.
 
 ## 6.1.2
 

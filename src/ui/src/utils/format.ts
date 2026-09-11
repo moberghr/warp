@@ -200,31 +200,6 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-// Six missed ticks at the default 5s HealthCheckInterval. This is the dashboard's own health
-// reading, deliberately tighter than the server-side ApplicationInstanceStaleGrace (2 min) that
-// governs when an instance row is swept and an InstanceDown alert fires — "should I worry?" is a
-// different question from "should this row be deleted?".
-export const HEARTBEAT_STALE_THRESHOLD_MS = 30_000;
-
-// `now` is a parameter for the same reason formatRelativeTime takes one: the shared ticker
-// (lib/clockTick) re-evaluates staleness against one instant, so a dot goes red on its own rather
-// than waiting for the next refetch to re-render it.
-export function isServerStale(lastHeartbeatTime: string, now: number = Date.now()): boolean {
-  return now - new Date(lastHeartbeatTime).getTime() > HEARTBEAT_STALE_THRESHOLD_MS;
-}
-
-export function serverStatusDotColor(lastHeartbeatTime: string, pausedAt: string | null, now: number = Date.now()): string {
-  if (pausedAt) {
-    return 'bg-amber-500';
-  }
-
-  if (isServerStale(lastHeartbeatTime, now)) {
-    return 'bg-red-500';
-  }
-
-  return 'bg-green-500';
-}
-
 function plural(value: number, unit: string): string {
   return `${value} ${unit}${value === 1 ? '' : 's'}`;
 }

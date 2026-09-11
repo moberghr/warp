@@ -357,6 +357,12 @@ export interface WarpAddonsInfo {
   webhooks: boolean;
   applications: boolean;
   slo: boolean;
+  /**
+   * Seconds of silence after which an instance stops counting as live — the server's own
+   * ApplicationInstanceStaleGrace. Optional: a pre-6.2 backend does not send it, and the dashboard
+   * falls back to its historical 30s guess (lib/liveness).
+   */
+  instanceStaleAfterSeconds?: number;
 }
 
 export type {

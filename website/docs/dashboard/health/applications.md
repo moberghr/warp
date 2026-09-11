@@ -34,12 +34,19 @@ appear, and nothing new is written.
 
 ### Liveness
 
-Each instance carries a status dot: green live, amber paused, red silent. On this page liveness is
-computed by the API against `ApplicationInstanceStaleGrace` (2 minutes by default) — the same
-threshold that decides when a stale instance row is swept and an `InstanceDown` notification fires —
-and the page refetches every 15 seconds to pick up the answer. The flat server list this page falls
-back to when no `ApplicationName` is set has no such API answer to read, and applies the dashboard's
-own 30-second rule instead, refreshed on the same 15-second cadence.
+Each instance carries a status dot: green live, amber paused, red silent. Liveness is
+`ApplicationInstanceStaleGrace` (2 minutes by default) — the same threshold that decides when a stale
+instance row is swept and an `InstanceDown` notification fires.
+
+The API computes it once per read and also publishes the threshold itself, so the browser re-derives
+the same answer every second: an instance that stops checking in while you are looking at the roster
+goes red on its own, and the headline `3/4 live instances` count drops with it. That holds for the
+flat server list this page falls back to when no `ApplicationName` is set, and for a server's own
+detail page, which used to apply a tighter rule of its own. The 15-second refresh is still there for
+everything that is not liveness — CPU, memory, and instances that started after you opened the page.
+
+See [Status dots](/docs/dashboard/overview#status-dots) for what the dashboard does against a
+backend too old to send the threshold.
 
 A **server's own** detail page asks a tighter question and answers it in the browser: silent for more
 than 30 seconds (six missed heartbeats at the default 5-second `HealthCheckInterval`) turns the dot

@@ -236,6 +236,11 @@ public static class WarpEndpoints
                 // reads config: the feature is on when this process set an ApplicationName. The Applications
                 // page itself (the renamed Servers page) is always available; the flag toggles app-grouping.
                 Applications = configuration.Value.ApplicationName is not null,
+
+                // Not a flag — the liveness threshold the browser needs to re-derive a decaying fact for
+                // itself. Floored at one second: a sub-second grace would truncate to 0 and read every
+                // instance as stale on arrival.
+                InstanceStaleAfterSeconds = Math.Max(1, (int)Math.Round(configuration.Value.ApplicationInstanceStaleGrace.TotalSeconds)),
             }));
 
         apiGroup.MapGet("concurrency", async ([FromServices] IConcurrencyLimitManager? mgr, CancellationToken ct) =>

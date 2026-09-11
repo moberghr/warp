@@ -7,8 +7,17 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { ApplicationInstanceEventType } from '@/types/applications';
+import type { InstanceView } from '@/types/applications';
 import { StatusDot, KindBadge, formatCpu, formatMem } from './shared';
+import { useInstanceLive } from '@/hooks/useTicking';
 import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
+
+// The word beside the dot reads from the same clock the dot does, so they cannot disagree.
+function LiveWord({ instance }: { instance: InstanceView }) {
+  const live = useInstanceLive(instance.lastHeartbeatAt, instance.isLive);
+
+  return <>{live ? 'Live' : 'Inactive'}</>;
+}
 
 const eventLabels: Record<number, string> = {
   [ApplicationInstanceEventType.Registered]: 'Registered',
@@ -59,7 +68,7 @@ export default function ApplicationInstanceDetailPage() {
       <div className="mb-4">
         <Link to={backLink} className="text-sm text-muted-foreground hover:underline">← {instance.application}</Link>
         <div className="flex items-center gap-3 mt-1">
-          <StatusDot isLive={instance.isLive} />
+          <StatusDot isLive={instance.isLive} lastHeartbeatAt={instance.lastHeartbeatAt} />
           <h1 className="text-2xl font-bold">{instance.machineName}</h1>
           <KindBadge isServer={instance.isServer} />
         </div>
@@ -68,7 +77,7 @@ export default function ApplicationInstanceDetailPage() {
       <Card className="mb-4">
         <CardHeader className="pb-2"><CardTitle className="text-sm">Details</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
-          <div><span className="text-muted-foreground">Status:</span> {instance.isLive ? 'Live' : 'Inactive'}</div>
+          <div><span className="text-muted-foreground">Status:</span> <LiveWord instance={instance} /></div>
           <div><span className="text-muted-foreground">CPU:</span> {formatCpu(instance.cpuUsagePercent)}</div>
           <div><span className="text-muted-foreground">Memory:</span> {formatMem(instance.memoryWorkingSetBytes)}</div>
           <div><span className="text-muted-foreground">Version:</span> {instance.version ?? '—'}</div>

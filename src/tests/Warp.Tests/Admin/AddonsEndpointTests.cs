@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Concurrency;
 using Warp.Core.RateLimit;
 using Warp.Core.Sagas;
@@ -219,6 +220,71 @@ public class AddonsEndpointTests
             info.Sagas.ShouldBeFalse();
             info.Concurrency.ShouldBeFalse();
             info.Endpoints.ShouldBeFalse();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// The browser re-derives liveness rather than re-asking, so it needs the same threshold the API
+    /// answered with — otherwise it guesses, and a guess that disagrees renders one silent process red
+    /// on one page and green on another.
+    /// </summary>
+    [TimedFact]
+    public async Task GetAddons_ReportsTheConfiguredInstanceStaleGrace()
+    {
+        var (app, client) = await CreateApp(services =>
+            services.Configure<WarpConfiguration>(o => o.ApplicationInstanceStaleGrace = TimeSpan.FromSeconds(90)));
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+            info!.InstanceStaleAfterSeconds.ShouldBe(90);
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetAddons_UnconfiguredGrace_ReportsTheDefault()
+    {
+        var (app, client) = await CreateApp();
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+            info!.InstanceStaleAfterSeconds.ShouldBe((int)new WarpConfiguration().ApplicationInstanceStaleGrace.TotalSeconds);
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A sub-second grace truncates to zero, and a zero threshold reads every instance as stale the moment
+    /// it arrives — the floor keeps a misconfiguration from painting a healthy cluster red.
+    /// </summary>
+    [TimedFact]
+    public async Task GetAddons_SubSecondGrace_FloorsAtOneSecond()
+    {
+        var (app, client) = await CreateApp(services =>
+            services.Configure<WarpConfiguration>(o => o.ApplicationInstanceStaleGrace = TimeSpan.FromMilliseconds(200)));
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+            info!.InstanceStaleAfterSeconds.ShouldBe(1);
         }
         finally
         {

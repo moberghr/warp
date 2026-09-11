@@ -18,6 +18,7 @@ import { useTheme } from '@/hooks/useTheme';
 import { useRealtimeInvalidation } from '@/hooks/useRealtimeInvalidation';
 import { useRealtimeStore } from '@/stores/realtime';
 import { startRealtimeFeed, stopRealtimeFeed } from '@/lib/realtimeFeed';
+import { setInstanceStaleGrace } from '@/lib/liveness';
 import { config } from '@/config';
 import { Hint } from '@/components/ui/tooltip';
 import * as api from '@/api';
@@ -206,6 +207,10 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
       .then((info) => {
         if (cancelled) return;
         setAddons(info);
+
+        // Liveness decays while a page sits open, so every dot re-derives it from this threshold
+        // rather than trusting a boolean the API computed at fetch time (lib/liveness).
+        setInstanceStaleGrace(info.instanceStaleAfterSeconds);
         void useRealtimeStore.getState().connectIfEnabled(info.push);
       })
       .catch(() => {
