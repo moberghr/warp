@@ -66,13 +66,46 @@ app.MapWarpDashboard(o => o.ConfigureMenu(m => m.Pages(
     WarpDashboardPage.Applications)));
 ```
 
-Three rules are enforced at startup rather than silently: a page may appear in only one place, a group label may be declared only once, and no group may take the overflow group's own label (the nav keys its open dropdown on the label, so two groups sharing one would leave the overflow's pages unreachable). The first two throw from the offending call; the label collision is checked by `MapWarpDashboard`, so it catches an `OverflowLabel` set after the group too.
+Three rules are enforced at startup rather than silently: a page may appear in only one place, a group label may be declared only once, and no group may take the overflow group's own label (the nav keys its open dropdown on the label, so two groups sharing one would leave the overflow's pages unreachable). The first two throw from the offending call; the label collision is checked by `MapWarpDashboard`, so it catches an `OverflowLabel` set after the group too — and it validates the label the overflow group will actually render under, so blanking `OverflowLabel` falls back to "More" and still collides with a group of that name rather than slipping through.
 
 Addon gating is unchanged and runs after your layout: a page whose addon this process didn't register is dropped wherever you put it, and a group left empty by that gets no trigger. A divider that gating strands — leading, trailing, or beside another — is dropped too, so a rule can never dangle off the end of the bar. Extension pages keep their own slot after the declared entries; their labels are host-supplied and have no enum member to name them by.
 
 :::note
 The layout is a rendering concern only. It doesn't gate access — every page is still routable by URL, and the command palette (`Ctrl`/`Cmd`+`K`) reaches all of them regardless of grouping. Use [Dashboard Auth](/docs/operations/dashboard-auth) to actually restrict the dashboard.
 :::
+
+### Nav declarations
+
+`ConfigureMenu` decides *where* a nav item sits. Which items exist at all is decided by addon
+detection — a page shows when its addon is registered **in the dashboard's own process**.
+
+That inference is wrong for a dashboard-only host (`AddWarp` plus a provider, no `AddWarpServer`). The
+addons live in the worker processes, so pages get hidden over data that is sitting in the database.
+Where the dashboard can still serve the page, say so explicitly:
+
+```csharp
+app.MapWarpDashboard(o => o
+    .ConfigureMenu(m => m.Pages(WarpDashboardPage.Dashboard, WarpDashboardPage.Jobs))
+    .ShowAdapters()       // outbound calls are recorded by the workers, not here
+    .ShowEndpoints()
+    .ShowClient()
+    .ShowSlo()
+    .ShowRetries(false)); // ...and this one turns a shown-by-default tab off
+```
+
+These sit on the same options object as `ConfigureMenu` deliberately — both are "how the dashboard
+looks", as opposed to how it is secured. An explicit declaration outranks detection; **without one,
+detection behaves exactly as before**, so an existing host is unaffected.
+
+`ShowRetries` is the odd one out in defaulting to *on*: the [Retrying](/docs/dashboard/retrying) view
+reads job metadata rather than probing a service, so there is nothing to detect and the switch exists
+to turn it off.
+
+There is deliberately **no** `ShowSagas`, `ShowConcurrency` or `ShowRateLimits`. For those three the
+probed service *is* the page's query service (`ISagaQueryService`, `IConcurrencyLimitManager`,
+`IRateLimitManager`), registered only by `AddSagas()` / `AddConcurrency()` / `AddRateLimit()` and never
+by `AddWarp`. Forcing those nav items on would produce a page whose every request answers 404. To show
+them, register the addon in the dashboard process.
 
 ### The dashboard API ignores your JSON options
 
