@@ -2,10 +2,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import { useRealtimeRefetch } from './useRealtimeRefetch';
 import { emit } from '@/lib/realtimeBus';
+import { signalDue, resetDueSignalForTests, DUE_SIGNAL_COALESCE_MS } from '@/lib/dueSignal';
 
 describe('useRealtimeRefetch', () => {
   beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+
+  afterEach(() => {
+    resetDueSignalForTests();
+    vi.useRealTimers();
+  });
 
   it('refetches when the subscribed event fires', () => {
     const refetch = vi.fn();
@@ -50,6 +55,29 @@ describe('useRealtimeRefetch', () => {
 
     emit('JobFinalized');
     vi.advanceTimersByTime(60_000);
+    expect(refetch).not.toHaveBeenCalled();
+  });
+
+  it('refetches when a countdown on the page reaches zero', () => {
+    // These pages own their own fetch, so the MainLayout React Query bridge cannot reach them —
+    // and JobFinalized never fires for a Scheduled job crossing its instant.
+    const refetch = vi.fn();
+    renderHook(() => useRealtimeRefetch('JobFinalized', refetch));
+
+    signalDue();
+    vi.advanceTimersByTime(DUE_SIGNAL_COALESCE_MS);
+
+    expect(refetch).toHaveBeenCalledOnce();
+  });
+
+  it('stops listening for due crossings after unmount', () => {
+    const refetch = vi.fn();
+    const { unmount } = renderHook(() => useRealtimeRefetch('JobFinalized', refetch));
+    unmount();
+
+    signalDue();
+    vi.advanceTimersByTime(DUE_SIGNAL_COALESCE_MS);
+
     expect(refetch).not.toHaveBeenCalled();
   });
 });

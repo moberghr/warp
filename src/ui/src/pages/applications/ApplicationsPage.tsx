@@ -8,6 +8,7 @@ import { encodeAppId } from '@/types/applications';
 import type { ApplicationSummaryModel } from '@/types/applications';
 import { InstancesTable, Spread, formatCpu, formatMem, fromInstanceView, fromServer } from './shared';
 import { PageHeading } from '@/components/PageHeading';
+import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
 
 // The renamed Servers surface. When the multi-app roster has data we group instances (server ∪ non-server)
 // per application; otherwise we degrade to a flat server list so single-app deployments keep working.
@@ -15,6 +16,7 @@ export default function ApplicationsPage() {
   const appsQuery = useQuery({
     queryKey: ['applications', 'list'] as const,
     queryFn: () => api.getApplications(),
+    refetchInterval: INSTANCE_ROSTER_POLL_MS,
   });
 
   const apps = useMemo(() => (Array.isArray(appsQuery.data) ? appsQuery.data : []), [appsQuery.data]);
@@ -48,6 +50,7 @@ function ApplicationGroup({ app }: { app: ApplicationSummaryModel }) {
   const detailQuery = useQuery({
     queryKey: ['applications', 'detail', app.name] as const,
     queryFn: () => api.getApplicationDetail(id),
+    refetchInterval: INSTANCE_ROSTER_POLL_MS,
   });
 
   const instances = useMemo(
@@ -87,6 +90,7 @@ function FlatServerList() {
   const serversQuery = useQuery({
     queryKey: ['servers', 'list'] as const,
     queryFn: () => api.getServers(),
+    refetchInterval: INSTANCE_ROSTER_POLL_MS,
   });
 
   const instances = useMemo(

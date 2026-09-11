@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import * as api from '@/api';
-import { queryKeys, queryScopes } from '@/lib/queryClient';
+import { COUNTDOWN_POLL_MS, queryKeys, queryScopes } from '@/lib/queryClient';
 import type { JobModel, PagedList } from '@/types';
 
 type StateFetcher = (page: number, pageSize: number) => Promise<PagedList<JobModel>>;
@@ -29,6 +29,9 @@ export function useJobsList(state: string, page: number, pageSize: number) {
       return fetcher(page, pageSize);
     },
     enabled: state in stateEndpoints,
+    // Scheduled and Retrying render a countdown; the other tabs ride JobFinalized, which only
+    // arrives on a push-enabled deployment but also carries no instant those tabs are waiting for.
+    refetchInterval: state === 'scheduled' || state === 'retrying' ? COUNTDOWN_POLL_MS : undefined,
   });
 }
 

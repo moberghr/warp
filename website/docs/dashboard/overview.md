@@ -159,3 +159,48 @@ import Screenshot from '@site/src/components/Screenshot';
   dark="/img/screenshots/01-dashboard-dark.png"
   alt="Dashboard"
 />
+
+## Timestamps and countdowns
+
+Every timestamp in the dashboard is rendered as an exact instant plus a relative label —
+`2026-05-25 13:10:42 (5 minutes ago)` — and the relative half **updates once a second** while the
+tab is visible, so a page left open does not sit on a stale "5 minutes ago". The ticking pauses
+while the tab is backgrounded and catches up the moment you switch back to it. Hovering a timestamp
+reveals the full instant down to the millisecond.
+
+Columns that point at something still being waited on — a scheduled job's **Scheduled**, a retrying
+job's **Next attempt**, a webhook delivery's **Next attempt**, a recurring job's **Next execution** —
+count down instead:
+
+- **`in 2 minutes`** — still ahead.
+- **`due now`** — the instant has passed and the work is waiting to be picked up. This is the normal
+  path, not a fault: a scheduled job becomes eligible on the `ScheduledJobActivation` cadence
+  (10 seconds by default) and then waits for a worker to claim it. The label deliberately does not
+  flip to "3 seconds ago", which would read as a run that already happened.
+- **`overdue by 5 minutes`** — past due by more than a minute, which usually means something is
+  not running: a stopped server, a drained worker pool, a paused queue. The grace covers the
+  worst-case healthy latency — up to `ScheduledActivationInterval` (10s) to be activated, plus up to
+  `MaxPollingInterval` (30s) for a peer server's worker to poll when push is off — so it is quiet
+  while a working deployment catches up.
+
+Pages carrying a countdown refresh every 15 seconds, and a countdown reaching zero refetches
+immediately, so the row moves to its new state on its own rather than sitting at `due now`.
+
+:::note
+Relative labels are computed from the **browser's** clock. A workstation whose clock is minutes off
+from the servers will show every label shifted by that much.
+:::
+
+### Status dots
+
+A server's status dot and its **Inactive** badge follow the same clock. Green means the server has
+checked in within the last 30 seconds (six missed heartbeats at the default 5-second
+`HealthCheckInterval`), amber means paused, red means silent — and the dot turns red on its own
+while you are watching the page, without waiting for a refresh.
+
+The **Applications** roster answers the same question from the server instead: an instance is live
+until its heartbeat is older than `ApplicationInstanceStaleGrace` (2 minutes by default), which is
+also when the row is swept and an `InstanceDown` notification fires. Those pages refresh every 15
+seconds to pick up the answer, so a dot there can trail a dead process by that much. Its fallback
+flat server list — what you see when no `ApplicationName` is set — has no API answer to read and
+uses the 30-second rule, refreshed on the same cadence.

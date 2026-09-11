@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { DataTable } from '@/components/DataTable';
 import { RelativeTime } from '@/components/RelativeTime';
+import { COUNTDOWN_POLL_MS } from '@/lib/queryClient';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { WebhookDeliveryChart } from '@/components/WebhookDeliveryChart';
 import * as api from '@/api';
@@ -40,6 +41,7 @@ export default function WebhooksPage() {
   const listQuery = useQuery({
     queryKey: ['webhooks', 'list', filter] as const,
     queryFn: () => api.getWebhooks(filter),
+    refetchInterval: COUNTDOWN_POLL_MS,
   });
 
   const summaryQuery = useQuery({
@@ -118,7 +120,7 @@ export default function WebhooksPage() {
         cell: ({ row }) =>
           row.original.nextAttemptAt ? (
             <span className="text-sm text-muted-foreground">
-              <RelativeTime date={row.original.nextAttemptAt} />
+              <RelativeTime date={row.original.nextAttemptAt} tense="countdown" />
             </span>
           ) : (
             <span className="text-muted-foreground/40">—</span>

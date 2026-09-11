@@ -31,6 +31,12 @@ Beyond the usual job columns, the list adds two:
 The attempt count comes from the retry bookkeeping already on the job — nothing is added to the
 schema, and nothing extra is written on the worker's hot path to produce it.
 
+**Next attempt** [counts down](/docs/dashboard/overview#timestamps-and-countdowns) while the job is
+still waiting on its instant, and reads `due now` once it passes — the attempt is waiting to be
+activated and claimed, not finished. A row that sits in `Enqueued` (an empty retry schedule) has no
+instant left to wait for, so its timestamp reads as elapsed instead; a countdown there would call an
+ordinary queue backlog overdue.
+
 A job that exhausts its retries is no longer waiting on an attempt, so it leaves this view and appears
 under **Failed**. One that succeeds on a later attempt leaves it for **Completed**.
 

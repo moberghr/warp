@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { RelativeTime } from '@/components/RelativeTime';
-import { formatBytes } from '@/utils/format';
+import { formatBytes, isServerStale } from '@/utils/format';
 import type { InstanceView } from '@/types/applications';
 import type { ServerModel } from '@/types';
 
@@ -69,7 +69,11 @@ export function fromInstanceView(instance: InstanceView, appId: string): Normali
 
 /** Map a (fallback) ServerModel onto the shared row shape — every server is a live-or-stale instance. */
 export function fromServer(server: ServerModel): NormalizedInstance {
-  const stale = Date.now() - new Date(server.lastHeartbeatTime).getTime() > 30_000;
+  // One definition of the dashboard's stale threshold — this used to carry its own copy of the 30s.
+  // Unlike ServerDetailPage's dot this one is not re-derived on the clock: the same table also
+  // renders rows whose liveness the API computed against its own grace, and two liveness rules in
+  // one column would mean two colours for the same silence. The page polls instead.
+  const stale = isServerStale(server.lastHeartbeatTime);
 
   return {
     id: server.id,

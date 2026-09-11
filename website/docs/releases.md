@@ -7,8 +7,9 @@ sidebar_position: 6
 ## Unreleased
 
 Dashboard-only release, **no schema change and no migration**: a new Retrying view for jobs waiting on
-their next attempt, explicit host declarations for nav items the dashboard cannot infer, and one
-default change to how timestamps render.
+their next attempt, explicit host declarations for nav items the dashboard cannot infer, one default
+change to how timestamps render — and timestamps that now keep themselves current, including
+countdowns on the columns that point at work still to come.
 
 ### Retrying jobs
 
@@ -54,6 +55,51 @@ group's pages became unreachable. Both sides now read the same effective label.
 detail surface. Milliseconds were three digits of noise in a column nobody scans by fractions of a
 second; the full instant is now on hover, so no precision is lost. Cron-derived surfaces (recurring
 next/last run) keep their minute precision. This is a display default only — no API or data change.
+
+### Timestamps keep themselves current
+
+Relative labels were computed once, at render. On a deployment with realtime push an idle list never
+re-renders, so "5 minutes ago" could sit there for an hour and a page opened and left alone was
+quietly lying about every instant on it.
+
+Every relative label now updates once a second. The cost of that is bounded by construction rather
+than by a refresh cadence: one interval serves the whole page (not one per row), it stops while the
+tab is backgrounded and republishes the moment you switch back, and a label only re-renders when its
+*text* would change — a row reading "3 hours ago" is untouched, a row reading "in 12 seconds" moves
+every second. Hovering still reveals the exact instant.
+
+### Countdowns say "due now", not "3 seconds ago"
+
+Columns that point at something still being waited on — a scheduled job's **Scheduled**, a retrying
+job's **Next attempt**, a webhook delivery's **Next attempt**, a recurring job's **Next execution** —
+now count down, and past their instant they read `due now` rather than flipping to the past tense.
+
+That flip was wrong, not just ugly. A `ScheduleTime` in the past means the row is eligible and
+waiting: `ScheduledJobActivation` has to flip it (10s cadence by default) and a worker has to claim
+it. Reading "3 seconds ago" there claims a run that has not happened. Past a minute — the grace
+covers the worst-case *healthy* latency, `ScheduledActivationInterval` plus a peer server's worker
+backoff — the label becomes `overdue by 5 minutes`, which is the shape of a real problem — a stopped
+scheduler, a drained worker pool, a paused queue — and is now visible without opening anything.
+
+Reaching zero refetches immediately, and the surfaces carrying a countdown — the Scheduled and
+Retrying job lists, Recurring, Webhooks — now refresh every 15 seconds, so the row moves to its new
+state on its own instead of sitting at `due now`. Recurring and Webhooks previously had no refresh
+of any kind: no event invalidated them and neither used the safety-net interval, so a page left open
+showed whatever it first loaded.
+
+### Server status dots update on their own
+
+A server's status dot and its **Inactive** badge are computed in the browser from the last heartbeat,
+so they now flip while you are watching: green while the server has checked in within 30 seconds
+(six missed ticks at the default 5s `HealthCheckInterval`), amber paused, red silent. The server
+detail page also refreshes on a 10s cadence instead of only on its manual refresh button.
+
+The **Applications** roster answers liveness from the API instead, against the server's configured
+`ApplicationInstanceStaleGrace` (2 minutes) — the client cannot re-derive that threshold, so those
+pages refetch every 15 seconds rather than guessing. Its fallback flat server list (no
+`ApplicationName` set) keeps the 30-second rule, since there is no API answer to read there. That
+list previously had no refresh at all: a process could die and keep a green dot for as long as the
+page stayed open.
 
 ## 6.1.2
 

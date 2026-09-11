@@ -3,6 +3,7 @@ import {
   shortType, shortId, stateName, formatBytes, isServerStale,
   formatRelativeTime, formatDateTime, formatDateTimeExact, formatDateTimeMinute, formatDateTimeSecond,
   absoluteLabel, DASHBOARD_LOCALE,
+  formatCountdown, countdownPhase, formatDurationRough, DUE_GRACE_MS,
   stateColor, serverStatusDotColor,
   httpStatusName,
 } from './format';
@@ -192,5 +193,66 @@ describe('locale pinning', () => {
   it('pins a concrete English locale', () => {
     expect(DASHBOARD_LOCALE).toBe('en-US');
     expect((1234.5).toLocaleString(DASHBOARD_LOCALE)).toBe('1,234.5');
+  });
+});
+
+describe('formatDurationRough', () => {
+  it('picks the largest whole unit and pluralises it', () => {
+    expect(formatDurationRough(1_000)).toBe('1 second');
+    expect(formatDurationRough(45_000)).toBe('45 seconds');
+    expect(formatDurationRough(90_000)).toBe('1 minute');
+    expect(formatDurationRough(3 * 3_600_000)).toBe('3 hours');
+    expect(formatDurationRough(50 * 3_600_000)).toBe('2 days');
+  });
+
+  it('reads the same on both sides of zero', () => {
+    expect(formatDurationRough(-45_000)).toBe(formatDurationRough(45_000));
+  });
+});
+
+describe('countdown labels', () => {
+  const base = Date.UTC(2026, 4, 25, 11, 0, 0);
+  const at = (offsetMs: number) => new Date(base + offsetMs).toISOString();
+
+  it('counts down while the instant is still ahead', () => {
+    expect(formatCountdown(at(120_000), base)).toBe('in 2 minutes');
+    expect(formatCountdown(at(1_000), base)).toBe('in 1 second');
+  });
+
+  it('reads "due now" from the crossing until the grace expires', () => {
+    // A scheduled job sits past its instant while ScheduledJobActivation flips it and a worker
+    // claims it — that is waiting, not a run that already happened.
+    expect(formatCountdown(at(0), base)).toBe('due now');
+    expect(formatCountdown(at(-1), base)).toBe('due now');
+    expect(formatCountdown(at(-DUE_GRACE_MS + 1_000), base)).toBe('due now');
+  });
+
+  it('calls out a real overrun once the grace is spent', () => {
+    expect(formatCountdown(at(-DUE_GRACE_MS), base)).toBe('overdue by 1 minute');
+    expect(formatCountdown(at(-5 * 60_000), base)).toBe('overdue by 5 minutes');
+  });
+
+  it('covers the worst-case healthy latency before crying overdue', () => {
+    // ScheduledActivationInterval (10s) + a peer worker's MaxPollingInterval backoff (30s).
+    expect(formatCountdown(at(-40_000), base)).toBe('due now');
+  });
+
+  it('degrades to empty on an unparseable timestamp instead of rendering NaN', () => {
+    expect(formatCountdown('not-a-timestamp', base)).toBe('');
+    expect(countdownPhase('not-a-timestamp', base)).toBe('future');
+  });
+
+  it('exposes the same three phases the cross-zero refetch keys on', () => {
+    expect(countdownPhase(at(60_000), base)).toBe('future');
+    expect(countdownPhase(at(-1_000), base)).toBe('due');
+    expect(countdownPhase(at(-10 * 60_000), base)).toBe('overdue');
+  });
+});
+
+describe('formatRelativeTime', () => {
+  it('formats against a supplied instant so every label on the page shares one now', () => {
+    const base = Date.UTC(2026, 4, 25, 11, 0, 0);
+    expect(formatRelativeTime(new Date(base - 300_000).toISOString(), base)).toBe('5 minutes ago');
+    expect(formatRelativeTime(new Date(base + 600_000).toISOString(), base)).toBe('in 10 minutes');
   });
 });

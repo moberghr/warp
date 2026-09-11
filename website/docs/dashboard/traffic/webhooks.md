@@ -27,7 +27,7 @@ the delivery row, in one of three states:
 
 | Status | Meaning |
 |---|---|
-| **Pending** | Attempts remain; `Next attempt` is when the next one fires |
+| **Pending** | Attempts remain; `Next attempt` [counts down](/docs/dashboard/overview#timestamps-and-countdowns) to the next one |
 | **Delivered** | An attempt returned a success code |
 | **Exhausted** | The retry schedule ran out; your `IWebhookDeliveryExhaustedHandler` was invoked |
 

@@ -8,6 +8,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { ApplicationInstanceEventType } from '@/types/applications';
 import { StatusDot, KindBadge, formatCpu, formatMem } from './shared';
+import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
 
 const eventLabels: Record<number, string> = {
   [ApplicationInstanceEventType.Registered]: 'Registered',
@@ -27,6 +28,7 @@ export default function ApplicationInstanceDetailPage() {
     queryKey: ['applications', 'instance', id, instanceId] as const,
     queryFn: () => api.getInstanceDetail(id, instanceId!),
     enabled: !!id && !!instanceId,
+    refetchInterval: INSTANCE_ROSTER_POLL_MS,
   });
 
   const backLink = `/applications/${encodeURIComponent(rawId ?? '')}`;

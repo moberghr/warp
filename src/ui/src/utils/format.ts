@@ -16,9 +16,80 @@ import { State } from '@/types';
 // really localised, this constant is the seam to make configurable.
 export const DASHBOARD_LOCALE = 'en-US';
 
-export function formatRelativeTime(dateString: string): string {
+// `now` is a parameter rather than an internal `Date.now()` so the shared ticker (lib/clockTick) can
+// format every label on the page against one instant. Defaulted, so the non-ticking callers are
+// unchanged.
+export function formatRelativeTime(dateString: string, now: number = Date.now()): string {
   return DateTime.fromJSDate(new Date(dateString))
-    .toRelative({ base: DateTime.fromMillis(Date.now()), locale: DASHBOARD_LOCALE }) ?? '';
+    .toRelative({ base: DateTime.fromMillis(now), locale: DASHBOARD_LOCALE }) ?? '';
+}
+
+// How far past its instant a pending row may sit before the label stops saying "due now" — and it
+// has to cover the worst-case HEALTHY latency, or "overdue" accuses a working deployment. A
+// scheduled job waits up to ScheduledActivationInterval (10s) to be flipped to Enqueued, and then,
+// on a multi-server deployment without UseDatabasePush(), up to MaxPollingInterval (30s) for a peer
+// server's worker backoff — the activating server's own workers get the in-process JobEnqueued
+// signal, its peers do not. 40s of normal, so 30s was too tight.
+export const DUE_GRACE_MS = 60_000;
+
+export type CountdownPhase = 'future' | 'due' | 'overdue';
+
+export function countdownPhase(dateString: string, now: number = Date.now()): CountdownPhase {
+  const delta = new Date(dateString).getTime() - now;
+
+  // An unparseable timestamp reads as 'future' so it neither claims to be overdue nor asks the page
+  // to refetch; formatCountdown renders it as empty, the way Luxon degrades for the same input.
+  if (Number.isNaN(delta) || delta >= 1_000) {
+    return 'future';
+  }
+
+  return delta > -DUE_GRACE_MS ? 'due' : 'overdue';
+}
+
+// Largest whole unit, hand-rolled rather than Luxon's `toRelative`, because a countdown needs the
+// same phrasing on both sides of zero: "in 45 seconds" / "overdue by 45 seconds". Stops at days —
+// past that nobody is watching a countdown, and "in 40 days" beats "in 1 month" for a cron preview.
+export function formatDurationRough(ms: number): string {
+  const seconds = Math.floor(Math.abs(ms) / 1000);
+  if (seconds < 60) {
+    return plural(seconds, 'second');
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return plural(minutes, 'minute');
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return plural(hours, 'hour');
+  }
+
+  return plural(Math.floor(hours / 24), 'day');
+}
+
+// The label for an instant something is still *waiting for*: a scheduled job, a retry's next attempt,
+// a webhook's next delivery, a recurring job's next firing.
+//
+// Luxon would happily flip "in 30 seconds" to "30 seconds ago" on its own, and for those surfaces
+// that reading is wrong: a past `scheduleTime` means the row is due and waiting on activation plus a
+// worker, not that it already ran. "due now" says waiting; "overdue by 5 minutes" says something is
+// actually wrong (a stopped scheduler, a drained worker pool) instead of quietly claiming a run.
+export function formatCountdown(dateString: string, now: number = Date.now()): string {
+  const delta = new Date(dateString).getTime() - now;
+
+  if (Number.isNaN(delta)) {
+    return '';
+  }
+
+  switch (countdownPhase(dateString, now)) {
+    case 'future':
+      return `in ${formatDurationRough(delta)}`;
+    case 'due':
+      return 'due now';
+    default:
+      return `overdue by ${formatDurationRough(delta)}`;
+  }
 }
 
 export function formatDateTime(dateString: string): string {
@@ -129,21 +200,31 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-const HEARTBEAT_STALE_THRESHOLD_MS = 30_000;
+// Six missed ticks at the default 5s HealthCheckInterval. This is the dashboard's own health
+// reading, deliberately tighter than the server-side ApplicationInstanceStaleGrace (2 min) that
+// governs when an instance row is swept and an InstanceDown alert fires — "should I worry?" is a
+// different question from "should this row be deleted?".
+export const HEARTBEAT_STALE_THRESHOLD_MS = 30_000;
 
-export function isServerStale(lastHeartbeatTime: string): boolean {
-  return Date.now() - new Date(lastHeartbeatTime).getTime() > HEARTBEAT_STALE_THRESHOLD_MS;
+// `now` is a parameter for the same reason formatRelativeTime takes one: the shared ticker
+// (lib/clockTick) re-evaluates staleness against one instant, so a dot goes red on its own rather
+// than waiting for the next refetch to re-render it.
+export function isServerStale(lastHeartbeatTime: string, now: number = Date.now()): boolean {
+  return now - new Date(lastHeartbeatTime).getTime() > HEARTBEAT_STALE_THRESHOLD_MS;
 }
 
-export function serverStatusDotColor(lastHeartbeatTime: string, pausedAt: string | null): string {
+export function serverStatusDotColor(lastHeartbeatTime: string, pausedAt: string | null, now: number = Date.now()): string {
   if (pausedAt) {
     return 'bg-amber-500';
   }
 
-  const elapsed = Date.now() - new Date(lastHeartbeatTime).getTime();
-  if (elapsed > HEARTBEAT_STALE_THRESHOLD_MS) {
+  if (isServerStale(lastHeartbeatTime, now)) {
     return 'bg-red-500';
   }
 
   return 'bg-green-500';
+}
+
+function plural(value: number, unit: string): string {
+  return `${value} ${unit}${value === 1 ? '' : 's'}`;
 }

@@ -4,7 +4,7 @@ import { ArrowLeftRight } from 'lucide-react';
 import type { ColumnDef } from '@tanstack/react-table';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
-import { RelativeTime } from '@/components/RelativeTime';
+import { RelativeLabel, RelativeTime } from '@/components/RelativeTime';
 import { StateBadge } from '@/components/StateBadge';
 import { Hint } from '@/components/ui/tooltip';
 import { LoadingState, ErrorState } from '@/components/PageState';
@@ -18,7 +18,7 @@ import {
   useTriggerRecurringJob,
   useDeleteRecurringJob,
 } from '@/api/hooks/useRecurring';
-import { formatRelativeTime, absoluteLabel } from '@/utils/format';
+import { absoluteLabel } from '@/utils/format';
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import { lastRunHref, isLastRunCleanedUp, isLastRunOutcomeUnknown, describeCron } from './recurringModel';
 import type { RecurringJobModel } from '@/types';
@@ -150,7 +150,7 @@ export default function RecurringPage() {
             </Hint>
           ) : row.original.nextExecution ? (
             <span className="text-sm">
-              <RelativeTime date={row.original.nextExecution} precision="minute" display="relative" />
+              <RelativeTime date={row.original.nextExecution} precision="minute" display="relative" tense="countdown" />
             </span>
           ) : (
             <span className="text-sm">N/A</span>
@@ -180,11 +180,11 @@ export default function RecurringPage() {
             <Hint text={hint}>
               {href ? (
                 <Link to={href} className="text-sm text-primary hover:underline">
-                  {formatRelativeTime(lastExecution)}
+                  <RelativeLabel date={lastExecution} />
                 </Link>
               ) : (
                 <span className="text-sm text-muted-foreground decoration-dotted underline-offset-4 hover:underline">
-                  {formatRelativeTime(lastExecution)}
+                  <RelativeLabel date={lastExecution} />
                 </span>
               )}
             </Hint>
