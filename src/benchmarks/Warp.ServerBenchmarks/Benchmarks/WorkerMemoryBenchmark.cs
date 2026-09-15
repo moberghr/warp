@@ -14,6 +14,7 @@ using Warp.Core.Enums;
 using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Notifications;
+using Warp.Core.Services;
 using Warp.ServerBenchmarks.Infrastructure;
 using Warp.Worker;
 
@@ -50,7 +51,8 @@ public class WorkerMemoryBenchmark
             services.GetRequiredService<TimeProvider>(),
             services.GetRequiredService<IWarpSqlQueries<TestContext>>(),
             services.GetRequiredService<IWarpNotificationTransport>(),
-            services.GetRequiredService<ServerTaskSignals<TestContext>>());
+            services.GetRequiredService<ServerTaskSignals<TestContext>>(),
+            services.GetRequiredService<WarpCounterBuffer>());
 
         // Register a server + worker in the DB (required for job processing)
         await using var scope = services.CreateAsyncScope();
