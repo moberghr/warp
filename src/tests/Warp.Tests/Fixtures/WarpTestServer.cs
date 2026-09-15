@@ -85,6 +85,9 @@ public class WarpTestServer : IAsyncDisposable
     /// which is atomic against a concurrent increment, so racing the background flusher cannot
     /// double-count.
     /// </summary>
+    /// <summary>The worker's process-wide counter accumulator, before any flush has written rows.</summary>
+    internal WarpCounterBuffer CounterBuffer => _host.Services.GetRequiredService<WarpCounterBuffer>();
+
     public async Task FlushCountersAsync(CancellationToken ct = default)
     {
         await using var scope = _host.Services.CreateAsyncScope();

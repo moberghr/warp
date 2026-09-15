@@ -771,11 +771,11 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     /// same ~20 keys, so at 500k jobs that was ten million rows folding down to twenty.
     /// </para>
     /// <para>
-    /// The trade, deliberately: buffering happens BEFORE the finalizing SaveChanges, so a save that then
-    /// fails leaves the increment counted where it used to roll back. Same class of inaccuracy as the
-    /// flush window itself — counters are the write-optimised side of the fold (§6.2), diagnostics and
-    /// not an audit trail — and keeping it here avoids a second pass over the job's counters on the hot
-    /// path.
+    /// Staged, not buffered: the increment is held on the worker until the unit of work it belongs to
+    /// COMMITS, then moved to the shared buffer by <see cref="CommitStagedCounters"/>. An attempt whose
+    /// transaction rolls back therefore contributes nothing, exactly as the per-increment rows did when
+    /// they rode the finalizing SaveChanges. The flush window is still lossy on an ungraceful exit
+    /// (§6.2 — counters are diagnostics, not an audit trail), but a rollback is not a loss case.
     /// </para>
     /// </summary>
     private void EmitCounter(string key, int value)

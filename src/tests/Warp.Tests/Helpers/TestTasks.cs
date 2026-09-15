@@ -33,18 +33,29 @@ public static class TestTasks
     /// </summary>
     public static async Task FlushCountersAsync(WarpCounterBuffer buffer, DbContext context, CancellationToken ct = default)
     {
-        var pending = buffer.Drain();
-        if (pending.Count == 0)
-        {
-            return;
-        }
+        await CreateCounterBufferFlusher(buffer, context).FlushOnceAsync(ct);
+    }
 
-        foreach (var (key, value) in pending)
-        {
-            context.Set<Counter>().Add(new Counter { Key = key, Value = (int)value });
-        }
+    /// <summary>
+    /// Builds the real <see cref="CounterBufferFlusher{TContext}"/> over a single context.
+    /// <para>
+    /// Tests drain through the production flusher rather than a stand-in that writes <c>Counter</c>
+    /// rows itself. A stand-in silently diverges — the one written first truncated a long to an int
+    /// while the flusher splits values past <c>int.MaxValue</c> across rows — and every test that used
+    /// it would keep passing while the code it stood for was broken.
+    /// </para>
+    /// </summary>
+    internal static CounterBufferFlusher<TestContext> CreateCounterBufferFlusher(
+        WarpCounterBuffer buffer, DbContext context)
+    {
+        var services = new ServiceCollection();
+        services.AddScoped<IWarpServerContext>(_ => new TestServerContext(context));
 
-        await context.SaveChangesAsync(ct);
+        return new CounterBufferFlusher<TestContext>(
+            services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            buffer,
+            Options.Create(new WarpServerConfiguration()),
+            NullLogger<CounterBufferFlusher<TestContext>>.Instance);
     }
 
     // Throwaway scope factory for tasks whose instance methods don't create scopes
