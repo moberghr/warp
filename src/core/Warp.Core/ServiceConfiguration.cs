@@ -467,7 +467,29 @@ public static class ServiceConfiguration
         // Child job queries + failed children check during completion
         job.HasIndex(p => new { p.ParentJobId, p.CurrentState });
 
-        // Message/Batch listing pages
+        // Dashboard listing pages: filter by Kind (+ CurrentState) and page ORDER BY CreateTime DESC.
+        // JobQueryService.Jobs() pins Kind = Job and every list adds a state filter, so this index
+        // supplies both the filter and the ordering and the page stops after `take` rows.
+        //
+        // DO NOT DROP IT to speed up the worker claim. It is tempting: profiling a job backlog shows
+        // this index reading ~14,000 tuples per scan and accounting for ~98% of all buffer traffic,
+        // and dropping it measurably improves the claim (155s -> 12s of claim execution, 119.7M ->
+        // 4.8M blocks, over 100k jobs). That is real, and it is still the wrong fix — the traffic is
+        // the claim borrowing this index, not this index doing its own job badly.
+        //
+        // The claim filters Kind = Job AND CurrentState = Enqueued AND Queue = ANY($1) and orders by
+        // Queue, ScheduleTime. The planner estimates ONE row for that predicate and actually gets
+        // thousands, so it believes a scan-plus-Sort is cheap. A Sort cannot stop early — it must
+        // consume its whole input before emitting a row — so LIMIT buys nothing and the claim reads
+        // the entire enqueued range to return one job. Deleting this index only removes the plan the
+        // planner escapes to; the misestimate that sends it there remains, and the dashboard's list
+        // pages lose their index.
+        //
+        // Measured and REFUTED as fixes for that misestimate, so they need not be retried: autovacuum
+        // tuning, more frequent ANALYZE, extended statistics on (Kind, CurrentState, Queue), a partial
+        // index matching the claim predicate (verified used, ~31.5k scans, and still no change), and
+        // plan_cache_mode = force_custom_plan. Reproduce any of it with
+        // `Warp.ServerBenchmarks -- load --tune=...`.
         job.HasIndex(p => new { p.Kind, p.CurrentState, p.CreateTime });
 
         // ScheduledJobActivation's UPDATE ... WHERE CurrentState = Scheduled AND ScheduleTime <= now.
