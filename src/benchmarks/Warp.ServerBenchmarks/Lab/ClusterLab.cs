@@ -37,7 +37,8 @@ public static class ClusterLab
         int repeats,
         bool useDispatcher,
         int idleSeconds = 0,
-        string? existingConnection = null)
+        string? existingConnection = null,
+        int handlerMs = 0)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
@@ -75,7 +76,7 @@ public static class ClusterLab
         Console.WriteLine(
             $"servers={servers} (separate processes)  workers={workersPerServer}/server  jobs={jobs:N0}  "
             + $"arrival={(arrivalPerSecond > 0 ? arrivalPerSecond + "/s" : "burst")}  "
-            + $"dispatcher={useDispatcher}");
+            + $"dispatcher={useDispatcher}  handler={handlerMs}ms");
 
         var children = StartServers(connectionString, workersPerServer, servers, useDispatcher);
 
@@ -105,7 +106,7 @@ public static class ClusterLab
                 await using var sampler = new WaitSampler(connectionString, TimeSpan.FromMilliseconds(50));
                 var sw = Stopwatch.StartNew();
 
-                var publishSeconds = await PublishAsync(coordinator, jobs, arrivalPerSecond);
+                var publishSeconds = await PublishAsync(coordinator, jobs, arrivalPerSecond, handlerMs);
                 await WaitForDrainAsync(coordinator, jobs, TimeSpan.FromMinutes(30));
 
                 sw.Stop();
@@ -281,7 +282,7 @@ public static class ClusterLab
     /// measured throughput — a cluster cannot drain faster than the coordinator can enqueue — so a
     /// scaling test has to report it, or a publisher bottleneck reads as server saturation.
     /// </summary>
-    private static async Task<double> PublishAsync(IHost coordinator, int count, int arrivalPerSecond)
+    private static async Task<double> PublishAsync(IHost coordinator, int count, int arrivalPerSecond, int handlerMs)
     {
         var publishClock = Stopwatch.StartNew();
         var remaining = count;
@@ -297,7 +298,14 @@ public static class ClusterLab
             var publisher = scope.ServiceProvider.GetRequiredService<IPublisher>();
             for (var i = 0; i < batch; i++)
             {
-                await publisher.Enqueue(new EmptyRequest());
+                if (handlerMs > 0)
+                {
+                    await publisher.Enqueue(new DelayRequest { DelayMs = handlerMs });
+                }
+                else
+                {
+                    await publisher.Enqueue(new EmptyRequest());
+                }
             }
 
             await publisher.SaveChangesAsync();

@@ -38,6 +38,7 @@ else if (args.Length > 0 && string.Equals(args[0], "cluster", StringComparison.O
     var clusterDispatcher = false;
     var clusterIdle = 0;
     string? clusterConnection = null;
+    var clusterHandlerMs = 0;
 
     for (var i = 1; i < args.Length; i++)
     {
@@ -73,10 +74,14 @@ else if (args.Length > 0 && string.Equals(args[0], "cluster", StringComparison.O
         {
             clusterConnection = args[i]["--connection=".Length..];
         }
+        else if (args[i].StartsWith("--handler-ms=", StringComparison.OrdinalIgnoreCase))
+        {
+            clusterHandlerMs = int.Parse(args[i]["--handler-ms=".Length..]);
+        }
     }
 
     await ClusterLab.RunAsync(
-        clusterJobs, clusterWorkers, clusterServers, clusterArrival, clusterRepeats, clusterDispatcher, clusterIdle, clusterConnection);
+        clusterJobs, clusterWorkers, clusterServers, clusterArrival, clusterRepeats, clusterDispatcher, clusterIdle, clusterConnection, clusterHandlerMs);
 }
 else if (args.Length > 0 && string.Equals(args[0], "stress", StringComparison.OrdinalIgnoreCase))
 {

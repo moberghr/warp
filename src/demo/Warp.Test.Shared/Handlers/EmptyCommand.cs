@@ -123,3 +123,24 @@ public class PayloadCommand8 : IJobHandler<PayloadRequest8>
 {
     public Task HandleAsync(PayloadRequest8 message, CancellationToken cancellationToken) => Task.CompletedTask;
 }
+
+/// <summary>
+/// A job that spends a configurable time doing nothing, to model handler work the benchmark can hold
+/// constant. <c>EmptyRequest</c> measures Warp's overhead in isolation; this measures what that
+/// overhead is worth once a job also does something.
+/// </summary>
+public class DelayRequest : IJob
+{
+    public int DelayMs { get; set; }
+}
+
+public class DelayCommand : IJobHandler<DelayRequest>
+{
+    public async Task HandleAsync(DelayRequest message, CancellationToken cancellationToken)
+    {
+        if (message.DelayMs > 0)
+        {
+            await Task.Delay(message.DelayMs, cancellationToken);
+        }
+    }
+}
