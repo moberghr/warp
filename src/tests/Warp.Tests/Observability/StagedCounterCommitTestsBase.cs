@@ -41,7 +41,14 @@ public abstract class StagedCounterCommitTestsBase : IntegrationTestBase
 
         await using var server = await WarpTestServer.StartAsync(
             Fixture,
-            config => config.WorkerCount = 1,
+            config =>
+            {
+                config.WorkerCount = 1;
+
+                // The background flusher would otherwise drain the buffer out from under the
+                // assertion on its 2s default, leaving nothing to read and failing intermittently.
+                config.CounterBufferFlushInterval = TimeSpan.FromMinutes(10);
+            },
             services => services.AddSingleton(barrier));
 
         var publisher = server.CreatePublisher();

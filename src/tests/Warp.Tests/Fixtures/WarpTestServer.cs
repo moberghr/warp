@@ -78,6 +78,9 @@ public class WarpTestServer : IAsyncDisposable
 
     public PauseStateHolder PauseState => _host.Services.GetRequiredService<PauseStateHolder>();
 
+    /// <summary>The worker's process-wide counter accumulator, before any flush has written rows.</summary>
+    internal WarpCounterBuffer CounterBuffer => _host.Services.GetRequiredService<WarpCounterBuffer>();
+
     /// <summary>
     /// Writes the worker's buffered counter increments out as <c>Counter</c> rows immediately rather
     /// than waiting for <c>CounterBufferFlusher</c>'s interval. A test that runs jobs and then asserts
@@ -85,9 +88,6 @@ public class WarpTestServer : IAsyncDisposable
     /// which is atomic against a concurrent increment, so racing the background flusher cannot
     /// double-count.
     /// </summary>
-    /// <summary>The worker's process-wide counter accumulator, before any flush has written rows.</summary>
-    internal WarpCounterBuffer CounterBuffer => _host.Services.GetRequiredService<WarpCounterBuffer>();
-
     public async Task FlushCountersAsync(CancellationToken ct = default)
     {
         await using var scope = _host.Services.CreateAsyncScope();

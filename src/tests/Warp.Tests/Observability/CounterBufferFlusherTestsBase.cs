@@ -115,16 +115,47 @@ public abstract class CounterBufferFlusherTestsBase : IAsyncLifetime
         rows.Sum(x => (long)x.Value).ShouldBe((long)int.MaxValue + 25);
     }
 
+    /// <summary>
+    /// A failed write must hand the increments back rather than drop them. The drain has already
+    /// emptied the buffer by the time the write runs, so without this a transient connection reset in
+    /// a perfectly healthy process loses that interval outright — well outside the documented trade,
+    /// which only allows an UNGRACEFUL exit to lose one. Counters are additive, so returning them is
+    /// exact: the next flush writes this interval summed with the following one.
+    /// </summary>
+    [TimedFact]
+    public async Task FlushOnce_WhenTheWriteFails_ReturnsTheIncrementsToTheBuffer()
+    {
+        var buffer = new WarpCounterBuffer();
+        buffer.Add("stats:succeeded", 4);
+        buffer.Add("stats:failed", 1);
+
+        // A disposed context fails the write without needing a broken database.
+        var broken = _fixture.CreateContext();
+        await broken.DisposeAsync();
+
+        await Should.ThrowAsync<Exception>(async () =>
+            await CreateFlusher(buffer, broken).FlushOnceAsync(Ct));
+
+        // Nothing written, and nothing lost: the next flush carries the full total.
+        (await ReadCounters()).ShouldBeEmpty();
+        await CreateFlusher(buffer).FlushOnceAsync(Ct);
+
+        var rows = await ReadCounters();
+        rows.Count.ShouldBe(2);
+        rows.Single(x => string.Equals(x.Key, "stats:succeeded", StringComparison.Ordinal)).Value.ShouldBe(4);
+        rows.Single(x => string.Equals(x.Key, "stats:failed", StringComparison.Ordinal)).Value.ShouldBe(1);
+    }
+
     private async Task<List<Counter>> ReadCounters() =>
         await _fixture.CreateContext()
             .Set<Counter>()
             .AsNoTracking()
             .ToListAsync(Ct);
 
-    private CounterBufferFlusher<TestContext> CreateFlusher(WarpCounterBuffer buffer)
+    private CounterBufferFlusher<TestContext> CreateFlusher(WarpCounterBuffer buffer, DbContext? context = null)
     {
         var services = new ServiceCollection();
-        services.AddScoped<IWarpServerContext>(_ => new TestServerContext(_fixture.CreateContext()));
+        services.AddScoped<IWarpServerContext>(_ => new TestServerContext(context ?? _fixture.CreateContext()));
         var provider = services.BuildServiceProvider();
 
         return new CounterBufferFlusher<TestContext>(

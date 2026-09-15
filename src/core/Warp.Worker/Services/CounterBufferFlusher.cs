@@ -92,18 +92,35 @@ internal sealed class CounterBufferFlusher<TContext> : BackgroundService
             return 0;
         }
 
-        using var scope = _scopeFactory.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-
-        foreach (var (key, value) in pending)
+        try
         {
-            foreach (var chunk in Split(value))
-            {
-                context.Set<Counter>().Add(new Counter { Key = key, Value = chunk });
-            }
-        }
+            using var scope = _scopeFactory.CreateScope();
+            var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
-        await context.SaveChangesAsync(ct);
+            foreach (var (key, value) in pending)
+            {
+                foreach (var chunk in Split(value))
+                {
+                    context.Set<Counter>().Add(new Counter { Key = key, Value = chunk });
+                }
+            }
+
+            await context.SaveChangesAsync(ct);
+        }
+        catch
+        {
+            // The drain already took these out of the buffer, so a failure anywhere in the write would
+            // lose them outright — a transient connection reset in a perfectly healthy process, well
+            // outside the documented trade (an UNGRACEFUL exit may lose one interval). Counters are
+            // additive and the keys re-merge, so handing them back is exact: the next flush writes this
+            // interval's increments summed with the following one's.
+            //
+            // The whole write is covered, not just SaveChanges: resolving the scope or adding to the
+            // context can throw too, and a narrower guard silently drops the batch in those cases.
+            _buffer.AddRange(pending);
+
+            throw;
+        }
 
         return pending.Count;
     }

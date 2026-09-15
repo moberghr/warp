@@ -35,6 +35,13 @@ public sealed class CounterAggregator<TContext> : IServerTask
     // (a minute by default) and could never catch up with a busy worker pool.
     public bool RerunImmediately => true;
 
+    // Re-ticking means this runs far more often than its interval, and every logged run costs a
+    // ServerTask UPDATE plus a ServerLog INSERT. ExpirationCleanup sizes ServerLog retention as
+    // "300 runs" from the interval, so logging each drain would both amplify writes and blow that
+    // estimate. Same stance as the other high-frequency metrics tasks (Heartbeat, BacklogSampler,
+    // SloEvaluator, StatisticRollup) — a failure still logs.
+    public bool LogOnSuccess => false;
+
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
         var count = await AggregateCountersAsync(ct);
