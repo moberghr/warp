@@ -14,6 +14,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Logging;
 using Warp.Core.Retry;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
@@ -38,6 +39,10 @@ namespace Warp.Tests.Observability;
 [GenerateDatabaseTests]
 public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
 
@@ -80,6 +85,7 @@ public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         (await ReadJob(jobId)).CurrentState.ShouldBe(State.Scheduled);
@@ -113,6 +119,8 @@ public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
 
         await worker.GetAndProcessJob(CancellationToken.None);
 
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
         // The retry is Scheduled into the future and the worker only fetches Enqueued rows (§2.8), so make
         // it eligible again directly rather than waiting out a 15s backoff. The job's RetriedTimes metadata
         // — the input the distinct-job count reads — is untouched by this.
@@ -124,6 +132,7 @@ public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         var counters = await ReadCounters();
@@ -143,8 +152,11 @@ public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
 
         await worker.GetAndProcessJob(CancellationToken.None);
 
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
         // Act — second attempt has no budget left.
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         (await ReadJob(jobId)).CurrentState.ShouldBe(State.Failed);
@@ -179,6 +191,7 @@ public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         (await ReadJob(jobId)).CurrentState.ShouldBe(State.Failed);
@@ -274,7 +287,8 @@ public abstract class OutcomeMetricsTestsBase : IAsyncLifetime
             TimeProvider.System,
             TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             TestTasks.NullTransport,
-            TestTasks.NullSignals);
+            TestTasks.NullSignals,
+            _counterBuffer);
     }
 
     private static void AssertAppendOnly(List<Counter> counters) =>

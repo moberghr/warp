@@ -113,6 +113,8 @@ public abstract class CircuitBreakerIntegrationTestsBase : IntegrationTestBase
 
         await server.WaitForJobLog(jobId, "Scheduled", timeout: TimeSpan.FromSeconds(15));
 
+        await server.FlushCountersAsync(Xunit.TestContext.Current.CancellationToken);
+
         var readCtx = Fixture.CreateContext();
         var counters = await readCtx.Set<Counter>()
             .Where(x => x.Key.StartsWith("stats:requeued"))

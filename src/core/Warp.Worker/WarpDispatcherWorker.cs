@@ -44,6 +44,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly DispatcherWorkerAvailability _availability;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
+    private readonly WarpCounterBuffer _counterBuffer;
 
     public WarpDispatcherWorker(
         Guid workerId,
@@ -55,8 +56,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals,
         IDatabaseExceptionClassifier exceptionClassifier,
-        DispatcherWorkerAvailability availability)
+        DispatcherWorkerAvailability availability,
+        WarpCounterBuffer counterBuffer)
     {
+        _counterBuffer = counterBuffer;
         _availability = availability;
         _workerId = workerId;
         _jobReader = jobReader;
@@ -72,7 +75,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             logger,
             exceptionClassifier,
             _configuration.CompletionBatchSize,
-            _configuration.CompletionFlushInterval);
+            _configuration.CompletionFlushInterval,
+            counterBuffer);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -569,7 +573,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         {
             foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes)))
             {
-                context.Set<Counter>().Add(counter);
+                _counterBuffer.Add(counter.Key, counter.Value);
             }
         }
 

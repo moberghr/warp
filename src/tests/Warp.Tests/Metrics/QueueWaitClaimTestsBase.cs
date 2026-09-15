@@ -33,6 +33,10 @@ namespace Warp.Tests.Metrics;
 [GenerateDatabaseTests]
 public abstract class QueueWaitClaimTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
     private static readonly string TypeUnit = typeof(UnitRequest).AssemblyQualifiedName!;
@@ -64,6 +68,8 @@ public abstract class QueueWaitClaimTestsBase : IAsyncLifetime
 
         await worker.GetAndProcessJob(Ct);
 
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
         var ctx = _fixture.CreateContext();
         (await ctx.Set<Counter>().Where(x => x.Key == "qwait:default:count").SumAsync(x => x.Value, Ct)).ShouldBe(1);
 
@@ -85,6 +91,8 @@ public abstract class QueueWaitClaimTestsBase : IAsyncLifetime
 
         await worker.GetAndProcessJob(Ct);
 
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
         var dur = await _fixture.CreateContext().Set<Counter>().Where(x => x.Key == "qwait:default:dur").SumAsync(x => x.Value, Ct);
         dur.ShouldBeGreaterThanOrEqualTo(1000);           // ~2s from ScheduleTime
         dur.ShouldBeLessThan(60_000);                     // nowhere near the 1h CreateTime (~3.6M ms)
@@ -100,6 +108,8 @@ public abstract class QueueWaitClaimTestsBase : IAsyncLifetime
         using var listener = CaptureQueueWaitMeter(_appName, waits);
 
         await worker.GetAndProcessJob(Ct);
+
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Meter fired with the right queue tag AND a sensible recorded value (~2s), not 0 ...
         var measurement = waits.ShouldHaveSingleItem();
@@ -205,6 +215,7 @@ public abstract class QueueWaitClaimTestsBase : IAsyncLifetime
             TimeProvider.System,
             TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             TestTasks.NullTransport,
-            TestTasks.NullSignals);
+            TestTasks.NullSignals,
+            _counterBuffer);
     }
 }

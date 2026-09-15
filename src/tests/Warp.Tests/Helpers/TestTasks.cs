@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data;
+using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
@@ -22,6 +23,30 @@ namespace Warp.Tests.Helpers;
 /// </summary>
 public static class TestTasks
 {
+    /// <summary>
+    /// Writes a worker's buffered counter increments out as <c>Counter</c> rows.
+    /// <para>
+    /// The worker sums increments into a <see cref="WarpCounterBuffer"/> and a background flusher
+    /// writes them out on an interval, so a test that runs jobs and then asserts on Counter or
+    /// Statistic rows must drain the buffer first rather than race that interval.
+    /// </para>
+    /// </summary>
+    public static async Task FlushCountersAsync(WarpCounterBuffer buffer, DbContext context, CancellationToken ct = default)
+    {
+        var pending = buffer.Drain();
+        if (pending.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (key, value) in pending)
+        {
+            context.Set<Counter>().Add(new Counter { Key = key, Value = (int)value });
+        }
+
+        await context.SaveChangesAsync(ct);
+    }
+
     // Throwaway scope factory for tasks whose instance methods don't create scopes
     // (StaleJobRecoveryTask, ServerCleanupTask). MessageRoutingTask needs a real one with
     // registered handlers — pass it via the scopeFactory parameter.

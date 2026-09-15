@@ -21,6 +21,7 @@ using Warp.Core.Timeout;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Worker;
 
 namespace Warp.Tests.Fixtures;
@@ -76,6 +77,22 @@ public class WarpTestServer : IAsyncDisposable
     }
 
     public PauseStateHolder PauseState => _host.Services.GetRequiredService<PauseStateHolder>();
+
+    /// <summary>
+    /// Writes the worker's buffered counter increments out as <c>Counter</c> rows immediately rather
+    /// than waiting for <c>CounterBufferFlusher</c>'s interval. A test that runs jobs and then asserts
+    /// on Counter or Statistic rows must call this first. Draining removes each key with TryRemove,
+    /// which is atomic against a concurrent increment, so racing the background flusher cannot
+    /// double-count.
+    /// </summary>
+    public async Task FlushCountersAsync(CancellationToken ct = default)
+    {
+        await using var scope = _host.Services.CreateAsyncScope();
+        await TestTasks.FlushCountersAsync(
+            _host.Services.GetRequiredService<WarpCounterBuffer>(),
+            scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context,
+            ct);
+    }
 
     /// <summary>
     /// Synchronously runs a single registered <see cref="Warp.Worker.Services.IServerTask"/> of

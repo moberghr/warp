@@ -13,6 +13,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Helper;
 using Warp.Core.RateLimit;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
@@ -23,6 +24,10 @@ namespace Warp.Tests.Features.RateLimit;
 [GenerateDatabaseTests]
 public abstract class RateLimitTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private readonly IDatabaseFixture _fixture;
 
     protected RateLimitTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
@@ -920,6 +925,7 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
             TimeProvider.System,
             Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.NullSignals);
+            Warp.Tests.Helpers.TestTasks.NullSignals,
+            _counterBuffer);
     }
 }

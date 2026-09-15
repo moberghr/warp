@@ -176,6 +176,20 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan? CounterAggregationInterval { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
+    /// How often this process writes its in-memory <c>WarpCounterBuffer</c> increments out as
+    /// <c>Counter</c> rows.
+    /// <para>
+    /// The worker sums counter increments in memory rather than writing a row per increment, so this
+    /// is the window in which an ungraceful process exit loses metrics — a graceful stop flushes. It
+    /// is also the collapse factor: a job emits ~20 increments, and at 500 jobs/sec a 2s interval
+    /// turns ~20,000 rows into roughly 20. Shorten it to narrow the loss window, lengthen it to write
+    /// fewer, larger rows. Counters are the write-optimised side of the metrics fold (§6.2) — if a
+    /// number must survive a crash, it belongs in a row, not a counter.
+    /// </para>
+    /// </summary>
+    public TimeSpan CounterBufferFlushInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
     /// How often <c>StatisticRollup</c> downsamples time-bucketed <c>Statistic</c> rows — fine (5-min) → hourly
     /// → daily — and deletes buckets past <see cref="WarpConfiguration.DailyStatisticsRetention"/> (§8.30). Off
     /// the hot path; replaces the old delete-only hourly prune. <b>The rollup is now the ONLY pruner of

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core.Data.Queries;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
+using Warp.Core.Services;
 using Warp.Worker.Services;
 
 namespace Warp.Worker;
@@ -30,6 +31,7 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly ServerRegistrationState _state;
     private readonly ServerTaskSignals<TContext> _signals;
+    private readonly WarpCounterBuffer _counterBuffer;
     private readonly ILoggerFactory _loggerFactory;
     private readonly List<BackgroundService> _workers = [];
 
@@ -42,8 +44,10 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
         IWarpSqlQueries<TContext> sqlQueries,
         ServerRegistrationState state,
         ServerTaskSignals<TContext> signals,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        WarpCounterBuffer counterBuffer)
     {
+        _counterBuffer = counterBuffer;
         _configuration = configuration.Value;
         _configurationOptions = configuration;
         _serviceScopeFactory = serviceScopeFactory;
@@ -90,7 +94,8 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
                     _timeProvider,
                     _sqlQueries,
                     _notificationTransport,
-                    _signals);
+                    _signals,
+                    _counterBuffer);
 
                 var worker = new WarpWorker<TContext>(
                     workerService,

@@ -10,6 +10,7 @@ using Warp.Core.BackgroundServices;
 using Warp.Core.Diagnostics;
 using Warp.Core.Events;
 using Warp.Core.Logging;
+using Warp.Core.Services;
 using Warp.Worker.BackgroundServices;
 using Warp.Worker.Services;
 
@@ -148,6 +149,14 @@ public static class ServiceConfiguration
         // stays gated here. (Trace-correlation scope tracking is configured server-wide in
         // AddServerHostCore so background-service and server-task logs get it too.)
         services.AddLogging(builder => builder.AddProvider(new JobLoggerProvider()));
+
+        // Per-process counter accumulator + its writer. Registered beside the job tasks because only
+        // the worker feeds it. The flusher is a BackgroundService, not an IServerTask: the buffer is
+        // per-process so each process must write out its own, and taking a cluster-wide lock would be
+        // actively wrong — one winner would flush its own buffer and leave every other process's
+        // increments in memory (§8.32).
+        services.AddSingleton<WarpCounterBuffer>();
+        services.AddHostedService<CounterBufferFlusher<TContext>>();
 
         // Job-only server tasks — routing, orchestration, scheduling, recovery, stat aggregation.
         // Deliberately NOT part of AddServerHostCore: a service-only server has no jobs to drive.

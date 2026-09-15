@@ -7,6 +7,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.ErrorGrouping;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Worker;
@@ -16,6 +17,10 @@ namespace Warp.Tests.Worker;
 [GenerateDatabaseTests]
 public abstract class CompletionBatchTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private readonly IDatabaseFixture _fixture;
     private readonly BatchTestTimeProvider _time = new(new DateTime(2026, 4, 17, 10, 0, 0, DateTimeKind.Utc));
 
@@ -123,7 +128,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 3, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 3, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var job1 = await InsertProcessingJob();
         var job2 = await InsertProcessingJob();
@@ -137,6 +142,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         // Act
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         var ctx = _fixture.CreateContext();
@@ -153,8 +159,13 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             job.LastKeepAlive.ShouldBeNull();
         }
 
-        var counters = await ctx.Set<Counter>().CountAsync(Xunit.TestContext.Current.CancellationToken);
-        counters.ShouldBe(6);
+        // Increments are summed per key before being written, so three completions produce TWO rows —
+        // the lifetime total and its hourly bucket — each carrying 3, rather than six rows of 1.
+        var counters = await ctx.Set<Counter>()
+            .AsNoTracking()
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        counters.Count.ShouldBe(2);
+        counters.Sum(x => x.Value).ShouldBe(6);
 
         var logs = await ctx.Set<JobLog>()
             .Where(x => x.EventType == "Completed")
@@ -172,7 +183,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // and CompletionBatch persists it in the completion transaction. This was missed initially (only the
         // single-worker path was wired) and surfaced in the demo (UseDispatcher = true → zero issues).
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var job = await InsertProcessingJob();
         job.CurrentState = State.Failed;
@@ -190,6 +201,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         batch.Add(new PendingCompletion(job, [], [], occurrence));
 
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         var ctx = _fixture.CreateContext();
         var persisted = (await ctx.Set<ErrorOccurrence>().AsNoTracking().ToListAsync(Xunit.TestContext.Current.CancellationToken)).ShouldHaveSingleItem();
@@ -204,10 +216,11 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(1));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(1), _counterBuffer);
 
         // Act
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         var ctx = _fixture.CreateContext();
@@ -221,16 +234,18 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var job = await InsertProcessingJob();
         batch.Add(MakeEntry(job));
 
         // Act
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         var countersAfterFirst = await _fixture.CreateContext().Set<Counter>().CountAsync(Xunit.TestContext.Current.CancellationToken);
 
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         var countersAfterSecond = await _fixture.CreateContext().Set<Counter>().CountAsync(Xunit.TestContext.Current.CancellationToken);
@@ -244,7 +259,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // Arrange
         var scopeFactory = CreateScopeFactory();
         var flushInterval = TimeSpan.FromMilliseconds(100);
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 100, flushInterval: flushInterval);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 100, flushInterval: flushInterval, _counterBuffer);
 
         // Assert empty — no timestamp yet
         batch.IsTimeElapsed.ShouldBeFalse();
@@ -261,6 +276,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         // Act — flush resets the timestamp
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — empty buffer, no timestamp
         batch.IsTimeElapsed.ShouldBeFalse();
@@ -273,7 +289,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // and EF raises DbUpdateConcurrencyException. FlushAsync must split on failure, isolate
         // the poison entry, commit the good one, and return without surfacing the exception.
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var realJob = await InsertProcessingJob();
         batch.Add(MakeEntry(realJob));
@@ -296,6 +312,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         // Act
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — real job committed, phantom dropped, buffer drained.
         var ctx = _fixture.CreateContext();
@@ -318,7 +335,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // Arrange — four good jobs and one poison in the middle. Split-on-failure must isolate
         // the single bad entry (via recursive halving) without dropping the neighbours.
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var good1 = await InsertProcessingJob();
         var good2 = await InsertProcessingJob();
@@ -346,6 +363,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         // Act
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — all four real jobs commit as Completed; phantom is gone.
         var ctx = _fixture.CreateContext();
@@ -369,7 +387,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // and commits the good entry.
         var classifier = new AlwaysTransientClassifier();
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, classifier, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, classifier, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var realJob = await InsertProcessingJob();
         batch.Add(MakeEntry(realJob));
@@ -389,6 +407,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         // Act
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — at least one full budget exhaustion (3 calls in the initial pass; more
         // during the recursive phantom split). Lower-bound rather than exact so the
@@ -414,7 +433,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // split to distort the call count.
         var classifier = new OnceTransientClassifier();
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, classifier, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, classifier, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var phantomJob = new Job
         {
@@ -431,6 +450,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         // Act
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — first throw reported transient (retry), second throw reported
         // non-transient (drop into the DbUpdateException catch → log + drop poison).
@@ -457,12 +477,13 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // calling FlushAsync always commits the buffered entries, there's no caller-visible way
         // to cancel a drained flush mid-commit.
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var job = await InsertProcessingJob();
         batch.Add(MakeEntry(job));
 
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         var persisted = await _fixture.CreateContext().Set<Job>().FirstAsync(x => x.Id == job.Id, Xunit.TestContext.Current.CancellationToken);
         persisted.CurrentState.ShouldBe(State.Completed);
@@ -476,7 +497,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10));
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
 
         var job = await InsertProcessingJob();
 
@@ -489,6 +510,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         // Flush commits the single entry
         await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         var persisted = await _fixture.CreateContext().Set<Job>().FirstAsync(x => x.Id == job.Id, Xunit.TestContext.Current.CancellationToken);
         persisted.CurrentState.ShouldBe(State.Completed);
     }

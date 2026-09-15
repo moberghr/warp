@@ -14,6 +14,7 @@ using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Retry;
+using Warp.Core.Services;
 using Warp.Core.Timeout;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
@@ -52,6 +53,10 @@ namespace Warp.Tests.Observability;
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class StatSurfaceTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
 
@@ -342,11 +347,16 @@ public abstract class StatSurfaceTestsBase : IAsyncLifetime
             .Select(x => x.CurrentState)
             .FirstAsync(Xunit.TestContext.Current.CancellationToken);
 
-    private async Task<List<Counter>> ReadCounters() =>
-        await _fixture.CreateContext()
+    private async Task<List<Counter>> ReadCounters()
+    {
+        // Increments are summed in the worker's buffer; drain them before reading the rows.
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
+        return await _fixture.CreateContext()
             .Set<Counter>()
             .AsNoTracking()
             .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+    }
 
     /// <summary>
     /// Folds every <c>stats:</c> row onto its base key, taking either the lifetime rows (<c>stats:{name}</c>)
@@ -454,6 +464,7 @@ public abstract class StatSurfaceTestsBase : IAsyncLifetime
             TimeProvider.System,
             TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             TestTasks.NullTransport,
-            TestTasks.NullSignals);
+            TestTasks.NullSignals,
+            _counterBuffer);
     }
 }

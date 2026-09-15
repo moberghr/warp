@@ -12,6 +12,7 @@ using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Helper;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
@@ -22,6 +23,10 @@ namespace Warp.Tests.Features.Concurrency;
 [GenerateDatabaseTests]
 public abstract class MutexTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private readonly IDatabaseFixture _fixture;
 
     protected MutexTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
@@ -94,6 +99,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         // Act: worker processes job2 — should fail to acquire lock
         var worker = CreateWorker(lockProvider);
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Cleanup
         await heldHandle.DisposeAsync();
@@ -148,6 +154,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         // Act
         var worker = CreateWorker();
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert: job2 should be processing (not cancelled)
         var readCtx = _fixture.CreateContext();
@@ -178,6 +185,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         // Act
         var worker = CreateWorker();
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert: job should complete normally (no mutex cancellation)
         var readCtx = _fixture.CreateContext();
@@ -209,6 +217,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         // Act
         var worker = CreateWorker();
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert: should complete
         var readCtx = _fixture.CreateContext();
@@ -256,6 +265,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         // Act
         var worker = CreateWorker(lockProvider);
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         await heldHandle.DisposeAsync();
 
         // Assert: ExpireAt should be set (not null)
@@ -311,6 +321,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         // Act
         var worker = CreateWorker(lockProvider);
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         await heldHandle.DisposeAsync();
 
         // Assert: job2 should be back in Enqueued, ExpireAt unset, Requeued log entry written
@@ -365,6 +376,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         // Act
         var worker = CreateWorker();
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert: job should complete normally
         var readCtx = _fixture.CreateContext();
@@ -488,6 +500,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
             TimeProvider.System,
             Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.NullSignals);
+            Warp.Tests.Helpers.TestTasks.NullSignals,
+            _counterBuffer);
     }
 }

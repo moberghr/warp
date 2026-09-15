@@ -5,6 +5,7 @@ using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
+using Warp.Core.Services;
 
 namespace Warp.Worker;
 
@@ -43,6 +44,7 @@ internal sealed class CompletionBatch
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
+    private readonly WarpCounterBuffer _counterBuffer;
     private readonly int _batchSize;
     private readonly TimeSpan _flushInterval;
     private DateTimeOffset? _firstEntryTimestamp;
@@ -53,8 +55,10 @@ internal sealed class CompletionBatch
         ILogger logger,
         IDatabaseExceptionClassifier exceptionClassifier,
         int batchSize,
-        TimeSpan flushInterval)
+        TimeSpan flushInterval,
+        WarpCounterBuffer counterBuffer)
     {
+        _counterBuffer = counterBuffer;
         _scopeFactory = scopeFactory;
         _timeProvider = timeProvider;
         _logger = logger;
@@ -134,11 +138,6 @@ internal sealed class CompletionBatch
                     var entry = entries[i];
                     context.Entry(entry.Job).State = EntityState.Modified;
 
-                    if (entry.Counters.Count > 0)
-                    {
-                        context.Set<Counter>().AddRange(entry.Counters);
-                    }
-
                     if (entry.Logs.Count > 0)
                     {
                         context.Set<JobLog>().AddRange(entry.Logs);
@@ -154,6 +153,16 @@ internal sealed class CompletionBatch
 
                 await context.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
+
+                // Only once the batch has COMMITTED do its increments become real, so a rolled-back or
+                // retried batch cannot leave them counted.
+                for (var i = start; i < start + count; i++)
+                {
+                    foreach (var counter in entries[i].Counters)
+                    {
+                        _counterBuffer.Add(counter.Key, counter.Value);
+                    }
+                }
 
                 return;
             }
