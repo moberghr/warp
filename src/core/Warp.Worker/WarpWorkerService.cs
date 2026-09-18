@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -265,7 +266,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await monitorTask;
 
             PerfTrace.Mark(PerfTrace.BeginTransaction2);
-            await using var endTransaction = await workerContext.Database.BeginTransactionAsync(default);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
 
             if (successOutcome != null)
             {
@@ -316,7 +317,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await monitorTask;
 
             var cancelNow = _timeProvider.GetUtcNow().UtcDateTime;
-            await using var endTransaction = await workerContext.Database.BeginTransactionAsync(default);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
             job.CurrentState = State.Deleted;
             job.ExpireAt = cancelNow.Add(_configuration.JobExpirationTimeout);
             job.CancellationMode = CancellationMode.None;
@@ -430,7 +431,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await jobCts.CancelAsync();
             await monitorTask;
 
-            await using var endTransaction = await workerContext.Database.BeginTransactionAsync(default);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
             FinalizeJobState(workerContext, job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
             if (_configuration.EnableHandlerLogging)
             {
@@ -784,9 +785,37 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     }
 
     /// <summary>
+    /// Opens the transaction that finalizes a job, discarding anything still staged from an attempt
+    /// that never committed.
+    /// <para>
+    /// Every finalization arm — success, graceful cancel and failure — stages its increments INSIDE
+    /// this transaction, so starting one is exactly the moment the previous unit of work is known to
+    /// be over. Clearing here rather than in each arm is the point: when the success arm's
+    /// SaveChanges or COMMIT throws, control lands in one of the catch arms, which finalizes the job
+    /// a second time and commits. Without this, that second commit hands the buffer BOTH sets and the
+    /// job is counted as succeeded and failed — <c>stats:succeeded</c> and <c>stats:failed</c> both
+    /// move for one job, breaking the reconciliation §8.33 requires and letting the attributed reason
+    /// breakdown exceed its own state total.
+    /// </para>
+    /// <para>
+    /// Clearing at the top of each arm would work today and rot tomorrow: a new arm is written by
+    /// copying an existing one, and the clear is the line with no visible effect on the path being
+    /// copied. Pairing it with the transaction start makes it impossible to open a finalizing
+    /// transaction without it.
+    /// </para>
+    /// </summary>
+    private async Task<IDbContextTransaction> BeginFinalizingTransactionAsync(DbContext workerContext)
+    {
+        _stagedCounters.Clear();
+
+        return await workerContext.Database.BeginTransactionAsync(default);
+    }
+
+    /// <summary>
     /// Moves everything staged for the just-committed unit of work into the shared buffer. Called after
-    /// each commit; staged increments left behind by a unit of work that threw are dropped when the next
-    /// job clears the list.
+    /// each commit; staged increments left behind by a unit of work that threw are dropped by whichever
+    /// comes first — the next finalizing transaction on this job
+    /// (<see cref="BeginFinalizingTransactionAsync"/>) or the next job's iteration.
     /// </summary>
     private void CommitStagedCounters()
     {

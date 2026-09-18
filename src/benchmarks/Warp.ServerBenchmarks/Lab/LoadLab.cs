@@ -255,7 +255,26 @@ public static class LoadLab
     /// </summary>
     private static async Task ApplyTuningAsync(string connectionString, string tune)
     {
-        if (string.Equals(tune, "none", StringComparison.OrdinalIgnoreCase))
+        // Match lower-cased against a known set, and refuse anything else. Every lever below is a
+        // case-SENSITIVE `is` pattern, so --tune=DropIdx used to apply nothing, print no "tuning
+        // applied" line and no error, and report the untuned baseline under the tuned run's heading —
+        // the operator reads that as "the lever does not help". A silently-ignored typo is the same
+        // failure the customplan lever is commented against: reporting a lever that was never pulled.
+        tune = tune.ToLowerInvariant();
+
+        var known = new[]
+        {
+            "none", "explainclaim", "extstats", "dropidx", "customplan", "analyze", "vacuum", "index", "both",
+        };
+
+        if (!known.Contains(tune, StringComparer.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Unknown --tune value '{tune}'. Known levers: {string.Join(", ", known)}.",
+                nameof(tune));
+        }
+
+        if (tune is "none")
         {
             return;
         }
@@ -598,9 +617,19 @@ public static class LoadLab
 
     /// <summary>
     /// Emulates tabs on the dashboard polling status.
+    /// <para>
+    /// A poller failure must never take the run's RESULT with it. RunScenarioAsync awaits these before
+    /// it returns, so an escaping exception propagates out of the measured window and neither Report
+    /// nor ReportSpread runs — a 90-minute run that completed successfully would print nothing at all
+    /// because one status query hit a transient connection reset under the load the lab itself is
+    /// generating. The poller is emulated background noise, not a measurement: its failures are
+    /// counted and reported, never thrown.
+    /// </para>
     /// </summary>
     private static Task StartDashboardPollers(IHost host, int tabs, CancellationToken ct)
     {
+        var failures = 0;
+
         var pollers = Enumerable.Range(0, tabs).Select(async _ =>
         {
             while (!ct.IsCancellationRequested)
@@ -615,10 +644,25 @@ public static class LoadLab
                 {
                     return;
                 }
+                catch (Exception)
+                {
+                    // Counted, not swallowed silently: a run whose dashboard load mostly failed did not
+                    // measure the dashboard load it claims to have applied.
+                    Interlocked.Increment(ref failures);
+                }
             }
         });
 
-        return Task.WhenAll(pollers);
+        return Task.WhenAll(pollers)
+            .ContinueWith(
+                _ =>
+                {
+                    if (failures > 0)
+                    {
+                        Console.WriteLine($"  dashboard pollers: {failures} failed status queries");
+                    }
+                },
+                TaskScheduler.Default);
     }
 
     private static async Task PublishAsync(IHost host, int count, int payloadBytes, int types, int arrivalPerSecond)

@@ -97,6 +97,19 @@ public static class ServiceConfiguration
                 + "StatisticRollup roll a bucket into a coarser parent that is already past its own retention.");
         }
 
+        // Fail fast on a non-positive counter-buffer flush interval. It is the sole delay in
+        // CounterBufferFlusher's loop, so TimeSpan.Zero spins the flush with no pause and a negative value
+        // makes Task.Delay throw every iteration into a catch that logs and immediately retries — a hot CPU
+        // loop writing an unbounded error log, in a process that otherwise looks healthy. Neither shape is
+        // reachable by accident from code, but both are one ConfigurationBinder typo away.
+        if (builder.CounterBufferFlushInterval <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                $"CounterBufferFlushInterval must be greater than zero (was {builder.CounterBufferFlushInterval}). "
+                + "It is the interval at which buffered counter increments are written out as Counter rows; "
+                + "a non-positive value leaves the flusher spinning instead of waiting.");
+        }
+
         // Fail fast when the singleton background-service lease cannot survive a missed renewal. Heartbeat
         // renews the lease, so HealthCheckInterval is the renewal cadence and BackgroundServiceLeaseTtl is
         // the deadline — but they are configured independently, so a TTL under three cadences leaves barely
