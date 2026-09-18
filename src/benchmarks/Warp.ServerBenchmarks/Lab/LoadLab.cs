@@ -57,167 +57,190 @@ public static class LoadLab
 
         PostgreSqlContainer? container = null;
         MsSqlContainer? sqlContainer = null;
-        string connectionString;
-
-        if (sqlServer)
-        {
-            // SQL Server arm. The committed changes touch both providers, and pre-aggregation in
-            // particular changes write patterns, so measuring only Postgres leaves half the surface
-            // unverified. Server-side statistics differ entirely, so only wall-clock and throughput
-            // are compared across providers — the pg_stat_* columns are not available here.
-            sqlContainer = new MsSqlBuilder().Build();
-            await sqlContainer.StartAsync();
-            connectionString = sqlContainer.GetConnectionString();
-            Console.WriteLine("Started a throwaway SQL Server container (throughput only, no DB-side stats).");
-        }
-        else if (externalConnectionString is not null)
-        {
-            connectionString = externalConnectionString;
-            Console.WriteLine("Using the supplied PostgreSQL instance.");
-        }
-        else
-        {
-            container = new PostgreSqlBuilder()
-                .WithImage("postgres:latest")
-                // auto_explain captures the plan of any statement slower than the threshold, so a
-                // pathological plan can be read rather than guessed at.
-                .WithCommand(BuildPostgresArgs(explainPlans: false))
-                .Build();
-
-            await container.StartAsync();
-            connectionString = container.GetConnectionString();
-            Console.WriteLine("Started a throwaway PostgreSQL container.");
-        }
-
-        if (!sqlServer)
-        {
-            await PgStats.TryCreateExtensionAsync(connectionString);
-        }
-
-        var withStatements = !sqlServer && await PgStats.HasStatStatementsAsync(connectionString);
-        if (!withStatements && !sqlServer)
-        {
-            Console.WriteLine(
-                "WARNING: pg_stat_statements unavailable — statement counts and DB exec time will be blank. " +
-                "Tuple and transaction figures below are still exact.");
-        }
-
-        // Several servers against one database is the shape Warp is built for, and the one every
-        // measurement so far has skipped. Each host registers its own server row and its workers
-        // compete for the same queue, so this exercises cross-server claim contention — which a
-        // single-process run cannot show at all.
         var hosts = new List<IHost>();
-        for (var i = 0; i < servers; i++)
+
+        // Teardown belongs in a finally, not on the happy path. A throw anywhere in a scenario used
+        // to leak the container AND the running hosts, whose workers keep polling the database after
+        // the run that started them has gone — so the NEXT measurement silently includes the previous
+        // one's load. A measuring instrument that contaminates its own next reading is worse than one
+        // that simply fails.
+        try
         {
-            hosts.Add(BuildHost(connectionString, workers, useDispatcher, prefetchCount, completionBatchSize, sqlServer));
-        }
+            string connectionString;
 
-        var host = hosts[0];
-
-        await using (var scope = host.Services.CreateAsyncScope())
-        {
-            await scope.ServiceProvider.GetRequiredService<TestContext>().Database.EnsureCreatedAsync();
-        }
-
-        if (!sqlServer)
-        {
-            await ApplyTuningAsync(connectionString, tune);
-        }
-
-        foreach (var started in hosts)
-        {
-            await started.StartAsync();
-        }
-
-        Console.WriteLine($"scenario={scenario}  servers={servers}  workers={workers}/server"
-            + (scenario == LoadScenario.Idle
-                ? string.Empty
-                : $"  jobs={jobs:N0}  dispatcher={useDispatcher}  prefetch={FormatKnob(prefetchCount)}  completionBatch={FormatKnob(completionBatchSize)}  payload={payloadBytes}B  tune={tune}  types={types}  arrival={FormatArrival(arrivalPerSecond)}")
-            + (scenario == LoadScenario.JobsWithDashboard ? $"  tabs={tabs}" : string.Empty));
-
-        // Warm up: JIT, connection pool, EF query compilation, server registration. Measuring these
-        // would attribute one-time startup cost to steady-state load.
-        await WarmUpAsync(host, scenario);
-        Console.WriteLine("Warmed up. Settling...");
-        await Task.Delay(TimeSpan.FromSeconds(scenario == LoadScenario.Idle ? 45 : 5));
-
-        var samples = new List<(double Seconds, double DbMs, long Statements, int Processed)>();
-
-        for (var run = 1; run <= repeats; run++)
-        {
-            if (repeats > 1)
+            if (sqlServer)
             {
-                Console.WriteLine($"-- run {run} of {repeats} " + new string('-', 40));
-                await ResetJobTablesAsync(host);
+                // SQL Server arm. The committed changes touch both providers, and pre-aggregation in
+                // particular changes write patterns, so measuring only Postgres leaves half the surface
+                // unverified. Server-side statistics differ entirely, so only wall-clock and throughput
+                // are compared across providers — the pg_stat_* columns are not available here.
+                sqlContainer = new MsSqlBuilder().Build();
+                await sqlContainer.StartAsync();
+                connectionString = sqlContainer.GetConnectionString();
+                Console.WriteLine("Started a throwaway SQL Server container (throughput only, no DB-side stats).");
+            }
+            else if (externalConnectionString is not null)
+            {
+                connectionString = externalConnectionString;
+                Console.WriteLine("Using the supplied PostgreSQL instance.");
+            }
+            else
+            {
+                container = new PostgreSqlBuilder()
+                    .WithImage("postgres:latest")
+                    // auto_explain captures the plan of any statement slower than the threshold, so a
+                    // pathological plan can be read rather than guessed at.
+                    .WithCommand(BuildPostgresArgs(explainPlans: false))
+                    .Build();
+
+                await container.StartAsync();
+                connectionString = container.GetConnectionString();
+                Console.WriteLine("Started a throwaway PostgreSQL container.");
             }
 
-            var before = sqlServer ? PgStats.Empty : await PgStats.CaptureAsync(connectionString, withStatements);
-            var sw = Stopwatch.StartNew();
-
-            var processed = await RunScenarioAsync(host, scenario, jobs, tabs, idleWindow, payloadBytes, types, arrivalPerSecond);
-
-            sw.Stop();
-            var after = sqlServer ? PgStats.Empty : await PgStats.CaptureAsync(connectionString, withStatements);
-            var delta = after.Since(before);
-
-            Report(scenario, delta, sw.Elapsed, processed, withStatements);
-            samples.Add((sw.Elapsed.TotalSeconds, delta.TotalExecMs, delta.TotalCalls, processed));
-        }
-
-        if (repeats > 1)
-        {
-            ReportSpread(samples);
-        }
-
-        if (!sqlServer)
-        {
-            await ReportIndexUsageAsync(connectionString);
-        }
-
-        if (!sqlServer && string.Equals(tune, "explainclaim", StringComparison.OrdinalIgnoreCase))
-        {
-            await ExplainClaimShapesAsync(connectionString);
-        }
-
-        if (container is not null)
-        {
-            var (stdout, stderr) = await container.GetLogsAsync();
-            var planLines = (stdout + stderr)
-                .Split((char)10)
-                .Where(x => x.Contains("Index Scan", StringComparison.Ordinal)
-                    || x.Contains("Seq Scan", StringComparison.Ordinal)
-                    || x.Contains("duration:", StringComparison.Ordinal)
-                    || x.Contains("Sort", StringComparison.Ordinal)
-                    || x.Contains("LockRows", StringComparison.Ordinal))
-                .Take(40)
-                .ToList();
-
-            if (planLines.Count > 0)
+            if (!sqlServer)
             {
-                Console.WriteLine("-- slow-statement plans (auto_explain) " + new string('-', 20));
-                foreach (var line in planLines)
+                await PgStats.TryCreateExtensionAsync(connectionString);
+            }
+
+            var withStatements = !sqlServer && await PgStats.HasStatStatementsAsync(connectionString);
+            if (!withStatements && !sqlServer)
+            {
+                Console.WriteLine(
+                    "WARNING: pg_stat_statements unavailable — statement counts and DB exec time will be blank. " +
+                    "Tuple and transaction figures below are still exact.");
+            }
+
+            // Several servers against one database is the shape Warp is built for, and the one every
+            // measurement so far has skipped. Each host registers its own server row and its workers
+            // compete for the same queue, so this exercises cross-server claim contention — which a
+            // single-process run cannot show at all.
+            for (var i = 0; i < servers; i++)
+            {
+                hosts.Add(BuildHost(connectionString, workers, useDispatcher, prefetchCount, completionBatchSize, sqlServer));
+            }
+
+            var host = hosts[0];
+
+            await using (var scope = host.Services.CreateAsyncScope())
+            {
+                await scope.ServiceProvider.GetRequiredService<TestContext>().Database.EnsureCreatedAsync();
+            }
+
+            if (!sqlServer)
+            {
+                await ApplyTuningAsync(connectionString, tune);
+            }
+
+            foreach (var started in hosts)
+            {
+                await started.StartAsync();
+            }
+
+            Console.WriteLine($"scenario={scenario}  servers={servers}  workers={workers}/server"
+                + (scenario == LoadScenario.Idle
+                    ? string.Empty
+                    : $"  jobs={jobs:N0}  dispatcher={useDispatcher}  prefetch={FormatKnob(prefetchCount)}  completionBatch={FormatKnob(completionBatchSize)}  payload={payloadBytes}B  tune={tune}  types={types}  arrival={FormatArrival(arrivalPerSecond)}")
+                + (scenario == LoadScenario.JobsWithDashboard ? $"  tabs={tabs}" : string.Empty));
+
+            // Warm up: JIT, connection pool, EF query compilation, server registration. Measuring these
+            // would attribute one-time startup cost to steady-state load.
+            await WarmUpAsync(host, scenario);
+            Console.WriteLine("Warmed up. Settling...");
+            await Task.Delay(TimeSpan.FromSeconds(scenario == LoadScenario.Idle ? 45 : 5));
+
+            var samples = new List<(double Seconds, double DbMs, long Statements, int Processed)>();
+
+            for (var run = 1; run <= repeats; run++)
+            {
+                if (repeats > 1)
                 {
-                    Console.WriteLine(line.TrimEnd());
+                    Console.WriteLine($"-- run {run} of {repeats} " + new string('-', 40));
+                    await ResetJobTablesAsync(host);
                 }
 
-                Console.WriteLine();
+                var before = sqlServer ? PgStats.Empty : await PgStats.CaptureAsync(connectionString, withStatements);
+                var harnessBefore = HarnessQueries.Total;
+                var sw = Stopwatch.StartNew();
+
+                var processed = await RunScenarioAsync(host, scenario, jobs, tabs, idleWindow, payloadBytes, types, arrivalPerSecond);
+
+                sw.Stop();
+                var after = sqlServer ? PgStats.Empty : await PgStats.CaptureAsync(connectionString, withStatements);
+                var delta = after.Since(before);
+
+                Report(scenario, delta, sw.Elapsed, processed, withStatements, HarnessQueries.Total - harnessBefore);
+                samples.Add((sw.Elapsed.TotalSeconds, delta.TotalExecMs, delta.TotalCalls, processed));
+            }
+
+            if (repeats > 1)
+            {
+                ReportSpread(samples);
+            }
+
+            if (!sqlServer)
+            {
+                await ReportIndexUsageAsync(connectionString);
+            }
+
+            if (!sqlServer && string.Equals(tune, "explainclaim", StringComparison.OrdinalIgnoreCase))
+            {
+                await ExplainClaimShapesAsync(connectionString);
+            }
+
+            if (container is not null)
+            {
+                var (stdout, stderr) = await container.GetLogsAsync();
+                var planLines = (stdout + stderr)
+                    .Split((char)10)
+                    .Where(x => x.Contains("Index Scan", StringComparison.Ordinal)
+                        || x.Contains("Seq Scan", StringComparison.Ordinal)
+                        || x.Contains("duration:", StringComparison.Ordinal)
+                        || x.Contains("Sort", StringComparison.Ordinal)
+                        || x.Contains("LockRows", StringComparison.Ordinal))
+                    .Take(40)
+                    .ToList();
+
+                if (planLines.Count > 0)
+                {
+                    Console.WriteLine("-- slow-statement plans (auto_explain) " + new string('-', 20));
+                    foreach (var line in planLines)
+                    {
+                        Console.WriteLine(line.TrimEnd());
+                    }
+
+                    Console.WriteLine();
+                }
             }
         }
-
-        foreach (var running in hosts)
+        finally
         {
-            await running.StopAsync();
-            running.Dispose();
-        }
+            // Each teardown step is independent: a host that refuses to stop must not strand the
+            // container, which is the resource that actually survives the process and costs the
+            // next run.
+            foreach (var running in hosts)
+            {
+                try
+                {
+                    await running.StopAsync();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  teardown: host stop failed: {ex.Message}");
+                }
 
-        if (container is not null)
-        {
-            await container.DisposeAsync();
-        }
+                running.Dispose();
+            }
 
-        if (sqlContainer is not null)
-        {
-            await sqlContainer.DisposeAsync();
+            if (container is not null)
+            {
+                await container.DisposeAsync();
+            }
+
+            if (sqlContainer is not null)
+            {
+                await sqlContainer.DisposeAsync();
+            }
         }
     }
 
@@ -727,7 +750,9 @@ public static class LoadLab
 
             await using var scope = host.Services.CreateAsyncScope();
             var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-            var done = await ctx.Set<Job>().CountAsync(x => x.CurrentState == State.Completed, CancellationToken.None);
+            HarnessQueries.Count();
+            var done = await ctx.Set<Job>()
+                .CountAsync(x => x.CurrentState == State.Completed, CancellationToken.None);
 
             var now = DateTime.UtcNow;
             var windowRate = (done - previous) / Math.Max((now - previousAt).TotalSeconds, 0.001);
@@ -785,6 +810,7 @@ public static class LoadLab
             await using (var scope = host.Services.CreateAsyncScope())
             {
                 var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
+                HarnessQueries.Count();
                 var active = await ctx.Set<Job>()
                     .AnyAsync(x => x.CurrentState == State.Enqueued
                         || x.CurrentState == State.Processing
@@ -804,7 +830,12 @@ public static class LoadLab
     }
 
     private static void Report(
-        LoadScenario scenario, PgStatsDelta delta, TimeSpan elapsed, int processed, bool withStatements)
+        LoadScenario scenario,
+        PgStatsDelta delta,
+        TimeSpan elapsed,
+        int processed,
+        bool withStatements,
+        long harnessQueries)
     {
         var seconds = elapsed.TotalSeconds;
         var db = delta.Database;
@@ -816,6 +847,17 @@ public static class LoadLab
 
         Console.WriteLine($"{"metric",-28}{"total",16}{"per sec",14}{(processed > 0 ? "per job" : string.Empty),12}");
         WriteRow("statements", delta.TotalCalls, seconds, processed);
+
+        // Included in the row above, not subtracted from it: the execution time these cost sits inside
+        // total_exec_time with no way to attribute it back out, so correcting the count while leaving
+        // the time figure alone would be the misleading half-measure. See HarnessQueries.
+        if (harnessQueries > 0 && delta.TotalCalls > 0)
+        {
+            Console.WriteLine(
+                $"{"  of which harness",-28}{harnessQueries,16:N0}{string.Empty,14}"
+                + $"{harnessQueries / (double)delta.TotalCalls,12:P2}");
+        }
+
         WriteRow("transactions", delta.TotalTransactions, seconds, processed);
         WriteRow("rows inserted", db.TupInserted, seconds, processed);
         WriteRow("rows updated", db.TupUpdated, seconds, processed);

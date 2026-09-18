@@ -336,6 +336,7 @@ public static class ClusterLab
             await using (var scope = coordinator.Services.CreateAsyncScope())
             {
                 var context = scope.ServiceProvider.GetRequiredService<TestContext>();
+                HarnessQueries.Count();
                 var active = await context.Set<Job>()
                     .AnyAsync(x => x.CurrentState == State.Enqueued
                         || x.CurrentState == State.Processing
@@ -350,7 +351,9 @@ public static class ClusterLab
                 if (DateTime.UtcNow >= nextReport)
                 {
                     nextReport = DateTime.UtcNow.AddSeconds(20);
-                    var done = await context.Set<Job>().CountAsync(x => x.CurrentState == State.Completed);
+                    HarnessQueries.Count();
+                    var done = await context.Set<Job>()
+                        .CountAsync(x => x.CurrentState == State.Completed);
                     Console.WriteLine($"     {done,8:N0}/{expected:N0}");
                 }
             }
@@ -416,6 +419,21 @@ public static class ClusterLab
             ? ordered[ordered.Length / 2]
             : (ordered[(ordered.Length / 2) - 1] + ordered[ordered.Length / 2]) / 2;
 
+    /// <summary>
+    /// Kills one child server, and never throws.
+    /// <para>
+    /// This runs in a loop over every child, so an exception here strands the servers after it —
+    /// still running, still claiming jobs against the same database. The next run then measures its
+    /// own load plus the previous run's, which reads as unexplained contention rather than as
+    /// leftover processes. InvalidOperationException (already exited) is only one of the ways Kill
+    /// fails: Win32Exception covers a refusal from the OS, which is what a process caught mid-exit
+    /// or a permissions problem actually raises, and either one used to escape.
+    /// </para>
+    /// <para>
+    /// A failure is reported rather than swallowed. A leaked server invalidates whatever is measured
+    /// next, so the operator has to know to go and look.
+    /// </para>
+    /// </summary>
     private static void TryKill(Process child)
     {
         try
@@ -424,12 +442,33 @@ public static class ClusterLab
             {
                 child.Kill(entireProcessTree: true);
             }
-
-            child.Dispose();
         }
         catch (InvalidOperationException)
         {
             // Already gone.
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"  WARNING: could not kill child server pid {SafePid(child)}: {ex.Message}. "
+                + "It may still be claiming jobs — check before trusting the next run.");
+        }
+        finally
+        {
+            child.Dispose();
+        }
+    }
+
+    /// <summary>The pid is unreadable once the Process object is disposed, so reading it can throw too.</summary>
+    private static string SafePid(Process child)
+    {
+        try
+        {
+            return child.Id.ToString(CultureInfo.InvariantCulture);
+        }
+        catch (Exception)
+        {
+            return "unknown";
         }
     }
 

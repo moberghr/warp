@@ -58,61 +58,76 @@ public static class IdleServerProbe
             await h.StartAsync();
         }
 
-        Console.WriteLine($"Settling {settle.TotalSeconds:N0}s so worker backoff reaches MaxPollingInterval...");
-        await Task.Delay(settle);
-
-        await ExecuteAsync(connectionString, "SELECT pg_stat_statements_reset();");
-
-        Console.WriteLine($"Measuring {window.TotalSeconds:N0}s of a completely idle server, workers={workerCount}.");
-        Console.WriteLine();
-
-        var sw = Stopwatch.StartNew();
-        await Task.Delay(window);
-        sw.Stop();
-
-        var rows = await ReadStatementsAsync(connectionString);
-
-        var total = rows.Sum(x => x.Calls);
-        Console.WriteLine($"{"statement",-52}{"calls",9}{"per sec",10}{"share",8}");
-        foreach (var row in rows.Take(18))
+        // The container is handled by `await using`, but the hosts were not: a throw mid-measurement
+        // left every server running, still polling, until the process happened to exit.
+        try
         {
+            Console.WriteLine($"Settling {settle.TotalSeconds:N0}s so worker backoff reaches MaxPollingInterval...");
+            await Task.Delay(settle);
+
+            await ExecuteAsync(connectionString, "SELECT pg_stat_statements_reset();");
+
+            Console.WriteLine($"Measuring {window.TotalSeconds:N0}s of a completely idle server, workers={workerCount}.");
+            Console.WriteLine();
+
+            var sw = Stopwatch.StartNew();
+            await Task.Delay(window);
+            sw.Stop();
+
+            var rows = await ReadStatementsAsync(connectionString);
+
+            var total = rows.Sum(x => x.Calls);
+            Console.WriteLine($"{"statement",-52}{"calls",9}{"per sec",10}{"share",8}");
+            foreach (var row in rows.Take(18))
+            {
+                Console.WriteLine(
+                    $"{Shorten(row.Query),-52}{row.Calls,9:N0}{row.Calls / sw.Elapsed.TotalSeconds,10:N2}" +
+                    $"{row.Calls / (double)total,8:P1}");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine($"{"TOTAL",-52}{total,9:N0}{total / sw.Elapsed.TotalSeconds,10:N2}");
+            Console.WriteLine();
             Console.WriteLine(
-                $"{Shorten(row.Query),-52}{row.Calls,9:N0}{row.Calls / sw.Elapsed.TotalSeconds,10:N2}" +
-                $"{row.Calls / (double)total,8:P1}");
+                $"{servers} idle server(s), {workerCount} workers each: "
+                + $"{total / sw.Elapsed.TotalSeconds * 60:N0} statements/minute total, "
+                + $"{total / sw.Elapsed.TotalSeconds * 60 / servers:N0} per server (track={track}).");
+            Console.WriteLine();
+
+            var reset = rows.Where(x => IsConnectionReset(x.Query)).Sum(x => x.Calls);
+            var txn = rows.Where(x => IsTransactionControl(x.Query)).Sum(x => x.Calls);
+            var locks = rows.Where(x => x.Query.Contains("advisory", StringComparison.OrdinalIgnoreCase)
+                                        && !IsConnectionReset(x.Query)).Sum(x => x.Calls);
+            var work = total - reset - txn - locks;
+
+            Console.WriteLine($"{"bucket",-34}{"calls",9}{"per min",10}{"share",8}");
+            foreach (var (name, calls) in new[]
+                     {
+                         ("connection reset (pool churn)", reset),
+                         ("transaction control", txn),
+                         ("advisory locks", locks),
+                         ("actual Warp table traffic", work),
+                     })
+            {
+                Console.WriteLine(
+                    $"{name,-34}{calls,9:N0}{calls / sw.Elapsed.TotalSeconds * 60,10:N0}{calls / (double)total,8:P1}");
+            }
         }
-
-        Console.WriteLine();
-        Console.WriteLine($"{"TOTAL",-52}{total,9:N0}{total / sw.Elapsed.TotalSeconds,10:N2}");
-        Console.WriteLine();
-        Console.WriteLine(
-            $"{servers} idle server(s), {workerCount} workers each: "
-            + $"{total / sw.Elapsed.TotalSeconds * 60:N0} statements/minute total, "
-            + $"{total / sw.Elapsed.TotalSeconds * 60 / servers:N0} per server (track={track}).");
-        Console.WriteLine();
-
-        var reset = rows.Where(x => IsConnectionReset(x.Query)).Sum(x => x.Calls);
-        var txn = rows.Where(x => IsTransactionControl(x.Query)).Sum(x => x.Calls);
-        var locks = rows.Where(x => x.Query.Contains("advisory", StringComparison.OrdinalIgnoreCase)
-                                    && !IsConnectionReset(x.Query)).Sum(x => x.Calls);
-        var work = total - reset - txn - locks;
-
-        Console.WriteLine($"{"bucket",-34}{"calls",9}{"per min",10}{"share",8}");
-        foreach (var (name, calls) in new[]
-                 {
-                     ("connection reset (pool churn)", reset),
-                     ("transaction control", txn),
-                     ("advisory locks", locks),
-                     ("actual Warp table traffic", work),
-                 })
+        finally
         {
-            Console.WriteLine(
-                $"{name,-34}{calls,9:N0}{calls / sw.Elapsed.TotalSeconds * 60,10:N0}{calls / (double)total,8:P1}");
-        }
+            foreach (var h in hosts)
+            {
+                try
+                {
+                    await h.StopAsync();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  teardown: host stop failed: {ex.Message}");
+                }
 
-        foreach (var h in hosts)
-        {
-            await h.StopAsync();
-            h.Dispose();
+                h.Dispose();
+            }
         }
     }
 

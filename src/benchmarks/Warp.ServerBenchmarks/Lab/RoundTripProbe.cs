@@ -45,30 +45,37 @@ public static class RoundTripProbe
             connectionString = container.GetConnectionString();
         }
 
-        // Warm the pool and the server so the first level does not pay for both.
-        await MeasureAsync(connectionString, 1, 2, persistent: true, report: false);
-
-        Console.WriteLine();
-        Console.WriteLine("-- one connection held open per task (pure round trip) --");
-
-        foreach (var level in Levels)
+        // Teardown in a finally: a throw in any level used to leak the container, which then holds
+        // its port and keeps running after the process that started it is gone.
+        try
         {
-            await MeasureAsync(connectionString, level, seconds, persistent: true, report: true);
+            // Warm the pool and the server so the first level does not pay for both.
+            await MeasureAsync(connectionString, 1, 2, persistent: true, report: false);
+
+            Console.WriteLine();
+            Console.WriteLine("-- one connection held open per task (pure round trip) --");
+
+            foreach (var level in Levels)
+            {
+                await MeasureAsync(connectionString, level, seconds, persistent: true, report: true);
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("-- a connection taken from the pool per operation (adds the reset) --");
+
+            foreach (var level in Levels)
+            {
+                await MeasureAsync(connectionString, level, seconds, persistent: false, report: true);
+            }
+
+            Console.WriteLine();
         }
-
-        Console.WriteLine();
-        Console.WriteLine("-- a connection taken from the pool per operation (adds the reset) --");
-
-        foreach (var level in Levels)
+        finally
         {
-            await MeasureAsync(connectionString, level, seconds, persistent: false, report: true);
-        }
-
-        Console.WriteLine();
-
-        if (container is not null)
-        {
-            await container.DisposeAsync();
+            if (container is not null)
+            {
+                await container.DisposeAsync();
+            }
         }
     }
 

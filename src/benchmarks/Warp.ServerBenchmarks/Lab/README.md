@@ -46,3 +46,35 @@ At 16 workers Postgres burns ~2.5 cores while `pg_stat_statements` attributes on
 statement execution. Planning is **not** the gap — measured with `track_planning=on`, planning is 4.3%
 of execution time, so Npgsql auto-prepare is not the lever it looked like. Connection and session
 churn, WAL, and the background workers are what is left to account for it.
+
+## The harness is inside its own measurement, and cannot tag its way out
+
+The drain poll and the progress count run against the database being measured, so
+`pg_stat_statements` attributes them to Warp like anything else.
+
+They cannot be filtered out at the source. **`pg_stat_statements` strips comments when it normalizes
+a statement**, so an EF `TagWith` marker never reaches the view. Verified directly:
+
+```sql
+-- leading-comment-probe
+SELECT 1;
+SELECT 2 /* inline-comment-probe */;
+```
+
+Both collapse into a single untagged `SELECT $1` entry with two calls. A leading comment and an
+inline one fare exactly the same, so there is no marker to filter on. Matching on query *shape*
+instead would be worse than leaving them in, because the statements they most resemble are Warp's
+own claim and completion queries.
+
+So the harness counts its own calls in-process (`HarnessQueries`) and reports them beside the total
+rather than subtracting them: the execution time they cost sits inside `total_exec_time` with no way
+to attribute it back out, and a corrected count beside an uncorrected time is the misleading
+half-measure.
+
+Measured magnitude on a 22s / 8,000-job run: **20 statements, 0.01% of the total** — roughly three
+hundred times smaller than the run-to-run variance. It grows with run length, which is the reason it
+is reported at all; on a 90-minute soak it is thousands.
+
+The corollary matters more than the number: **two runs of the same workload differ by several percent**
+(417,688 vs 438,323 statements on identical 25,000-job runs — 4.7%). Never conclude anything from a single
+arm — interleave the arms and take medians across repeats.

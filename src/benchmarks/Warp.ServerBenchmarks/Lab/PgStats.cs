@@ -14,8 +14,16 @@ namespace Warp.ServerBenchmarks.Lab;
 /// <para>
 /// Scoping to "our own load" relies on Warp owning the database it is pointed at: the
 /// <c>pg_stat_database</c> and <c>pg_stat_user_tables</c> rows are per-database already, and the
-/// <c>pg_stat_statements</c> read is filtered to the current database's OID. The harness's own
-/// bookkeeping queries are excluded by name.
+/// <c>pg_stat_statements</c> read is filtered to the current database's OID.
+/// </para>
+/// <para>
+/// The harness's own bookkeeping — the drain poll and the progress count — runs against the database
+/// being measured and is counted like anything else. It CANNOT be filtered out here: pg_stat_statements
+/// strips comments when it normalizes, so an EF <c>TagWith</c> marker never reaches this view (verified:
+/// a leading comment and an inline one both collapse into the same untagged entry). Matching on query
+/// shape instead would be worse, because the statements it most resembles are Warp's own. So the harness
+/// counts its calls in-process instead and <see cref="HarnessQueries"/> reports them beside the totals —
+/// exact for the statement count, and the honest way to see when a long run makes them matter.
 /// </para>
 /// </summary>
 public sealed class PgStats
@@ -90,18 +98,34 @@ public sealed class PgStats
         };
     }
 
+    /// <summary>
+    /// Reads per-statement counters, summed per <c>queryid</c>.
+    /// <para>
+    /// A pg_stat_statements row is identified by <c>(userid, dbid, queryid)</c> — and since PG 14 by
+    /// <c>toplevel</c> as well — so one queryid can occupy several rows: the same statement run by two
+    /// roles, or run both directly and nested inside a function or DO block. This keys its dictionary
+    /// on queryid alone because that is what a snapshot diff needs, and assigning row by row therefore
+    /// kept only whichever arrived last and dropped the rest. Aggregating in SQL is what makes the key
+    /// honest. It fails by UNDER-counting, which is the direction a load measurement never notices.
+    /// </para>
+    /// </summary>
     private static async Task<Dictionary<long, StatementStat>> ReadStatementsAsync(NpgsqlConnection connection)
     {
         var result = new Dictionary<long, StatementStat>();
 
         await using var command = new NpgsqlCommand(
             """
-            SELECT queryid, calls, total_exec_time, rows,
-                   COALESCE(shared_blks_hit, 0) + COALESCE(shared_blks_read, 0) AS blocks, query
+            SELECT queryid,
+                   SUM(calls) AS calls,
+                   SUM(total_exec_time) AS total_exec_time,
+                   SUM(rows) AS rows,
+                   SUM(COALESCE(shared_blks_hit, 0) + COALESCE(shared_blks_read, 0)) AS blocks,
+                   MIN(query) AS query
             FROM pg_stat_statements
             WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
               AND query NOT LIKE '%pg_stat_%'
-              AND queryid IS NOT NULL;
+              AND queryid IS NOT NULL
+            GROUP BY queryid;
             """,
             connection);
 
