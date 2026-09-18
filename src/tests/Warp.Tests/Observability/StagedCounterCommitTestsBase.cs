@@ -26,12 +26,9 @@ namespace Warp.Tests.Observability;
 /// the call sites being ordered after the commit, which is enforced by reading the code, not here.
 /// </para>
 /// <para>
-/// Untested for the same reason: that a failed success-path commit does not leave its increments staged
-/// for the catch arm to commit alongside the failure's, counting one job as both succeeded and failed.
-/// Reaching it needs the finalizing SaveChanges to throw and the catch arm's to succeed, and the two
-/// write the same rows through the same context — there is no asymmetry to exploit without injecting a
-/// fault. It is structurally enforced instead: <c>BeginFinalizingTransactionAsync</c> clears the staging
-/// list, and every arm goes through it to open its transaction.
+/// The neighbouring case — a failed success-path write leaving its increments staged for the catch arm
+/// to commit alongside the failure's, counting one job as both succeeded and failed — is covered by
+/// <see cref="FailedFinalizationCounterTestsBase"/>, which injects the fault this test cannot.
 /// </para>
 /// </summary>
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
