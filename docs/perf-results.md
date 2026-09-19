@@ -393,3 +393,87 @@ Two traps worth recording:
 - Rows average 520 B (~12 rows/block), driven by the `message` payload. Deployments with smaller
   payloads get a denser heap and a proportionally cheaper scan; this lever was reasoned about, not
   measured.
+
+## Counter write volume and the vacuum-horizon collapse (PostgreSQL, 2026-09-18)
+
+Why a server's own bookkeeping was the largest single share of the database time it cost, and what
+two changes did about it. Also records the measurement traps, because most of the elapsed effort went
+on numbers that turned out to be artefacts.
+
+### The write volume
+
+A finalizing job emits ~20 `Counter` rows — per-type and per-handler totals, durations, latency
+buckets, the state total, the reason breakdown, queue wait. For a uniform workload they are the
+**same ~20 keys every time**, so 100k jobs wrote 2,000,000 rows that `CounterAggregator` folded back
+into about twenty `Statistic` rows. Summing in memory and flushing on an interval wrote **1,799 rows
+for the same 100k jobs**.
+
+### The collapse
+
+`CounterAggregator` drained in `while (true)` inside the task host's lock transaction. Against a
+500k-job backlog that held **one transaction open for 51 minutes**.
+
+The cost is not the aggregator's own runtime. An open transaction pins the vacuum horizon, so
+autovacuum cannot reclaim any tuple newer than its snapshot. The job table takes two updates per job
+and gets **zero HOT updates** — `current_state` is part of the worker's fetch index, so every
+transition writes new index entries and orphans the old ones — which measured **43% dead tuples**.
+The claim scan (`ORDER BY queue, schedule_time … FOR UPDATE SKIP LOCKED`) then walks an index range
+that is mostly corpses:
+
+| | claim latency | throughput |
+|---|---:|---:|
+| healthy | 3.3 ms | 567 jobs/sec |
+| 43% dead tuples | **253 ms** | **27 jobs/sec** |
+
+Self-reinforcing: the aggregator running longer made the bloat worse, which made the aggregator
+slower. Bounding the slice keeps each transaction ~1s so the horizon advances between batches.
+
+### Before/after
+
+Interleaved arms, `repeats=3`, medians (4 before / 6 after), container-to-container.
+
+| Scenario | Throughput | DB ms/job | Statements/job | Spread before → after |
+|---|---:|---:|---:|---:|
+| Single worker, empty | 450 → 500 (+11%) | 1.77 → 0.66 (−63%) | 45.9 → 20.5 (−55%) | 10× → 3% |
+| Dispatcher, empty | 434 → 464 (+7%) | 0.99 → 0.42 (−57%) | 36.2 → 14.2 (−61%) | 58% → 3% |
+| Single worker, 50 ms handler | 133 → 136 (+2%) | 1.30 → 0.57 (−56%) | 43.9 → 21.0 (−52%) | — |
+
+796,000 counter statements eliminated per 30k jobs. The throughput column scales with how much of a
+job is framework: with a 50 ms handler the gain is inside the noise, and the win is database headroom
+rather than jobs/sec.
+
+**Not measured: SQL Server before/after.** The after arm ran (median 187 jobs/sec); the before arm
+died on `Execution Timeout Expired` at 1.7 GB free memory, which cannot be distinguished from the
+pre-fix lock contention and is therefore evidence of nothing. The mechanism is provider-independent
+and the suite passes on both, but that is correctness, not cost.
+
+### Measurement traps
+
+Four, each of which produced a confidently wrong number first.
+
+**The host port-forward costs 11–15×.** Reaching a container database from the host goes through a
+proxy: 15,237 statements/sec over the container's own loopback against **1,013** through the proxy
+(~0.92 ms per round trip). Enough to dominate any measurement. Run the lab in a container beside
+Postgres.
+
+**Run-to-run variance is ~5%.** Two identical 25,000-job runs gave 417,688 and 438,323 statements.
+Any single-arm comparison below that is noise — an early "+24%" from n=1 became **+11%** under
+interleaved repeats.
+
+**`pg_stat_statements` strips comments.** An EF `TagWith` marker cannot be used to exclude the
+harness's own queries, because the view normalizes comments away. Verified: `-- probe\nSELECT 1;` and
+`SELECT 2 /* probe */;` both collapse into one untagged `SELECT $1` with two calls. The harness counts
+its own calls in-process instead (~0.01% of the total on a short run, growing with run length).
+
+**`pg_stat_statements` rows are not unique by `queryid`.** Identity is `(userid, dbid, queryid)` plus
+`toplevel` since PG 14, so a dictionary keyed on queryid alone silently drops rows. Aggregate in SQL.
+
+### Refuted along the way
+
+Recorded so they are not re-tried: `auto_explain.log_analyze` instruments every statement and lands in
+`total_exec_time`, corrupting the quantity being reported. Planning is **4.3%** of execution time
+(`track_planning=on`), so Npgsql auto-prepare is not the lever it looks like. Dropping
+`ix_job_kind_current_state_create_time` does speed the claim up but makes the dashboard listing pages
+sort the whole table. Replacing EF with raw SQL for the WAL path is worth ~1.7% of total WAL (EF
+update 906 B vs raw 841 B). `synchronous_commit=off` — the entire WAL contention lead — is worth ~10%
+(648 → 711 jobs/sec).

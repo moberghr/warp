@@ -183,7 +183,8 @@ builder.Services.AddWarpServer<AppDbContext>(options =>
     options.OrchestrationInterval = TimeSpan.FromSeconds(10);
     options.MessageRoutingInterval = TimeSpan.FromSeconds(10);
     options.ScheduledActivationInterval = TimeSpan.FromSeconds(10);
-    options.CounterAggregationInterval = TimeSpan.FromSeconds(5);
+    options.CounterAggregationInterval = TimeSpan.FromMinutes(1);
+    options.CounterBufferFlushInterval = TimeSpan.FromSeconds(2);
     options.ServerCleanupInterval = TimeSpan.FromSeconds(30);
     options.StaleJobRecoveryInterval = TimeSpan.FromSeconds(30);
     options.ExpirationCleanupInterval = TimeSpan.FromMinutes(5);
@@ -316,7 +317,8 @@ Failed jobs have `ExpireAt = null` and are never automatically deleted. They mus
 | `OrchestrationInterval` | `TimeSpan` | `10 seconds` | Fallback sweep interval for parent finalization |
 | `MessageRoutingInterval` | `TimeSpan` | `10 seconds` | Message routing poll interval |
 | `ScheduledActivationInterval` | `TimeSpan` | `10 seconds` | How often `ScheduledJobActivation` flips `State.Scheduled` jobs to `Enqueued`. Controls worst-case latency between a job's `ScheduleTime` and when it becomes eligible for pickup |
-| `CounterAggregationInterval` | `TimeSpan` | `5 seconds` | Counter aggregation interval |
+| `CounterAggregationInterval` | `TimeSpan?` | `1 minute` | How often `CounterAggregator` folds pending `Counter` rows into `Statistic` totals. Dashboard counter graphs refresh at this cadence. `null` disables the scheduled run |
+| `CounterBufferFlushInterval` | `TimeSpan` | `2 seconds` | How often this process writes its in-memory counter increments out as `Counter` rows. **This is the window in which an ungraceful exit loses metrics** — a graceful stop flushes. Must be greater than zero (validated at `AddWarpServer`). See [how counters reach the database](/docs/features/queue-metrics#how-counters-reach-the-database) |
 | `ServerCleanupInterval` | `TimeSpan` | `30 seconds` | Dead server cleanup interval |
 | `StaleJobRecoveryInterval` | `TimeSpan` | `30 seconds` | Stale job recovery interval |
 | `ExpirationCleanupInterval` | `TimeSpan` | `5 minutes` | Expiration cleanup interval |
