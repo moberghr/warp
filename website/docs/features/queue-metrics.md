@@ -51,6 +51,24 @@ The worker hot path used to write a `Counter` **row per increment**. A finalizin
 
 Increments now accumulate in memory and `CounterBufferFlusher` writes them out every `CounterBufferFlushInterval` (default **2 seconds**), one row per distinct key per interval. The same 100,000 jobs wrote **1,799 rows instead of two million**. Nothing downstream changed: `CounterAggregator` sees rows of identical shape, there are simply far fewer of them carrying larger values.
 
+### Counters are not readable immediately after the job that emitted them
+
+A worker used to write its `Counter` rows inside the same transaction that finalized the job, so a
+reader saw the increment the moment the job reached `Completed`. It does not any more — the increment
+is in memory until the next flush:
+
+```csharp
+// job completes, then immediately:
+var stat = await db.Set<Statistic>().FirstAsync(x => x.Key == "stats:succeeded");
+// may not include that job, for up to CounterBufferFlushInterval
+```
+
+There is no error; the read just returns the earlier value. These are cumulative totals, so anything
+that polls or retries converges on its own — which covers dashboards, since the fold into `Statistic`
+already lags a full `CounterAggregationInterval` anyway. If you genuinely need read-after-write, set
+`CounterBufferFlushInterval` low (say 200 ms) and give back a proportional share of the write
+reduction.
+
 ### The durability trade
 
 **Worker counter increments live in memory until the next flush.** An ungraceful exit — `kill -9`, an OOM, a lost container — loses at most one interval of them. A graceful shutdown flushes before exiting, so an orderly stop loses nothing.
