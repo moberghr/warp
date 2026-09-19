@@ -184,6 +184,51 @@ public abstract class StatisticRollupTestsBase : IAsyncLifetime
         (await ValueAsync("qbacklog:default:depth")).ShouldBe(3);
     }
 
+    /// <summary>
+    /// One tick must not roll an unbounded backlog. LocksWithTransaction defaults to true, so the whole
+    /// of ExecuteAsync runs in one transaction, and an unbounded pass holds it open until the work runs
+    /// out — pinning the vacuum horizon, which is the §6.2.1 incident. The backlog has to drain across
+    /// ticks instead, and no value may be lost on the way.
+    /// </summary>
+    [TimedFact(30_000)]
+    public async Task Rollup_BacklogLargerThanTheTickCap_DrainsAcrossTicksWithoutLosingValue()
+    {
+        const int Cap = 20_000;
+        const int Total = Cap + 500;
+
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Statistic>().AddRange(Enumerable.Range(0, Total).Select(i =>
+            new Statistic { Key = $"jobstat:type:Cap{i}:hist:succeeded{Hourly(Rollable)}", Value = 1 }));
+        await ctx.SaveChangesAsync(Ct);
+
+        await RunAsync();
+
+        var afterFirst = await RemainingAsync("jobstat:type:Cap%");
+        afterFirst.ShouldBe(Total - Cap, "one tick must roll at most the cap, leaving the rest for the next");
+
+        await RunAsync();
+
+        (await RemainingAsync("jobstat:type:Cap%")).ShouldBe(0);
+
+        // Every source row carried a value of 1 and each has its own base key, so the daily parents must
+        // account for all of them — the cap defers work, it never drops it.
+        var rolled = _fixture.CreateContext();
+        var total = await rolled.Set<Statistic>().AsNoTracking()
+            .Where(x => EF.Functions.Like(x.Key, "jobstat:type:Cap%"))
+            .SumAsync(x => x.Value, Ct);
+        total.ShouldBe(Total);
+    }
+
+    private async Task<int> RemainingAsync(string pattern)
+    {
+        var ctx = _fixture.CreateContext();
+
+        return await ctx.Set<Statistic>().AsNoTracking()
+            .Where(x => EF.Functions.Like(x.Key, pattern))
+            .Where(x => EF.Functions.Like(x.Key, "%:h1:%"))
+            .CountAsync(Ct);
+    }
+
     private async Task SeedAsync(string key, long value)
     {
         var ctx = _fixture.CreateContext();
