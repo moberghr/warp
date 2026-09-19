@@ -50,7 +50,8 @@ public static class LoadLab
         int types = 1,
         int arrivalPerSecond = 0,
         bool sqlServer = false,
-        int servers = 1)
+        int servers = 1,
+        int warmupRuns = 0)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
@@ -151,26 +152,59 @@ public static class LoadLab
 
             var samples = new List<(double Seconds, double DbMs, long Statements, int Processed)>();
 
-            for (var run = 1; run <= repeats; run++)
+            // Warm-up runs execute the full scenario but are not sampled. The first run of a fresh
+            // database pays for an empty page cache, indexes growing from nothing and cold plans:
+            // measured at 23,315 ms of DB time against 16,327 and 13,383 for the two runs after it,
+            // which alone pushed the reported spread on DB ms/job to 60.8%. The median already
+            // survives that, but the spread is what tells a reader whether an arm's difference is
+            // real, so a cold run left in the sample makes every comparison look like noise.
+            for (var run = 1; run <= warmupRuns + repeats; run++)
             {
-                if (repeats > 1)
+                var isWarmup = run <= warmupRuns;
+
+                if (warmupRuns + repeats > 1)
                 {
-                    Console.WriteLine($"-- run {run} of {repeats} " + new string('-', 40));
-                    await ResetJobTablesAsync(host);
+                    var label = isWarmup
+                        ? $"-- warm-up {run} of {warmupRuns} (not sampled) "
+                        : $"-- run {run - warmupRuns} of {repeats} ";
+                    Console.WriteLine(label + new string('-', 40));
+                    await ResetJobTablesAsync(host, connectionString, sqlServer);
                 }
 
                 var before = sqlServer ? PgStats.Empty : await PgStats.CaptureAsync(connectionString, withStatements);
                 var harnessBefore = HarnessQueries.Total;
+
+                // Dead tuples peak DURING the drain and fall again as autovacuum catches up, so the
+                // after-snapshot alone cannot see the bloat the run actually created. 1s is well under
+                // the autovacuum cycle and costs one tiny indexed read per second.
+                var bloat = sqlServer ? null : new BloatSampler(connectionString, TimeSpan.FromSeconds(1));
                 var sw = Stopwatch.StartNew();
 
-                var processed = await RunScenarioAsync(host, scenario, jobs, tabs, idleWindow, payloadBytes, types, arrivalPerSecond);
+                int processed;
+                try
+                {
+                    processed = await RunScenarioAsync(host, scenario, jobs, tabs, idleWindow, payloadBytes, types, arrivalPerSecond);
+                }
+                finally
+                {
+                    sw.Stop();
 
-                sw.Stop();
+                    if (bloat is not null)
+                    {
+                        await bloat.DisposeAsync();
+                    }
+                }
+
                 var after = sqlServer ? PgStats.Empty : await PgStats.CaptureAsync(connectionString, withStatements);
                 var delta = after.Since(before);
 
                 Report(scenario, delta, sw.Elapsed, processed, withStatements, HarnessQueries.Total - harnessBefore);
-                samples.Add((sw.Elapsed.TotalSeconds, delta.TotalExecMs, delta.TotalCalls, processed));
+                bloat?.Report();
+
+                if (!isWarmup)
+                {
+                    samples.Add((sw.Elapsed.TotalSeconds, delta.TotalExecMs, delta.TotalCalls, processed));
+                }
             }
 
             if (repeats > 1)
@@ -492,10 +526,28 @@ public static class LoadLab
     }
 
     /// <summary>Clears job tables between repeats so each run starts from the same state.</summary>
-    private static async Task ResetJobTablesAsync(IHost host)
+    private static async Task ResetJobTablesAsync(IHost host, string? connectionString, bool sqlServer)
     {
         await using var scope = host.Services.CreateAsyncScope();
         await ClearJobTablesAsync(scope.ServiceProvider.GetRequiredService<TestContext>());
+
+        if (sqlServer || connectionString is null)
+        {
+            return;
+        }
+
+        // Clearing the rows is not the same as starting clean. DELETE leaves every removed row as a
+        // dead tuple, so without this each run begins on the previous run's corpses and autovacuum
+        // fires somewhere inside the next measured window instead of between them. Measured: three
+        // identical 60k-job runs came out at 7.254, 0.787 and 0.743 DB ms/job — an 827% spread on the
+        // headline metric, where the 9x arm is the one that inherited the most bloat and then paid for
+        // a vacuum mid-run. VACUUM ANALYZE between runs is the same discipline every EXPLAIN section in
+        // docs/perf-results.md already follows; it makes arms comparable instead of sequenced.
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("VACUUM (ANALYZE);", connection);
+        command.CommandTimeout = 300;
+        await command.ExecuteNonQueryAsync();
     }
 
     /// <summary>
@@ -883,12 +935,19 @@ public static class LoadLab
             }
         }
 
+        // hot% and dead% are the two columns a queue-table experiment is read off. hot% is the share
+        // of updates that touched no index; it sits at ~0 for `job` because CurrentState is in four of
+        // its six indexes, so every state transition orphans index entries and leaves a dead tuple.
+        // dead% is a LEVEL at the end of the window, not a total — the peak during the drain is
+        // reported separately by the sampler, since a run that ends drained looks clean either way.
         Console.WriteLine();
-        Console.WriteLine($"{"table",-28}{"ins",12}{"upd",12}{"del",12}{"seq",10}{"idx",12}");
+        Console.WriteLine(
+            $"{"table",-28}{"ins",12}{"upd",12}{"del",12}{"seq",10}{"idx",12}{"hot%",8}{"dead%",8}");
         foreach (var (name, stat) in delta.Tables.OrderByDescending(x => x.Value.Inserted + x.Value.Updated + x.Value.Deleted).Take(10))
         {
             Console.WriteLine(
-                $"{name,-28}{stat.Inserted,12:N0}{stat.Updated,12:N0}{stat.Deleted,12:N0}{stat.SeqScan,10:N0}{stat.IdxScan,12:N0}");
+                $"{name,-28}{stat.Inserted,12:N0}{stat.Updated,12:N0}{stat.Deleted,12:N0}{stat.SeqScan,10:N0}{stat.IdxScan,12:N0}"
+                + $"{stat.HotShare,8:P0}{stat.DeadShare,8:P0}");
         }
 
         Console.WriteLine();

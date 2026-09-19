@@ -47,7 +47,40 @@ public sealed class PgStats
         long BlksRead,
         long BlksHit);
 
-    public sealed record TableStat(long Inserted, long Updated, long Deleted, long SeqScan, long IdxScan);
+    /// <summary>
+    /// Per-table counters, plus the two gauges that say whether updates are HOT.
+    /// <para>
+    /// <see cref="Inserted"/>, <see cref="Updated"/>, <see cref="Deleted"/>, <see cref="SeqScan"/>,
+    /// <see cref="IdxScan"/> and <see cref="HotUpdated"/> are monotonic counters and diff correctly.
+    /// <see cref="DeadTuples"/> and <see cref="LiveTuples"/> are NOT — they are levels that rise and
+    /// fall as autovacuum reclaims, so <see cref="Since"/> carries them through as the after-value
+    /// rather than subtracting. Subtracting them yields a negative number the moment a vacuum lands
+    /// mid-window, which reads as "no bloat" exactly when there was the most.
+    /// </para>
+    /// <para>
+    /// <see cref="HotUpdated"/> is the quantity the queue-table question turns on: an update is HOT
+    /// only when no indexed column changed, so a table whose claim writes an indexed state column
+    /// reports a ratio at or near zero and pays new index entries plus a dead tuple on every
+    /// transition.
+    /// </para>
+    /// </summary>
+    public sealed record TableStat(
+        long Inserted,
+        long Updated,
+        long Deleted,
+        long SeqScan,
+        long IdxScan,
+        long HotUpdated,
+        long DeadTuples,
+        long LiveTuples)
+    {
+        /// <summary>Share of updates that avoided touching any index, as a fraction of 1.</summary>
+        public double HotShare => Updated > 0 ? HotUpdated / (double)Updated : 0;
+
+        /// <summary>Dead tuples as a share of all tuples, as a fraction of 1.</summary>
+        public double DeadShare =>
+            DeadTuples + LiveTuples > 0 ? DeadTuples / (double)(DeadTuples + LiveTuples) : 0;
+    }
 
     public static async Task<bool> HasStatStatementsAsync(string connectionString)
     {
@@ -168,14 +201,23 @@ public sealed class PgStats
             reader.GetInt64(8));
     }
 
+    /// <summary>
+    /// Per-table counters and bloat gauges.
+    /// <para>
+    /// Keyed on <c>schema.relname</c>, not the bare relation name: Warp's own tables live in the
+    /// <c>warp</c> schema, and a bare key silently merges two same-named tables from different schemas
+    /// into one row — which is exactly the shape a queue-table experiment introduces.
+    /// </para>
+    /// </summary>
     private static async Task<Dictionary<string, TableStat>> ReadTablesAsync(NpgsqlConnection connection)
     {
         var result = new Dictionary<string, TableStat>(StringComparer.Ordinal);
 
         await using var command = new NpgsqlCommand(
             """
-            SELECT relname, n_tup_ins, n_tup_upd, n_tup_del,
-                   COALESCE(seq_scan, 0), COALESCE(idx_scan, 0)
+            SELECT schemaname || '.' || relname, n_tup_ins, n_tup_upd, n_tup_del,
+                   COALESCE(seq_scan, 0), COALESCE(idx_scan, 0),
+                   COALESCE(n_tup_hot_upd, 0), COALESCE(n_dead_tup, 0), COALESCE(n_live_tup, 0)
             FROM pg_stat_user_tables;
             """,
             connection);
@@ -184,7 +226,14 @@ public sealed class PgStats
         while (await reader.ReadAsync())
         {
             result[reader.GetString(0)] = new TableStat(
-                reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5));
+                reader.GetInt64(1),
+                reader.GetInt64(2),
+                reader.GetInt64(3),
+                reader.GetInt64(4),
+                reader.GetInt64(5),
+                reader.GetInt64(6),
+                reader.GetInt64(7),
+                reader.GetInt64(8));
         }
 
         return result;
@@ -215,12 +264,18 @@ public sealed class PgStats
         foreach (var (name, after) in Tables)
         {
             var baseline = before.Tables.GetValueOrDefault(name);
+
+            // DeadTuples/LiveTuples are levels, not counters — carried through as the after-value.
+            // See the TableStat doc comment: subtracting them goes negative across a vacuum.
             var stat = new TableStat(
                 after.Inserted - (baseline?.Inserted ?? 0),
                 after.Updated - (baseline?.Updated ?? 0),
                 after.Deleted - (baseline?.Deleted ?? 0),
                 after.SeqScan - (baseline?.SeqScan ?? 0),
-                after.IdxScan - (baseline?.IdxScan ?? 0));
+                after.IdxScan - (baseline?.IdxScan ?? 0),
+                after.HotUpdated - (baseline?.HotUpdated ?? 0),
+                after.DeadTuples,
+                after.LiveTuples);
 
             if (stat.Inserted + stat.Updated + stat.Deleted + stat.SeqScan + stat.IdxScan > 0)
             {
