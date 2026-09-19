@@ -136,7 +136,7 @@ internal sealed class CompletionBatch
                 for (var i = start; i < start + count; i++)
                 {
                     var entry = entries[i];
-                    context.Entry(entry.Job).State = EntityState.Modified;
+                    MarkFinalizedColumns(context, entry.Job);
 
                     if (entry.Logs.Count > 0)
                     {
@@ -195,5 +195,40 @@ internal sealed class CompletionBatch
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Attaches a finalized job and marks ONLY the columns finalization can change.
+    /// <para>
+    /// The job arrives on a fresh scope's context with no original values to diff against, so
+    /// <c>Entry(job).State = Modified</c> — what this replaces — marked all 22 mapped columns dirty and
+    /// EF emitted an UPDATE writing every one of them, fifty per flush transaction. That rewrote
+    /// <c>Message</c> (the unbounded JSON payload) and twelve other columns that finalization never
+    /// touches, on every completed job: WAL, TOAST and row-width cost paid for values identical to what
+    /// was already stored.
+    /// </para>
+    /// <para>
+    /// The marked set is exactly what <c>WarpDispatcherWorker.BuildFinalization</c> and its three
+    /// outcome arms assign. It must move in lockstep with them: a new field assigned at finalization and
+    /// not listed here is silently never persisted, which is the quiet direction of this bug.
+    /// </para>
+    /// </summary>
+    private static void MarkFinalizedColumns(DbContext context, Job job)
+    {
+        var entry = context.Entry(job);
+
+        if (entry.State == EntityState.Detached)
+        {
+            context.Attach(job);
+        }
+
+        entry.Property(x => x.CurrentState).IsModified = true;
+        entry.Property(x => x.CancellationMode).IsModified = true;
+        entry.Property(x => x.CurrentWorkerId).IsModified = true;
+        entry.Property(x => x.LastKeepAlive).IsModified = true;
+        entry.Property(x => x.ExpireAt).IsModified = true;
+        entry.Property(x => x.HandlerType).IsModified = true;
+        entry.Property(x => x.ScheduleTime).IsModified = true;
+        entry.Property(x => x.Metadata).IsModified = true;
     }
 }
