@@ -13,6 +13,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Helper;
 using Warp.Core.Services;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
@@ -30,7 +31,31 @@ public enum LoadScenario
 
     /// <summary>N empty jobs drained while dashboard tabs poll, i.e. someone is watching it work.</summary>
     JobsWithDashboard = 3,
+
+    /// <summary>
+    /// N jobs spread over <c>--keys</c> mutex groups, so surplus claims are rejected by
+    /// <c>ConcurrencyPipelineBehavior</c> and (in Wait mode) requeued. The arm that measures what
+    /// enforcing group serialization AFTER the claim costs — the claim UPDATE, the limit lookup, the
+    /// advisory-lock round trip and the requeue write are all spent on a job that did not run.
+    /// </summary>
+    Mutex = 4,
+
+    /// <summary>
+    /// As <see cref="Mutex"/> but with <c>--limit</c> slots per key, so the rejection rate is a
+    /// fraction of the mutex arm's rather than all-but-one.
+    /// </summary>
+    Semaphore = 5,
 }
+
+/// <summary>
+/// Requeue churn read from the durable <c>stats:</c> family (§8.33) after a run. The ratio of
+/// <see cref="RequeuedConcurrency"/> to <see cref="Succeeded"/> is the number PA-02 turns on: how many
+/// full claim/reject/requeue cycles the system pays per job it actually completes.
+/// </summary>
+public sealed record ChurnCounts(long Succeeded, long Deleted, long Requeued, long RequeuedConcurrency, long DeletedConcurrency);
+
+/// <summary>The concurrency arm's shape: how many groups, how wide each is, what happens to the surplus, and how long a group stays busy.</summary>
+public sealed record ConcurrencyShape(int Keys, int Limit, ConcurrencyMode Mode, int HandlerMs);
 
 public static class LoadLab
 {
@@ -50,7 +75,11 @@ public static class LoadLab
         int types = 1,
         int arrivalPerSecond = 0,
         bool sqlServer = false,
-        int servers = 1)
+        int servers = 1,
+        int concurrencyKeys = 1,
+        int concurrencyLimit = 1,
+        ConcurrencyMode concurrencyMode = ConcurrencyMode.Wait,
+        int handlerMs = 0)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
@@ -140,12 +169,14 @@ public static class LoadLab
             Console.WriteLine($"scenario={scenario}  servers={servers}  workers={workers}/server"
                 + (scenario == LoadScenario.Idle
                     ? string.Empty
-                    : $"  jobs={jobs:N0}  dispatcher={useDispatcher}  prefetch={FormatKnob(prefetchCount)}  completionBatch={FormatKnob(completionBatchSize)}  payload={payloadBytes}B  tune={tune}  types={types}  arrival={FormatArrival(arrivalPerSecond)}")
-                + (scenario == LoadScenario.JobsWithDashboard ? $"  tabs={tabs}" : string.Empty));
+                    : $"  jobs={jobs:N0}  dispatcher={useDispatcher}  prefetch={FormatKnob(prefetchCount)}  completionBatch={FormatKnob(completionBatchSize)}  tune={tune}  arrival={FormatArrival(arrivalPerSecond)}"
+                        + DescribePayload(scenario, payloadBytes, types))
+                + (scenario == LoadScenario.JobsWithDashboard ? $"  tabs={tabs}" : string.Empty)
+                + DescribeConcurrency(scenario, concurrencyKeys, concurrencyLimit, concurrencyMode, handlerMs));
 
             // Warm up: JIT, connection pool, EF query compilation, server registration. Measuring these
             // would attribute one-time startup cost to steady-state load.
-            await WarmUpAsync(host, scenario);
+            await WarmUpAsync(host, scenario, new ConcurrencyShape(concurrencyKeys, concurrencyLimit, concurrencyMode, handlerMs));
             Console.WriteLine("Warmed up. Settling...");
             await Task.Delay(TimeSpan.FromSeconds(scenario == LoadScenario.Idle ? 45 : 5));
 
@@ -163,13 +194,24 @@ public static class LoadLab
                 var harnessBefore = HarnessQueries.Total;
                 var sw = Stopwatch.StartNew();
 
-                var processed = await RunScenarioAsync(host, scenario, jobs, tabs, idleWindow, payloadBytes, types, arrivalPerSecond);
+                var processed = await RunScenarioAsync(
+                    host, scenario, jobs, tabs, idleWindow, payloadBytes, types, arrivalPerSecond, new ConcurrencyShape(concurrencyKeys, concurrencyLimit, concurrencyMode, handlerMs));
 
                 sw.Stop();
                 var after = sqlServer ? PgStats.Empty : await PgStats.CaptureAsync(connectionString, withStatements);
                 var delta = after.Since(before);
 
-                Report(scenario, delta, sw.Elapsed, processed, withStatements, HarnessQueries.Total - harnessBefore);
+                // Read AFTER the stats capture so the churn queries stay out of the delta. The cost is
+                // that counters still sitting in WarpCounterBuffer when the last job drained flush
+                // outside the measured window (§6.2, CounterBufferFlushInterval = 2s) — a couple of
+                // seconds of writes on a multi-minute run. The churn figures themselves are complete,
+                // because ReadChurnAsync waits for that flush before it reads.
+                // Read the harness counter BEFORE the churn queries, which call HarnessQueries.Count()
+                // themselves — they are outside the measured window and must not inflate its figure.
+                var harnessQueries = HarnessQueries.Total - harnessBefore;
+                var churn = IsConcurrency(scenario) ? await ReadChurnAsync(host) : null;
+
+                Report(scenario, delta, sw.Elapsed, processed, withStatements, harnessQueries, churn);
                 samples.Add((sw.Elapsed.TotalSeconds, delta.TotalExecMs, delta.TotalCalls, processed));
             }
 
@@ -576,14 +618,17 @@ public static class LoadLab
             .Build();
     }
 
-    private static async Task WarmUpAsync(IHost host, LoadScenario scenario)
+    private static async Task WarmUpAsync(IHost host, LoadScenario scenario, ConcurrencyShape concurrency)
     {
         if (scenario == LoadScenario.Idle)
         {
             return;
         }
 
-        await PublishAsync(host, 200, 0, 1, 0);
+        // Warmed in the arm's own shape, not the plain-jobs shape: a concurrency arm's first jobs
+        // otherwise pay to JIT the policy pipeline, the semaphore provider and the requeue path inside
+        // the measured window. The handler delay is dropped so the warmup still drains quickly.
+        await PublishAsync(host, 200, 0, 1, 0, scenario, concurrency with { HandlerMs = 0 });
         await WaitForDrainAsync(host, TimeSpan.FromMinutes(2));
 
         await using var scope = host.Services.CreateAsyncScope();
@@ -598,13 +643,24 @@ public static class LoadLab
     /// </summary>
     private static async Task ClearJobTablesAsync(TestContext context)
     {
+        // Settle past CounterBufferFlushInterval (2s) BEFORE clearing. The worker stages counters in
+        // WarpCounterBuffer (§6.2) and the flusher writes them up to two seconds after the job that
+        // produced them finished — so clearing the instant a drain completes leaves the tail to land
+        // afterwards, and the next run's churn read opens with the previous run's requeues already in it.
+        await Task.Delay(TimeSpan.FromSeconds(4));
+
         await context.Set<JobLog>().ExecuteDeleteAsync();
         await context.Set<Counter>().ExecuteDeleteAsync();
+
+        // Statistic too, or a repeat's churn read would include every previous run's requeues:
+        // CounterAggregator folds Counter rows into Statistic, so clearing only the former leaves the
+        // folded history behind and the ratio climbs run over run.
+        await context.Set<Statistic>().ExecuteDeleteAsync();
         await context.Set<Job>().ExecuteDeleteAsync();
     }
 
     private static async Task<int> RunScenarioAsync(
-        IHost host, LoadScenario scenario, int jobs, int tabs, TimeSpan idleWindow, int payloadBytes, int types, int arrivalPerSecond)
+        IHost host, LoadScenario scenario, int jobs, int tabs, TimeSpan idleWindow, int payloadBytes, int types, int arrivalPerSecond, ConcurrencyShape concurrency)
     {
         if (scenario == LoadScenario.Idle)
         {
@@ -625,7 +681,7 @@ public static class LoadLab
         using var stopProgress = new CancellationTokenSource();
         var progress = ReportProgressAsync(host, jobs, stopProgress.Token);
 
-        await PublishAsync(host, jobs, payloadBytes, types, arrivalPerSecond);
+        await PublishAsync(host, jobs, payloadBytes, types, arrivalPerSecond, scenario, concurrency);
         Console.WriteLine($"  publish complete");
         await WaitForDrainAsync(host, TimeSpan.FromMinutes(90));
 
@@ -688,7 +744,8 @@ public static class LoadLab
                 TaskScheduler.Default);
     }
 
-    private static async Task PublishAsync(IHost host, int count, int payloadBytes, int types, int arrivalPerSecond)
+    private static async Task PublishAsync(
+        IHost host, int count, int payloadBytes, int types, int arrivalPerSecond, LoadScenario scenario, ConcurrencyShape concurrency)
     {
         var remaining = count;
         var published = 0;
@@ -705,7 +762,14 @@ public static class LoadLab
             var publisher = scope.ServiceProvider.GetRequiredService<IPublisher>();
             for (var i = 0; i < batch; i++)
             {
-                await EnqueueOneAsync(publisher, payloadBytes, types, published + i);
+                if (IsConcurrency(scenario))
+                {
+                    await EnqueueConcurrencyOneAsync(publisher, scenario, concurrency, published + i);
+                }
+                else
+                {
+                    await EnqueueOneAsync(publisher, payloadBytes, types, published + i);
+                }
             }
 
             await publisher.SaveChangesAsync();
@@ -801,6 +865,135 @@ public static class LoadLab
         }
     }
 
+    /// <summary>
+    /// Publishes one concurrency-gated job. The key is applied at PUBLISH (<c>WithMutex</c> /
+    /// <c>WithSemaphore</c>) rather than as an attribute so key cardinality is a run parameter instead of
+    /// a compile-time set of types — sweeping contention is the whole point of the arm. It is also the
+    /// top precedence rung (§8.8), so the shape asked for is the shape that executes.
+    /// </summary>
+    private static async Task EnqueueConcurrencyOneAsync(IPublisher publisher, LoadScenario scenario, ConcurrencyShape concurrency, int index)
+    {
+        var key = $"g{KeyFor(index, concurrency.Keys)}";
+        var parameters = new JobParameters();
+
+        if (scenario == LoadScenario.Mutex)
+        {
+            parameters.WithMutex(key, concurrency.Mode);
+        }
+        else
+        {
+            parameters.WithSemaphore(key, Math.Max(concurrency.Limit, 1), concurrency.Mode);
+        }
+
+        // DelayRequest, not EmptyRequest: a handler that returns immediately holds the group for
+        // microseconds, so the rejection rate collapses and the arm measures almost no contention. The
+        // delay is what makes a group genuinely busy while its siblings are claimed and turned away.
+        await publisher.Enqueue(new DelayRequest { DelayMs = concurrency.HandlerMs }, parameters);
+    }
+
+    /// <summary>
+    /// Sums the <c>stats:</c> family across BOTH tables: the worker writes into
+    /// <c>WarpCounterBuffer</c> (§6.2), <c>CounterBufferFlusher</c> lands that as <c>Counter</c> rows,
+    /// and <c>CounterAggregator</c> later folds those into <c>Statistic</c> and deletes them — so at any
+    /// instant a key's total is split across the two.
+    /// </summary>
+    private static async Task<ChurnCounts> ReadChurnAsync(IHost host)
+    {
+        // Past CounterBufferFlushInterval (2s), so the last jobs to finalize are counted rather than
+        // still sitting in the process-local buffer.
+        await Task.Delay(TimeSpan.FromSeconds(4));
+
+        await using var scope = host.Services.CreateAsyncScope();
+        var context = scope.ServiceProvider.GetRequiredService<TestContext>();
+
+        HarnessQueries.Count();
+        var counters = await context.Set<Counter>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith("stats:"))
+            .GroupBy(x => x.Key)
+            .Select(x =>
+                new
+                {
+                    Key = x.Key,
+                    Value = (long)x.Sum(y => y.Value),
+                })
+            .ToListAsync();
+
+        HarnessQueries.Count();
+        var statistics = await context.Set<Statistic>()
+            .AsNoTracking()
+            .Where(x => x.Key.StartsWith("stats:"))
+            .Select(x =>
+                new
+                {
+                    x.Key,
+                    x.Value,
+                })
+            .ToListAsync();
+
+        var totals = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (var row in counters.Concat(statistics))
+        {
+            // Lifetime keys only. The hourly siblings (stats:requeued:2026-09-19-14) carry the same
+            // events and would double every figure here.
+            if (row.Key.AsSpan(6).IndexOf(':') >= 0)
+            {
+                continue;
+            }
+
+            totals[row.Key] = totals.GetValueOrDefault(row.Key) + row.Value;
+        }
+
+        return new ChurnCounts(
+            totals.GetValueOrDefault("stats:succeeded"),
+            totals.GetValueOrDefault("stats:deleted"),
+            totals.GetValueOrDefault("stats:requeued"),
+            totals.GetValueOrDefault("stats:requeued-concurrency"),
+            totals.GetValueOrDefault("stats:deleted-concurrency"));
+    }
+
+    /// <summary>
+    /// Scatters a job index across the key set with a splitmix64 finalizer.
+    /// <para>
+    /// NOT <c>index % keys</c>. Round-robin assigns consecutive keys to consecutive rows, and the claim
+    /// hands rows out in <c>ScheduleTime</c> order, so N workers each receive a DIFFERENT key and the
+    /// arm measures zero contention however many workers run — an artifact of the publish order, not a
+    /// property of Warp. A scattered assignment produces collisions at the rate the key count implies,
+    /// and being a pure function of the index it stays reproducible across runs (<c>Random.Shared</c>
+    /// would not).
+    /// </para>
+    /// </summary>
+    private static ulong KeyFor(int index, int keys)
+    {
+        var mixed = ((ulong)index + 1) * 0x9E3779B97F4A7C15UL;
+        mixed ^= mixed >> 30;
+        mixed *= 0xBF58476D1CE4E5B9UL;
+        mixed ^= mixed >> 27;
+
+        return mixed % (ulong)Math.Max(keys, 1);
+    }
+
+    private static bool IsConcurrency(LoadScenario scenario) =>
+        scenario is LoadScenario.Mutex or LoadScenario.Semaphore;
+
+    /// <summary>Only the arms that HONOUR --payload/--types report them: the concurrency arms always publish a single-type, zero-payload DelayRequest, and echoing values they ignore makes a saved transcript unreproducible from its own header.</summary>
+    private static string DescribePayload(LoadScenario scenario, int payloadBytes, int types) =>
+        IsConcurrency(scenario) ? string.Empty : $"  payload={payloadBytes}B  types={types}";
+
+    private static string DescribeConcurrency(LoadScenario scenario, int keys, int limit, ConcurrencyMode mode, int handlerMs)
+    {
+        if (!IsConcurrency(scenario))
+        {
+            return string.Empty;
+        }
+
+        // A Mutex is a Semaphore of one by definition (§8.6) — reporting the --limit the operator
+        // happened to pass would print a width that arm does not have.
+        var effectiveLimit = scenario == LoadScenario.Mutex ? 1 : limit;
+
+        return $"  keys={keys}  limit={effectiveLimit}  mode={mode}  handlerMs={handlerMs}";
+    }
+
     private static async Task WaitForDrainAsync(IHost host, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
@@ -835,7 +1028,8 @@ public static class LoadLab
         TimeSpan elapsed,
         int processed,
         bool withStatements,
-        long harnessQueries)
+        long harnessQueries,
+        ChurnCounts? churn)
     {
         var seconds = elapsed.TotalSeconds;
         var db = delta.Database;
@@ -866,6 +1060,11 @@ public static class LoadLab
         WriteRow("buffer hits", db.BlksHit, seconds, processed);
         WriteRow("buffer reads (disk)", db.BlksRead, seconds, processed);
 
+        if (churn is { } counts)
+        {
+            WriteChurn(counts);
+        }
+
         if (withStatements)
         {
             Console.WriteLine();
@@ -892,6 +1091,39 @@ public static class LoadLab
         }
 
         Console.WriteLine();
+    }
+
+    /// <summary>
+    /// The PA-02 headline. <c>rejected cycles / settled job</c> is what a claim-side group filter would
+    /// remove: each one is a claim UPDATE, a limit lookup, an advisory-lock round trip on a session
+    /// connection and a requeue write, all spent on a job that did not run.
+    /// </summary>
+    private static void WriteChurn(ChurnCounts churn)
+    {
+        var settled = churn.Succeeded + churn.Deleted;
+
+        Console.WriteLine();
+        Console.WriteLine($"{"concurrency churn",-28}{"total",16}{string.Empty,14}{"per settled",12}");
+        WriteChurnRow("settled (succ + del)", settled, settled);
+        WriteChurnRow("  succeeded", churn.Succeeded, settled);
+        WriteChurnRow("  deleted", churn.Deleted, settled);
+        WriteChurnRow("requeues (all reasons)", churn.Requeued, settled);
+        WriteChurnRow("  reason=concurrency", churn.RequeuedConcurrency, settled);
+        WriteChurnRow("skips (deleted-concurrency)", churn.DeletedConcurrency, settled);
+
+        // Per job that actually RAN, not per settled job. In Skip mode a rejected job IS the Deleted
+        // row, so dividing by settled puts the same job in numerator and denominator and pins the
+        // ratio near 1.00 however much contention the arm really produced.
+        var rejected = churn.RequeuedConcurrency + churn.DeletedConcurrency;
+        Console.WriteLine(
+            $"{"rejected cycles / succeeded",-28}{rejected,16:N0}{string.Empty,14}"
+            + $"{(churn.Succeeded > 0 ? (rejected / (double)churn.Succeeded).ToString("N2", CultureInfo.InvariantCulture) : "n/a"),12}");
+    }
+
+    private static void WriteChurnRow(string label, long total, long settled)
+    {
+        var per = settled > 0 ? (total / (double)settled).ToString("N2", CultureInfo.InvariantCulture) : string.Empty;
+        Console.WriteLine($"{label,-28}{total,16:N0}{string.Empty,14}{per,12}");
     }
 
     private static void WriteRow(string label, long total, double seconds, int processed)
