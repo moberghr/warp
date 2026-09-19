@@ -21,8 +21,6 @@ namespace Warp.Provider.SqlServer;
 public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     where TContext : DbContext
 {
-    private const string Separator = "\x1F"; // ASCII "unit separator" — safe: queue names / GUIDs won't contain it
-
     private readonly WarpJobTableNames _n;
 
     private readonly string _claimEnqueuedJobsSql;
@@ -48,19 +46,29 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         var serverTable = QualifiedServerTable();
 
         // Atomic claim via UPDATE with OUTPUT. The candidates CTE picks up to N rows in
-        // queue/schedule order with ROWLOCK+UPDLOCK+READPAST so concurrent workers skip each
+        // schedule order with ROWLOCK+UPDLOCK+READPAST so concurrent workers skip each
         // other's locked rows. The UPDATE mutates the same rows and OUTPUT INSERTED.* streams
         // them back — caller gets tracked Job entities and sees post-update state. Pause is
         // enforced in C# via PauseStateHolder before the worker calls into this query — pause
         // has heartbeat-cadence latency, see PauseStateHolder for details.
+        //
+        // The queue predicate is a SCALAR equality and one statement is issued per queue, in
+        // lockstep with the PostgreSQL provider — see the long note on
+        // PostgresWarpSqlQueries._claimEnqueuedJobsSql for the measurement that motivated it
+        // (a multi-value queue predicate cannot supply ORDER BY from the claim index, so a stale
+        // row estimate sends the planner to a Sort that must drain the whole enqueued range:
+        // 62.1 ms and 52,088 buffers against 0.101 ms and 43 for the scalar form on PostgreSQL).
+        // The mechanism is a cost-model one, not a PostgreSQL quirk, and SQL Server picks plans
+        // from estimates the same way; the shapes are kept identical so the two providers cannot
+        // drift. The SQL Server numbers themselves are NOT measured — see docs/perf-results.md.
         _claimEnqueuedJobsSql = $@"
             WITH candidates AS (
                 SELECT TOP ({{3}}) *
                 FROM {table} WITH (ROWLOCK, UPDLOCK, READPAST)
                 WHERE [{_n.Kind}] = {(int)JobKind.Job}
                   AND [{_n.CurrentState}] = {(int)State.Enqueued}
-                  AND [{_n.Queue}] IN (SELECT value FROM STRING_SPLIT({{2}}, N'{Separator}'))
-                ORDER BY [{_n.Queue}], [{_n.ScheduleTime}]
+                  AND [{_n.Queue}] = {{2}}
+                ORDER BY [{_n.ScheduleTime}]
             )
             UPDATE candidates
             SET [{_n.CurrentState}] = {(int)State.Processing},
@@ -177,6 +185,12 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
                 WHERE [{_n.BackgroundServiceDefinitionName}] = {{0}}";
     }
 
+    /// <summary>
+    /// Claims up to <paramref name="limit"/> enqueued jobs, one statement per queue. Mirrors
+    /// <c>PostgresWarpSqlQueries.ClaimEnqueuedJobsAsync</c> exactly — see its remarks for why the
+    /// queue predicate is scalar, and for the ordering, collation and per-statement-transaction
+    /// consequences, all of which apply identically here.
+    /// </summary>
     public async Task<List<Job>> ClaimEnqueuedJobsAsync(
         DbContext context,
         string[] queues,
@@ -185,10 +199,26 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         int limit,
         CancellationToken ct)
     {
-        var queueCsv = string.Join(Separator, queues);
-        return await context.Set<Job>()
-            .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queueCsv, limit)
-            .ToListAsync(ct);
+        if (queues.Length == 1)
+        {
+            return await ClaimFromQueueAsync(context, queues[0], workerId, now, limit, ct);
+        }
+
+        var ordered = queues.OrderBy(x => x, StringComparer.Ordinal);
+        var claimed = new List<Job>(limit);
+
+        foreach (var queue in ordered)
+        {
+            var remaining = limit - claimed.Count;
+            if (remaining <= 0)
+            {
+                break;
+            }
+
+            claimed.AddRange(await ClaimFromQueueAsync(context, queue, workerId, now, remaining, ct));
+        }
+
+        return claimed;
     }
 
     public async Task<List<Job>> ClaimEnqueuedMessagesAsync(DbContext context, int limit, CancellationToken ct)
@@ -498,5 +528,18 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             : $"[{schema}].[{table}]";
 
         return $"SELECT * FROM {qualified} WITH (UPDLOCK, ROWLOCK) WHERE [{nameColumn}] = {{0}}";
+    }
+
+    private async Task<List<Job>> ClaimFromQueueAsync(
+        DbContext context,
+        string queue,
+        Guid workerId,
+        DateTime now,
+        int limit,
+        CancellationToken ct)
+    {
+        return await context.Set<Job>()
+            .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
+            .ToListAsync(ct);
     }
 }

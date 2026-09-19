@@ -212,6 +212,7 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
     var payloadBytes = 0;
     var tune = "none";
     var repeats = 1;
+    var warmup = 0;
     var types = 1;
     var arrival = 0;
     var sqlServer = false;
@@ -273,6 +274,10 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
         {
             repeats = int.Parse(args[i]["--repeats=".Length..]);
         }
+        else if (args[i].StartsWith("--warmup=", StringComparison.OrdinalIgnoreCase))
+        {
+            warmup = int.Parse(args[i]["--warmup=".Length..]);
+        }
         else if (args[i].StartsWith("--types=", StringComparison.OrdinalIgnoreCase))
         {
             types = int.Parse(args[i]["--types=".Length..]);
@@ -308,7 +313,7 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
     }
 
     await LoadLab.RunAsync(
-        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs);
+        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs, warmup);
 }
 else
 {

@@ -44,6 +44,29 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         // and RETURNING pipes the full row back. Pause is enforced in C# via PauseStateHolder
         // before the worker calls into this query — pause has heartbeat-cadence latency, see
         // PauseStateHolder for details.
+        //
+        // The queue predicate is a SCALAR equality, and one statement is issued per queue
+        // (see ClaimEnqueuedJobsAsync). It used to be `queue = ANY(@queues)`, which is the same
+        // result but collapses catastrophically the moment the planner's row estimate goes stale:
+        //
+        //   stale stats, 54,000 claimable rows in a 300k table, PostgreSQL 18
+        //     queue = ANY(array)   Sort (external merge, 2.6 MB to disk) over the WRONG index
+        //                          52,088 buffers,  62.1 ms
+        //     queue = scalar       Index Cond on (Kind, CurrentState, Queue, ScheduleTime)
+        //                             43 buffers,   0.101 ms      -- 615x faster, 1,211x fewer buffers
+        //
+        // Both spellings estimate `rows=1` there; the scalar one does not need the estimate to be
+        // right. With `queue` fixed, this index supplies ORDER BY queue, schedule_time for free, so
+        // there is no Sort and LIMIT stops at the first rows. A multi-value predicate cannot supply
+        // that ordering as cheaply, so at `rows=1` the planner prefers a scan of
+        // (Kind, CurrentState, CreateTime) plus a Sort — and a Sort must consume its ENTIRE input
+        // before emitting a row, which is why LIMIT buys nothing and the claim reads the whole
+        // enqueued range to return one job. It is a knife-edge: 8.44 vs 8.46 estimated cost.
+        //
+        // Not parameter opacity — a literal `ANY(ARRAY[...])` (69.2 ms) and `IN (...)` (72.4 ms)
+        // are just as bad. Fresh statistics also fix it, which is why `ANALYZE` looks like a cure,
+        // but that is a race against a backlog that swings from empty to full between autovacuum
+        // ticks; the scalar form removes the race instead of running it. See docs/perf-results.md.
         _claimEnqueuedJobsSql = $@"
             UPDATE {table} AS t
             SET ""{_n.CurrentState}"" = {(int)State.Processing},
@@ -54,8 +77,8 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 FROM {table}
                 WHERE ""{_n.Kind}"" = {(int)JobKind.Job}
                   AND ""{_n.CurrentState}"" = {(int)State.Enqueued}
-                  AND ""{_n.Queue}"" = ANY({{2}})
-                ORDER BY ""{_n.Queue}"", ""{_n.ScheduleTime}""
+                  AND ""{_n.Queue}"" = {{2}}
+                ORDER BY ""{_n.ScheduleTime}""
                 LIMIT {{3}}
                 FOR UPDATE SKIP LOCKED
             ) AS c
@@ -181,6 +204,32 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 FOR NO KEY UPDATE";
     }
 
+    /// <summary>
+    /// Claims up to <paramref name="limit"/> enqueued jobs, one statement per queue.
+    /// <para>
+    /// The single-queue case — the overwhelmingly common one — issues exactly one statement, as it
+    /// always did. Multiple queues are visited in order and the budget is spent down, which
+    /// reproduces the `ORDER BY Queue, ScheduleTime LIMIT n` the one-statement form used to give:
+    /// that ordering drains the lexicographically-first queue completely before the next one is
+    /// looked at, so taking as much as possible from each queue in turn yields the same rows.
+    /// That starve-the-later-queue behaviour is PRESERVED deliberately, not fixed here — the
+    /// default group binds `{DefaultQueue, warp:webhooks}`, so webhook deliveries already wait for
+    /// the default queue to drain, and changing it is a separate decision with its own blast radius.
+    /// </para>
+    /// <para>
+    /// Ordering uses <see cref="StringComparer.Ordinal"/>, where the statement it replaces used the
+    /// database's collation for the `queue` column. For the ASCII queue names Warp produces the two
+    /// agree; a deployment using queue names that collate differently from ordinal would see the
+    /// relative priority of two queues change.
+    /// </para>
+    /// <para>
+    /// Each statement is its own implicit transaction, where one statement was atomic across all
+    /// queues before. Nothing depends on cross-queue atomicity — every claimed row is stamped
+    /// Processing by the statement that claimed it — but a failure partway through leaves the
+    /// already-claimed rows Processing with no worker running them, which is the crash-mid-claim
+    /// case `StaleJobRecovery` already exists to repair.
+    /// </para>
+    /// </summary>
     public async Task<List<Job>> ClaimEnqueuedJobsAsync(
         DbContext context,
         string[] queues,
@@ -189,9 +238,26 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         int limit,
         CancellationToken ct)
     {
-        return await context.Set<Job>()
-            .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queues, limit)
-            .ToListAsync(ct);
+        if (queues.Length == 1)
+        {
+            return await ClaimFromQueueAsync(context, queues[0], workerId, now, limit, ct);
+        }
+
+        var ordered = queues.OrderBy(x => x, StringComparer.Ordinal);
+        var claimed = new List<Job>(limit);
+
+        foreach (var queue in ordered)
+        {
+            var remaining = limit - claimed.Count;
+            if (remaining <= 0)
+            {
+                break;
+            }
+
+            claimed.AddRange(await ClaimFromQueueAsync(context, queue, workerId, now, remaining, ct));
+        }
+
+        return claimed;
     }
 
     public async Task<List<Job>> ClaimEnqueuedMessagesAsync(DbContext context, int limit, CancellationToken ct)
@@ -494,5 +560,18 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             : $"\"{schema}\".\"{table}\"";
 
         return $"SELECT * FROM {qualified} WHERE \"{nameColumn}\" = {{0}} FOR NO KEY UPDATE";
+    }
+
+    private async Task<List<Job>> ClaimFromQueueAsync(
+        DbContext context,
+        string queue,
+        Guid workerId,
+        DateTime now,
+        int limit,
+        CancellationToken ct)
+    {
+        return await context.Set<Job>()
+            .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
+            .ToListAsync(ct);
     }
 }
