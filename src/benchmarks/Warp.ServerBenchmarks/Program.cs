@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Running;
+using Warp.Core.Concurrency;
 using Warp.ServerBenchmarks.Benchmarks;
 using Warp.ServerBenchmarks.Lab;
 
@@ -165,6 +166,40 @@ else if (args.Length > 0 && string.Equals(args[0], "rtt", StringComparison.Ordin
 
     await RoundTripProbe.RunAsync(rttSeconds, rttConnection);
 }
+else if (args.Length > 0 && string.Equals(args[0], "lockprobe", StringComparison.OrdinalIgnoreCase))
+{
+    var probeIterations = 2000;
+    var probeMaxCount = 1;
+    var probeSeparatePool = false;
+    var probeDataSource = false;
+    var probeConnection = string.Empty;
+
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (args[i].StartsWith("--iterations=", StringComparison.OrdinalIgnoreCase))
+        {
+            probeIterations = int.Parse(args[i]["--iterations=".Length..]);
+        }
+        else if (args[i].StartsWith("--max-count=", StringComparison.OrdinalIgnoreCase))
+        {
+            probeMaxCount = int.Parse(args[i]["--max-count=".Length..]);
+        }
+        else if (string.Equals(args[i], "--separate-pool", StringComparison.OrdinalIgnoreCase))
+        {
+            probeSeparatePool = true;
+        }
+        else if (string.Equals(args[i], "--data-source", StringComparison.OrdinalIgnoreCase))
+        {
+            probeDataSource = true;
+        }
+        else if (args[i].StartsWith("--connection=", StringComparison.OrdinalIgnoreCase))
+        {
+            probeConnection = args[i]["--connection=".Length..];
+        }
+    }
+
+    await LockProbe.RunAsync(probeIterations, probeMaxCount, probeSeparatePool, probeDataSource, probeConnection);
+}
 else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.OrdinalIgnoreCase))
 {
     var scenario = LoadScenario.Jobs;
@@ -184,6 +219,10 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
     var loadServers = 1;
     var idleSeconds = 120;
     string? connectionString = null;
+    var keys = 1;
+    var limit = 1;
+    var mode = ConcurrencyMode.Wait;
+    var handlerMs = 0;
 
     for (var i = 1; i < args.Length; i++)
     {
@@ -255,9 +294,26 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
         {
             loadServers = int.Parse(args[i]["--servers=".Length..]);
         }
+        else if (args[i].StartsWith("--keys=", StringComparison.OrdinalIgnoreCase))
+        {
+            keys = int.Parse(args[i]["--keys=".Length..]);
+        }
+        else if (args[i].StartsWith("--limit=", StringComparison.OrdinalIgnoreCase))
+        {
+            limit = int.Parse(args[i]["--limit=".Length..]);
+        }
+        else if (args[i].StartsWith("--mode=", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = Enum.Parse<ConcurrencyMode>(args[i]["--mode=".Length..], ignoreCase: true);
+        }
+        else if (args[i].StartsWith("--handler-ms=", StringComparison.OrdinalIgnoreCase))
+        {
+            handlerMs = int.Parse(args[i]["--handler-ms=".Length..]);
+        }
     }
 
-    await LoadLab.RunAsync(scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, warmup);
+    await LoadLab.RunAsync(
+        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs, warmup);
 }
 else
 {

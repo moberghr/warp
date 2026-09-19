@@ -97,6 +97,36 @@ Session mode gives no multiplexing while a connection is open, so a pool sized f
 
 Size `default_pool_size` for that, or point Warp at a direct connection and leave the pooler to your request traffic. Under-sizing shows up as client-login timeouts, not as a lock error.
 
+### The lock sessions use a separate Npgsql pool
+
+On PostgreSQL, Warp gives the advisory-lock providers your DbContext's connection string with `Application Name` suffixed `:warp-locks`. That value is part of Npgsql's pool key, so the lock sessions live in their own client-side pool. Nothing about locking changes — advisory locks are database-scoped, so mutual exclusion is unaffected — but two things follow that matter operationally.
+
+**Connection ceilings double.** `MaxPoolSize` is per pool, so what was one bound covering EF and the lock sessions together is now that bound twice against the same server. Active connection use should be close to unchanged (the lock sessions moved rather than multiplied, and the lock library multiplexes several held locks onto one connection), and Warp pins `MinPoolSize = 0` on the lock pool so a host that pre-warms its DbContext pool does not hold those idle connections a second time. But a deployment sized right at its server's `max_connections` should account for the second pool.
+
+**Lock sessions are labelled.** `SELECT application_name, count(*) FROM pg_stat_activity WHERE datname = current_database() GROUP BY 1` now separates Warp's lock sessions from its query traffic. If your own `Application Name` is long, Warp truncates your portion so the suffix survives Postgres's 63-byte `application_name` limit.
+
+Why it exists: Npgsql resets a pooled connection with a single `DISCARD ALL`, but a connector carrying prepared statements must instead be reset with a seven-statement sequence, because `DISCARD ALL` would deallocate them. The lock library prepares its advisory-lock statements, so when it shared a pool with EF its connectors flipped *every* connection in the process onto the longer reset. Measured on a concurrency-heavy workload: 50.4 statements per job before the split, 24.8 after — and 16.9 to 13.8 on a workload using no `[Mutex]` or `[Semaphore]` at all, since the server tasks take advisory locks too. Throughput is unchanged; this is database load, not latency.
+
+#### If you register an `NpgsqlDataSource`
+
+Hosts that register the DbContext with an `NpgsqlDataSource` — Aspire, Managed Identity, client certificates — do **not** get this automatically, and keep the shared pool and the longer reset. Warp cannot derive a second pool there: a data source's password provider, certificate callbacks and type mappings are write-only on `NpgsqlDataSourceBuilder` and unreadable from the built object, so forking one would silently drop your authentication.
+
+Build a second data source yourself, configured exactly like the first, and pass it in:
+
+```csharp
+var lockDataSource = BuildMyDataSource(builder =>
+    builder.ConnectionStringBuilder.ApplicationName = "my-app:warp-locks");
+
+services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql(lockDataSource);
+});
+```
+
+Only the `Application Name` needs to differ — that is what separates the pool.
+
+SQL Server is unaffected: `SqlClient` resets a pooled connection with a single `sp_reset_connection` call, so there is no equivalent amplification to remove.
+
 ## Scale-to-zero Postgres
 
 Neon suspends the compute after a period of inactivity (5 minutes by default on the free and launch plans), which terminates every session. That drops any session-scoped advisory lock a long-running task was holding, along with any `LISTEN` registration. Other serverless Postgres offerings behave the same way.
