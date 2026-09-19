@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 7.0.0
 
-*Unreleased*
+*2026-09-19*
 
 Performance release with **one breaking behavioural change**: a server now puts substantially less
 load on the database it shares with your application, and the counters a worker emits reach that
