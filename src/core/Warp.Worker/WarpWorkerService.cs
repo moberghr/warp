@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -40,8 +41,14 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly ServerTaskSignals<TContext> _signals;
+    private readonly WarpCounterBuffer _counterBuffer;
 
-    public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
+    // Increments staged for the unit of work in flight. Pushed to the shared buffer only once that work
+    // COMMITS, so a rollback drops them exactly as the old row-per-increment writes did. Safe as instance
+    // state: one WarpWorkerService belongs to one worker and processes one job at a time.
+    private readonly List<(string Key, int Value)> _stagedCounters = [];
+
+    public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals, WarpCounterBuffer counterBuffer)
     {
         _workerId = workerId;
         _serviceScopeFactory = serviceScopeFactory;
@@ -52,11 +59,16 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         _sqlQueries = sqlQueries;
         _notificationTransport = notificationTransport;
         _signals = signals;
+
+        _counterBuffer = counterBuffer;
     }
 
     public async Task<bool> GetAndProcessJob(CancellationToken cancellationToken)
     {
         PerfTrace.Begin();
+
+        // Anything still staged belongs to a previous job whose unit of work never committed; drop it.
+        _stagedCounters.Clear();
 
         // Worker scope — owns Warp state (Job, JobLog, Counter). Isolated from handler's DbContext.
         using var workerScope = _serviceScopeFactory.CreateScope();
@@ -107,21 +119,22 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             });
 
             // Queue-wait SLI (§8.26): time the job spent eligible-but-unclaimed. Always-on meter + (sink-gated)
-            // Counter rows added to workerContext so they ride the SaveChanges below — no extra round-trip
-            // (§0.2/§6.1), mirroring the jobstat finalization triad (§8.23/§8.24).
+            // increments summed into the process counter buffer — no rows on this SaveChanges and no extra
+            // round-trip (§0.2/§6.1), mirroring the jobstat finalization triad (§8.23/§8.24).
             var waitMs = Math.Max(0, (now - job.ScheduleTime).TotalMilliseconds);
             WarpTelemetry.RecordQueueWait(job.Queue, waitMs, _configuration.ApplicationName);
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
                 foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes)))
                 {
-                    workerContext.Set<Counter>().Add(counter);
+                    EmitCounter(counter.Key, counter.Value);
                 }
             }
 
             PerfTrace.Mark(PerfTrace.SaveProcessing);
             await workerContext.SaveChangesAsync(cancellationToken);
             PerfTrace.Mark(PerfTrace.CommitTransaction1);
+            CommitStagedCounters();
         }
 
         var logCollector = new JobLogCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
@@ -253,7 +266,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await monitorTask;
 
             PerfTrace.Mark(PerfTrace.BeginTransaction2);
-            await using var endTransaction = await workerContext.Database.BeginTransactionAsync(default);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
 
             if (successOutcome != null)
             {
@@ -286,6 +299,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
             PerfTrace.Mark(PerfTrace.CommitTransaction2);
             await endTransaction.CommitAsync(default);
+            CommitStagedCounters();
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -303,7 +317,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await monitorTask;
 
             var cancelNow = _timeProvider.GetUtcNow().UtcDateTime;
-            await using var endTransaction = await workerContext.Database.BeginTransactionAsync(default);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
             job.CurrentState = State.Deleted;
             job.ExpireAt = cancelNow.Add(_configuration.JobExpirationTimeout);
             job.CancellationMode = CancellationMode.None;
@@ -322,7 +336,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             // lifetime row, or a cancellation is invisible on the Counters chart and the lifetime total stops
             // reconciling with the sum of its own buckets.
             var cancelHourSuffix = cancelNow.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
-            AddCounters(workerContext, "stats:deleted", $"stats:deleted:{cancelHourSuffix}");
+            AddCounters("stats:deleted", $"stats:deleted:{cancelHourSuffix}");
             workerContext.Set<JobLog>().Add(new JobLog
             {
                 JobId = job.Id,
@@ -342,6 +356,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
             await workerContext.SaveChangesAsync(default);
             await endTransaction.CommitAsync(default);
+            CommitStagedCounters();
         }
         catch (Exception e)
         {
@@ -416,7 +431,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await jobCts.CancelAsync();
             await monitorTask;
 
-            await using var endTransaction = await workerContext.Database.BeginTransactionAsync(default);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
             FinalizeJobState(workerContext, job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
             if (_configuration.EnableHandlerLogging)
             {
@@ -427,6 +442,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
             await workerContext.SaveChangesAsync(default);
             await endTransaction.CommitAsync(default);
+            CommitStagedCounters();
         }
         finally
         {
@@ -602,7 +618,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         if (state == State.Completed)
         {
             job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
-            AddCounters(context, "stats:succeeded", $"stats:succeeded:{hourSuffix}");
+            AddCounters("stats:succeeded", $"stats:succeeded:{hourSuffix}");
 
             // Always-on execution meters (null-listener, zero cost) — emitted regardless of JobMetricsSink.
             WarpTelemetry.RecordJobExecution(job.Type, job.HandlerType, JobStatsKeys.SucceededToken, durationMs, _configuration.ApplicationName);
@@ -611,29 +627,29 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             // Otel sink (the meters carry the data) — the finalization-path perf win. Counter writes only.
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
-                AddJobStatsCounters(context, job, JobStatsKeys.SucceededToken, durationMs, tierSuffix);
+                AddJobStatsCounters(job, JobStatsKeys.SucceededToken, durationMs, tierSuffix);
             }
         }
         else if (state == State.Failed)
         {
-            AddCounters(context, "stats:failed", $"stats:failed:{hourSuffix}");
+            AddCounters("stats:failed", $"stats:failed:{hourSuffix}");
 
             WarpTelemetry.RecordJobExecution(job.Type, job.HandlerType, JobStatsKeys.FailedToken, durationMs, _configuration.ApplicationName);
 
             if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
             {
-                AddJobStatsCounters(context, job, JobStatsKeys.FailedToken, durationMs, tierSuffix);
+                AddJobStatsCounters(job, JobStatsKeys.FailedToken, durationMs, tierSuffix);
             }
         }
         else if (state == State.Deleted)
         {
             job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
-            AddCounters(context, "stats:deleted", $"stats:deleted:{hourSuffix}");
+            AddCounters("stats:deleted", $"stats:deleted:{hourSuffix}");
         }
         else if (state == State.Enqueued || state == State.Scheduled)
         {
             // Covers retry backoff and Mutex Wait — anything that puts the job back on the queue.
-            AddCounters(context, "stats:requeued", $"stats:requeued:{hourSuffix}");
+            AddCounters("stats:requeued", $"stats:requeued:{hourSuffix}");
 
             // Always-on meter — the countable signal concurrency and rate limiting never had (they emit
             // spans, which are sampled). It sits HERE, beside the state total it must agree with, and NOT
@@ -677,7 +693,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             if (stateToken != null)
             {
                 var key = $"stats:{stateToken}-{token}";
-                AddCounters(context, key, $"{key}:{hourSuffix}");
+                AddCounters(key, $"{key}:{hourSuffix}");
             }
 
             // Distinct jobs that entered retry, as opposed to the retry EVENTS counted above. A job retried
@@ -689,7 +705,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             // dependency on the Retry addon (the literal key is pinned to the property name by a test).
             if (reason == OutcomeReason.Retry && incomingAttempts == 0)
             {
-                AddCounters(context, "stats:retried-jobs", $"stats:retried-jobs:{hourSuffix}");
+                AddCounters("stats:retried-jobs", $"stats:retried-jobs:{hourSuffix}");
             }
         }
 
@@ -712,7 +728,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 var type = string.IsNullOrEmpty(job.Type) ? "job" : job.Type;
                 foreach (var counter in DeadlineKeys.Build(type, missed, _configuration.ApplicationName, tierSuffix))
                 {
-                    context.Set<Counter>().Add(counter);
+                    EmitCounter(counter.Key, counter.Value);
                 }
             }
         }
@@ -747,21 +763,90 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         await context.Set<JobLog>().AddRangeAsync(entries);
     }
 
-    private static void AddCounters(DbContext context, string totalKey, string hourlyKey)
+    /// <summary>
+    /// The single place a counter increment leaves this worker.
+    /// <para>
+    /// Normally it is summed into the process-wide <see cref="WarpCounterBuffer"/> and written out by
+    /// <c>CounterBufferFlusher</c> as one row per distinct key per interval, rather than a row per
+    /// increment riding the finalizing SaveChanges. A finalizing job emits ~20 increments against the
+    /// same ~20 keys, so at 500k jobs that was ten million rows folding down to twenty.
+    /// </para>
+    /// <para>
+    /// Staged, not buffered: the increment is held on the worker until the unit of work it belongs to
+    /// COMMITS, then moved to the shared buffer by <see cref="CommitStagedCounters"/>. An attempt whose
+    /// transaction rolls back therefore contributes nothing, exactly as the per-increment rows did when
+    /// they rode the finalizing SaveChanges. The flush window is still lossy on an ungraceful exit
+    /// (§6.2 — counters are diagnostics, not an audit trail), but a rollback is not a loss case.
+    /// </para>
+    /// </summary>
+    private void EmitCounter(string key, int value)
     {
-        context.Set<Counter>().Add(new Counter { Key = totalKey, Value = 1 });
-        context.Set<Counter>().Add(new Counter { Key = hourlyKey, Value = 1 });
+        _stagedCounters.Add((key, value));
+    }
+
+    /// <summary>
+    /// Opens the transaction that finalizes a job, discarding anything still staged from an attempt
+    /// that never committed.
+    /// <para>
+    /// Every finalization arm — success, graceful cancel and failure — stages its increments INSIDE
+    /// this transaction, so starting one is exactly the moment the previous unit of work is known to
+    /// be over. Clearing here rather than in each arm is the point: when the success arm's
+    /// SaveChanges or COMMIT throws, control lands in one of the catch arms, which finalizes the job
+    /// a second time and commits. Without this, that second commit hands the buffer BOTH sets and the
+    /// job is counted as succeeded and failed — <c>stats:succeeded</c> and <c>stats:failed</c> both
+    /// move for one job, breaking the reconciliation §8.33 requires and letting the attributed reason
+    /// breakdown exceed its own state total.
+    /// </para>
+    /// <para>
+    /// Clearing at the top of each arm would work today and rot tomorrow: a new arm is written by
+    /// copying an existing one, and the clear is the line with no visible effect on the path being
+    /// copied. Pairing it with the transaction start makes it impossible to open a finalizing
+    /// transaction without it.
+    /// </para>
+    /// </summary>
+    private async Task<IDbContextTransaction> BeginFinalizingTransactionAsync(DbContext workerContext)
+    {
+        _stagedCounters.Clear();
+
+        return await workerContext.Database.BeginTransactionAsync(default);
+    }
+
+    /// <summary>
+    /// Moves everything staged for the just-committed unit of work into the shared buffer. Called after
+    /// each commit; staged increments left behind by a unit of work that threw are dropped by whichever
+    /// comes first — the next finalizing transaction on this job
+    /// (<see cref="BeginFinalizingTransactionAsync"/>) or the next job's iteration.
+    /// </summary>
+    private void CommitStagedCounters()
+    {
+        if (_stagedCounters.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (key, value) in _stagedCounters)
+        {
+            _counterBuffer.Add(key, value);
+        }
+
+        _stagedCounters.Clear();
+    }
+
+    private void AddCounters(string totalKey, string hourlyKey)
+    {
+        EmitCounter(totalKey, 1);
+        EmitCounter(hourlyKey, 1);
     }
 
     // Per-job-TYPE + per-HANDLER execution counters (§8.19 multi-app observability), sliced by this worker
     // process's executor ApplicationName. Counter writes only — no reads/orchestration — so the fetch/execute
     // hot path stays sacred (§0.2/§6.1). Rides the standard Counter→Statistic fold; the fine (5-min) tier is
     // downsampled to hourly then daily by StatisticRollup (§8.30).
-    private void AddJobStatsCounters(DbContext context, Job job, string outcomeToken, double? durationMs, string tierSuffix)
+    private void AddJobStatsCounters(Job job, string outcomeToken, double? durationMs, string tierSuffix)
     {
         foreach (var counter in JobStatsKeys.Build(job, outcomeToken, durationMs, _configuration.ApplicationName, tierSuffix))
         {
-            context.Set<Counter>().Add(counter);
+            EmitCounter(counter.Key, counter.Value);
         }
     }
 }

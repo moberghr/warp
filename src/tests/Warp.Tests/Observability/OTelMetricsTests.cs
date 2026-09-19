@@ -15,6 +15,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Logging;
 using Warp.Core.Retry;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
@@ -25,6 +26,10 @@ namespace Warp.Tests.Observability;
 [GenerateDatabaseTests]
 public abstract class OTelMetricsTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private readonly IDatabaseFixture _fixture;
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
@@ -108,7 +113,8 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
             TimeProvider.System,
             Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.NullSignals);
+            Warp.Tests.Helpers.TestTasks.NullSignals,
+            _counterBuffer);
     }
 
     private static bool HasTag(ReadOnlySpan<KeyValuePair<string, object?>> tags, string key, string value)

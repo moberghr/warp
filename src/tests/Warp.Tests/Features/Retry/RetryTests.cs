@@ -12,6 +12,7 @@ using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Retry;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
@@ -23,6 +24,10 @@ namespace Warp.Tests.Features.Retry;
 [GenerateDatabaseTests]
 public abstract class RetryTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private readonly IDatabaseFixture _fixture;
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
@@ -116,7 +121,8 @@ public abstract class RetryTestsBase : IAsyncLifetime
             TimeProvider.System,
             Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.NullSignals);
+            Warp.Tests.Helpers.TestTasks.NullSignals,
+            _counterBuffer);
     }
 
     [TimedFact]
@@ -144,6 +150,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
         for (var i = 0; i < 4; i++)
         {
             await worker.GetAndProcessJob(CancellationToken.None);
+            await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         }
 
         // Assert
@@ -176,6 +183,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         var readCtx = _fixture.CreateContext();
@@ -207,6 +215,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act — process once (should be requeued, not failed)
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         await Warp.Tests.Helpers.TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(CancellationToken.None);
 
@@ -256,6 +265,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act — first attempt fails and gets requeued
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Change job type to succeed on next attempt
         var updateCtx = _fixture.CreateContext();
@@ -270,6 +280,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Process again — should succeed
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         var readCtx = _fixture.CreateContext();
@@ -302,6 +313,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — retries with a future ScheduleTime land in Scheduled so the worker fetch
         // (State=Enqueued only) doesn't pick them up early.
@@ -347,6 +359,8 @@ public abstract class RetryTestsBase : IAsyncLifetime
                     Xunit.TestContext.Current.CancellationToken);
 
             await worker.GetAndProcessJob(CancellationToken.None);
+
+            await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         }
 
         // Assert — 3rd retry should use last delay (20s)
@@ -380,6 +394,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — ScheduleTime should still be in the past (no delay applied)
         var readCtx = _fixture.CreateContext();
@@ -411,6 +426,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act — first call processes and requeues with 1h delay
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Second call should not find the job (ScheduleTime is in the future)
         var didProcess = await worker.GetAndProcessJob(CancellationToken.None);
@@ -450,6 +466,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — should use per-job delay (7200s), not global (60s)
         var readCtx = _fixture.CreateContext();
@@ -489,6 +506,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
         for (var i = 0; i < 3; i++)
         {
             await worker.GetAndProcessJob(CancellationToken.None);
+            await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         }
 
         // Assert — should have retried 2 times (from metadata), then failed
@@ -521,6 +539,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act — process once, should be requeued (attribute says 5 retries)
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         var readCtx = _fixture.CreateContext();
@@ -552,6 +571,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act — process once, should be requeued (attribute says 4 retries)
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert
         var readCtx = _fixture.CreateContext();
@@ -594,6 +614,8 @@ public abstract class RetryTestsBase : IAsyncLifetime
                     Xunit.TestContext.Current.CancellationToken);
 
             await worker.GetAndProcessJob(CancellationToken.None);
+
+            await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         }
 
         // Assert — the handler's 7 retries were taken, not the contract's 2
@@ -633,6 +655,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
         for (var i = 0; i < 2; i++)
         {
             await worker.GetAndProcessJob(CancellationToken.None);
+            await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         }
 
         // Assert — should have used metadata's 1 retry (not handler attribute's 5)
@@ -667,6 +690,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — should use attribute's 100s delay (not global 10s); delayed retries land in Scheduled.
         var readCtx = _fixture.CreateContext();
@@ -700,6 +724,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
         // Act
         var before = DateTime.UtcNow;
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         var after = DateTime.UtcNow;
 
         // Assert — ScheduleTime ≈ now + 100s (no jitter)
@@ -738,6 +763,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
             // Act
             await worker.GetAndProcessJob(CancellationToken.None);
+            await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
             var after = DateTime.UtcNow;
 
@@ -780,6 +806,8 @@ public abstract class RetryTestsBase : IAsyncLifetime
         var worker = CreateWorker(maxRetries: 3, delays: [30]);
 
         await worker.GetAndProcessJob(CancellationToken.None);
+
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         var readCtx = _fixture.CreateContext();
         var job = await readCtx.Set<Job>().FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
@@ -825,6 +853,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
         // Act
         var before = DateTime.UtcNow;
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         var after = DateTime.UtcNow;
 
         // Assert — clamped to 1.0, so ScheduleTime ∈ [now, now + 200s]. Lower bound is
@@ -861,6 +890,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
         // Act
         var before = DateTime.UtcNow;
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         var after = DateTime.UtcNow;
 
         // Assert — clamped to 0, so ScheduleTime ≈ now + 100s (no jitter)
@@ -894,6 +924,7 @@ public abstract class RetryTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // Assert — ScheduleTime should remain in the past (empty-delays short-circuit preserved)
         var readCtx = _fixture.CreateContext();

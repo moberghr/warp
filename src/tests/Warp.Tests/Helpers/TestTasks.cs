@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data;
+using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
@@ -22,6 +23,41 @@ namespace Warp.Tests.Helpers;
 /// </summary>
 public static class TestTasks
 {
+    /// <summary>
+    /// Writes a worker's buffered counter increments out as <c>Counter</c> rows.
+    /// <para>
+    /// The worker sums increments into a <see cref="WarpCounterBuffer"/> and a background flusher
+    /// writes them out on an interval, so a test that runs jobs and then asserts on Counter or
+    /// Statistic rows must drain the buffer first rather than race that interval.
+    /// </para>
+    /// </summary>
+    public static async Task FlushCountersAsync(WarpCounterBuffer buffer, DbContext context, CancellationToken ct = default)
+    {
+        await CreateCounterBufferFlusher(buffer, context).FlushOnceAsync(ct);
+    }
+
+    /// <summary>
+    /// Builds the real <see cref="CounterBufferFlusher{TContext}"/> over a single context.
+    /// <para>
+    /// Tests drain through the production flusher rather than a stand-in that writes <c>Counter</c>
+    /// rows itself. A stand-in silently diverges — the one written first truncated a long to an int
+    /// while the flusher splits values past <c>int.MaxValue</c> across rows — and every test that used
+    /// it would keep passing while the code it stood for was broken.
+    /// </para>
+    /// </summary>
+    internal static CounterBufferFlusher<TestContext> CreateCounterBufferFlusher(
+        WarpCounterBuffer buffer, DbContext context)
+    {
+        var services = new ServiceCollection();
+        services.AddScoped<IWarpServerContext>(_ => new TestServerContext(context));
+
+        return new CounterBufferFlusher<TestContext>(
+            services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>(),
+            buffer,
+            Options.Create(new WarpServerConfiguration()),
+            NullLogger<CounterBufferFlusher<TestContext>>.Instance);
+    }
+
     // Throwaway scope factory for tasks whose instance methods don't create scopes
     // (StaleJobRecoveryTask, ServerCleanupTask). MessageRoutingTask needs a real one with
     // registered handlers — pass it via the scopeFactory parameter.

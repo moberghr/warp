@@ -6,6 +6,7 @@ using Shouldly;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Notifications;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Worker;
@@ -135,7 +136,8 @@ public abstract class WorkerHostModeTestsBase : IAsyncLifetime
             TestTasks.NullSignals,
             new DispatcherRegistry(),
             NullLoggerFactory.Instance,
-            NullExceptionClassifier.Instance);
+            NullExceptionClassifier.Instance,
+            new WarpCounterBuffer());
     }
 
     private sealed class NullExceptionClassifier : IDatabaseExceptionClassifier
@@ -164,7 +166,8 @@ public abstract class WorkerHostModeTestsBase : IAsyncLifetime
             TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             state,
             TestTasks.NullSignals,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            new WarpCounterBuffer());
     }
 
     private async Task AssertNoServerSideEffectsAsync()

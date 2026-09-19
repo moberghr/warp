@@ -229,6 +229,8 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         var logs = await server.GetJobLogs(jobId);
         logs.ShouldContain(l => l.EventType == "Cancelled");
 
+        await server.FlushCountersAsync(Xunit.TestContext.Current.CancellationToken);
+
         // Both the aggregate and hourly counters must be written, matching non-dispatcher mode.
         var ctx = Fixture.CreateContext();
         var hourSuffix = DateTime.UtcNow.ToString("yyyy-MM-dd-HH", System.Globalization.CultureInfo.InvariantCulture);

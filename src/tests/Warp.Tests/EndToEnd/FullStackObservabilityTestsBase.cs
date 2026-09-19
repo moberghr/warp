@@ -26,6 +26,7 @@ using Warp.Http.Observability;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Worker;
 
 namespace Warp.Tests.EndToEnd;
@@ -350,6 +351,15 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         // ==================== 7. Counter rows (the stats pipeline behind the dashboard) ====================
         await using (var ctx = _fixture.CreateContext())
         {
+            // The worker sums job counter increments in memory; drain them so the rows are present.
+            await using (var flushScope = app.Services.CreateAsyncScope())
+            {
+                await TestTasks.FlushCountersAsync(
+                    app.Services.GetRequiredService<WarpCounterBuffer>(),
+                    flushScope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context,
+                    Ct);
+            }
+
             (await ctx.Set<Counter>().AnyAsync(x => x.Key.Contains(VendorAdapter), Ct)).ShouldBeTrue();
             (await ctx.Set<Counter>().AnyAsync(x => x.Key.Contains(WebhookConstants.AdapterName), Ct)).ShouldBeTrue();
             (await ctx.Set<Counter>().AnyAsync(x => x.Key.Contains("/inbound"), Ct)).ShouldBeTrue();

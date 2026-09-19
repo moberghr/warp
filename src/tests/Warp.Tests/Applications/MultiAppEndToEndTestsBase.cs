@@ -119,7 +119,7 @@ public abstract class MultiAppEndToEndTestsBase : IntegrationTestBase
         unfiltered.Items.Select(x => x.Id).ShouldBe([idA, idB], ignoreOrder: true);
 
         // ---- execution metrics attribute to the EXECUTOR (app-a ran both jobs), never the creator ----
-        await AggregateAsync();
+        await AggregateAsync(server);
 
         var executorMetrics = await CreateJobQuery().GetJobExecutionMetrics(AppA);
         executorMetrics.ByType
@@ -281,8 +281,18 @@ public abstract class MultiAppEndToEndTestsBase : IntegrationTestBase
         await ctx.SaveChangesAsync(Ct);
     }
 
-    private async Task AggregateAsync()
-        => await TestTasks.CreateCounterAggregator(Fixture.CreateContext()).AggregateCountersAsync(Ct);
+    private async Task AggregateAsync(WarpTestServer? server = null)
+    {
+        // The worker sums counter increments in memory; drain them before folding, or the aggregate
+        // races CounterBufferFlusher's interval. Null when the test persisted rows directly and no
+        // worker ran, so there is nothing buffered.
+        if (server is not null)
+        {
+            await server.FlushCountersAsync(Ct);
+        }
+
+        await TestTasks.CreateCounterAggregator(Fixture.CreateContext()).AggregateCountersAsync(Ct);
+    }
 
     private ApplicationQueryService<TestContext> CreateApplicationQuery()
         => new(

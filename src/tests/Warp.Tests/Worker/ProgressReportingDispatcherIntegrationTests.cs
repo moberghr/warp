@@ -58,6 +58,8 @@ public abstract class ProgressReportingDispatcherIntegrationTestsBase : Integrat
 
         // The dispatcher claims via WarpDispatcherWorker.MarkWorkerOwnership — a separate hot-path copy of the
         // queue-wait write from WarpWorkerService. Assert it fired end-to-end in dispatcher mode (§8.26).
+        await server.FlushCountersAsync(Xunit.TestContext.Current.CancellationToken);
+
         var ctx = Fixture.CreateContext();
         var waitCount = await ctx.Set<Counter>()
             .AsNoTracking()

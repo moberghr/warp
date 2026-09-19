@@ -23,6 +23,9 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
 {
     private const int DrainBatchSize = 1000;
 
+    // See the loop in ExecuteAsync and CounterAggregator.MaxBatchesPerTick for why this cap exists.
+    private const int MaxBatchesPerTick = 20;
+
     private const string OtherToken = "{other}";
 
     private const int MaxSamples = 10;
@@ -59,7 +62,16 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.ErrorGroupingInterval;
 
-    public bool RerunImmediately => false;
+    // With MaxBatchesPerTick bounding one tick, a backlog has to drain across consecutive ticks
+    // rather than waiting a whole ErrorGroupingInterval between slices.
+    public bool RerunImmediately => true;
+
+    // Re-ticking means this runs far more often than its interval, and every logged run costs a
+    // ServerTask UPDATE plus a ServerLog INSERT. ExpirationCleanup sizes ServerLog retention as
+    // "300 runs" from the interval, so logging each drain would both amplify writes and blow that
+    // estimate. Same stance as the other high-frequency metrics tasks (Heartbeat, BacklogSampler,
+    // SloEvaluator, StatisticRollup) — a failure still logs.
+    public bool LogOnSuccess => false;
 
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
@@ -86,7 +98,15 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
             .ToDictionaryAsync(x => x.Source, x => x.Count, ct);
 
         var total = 0;
-        while (true)
+
+        // Bounded for the same reason as CounterAggregator.MaxBatchesPerTick — see the comment there.
+        // LocksWithTransaction is true, so nothing below commits until ExecuteAsync returns, and an
+        // unbounded drain holds ONE transaction open until the inbox is empty. That pins the database's
+        // vacuum horizon, which stops autovacuum reclaiming the job table's dead tuples and degrades the
+        // worker's claim scan. The exposure here is worse than the counter case, not better: this inbox
+        // only fills during a burst of failures, so the unbounded drain would fire precisely when the
+        // system is already struggling.
+        for (var drained = 0; drained < MaxBatchesPerTick; drained++)
         {
             var batch = await _context.Set<ErrorOccurrence>()
                 .OrderBy(x => x.Timestamp)

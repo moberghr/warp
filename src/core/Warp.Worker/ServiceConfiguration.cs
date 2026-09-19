@@ -10,6 +10,7 @@ using Warp.Core.BackgroundServices;
 using Warp.Core.Diagnostics;
 using Warp.Core.Events;
 using Warp.Core.Logging;
+using Warp.Core.Services;
 using Warp.Worker.BackgroundServices;
 using Warp.Worker.Services;
 
@@ -96,6 +97,19 @@ public static class ServiceConfiguration
                 + "StatisticRollup roll a bucket into a coarser parent that is already past its own retention.");
         }
 
+        // Fail fast on a non-positive counter-buffer flush interval. It is the sole delay in
+        // CounterBufferFlusher's loop, so TimeSpan.Zero spins the flush with no pause and a negative value
+        // makes Task.Delay throw every iteration into a catch that logs and immediately retries — a hot CPU
+        // loop writing an unbounded error log, in a process that otherwise looks healthy. Neither shape is
+        // reachable by accident from code, but both are one ConfigurationBinder typo away.
+        if (builder.CounterBufferFlushInterval <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                $"CounterBufferFlushInterval must be greater than zero (was {builder.CounterBufferFlushInterval}). "
+                + "It is the interval at which buffered counter increments are written out as Counter rows; "
+                + "a non-positive value leaves the flusher spinning instead of waiting.");
+        }
+
         // Fail fast when the singleton background-service lease cannot survive a missed renewal. Heartbeat
         // renews the lease, so HealthCheckInterval is the renewal cadence and BackgroundServiceLeaseTtl is
         // the deadline — but they are configured independently, so a TTL under three cadences leaves barely
@@ -148,6 +162,14 @@ public static class ServiceConfiguration
         // stays gated here. (Trace-correlation scope tracking is configured server-wide in
         // AddServerHostCore so background-service and server-task logs get it too.)
         services.AddLogging(builder => builder.AddProvider(new JobLoggerProvider()));
+
+        // Per-process counter accumulator + its writer. Registered beside the job tasks because only
+        // the worker feeds it. The flusher is a BackgroundService, not an IServerTask: the buffer is
+        // per-process so each process must write out its own, and taking a cluster-wide lock would be
+        // actively wrong — one winner would flush its own buffer and leave every other process's
+        // increments in memory (§8.32).
+        services.AddSingleton<WarpCounterBuffer>();
+        services.AddHostedService<CounterBufferFlusher<TContext>>();
 
         // Job-only server tasks — routing, orchestration, scheduling, recovery, stat aggregation.
         // Deliberately NOT part of AddServerHostCore: a service-only server has no jobs to drive.

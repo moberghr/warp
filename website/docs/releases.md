@@ -4,6 +4,137 @@ sidebar_position: 6
 
 # Releases
 
+## 7.0.0
+
+*2026-09-19*
+
+Performance release with **one breaking behavioural change**: a server now puts substantially less
+load on the database it shares with your application, and the counters a worker emits reach that
+database on an interval instead of inside the job's own transaction. Measured against 6.2 on an
+identical workload, **database time per job fell 52-63% and statements per job 52-61%**, holding
+across single-worker and dispatcher modes and whether the handler does nothing or real work.
+
+**No schema change and no migration.** The break is behavioural, and it is confined to metrics.
+
+### Breaking: counters are no longer readable immediately after the job that emitted them
+
+This is the one to check before upgrading.
+
+A worker used to write its `Counter` rows **inside the same transaction that finalized the job**, so
+the moment a job reached `Completed`, its `stats:succeeded` increment was already visible to any
+reader. Increments are now summed in memory and written out every `CounterBufferFlushInterval`
+(default **2 seconds**), so this no longer holds:
+
+```csharp
+await publisher.Enqueue(new MyJob());
+// ... job completes ...
+var stat = await db.Set<Statistic>().FirstAsync(x => x.Key == "stats:succeeded");
+// Before 7.0: includes this job. From 7.0: may not, for up to CounterBufferFlushInterval.
+```
+
+**There is no compile error** — the read simply returns the pre-job value. If you have monitoring,
+reconciliation or tests that complete a job and then assert on `Counter` or `Statistic` rows, they
+need one of:
+
+- **Tolerate the lag.** These are cumulative totals, so a reader that polls or retries converges on
+  its own. This is the right answer for almost everything, including dashboards — Warp's own already
+  lagged a full `CounterAggregationInterval` (1 minute), so the extra 2 seconds is invisible there.
+- **Shorten the window.** `opt.CounterBufferFlushInterval = TimeSpan.FromMilliseconds(200)` restores
+  near-immediate visibility and gives back a proportional share of the write reduction.
+
+For scale: adapting Warp's own suite to this needed an explicit flush in **30 existing test files** —
+every one of them a case that completed work and then read a counter. If your code does that, expect
+to hear about it.
+
+### Breaking: an ungraceful exit loses up to one flush interval of worker metrics
+
+Increments live in memory until the next flush, so `kill -9`, an OOM, or a lost container discards at
+most `CounterBufferFlushInterval` of them. A graceful stop flushes and loses nothing.
+
+This is what `Counter` already was — the write-optimised, lossy side of the metrics fold — but it was
+previously lossy only in the sense that rows awaited aggregation, not that increments could vanish.
+If a number must survive a crash it belongs in a row, not a counter. **Job state, logs, and every
+control-plane record are unaffected**; they were never counters.
+
+### Breaking: three public constructors gained a required parameter
+
+- `WarpWorkerService<TContext>`
+- `WarpSingleWorkerHost<TContext>`
+- `WarpDispatcherHost<TContext>`
+
+Each takes a `WarpCounterBuffer`. All three are registered and resolved by `AddWarpServer`, so a host
+configured through the builder is unaffected and needs no change. You only hit this if you `new` one
+yourself, in which case resolve `WarpCounterBuffer` from the container (`AddWarpServer` registers it
+as a singleton) and pass it through.
+
+### Not affected
+
+Job execution, state transitions, retries, scheduling, webhooks, sagas, the data model, and every
+control-plane record behave exactly as in 6.2. Adapter, endpoint and client-event counters are
+**not** buffered — their own flushers were already batched off the hot path and still write rows
+directly — so nothing about adapter, endpoint or client metrics changes.
+
+### Why: twenty rows per job, all with the same twenty keys
+
+A finalizing job emits roughly twenty counter increments — per-type and per-handler totals,
+durations, latency buckets, the state total, the reason breakdown, queue wait. For a uniform workload
+those are the *same twenty keys* every time, so 100,000 jobs wrote two million `Counter` rows that
+`CounterAggregator` then folded back down to about twenty `Statistic` rows. That traffic — the
+inserts, the aggregator's reads, and the deletes — was the largest single share of database execution
+time in a 100k-job run.
+
+Summing in memory and writing one row per distinct key per interval turned the same 100,000 jobs into
+**1,799 rows instead of two million**. Downstream is unchanged: the aggregator sees rows of identical
+shape, there are just far fewer of them carrying larger values.
+
+`CounterBufferFlushInterval` is the knob — tighten it to narrow the visibility lag and the loss
+window, lengthen it to write fewer, larger rows. A non-positive value is now rejected at
+`AddWarpServer`: it is the only delay in the flusher's loop, so zero spins it and a negative value
+throws on every iteration into a catch that logs and retries.
+
+Increments are **staged** during a job and handed to the buffer only once the transaction commits, so
+an attempt that rolls back contributes nothing — the same guarantee the per-increment rows gave by
+riding the finalizing `SaveChanges`.
+
+### Aggregator drains no longer pin the vacuum horizon
+
+`CounterAggregator` and `ErrorGroupAggregator` drained in a `while (true)` inside the task host's lock
+transaction, so a backlog held **one transaction open for as long as it took to clear** — measured at
+51 minutes against a 500,000-job backlog.
+
+The consequence was not a slow aggregator but a stalled database. An open transaction pins the vacuum
+horizon, so autovacuum cannot reclaim any dead tuple newer than it; the job table kept growing, every
+worker claim scanned more dead rows, and throughput fell from about **500 jobs/sec to 27** while the
+queue was still draining. The aggregator running longer made the bloat worse, which made the
+aggregator slower.
+
+Each tick now takes a bounded slice and asks to be re-run immediately when more remains. The same
+work happens at the same rate, in short transactions, so the horizon keeps advancing.
+
+### Measured
+
+Interleaved before/after arms, medians across repeats, Postgres, container-to-container (a host
+port-forward costs 11-15x in statement throughput and would have dominated the result):
+
+| Scenario | Throughput | DB ms/job | Statements/job |
+|---|---|---|---|
+| Single worker, empty handler | 450 → 500 (+11%) | 1.77 → 0.66 (**-63%**) | 45.9 → 20.5 (**-55%**) |
+| Dispatcher, empty handler | 434 → 464 (+7%) | 0.99 → 0.42 (**-57%**) | 36.2 → 14.2 (**-61%**) |
+| Single worker, 50 ms handler | 133 → 136 (+2%) | 1.30 → 0.57 (**-56%**) | 43.9 → 21.0 (**-52%**) |
+
+Read the throughput column with the middle one in mind: the database-load reduction is consistent,
+but how much of it turns into throughput depends on how much of each job is Warp rather than your
+handler. With a 50 ms handler the gain is inside the noise — the win there is headroom on the shared
+database, not jobs per second.
+
+Run-to-run spread also narrowed sharply, from 10x to 3% on the single-worker arm and 58% to 3% on the
+dispatcher arm: the old numbers were unstable because a counter backlog could tip a run into the
+vacuum-starvation collapse above.
+
+SQL Server was **not** measured before/after. The mechanism is provider-independent — the buffer
+collapses the same ~20 keys per job either way — and the full test suite passes on both providers, but
+that is correctness, not cost. Do not read the figures above as SQL Server numbers.
+
 ## 6.2.0
 
 *2026-09-11*

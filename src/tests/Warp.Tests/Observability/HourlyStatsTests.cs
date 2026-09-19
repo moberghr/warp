@@ -22,6 +22,10 @@ namespace Warp.Tests.Observability;
 [GenerateDatabaseTests]
 public abstract class HourlyStatsTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private readonly IDatabaseFixture _fixture;
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
@@ -92,7 +96,8 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
             TimeProvider.System,
             Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.NullSignals);
+            Warp.Tests.Helpers.TestTasks.NullSignals,
+            _counterBuffer);
     }
 
     [TimedFact]
@@ -118,6 +123,7 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         await Warp.Tests.Helpers.TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(CancellationToken.None);
 
@@ -153,6 +159,7 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         await Warp.Tests.Helpers.TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(CancellationToken.None);
 
@@ -191,8 +198,11 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
 
         // Act
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
         await worker.GetAndProcessJob(CancellationToken.None);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         await Warp.Tests.Helpers.TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(CancellationToken.None);
 

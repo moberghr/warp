@@ -44,6 +44,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly DispatcherWorkerAvailability _availability;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
+    private readonly WarpCounterBuffer _counterBuffer;
 
     public WarpDispatcherWorker(
         Guid workerId,
@@ -55,8 +56,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals,
         IDatabaseExceptionClassifier exceptionClassifier,
-        DispatcherWorkerAvailability availability)
+        DispatcherWorkerAvailability availability,
+        WarpCounterBuffer counterBuffer)
     {
+        _counterBuffer = counterBuffer;
         _availability = availability;
         _workerId = workerId;
         _jobReader = jobReader;
@@ -72,7 +75,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             logger,
             exceptionClassifier,
             _configuration.CompletionBatchSize,
-            _configuration.CompletionFlushInterval);
+            _configuration.CompletionFlushInterval,
+            counterBuffer);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -565,15 +569,22 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         // point); a sub-second skew vs the group claim is acceptable for a wait SLI.
         var waitMs = Math.Max(0, (now - job.ScheduleTime).TotalMilliseconds);
         WarpTelemetry.RecordQueueWait(job.Queue, waitMs, _configuration.ApplicationName);
+        Counter[] staged = [];
         if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
         {
-            foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes)))
-            {
-                context.Set<Counter>().Add(counter);
-            }
+            // Staged, published after the claim commits. Adding straight to the shared buffer here
+            // would count the sample even when this SaveChanges throws — the claim rolls back, the job
+            // is requeued by StaleJobRecovery, and the next claim records a SECOND sample for the same
+            // wait. The single-worker path stages the same way (§8.33 lockstep).
+            staged = [.. QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes))];
         }
 
         await context.SaveChangesAsync(cancellationToken);
+
+        foreach (var counter in staged)
+        {
+            _counterBuffer.Add(counter.Key, counter.Value);
+        }
 
         return true;
     }

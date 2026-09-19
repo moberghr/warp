@@ -15,6 +15,7 @@ using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Logging;
 using Warp.Core.Retry;
+using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
@@ -40,6 +41,10 @@ namespace Warp.Tests.Features.CircuitBreaker;
 [GenerateDatabaseTests]
 public abstract class CircuitBreakerRetryOrderingTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
 
@@ -181,6 +186,7 @@ public abstract class CircuitBreakerRetryOrderingTestsBase : IAsyncLifetime
             TimeProvider.System,
             TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             TestTasks.NullTransport,
-            TestTasks.NullSignals);
+            TestTasks.NullSignals,
+            _counterBuffer);
     }
 }

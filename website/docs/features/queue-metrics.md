@@ -8,7 +8,7 @@ import Screenshot from '@site/src/components/Screenshot';
 
 Warp already tracks how long each job takes to *run* ([execution metrics](./observability-sinks.md) — `warp.job.execution.*`). Queue metrics track the other half of a job system's health: **how long jobs wait before a worker picks them up**, and **how deep each queue is backed up**.
 
-- **Queue-wait latency** — the time a job spends eligible-but-unclaimed (from the moment it becomes `Enqueued` with `ScheduleTime ≤ now` to the moment a worker claims it). Recorded at the claim site, on the worker hot path, as a single batched Counter write — no extra database round-trip.
+- **Queue-wait latency** — the time a job spends eligible-but-unclaimed (from the moment it becomes `Enqueued` with `ScheduleTime ≤ now` to the moment a worker claims it). Recorded at the claim site, on the worker hot path, into an in-memory buffer — no extra database round-trip and no row per increment (see [How counters reach the database](#how-counters-reach-the-database)).
 - **Backlog depth + oldest-age** — how many eligible jobs are waiting on each queue, and the age of the oldest one. Sampled periodically off the hot path by the `BacklogSampler` server task.
 
 Both are **always on** — no addon opt-in. The dashboard surfaces them in the **Queues** family on the [Counters](/docs/dashboard/health/counters) page; the meters are emitted unconditionally for any OpenTelemetry collector.
@@ -33,7 +33,57 @@ Queue-wait folds into `Counter` → `Statistic` rows the same way execution and 
 
 ## Queue-wait on the hot path
 
-Queue-wait is measured where a worker flips a job `Enqueued → Processing`. The wait is `claimTime − Job.ScheduleTime` (`ScheduleTime` advances on requeue, so a requeued job's wait is measured from its requeue, not its original enqueue). The Counter rows are added to the **same `SaveChanges` that already writes the "Processing" `JobLog`** — the hot path gains a Counter write, never a query or a round-trip (the worker fetch/execute path stays sacred).
+Queue-wait is measured where a worker flips a job `Enqueued → Processing`. The wait is `claimTime − Job.ScheduleTime` (`ScheduleTime` advances on requeue, so a requeued job's wait is measured from its requeue, not its original enqueue). The increments are summed into a process-wide in-memory buffer — the hot path gains an interlocked add, never a query, a row or a round-trip (the worker fetch/execute path stays sacred).
+
+They are **staged** during the claim and moved into the shared buffer only once the claim's transaction commits, so an attempt that rolls back contributes nothing.
+
+## How counters reach the database
+
+Counters emitted by the **worker** — queue-wait, per-type and per-handler execution stats, outcome totals and their reason breakdown — take this path:
+
+```
+worker hot path → in-memory buffer → CounterBufferFlusher → Counter rows → CounterAggregator → Statistic rows
+```
+
+**The buffer is the worker path only.** Adapter, endpoint and client-event counters are written as `Counter` rows directly by their own flushers, which are already batched off the hot path and already collapse many calls into one write; saga counters, manual requeue/delete stats, crash-recovery stats and error-group trends are written directly too. Everything converges at `Counter` → `CounterAggregator` → `Statistic`, so the fold, the retention tiers and the dashboard are identical either way — the difference is only how increments get *into* the `Counter` table, and it matters for durability (below).
+
+The worker hot path used to write a `Counter` **row per increment**. A finalizing job emits roughly twenty of them, and for a uniform workload they are the *same twenty keys* every time — so 100,000 jobs wrote two million rows that `CounterAggregator` then folded back down to about twenty `Statistic` rows. Measured on a 100k-job run, that traffic (the inserts, the aggregator's reads, and the deletes) was the single largest share of database execution time.
+
+Increments now accumulate in memory and `CounterBufferFlusher` writes them out every `CounterBufferFlushInterval` (default **2 seconds**), one row per distinct key per interval. The same 100,000 jobs wrote **1,799 rows instead of two million**. Nothing downstream changed: `CounterAggregator` sees rows of identical shape, there are simply far fewer of them carrying larger values.
+
+### Counters are not readable immediately after the job that emitted them
+
+A worker used to write its `Counter` rows inside the same transaction that finalized the job, so a
+reader saw the increment the moment the job reached `Completed`. It does not any more — the increment
+is in memory until the next flush:
+
+```csharp
+// job completes, then immediately:
+var stat = await db.Set<Statistic>().FirstAsync(x => x.Key == "stats:succeeded");
+// may not include that job, for up to CounterBufferFlushInterval
+```
+
+There is no error; the read just returns the earlier value. These are cumulative totals, so anything
+that polls or retries converges on its own — which covers dashboards, since the fold into `Statistic`
+already lags a full `CounterAggregationInterval` anyway. If you genuinely need read-after-write, set
+`CounterBufferFlushInterval` low (say 200 ms) and give back a proportional share of the write
+reduction.
+
+### The durability trade
+
+**Worker counter increments live in memory until the next flush.** An ungraceful exit — `kill -9`, an OOM, a lost container — loses at most one interval of them. A graceful shutdown flushes before exiting, so an orderly stop loses nothing.
+
+This applies to the worker-emitted counters listed above and to nothing else. Adapter, endpoint and client metrics keep whatever durability their own lossy channels already gave them, which this change did not touch.
+
+This is deliberate, and it is the reason `Counter` exists as a separate table from `Statistic` in the first place: counters are the **write-optimised, lossy** side of the metrics fold. If a number must survive a crash, it belongs in a row, not a counter. Job state, logs, and every control-plane record are unaffected — they were never counters.
+
+Shorten `CounterBufferFlushInterval` to narrow the loss window; lengthen it to write fewer, larger rows. A non-positive value is rejected at `AddWarpServer` (it is the only delay in the flusher's loop, so zero would spin it).
+
+### Aggregator drains are bounded
+
+`CounterAggregator` takes at most 20 batches of 1,000 rows per tick and asks to be re-run immediately if more remain. It used to drain in a single `while (true)` inside the task host's lock transaction, which on a large backlog held **one transaction open for as long as the drain took** — measured at 51 minutes against a 500,000-job backlog.
+
+That matters far beyond the aggregator: an open transaction pins the vacuum horizon, so autovacuum cannot reclaim any dead tuple newer than it. The job table grew, every worker claim scanned more dead rows, and throughput fell from about 500 jobs/sec to 27 *while the queue was still draining* — the aggregator running longer made the bloat worse, which made the aggregator slower. The same work now happens at the same rate in short transactions, so the horizon keeps advancing.
 
 ## Backlog sampling (off the hot path)
 
@@ -101,7 +151,7 @@ Full EXPLAIN plans, buffer counts and the A/B write measurements are in `docs/pe
 Queue-wait respects `WarpConfiguration.JobMetricsSink` ([observability sinks](./observability-sinks.md)) exactly like execution metrics:
 
 - `Database` (default) / `Both` — Counter rows are written; the dashboard's Queues counter family works.
-- `Otel` — the Counter writes are **skipped** (the hot-path perf win); the `warp.job.queue.wait` meter still fires, carrying the data to your collector. Use Grafana/Prometheus for percentiles; the dashboard page will have no rows.
+- `Otel` — the counter increments are **skipped entirely** (no buffer entry, no row); the `warp.job.queue.wait` meter still fires, carrying the data to your collector. Use Grafana/Prometheus for percentiles; the dashboard page will have no rows.
 
 The backlog gauges always emit; the `qbacklog:` `Statistic` upsert is likewise skipped under `Otel`.
 

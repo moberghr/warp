@@ -34,6 +34,10 @@ namespace Warp.Tests.Observability;
 [GenerateDatabaseTests]
 public abstract class OTelJobMetricsSinkTestsBase : IAsyncLifetime
 {
+    // Counter increments are summed here rather than written as rows. Tests that assert on
+    // Counter/Statistic rows flush it with TestTasks.FlushCountersAsync before reading.
+    private readonly WarpCounterBuffer _counterBuffer = new();
+
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
     private static readonly string TypeUnit = typeof(UnitRequest).AssemblyQualifiedName!;
@@ -85,6 +89,8 @@ public abstract class OTelJobMetricsSinkTestsBase : IAsyncLifetime
 
         await worker.GetAndProcessJob(Ct);
 
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
         var total = totals.ShouldHaveSingleItem();
         total[WarpTelemetryAttributes.JobMeterType].ShouldBe(jobType);
         total[WarpTelemetryAttributes.JobMeterOutcome].ShouldBe("succeeded");
@@ -109,6 +115,8 @@ public abstract class OTelJobMetricsSinkTestsBase : IAsyncLifetime
 
         await worker.GetAndProcessJob(Ct);
 
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
         var total = totals.ShouldHaveSingleItem();
         total[WarpTelemetryAttributes.JobMeterOutcome].ShouldBe("failed");
         total[WarpTelemetryAttributes.MeterApplication].ShouldBe(_appName);
@@ -124,6 +132,8 @@ public abstract class OTelJobMetricsSinkTestsBase : IAsyncLifetime
         using var listener = CaptureExecutionMeters(_appName, totals, []);
 
         await worker.GetAndProcessJob(Ct);
+
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         // The meter still fired (aggregate data goes to the collector) ...
         totals.ShouldHaveSingleItem();
@@ -143,6 +153,8 @@ public abstract class OTelJobMetricsSinkTestsBase : IAsyncLifetime
 
         await worker.GetAndProcessJob(Ct);
 
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
         (await CountJobStatCountersAsync()).ShouldBeGreaterThan(0);
     }
 
@@ -153,6 +165,8 @@ public abstract class OTelJobMetricsSinkTestsBase : IAsyncLifetime
         var worker = CreateWorker(RecordingSink.Both);
 
         await worker.GetAndProcessJob(Ct);
+
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
         (await CountJobStatCountersAsync()).ShouldBeGreaterThan(0);
     }
@@ -302,6 +316,7 @@ public abstract class OTelJobMetricsSinkTestsBase : IAsyncLifetime
             TimeProvider.System,
             TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             TestTasks.NullTransport,
-            TestTasks.NullSignals);
+            TestTasks.NullSignals,
+            _counterBuffer);
     }
 }
