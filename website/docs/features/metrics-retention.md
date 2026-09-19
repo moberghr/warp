@@ -1,6 +1,6 @@
 # Metrics retention tiers
 
-Warp folds every time-series metric — per-type/handler execution (`jobstat`), queue-wait (`qwait`), adapter and endpoint call stats, browser events, error-group trends — through one pipeline: hot-path code writes `Counter` rows, a `CounterAggregator` sums them into durable `Statistic` rows, and the dashboard reads those back. **Metrics retention tiers** control how that time-series data ages: recent data is kept at fine (5-minute) resolution, and a background task progressively **rolls it up** into hourly then daily buckets as it ages — so recent graphs stay detailed while long history stays cheap.
+Warp folds every time-series metric — per-type/handler execution (`jobstat`), queue-wait (`qwait`), adapter and endpoint call stats, browser events, error-group trends — through one pipeline: hot-path code emits counter increments, they land in the `Counter` table (worker metrics via an in-memory buffer flushed on an interval, everything else written as rows by its own flusher), a `CounterAggregator` sums them into durable `Statistic` rows, and the dashboard reads those back. **Metrics retention tiers** control how that time-series data ages: recent data is kept at fine (5-minute) resolution, and a background task progressively **rolls it up** into hourly then daily buckets as it ages — so recent graphs stay detailed while long history stays cheap.
 
 ## The model
 

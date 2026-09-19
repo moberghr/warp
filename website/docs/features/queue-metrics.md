@@ -39,19 +39,23 @@ They are **staged** during the claim and moved into the shared buffer only once 
 
 ## How counters reach the database
 
-Every counter Warp writes — queue-wait, execution stats, outcome totals, adapter and endpoint metrics — takes the same path:
+Counters emitted by the **worker** — queue-wait, per-type and per-handler execution stats, outcome totals and their reason breakdown — take this path:
 
 ```
-hot path → in-memory buffer → CounterBufferFlusher → Counter rows → CounterAggregator → Statistic rows
+worker hot path → in-memory buffer → CounterBufferFlusher → Counter rows → CounterAggregator → Statistic rows
 ```
 
-The hot path used to write a `Counter` **row per increment**. A finalizing job emits roughly twenty of them, and for a uniform workload they are the *same twenty keys* every time — so 100,000 jobs wrote two million rows that `CounterAggregator` then folded back down to about twenty `Statistic` rows. Measured on a 100k-job run, that traffic (the inserts, the aggregator's reads, and the deletes) was the single largest share of database execution time.
+**The buffer is the worker path only.** Adapter, endpoint and client-event counters are written as `Counter` rows directly by their own flushers, which are already batched off the hot path and already collapse many calls into one write; saga counters, manual requeue/delete stats, crash-recovery stats and error-group trends are written directly too. Everything converges at `Counter` → `CounterAggregator` → `Statistic`, so the fold, the retention tiers and the dashboard are identical either way — the difference is only how increments get *into* the `Counter` table, and it matters for durability (below).
+
+The worker hot path used to write a `Counter` **row per increment**. A finalizing job emits roughly twenty of them, and for a uniform workload they are the *same twenty keys* every time — so 100,000 jobs wrote two million rows that `CounterAggregator` then folded back down to about twenty `Statistic` rows. Measured on a 100k-job run, that traffic (the inserts, the aggregator's reads, and the deletes) was the single largest share of database execution time.
 
 Increments now accumulate in memory and `CounterBufferFlusher` writes them out every `CounterBufferFlushInterval` (default **2 seconds**), one row per distinct key per interval. The same 100,000 jobs wrote **1,799 rows instead of two million**. Nothing downstream changed: `CounterAggregator` sees rows of identical shape, there are simply far fewer of them carrying larger values.
 
 ### The durability trade
 
-**Counter increments live in memory until the next flush.** An ungraceful exit — `kill -9`, an OOM, a lost container — loses at most one interval of metrics. A graceful shutdown flushes before exiting, so an orderly stop loses nothing.
+**Worker counter increments live in memory until the next flush.** An ungraceful exit — `kill -9`, an OOM, a lost container — loses at most one interval of them. A graceful shutdown flushes before exiting, so an orderly stop loses nothing.
+
+This applies to the worker-emitted counters listed above and to nothing else. Adapter, endpoint and client metrics keep whatever durability their own lossy channels already gave them, which this change did not touch.
 
 This is deliberate, and it is the reason `Counter` exists as a separate table from `Statistic` in the first place: counters are the **write-optimised, lossy** side of the metrics fold. If a number must survive a crash, it belongs in a row, not a counter. Job state, logs, and every control-plane record are unaffected — they were never counters.
 

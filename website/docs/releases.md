@@ -12,8 +12,8 @@ otherwise identical workload, **database time per job fell 52-63% and statements
 holding across single-worker and dispatcher modes and whether the handler does nothing or real work.
 
 One new setting, `CounterBufferFlushInterval`, and one behaviour change worth reading before you
-upgrade: **counter increments are now buffered in memory**, so an ungraceful exit can lose up to one
-flush interval of metrics.
+upgrade: **the counters a worker emits are now buffered in memory**, so an ungraceful exit can lose up
+to one flush interval of them.
 
 ### Migration and breaking changes
 
@@ -37,7 +37,7 @@ yourself, in which case resolve `WarpCounterBuffer` from the container (`AddWarp
 as a singleton) and pass it through. There is no configuration flag to restore the old
 behaviour; the buffer is not optional.
 
-### Counters are summed in memory instead of written row-per-increment
+### Worker counters are summed in memory instead of written row-per-increment
 
 A finalizing job emits roughly twenty `Counter` rows — per-type and per-handler totals, durations,
 latency buckets, the state total, the reason breakdown, queue wait. For a uniform workload those are
@@ -50,11 +50,18 @@ row per distinct key. The same 100,000 jobs wrote **1,799 rows instead of two mi
 is unchanged: the aggregator sees rows of identical shape, there are just far fewer of them carrying
 larger values.
 
-**The trade is durability, and it is deliberate.** Increments live in memory until the next flush, so
-an ungraceful exit (`kill -9`, OOM, a lost container) loses at most `CounterBufferFlushInterval`
-(default 2 seconds) of metrics; a graceful stop flushes and loses nothing. This is what `Counter`
-already was — the write-optimised, lossy side of the metrics fold. If a number must survive a crash it
-belongs in a row, not a counter. Job state, logs and every control-plane record are unaffected.
+**This is the worker path only.** Adapter, endpoint and client-event counters are still written as
+rows by their own flushers, which were already batched off the hot path; saga, manual-requeue,
+crash-recovery and error-group counters are unchanged too. Everything still converges on
+`Counter` → `CounterAggregator` → `Statistic`, so the fold, the retention tiers and every dashboard
+surface are identical.
+
+**The trade is durability, and it is deliberate.** Worker increments live in memory until the next
+flush, so an ungraceful exit (`kill -9`, OOM, a lost container) loses at most
+`CounterBufferFlushInterval` (default 2 seconds) of them; a graceful stop flushes and loses nothing.
+This is what `Counter` already was — the write-optimised, lossy side of the metrics fold. If a number
+must survive a crash it belongs in a row, not a counter. Job state, logs and every control-plane
+record are unaffected.
 
 Tighten the interval to narrow the loss window, lengthen it to write fewer, larger rows. A
 non-positive value is now rejected at `AddWarpServer`: it is the only delay in the flusher's loop, so
