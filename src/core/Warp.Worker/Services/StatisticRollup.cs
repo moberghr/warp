@@ -23,6 +23,20 @@ namespace Warp.Worker.Services;
 public sealed class StatisticRollup<TContext> : IServerTask
     where TContext : DbContext
 {
+    // Cap on the rows ONE tick may roll, for the reason recorded against
+    // CounterAggregator.MaxBatchesPerTick (§6.2.1): LocksWithTransaction defaults to true, so the task
+    // host wraps the whole of ExecuteAsync in one transaction and an unbounded pass holds it open until
+    // the work runs out. An open transaction pins the vacuum horizon, and the job table takes two
+    // non-HOT updates per job, so nothing it orphans can be reclaimed for as long as the pass runs.
+    //
+    // The write is what costs: a 300,000-key ExecuteDeleteAsync measured 3,280 ms / 313,962 buffers,
+    // against 116 ms for the scan that feeds it (500,000 rows, PostgreSQL 18). The worst tick is the
+    // first after upgrading, when every legacy unmarked hourly key rolls to daily at once, or any tick
+    // after rollup has been disabled past the hourly window. Bounding it keeps a tick short and lets a
+    // backlog drain across consecutive ticks via RerunImmediately. Do NOT remove this cap to
+    // "catch up faster" — that is precisely the change that caused the incident.
+    private const int MaxRollupRowsPerTick = 20_000;
+
     private readonly DbContext _context;
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
@@ -43,7 +57,9 @@ public sealed class StatisticRollup<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.StatisticRollupInterval;
 
-    public bool RerunImmediately => false;
+    // Re-run back-to-back while a backlog remains. ServerTaskLoop re-runs only when ExecuteAsync
+    // returned a message, and this returns null when it rolled nothing, so an idle rollup does not spin.
+    public bool RerunImmediately => true;
 
     public bool LogOnSuccess => false;
 
@@ -69,6 +85,11 @@ public sealed class StatisticRollup<TContext> : IServerTask
         // received a contribution this tick.
         foreach (var row in rows)
         {
+            if (deletions.Count >= MaxRollupRowsPerTick)
+            {
+                break;
+            }
+
             if (MetricTiers.TryClassifyKey(row.Key, out var baseKey, out var tier, out var bucketStart)
                 && tier == MetricTier.Fine
                 && bucketStart < fineCutoff)
@@ -87,6 +108,15 @@ public sealed class StatisticRollup<TContext> : IServerTask
         // empty. A naive guard that just dropped the colliding target here would silently discard the fine value.
         foreach (var row in rows)
         {
+            // Sharing the budget with pass 1 is what bounds the tick. A fine row deferred by the cap
+            // whose hourly parent pass 2 then rolls away is not lost: it simply re-creates that hourly
+            // key next tick with its own value and rolls on the tick after. The value is preserved
+            // either way, which is the invariant that makes capping safe here.
+            if (deletions.Count >= MaxRollupRowsPerTick)
+            {
+                break;
+            }
+
             if (!MetricTiers.TryClassifyKey(row.Key, out var baseKey, out var tier, out var bucketStart))
             {
                 continue;

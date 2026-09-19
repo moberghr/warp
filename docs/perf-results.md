@@ -477,3 +477,553 @@ Recorded so they are not re-tried: `auto_explain.log_analyze` instruments every 
 sort the whole table. Replacing EF with raw SQL for the WAL path is worth ~1.7% of total WAL (EF
 update 906 B vs raw 841 B). `synchronous_commit=off` — the entire WAL contention lead — is worth ~10%
 (648 → 711 jobs/sec).
+
+---
+
+## Gate 0: instrumenting for the queue/record split (PostgreSQL, 2026-09-19)
+
+Groundwork for evaluating PA-01 — moving the queue out of the wide `job` table into a narrow one.
+Nothing in the harness measured the quantity that question turns on, so this adds it, and most of the
+elapsed effort went on three measurement defects that made arms incomparable.
+
+### What was added
+
+`PgStats.ReadTablesAsync` now also selects `n_tup_hot_upd`, `n_dead_tup` and `n_live_tup`, and the
+per-table block in `LoadLab.Report` gained `hot%` and `dead%` columns. `n_tup_hot_upd` is a true
+counter and diffs correctly; `n_dead_tup`/`n_live_tup` are **levels**, so `PgStats.Since` carries them
+through as the after-value instead of subtracting — subtracting goes negative the moment a vacuum
+lands mid-window, which reads as "no bloat" exactly when there was the most. The table dictionary is
+now keyed `schema.relname`, since a bare key silently merges same-named tables from two schemas, which
+is the shape a queue-table experiment introduces.
+
+`BloatSampler` (new, modelled on `WaitSampler`) polls `pg_stat_user_tables` at 1s through the run and
+keeps the high-water mark. A before/after snapshot cannot see this: a run that ends with a drained
+table reports a clean zero whether it peaked at 3% or 60%.
+
+### The headline number
+
+**No update to `job` is ever HOT in single-worker mode: `hot% = 0`, in every run, at every job count.**
+That is the mechanism PA-01 names, confirmed directly rather than inferred. `CurrentState` is in four
+of the six `job` indexes, so each of the two state transitions per job writes new index entries and
+orphans the old ones. Measured 2.0 updates per job (119,910 updates / 60,000 jobs).
+
+**Dispatcher mode measures `hot% = 30-31%`, and the arithmetic is exact.** It does ~3 job-row updates
+per job (2.96 measured): the batch claim and the completion both move `CurrentState` and cannot be HOT,
+while `MarkWorkerOwnership` writes only `CurrentWorkerId`/`LastKeepAlive`/`HandlerType` — none of them
+indexed — so it is HOT-eligible. One of three is 33%; the measurement says 30%.
+
+Dead tuples on `job` peak **above the live row count**: 62k-139k dead against 60,000 live rows, up to
+2.3x. The claim is 58.9% of all database time, and `ix_job_kind_current_state_create_time` showed
+**2,260,427 tuples read over 1,002 scans with no dashboard running** — the claim borrowing the
+dashboard's index, which is the misestimate documented at `ServiceConfiguration.cs:470-492`,
+reproduced here rather than taken on trust.
+
+### Three measurement defects, each of which produced a confidently wrong number
+
+**The reset does not vacuum, and that was worth 827%.** `ResetJobTablesAsync` clears rows with DELETE,
+which leaves every one as a dead tuple, so each run began on the previous run's corpses and autovacuum
+fired somewhere *inside* the next measured window instead of between them. Three identical 60k-job runs
+came out at **7.254, 0.787 and 0.743 DB ms/job** — the 9x arm being the one that inherited the most
+bloat and then paid for a vacuum mid-run. Adding `VACUUM (ANALYZE)` between runs is the discipline
+every EXPLAIN section above already follows, and the mechanism is not in doubt: a run that starts on
+the previous run's dead tuples is not the same experiment as one that starts clean.
+
+The observed spread did fall sharply after the change (827% to 1.8% on DB ms/job), but **that figure is
+not a clean attribution** — the machine was contended for the whole session (see below) and the
+contention was varying underneath both measurements. Treat the change as correct on mechanism, and
+re-derive the magnitude on a quiet machine before quoting it.
+
+**The first run of a fresh database is cold, and it was in the sample.** 23,315 ms of DB time against
+16,327 and 13,383 for the two runs after it, which alone pushed DB ms/job spread to 60.8%. The median
+survives one outlier, but the *spread* is what tells a reader whether a difference is real, so a cold
+run left in the sample makes every comparison look like noise. Added `--warmup=N` (default 0, so
+existing behaviour is unchanged): warm-up runs execute in full and are not sampled.
+
+**`n_live_tup` is an estimate and cannot carry a ratio.** It drifts between ANALYZEs and was observed
+reading 2,000 for a table holding 20,000 rows, which sends a "dead%" to 98%. Worse, at both edges of
+the measured window the table holds dead tuples against *zero* live rows, scoring a perfect 100% and
+reporting the teardown as if it were the drain. The sampler now filters `n_live_tup > 0`, ranks on the
+**absolute** dead count, and labels the share an estimate. Compare arms on the absolute count at equal
+job counts; do not rank on the share.
+
+### The trap that invalidated every timing number here
+
+**A second load lab was running on the same machine for the whole session, and it was not noticed until
+the numbers had already been written down.** `docker stats` during a run:
+
+| container | CPU | whose |
+|---|---:|---|
+| `affectionate_hypatia` (`Warp.ServerBenchmarks`) | 252% | **another session's** |
+| `warppg-pa02` (`postgres`) | 222% | **another session's** |
+| `jovial_rhodes` (`Warp.ServerBenchmarks`) | 204% | this one's |
+| `warppg` (`postgres`) | 22% | this one's |
+
+Roughly half of 14 cores belonged to an unrelated benchmark. That is §4.7.1's neighbour-contention
+trap at the machine level rather than the xUnit-collection level, and it accounts for all three of the
+anomalies that had been attributed to the harness: a two-arm swing of 17% on jobs/sec and 12% on
+DB ms/job between invocations of the **same binary**, the 9x outlier above, and an arm killed at
+exit 137 under memory pressure.
+
+**Therefore: every `jobs/sec` and `DB ms/job` figure taken in this session is void**, including a
+before/after comparison of the completion-flush change, which had read as a 2.4% improvement — well
+inside the contention noise and worth nothing.
+
+The structural findings above survive, and the reason is worth keeping: `hot%`, updates-per-job,
+`statements/job` and `n_dead_tup` are **counters** — they measure work done, not time taken, and a
+competing process does not change how many index entries an UPDATE writes. Prefer them as the primary
+discriminator for any schema question, and treat timings as a secondary check that needs a quiet
+machine.
+
+**Before taking a timing, run `docker stats --no-stream` and confirm nothing else is on the box.** The
+lab gives no indication that it is sharing; two `postgres` containers and two `Warp.ServerBenchmarks`
+containers coexisted happily and the only symptom was numbers that would not settle.
+
+### Not measured
+
+- PostgreSQL only. The `--sqlserver` arm is throughput-only by construction: it takes no DB-side
+  statistics and ignores `--connection`, so none of the above exists on that provider.
+- `pgstattuple` would give exact live/dead counts instead of the collector's estimates, at the cost of
+  a full table scan per sample. Not used; the absolute `n_dead_tup` counter was enough to rank arms.
+
+### Gate 1a: the completion flush was rewriting the whole row (PostgreSQL, 2026-09-19)
+
+A no-schema candidate found while scoping PA-01, and the first thing measured cleanly once the machine
+was quiet.
+
+`CompletionBatch.FlushRangeAsync` set `context.Entry(job).State = EntityState.Modified`. The job
+arrives on a fresh scope's context with no original values to diff against, so that marked **all 22
+mapped columns** dirty and EF emitted an UPDATE writing every one of them, fifty per flush transaction
+— including `Message` (the unbounded JSON payload) and twelve other columns finalization never touches.
+The fix marks only the eight columns `BuildFinalization` and its three outcome arms actually assign:
+`CurrentState`, `CancellationMode`, `CurrentWorkerId`, `LastKeepAlive`, `ExpireAt`, `HandlerType`,
+`ScheduleTime`, `Metadata`.
+
+The change is visible in the statement text itself, which is the cleanest possible confirmation that
+the right thing happened:
+
+```
+before   UPDATE warp.job SET application = $1, cance…
+after    UPDATE warp.job SET cancellation_mode = $1,…
+```
+
+**Method.** 10,000 jobs, **4 KB payload**, dispatcher mode, 10 workers, `--warmup=1 --repeats=2`,
+**three separate invocations per arm, interleaved** (before, after, before, after, before, after),
+fresh database and `VACUUM (ANALYZE)` between every run, container-to-container. `docker ps` was
+recorded before each arm and showed only the lab's own Postgres throughout.
+
+| metric | before (3 arms) | after (3 arms) | delta |
+|---|---:|---:|---:|
+| **DB ms/job** (median) | **0.514** | **0.377** | **−26.7%** |
+| — arm values | 0.559 / 0.514 / 0.453 | 0.377 / 0.366 / 0.419 | **ranges do not overlap** |
+| jobs/sec (median) | 343.0 | 341.8 | −0.4% (overlaps — noise) |
+| statements/job (median) | 15.45 | 16.02 | +3.7% (overlaps — noise) |
+| completion UPDATE, exec ms / 10k jobs | ~1,782 | ~756 | **−58%** |
+| completion UPDATE, blocks | ~427,622 | ~216,119 | **−49%** |
+| completion UPDATE, share of DB time | ~32% | ~20% | |
+
+Every before arm is worse than every after arm on DB ms/job, across three independent invocations of
+each — the separation is the result, more than the percentage is.
+
+**Throughput does not move, and should not be expected to.** Same shape as the counter-buffer change
+above: the framework is a small share of a real job, so the win is database headroom rather than
+jobs/sec.
+
+**This does NOT address the PA-01 mechanism.** `hot%` is unchanged at ~31% before and after, because
+the completion UPDATE still writes `CurrentState` and `ExpireAt`, both indexed, so it still cannot be
+HOT. Updates per job are unchanged at ~2.9. This is pure write-volume reduction — fewer bytes, fewer
+blocks, less WAL per completion — and it is orthogonal to the queue/record split. Whatever PA-01 is
+worth, it is worth it on top of this, not instead of it.
+
+**The benefit scales with payload size, and is absent without one.** The same comparison at the lab's
+default `--payload=0` showed nothing outside noise, for the obvious reason: the column being removed
+from the UPDATE was empty. A deployment whose jobs carry trivial payloads gains little here; one
+carrying multi-KB messages gains roughly what the table above shows. **Any future measurement of a
+write-volume change must set `--payload`** — the default workload is precisely the case that cannot
+show the effect.
+
+**Not measured:** SQL Server (the `--sqlserver` arm takes no DB-side statistics). The change is
+provider-agnostic EF code and the full suite passes on both providers (PostgreSql 1,236 / SqlServer
+1,229 / NoDb 1,205, zero failures), but that is correctness, not cost.
+
+### Gate 1b: the claim's queue predicate (PostgreSQL 18, 2026-09-19)
+
+The claim is **58.9% of all database time** under load, and `ServiceConfiguration.cs:470-492` records
+the mechanism: the planner estimates one row for `Kind ∧ CurrentState ∧ Queue = ANY($1)`, actually gets
+thousands, and picks a scan-plus-Sort — and a Sort must consume its whole input before emitting a row,
+so `LIMIT` buys nothing and the claim reads the entire enqueued range to return one job. Autovacuum
+tuning, more frequent `ANALYZE`, extended statistics, a partial index and `force_custom_plan` are all
+recorded there as measured and refuted. This section reproduces the pathology, finds what it actually
+depends on, and fixes it.
+
+**Method.** 300,000 rows, real column set and all six production indexes, ~255 MB, `message` at ~500 B
+so the row width is realistic. Age-correlated insert (append-mostly heap) and `parent_job_id` populated
+on 20% of rows — both per the seed traps recorded above. 54,000 rows claimable across
+`{default, warp:webhooks}`. `PREPARE`/`EXECUTE` with parameters, six executions before measuring so the
+plan is past PostgreSQL's custom-to-generic switch. `EXPLAIN (ANALYZE, BUFFERS)` inside a transaction
+that is rolled back, since `FOR UPDATE SKIP LOCKED` takes real locks.
+
+**It is not the query shape. It is stale statistics.** With a fresh `VACUUM (ANALYZE)` the existing
+claim is already optimal — estimate 54,437 against an actual 54,000, Index Cond on
+`(Kind, CurrentState, Queue, ScheduleTime)`, no Sort, 53 buffers, **0.055 ms**. The documented
+pathology never appears. It appears the moment statistics describe a drained queue while the queue is
+full, which is the ordinary production shape: the table is mostly `Completed`, statistics are taken,
+and then a burst arrives.
+
+| | fresh statistics | stale statistics |
+|---|---:|---:|
+| estimated rows | 54,437 | **1** |
+| actual rows | 20 | **54,000** |
+| access path | Index Scan, claim index | **Sort over `(Kind, CurrentState, CreateTime)`** |
+| sort method | — | **external merge, 2,584 kB to disk** |
+| `queue` predicate | Index Cond | **demoted to Filter** |
+| buffers | 53 | **53,395** |
+| execution | 0.055 ms | **133.7 ms** |
+
+**The fix is a scalar queue predicate, one statement per queue.** Measured under identical pinned
+stale statistics (`autovacuum_enabled = false` so the condition cannot repair itself mid-experiment):
+
+| arm | plan | buffers | exec ms |
+|---|---|---:|---:|
+| `queue = ANY($1)`, LIMIT 20 — **today** | Sort + wrong index, external merge | 52,088 | **62.1** |
+| `queue = $1` scalar, LIMIT 20 — **the fix** | Index Cond on claim index, no Sort | **43** | **0.101** |
+| `queue = ANY($1)`, LIMIT 1 — single-worker mode | Sort + wrong index, external merge | 52,069 | **68.3** |
+
+**615x faster, 1,211x fewer buffers**, and note the single-worker row: this is not a dispatcher-only
+problem, it hits the default configuration too.
+
+**Why the scalar form wins is the part worth keeping.** It does **not** fix the estimate — it still
+plans at `rows=1`. It makes the estimate *stop mattering*: with `queue` pinned to a constant,
+`(Kind, CurrentState, Queue, ScheduleTime)` supplies `ORDER BY ScheduleTime` for free, so there is no
+Sort, and `LIMIT` stops at the first rows however wrong the estimate is. The array form has no such
+protection, and the margin is a knife-edge — estimated cost **8.46** for the multi-value index scan
+against **8.44** for the scan-plus-Sort — so at `rows=1` the planner takes the catastrophic plan by a
+hair.
+
+**It is not parameter opacity**, which was the obvious first theory and is wrong: a literal
+`ANY(ARRAY[...])` measures **69.2 ms** and `IN ('default','warp:webhooks')` **72.4 ms**, both as bad as
+the parameterised form. Any multi-value queue predicate loses the ordering; only a scalar keeps it.
+
+**And this is why `ANALYZE` was refuted as the fix.** Fresh statistics do repair the plan completely,
+but a job table's `CurrentState` distribution swings from drained to full and back between autovacuum
+ticks, so keeping statistics fresh is a race that has to be won continuously. The scalar predicate
+removes the race instead of running it.
+
+**Implementation.** Both providers now issue one scalar-queue statement per queue, in ordinal queue
+order, spending down the `limit` (`PostgresWarpSqlQueries` / `SqlServerWarpSqlQueries`
+`ClaimEnqueuedJobsAsync`). Callers are untouched — no change to `WarpWorkerService` or
+`WarpDispatcher`, so §0.2/§6.1 hold. Three consequences, all deliberate:
+
+- **The single-queue case still issues exactly one statement**, which is the overwhelmingly common
+  shape, so the common path costs exactly what it did.
+- **Cross-queue starvation is preserved, not fixed.** `ORDER BY Queue, ScheduleTime LIMIT n` drains the
+  lexicographically-first queue completely before looking at the next, so the loop reproduces it
+  exactly. The default group binds `{DefaultQueue, warp:webhooks}`, meaning webhook deliveries already
+  wait for the default queue to drain. That is existing behaviour and changing it is a separate
+  decision.
+- **Ordering moved from the database's collation to `StringComparer.Ordinal`.** They agree for the
+  ASCII queue names Warp produces; a deployment whose queue names collate differently would see two
+  queues swap priority.
+- **Each statement is its own implicit transaction** where one statement was atomic across all queues.
+  Nothing depends on cross-queue atomicity, but a failure partway through leaves already-claimed rows
+  `Processing` with no worker on them — the crash-mid-claim case `StaleJobRecovery` already repairs.
+
+**Not measured: SQL Server.** The shapes are kept identical so the providers cannot drift, and the
+mechanism is a cost-model one rather than a PostgreSQL quirk, but no SQL Server plan was taken. The
+full suite passes on both (PostgreSql 1,236 / SqlServer 1,229, zero failures) — correctness, not cost.
+
+#### End-to-end: the lab does not reproduce the bad state, and that is the finding
+
+The `EXPLAIN` result above is a **conditional** failure mode, not a steady-state cost, so it was run
+through the real worker to see what it is worth in a running system. Interleaved arms, dispatcher mode,
+`--warmup=1 --repeats=2`, fresh database and `VACUUM (ANALYZE)` between runs, quiet machine.
+
+| jobs per run | metric | `ANY(array)` | scalar loop | delta |
+|---|---|---:|---:|---:|
+| 30,000 | claim exec ms (median of 6) | 3,055 | 2,156 | −29% |
+| 30,000 | claim blocks | ~1.0–1.7 M | ~1.1–1.2 M | comparable |
+| 120,000 | jobs/sec | 927.5 | 923.9 | −0.4% |
+| 120,000 | DB ms/job | 0.419 | **0.403** | −3.8% |
+| 120,000 | claim exec ms (median) | 12,338 | **11,698** | −5.2% |
+| 120,000 | claim blocks (median) | 7,250,537 | **6,734,368** | −7.1% |
+| 120,000 | statements/job | 21.74 | 21.88 | +0.6% |
+
+**The lab never enters the pathological state, at either scale.** The tell is the block counts: they are
+comparable between arms, where the bad plan costs a thousand times more buffers. The workload publishes
+and drains concurrently at ~900 jobs/sec, so the enqueued backlog is transient and autoanalyze keeps
+statistics close enough to reality. The honest reading of the 30,000-job row is therefore *not* "−29%":
+the six old-claim runs ranged 1,943–3,634 ms against the new claim's 1,962–2,348 ms, so the medians
+differ mostly because the old arm is **bimodal** while the new one is not.
+
+So the steady-state value of this change is small — a few percent of claim time and blocks, at or near
+noise — and its real value is that **the worst case stops existing**. Two things support taking it
+anyway:
+
+- **The documented production incident has this signature.** §6.2.1 records a claim going from 3.3 ms
+  to 253 ms with throughput collapsing 567 to 27 jobs/sec at 43% dead tuples. The measured stale-stats
+  claim here is 0.055 ms to 133.7 ms — the same shape, and closer to an explanation than bloat alone
+  is. Bloat and stale statistics travel together: the long-running transaction that pins the vacuum
+  horizon also holds back the ANALYZE that would repair the estimate.
+- **It costs nothing in steady state.** Single-queue deployments still issue exactly one statement. The
+  multi-queue statement penalty is real but scale-dependent and vanishes under load: +15%
+  statements/job at 30,000 jobs (where the first queue often fails to fill the batch, so the second is
+  probed) against **+0.6% at 120,000**, where the first queue reliably fills it. The new arm is also
+  the more stable one at scale — 0.2% spread on jobs/sec against 1.0%, and 2.2% on DB ms/job against
+  7.8%.
+
+**What would falsify this:** a deployment whose queue never develops a standing backlog and whose
+statistics therefore never go stale gains nothing here and pays the extra probe. The change is worth
+making because the downside is bounded at a fraction of a percent and the upside is a 615x cliff that
+is already in the incident record — not because the steady-state number is impressive. It is not.
+
+## Gate 2: what a separate queue table is actually worth (PostgreSQL 18, 2026-09-19)
+
+PA-01 proposes moving the queue out of the wide `job` table into a narrow one. This measures it
+directly, in SQL, with no Warp code — so the answer does not depend on building it first.
+
+**Method.** Three schemas in one database, identical column sets, identical non-eligibility indexes,
+150,000 settled base rows each (age-correlated, `parent_job_id` on 20%, ~500 B payload), autovacuum
+pinned **off** so dead-tuple counts measure GENERATION rather than net-of-vacuum. 20,000 full job
+lifecycles per measurement in batches of 50 (matching `CompletionBatchSize`), three interleaved
+iterations per arm, `VACUUM (ANALYZE)` before each. WAL from `pg_current_wal_lsn()` deltas.
+
+- **A — today.** All six production indexes. Lifecycle: INSERT, claim `UPDATE job`, finalise
+  `UPDATE job`. Uses the scalar claim from Gate 1b, so this is the baseline being shipped, not the
+  older one.
+- **B — Hangfire shape.** `job` minus the two eligibility indexes
+  (`(Kind,CurrentState,Queue,ScheduleTime)` and `(CurrentState,ScheduleTime)`), plus `job_queue`
+  claimed by stamping `fetched_at`, which is what buys the free invisibility-timeout recovery.
+- **C — JobMaster shape.** Same, but the claim DELETEs the queue row instead of stamping it.
+
+| metric, 20,000 jobs | A (today) | B (stamp) | C (delete) |
+|---|---:|---:|---:|
+| wall ms, median of 3 | 1,296 | 1,020 (**−21%**) | **728 (−44%)** |
+| wall, range | 1,262–1,320 | 940–1,087 | 612–832 |
+| WAL bytes/job, median | 3,682.8 | 2,668.2 (**−28%**) | **2,338.4 (−36%)** |
+| WAL, range | 3,642–3,824 | 2,643–3,046 | 2,324–2,430 |
+| total updates | 40,000 | 40,000 | **20,000** |
+| **HOT updates** | **0** | **0** | **0** |
+| `job` dead tuples | 40,000 | **20,000** | **20,000** |
+| total dead tuples | 40,000 | 60,000 | 40,000 |
+| table + index size | 122 MB | 112 MB | 112 MB |
+
+Every arm's range is non-overlapping against every other on both wall time and WAL.
+
+### The framing in the prior-art note does not survive the measurement
+
+**No arm achieves a single HOT update. Not one.** The premise — that separating the queue lets the
+claim stop invalidating index entries — is false as stated, and the reason is structural: finalisation
+still writes `CurrentState` (in the listing and parent indexes, which the dashboard and the
+orchestrator need) and `ExpireAt` (indexed). Those indexes cannot go with the queue, so the surviving
+wide-table write is non-HOT in B and C exactly as in A. In B the queue row is not HOT either, because
+its own `fetched_at` is part of the index the claim scans.
+
+**The win is real, and it comes from somewhere else: fewer and narrower writes.** Halving the wide-row
+updates (40,000 to 20,000) halves the expensive dead tuples — the ones carrying a ~500 B payload
+through four to six indexes — and removes two indexes from every insert. That is where the WAL goes.
+
+**Stamping costs more than it looks.** B writes the same 40,000 updates as A, merely moving half to a
+narrow table, and generates **more total garbage than A** (60,000 dead against 40,000) because the
+stamp adds an update to a row that is then deleted anyway. C avoids the update entirely and is better
+on every axis. The trade is that Hangfire's stamp buys abandoned-claim recovery for free, where C's
+deleted row leaves nothing to time out — under C, `StaleJobRecovery` must **re-insert** a queue row
+rather than flip a state, which is strictly more work than it does today.
+
+### What this is worth in the real system, and what it is not
+
+These are lifecycle statements in isolation: no handler, no `JobLog` inserts, no counters, no worker
+round trips. In the 120,000-job lab run, DB ms/job was ~0.40 of which claim plus finalisation was
+~0.17 — roughly **40-45%** of database time is job-row lifecycle SQL. Applying C's −44% to that share
+suggests order **15-20% of total database time**, with the WAL saving landing on the job-write portion.
+That is an extrapolation across two different measurements, not a measured end-to-end number, and it
+should be treated as a ceiling: the lab consistently showed framework-level savings shrinking once real
+work is in the mix (§ the counter-buffer change moved DB ms/job 52-63% and throughput only 2-11%).
+
+**Not measured:** any of this end-to-end through the worker, SQL Server, a multi-queue claim in B or C,
+contention between concurrent claimers on the narrow table, or the cost of the recovery path C makes
+more complicated. The blast radius of actually building it is recorded separately and is large — ~67
+test files seeding `Job` rows directly, `NotificationDispatch.CapturePending` keying off
+`Entries<Job>()`, a third delete in both `ExpirationCleanup` paths, the handler-outbox/server-context
+split, and a rolling deploy with no precedent in the release notes.
+
+## Reproducing the §6.2.1 collapse, and what each candidate does to it (PostgreSQL 18, 2026-09-19)
+
+Everything above measures a healthy database, where none of these changes moves jobs/sec. But the
+collapse in §6.2.1 — **567 to 27 jobs/sec**, claim 3.3 to 253 ms — is the problem PA-01 exists to
+solve, and it is a *degraded-state* problem. This reproduces it and measures each candidate against it.
+
+**The reproduction needs a held snapshot, not just dead tuples. That is the headline.** A first attempt
+disabled autovacuum and churned the backlog to **68.8% dead tuples**, and the claim did not degrade at
+all — 1.149 ms at 0% dead against 1.316 ms at 68.8%. The reason is that PostgreSQL sets LP_DEAD hints
+on index entries it finds pointing at dead tuples, so later scans skip them for free. **An open
+snapshot is what prevents that**: while any transaction might still see those tuples they are not dead
+to everyone, the hint cannot be set, and every scan must fetch and re-check each one from the heap.
+
+§6.2.1 records exactly that condition — `CounterAggregator` draining `while (true)` inside the task
+host's lock transaction, holding **one transaction open for 51 minutes**. So the collapse was never
+"bloat" on its own; it was bloat plus a pinned vacuum horizon, and the unbounded drain supplied both.
+
+### Claim latency, one held snapshot, 200,000 rows with a 50,000-row backlog
+
+| `job` dead% | A: today, `ANY()` | A: today, scalar | B: queue table |
+|---:|---:|---:|---:|
+| 0.0 | 1.067 ms | 2.580 ms | **0.184 ms** |
+| 50.8 | 4.998 | 8.048 | **0.273** |
+| 72.0 | 18.879 | 14.241 | **0.391** |
+| 83.6 | **21.258** | **23.089** | **0.500** |
+
+As a claim-throughput ceiling (batch of 20 divided by latency), which is the jobs/sec form:
+
+| `job` dead% | A `ANY()` | A scalar | B queue table |
+|---:|---:|---:|---:|
+| 0.0 | 18,744 | 7,752 | **108,696** |
+| 50.8 | 4,002 | 2,485 | **73,260** |
+| 72.0 | 1,059 | 1,404 | **51,151** |
+| 83.6 | **941** | **866** | **40,000** |
+
+### What it says
+
+**The magnitude matches the incident.** Today's claim degrades **20x** (18,744 to 941 jobs/sec); the
+incident was 567 to 27, or 21x. Same shape, and the absolute numbers differ only because this backlog
+is 50,000 rows against the incident's 500,000-job table.
+
+**And it explains why the collapse is a cliff rather than a slope.** The lab measures ~925 jobs/sec end
+to end. At 83.6% dead the claim's own ceiling has fallen to **941 jobs/sec** — it has just become the
+binding constraint. Above that bloat level the claim *is* the throughput, which is why the system does
+not degrade gracefully: it tracks the claim ceiling down.
+
+**The queue table prevents it, and this is the first measurement that justifies PA-01 on its own
+terms.** B degrades only **2.7x** (108,696 to 40,000) and never approaches the system's throughput —
+its ceiling stays **43x** above it. The reason is structural rather than incidental: B's claim never
+scans `job` at all, so bloat on the wide table cannot reach it. The narrow queue table bloats too, but
+its rows are ~50 B against ~500 B, it carries one index against six, and its rows are deleted on claim
+rather than accumulating.
+
+**The Gate 1b scalar claim does NOT help here** — 866 jobs/sec at 83.6% dead, no better than the
+`ANY()` form. That is not a contradiction: the two failure modes are independent. The scalar predicate
+fixes the *stale-statistics* pathology (615x, measured above), where the planner picks a Sort it cannot
+stop early. It does nothing about *bloat*, where the plan is already correct and the cost is visibility
+checks on dead heap tuples. Two distinct failure modes, two distinct fixes, and neither substitutes for
+the other.
+
+### Caveats
+
+- Claim latency is measured single-threaded in plpgsql with the restore step excluded, so these are
+  **DB-side ceilings**, not achieved multi-worker throughput. The crossover argument stands on the
+  ceiling falling *to* the observed rate, not on the two being the same measurement.
+- **Unexplained:** the scalar claim's baseline at 0% dead (7,752) is worse than `ANY()`'s (18,744),
+  which is the opposite of the stale-statistics result and is probably an ordering artefact — `ANY()`
+  runs first in each sweep and the restore rewrites the same rows between arms. It does not affect the
+  degradation-shape conclusion, where both A variants behave the same, but it is not understood.
+- The held snapshot here is permanent for the measurement's duration; the real incident's was 51
+  minutes and then released. Recovery behaviour after release was not measured.
+- One backlog size (50,000) and one row width. PostgreSQL only.
+
+### Crash safety changes the answer: delete-on-claim is unsafe, and the fix is where the index goes
+
+The delete-on-claim result above (2.7x degradation against today's 20x) is real but **must not be
+built**, because it loses jobs silently. With the claim deleting the queue row and never touching the
+job row — which is exactly where its saving comes from — a worker that dies mid-execution leaves:
+
+- the queue row **deleted**, so nothing will ever claim the job again;
+- `job.CurrentState` still **`Enqueued`**, never stamped `Processing`, with a null `LastKeepAlive`;
+- `StaleJobRecovery` looking for `CurrentState = Processing AND LastKeepAlive < cutoff`, which matches
+  nothing.
+
+The job sits in `Enqueued` forever, looking healthy on every dashboard surface. Stamping the job row at
+claim time would fix it and would also erase the entire benefit, since that is the wide-row write being
+avoided. **The queue row has to survive the claim, because the queue row IS the recovery record** —
+which is what Hangfire's `fetched_at` buys and why the prior-art note singled it out.
+
+So the shapes worth measuring are the safe ones. Same held-snapshot method as above.
+
+| level | `job` dead% | A: today | D: stamp, `fetched_at` **in** the index | E: stamp, `fetched_at` **out** of the index |
+|---|---:|---:|---:|---:|
+| 0 | 0.0 | 1.518 ms | 1.173 ms | **0.627 ms** |
+| 1 | 50.5 | 3.386 | 1.905 | **0.748** |
+| 2 | 71.8 | 5.467 | 3.072 | **1.075** |
+| 3 | 83.5 | **9.242** | 3.851 | **1.262** |
+
+**D barely helps, and the reason is instructive.** Indexing `fetched_at` so the claim can seek straight
+to eligible rows means every stamp writes an indexed column — reintroducing, on the queue table, the
+exact mechanism that degrades `job`. Its queue table reached 19.4% dead and its advantage over today
+was only ~2.4x.
+
+**E is the design.** Take `fetched_at` out of the index — `(Queue, ScheduleTime)` only — and filter on
+it instead of seeking by it. The stamp then changes no indexed column, so it is **HOT-eligible**:
+
+- **82% of queue-table updates are HOT** — the first non-zero HOT figure anywhere in this
+  investigation, including every arm of Gate 2.
+- Queue-table bloat stays at **10.7%** where `job` reaches 83.5%.
+- Claim latency degrades **2.0x** (0.627 to 1.262 ms) against today's 6.1x, and ends **7.3x faster**.
+- As a claim-throughput ceiling: **15,800 jobs/sec against today's 2,160** at the same bloat level.
+
+The filter is affordable precisely because the queue table holds only the backlog plus the handful of
+rows actually in flight, so there is almost nothing for it to discard — the in-flight count is bounded
+by worker concurrency. That bound is the design's load-bearing assumption and should be stated wherever
+it is implemented: a deployment that prefetches deeply, or whose workers stall in bulk, widens the set
+of stamped-but-unfinalised rows the scan must skip.
+
+`fillfactor = 70` on the queue table is not optional — HOT needs free space in the page to write the
+new tuple version into. Without it the update falls back to non-HOT and E degenerates toward D.
+
+**Caveats.** D's arm entered this sweep already bloated from the preceding measurement, so the D-vs-E
+comparison overstates D's baseline; the A-vs-E comparison is the clean one and is what the conclusion
+rests on. Today's arm degraded 6.1x here against 20x in the earlier sweep, on the same mechanism with a
+different churn pattern — the degradation ratio is sensitive to how the bloat is produced, so treat
+these as same-run comparisons rather than absolute constants. Single-threaded plpgsql, one backlog
+size, PostgreSQL only; no crash-recovery path was executed, only reasoned about.
+
+### Audit: is the collapse still reachable from Warp's own code? (2026-09-19)
+
+The collapse needs a **held snapshot**, not merely bloat. #300 bounded `CounterAggregator`'s
+`while (true)` drain, which was the 51-minute transaction that caused the incident. This audits every
+other path that could hold one, because the answer decides whether PA-01 is a fix or insurance.
+
+`IServerTask.LocksWithTransaction` defaults **true**, so the task host wraps the whole of
+`ExecuteAsync` in one transaction. 13 tasks exist; only `MessageRouter` opts out (it takes a
+session-scoped lock and owns its transaction, §2.16). The other 12 were checked for unbounded work.
+
+**Bounded — no risk:**
+
+| task | bound |
+|---|---|
+| `CounterAggregator`, `ErrorGroupAggregator` | `MaxBatchesPerTick` 20 x 1,000 (#300) |
+| `ExpirationCleanup` | `MaxSweepBatchesPerTick` 100 x `ExpirationBatchSize`, every sweep |
+| `Orchestrator` | `ServerTaskBatchSize` on all three queries |
+| `Heartbeat`, `ServerCleanup`, `BacklogSampler`, `RecurringJobScheduler`, `SloEvaluator` | bounded by small configured sets — servers, definitions, objectives |
+
+**Unbounded, but bounded in practice:**
+
+- `StaleJobRecovery`'s main sweep has no `LIMIT`, but only `Processing` rows qualify, so it is bounded
+  by in-flight concurrency (servers x workers x prefetch) — hundreds, not millions.
+- `ScheduledJobActivation` has no `LIMIT`, but it is a single `UPDATE ... RETURNING`; it scales with
+  how many scheduled rows come due at the same instant.
+
+**Unbounded and growing with data — `StatisticRollup` (§8.30):**
+
+```csharp
+var rows = await _context.Set<Statistic>()
+    .Where(x => EF.Functions.Like(x.Key, "%:%"))     // no index can serve this
+    .Select(x => new { x.Key, x.Value })
+    .ToListAsync(ct);                                 // no .Take()
+```
+
+No `.Take()`, no batching, and the `deletions` list and `SaveChanges` that follow are unbounded too.
+It has no `LocksWithTransaction` override, so all of it is one transaction. Measured on a 500,000-row
+`statistic` table: the scan is **116 ms** (seq scan, 4,851 buffers) and a 300,000-key
+`ExecuteDeleteAsync` is **3,280 ms** / 313,962 buffers — so a heavy tick holds its transaction for
+**order 5-10 seconds**, worst at the first tick after upgrading (legacy unmarked hourly keys all roll
+to daily at once) or after rollup has been disabled past the hourly window.
+
+**Verdict: no path in Warp still reproduces the incident.** The worst offender holds a transaction for
+seconds against the aggregator's 51 minutes, and at a 10-minute cadence that pins the vacuum horizon
+roughly 1% of the time. #300 fixed the actual cause. `StatisticRollup` should still be bounded on
+principle — it is the same shape §6.2.1 forbids, and it grows with metric cardinality — but it is a
+tidy-up, not an incident waiting to happen.
+
+**The caveat that keeps PA-01 alive.** A held snapshot does not have to come from Warp. Warp's outbox
+is explicitly on the host's `TContext` and its whole multi-application stance is a **shared database**
+(§8.23), so a long transaction in the host's own application code, a reporting query, or
+`hot_standby_feedback` on a replica pins the horizon for the `job` table exactly as the aggregator did
+— and Warp cannot bound any of them. PA-01's value is therefore insurance against conditions Warp does
+not control, rather than a fix for one it creates.
