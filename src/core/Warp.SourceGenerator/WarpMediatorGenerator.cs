@@ -89,6 +89,19 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
             ? BuildSingleTypeMultiHandlerMap(compilation, iMessageHandlerSymbol)
             : [];
 
+        // Runs after the maps, which are what "has a handler" means, and before emission — like the
+        // policy check above it reports only, so a missing handler never suppresses the mediator.
+        UnhandledJobValidator.Validate(
+            context,
+            compilation,
+            candidates,
+            iJobSymbol,
+            iMessageSymbol,
+            iJobHandlerSymbol,
+            iMessageHandlerSymbol,
+            jobHandlerMap,
+            messageHandlerMap);
+
         var iPublishBehaviorSymbol = compilation.GetTypeByMetadataName(IPublishPipelineBehaviorMetadataName);
 
         var requestTypes = new List<RequestTypeInfo>();
@@ -617,7 +630,7 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
         return map;
     }
 
-    private static IEnumerable<INamedTypeSymbol> GetAllTypes(Compilation compilation)
+    internal static IEnumerable<INamedTypeSymbol> GetAllTypes(Compilation compilation)
     {
         var stack = new Stack<INamespaceOrTypeSymbol>();
         stack.Push(compilation.GlobalNamespace);

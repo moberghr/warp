@@ -139,6 +139,27 @@ public class SendEmailHandler : IJobHandler<SendEmailRequest>
 }
 ```
 
+Every `IJob` and `IMessage` needs a handler. Forgetting one is not a publish-time failure — the row is
+created, a worker picks it up later and fails it with `No handler registered for SendEmailRequest`. The
+source generator therefore reports a job or message contract that nothing handles as **`WARP003`**, a
+build **warning**.
+
+It is a warning rather than an error because a compilation cannot see an assembly that references it. A
+project declaring **no** job or message handler at all is treated as a contracts project and is never
+reported — the shared-contract layout (contracts in one assembly, handlers in another) stays silent. What
+remains is the case where a project handles some contracts and declares one it does not handle; if that is
+deliberate, suppress it:
+
+```csharp
+#pragma warning disable WARP003 // handled by the billing worker, which references this assembly
+public class SettleInvoice : IJob { public int InvoiceId { get; set; } }
+#pragma warning restore WARP003
+```
+
+Messages handled through a saga (`ISagaHandler<TSaga, TMessage>`) count as handled, as do self-handling
+jobs. Unhandled `IRequest<T>` and `IStreamRequest<T>` are not reported — those fail on the calling thread
+at `Send` / `CreateStream`, where they are already obvious.
+
 ### 7. Define a request (optional)
 
 ```csharp
