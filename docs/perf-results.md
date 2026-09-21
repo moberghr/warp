@@ -1134,7 +1134,9 @@ jobs), peak concurrent backends sampled from `pg_stat_activity` every 500 ms, in
 | after, two pools (pair 1 / pair 2) | **46 / 46** |
 
 Broken down by `application_name` on the after build: **30** for the DbContext pool, **17** for
-`warp-locks`. The DbContext pool's own peak does not fall — each pool sizes to its own demand, and a
+`warp-locks`. Those two are per-pool maxima sampled independently, so they do not have to sum to the
+46 above and are not a decomposition of it — the overall peak is the measured number, the split is
+what each pool reached. The DbContext pool's own peak does not fall — each pool sizes to its own demand, and a
 connector idle in one cannot serve the other, so the budget is `peak(TContext) + peak(locks)` rather
 than `peak(both together)`.
 

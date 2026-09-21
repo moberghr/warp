@@ -106,7 +106,7 @@ On PostgreSQL, Warp gives the advisory-lock providers your DbContext's connectio
 | | peak backends |
 | --- | ---: |
 | one pool (before) | 30-31 |
-| two pools (after) | **46-47** — 30 DbContext + 17 lock |
+| two pools (after) | **46** |
 
 The DbContext pool's own peak does not fall. Each pool sizes to its own demand independently, and a connector sitting idle in one cannot serve the other, so the correct budget is `peak(DbContext) + peak(locks)` rather than `peak(both together)`.
 

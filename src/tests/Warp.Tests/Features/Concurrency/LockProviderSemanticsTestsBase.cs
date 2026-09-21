@@ -64,19 +64,37 @@ public abstract class LockProviderSemanticsTestsBase : IAsyncLifetime
             .TryAcquireAsync(key, TimeSpan.Zero, TestCancellation);
         held.ShouldNotBeNull();
 
-        // Start waiting BEFORE the release, so the acquire genuinely blocks rather than finding the
-        // lock already free — otherwise this test passes against an implementation that never waits.
-        var waiting = waiterScope.GetRequiredService<IWarpLockProvider>()
-            .TryAcquireAsync(key, TimeSpan.FromSeconds(8), TestCancellation);
+        try
+        {
+            // Started BEFORE the release, so the acquire genuinely blocks rather than finding the lock
+            // already free.
+            var waiting = waiterScope.GetRequiredService<IWarpLockProvider>()
+                .TryAcquireAsync(key, TimeSpan.FromSeconds(8), TestCancellation);
 
-        waiting.IsCompleted.ShouldBeFalse("the acquire should still be blocked while the lock is held");
+            // Observed over a window, not sampled once: an immediate IsCompleted check is satisfied by
+            // any implementation that performs a single async round trip before giving up, including
+            // one that returns null straight away.
+            await Task.Delay(TimeSpan.FromMilliseconds(400), TestCancellation);
+            waiting.IsCompleted.ShouldBeFalse("the acquire should still be blocked while the lock is held");
 
-        await held.DisposeAsync();
+            await held.DisposeAsync();
+            held = null;
 
-        var acquired = await waiting;
+            var acquired = await waiting;
 
-        acquired.ShouldNotBeNull("the waiter should take the lock once the holder released it");
-        await acquired.DisposeAsync();
+            acquired.ShouldNotBeNull("the waiter should take the lock once the holder released it");
+            await acquired.DisposeAsync();
+        }
+        finally
+        {
+            // Without this, a failed assertion above leaves the holder's SESSION lock taken — container
+            // disposal does not release a lock handle — and abandons the 8s waiter, which can then take
+            // the lock after the test returned and hold a backend for the rest of the class.
+            if (held is not null)
+            {
+                await held.DisposeAsync();
+            }
+        }
     }
 
     [TimedFact]
@@ -132,7 +150,11 @@ public abstract class LockProviderSemanticsTestsBase : IAsyncLifetime
             var waiting = waiterScope.GetRequiredService<IWarpLockProvider>()
                 .TryAcquireAsync(key, TimeSpan.FromSeconds(20), cts.Token);
 
+            // Same reasoning as the waiting test: confirm it is STILL blocked after a window, which is
+            // what makes "cancelled during the wait" a true statement rather than a hopeful one.
+            await Task.Delay(TimeSpan.FromMilliseconds(400), TestCancellation);
             waiting.IsCompleted.ShouldBeFalse();
+
             await cts.CancelAsync();
 
             // Either shape is acceptable — the contract is that it STOPS, well inside the 20s timeout
