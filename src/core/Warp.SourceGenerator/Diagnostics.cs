@@ -21,4 +21,12 @@ internal static class Diagnostics
         category: Category,
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor UnhandledJobType = new(
+        id: "WARP003",
+        title: "Job or message type with no handler",
+        messageFormat: "'{0}' implements {1}, but no handler for it exists in this compilation or the assemblies it references. Publishing succeeds and the failure surfaces later, on a worker (\"No handler registered for {0}\"). Declare an {2}<{0}>, or suppress WARP003 if the handler lives in an assembly this one does not reference.",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
 }

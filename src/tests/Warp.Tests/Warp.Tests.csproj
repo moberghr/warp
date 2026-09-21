@@ -15,7 +15,11 @@
 		<CompilerGeneratedFilesOutputPath>$(BaseIntermediateOutputPath)GeneratedFiles</CompilerGeneratedFilesOutputPath>
 
 		<!-- Suppress xUnit v3 CancellationToken advisory warnings (bulk fix is a separate task) -->
-		<NoWarn>$(NoWarn);xUnit1051;CA1816;MA0040</NoWarn>
+		<!-- WARP003: this project deliberately declares job/message contracts with no handler — fixtures
+		     for the resolver, saga-correlation and serialization tests that are never executed. The
+		     diagnostic's own behaviour is covered by UnhandledJobDiagnosticTests, which drives the
+		     generator in-process and is unaffected by this. -->
+		<NoWarn>$(NoWarn);xUnit1051;CA1816;MA0040;WARP003</NoWarn>
 	</PropertyGroup>
 
 	<ItemGroup>
