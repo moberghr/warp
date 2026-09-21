@@ -789,10 +789,10 @@ iterations per arm, `VACUUM (ANALYZE)` before each. WAL from `pg_current_wal_lsn
 - **A — today.** All six production indexes. Lifecycle: INSERT, claim `UPDATE job`, finalise
   `UPDATE job`. Uses the scalar claim from Gate 1b, so this is the baseline being shipped, not the
   older one.
-- **B — Hangfire shape.** `job` minus the two eligibility indexes
+- **B — stamp-on-claim.** `job` minus the two eligibility indexes
   (`(Kind,CurrentState,Queue,ScheduleTime)` and `(CurrentState,ScheduleTime)`), plus `job_queue`
   claimed by stamping `fetched_at`, which is what buys the free invisibility-timeout recovery.
-- **C — JobMaster shape.** Same, but the claim DELETEs the queue row instead of stamping it.
+- **C — delete-on-claim.** Same, but the claim DELETEs the queue row instead of stamping it.
 
 | metric, 20,000 jobs | A (today) | B (stamp) | C (delete) |
 |---|---:|---:|---:|
@@ -824,7 +824,7 @@ through four to six indexes — and removes two indexes from every insert. That 
 **Stamping costs more than it looks.** B writes the same 40,000 updates as A, merely moving half to a
 narrow table, and generates **more total garbage than A** (60,000 dead against 40,000) because the
 stamp adds an update to a row that is then deleted anyway. C avoids the update entirely and is better
-on every axis. The trade is that Hangfire's stamp buys abandoned-claim recovery for free, where C's
+on every axis. The trade is that a stamp buys abandoned-claim recovery for free, where C's
 deleted row leaves nothing to time out — under C, `StaleJobRecovery` must **re-insert** a queue row
 rather than flip a state, which is strictly more work than it does today.
 
@@ -932,7 +932,7 @@ job row — which is exactly where its saving comes from — a worker that dies 
 The job sits in `Enqueued` forever, looking healthy on every dashboard surface. Stamping the job row at
 claim time would fix it and would also erase the entire benefit, since that is the wide-row write being
 avoided. **The queue row has to survive the claim, because the queue row IS the recovery record** —
-which is what Hangfire's `fetched_at` buys and why the prior-art note singled it out.
+which is what a `fetched_at` stamp buys and why the prior-art note singled it out.
 
 So the shapes worth measuring are the safe ones. Same held-snapshot method as above.
 
@@ -1130,3 +1130,276 @@ load, not latency — the reset statements cost ~0.007 ms each.
 - **DB exec time.** Reported by the lab but unusable here: within-arm variation reached 12x (every
   arm's first run is a cold-cache outlier), and one arm's median came in *below* the no-addon baseline,
   which is not physical. Statement counts reproduce to <1% and are what every claim above rests on.
+
+### Correction: the delete-on-claim arm was mis-modelled, and its advantage is overstated
+
+The delete-on-claim arm above wrote nothing but the queue-row delete — the job row was untouched at
+claim time. That is what produced its headline number (0.500 ms against today's 21.258 ms under bloat,
+and 2.4% of today's claim latency against stamp-on-claim's 13.7%).
+
+**Reading the prior art it came from shows that shape is not the safe one.** The system it was taken
+from deletes its transport row at claim, and survives a worker death because a **second durable record
+is stamped first**: its master row carries both an in-flight status and a deadline lease, written
+*before* the transport row is claimed. A sweep finds leases that lapsed while their owner stopped
+being live, and a re-assign step re-serialises the master row into a **fresh transport row**. The
+deleted row is not recovered; it is rebuilt. Its transport tier is explicitly described as an ephemeral
+buffer, and delivery is at-least-once with duplicate execution treated as a bug class to minimise.
+
+The same codebase also has a path with no such second record — work written to the transport first and
+synced to the master a few seconds later — and there a crash loses the job outright, which its own
+notes acknowledge as a durability gap.
+
+**The arm measured here modelled the second shape, not the first.** A faithful delete-on-claim for
+Warp needs the lease write too, and Warp's equivalent of that master row is the wide `job` row — so it
+would put a write back on `job` at claim time, which is the write the separation exists to remove.
+Its measured advantage over stamping is therefore overstated by the cost of a write that was never
+performed, and the true gap is unknown because the corrected arm was not run.
+
+That does not change the conclusion, and it strengthens the reasoning behind it: stamping the queue row
+is a ~50 B tuple copy on a one-index table, where a faithful delete-on-claim is that delete **plus** a
+~500 B tuple copy on a six-index table. The lease write would at least be HOT-eligible — `LastKeepAlive`
+and `CurrentWorkerId` are in none of `job`'s six indexes — but HOT still copies the tuple, and the claim
+would no longer be independent of `job`, which is the property that made it immune to `job`'s bloat.
+
+**The lesson is the transferable part.** Delete-on-claim is safe if and only if some other durable
+record is stamped with a lease before the claim. Whether it is cheaper than stamping depends entirely
+on how expensive that record is to write — and for Warp it is the most expensive row in the schema.
+
+#### The corrected arm, measured: stamping wins, and the earlier gap was an artefact
+
+All three shapes under one held snapshot, identical seed (150,000 settled + a 50,000-row backlog),
+autovacuum pinned off, claim timed alone with the restore excluded.
+
+- **A — today.** Claim UPDATEs `job.current_state`, which is in four indexes, so it is never HOT.
+- **E — stamp-on-claim.** Claim UPDATEs `job_queue.fetched_at`, which is in no index, so it is
+  HOT-eligible. **The job row is not touched.**
+- **F — delete-on-claim + lease.** Claim DELETEs the queue row *and* leases
+  `job.last_keep_alive` / `job.current_worker_id` — in none of `job`'s six indexes, so also
+  HOT-eligible. This is the shape the prior art actually runs, and the one the earlier arm omitted.
+
+| `job` dead% | A today | **E stamp** | F delete+lease |
+|---:|---:|---:|---:|
+| 0.0 | 1.224 ms | **0.298** | 0.682 |
+| 50.5 | 3.060 | **0.648** | 1.585 |
+| 71.8 | 5.347 | **1.053** | 3.050 |
+| 83.5 | **8.294** | **1.371** | **3.114** |
+
+As a claim-throughput ceiling (jobs/sec):
+
+| `job` dead% | A today | **E stamp** | F delete+lease |
+|---:|---:|---:|---:|
+| 0.0 | 16,340 | **67,114** | 29,326 |
+| 83.5 | 2,411 | **14,588** | 6,423 |
+
+**Stamping is 2.3x faster than a faithful delete-on-claim at every level, and 6.0x faster than today
+at the worst one.** The earlier result — delete-on-claim at 2.4% of today's latency against stamping's
+13.7% — was entirely an artefact of the delete arm not paying for the lease that makes it safe. It is
+withdrawn.
+
+**Why F degrades at all is the point.** Its claim still touches `job`, by primary key, to write the
+lease — and a primary-key lookup into a table that is 83.5% dead tuples, with a held snapshot
+preventing LP_DEAD hints, is exactly the cost the separation exists to avoid. F inherits `job`'s bloat
+through the one write it cannot drop. E does not touch `job` at all, which is what "the claim is
+independent of how bloated `job` is" means in practice.
+
+**F also pays on disk, on the largest table in the schema.** Its lease is HOT-eligible only with
+fillfactor headroom on `job` itself:
+
+| | `job` table + indexes |
+|---|---:|
+| A today (6 indexes, fillfactor 100) | 166 MB |
+| **E stamp** (4 indexes, fillfactor 100) | **150 MB (−10%)** |
+| F delete+lease (4 indexes, **fillfactor 70**) | **215 MB (+30%)** |
+
+E needs its fillfactor concession on a ~50 B side table; F needs it on the 500 B one, which is a 43%
+larger `job` than E for a claim 2.3x slower.
+
+**Both degrade 4.6x against today's 6.8x**, so neither is immune — the held snapshot reaches every
+table. The difference is where each one starts and what it touches on the way.
+
+### The claim must not WRITE the job row — reading it is free (PostgreSQL 18, 2026-09-21)
+
+Every queue-table arm measured so far stamped the queue row and stopped there. A real claim cannot: it
+must **read** the job row to get the payload, type and metadata it needs to execute, and today it also
+**writes** `CurrentState = Processing` so the dashboard can show the job as running. Both touch `job`
+by primary key — the operation that made the delete-on-claim arm slow. So the arms were re-run with
+the work a claim actually does.
+
+**One schema per arm this time.** The first attempt shared one `job` table between the stamp-only and
+realistic arms, so three claim functions churned it while today's arm churned its own — each level
+measured the realistic arms against a table they had bloated three times as fast. That run showed the
+queue table *losing*, which was an artefact. These four arms each own their `job` and `job_queue`, are
+seeded identically (200,000 rows, 50,000-row backlog) and are churned equally between levels.
+
+| `job` dead% | A today | E stamp only | **G1 stamp + read** | G2 stamp + read + `Processing` |
+|---:|---:|---:|---:|---:|
+| 0.0 | 1.922 ms | 0.312 | **0.379** | 1.838 |
+| 50.5 | 13.821 | 2.336 | **2.383** | 16.871 |
+| 78.0 | 11.807 | 0.902 | **1.084** | 10.503 |
+
+**Reading the job row is nearly free.** G1 tracks E within noise at every level — a primary-key read of
+twenty rows costs almost nothing even against a table that is 78% dead tuples. The earlier stamp-only
+arm was therefore not misleading about the read; it was a fair model of a claim that only reads.
+
+**Writing the job row costs the entire benefit.** G2 is indistinguishable from today, and at one level
+worse. Marking twenty rows `Processing` by primary key puts the claim back inside `job`'s bloat, and
+that single write is worth the whole 5-11x advantage.
+
+**So the design constraint is sharper than the spec had it.** It is not enough to move *eligibility*
+off the job row — the claim must not write the job row **at all**. In-flight state has to live on the
+queue row: `FetchedAt` already does the recovery half, and `CurrentWorkerId` / `LastKeepAlive` would
+have to move with it. The job row would stay `Enqueued` for the duration of execution, and anything
+that today reads `CurrentState = Processing` — the dashboard, `StaleJobRecovery`, the job-detail page —
+would read the queue row instead.
+
+That is a materially larger change than "add a table and repoint the claim", and it is the real cost of
+PA-01. It is also the reason the benefit is available at all: the 6x is not paid for by the queue
+table's existence, it is paid for by the job row going untouched from publish until finalisation.
+
+**Caveats.** The absolute numbers move around between levels — today's arm reads 13.821 ms at 50.5%
+dead and 11.807 ms at 78%, which is the wrong direction and shows the run-to-run spread on this rig is
+wide. The *ordering within each level* is what is stable, and it is consistent across all three: arms
+that leave `job` alone beat arms that write it by 5-11x, and arms that write it are indistinguishable
+from today. Single-threaded plpgsql, one backlog size, PostgreSQL only.
+
+#### The dead-tuple curve, resolved (PostgreSQL 18, 2026-09-21)
+
+The three-point sweep above was too coarse to trust: it had no repeats, and it labelled every arm with
+ONE schema's dead percentage even though each arm owns its table. This re-runs it with seven steps,
+**median of three per point**, and each arm reported **at its own dead percentage**.
+
+| A dead% | A claim | A ceiling | G dead% | G claim | G ceiling | speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.0 | 5.629 ms | 3,553 /s | 0.0 | **0.909 ms** | **22,002 /s** | 6.2x |
+| 13.5 | 11.787 | 1,697 | 0.0 | **2.007** | **9,965** | 5.9x |
+| 23.8 | 22.569 | 886 | 19.4 | **4.055** | **4,932** | 5.6x |
+| 37.4 | 24.223 | 826 | 32.9 | **2.477** | **8,074** | 9.8x |
+| 53.1 | 49.733 | 402 | 49.7 | **3.313** | **6,037** | 15.0x |
+| 62.5 | 45.308 | 441 | 59.8 | **11.935** | **1,676** | 3.8x |
+| 68.8 | **107.521** | **186** | 66.6 | **9.024** | **2,216** | 11.9x |
+
+A = today's claim. G = the queue-table claim that reads the job row but never writes it.
+
+**Today's claim degrades 19.1x across the range; the queue-table claim degrades 9.9x from a base six
+times lower.** The speedup is 3.8x-15x depending on where the noise falls, and the monotonic trend the
+coarse sweep lacked is now present in A: 5.6, 11.8, 22.6, 24.2, 49.7, 45.3, 107.5 ms.
+
+**The crossing point is the result.** The lab measures ~925 jobs/sec end to end. Today's claim ceiling
+passes below that between 23.8% and 37.4% dead — **886 /s and 826 /s** — and reaches **186 /s** at
+68.8%. Past the crossing the claim IS the throughput. The queue-table arm's lowest reading across the
+whole range is 1,676 /s, so it never crosses.
+
+**The two arms do not bloat at the same rate, and that is a finding rather than a flaw in the
+measurement.** Identical churn was applied to both, yet at step 1 today's table is already at 13.5%
+dead while the queue-table arm is still at 0.0%. The difference is the claim itself: today's writes the
+job row twice per claimed job, so it manufactures the bloat that slows it down, while a claim that only
+reads adds none. §6.2.1 calls this self-reinforcing, and it is visible here as the x-axis drifting
+apart on its own. The columns are therefore aligned by *point in the workload*, not by dead percentage
+— which is the comparison that matters, since production reaches a given workload, not a given dead
+percentage.
+
+**Caveats.** Noise is still roughly +/-20%: G reads 11.935 ms at 59.8% and 9.024 ms at 66.6%, and A
+dips at 62.5%. Medians of three tame it without removing it, and no conclusion here rests on a single
+point. Absolute values are not comparable with the earlier sweeps — 60 batches per repeat here against
+100, and a different rig state — only within-run ratios are. Single-threaded plpgsql, one backlog size,
+PostgreSQL only.
+
+### Does a stock PostgreSQL actually reach these dead percentages? (2026-09-21)
+
+Every bloat measurement so far manufactured its conditions — autovacuum disabled, a snapshot held open
+— which answers "what happens AT a given dead percentage" but not "does a real deployment get there".
+This runs an ordinary workload against an ordinary database and just watches.
+
+**Setup: stock `postgres:latest`, nothing tuned.** `autovacuum = on`,
+`autovacuum_vacuum_scale_factor = 0.2`, `autovacuum_vacuum_threshold = 50`, `autovacuum_naptime = 60`,
+3 workers. **No held transaction, nothing blocking the vacuum horizon.** 150,000 jobs, dispatcher
+mode, 10 workers, sampled every 20s from outside the lab as well as by the lab's own sampler.
+
+**It gets there on its own.**
+
+| | |
+|---|---:|
+| peak dead tuples on `job` | **93,071 against 149,985 live — 38.3%** |
+| `job` updates | 449,434 for 150,000 jobs (**3.0 per job**) |
+| HOT share on `job` | **29%** |
+| autovacuum runs during the drain | 4 |
+| throughput | 626 jobs/sec overall, **oscillating 503-828** |
+| DB time | 0.593 ms/job |
+
+Sampled dead percentage over the run: 0 → 4.7 → 12.7 → 22.8 → **29.7** → 18.2 → **29.2** → 1.4 →
+17.2 → **29.7** → 2.3 (external sampler, every 20s); the lab's own peak sampler caught **38.3%**
+between those points.
+
+**It is a sawtooth, not a climb.** Autovacuum does keep up in the sense that it recovers — dead
+tuples fall back to 1-2% after each pass — but between passes the table repeatedly reaches the high
+twenties and touched 38.3%. Nothing was holding a snapshot; this is simply 3 non-HOT updates per job
+arriving faster than a 60-second naptime can reclaim them.
+
+**That lands inside the band where today's claim stops keeping up.** The resolved curve puts today's
+claim ceiling at **886 jobs/sec at 23.8% dead and 826 at 37.4%**, against a system that runs ~925.
+This run oscillated through exactly that range four times in four minutes, and the throughput series
+oscillated with it — 828, 815, 653, 735, 750, 748, **503**, 696, **515**, 640, 628.
+
+**Honest limit on that correlation:** the dips coincide with both high dead tuples *and* autovacuum
+running, and this run cannot separate the cost of scanning corpses from the I/O of the vacuum
+reclaiming them. Both are consequences of the same non-HOT update rate, but the split between them is
+unmeasured.
+
+**What this changes.** The earlier framing — that after #300 this is insurance against a long
+transaction in host code — was too conservative. Bloat in the 25-38% band is what an ordinary
+deployment produces on default settings with nothing wrong, because the generation rate is structural:
+`CurrentState` is in four of six indexes, so every transition is non-HOT. A stuck transaction removes
+the ceiling entirely (43% in the incident, 69-83% in the sweeps) but is not required to enter the
+range where the claim degrades.
+
+**Also validated here:** 150,000 jobs completed with **zero queue rows left behind and zero orphans**,
+which exercises the stub-based finalisation removal at scale. The queue table itself peaked at 37.8%
+dead — it bloats too, and in percentage terms just as much. It matters far less because its rows are
+~50 B against ~500 B and it carries one index against six, but "the queue table does not bloat" would
+be false.
+
+### Dead tuples alone do NOT slow the real worker (PostgreSQL 18, 2026-09-21)
+
+The isolated plpgsql sweeps show today's claim degrading 19x as `job` fills with dead tuples, and the
+stock-database run showed throughput oscillating 503-828 while dead percentage sawtoothed to 38%. The
+obvious conclusion — that the bloat causes the dips — was never tested, because the dips coincide with
+autovacuum *running* as well as with dead tuples *existing*. This separates them.
+
+**Method.** `autovacuum_enabled = false` on `warp.job` only, so dead tuples accumulate monotonically
+and no vacuum I/O competes with the workload. 200,000 jobs, dispatcher, 10 workers, stock PostgreSQL
+otherwise. Dead percentage sampled from outside every 25s; throughput read from the lab's own 15s
+windows. A within-run trend is immune to the between-run variance that spoils the arm comparison
+below.
+
+| window | 15s throughput | `job` dead% at that point |
+|---|---:|---:|
+| 2-6 | 578, 712, 732, 734, 904 | 17 → 33 |
+| 7-11 | 943, 824, 903, 905, 773 | 43 → 55 |
+| 12-17 | 399, 719, 864, 867, 878, 706 | 58 → 67 |
+
+Final state: **68.0% dead — 424,421 dead tuples against 200,000 live** — and the run finished at
+**732 jobs/sec overall**.
+
+**Mean of the first six windows (17-43% dead): 767 jobs/sec. Mean of the last six (58-67% dead): 795
+jobs/sec.** There is no downward trend across a sweep that took `job` from 17% to 68% dead. The single
+399 reading at 58% looked like the onset and the next window came back at 719, so it was noise.
+
+**This refutes the mechanism as it applies to the real worker.** 68% dead is worse than the 43%
+recorded in the §6.2.1 incident, and the worker did not care. So the 19x degradation the plpgsql
+sweeps measure is real *for that harness* and does not transfer, and the honest conclusion is that
+**bloat on its own is not what collapsed the queue in the incident**.
+
+**Why the two disagree is the open question.** Candidates, none of them yet tested: the plpgsql sweeps
+claim with a 50,000-row standing backlog while this run drains its backlog continuously, so the index
+range the claim scans is short here and long there; the sweeps hold a snapshot open permanently while
+this run holds none, so LP_DEAD hints can be set here and cannot there; and the sweeps run one claim
+per statement in a tight loop with no handler, so a claim's share of each iteration is far higher.
+**The held snapshot is the most likely candidate** — it is the one factor the earlier work already
+identified as necessary to reproduce the collapse at all.
+
+**Consequence for the autovacuum arms measured just before this.** Aggressive autovacuum
+(`scale_factor = 0.02`, `cost_delay = 0`) read 643 jobs/sec against the default's 484 on one run each,
+which looked like a 33% win. But the same default configuration had measured 626 jobs/sec on an earlier
+run — 29% run-to-run variance, the same size as the effect. **That comparison is void**, and this
+result removes its premise anyway: if dead tuples are not slowing the worker, tuning vacuum to remove
+them cannot be what helps.
