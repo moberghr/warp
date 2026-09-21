@@ -1121,10 +1121,45 @@ Interleaved before/after, 5 alternating pairs per arm, fresh database each run:
 All inside the 7-20% within-arm spread, and the sign is inconsistent pair to pair. This is database
 load, not latency — the reset statements cost ~0.007 ms each.
 
+### Peak connection use: it rises (2026-09-21)
+
+The split's one real cost, and the claim originally shipped with it was wrong — the first version of
+this change asserted that "active connection use should be close to unchanged, the lock sessions moved
+rather than multiplied". They do not move; they add. Contended mutex arm (8 groups, 16 workers, 10k
+jobs), peak concurrent backends sampled from `pg_stat_activity` every 500 ms, interleaved:
+
+| arm | peak backends |
+|---|---:|
+| before, one pool (pair 1 / pair 2) | 31 / 30 |
+| after, two pools (pair 1 / pair 2) | **46 / 46** |
+
+Broken down by `application_name` on the after build: **30** for the DbContext pool, **17** for
+`warp-locks`. Those two are per-pool maxima sampled independently, so they do not have to sum to the
+46 above and are not a decomposition of it — the overall peak is the measured number, the split is
+what each pool reached. The DbContext pool's own peak does not fall — each pool sizes to its own demand, and a
+connector idle in one cannot serve the other, so the budget is `peak(TContext) + peak(locks)` rather
+than `peak(both together)`.
+
+The lock pool tends toward the **worker count**, because it sizes to concurrent lock *attempts* and
+not concurrent holds: 17 here against only 8 locks that could be held at once (8 groups, limit 1),
+since a rejected attempt opens a connection too. Medallion's multiplexing does not bound this — its
+own documentation states an acquire that cannot complete instantly on the shared connection allocates
+a fresh shareable one, which is exactly the contended case. Citing multiplexing as a mitigation was
+the second error in the original note.
+
+Practical consequence: two pools mean two `MaxPoolSize` ceilings **and** a higher floor.
+`MinPoolSize` is pinned to 0 so the idle cost is not doubled, but a host near its server's
+`max_connections` must raise it or lower `MaxPoolSize` — which applies to both pools, since a
+connection-string host cannot size the lock pool independently.
+
 ### What is not measured
 
 - **SQL Server.** `sp_reset_connection` is a single TDS token, so there is no equivalent amplification
   to remove; the change is Postgres-only and no SQL Server arm was taken.
+- **A forced `max_connections` exhaustion.** The arms above ran against `max_connections = 100` with
+  Npgsql's default `MaxPoolSize` of 100, so neither the server limit nor the pool cap was the binding
+  constraint — the numbers are demand, not a ceiling test. What bites is a host whose ceiling sits
+  between its one-pool and two-pool demand; the figures above are what that threshold has to clear.
 - **Sub-2% throughput effects.** Five pairs against a 7-20% spread cannot resolve them. A longer soak
   would be the instrument, not more repeats of a 30-second run.
 - **DB exec time.** Reported by the lab but unusable here: within-arm variation reached 12x (every

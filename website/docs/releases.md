@@ -4,6 +4,88 @@ sidebar_position: 6
 
 # Releases
 
+## Unreleased
+
+Another database-load release, on PostgreSQL only. A Warp server issues **substantially fewer
+statements per job**, and the reduction applies whether or not you use `[Mutex]` or `[Semaphore]` —
+because Warp's own server tasks take advisory locks too.
+
+**No schema change, no migration, no API break.** Statements per job, medians of three runs, 16
+workers, measured in-container against PostgreSQL:
+
+| workload | before | after | change |
+| --- | ---: | ---: | ---: |
+| ordinary jobs, no concurrency addon in use | 16.87 | 13.76 | **-18%** |
+| concurrency addon registered, nothing contending | 50.40 | 24.84 | **-51%** |
+| `[Mutex]`, 8 groups / 16 workers | 80.77 | 35.75 | **-56%** |
+| `[Semaphore]`, 4 slots / 16 workers | 97.73 | 40.91 | **-58%** |
+| `[Mutex]`, 1 group / 16 workers | 289.82 | 111.84 | **-61%** |
+
+**Throughput is unchanged** — verified with before/after arms interleaved in alternating pairs, where
+every delta fell inside the 7-20% run-to-run spread and the sign was inconsistent. This is load on
+the database, not latency: the statements removed were cheap ones, and they were batched rather than
+separate round trips.
+
+### What was happening
+
+Npgsql resets a pooled connection with a single `DISCARD ALL` — unless that connector carries
+**prepared statements**, in which case it has to use a seven-statement sequence instead, because
+`DISCARD ALL` would deallocate them. Warp's advisory-lock library prepares its lock statements, and
+it was handed the same connection string as your `DbContext`, so the two shared one Npgsql pool. Its
+prepared connectors flipped *every* connection in the process onto the longer reset, and `DISCARD ALL`
+disappeared from the trace entirely — about 38 statements per job spent on connection hygiene.
+
+The lock providers now get your connection string with `Application Name` suffixed `:warp-locks`.
+That value is part of Npgsql's pool key, so the lock sessions live in their own pool and ordinary
+`DbContext` traffic goes back to the one-statement reset. Locking semantics are untouched: advisory
+locks are scoped to the database, not to a client pool.
+
+A side benefit in `pg_stat_activity` — lock sessions are now labelled, so
+`SELECT application_name, count(*) FROM pg_stat_activity WHERE datname = current_database() GROUP BY 1`
+separates them from query traffic. If your own `Application Name` is long, Warp truncates its portion
+so the suffix survives Postgres's 63-byte limit.
+
+### The cost: peak connection use rises
+
+Two pools mean two `MaxPoolSize` ceilings **and** a higher floor, and this is the one thing to check
+before upgrading if you run near your server's `max_connections`. On the contended mutex arm above,
+peak concurrent backends went from **30-31 to 46**, with per-pool maxima of 30 for the `DbContext`
+pool and 17 for the lock pool.
+
+The `DbContext` pool's own peak does not fall. Each pool sizes to its own demand independently, and a
+connector idle in one cannot serve the other, so budget `peak(DbContext) + peak(locks)` rather than
+`peak(both together)`. The lock pool tends toward your **worker count** on a concurrency-heavy
+workload, because it sizes to concurrent lock *attempts* rather than concurrent holds.
+
+`MinPoolSize` is pinned to 0 on the lock pool so the idle cost at least is not paid twice. The ceiling
+is inherited rather than capped — a cap set too low blocks lock acquisition instead of degrading it —
+so if you are close to the limit, raise `max_connections` or lower `MaxPoolSize`, which applies to
+both pools.
+
+### If you register an `NpgsqlDataSource`
+
+Hosts that register the `DbContext` with an `NpgsqlDataSource` — Aspire, Managed Identity, client
+certificates — keep the shared pool and the longer reset, and so get neither the statement reduction
+nor the extra connections. Warp cannot derive a second pool there: a data source's password provider,
+certificate callbacks and type mappings are write-only on `NpgsqlDataSourceBuilder` and unreadable
+from the built object, so forking one would silently drop your authentication.
+
+Build a second data source yourself, configured exactly like the first, and pass it to the new
+overload:
+
+```csharp
+services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql(lockDataSource);
+});
+```
+
+Only `Application Name` needs to differ. `UsePostgreSql()` with no argument is unchanged, and is a
+separate overload rather than an optional parameter, so existing compiled call sites keep working.
+
+**SQL Server is unaffected** — `sp_reset_connection` is a single call, so there is no equivalent
+amplification to remove.
+
 ## 7.0.0
 
 *2026-09-19*

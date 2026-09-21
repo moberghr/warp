@@ -168,14 +168,23 @@ public static class PostgreSqlServiceConfiguration
     /// the shared pool and the seven-statement reset. See §2.16.
     /// </para>
     /// <para>
-    /// Operational note: two pools mean two <c>MaxPoolSize</c> ceilings against one server, so a host
-    /// sized right at its server's <c>max_connections</c> must account for the second pool — what was
-    /// one bound covering EF and the lock sessions together is now that bound twice. Active use should
-    /// be close to unchanged (the lock sessions moved rather than multiplied, and Medallion multiplexes
-    /// locks onto a shared connection), and <c>MinPoolSize</c> is pinned to 0 below so a host that
-    /// pre-warms its DbContext pool does not silently hold those idle connections twice over. The
-    /// ceiling is inherited rather than capped: nothing measured justifies a particular number, and an
-    /// invented one would be the wrong kind of constant to add.
+    /// <b>Operational note — peak connection use RISES, it does not merely re-divide.</b> Measured on
+    /// the contended mutex arm (8 groups, 16 workers): 30-31 peak backends on one pool, 46 on two, with
+    /// per-pool maxima of 30 for the DbContext pool and 17 for the lock pool (sampled independently, so
+    /// they need not sum to the overall peak). The DbContext pool's own peak does not
+    /// fall, because each pool now sizes to its own demand independently — a connector idle in one
+    /// cannot serve the other. So budget <c>peak(DbContext) + peak(locks)</c>, where the lock pool
+    /// tends toward the worker count on a concurrency-heavy workload: it sizes to concurrent lock
+    /// ATTEMPTS, not concurrent holds (17 here against only 8 holdable locks, because a rejected
+    /// attempt opens a connection too, and Medallion allocates a fresh shareable connection whenever
+    /// the multiplexed one cannot take an acquire instantly).
+    /// </para>
+    /// <para>
+    /// Two pools therefore mean two <c>MaxPoolSize</c> ceilings AND a higher floor. The ceiling is
+    /// inherited rather than capped — nothing measured justifies a particular number, and a cap set
+    /// too low blocks lock acquisition rather than degrading it — so a host near its server's
+    /// <c>max_connections</c> must raise it or lower <c>MaxPoolSize</c>, which applies to both pools.
+    /// <c>MinPoolSize</c> is pinned to 0 below so at least the IDLE cost is not paid twice.
     /// </para>
     /// </summary>
     internal static string ResolveLockConnectionString<TContext>(IServiceProvider sp)

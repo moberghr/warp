@@ -101,7 +101,18 @@ Size `default_pool_size` for that, or point Warp at a direct connection and leav
 
 On PostgreSQL, Warp gives the advisory-lock providers your DbContext's connection string with `Application Name` suffixed `:warp-locks`. That value is part of Npgsql's pool key, so the lock sessions live in their own client-side pool. Nothing about locking changes — advisory locks are database-scoped, so mutual exclusion is unaffected — but two things follow that matter operationally.
 
-**Connection ceilings double.** `MaxPoolSize` is per pool, so what was one bound covering EF and the lock sessions together is now that bound twice against the same server. Active connection use should be close to unchanged (the lock sessions moved rather than multiplied, and the lock library multiplexes several held locks onto one connection), and Warp pins `MinPoolSize = 0` on the lock pool so a host that pre-warms its DbContext pool does not hold those idle connections a second time. But a deployment sized right at its server's `max_connections` should account for the second pool.
+**Peak connection use rises — budget for it.** This is the one operational cost of the split, and it is not a re-division of the same connections. Measured on a contended mutex arm (8 groups, 16 workers, 10k jobs):
+
+| | peak backends |
+| --- | ---: |
+| one pool (before) | 30-31 |
+| two pools (after) | **46** |
+
+The DbContext pool's own peak does not fall. Each pool sizes to its own demand independently, and a connector sitting idle in one cannot serve the other, so the correct budget is `peak(DbContext) + peak(locks)` rather than `peak(both together)`.
+
+The lock pool tends toward your **worker count** on a concurrency-heavy workload, because it sizes to concurrent lock *attempts* rather than concurrent holds — 17 above, against only 8 locks that could be held at once, since a rejected attempt opens a connection too and the lock library allocates a fresh shareable connection whenever its multiplexed one cannot take an acquire instantly.
+
+So two pools mean two `MaxPoolSize` ceilings **and** a higher floor. Warp pins `MinPoolSize = 0` on the lock pool so the idle cost at least is not paid twice, but the ceiling is inherited rather than capped — a cap set too low blocks lock acquisition instead of degrading it, and nothing measured justifies a particular number. If you run near your server's `max_connections`, raise it or lower `MaxPoolSize` (which applies to both pools).
 
 **Lock sessions are labelled.** `SELECT application_name, count(*) FROM pg_stat_activity WHERE datname = current_database() GROUP BY 1` now separates Warp's lock sessions from its query traffic. If your own `Application Name` is long, Warp truncates your portion so the suffix survives Postgres's 63-byte `application_name` limit.
 
