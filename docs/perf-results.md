@@ -1027,3 +1027,106 @@ is explicitly on the host's `TContext` and its whole multi-application stance is
 `hot_standby_feedback` on a replica pins the horizon for the `job` table exactly as the aggregator did
 — and Warp cannot bound any of them. PA-01's value is therefore insurance against conditions Warp does
 not control, rather than a fix for one it creates.
+
+## Advisory-lock connection pool, and the PA-02 measurement it came out of (PostgreSQL, 2026-09-19)
+
+Two results from one investigation. The question asked was whether to enforce group serialization
+inside the claim predicate (skip a job whose `[Mutex]`/`[Semaphore]` group already has one in flight)
+instead of claiming it and having `ConcurrencyPipelineBehavior` requeue it. The answer was no — and
+the measurement taken to answer it found something else worth an order of magnitude more.
+
+### Method
+
+`Warp.ServerBenchmarks` `load` with the `mutex` / `semaphore` scenarios, run in a container on the
+same Docker network as Postgres — the Docker Desktop port-forward costs 11-15x in statement
+throughput and would swamp this entirely (see `src/benchmarks/Warp.ServerBenchmarks/Lab/README.md`).
+16 workers, 5 ms handler, fresh database per arm, medians of 3 runs.
+
+```bash
+docker run --rm --network warplab -v "<abs>/artifacts/lab-linux:/app" mcr.microsoft.com/dotnet/sdk:10.0 \
+  /app/Warp.ServerBenchmarks load --scenario=mutex --jobs=10000 --keys=8 \
+  --handler-ms=5 --workers=16 --repeats=3 --connection="..."
+```
+
+Churn is read from the durable `stats:requeued-concurrency` / `stats:deleted-concurrency` counters
+(§8.33), not from the `warp.job.requeued` meter — same signal, but a batch run reads it straight from
+the database with no exporter attached. `--keys` is scattered across the key set with a splitmix64
+finalizer rather than `index % keys`: round-robin assigns consecutive keys to consecutive rows and the
+claim hands rows out in `ScheduleTime` order, so every worker gets a different key and the arm measures
+*zero* contention however many workers run. That is an artifact of publish order, not a property of Warp.
+
+### 1. Claim-time group serialization (PA-02): measured, not built
+
+| groups vs 16 workers | rejected cycles/job | statements/job | share removable by a claim filter (DB time) |
+|---|---:|---:|---:|
+| 64 keys                | 0.05 | 52.97 | ~0-4% |
+| 8 keys                 | 0.73 | 80.77 | 15% |
+| 4 slots (semaphore)    | 1.18 | 97.73 | 32% |
+| 1 key                  | 5.05 | 289.82 | 78% |
+
+The churn is real — at one key, six claims and thirteen `JobLog` rows per job that actually ran — but
+only where **groups are fewer than workers**. The decisive number was the decomposition: a **fixed**
+33.5 statements/job paid on every concurrency-gated job even with zero contention, plus a **marginal**
+40-47 per rejected cycle. Only the marginal half is a claim filter's to take, so even at 8 keys it
+addressed under half the addon's cost — and the fixed half turned out not to be a design problem at
+all (below). Not built: it needs a `Job.ConcurrencyKey` column and index, a correlated subquery every
+job pays for in the claim (§0.2/§6.1), and publish-time stamping that re-opens the #236 shape that
+§8.8 deleted three behaviours to avoid. `[Mutex]` also defaults to `Skip`, which must be claimed in
+order to be deleted, so the filter could never apply to the default mode.
+
+### 2. The lock provider was sharing EF's Npgsql pool
+
+Npgsql resets a pooled connection with one `DISCARD ALL` — unless the connector carries prepared
+statements, in which case it must use a seven-statement sequence instead (`CLOSE ALL`, `UNLISTEN *`,
+`SELECT pg_advisory_unlock_all()`, `RESET ALL`, `DISCARD TEMP`, `DISCARD SEQUENCES`,
+`SET SESSION AUTHORIZATION DEFAULT`), because `DISCARD ALL` would deallocate them. Medallion prepares
+its advisory-lock statements and was handed the DbContext's connection string verbatim, so both shared
+one pool and *every EF connection in the process* paid the longer reset:
+
+| | baseline (no addon) | addon on, zero contention |
+|---|---:|---:|
+| `DISCARD ALL` | 15,651 (3.13/job) | **0** |
+| granular 7-statement reset | 1,092 (0.22/job) | **27,048 (5.41/job)** |
+
+5.41 x 7 = ~38 statements/job of pure connection hygiene. Fixed by suffixing `Application Name` with
+`:warp-locks` (part of Npgsql's pool key) — shipped in #302, §2.18.
+
+### Results — statements per job, before and after the pool split
+
+| arm | before | after | Δ |
+|---|---:|---:|---:|
+| baseline, no concurrency keys anywhere | 16.87 | 13.76 | **-18%** |
+| addon on, zero contention | 50.40 | 24.84 | **-51%** |
+| mutex, 8 keys | 80.77 | 35.75 | **-56%** |
+| semaphore, 4 slots | 97.73 | 40.91 | **-58%** |
+| mutex, 1 key | 289.82 | 111.84 | **-61%** |
+
+The baseline arm moves because the server tasks take advisory locks too — every deployment pays this,
+not only ones using `[Mutex]`/`[Semaphore]`.
+
+Isolated (`lockprobe`, one EF read + one acquire/release per iteration): 17.00 statements/iteration
+shared, **11.00** split. The `NpgsqlDataSource` path measures 17.00 and is deliberately not split
+(§2.18).
+
+### Throughput: unchanged
+
+Interleaved before/after, 5 alternating pairs per arm, fresh database each run:
+
+| arm | before | after | median Δ |
+|---|---:|---:|---:|
+| mutex, 8 keys       | 364 | 355 | -2.5% |
+| semaphore, 2x2      | 292 | 274 | -6.2% |
+| mutex, 1 key        |  96 |  99 | +3.1% |
+
+All inside the 7-20% within-arm spread, and the sign is inconsistent pair to pair. This is database
+load, not latency — the reset statements cost ~0.007 ms each.
+
+### What is not measured
+
+- **SQL Server.** `sp_reset_connection` is a single TDS token, so there is no equivalent amplification
+  to remove; the change is Postgres-only and no SQL Server arm was taken.
+- **Sub-2% throughput effects.** Five pairs against a 7-20% spread cannot resolve them. A longer soak
+  would be the instrument, not more repeats of a 30-second run.
+- **DB exec time.** Reported by the lab but unusable here: within-arm variation reached 12x (every
+  arm's first run is a cold-cache outlier), and one arm's median came in *below* the no-addon baseline,
+  which is not physical. Statement counts reproduce to <1% and are what every claim above rests on.
