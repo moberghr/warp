@@ -105,18 +105,18 @@ On PostgreSQL, Warp gives the advisory-lock providers your DbContext's connectio
 
 | | peak backends |
 | --- | ---: |
-| one pool (before) | 30-31 |
-| two pools (after) | **46** |
+| one pool (before) | 29-30 |
+| two pools (after) | **44-47** |
 
 The DbContext pool's own peak does not fall. Each pool sizes to its own demand independently, and a connector sitting idle in one cannot serve the other, so the correct budget is `peak(DbContext) + peak(locks)` rather than `peak(both together)`.
 
-The lock pool tends toward your **worker count** on a concurrency-heavy workload, because it sizes to concurrent lock *attempts* rather than concurrent holds — 17 above, against only 8 locks that could be held at once, since a rejected attempt opens a connection too and the lock library allocates a fresh shareable connection whenever its multiplexed one cannot take an acquire instantly.
+The lock pool tends toward your **worker count** on a concurrency-heavy workload, because it sizes to concurrent lock *attempts* rather than concurrent holds — 17 in both passes above with 16 workers, against only 8 locks that could be held at once, since a rejected attempt opens a connection too and the lock library allocates a fresh shareable connection whenever its multiplexed one cannot take an acquire instantly.
 
 So two pools mean two `MaxPoolSize` ceilings **and** a higher floor. Warp pins `MinPoolSize = 0` on the lock pool so the idle cost at least is not paid twice, but the ceiling is inherited rather than capped — a cap set too low blocks lock acquisition instead of degrading it, and nothing measured justifies a particular number. If you run near your server's `max_connections`, raise it or lower `MaxPoolSize` (which applies to both pools).
 
 **Lock sessions are labelled.** `SELECT application_name, count(*) FROM pg_stat_activity WHERE datname = current_database() GROUP BY 1` now separates Warp's lock sessions from its query traffic. If your own `Application Name` is long, Warp truncates your portion so the suffix survives Postgres's 63-byte `application_name` limit.
 
-Why it exists: Npgsql resets a pooled connection with a single `DISCARD ALL`, but a connector carrying prepared statements must instead be reset with a seven-statement sequence, because `DISCARD ALL` would deallocate them. The lock library prepares its advisory-lock statements, so when it shared a pool with EF its connectors flipped *every* connection in the process onto the longer reset. Measured on a concurrency-heavy workload: 50.4 statements per job before the split, 24.8 after — and 16.9 to 13.8 on a workload using no `[Mutex]` or `[Semaphore]` at all, since the server tasks take advisory locks too. Throughput is unchanged; this is database load, not latency.
+Why it exists: Npgsql resets a pooled connection with a single `DISCARD ALL`, but a connector carrying prepared statements must instead be reset with a seven-statement sequence, because `DISCARD ALL` would deallocate them. The lock library prepares its advisory-lock statements, so when it shared a pool with EF its connectors flipped *every* connection in the process onto the longer reset. Measured on a concurrency-heavy workload (`[Mutex]`, 8 groups, 16 workers): 84.3 statements per job before the split, 37.0 after — and 17.0 to 13.7 on a workload using no `[Mutex]` or `[Semaphore]` at all, since the server tasks take advisory locks too. Throughput is unchanged; this is database load, not latency.
 
 #### If you register an `NpgsqlDataSource`
 

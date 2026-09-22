@@ -201,8 +201,8 @@ internal sealed class CompletionBatch
     /// Attaches a finalized job and marks ONLY the columns finalization can change.
     /// <para>
     /// The job arrives on a fresh scope's context with no original values to diff against, so
-    /// <c>Entry(job).State = Modified</c> — what this replaces — marked all 22 mapped columns dirty and
-    /// EF emitted an UPDATE writing every one of them, fifty per flush transaction. That rewrote
+    /// <c>Entry(job).State = Modified</c> — what this replaces — marked every one of the 21 mapped columns
+    /// dirty and EF emitted an UPDATE writing all 20 non-key ones, fifty per flush transaction. That rewrote
     /// <c>Message</c> (the unbounded JSON payload) and twelve other columns that finalization never
     /// touches, on every completed job: WAL, TOAST and row-width cost paid for values identical to what
     /// was already stored.

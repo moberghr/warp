@@ -4,36 +4,88 @@ sidebar_position: 6
 
 # Releases
 
-## Unreleased
+## 7.1.0
 
-Another database-load release, on PostgreSQL only. A Warp server issues **substantially fewer
-statements per job**, and the reduction applies whether or not you use `[Mutex]` or `[Semaphore]` —
-because Warp's own server tasks take advisory locks too.
+*2026-09-25*
 
-**No schema change, no migration, no API break.** Statements per job, medians of three runs, 16
-workers, measured in-container against PostgreSQL:
+A second database-load release, PostgreSQL-first, with fixes for jobs a PostgreSQL claim could strand
+and for work that waited out a polling backoff, plus one new build warning worth knowing about before
+you upgrade.
+
+Three independent changes cut what a Warp server costs the database it shares with your application:
+the advisory-lock providers stop dragging every EF connection onto Npgsql's slow reset path, a
+batched completion stops rewriting columns it never touched, and the job claim stops depending on
+fresh planner statistics to find the right index. A fourth change bounds the statistics rollup so it
+cannot hold a long transaction open against a large backlog.
+
+The fixes are under [Fixed](#fixed). The one to read first: on PostgreSQL a job claim could take several
+jobs when the planner believed the job table empty, which happens after a queue drains, and the worker
+ran only one of them; the rest waited in Processing until stale-job recovery. On 7.0.0 a burst of 1,000
+scheduled jobs left 990 of them stranded that way.
+
+**No schema change, no migration, no API break.** Two things to check before upgrading, both covered
+below: **peak connection use rises** on PostgreSQL, and **`WARP003` is a new build warning** that a
+project building with `TreatWarningsAsErrors` will fail on.
+
+### What upgrading from 7.0.0 gives you
+
+Everything below, measured together rather than change by change — 7.0.0's runtime against this
+release on an identical harness, 16 workers, fresh database per run, medians of three runs:
+
+| workload | 7.0.0 | 7.1.0 | change |
+| --- | ---: | ---: | ---: |
+| ordinary jobs, no concurrency addon in use | 18.68 | 13.73 | **-26%** |
+| `[Mutex]`, a distinct key per job (nothing contending) | 51.09 | 25.17 | **-51%** |
+| `[Mutex]`, 8 groups | 78.17 | 37.36 | **-52%** |
+| `[Semaphore]`, 2 groups x 2 slots | 106.04 | 48.32 | **-54%** |
+| `[Mutex]`, 1 group | 326.42 | 144.05 | **-56%** |
+| dispatcher mode, 4 KB payloads | 15.22 | 9.86 | **-35%** |
+| dispatcher mode, 120,000 jobs | 17.85 | 9.86 | **-45%** |
+
+Statements per job — database *load*, not latency. **Throughput is unchanged**, and saying so honestly
+needs a word about the measurement: across these eight workloads the jobs/sec delta ranged from -30%
+to +37% with within-arm spreads reaching 56%, and the signs were inconsistent, so most of these arms
+cannot resolve a throughput difference at all. The one arm that measured stably — 120,000 jobs, 0.5%
+and 0.7% spread on the two sides — came out at **+1.1%**. Treat throughput as unchanged for a steady
+drain, and the statement counts as the result.
+
+The exception is work that arrives while a server is idle. Two of the fixes below remove a wait on the
+polling backoff: dispatcher mode now wakes on a job enqueued in its own process, and a released
+continuation is announced. On the benchmark each took about **10x** less time to drain 1,000 jobs, 48 to
+roughly 500 jobs/sec, and the gain is anywhere a queue empties and then refills.
+
+### Advisory locks get their own Npgsql connection pool
+
+A Warp server issues **substantially fewer statements per job**, and the reduction applies whether or
+not you use `[Mutex]` or `[Semaphore]` — because Warp's own server tasks take advisory locks too.
+
+How much of the table above is this change alone: the same build with only the pool split reverted,
+10,000 jobs, 16 workers, 5 ms handler on the concurrency arms, medians of three runs in each of two
+interleaved passes, in-container against PostgreSQL 18:
 
 | workload | before | after | change |
 | --- | ---: | ---: | ---: |
-| ordinary jobs, no concurrency addon in use | 16.87 | 13.76 | **-18%** |
-| concurrency addon registered, nothing contending | 50.40 | 24.84 | **-51%** |
-| `[Mutex]`, 8 groups / 16 workers | 80.77 | 35.75 | **-56%** |
-| `[Semaphore]`, 4 slots / 16 workers | 97.73 | 40.91 | **-58%** |
-| `[Mutex]`, 1 group / 16 workers | 289.82 | 111.84 | **-61%** |
+| ordinary jobs, no concurrency addon in use | 17.00 | 13.71 | **-19%** |
+| `[Mutex]`, a distinct key per job (nothing contending) | 51.18 | 25.10 | **-51%** |
+| `[Mutex]`, 8 groups / 16 workers | 84.28 | 37.00 | **-56%** |
+| `[Semaphore]`, 2 groups x 2 slots / 16 workers | 114.09 | 49.49 | **-57%** |
+| `[Mutex]`, 1 group / 16 workers | 379.88 | 181.10 | **-52%** |
 
-**Throughput is unchanged** — verified with before/after arms interleaved in alternating pairs, where
-every delta fell inside the 7-20% run-to-run spread and the sign was inconsistent. This is load on
-the database, not latency: the statements removed were cheap ones, and they were batched rather than
-separate round trips.
+Nearly all of it, in other words — this one change is most of the release's reduction. Statement
+counts reproduce closely: the spread within an invocation was 0.1-2.7%, and the two passes agreed to
+within 5% on every arm. The per-job *timings* do not reproduce (spreads to 44%) and are not quoted.
+The statements removed were cheap ones and were batched rather than separate round trips, which is why
+this is load rather than latency.
 
-### What was happening
+#### What was happening
 
 Npgsql resets a pooled connection with a single `DISCARD ALL` — unless that connector carries
 **prepared statements**, in which case it has to use a seven-statement sequence instead, because
 `DISCARD ALL` would deallocate them. Warp's advisory-lock library prepares its lock statements, and
 it was handed the same connection string as your `DbContext`, so the two shared one Npgsql pool. Its
 prepared connectors flipped *every* connection in the process onto the longer reset, and `DISCARD ALL`
-disappeared from the trace entirely — about 38 statements per job spent on connection hygiene.
+disappeared from the trace entirely — measured at 5.32 granular resets per job, seven statements each,
+so about 37 statements per job spent on connection hygiene.
 
 The lock providers now get your connection string with `Application Name` suffixed `:warp-locks`.
 That value is part of Npgsql's pool key, so the lock sessions live in their own pool and ordinary
@@ -45,12 +97,13 @@ A side benefit in `pg_stat_activity` — lock sessions are now labelled, so
 separates them from query traffic. If your own `Application Name` is long, Warp truncates its portion
 so the suffix survives Postgres's 63-byte limit.
 
-### The cost: peak connection use rises
+#### The cost: peak connection use rises
 
 Two pools mean two `MaxPoolSize` ceilings **and** a higher floor, and this is the one thing to check
 before upgrading if you run near your server's `max_connections`. On the contended mutex arm above,
-peak concurrent backends went from **30-31 to 46**, with per-pool maxima of 30 for the `DbContext`
-pool and 17 for the lock pool.
+sampling `pg_stat_activity` every 500 ms across two interleaved passes, peak concurrent backends went
+from **29-30 to 44-47** — per-pool maxima of 27-30 for the `DbContext` pool and **17 in both passes**
+for the lock pool.
 
 The `DbContext` pool's own peak does not fall. Each pool sizes to its own demand independently, and a
 connector idle in one cannot serve the other, so budget `peak(DbContext) + peak(locks)` rather than
@@ -62,7 +115,7 @@ is inherited rather than capped — a cap set too low blocks lock acquisition in
 so if you are close to the limit, raise `max_connections` or lower `MaxPoolSize`, which applies to
 both pools.
 
-### If you register an `NpgsqlDataSource`
+#### If you register an `NpgsqlDataSource`
 
 Hosts that register the `DbContext` with an `NpgsqlDataSource` — Aspire, Managed Identity, client
 certificates — keep the shared pool and the longer reset, and so get neither the statement reduction
@@ -85,6 +138,156 @@ separate overload rather than an optional parameter, so existing compiled call s
 
 **SQL Server is unaffected** — `sp_reset_connection` is a single call, so there is no equivalent
 amplification to remove.
+
+### Completing a job no longer rewrites the whole row
+
+Dispatcher mode only (`UseDispatcher = true`), and nothing to configure.
+
+A batched completion arrives on a fresh scope's `DbContext` with no original values to diff against,
+so EF was told the whole entity was modified and wrote **every one of the 20 non-key columns** —
+fifty jobs per flush transaction, each rewriting `Message` (the unbounded JSON payload) and eleven
+other columns finalization never touches. The flush now marks only the columns finalization
+actually assigns.
+
+Measured with 4 KB payloads, dispatcher mode, 30,000 jobs, three interleaved before/after passes of
+two runs each:
+
+| | before | after | change |
+| --- | ---: | ---: | ---: |
+| DB ms/job | 0.549 | 0.455 | **-17%** |
+| completion `UPDATE`, execution time | 5,555 ms | 2,233 ms | **-60%** |
+| completion `UPDATE`, blocks read | 1,253,774 | 687,511 | **-45%** |
+
+Every pass moved the same way, and the `UPDATE`'s own before and after ranges do not overlap. The
+statement is visible in `pg_stat_statements` from its first assignment: `SET application = $1, …`
+before, `SET cancellation_mode = $1, …` after — `application` being simply the first column
+finalization does not touch.
+
+Throughput is unchanged, as expected — this is database cost, not jobs/sec. Single-worker mode was
+never affected: it tracks the entity and already wrote only what changed.
+
+**The benefit scales with payload size, and at a zero-length payload there is none.** That is the
+control worth running, because it is what tells you the gain is the payload column and not something
+else — the same workload against 7.0.0, varying only the payload:
+
+| payload | 7.0.0 | 7.1.0 | change |
+| --- | ---: | ---: | ---: |
+| 4 KB | 0.530 | 0.445 | **-16%** |
+| 0 B | 0.422 | 0.417 | -1% (noise) |
+
+So a deployment publishing large job payloads gains the most, and one publishing tiny ones gains
+nothing here — though it still gets the connection-pool reduction above, which is payload-independent.
+
+### The claim no longer depends on fresh planner statistics
+
+The worker's claim filtered `queue = ANY(@queues)`. That returns the same rows as a scalar equality,
+but it stops using the claim index the moment PostgreSQL's row estimate goes stale — which is exactly
+what a queue swinging from empty to full between autovacuum ticks does to it. With 54,000 claimable
+rows in a 300,000-row table and stale statistics:
+
+| predicate | plan | buffers | time |
+| --- | --- | ---: | ---: |
+| `queue = ANY(array)` | Sort (external merge, 2,584 kB to disk) over the wrong index, `queue` demoted to a Filter | 5,139 + 584 temp | 44.6 ms |
+| `queue = <scalar>` | Index Cond on `(Kind, CurrentState, Queue, ScheduleTime)`, no Sort | **26** | **0.062 ms** |
+
+720x faster on 198x fewer buffers, and `LIMIT 1` — single-worker mode — is hit just as hard (42.1 ms),
+so this is not a dispatcher-only problem.
+
+Both spellings estimate one row there. The scalar one does not need that estimate to be right: with
+`queue` fixed, the claim index supplies the ordering for free, so there is no Sort and `LIMIT` stops
+at the first rows. A Sort has to consume its entire input before it can emit anything, which is why
+`LIMIT` bought nothing and the claim read the whole enqueued range to return a single job.
+
+It is not parameter opacity — a literal `ANY(ARRAY[...])` measures 40.8 ms and `IN (...)` 40.2 ms, both as bad as the parameterised form.
+Running `ANALYZE` also fixes it, which is why it can look like a statistics problem; but that is a
+race against your own backlog, and the scalar form removes the race instead of running it.
+
+**How often does this actually happen?** Often enough to matter. Run through the real worker at
+120,000 jobs — published up front, then drained, which is what produces a standing backlog — the old
+predicate took the bad plan in **two of six runs**, and the new one in none of twelve:
+
+| | runs on the bad plan | claim blocks read | throughput |
+| --- | ---: | ---: | ---: |
+| `queue = ANY(array)`, good runs | — | 6.9 M | 1,138-1,200 jobs/sec |
+| `queue = ANY(array)`, bad runs | 2 of 6 | **78-85 M** | **905-913 jobs/sec** |
+| `queue = <scalar>` | 0 of 6 | 6.5-7.1 M | 1,179-1,254 jobs/sec |
+
+When the plan flips, the claim reads **twelve times the blocks** and throughput falls 22-24%. The
+two arms have similar medians, so a median-to-median comparison makes this change look like nothing;
+the distribution is the result. The old predicate is bimodal and the new one is not.
+
+A worker subscribed to several queues now issues **one claim statement per queue**, spending its
+budget down queue by queue. One queue — the overwhelmingly common case — still issues exactly one
+statement, and the loop costs nothing measurable in steady state: statements per job came out within
+noise of the old form across the same runs. Three consequences are deliberate:
+
+- **Queue priority still starves.** Draining the first queue completely before looking at the next is
+  what the old `ORDER BY Queue, ScheduleTime` did, and the loop reproduces it rather than fixing it.
+  The default worker group binds `{DefaultQueue, "warp:webhooks"}`, so webhook deliveries already
+  waited for the default queue to drain. Give a queue its own worker group if it must not be starved.
+- **Queue ordering is now ordinal**, where it used to follow the `queue` column's database collation.
+  For ASCII queue names — everything Warp itself produces — the two agree. A deployment using queue
+  names that collate differently from ordinal would see the relative priority of two queues change.
+- **Each statement is its own implicit transaction**, where one statement was atomic across every
+  queue. Nothing depends on cross-queue atomicity, and a failure partway through leaves claimed rows
+  `Processing` with no worker running them — the crash-mid-claim case `StaleJobRecovery` already
+  repairs.
+
+SQL Server keeps the identical shape so the two providers cannot drift, but its plans are unmeasured.
+
+**What to expect.** On a queue that never develops a backlog, nothing: the plans are identical and
+the claim costs what it always did. The change is worth having because the bad plan is not exotic — it
+needs only a queue that fills faster than autovacuum re-analyzes it, which is the ordinary shape of a
+burst — and because the same signature is already in the incident record, where a claim went from
+3.3 ms to 253 ms and throughput collapsed from 567 to 27 jobs/sec while the queue was still draining.
+Stale statistics and a standing backlog travel together: whatever holds the vacuum horizon open also
+holds back the `ANALYZE` that would repair the estimate.
+
+### The statistics rollup is bounded per tick
+
+`StatisticRollup` was the last unbounded drain running inside a server task's lock transaction. It now
+rolls at most **20,000 source rows per tick**, shared across both of its passes, and re-runs
+back-to-back while a backlog remains.
+
+The scan was never the problem — reading a 500,000-row `Statistic` table costs 43 ms. The write is:
+
+| one tick deletes | time | buffers |
+| --- | ---: | ---: |
+| 300,000 keys (uncapped) | **3,472 ms** | 317,259 |
+| 20,000 keys (the cap) | **462 ms** | 34,727 |
+
+Seconds rather than the 51 minutes the counter aggregator once managed, so this was a latent risk
+rather than an incident in waiting — but an open transaction pins the vacuum horizon, and the `job`
+table takes two non-HOT updates per job, so nothing it orphans can be reclaimed for as long as the
+pass runs. The cap turns the worst tick from a multi-second transaction into a sub-second one.
+
+The tick most likely to reach the cap is the **first one after upgrading to 3.10 or later**, when
+every legacy hourly key rolls to daily at once. Nothing is dropped by deferring: a fine bucket held
+back by the cap whose hourly parent was rolled away in the same tick re-creates that hourly bucket
+next tick and rolls on the one after, preserving the summed value.
+
+### New build warning: a contract that nothing handles (`WARP003`)
+
+Every `IJob` and `IMessage` needs a handler, and forgetting one is not a publish-time failure — the
+row is created, and a worker fails it later with `No handler registered for X`. The source generator
+already knows every contract and every handler beside it, so it now reports the gap at build time.
+
+**It is a warning, and a project building with `TreatWarningsAsErrors` will fail on it.** Suppress a
+deliberate case at the declaration:
+
+```csharp
+#pragma warning disable WARP003 // handled by the billing worker, which references this assembly
+public class SettleInvoice : IJob { public int InvoiceId { get; set; } }
+#pragma warning restore WARP003
+```
+
+The exemptions are the design. A compilation cannot see an assembly that references it, so a project
+declaring **no** job or message handler at all is treated as a contracts project and is skipped
+wholesale — the shared-contract layout stays silent. Messages handled through a saga
+(`ISagaHandler<TSaga, TMessage>`) count as handled, as do self-handling jobs; open generics and
+contracts that arrived from a referenced assembly are never reported. Unhandled `IRequest<T>` and
+`IStreamRequest<T>` are deliberately out of scope — they throw on the calling thread at `Send` /
+`CreateStream`, where they are already obvious.
 
 ### Fixed
 
