@@ -20,7 +20,7 @@ Profiled on 2026-04-15. Measures memory allocation, retention, and leak behavior
 Benchmarks live in `src/benchmarks/Warp.ServerBenchmarks/`. Three types of measurements:
 
 - **BenchmarkDotNet benchmarks** (`[MemoryDiagnoser]`) — per-operation allocation tracking
-- **Custom TotalAllocatedDiagnoser** — tracks `GC.GetTotalAllocatedBytes()` across all threads (workers + background tasks)
+- **`MemoryDiagnoser`** — its `Allocated` column is process-wide, covering the worker and background-task threads, not only the thread BenchmarkDotNet invokes. `AllocationAttributionBenchmark` is the check that this holds: it allocates the same amount on the benchmark thread and on another, and the two rows must agree.
 - **Stress test** — standalone test that runs N rounds of jobs, measuring heap retention after each round via `GC.GetTotalMemory()` with aggressive collection
 
 ### How to run
@@ -66,7 +66,7 @@ Calls `GetAndProcessJob()` directly on the benchmark thread — isolates a singl
 
 ### 3. Full Server (5 workers, all background tasks)
 
-Boots a real server with 5 workers + all 9 background tasks against a PostgreSQL Testcontainer. `Total Allocated` tracks allocations across ALL threads.
+Boots a real server with 5 workers + the background tasks against PostgreSQL. `Allocated` is process-wide, so it includes those threads.
 
 | Method | JobCount | Mean | Total Allocated (all threads) | Per-Job |
 |--------|----------|------|-------------------------------|---------|
