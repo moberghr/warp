@@ -1,0 +1,191 @@
+name: Performance
+
+# Compares THIS pull request against its merge base, both measured on the SAME runner in the SAME
+# job, interleaved. Never against a stored historical number: that comparison measures the runners.
+#
+# What is gated and what is not is a measurement question, not a policy preference — see
+# docs/plans/2026-09-22-performance-ci.md. Short version: counts are gated because they reproduce to
+# a few percent; server-arm timings are reported because their measured spread reached 417%.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/core/**'
+      - 'src/benchmarks/**'
+      - '.github/workflows/perf.yml'
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '10.0'
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # Tier A — microbenchmarks. Microseconds per iteration, so the sample size needed to resolve a few
+  # percent is free. Allocations AND time are both gated here; BenchmarkDotNet's own statistical test
+  # decides significance, so a noisy runner widens the interval and declines to call it rather than
+  # producing a flaky red build.
+  # ---------------------------------------------------------------------------------------------
+  microbenchmarks:
+    name: Microbenchmarks (alloc + time)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run BenchmarkDotNet against the merge base
+        working-directory: src/benchmarks/Warp.Benchmarks
+        run: |
+          dotnet run -c Release -- \
+            --filter '*' \
+            --memory \
+            --statisticalTest 5% \
+            --exporters json \
+            --artifacts "${{ github.workspace }}/perf-artifacts"
+
+      - name: Fail on a multimodal distribution
+        run: |
+          # A multimodal benchmark means the median is not describing the behaviour. This is the
+          # check that would have caught the bimodal claim plan found by hand during 7.1.0.
+          if grep -rqi "multimodal" "${{ github.workspace }}/perf-artifacts"; then
+            echo "::error::BenchmarkDotNet reported a multimodal distribution — the median is not a"
+            echo "::error::valid summary here. Investigate before reading any comparison."
+            grep -ri "multimodal" "${{ github.workspace }}/perf-artifacts" || true
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: microbenchmark-results
+          path: ${{ github.workspace }}/perf-artifacts
+
+  # ---------------------------------------------------------------------------------------------
+  # Tier B — the server arms. This is the tier that measures what the release notes claim.
+  # ---------------------------------------------------------------------------------------------
+  server-counters:
+    name: Server counters (${{ matrix.arm.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arm:
+          - name: baseline
+            args: --scenario=jobs --jobs=10000 --workers=16
+          - name: mutex-8
+            args: --scenario=mutex --keys=8 --handler-ms=5 --jobs=10000 --workers=16
+          - name: dispatcher-4kb
+            args: --scenario=jobs --jobs=10000 --workers=16 --dispatcher --payload=4096
+
+    services:
+      postgres:
+        # Pinned by digest: an image that moves under the comparison invalidates it silently.
+        image: postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db  # postgres:18.3
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup Node.js (Warp.Dashboard npm build)
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: src/ui/package-lock.json
+
+      # The base build is TODAY's harness with the merge base's RUNTIME files. Building the lab from
+      # the base commit itself would compare two different measuring instruments — during the 7.1.0
+      # revalidation the 7.0.0 tag could not even run most arms, because the scenarios and --warmup
+      # were added after it.
+      - name: Build head lab
+        run: |
+          dotnet publish src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj \
+            -c Release -o "$RUNNER_TEMP/lab-head"
+
+      - name: Build base lab (merge-base runtime, current harness)
+        id: basebuild
+        continue-on-error: true
+        run: |
+          BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          git checkout "$BASE" -- src/core
+          dotnet publish src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj \
+            -c Release -o "$RUNNER_TEMP/lab-base"
+          git checkout HEAD -- src/core
+
+      # If the harness uses an API this PR introduced, the swap cannot compile. That is a legitimate
+      # outcome, not a broken workflow — say so clearly instead of failing with a compiler error.
+      - name: Explain an incompatible base
+        if: steps.basebuild.outcome == 'failure'
+        run: |
+          echo "::warning::The current harness does not compile against the merge base's src/core,"
+          echo "::warning::so no comparison is possible for this PR. This happens when the PR adds an"
+          echo "::warning::API the benchmark uses. Compare against a published package version instead."
+          echo "### Performance: comparison skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The benchmark harness does not compile against the merge base." >> "$GITHUB_STEP_SUMMARY"
+
+      # Interleaved A/B/A/B, fresh database per run. Interleaving is what cancels drift within the
+      # job — a noisy neighbour arriving mid-run biases a whole block of iterations rather than
+      # scattering them, which is the one component averaging cannot remove.
+      - name: Run interleaved arms
+        if: steps.basebuild.outcome == 'success'
+        env:
+          CONN: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=warplab"
+        run: |
+          set -e
+          reset_db () {
+            PGPASSWORD=postgres psql -h localhost -U postgres -q \
+              -c "DROP DATABASE IF EXISTS warplab" -c "CREATE DATABASE warplab"
+          }
+          for pass in 1 2; do
+            for build in head base; do
+              reset_db
+              "$RUNNER_TEMP/lab-$build/Warp.ServerBenchmarks" load ${{ matrix.arm.args }} \
+                --repeats=3 --warmup=1 \
+                --json="$RUNNER_TEMP/${{ matrix.arm.name }}.$build.p$pass.json" \
+                --connection="$CONN"
+            done
+          done
+
+      - name: Compare
+        if: steps.basebuild.outcome == 'success'
+        run: |
+          "$RUNNER_TEMP/lab-head/Warp.ServerBenchmarks" compare \
+            --base="$RUNNER_TEMP/${{ matrix.arm.name }}.base.p2.json" \
+            --head="$RUNNER_TEMP/${{ matrix.arm.name }}.head.p2.json" \
+            --label="${{ matrix.arm.name }}" \
+            --summary="$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: server-counters-${{ matrix.arm.name }}
+          path: ${{ runner.temp }}/*.json

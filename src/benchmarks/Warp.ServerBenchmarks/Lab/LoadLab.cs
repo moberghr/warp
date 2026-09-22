@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -54,6 +55,11 @@ public enum LoadScenario
 /// </summary>
 public sealed record ChurnCounts(long Succeeded, long Deleted, long Requeued, long RequeuedConcurrency, long DeletedConcurrency);
 
+/// <summary>The arm's full shape, recorded beside its results so a stored measurement can be matched to the run that produced it.</summary>
+public sealed record ArmParameters(
+    int Jobs, int Workers, bool Dispatcher, int PayloadBytes, int Repeats, int Warmup,
+    int ConcurrencyKeys, int ConcurrencyLimit, string ConcurrencyMode, int HandlerMs);
+
 /// <summary>The concurrency arm's shape: how many groups, how wide each is, what happens to the surplus, and how long a group stays busy.</summary>
 public sealed record ConcurrencyShape(int Keys, int Limit, ConcurrencyMode Mode, int HandlerMs);
 
@@ -80,7 +86,8 @@ public static class LoadLab
         int concurrencyLimit = 1,
         ConcurrencyMode concurrencyMode = ConcurrencyMode.Wait,
         int handlerMs = 0,
-        int warmupRuns = 0)
+        int warmupRuns = 0,
+        string? jsonPath = null)
     {
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
@@ -253,6 +260,25 @@ public static class LoadLab
             if (repeats > 1)
             {
                 ReportSpread(samples);
+            }
+
+            if (jsonPath is not null)
+            {
+                WriteJson(
+                    jsonPath,
+                    scenario,
+                    samples,
+                    new ArmParameters(
+                        jobs,
+                        workers,
+                        useDispatcher,
+                        payloadBytes,
+                        repeats,
+                        warmupRuns,
+                        concurrencyKeys,
+                        concurrencyLimit,
+                        concurrencyMode.ToString(),
+                        handlerMs));
             }
 
             if (!sqlServer)
@@ -524,6 +550,67 @@ public static class LoadLab
 
             Console.WriteLine();
         }
+    }
+
+    /// <summary>
+    /// Writes the arm's medians in a machine-readable form for CI comparison.
+    /// <para>
+    /// Deliberately carries the SPREAD beside every median, not just the median: a comparator that
+    /// cannot see the spread will happily report a 3% "regression" that sits inside a 20% band. The
+    /// consuming side is expected to refuse to judge a metric whose spread exceeds the difference.
+    /// </para>
+    /// <para>
+    /// Also carries the arm's full parameters, so a stored result can be matched against the arm that
+    /// produced it. Two JSON files from differently-shaped arms are not comparable and the comparator
+    /// checks this rather than trusting the filename.
+    /// </para>
+    /// </summary>
+    private static void WriteJson(
+        string path,
+        LoadScenario scenario,
+        List<(double Seconds, double DbMs, long Statements, int Processed)> samples,
+        ArmParameters parameters)
+    {
+        if (samples.Count == 0)
+        {
+            return;
+        }
+
+        var payload = new ArmResult(
+            scenario.ToString(),
+            parameters,
+            samples.Count,
+            new Dictionary<string, MetricSummary>(StringComparer.Ordinal)
+            {
+                ["jobs_per_sec"] = Summarise([.. samples.Select(x => x.Processed > 0 ? x.Processed / x.Seconds : 0)]),
+                ["db_ms_per_job"] = Summarise([.. samples.Select(x => x.Processed > 0 ? x.DbMs / x.Processed : x.DbMs)]),
+                ["statements_per_job"] = Summarise([.. samples.Select(x => x.Processed > 0 ? x.Statements / (double)x.Processed : x.Statements)]),
+                ["wall_seconds"] = Summarise([.. samples.Select(x => x.Seconds)]),
+            });
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        File.WriteAllText(path, JsonSerializer.Serialize(payload, PerfCompare.SerializerOptions));
+        Console.WriteLine($"wrote {path}");
+        Console.WriteLine();
+    }
+
+    private static MetricSummary Summarise(double[] values)
+    {
+        Array.Sort(values);
+
+        var median = values.Length % 2 == 1
+            ? values[values.Length / 2]
+            : (values[(values.Length / 2) - 1] + values[values.Length / 2]) / 2;
+
+        var min = values[0];
+        var max = values[^1];
+
+        return new MetricSummary(median, min, max, Math.Abs(median) < double.Epsilon ? 0 : (max - min) / median * 100);
     }
 
     /// <summary>

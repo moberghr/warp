@@ -240,6 +240,35 @@ else if (args.Length > 0 && string.Equals(args[0], "lockprobe", StringComparison
     await LockProbe.RunAsync(
         probeIterations, probeMaxCount, probeSeparatePool, probeDataSource, probeRawLock, probeHeld, probeConcurrency, probeKeys, probeHoldMs, probeConnection);
 }
+else if (args.Length > 0 && string.Equals(args[0], "compare", StringComparison.OrdinalIgnoreCase))
+{
+    var comparePath = string.Empty;
+    var headPath = string.Empty;
+    string? compareLabel = null;
+    string? summaryPath = null;
+
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (args[i].StartsWith("--base=", StringComparison.OrdinalIgnoreCase))
+        {
+            comparePath = args[i]["--base=".Length..];
+        }
+        else if (args[i].StartsWith("--head=", StringComparison.OrdinalIgnoreCase))
+        {
+            headPath = args[i]["--head=".Length..];
+        }
+        else if (args[i].StartsWith("--label=", StringComparison.OrdinalIgnoreCase))
+        {
+            compareLabel = args[i]["--label=".Length..];
+        }
+        else if (args[i].StartsWith("--summary=", StringComparison.OrdinalIgnoreCase))
+        {
+            summaryPath = args[i]["--summary=".Length..];
+        }
+    }
+
+    Environment.ExitCode = PerfCompare.Run(comparePath, headPath, compareLabel, summaryPath);
+}
 else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.OrdinalIgnoreCase))
 {
     var scenario = LoadScenario.Jobs;
@@ -253,6 +282,7 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
     var tune = "none";
     var repeats = 1;
     var warmup = 0;
+    string? jsonPath = null;
     var types = 1;
     var arrival = 0;
     var sqlServer = false;
@@ -314,6 +344,10 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
         {
             repeats = int.Parse(args[i]["--repeats=".Length..]);
         }
+        else if (args[i].StartsWith("--json=", StringComparison.OrdinalIgnoreCase))
+        {
+            jsonPath = args[i]["--json=".Length..];
+        }
         else if (args[i].StartsWith("--warmup=", StringComparison.OrdinalIgnoreCase))
         {
             warmup = int.Parse(args[i]["--warmup=".Length..]);
@@ -353,7 +387,7 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
     }
 
     await LoadLab.RunAsync(
-        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs, warmup);
+        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs, warmup, jsonPath);
 }
 else
 {
