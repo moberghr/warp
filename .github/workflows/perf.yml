@@ -76,6 +76,10 @@ jobs:
             filter: '*FailurePathBenchmark*'
           - name: publish
             filter: '*PublishBenchmark*'
+          - name: message-routing
+            filter: '*MessageRoutingBenchmark*'
+          - name: scheduled-activation
+            filter: '*ScheduledActivationBenchmark*'
     env:
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
     steps:
