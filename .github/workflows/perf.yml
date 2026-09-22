@@ -46,7 +46,13 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   benchmarks:
     name: Benchmarks (${{ matrix.benchmark.name }})
-    runs-on: ubuntu-latest
+
+    # Pinned, not ubuntu-latest. This workflow measures, and the latest label migrates to Ubuntu 26 in
+    # October 2026 - a change of CPU, kernel and Docker underneath the numbers. Gating survives it
+    # regardless, since base and head run on the same image inside one job, but absolute figures stay
+    # comparable across runs only while the image is fixed. Bump it deliberately, and expect the
+    # absolute numbers to step when you do.
+    runs-on: ubuntu-24.04
 
     # One job per benchmark. BenchmarkDotNet is sequential within a process, so running all four in one
     # job took 69 minutes against the lab's 12 - and a migration that trades a twelve-minute gate for a
@@ -179,7 +185,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: benchmark-results-${{ matrix.benchmark.name }}
@@ -197,7 +203,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   server-counters:
     name: Server counters (${{ matrix.arm.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -316,7 +322,7 @@ jobs:
             --label="${{ matrix.arm.name }}" \
             --summary="$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: server-counters-${{ matrix.arm.name }}
