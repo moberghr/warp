@@ -8,6 +8,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Provider.PostgreSql;
 using Warp.Worker;
 
 namespace Warp.ServerBenchmarks.Infrastructure;
@@ -50,6 +51,11 @@ public class PostgresServerFixture : IAsyncDisposable
 
                 services.AddWarpServer<TestContext>(config =>
                 {
+                    // Registers IWarpLockProvider and IWarpSqlQueries. Without it ServerTaskHost
+                    // cannot be activated, every benchmark using this fixture reports NA, and the
+                    // failure is quiet - BenchmarkDotNet prints a table of NA rather than failing.
+                    config.UsePostgreSql();
+
                     config.WorkerCount = workerCount;
                     config.Queues = ["default"];
                     config.PollingInterval = TimeSpan.FromMilliseconds(100);
