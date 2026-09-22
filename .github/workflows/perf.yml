@@ -15,6 +15,15 @@ on:
       - 'src/benchmarks/**'
       - '.github/workflows/perf.yml'
   workflow_dispatch:
+    inputs:
+      base_ref:
+        description: 'Baseline commit, tag or branch (default: the merge base)'
+        required: false
+        type: string
+      head_ref:
+        description: 'Commit, tag or branch to measure (default: this branch)'
+        required: false
+        type: string
 
 env:
   DOTNET_VERSION: '10.0'
@@ -74,19 +83,54 @@ jobs:
           docker logs warpbench
           exit 1
 
-      - name: Run benchmarks on this PR
+      # Only src/core is ever swapped, so the HARNESS is identical on both sides and the two numbers
+      # differ by the library alone. That is what makes an arbitrary pair comparable: building each
+      # side from its own commit would compare two instruments as much as two libraries, and the 7.0.0
+      # tag cannot run these benchmarks at all — the scenarios and --warmup postdate it.
+      - name: Resolve the two commits under comparison
+        id: refs
         run: |
+          if [ -n "${{ inputs.head_ref }}" ]; then
+            HEAD_SHA=$(git rev-parse "${{ inputs.head_ref }}^{commit}")
+          else
+            HEAD_SHA=$(git rev-parse HEAD)
+          fi
+
+          if [ -n "${{ inputs.base_ref }}" ]; then
+            BASE_SHA=$(git rev-parse "${{ inputs.base_ref }}^{commit}")
+          elif [ -n "${{ github.base_ref }}" ]; then
+            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          else
+            BASE_SHA=$(git merge-base origin/main HEAD)
+          fi
+
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Comparing"
+            echo
+            echo "| side | commit | subject |"
+            echo "| --- | --- | --- |"
+            echo "| head | \`$(git rev-parse --short "$HEAD_SHA")\` | $(git log -1 --format=%s "$HEAD_SHA") |"
+            echo "| base | \`$(git rev-parse --short "$BASE_SHA")\` | $(git log -1 --format=%s "$BASE_SHA") |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run benchmarks on the head commit
+        run: |
+          git checkout ${{ steps.refs.outputs.head }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             --filter '*DispatcherModeBenchmark*' '*CompletionBatchBenchmark*' '*PayloadSizeBenchmark*' '*ConcurrencyBenchmark*' \
             --exporters json \
             --artifacts "${{ github.workspace }}/bench/head"
+          git checkout HEAD -- src/core
 
-      - name: Run benchmarks against the merge base
+      - name: Run benchmarks on the base commit
         id: basebench
         continue-on-error: true
         run: |
-          BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
-          git checkout "$BASE" -- src/core
+          git checkout ${{ steps.refs.outputs.base }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             --filter '*DispatcherModeBenchmark*' '*CompletionBatchBenchmark*' '*PayloadSizeBenchmark*' '*ConcurrencyBenchmark*' \
             --exporters json \
