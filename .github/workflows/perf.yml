@@ -25,87 +25,14 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------------------------
-  # Tier A — microbenchmarks. Gates ALLOCATIONS across versions, which needs no interleaving and no
-  # statistical test: bytes-per-operation is deterministic, so two numbers taken in separate processes
-  # compare directly. Mean time is shown beside them and not gated — cross-version TIME here wants
-  # BDN's own multi-version job (`Job.WithNuGet`), which needs a package reference rather than the
-  # project reference this benchmark uses. The in-run `--statisticalTest` compares each class against
-  # its own `[Benchmark(Baseline = true)]`, which is MediatR-vs-Warp, not head-vs-base.
-  # ---------------------------------------------------------------------------------------------
-  microbenchmarks:
-    name: Microbenchmarks (allocations)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      - name: Run BenchmarkDotNet on this PR
-        working-directory: src/benchmarks/Warp.Benchmarks
-        run: |
-          dotnet run -c Release -- \
-            --filter '*' \
-            --memory \
-            --statisticalTest 5% \
-            --exporters json \
-            --artifacts "${{ github.workspace }}/perf-artifacts/head"
-
-      # Same merge-base swap Tier B uses: today's benchmark code against the base's runtime, so the
-      # two runs measure the same benchmarks and differ only in the library under them.
-      - name: Run BenchmarkDotNet against the merge base
-        id: basebench
-        continue-on-error: true
-        run: |
-          BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
-          git checkout "$BASE" -- src/core
-          dotnet run -c Release --project src/benchmarks/Warp.Benchmarks/Warp.Benchmarks.csproj -- \
-            --filter '*' \
-            --memory \
-            --exporters json \
-            --artifacts "${{ github.workspace }}/perf-artifacts/base"
-          git checkout HEAD -- src/core
-
-      - name: Compare allocations
-        if: steps.basebench.outcome == 'success'
-        run: |
-          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
-            compare-bdn \
-            --base="${{ github.workspace }}/perf-artifacts/base" \
-            --head="${{ github.workspace }}/perf-artifacts/head" \
-            --tolerance=2 \
-            --summary="$GITHUB_STEP_SUMMARY"
-
-      - name: Explain an incompatible base
-        if: steps.basebench.outcome == 'failure'
-        run: |
-          echo "::warning::The benchmarks do not build against the merge base, so allocations were not"
-          echo "::warning::compared. This happens when the PR adds an API the benchmark uses."
-
-      - name: Fail on a multimodal distribution
-        run: |
-          # A multimodal benchmark means the median is not describing the behaviour. This is the
-          # check that would have caught the bimodal claim plan found by hand during 7.1.0.
-          if grep -rqi "multimodal" "${{ github.workspace }}/perf-artifacts/head"; then
-            echo "::error::BenchmarkDotNet reported a multimodal distribution — the median is not a"
-            echo "::error::valid summary here. Investigate before reading any comparison."
-            grep -ri "multimodal" "${{ github.workspace }}/perf-artifacts/head" || true
-            exit 1
-          fi
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: microbenchmark-results
-          path: ${{ github.workspace }}/perf-artifacts
-
-  # ---------------------------------------------------------------------------------------------
-  # Tier B — the server arms. This is the tier that measures what the release notes claim.
+  # The server arms — the tier that measures what the release notes actually claim.
+  #
+  # A microbenchmark job (BenchmarkDotNet, allocations compared across versions) was built and worked,
+  # and is deliberately NOT here: it measured mediator-dispatch allocations, while every performance
+  # claim this project publishes and every incident in its record is database-side. It also ran
+  # BenchmarkDotNet twice per PR, which roughly doubled the wall time of this workflow to guard a
+  # number that had not moved. The `compare-bdn` subcommand it used remains on the lab binary for
+  # running by hand; `docs/plans/2026-09-22-performance-ci.md` records the reasoning.
   # ---------------------------------------------------------------------------------------------
   server-counters:
     name: Server counters (${{ matrix.arm.name }})

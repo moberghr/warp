@@ -117,7 +117,23 @@ than an exact number.
 **Checkpoint:** run the new tests 20x locally and confirm the count never moves before choosing the
 budget. A budget picked from one run is a flake waiting to happen.
 
-## Batch 3 — BDN microbenchmarks: gate allocations AND time (Tier A)
+## Batch 3 — BDN microbenchmarks (built, then dropped from the PR gate)
+
+**Outcome: not part of the PR gate.** It was built and it worked — allocations compared across
+versions, byte-identical across 18 benchmarks on two independently built runs, which is exactly the
+determinism the design predicted. It was removed anyway, for reasons worth recording rather than
+rediscovering:
+
+- It guards **mediator-dispatch allocations**, while every performance claim this project publishes
+  and every incident in its record is database-side. It does not even cover the per-job memory figures
+  in `operations/benchmarks.md`, which are a different measurement.
+- It runs BenchmarkDotNet **twice per PR** (head and merge base), roughly doubling the workflow's wall
+  time, to watch a number that did not move.
+
+The `compare-bdn` subcommand survives on the lab binary and can be run by hand against two artifact
+directories. Reinstating the job is a matter of restoring the removed YAML block. The original design
+notes follow.
+
 
 **Files:** `src/benchmarks/Warp.Benchmarks/*` (add `[MemoryDiagnoser]`, JSON exporter),
 `.github/workflows/perf.yml` (new).
