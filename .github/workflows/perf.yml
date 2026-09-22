@@ -89,24 +89,35 @@ jobs:
           - name: dispatcher-4kb
             args: --scenario=jobs --jobs=10000 --workers=16 --dispatcher --payload=4096
 
-    services:
-      postgres:
-        # Pinned by digest: an image that moves under the comparison invalidates it silently.
-        image: postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db  # postgres:18.3
-        env:
-          POSTGRES_PASSWORD: postgres
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-        ports:
-          - 5432:5432
-
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      # Started by hand rather than as a `services:` container, because the lab counts statements
+      # through pg_stat_statements and that extension has to be loaded by the SERVER at startup
+      # (`shared_preload_libraries`). A service container takes no command arguments, so there is no
+      # way to ask for it there. This is also exactly how the lab README starts Postgres locally, so
+      # CI and a developer's machine measure against the same configuration.
+      - name: Start PostgreSQL
+        run: |
+          docker run -d --name warppg -p 5432:5432 \
+            -e POSTGRES_PASSWORD=postgres \
+            postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db \
+            -c shared_preload_libraries=pg_stat_statements \
+            -c pg_stat_statements.track=top
+
+          for i in $(seq 1 30); do
+            if docker exec warppg pg_isready -U postgres > /dev/null 2>&1; then
+              echo "postgres ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::PostgreSQL did not become ready"
+          docker logs warppg
+          exit 1
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
@@ -162,7 +173,7 @@ jobs:
         run: |
           set -e
           reset_db () {
-            PGPASSWORD=postgres psql -h localhost -U postgres -q \
+            docker exec warppg psql -U postgres -q \
               -c "DROP DATABASE IF EXISTS warplab" -c "CREATE DATABASE warplab"
           }
           for pass in 1 2; do
