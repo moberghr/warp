@@ -143,6 +143,12 @@ public class PostgresServerFixture : IAsyncDisposable
 
                 services.AddWarpServer<TestContext>(config =>
                 {
+                    // Registered here too. Nothing resolves IWarpLockProvider without hosted services,
+                    // so its absence was latent rather than fatal on this path - but latent is how the
+                    // same omission sat unnoticed in InitializeAsync while every server benchmark
+                    // reported NA.
+                    config.UsePostgreSql();
+
                     config.WorkerCount = 1;
                     config.Queues = ["default"];
                     config.PollingInterval = TimeSpan.FromMilliseconds(100);

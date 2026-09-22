@@ -72,6 +72,10 @@ jobs:
             filter: '*PayloadSizeBenchmark*'
           - name: concurrency
             filter: '*ConcurrencyBenchmark*'
+          - name: failure-path
+            filter: '*FailurePathBenchmark*'
+          - name: publish
+            filter: '*PublishBenchmark*'
     env:
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
     steps:
