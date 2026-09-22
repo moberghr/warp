@@ -30,6 +30,13 @@ public class ServerBenchmarkConfig : ManualConfig
         // reason no separate all-threads diagnoser exists any more.
         AddDiagnoser(new MemoryDiagnoser(new MemoryDiagnoserConfig(false)));
         AddDiagnoser(new PgStatStatementsDiagnoser());
+        // BenchmarkDotNet's default build timeout is two minutes. That suits a microbenchmark, but
+        // this project's benchmark assembly pulls in the whole server and its provider, and on a
+        // loaded machine the generated build overruns it. The run is then reported as NA, which reads
+        // as a broken benchmark rather than as a harness setting - the same way the missing provider
+        // registration did.
+        WithBuildTimeout(TimeSpan.FromMinutes(15));
+
         AddJob(Job.ShortRun
             .WithWarmupCount(1)
             .WithIterationCount(3));

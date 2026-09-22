@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using Testcontainers.PostgreSql;
 using Warp.Core;
+using Warp.Core.Concurrency;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
@@ -57,7 +58,12 @@ public class PostgresServerFixture : IAsyncDisposable
     /// <summary>
     /// Boots the full server: container, schema, host with workers + background tasks.
     /// </summary>
-    public async Task InitializeAsync(int workerCount = 5, bool useDispatcher = false, int completionBatchSize = 50, TimeSpan? completionFlushInterval = null)
+    public async Task InitializeAsync(
+        int workerCount = 5,
+        bool useDispatcher = false,
+        int completionBatchSize = 50,
+        TimeSpan? completionFlushInterval = null,
+        bool addConcurrency = false)
     {
         _connectionString = await ResolveConnectionStringAsync();
 
@@ -78,6 +84,15 @@ public class PostgresServerFixture : IAsyncDisposable
                     // cannot be activated, every benchmark using this fixture reports NA, and the
                     // failure is quiet - BenchmarkDotNet prints a table of NA rather than failing.
                     config.UsePostgreSql();
+
+                    // Opt-in addon (rule 8.6): without this, WithMutex stamps metadata that no
+                    // behaviour reads, so a concurrency benchmark measures the plain baseline and
+                    // reports it as the addon's cost. That is exactly what it did before this
+                    // parameter existed - 14.05 statements per job against the lab's 37.0.
+                    if (addConcurrency)
+                    {
+                        config.AddConcurrency();
+                    }
 
                     config.WorkerCount = workerCount;
                     config.Queues = ["default"];
