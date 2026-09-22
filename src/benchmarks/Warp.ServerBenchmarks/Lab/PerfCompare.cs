@@ -39,6 +39,8 @@ public static class PerfCompare
         WriteIndented = true,
     };
 
+    private static readonly JsonSerializerOptions BdnOptions = new() { PropertyNameCaseInsensitive = true };
+
     private static readonly MetricPolicy[] Policies =
     [
         new("statements_per_job", Gated: true, TolerancePct: 3.0, BadDirection: Direction.Higher),
@@ -87,7 +89,7 @@ public static class PerfCompare
 
             report.AppendLine(
                 CultureInfo.InvariantCulture,
-                $"| `{policy.Metric}` | {b.Median:N3} | {h.Median:N3} | {change:+0.0;-0.0}% | {b.SpreadPct:N1}% / {h.SpreadPct:N1}% | {verdict} |");
+                $"| `{policy.Metric}` | {b.Median:N3} | {h.Median:N3} | {change:+0.0;-0.0;0.0}% | {b.SpreadPct:N1}% / {h.SpreadPct:N1}% | {verdict} |");
         }
 
         report.AppendLine();
@@ -137,7 +139,7 @@ public static class PerfCompare
 
         failures.Add(string.Create(
             CultureInfo.InvariantCulture,
-            $"{policy.Metric}: {change:+0.0;-0.0}% (tolerance {policy.TolerancePct}%, spread {widest:N1}%)"));
+            $"{policy.Metric}: {change:+0.0;-0.0;0.0}% (tolerance {policy.TolerancePct}%, spread {widest:N1}%)"));
 
         return "**REGRESSION**";
     }
@@ -174,11 +176,140 @@ public static class PerfCompare
             ?? throw new InvalidOperationException($"{path} did not contain an arm result.");
     }
 
+    /// <summary>
+    /// Compares two BenchmarkDotNet runs of the same benchmarks, built from different versions.
+    /// <para>
+    /// Gates ALLOCATIONS only, and that is the point: bytes-per-operation is deterministic, so two
+    /// numbers taken in separate processes are directly comparable. Interleaving and statistical tests
+    /// exist to beat timing noise; a byte count needs neither. Mean time is printed beside it and never
+    /// gated here — cross-version TIME on micro-benchmarks wants BDN's own multi-version job
+    /// (<c>Job.WithNuGet</c>), where both versions run interleaved in one process.
+    /// </para>
+    /// </summary>
+    public static int RunBdn(string basePath, string headPath, double tolerancePct, string? summaryPath)
+    {
+        var baseRun = ReadBdn(basePath);
+        var headRun = ReadBdn(headPath);
+
+        var report = new StringBuilder();
+        var failures = new List<string>();
+
+        report.AppendLine("### Microbenchmarks — allocations");
+        report.AppendLine();
+        report.AppendLine("| benchmark | base alloc | head alloc | change | base mean | head mean | verdict |");
+        report.AppendLine("| --- | ---: | ---: | ---: | ---: | ---: | --- |");
+
+        foreach (var head in headRun.OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
+            if (!baseRun.TryGetValue(head.Key, out var b))
+            {
+                // A benchmark the base does not have is new, not a regression.
+                report.AppendLine(CultureInfo.InvariantCulture, $"| `{Shorten(head.Key)}` | — | {head.Value.Bytes:N0} | new | — | {head.Value.Mean:N0} ns | new |");
+                continue;
+            }
+
+            var h = head.Value;
+            var change = b.Bytes == 0 ? 0 : (h.Bytes - b.Bytes) / (double)b.Bytes * 100;
+            var verdict = "ok";
+
+            if (change > tolerancePct)
+            {
+                verdict = "**REGRESSION**";
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{Shorten(head.Key)}: allocations {b.Bytes:N0} -> {h.Bytes:N0} ({change:+0.0;-0.0;0.0}%)"));
+            }
+
+            report.AppendLine(
+                CultureInfo.InvariantCulture,
+                $"| `{Shorten(head.Key)}` | {b.Bytes:N0} | {h.Bytes:N0} | {change:+0.0;-0.0;0.0}% | {b.Mean:N0} ns | {h.Mean:N0} ns | {verdict} |");
+        }
+
+        report.AppendLine();
+        report.AppendLine(
+            CultureInfo.InvariantCulture,
+            $"Allocations gated at {tolerancePct}%. Mean time is shown for context and is not gated here.");
+
+        Console.WriteLine(report.ToString());
+
+        if (!string.IsNullOrEmpty(summaryPath))
+        {
+            File.AppendAllText(summaryPath, report.ToString() + Environment.NewLine);
+        }
+
+        if (failures.Count == 0)
+        {
+            return 0;
+        }
+
+        Console.Error.WriteLine("FAILED:");
+        foreach (var failure in failures)
+        {
+            Console.Error.WriteLine("  " + failure);
+        }
+
+        return 1;
+    }
+
+    /// <summary>Trims the namespace off a BDN FullName so the table stays readable.</summary>
+    private static string Shorten(string fullName)
+    {
+        var parameters = fullName.IndexOf('(', StringComparison.Ordinal);
+        var head = parameters < 0 ? fullName : fullName[..parameters];
+        var tail = parameters < 0 ? string.Empty : fullName[parameters..];
+        var lastDot = head.LastIndexOf('.');
+        var secondLast = lastDot <= 0 ? -1 : head.LastIndexOf('.', lastDot - 1);
+
+        return (secondLast < 0 ? head : head[(secondLast + 1)..]) + tail;
+    }
+
+    /// <summary>
+    /// Reads every <c>*-report-full-compressed.json</c> under a BenchmarkDotNet artifacts directory.
+    /// <para>
+    /// The property names are BDN's own PascalCase, so this deliberately does NOT use
+    /// <see cref="JsonOptions"/> — that one carries the snake_case policy the lab's own files use.
+    /// </para>
+    /// </summary>
+    private static Dictionary<string, (long Bytes, double Mean)> ReadBdn(string directory)
+    {
+        var results = new Dictionary<string, (long Bytes, double Mean)>(StringComparer.Ordinal);
+        var files = Directory.GetFiles(directory, "*-report-full-compressed.json", SearchOption.AllDirectories);
+
+        if (files.Length == 0)
+        {
+            throw new InvalidOperationException($"No BenchmarkDotNet reports under {directory}.");
+        }
+
+        foreach (var file in files)
+        {
+            var report = JsonSerializer.Deserialize<BdnReport>(File.ReadAllText(file), BdnOptions);
+            foreach (var benchmark in report?.Benchmarks ?? [])
+            {
+                if (benchmark.FullName is null)
+                {
+                    continue;
+                }
+
+                results[benchmark.FullName] = (benchmark.Memory?.BytesAllocatedPerOperation ?? 0, benchmark.Statistics?.Mean ?? 0);
+            }
+        }
+
+        return results;
+    }
+
     private enum Direction
     {
         Higher = 1,
         Lower = 2,
     }
+
+    private sealed record BdnReport(List<BdnBenchmark>? Benchmarks);
+
+    private sealed record BdnBenchmark(string? FullName, BdnStatistics? Statistics, BdnMemory? Memory);
+
+    private sealed record BdnStatistics(double Mean);
+
+    private sealed record BdnMemory(long BytesAllocatedPerOperation);
 
     private sealed record MetricPolicy(string Metric, bool Gated, double? TolerancePct, Direction BadDirection);
 }

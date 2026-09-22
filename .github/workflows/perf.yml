@@ -25,20 +25,17 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------------------------
-  # Tier A — microbenchmarks. Microseconds per iteration, so the sample size needed to resolve a few
-  # percent IS affordable here — but this job does not yet spend it on a version comparison.
-  #
-  # What it does today: runs the benchmarks on this PR, fails if any distribution is multimodal (where
-  # a median describes nothing), and keeps the results as an artifact. The `--statisticalTest` flag
-  # compares the benchmarks in a class against that class's own `[Benchmark(Baseline = true)]` — which
-  # is MediatR-vs-Warp, not head-vs-base. Version comparison for this tier is a follow-up; it needs a
-  # reader for BenchmarkDotNet's own report schema, and shipping an untested one would be worse than
-  # saying plainly that it is not here yet. Tier B below is the one that compares versions.
+  # Tier A — microbenchmarks. Gates ALLOCATIONS across versions, which needs no interleaving and no
+  # statistical test: bytes-per-operation is deterministic, so two numbers taken in separate processes
+  # compare directly. Mean time is shown beside them and not gated — cross-version TIME here wants
+  # BDN's own multi-version job (`Job.WithNuGet`), which needs a package reference rather than the
+  # project reference this benchmark uses. The in-run `--statisticalTest` compares each class against
+  # its own `[Benchmark(Baseline = true)]`, which is MediatR-vs-Warp, not head-vs-base.
   # ---------------------------------------------------------------------------------------------
   microbenchmarks:
-    name: Microbenchmarks (collect + multimodal check)
+    name: Microbenchmarks (allocations)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,16 +54,47 @@ jobs:
             --memory \
             --statisticalTest 5% \
             --exporters json \
-            --artifacts "${{ github.workspace }}/perf-artifacts"
+            --artifacts "${{ github.workspace }}/perf-artifacts/head"
+
+      # Same merge-base swap Tier B uses: today's benchmark code against the base's runtime, so the
+      # two runs measure the same benchmarks and differ only in the library under them.
+      - name: Run BenchmarkDotNet against the merge base
+        id: basebench
+        continue-on-error: true
+        run: |
+          BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
+          git checkout "$BASE" -- src/core
+          dotnet run -c Release --project src/benchmarks/Warp.Benchmarks/Warp.Benchmarks.csproj -- \
+            --filter '*' \
+            --memory \
+            --exporters json \
+            --artifacts "${{ github.workspace }}/perf-artifacts/base"
+          git checkout HEAD -- src/core
+
+      - name: Compare allocations
+        if: steps.basebench.outcome == 'success'
+        run: |
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            compare-bdn \
+            --base="${{ github.workspace }}/perf-artifacts/base" \
+            --head="${{ github.workspace }}/perf-artifacts/head" \
+            --tolerance=2 \
+            --summary="$GITHUB_STEP_SUMMARY"
+
+      - name: Explain an incompatible base
+        if: steps.basebench.outcome == 'failure'
+        run: |
+          echo "::warning::The benchmarks do not build against the merge base, so allocations were not"
+          echo "::warning::compared. This happens when the PR adds an API the benchmark uses."
 
       - name: Fail on a multimodal distribution
         run: |
           # A multimodal benchmark means the median is not describing the behaviour. This is the
           # check that would have caught the bimodal claim plan found by hand during 7.1.0.
-          if grep -rqi "multimodal" "${{ github.workspace }}/perf-artifacts"; then
+          if grep -rqi "multimodal" "${{ github.workspace }}/perf-artifacts/head"; then
             echo "::error::BenchmarkDotNet reported a multimodal distribution — the median is not a"
             echo "::error::valid summary here. Investigate before reading any comparison."
-            grep -ri "multimodal" "${{ github.workspace }}/perf-artifacts" || true
+            grep -ri "multimodal" "${{ github.workspace }}/perf-artifacts/head" || true
             exit 1
           fi
 

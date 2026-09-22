@@ -1,3 +1,4 @@
+using System.Globalization;
 using BenchmarkDotNet.Running;
 using Warp.Core.Concurrency;
 using Warp.ServerBenchmarks.Benchmarks;
@@ -268,6 +269,35 @@ else if (args.Length > 0 && string.Equals(args[0], "compare", StringComparison.O
     }
 
     Environment.ExitCode = PerfCompare.Run(comparePath, headPath, compareLabel, summaryPath);
+}
+else if (args.Length > 0 && string.Equals(args[0], "compare-bdn", StringComparison.OrdinalIgnoreCase))
+{
+    var bdnBase = string.Empty;
+    var bdnHead = string.Empty;
+    var bdnTolerance = 2.0;
+    string? bdnSummary = null;
+
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (args[i].StartsWith("--base=", StringComparison.OrdinalIgnoreCase))
+        {
+            bdnBase = args[i]["--base=".Length..];
+        }
+        else if (args[i].StartsWith("--head=", StringComparison.OrdinalIgnoreCase))
+        {
+            bdnHead = args[i]["--head=".Length..];
+        }
+        else if (args[i].StartsWith("--tolerance=", StringComparison.OrdinalIgnoreCase))
+        {
+            bdnTolerance = double.Parse(args[i]["--tolerance=".Length..], CultureInfo.InvariantCulture);
+        }
+        else if (args[i].StartsWith("--summary=", StringComparison.OrdinalIgnoreCase))
+        {
+            bdnSummary = args[i]["--summary=".Length..];
+        }
+    }
+
+    Environment.ExitCode = PerfCompare.RunBdn(bdnBase, bdnHead, bdnTolerance, bdnSummary);
 }
 else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.OrdinalIgnoreCase))
 {

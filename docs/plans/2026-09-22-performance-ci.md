@@ -131,12 +131,18 @@ machinery does exactly what it is built for:
   than thresholding a raw percentage: if the runner is noisy the interval widens and the test simply
   declines to call it, which fails toward silence instead of toward a flaky red build.
 
-**Status: only partly landed.** The first cut of `perf.yml` runs the benchmarks on the PR and checks
-for multimodality, but does **not** compare against the base. `--statisticalTest` compares a class's
-benchmarks against its own `[Benchmark(Baseline = true)]`, which here is MediatR-versus-Warp rather
-than head-versus-base — so the gating above is still to build. It needs a reader for BenchmarkDotNet's
-report JSON (`Benchmarks[].Memory.BytesAllocatedPerOperation`), built against a real exported file
-rather than a guessed schema, and the same merge-base swap Tier B uses.
+**Allocations are gated across versions; time is not.** The schema was confirmed by exporting a real
+run rather than guessing: `Benchmarks[]` keyed by `FullName`, carrying `Memory.BytesAllocatedPerOperation`
+and `Statistics.Mean`. Because bytes-per-operation is deterministic, the two versions do NOT need to be
+interleaved or subjected to a statistical test — that machinery exists to beat timing noise, and a byte
+count has none. So the job simply builds both sides with the same merge-base swap Tier B uses, runs
+each, and compares counts.
+
+Cross-version **time** on this tier remains open. It wants BDN's multi-version job
+(`Job.WithNuGet("Moberg.Warp.Core", "7.0.0")`), which runs both versions interleaved in one process
+and makes the statistical test meaningful across them — but the benchmark project references Warp.Core
+by `ProjectReference`, so that needs a package-reference variant first. The in-run `--statisticalTest`
+stays, comparing each class against its own `[Benchmark(Baseline = true)]` (MediatR-versus-Warp).
 - Fail the job on any benchmark BDN marks **multimodal**, rather than reading its median. That warning
   is what would have caught the bimodal claim plan the 7.1.0 revalidation found by hand.
 - Set `MinIterationCount` high enough that a pilot run on a slow runner cannot settle for a sample too
