@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using Testcontainers.PostgreSql;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -19,9 +20,32 @@ namespace Warp.ServerBenchmarks.Infrastructure;
 /// </summary>
 public class PostgresServerFixture : IAsyncDisposable
 {
-    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder()
-        .WithImage("postgres:latest")
-        .Build();
+    /// <summary>
+    /// Points the fixture at an EXISTING PostgreSQL instead of starting its own container.
+    /// <para>
+    /// This is what lets <see cref="PgStatStatementsDiagnoser"/> work at all. BenchmarkDotNet runs the
+    /// benchmark in a child process while diagnosers run in the host, so a container created in the
+    /// child is invisible to the diagnoser — it has no way to learn a randomly-assigned port. Naming
+    /// one database in the environment gives both processes the same target. It is also how the lab
+    /// already works (`--connection`), and how CI wants it: one server, started once, with
+    /// `shared_preload_libraries=pg_stat_statements` set.
+    /// </para>
+    /// </summary>
+    public const string ConnectionStringVariable = "WARP_BENCH_POSTGRES";
+
+    private readonly PostgreSqlContainer? _container = Environment.GetEnvironmentVariable(ConnectionStringVariable) is null
+        ? new PostgreSqlBuilder()
+            .WithImage("postgres:latest")
+
+            // Loaded at startup so statement counts can be read. shared_preload_libraries cannot be
+            // switched on later; it needs a restart.
+            .WithCommand(
+                "-c",
+                "shared_preload_libraries=pg_stat_statements",
+                "-c",
+                "pg_stat_statements.track=top")
+            .Build()
+        : null;
 
     private IHost? _host;
     private string _connectionString = null!;
@@ -35,8 +59,7 @@ public class PostgresServerFixture : IAsyncDisposable
     /// </summary>
     public async Task InitializeAsync(int workerCount = 5, bool useDispatcher = false, int completionBatchSize = 50, TimeSpan? completionFlushInterval = null)
     {
-        await _container.StartAsync();
-        _connectionString = _container.GetConnectionString();
+        _connectionString = await ResolveConnectionStringAsync();
 
         // Boot full Warp server
         _host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
@@ -82,8 +105,7 @@ public class PostgresServerFixture : IAsyncDisposable
     /// </summary>
     public async Task InitializeWithoutHostedServicesAsync()
     {
-        await _container.StartAsync();
-        _connectionString = _container.GetConnectionString();
+        _connectionString = await ResolveConnectionStringAsync();
 
         // Build a host but don't start it — only use its DI container
         _host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
@@ -163,6 +185,39 @@ public class PostgresServerFixture : IAsyncDisposable
             """);
     }
 
+    /// <summary>
+    /// Uses the externally-provided database when there is one, otherwise starts a container.
+    /// Each run gets a fresh database on the shared server, so arms cannot contaminate each other
+    /// through leftover rows or a warmed cache.
+    /// </summary>
+    private async Task<string> ResolveConnectionStringAsync()
+    {
+        var external = Environment.GetEnvironmentVariable(ConnectionStringVariable);
+
+        if (external is null)
+        {
+            await _container!.StartAsync();
+
+            return _container.GetConnectionString();
+        }
+
+        var builder = new NpgsqlConnectionStringBuilder(external);
+        var database = $"warpbench_{Guid.NewGuid():N}";
+
+        var adminConnectionString = new NpgsqlConnectionStringBuilder(external) { Database = "postgres" }.ConnectionString;
+        await using (var admin = new NpgsqlConnection(adminConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = admin.CreateCommand();
+            create.CommandText = $"CREATE DATABASE \"{database}\"";
+            await create.ExecuteNonQueryAsync();
+        }
+
+        builder.Database = database;
+
+        return builder.ConnectionString;
+    }
+
     public async ValueTask DisposeAsync()
     {
         GC.SuppressFinalize(this);
@@ -172,6 +227,9 @@ public class PostgresServerFixture : IAsyncDisposable
             _host.Dispose();
         }
 
-        await _container.DisposeAsync();
+        if (_container is not null)
+        {
+            await _container.DisposeAsync();
+        }
     }
 }

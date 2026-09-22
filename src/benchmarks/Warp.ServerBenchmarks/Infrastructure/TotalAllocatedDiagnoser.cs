@@ -110,6 +110,7 @@ public class ServerBenchmarkConfig : ManualConfig
     {
         AddDiagnoser(new MemoryDiagnoser(new MemoryDiagnoserConfig(false)));
         AddDiagnoser(new TotalAllocatedDiagnoser());
+        AddDiagnoser(new PgStatStatementsDiagnoser());
         AddJob(Job.ShortRun
             .WithWarmupCount(1)
             .WithIterationCount(3));
