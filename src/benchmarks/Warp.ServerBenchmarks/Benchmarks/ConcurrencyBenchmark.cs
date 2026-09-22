@@ -31,7 +31,7 @@ public class ConcurrencyBenchmark
 
     private PostgresServerFixture _fixture = null!;
 
-    [Params(10_000)]
+    [Params(1_000)]
     public int JobCount { get; set; }
 
     [Params(8, 10_000)]

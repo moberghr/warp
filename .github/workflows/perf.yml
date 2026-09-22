@@ -45,12 +45,27 @@ jobs:
   # that has to read pg_stat_statements from it.
   # ---------------------------------------------------------------------------------------------
   benchmarks:
-    name: Benchmarks (allocations + statements)
+    name: Benchmarks (${{ matrix.benchmark.name }})
     runs-on: ubuntu-latest
 
-    # Four benchmarks with parameter sweeps, each run twice (head and merge base), and one operation
-    # drains ten thousand jobs. The concurrency arm is the slow one: a 5 ms handler under contention.
-    timeout-minutes: 120
+    # One job per benchmark. BenchmarkDotNet is sequential within a process, so running all four in one
+    # job took 69 minutes against the lab's 12 - and a migration that trades a twelve-minute gate for a
+    # sixty-nine-minute one is not an improvement whatever it measures. Split across jobs they run in
+    # parallel and the wall clock is the slowest single benchmark rather than the sum.
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        benchmark:
+          - name: dispatcher
+            filter: '*DispatcherModeBenchmark*'
+          - name: completion-batch
+            filter: '*CompletionBatchBenchmark*'
+          - name: payload
+            filter: '*PayloadSizeBenchmark*'
+          - name: concurrency
+            filter: '*ConcurrencyBenchmark*'
     env:
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
     steps:
@@ -121,7 +136,7 @@ jobs:
         run: |
           git checkout ${{ steps.refs.outputs.head }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
-            --filter '*DispatcherModeBenchmark*' '*CompletionBatchBenchmark*' '*PayloadSizeBenchmark*' '*ConcurrencyBenchmark*' \
+            --filter '${{ matrix.benchmark.filter }}' \
             --exporters json \
             --artifacts "${{ github.workspace }}/bench/head"
           git checkout HEAD -- src/core
@@ -132,7 +147,7 @@ jobs:
         run: |
           git checkout ${{ steps.refs.outputs.base }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
-            --filter '*DispatcherModeBenchmark*' '*CompletionBatchBenchmark*' '*PayloadSizeBenchmark*' '*ConcurrencyBenchmark*' \
+            --filter '${{ matrix.benchmark.filter }}' \
             --exporters json \
             --artifacts "${{ github.workspace }}/bench/base"
           git checkout HEAD -- src/core
@@ -167,7 +182,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: benchmark-results
+          name: benchmark-results-${{ matrix.benchmark.name }}
           path: ${{ github.workspace }}/bench
 
   # ---------------------------------------------------------------------------------------------

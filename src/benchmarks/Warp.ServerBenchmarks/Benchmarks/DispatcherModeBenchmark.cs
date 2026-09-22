@@ -21,7 +21,14 @@ public class DispatcherModeBenchmark
 {
     private PostgresServerFixture _fixture = null!;
 
-    [Params(10_000)]
+    // 1,000 rather than 10,000, which was measured before being adopted: PayloadSizeBenchmark swept
+    // both and reported 10.52 statements per job against 9.95, a 5.7% offset in a metric that costs
+    // ten times as long to obtain. The smaller run reads slightly HIGH because IterationCleanup runs
+    // inside the measured window, so its fixed per-iteration deletes are divided by a tenth as many
+    // jobs. That offset cancels in the gate, which compares an arm against itself across two commits
+    // in the same run - but it does mean these numbers are not directly comparable to the lab's or to
+    // published claims, which are taken at 10,000.
+    [Params(1_000)]
     public int JobCount { get; set; }
 
     [Params(false, true)]

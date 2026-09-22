@@ -29,7 +29,7 @@ public class PayloadSizeBenchmark
     private PostgresServerFixture _fixture = null!;
     private string _payload = string.Empty;
 
-    [Params(1_000, 10_000)]
+    [Params(1_000)]
     public int JobCount { get; set; }
 
     // 4 KB, and it is the ALLOCATIONS this size is chosen for, not the statement count. Payload does
