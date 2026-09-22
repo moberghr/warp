@@ -29,16 +29,30 @@ public class PayloadSizeBenchmark
     private PostgresServerFixture _fixture = null!;
     private string _payload = string.Empty;
 
-    [Params(10_000)]
+    [Params(1_000, 10_000)]
     public int JobCount { get; set; }
 
-    [Params(0, 4096)]
+    // 4 KB, and it is the ALLOCATIONS this size is chosen for, not the statement count. Payload does
+    // not move statements per job at all (9.58 against 9.83 across a zero-byte control — noise), so an
+    // arm justified on that basis would be dead weight. It moves allocations from 3.02 GB to 3.24 GB,
+    // a 7.3% difference, which clears the 2% allocation gate with room to spare. That is what lets
+    // this arm catch a change that starts writing the payload column needlessly — the regression class
+    // #301 fixed, and one an empty-payload benchmark cannot see.
+    //
+    // The size itself is inherited from that measurement rather than derived from a real workload. The
+    // requirement it has to meet is only that payload handling clears the gate, and 4 KB does; a much
+    // smaller payload would not, and the arm would then be measuring nothing it could act on.
+    //
+    // The zero-byte control was measured and dropped from CI: it establishes the contrast once, and
+    // paying for it on every pull request buys nothing the gate can use. Run it locally when
+    // diagnosing whether a regression is payload-specific.
+    [Params(4096)]
     public int PayloadBytes { get; set; }
 
     [GlobalSetup]
     public async Task Setup()
     {
-        _payload = new string('x', PayloadBytes);
+        _payload = RandomPayload(PayloadBytes);
 
         _fixture = new PostgresServerFixture();
         await _fixture.InitializeAsync(workerCount: 16, useDispatcher: true);
@@ -67,6 +81,25 @@ public class PayloadSizeBenchmark
     {
         await PublishAsync(JobCount);
         await _fixture.WaitForCompletion();
+    }
+
+    /// <summary>
+    /// Incompressible payload. A repeated character compresses to almost nothing, so TOAST and WAL
+    /// costs vanish and a payload-width benchmark measures nothing — the trap the lab documents
+    /// having fallen into once, and that the first version of THIS benchmark then repeated with
+    /// <c>new string('x', bytes)</c>.
+    /// </summary>
+    private static string RandomPayload(int bytes)
+    {
+        const string Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+        var chars = new char[bytes];
+        for (var i = 0; i < bytes; i++)
+        {
+            chars[i] = Alphabet[Random.Shared.Next(Alphabet.Length)];
+        }
+
+        return new string(chars);
     }
 
     private async Task PublishAsync(int count)
