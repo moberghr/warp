@@ -81,10 +81,18 @@ public class PostgresServerFixture : IAsyncDisposable
 
                     config.WorkerCount = workerCount;
                     config.Queues = ["default"];
-                    config.PollingInterval = TimeSpan.FromMilliseconds(100);
-                    config.OrchestrationInterval = TimeSpan.FromMilliseconds(100);
-                    config.MessageRoutingInterval = TimeSpan.FromMilliseconds(500);
-                    config.HealthCheckInterval = TimeSpan.FromMilliseconds(200);
+
+                    // Intervals are left at their PRODUCTION defaults on purpose. They used to be
+                    // driven 20-100x faster here (polling 100ms against 10s, orchestration 100ms
+                    // against 10s, heartbeat 200ms against 5s) for quick turnaround, and the cost was
+                    // that every background tick landed in the statement count: this fixture reported
+                    // 42 statements per job where the lab, on defaults, measured 13.6 for the same
+                    // shape of work. A/B comparisons survived that, but the absolute number was an
+                    // artefact of the harness and not comparable to anything published.
+                    //
+                    // Defaults are affordable because a same-process enqueue signals the workers
+                    // directly (SignalJobEnqueued, rule 6.3), so a drain does not wait out
+                    // PollingInterval.
                     config.UseDispatcher = useDispatcher;
                     config.CompletionBatchSize = completionBatchSize;
                     config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);

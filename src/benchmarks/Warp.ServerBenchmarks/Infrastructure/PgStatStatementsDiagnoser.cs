@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 using BenchmarkDotNet.Analysers;
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Diagnosers;
@@ -14,37 +13,35 @@ using Npgsql;
 namespace Warp.ServerBenchmarks.Infrastructure;
 
 /// <summary>
-/// Reports DATABASE statements per operation as a first-class BenchmarkDotNet metric, read from
-/// <c>pg_stat_statements</c> around each measured run.
+/// Reports DATABASE statements per job as a first-class BenchmarkDotNet metric, read from
+/// <c>pg_stat_statements</c> around the measured run.
 /// <para>
 /// This is the quantity worth gating on in this project. Measured across the 7.1.0 revalidation,
 /// statements per job reproduced to 0.1-2.7% within a run and to within 5% between passes, while the
-/// timings of the same runs spread up to 417%. Letting BenchmarkDotNet carry the count means its
-/// iteration control, outlier handling, multimodality detection and exporters all apply to the metric
-/// that actually matters, instead of that metric living in a parallel harness.
+/// timings of those same runs spread up to 417%. Carrying the count inside BenchmarkDotNet means its
+/// iteration control, outlier handling and exporters apply to the metric that actually matters.
 /// </para>
 /// <para>
 /// Reads the database named by <see cref="PostgresServerFixture.ConnectionStringVariable"/>, which is
 /// the only channel that works: BenchmarkDotNet runs the benchmark in a CHILD process while diagnosers
-/// run in the HOST, so a container the child created is unreachable from here. The environment gives
-/// both processes the same target. The server must have been started with
-/// <c>shared_preload_libraries=pg_stat_statements</c>; without it this reports nothing rather than
-/// failing the run.
+/// run in the HOST, so a container the child created is unreachable from here. The server must have
+/// been started with <c>shared_preload_libraries=pg_stat_statements</c>; without it this reports
+/// nothing rather than failing the run.
 /// </para>
 /// <para>
-/// The count is server-wide for that instance, not per database, because the child creates a fresh
-/// database per fixture whose name the host does not know. Benchmarks therefore have to run one at a
-/// time against this server — which they do, BenchmarkDotNet being sequential — and anything else
-/// touching the same PostgreSQL during a run would be counted in.
+/// Both numbers are server-wide for that instance rather than per database, because the child creates
+/// a fresh database per fixture whose name the host does not know. Benchmarks therefore have to run
+/// one at a time against this server — which they do, BenchmarkDotNet being sequential — and anything
+/// else touching the same PostgreSQL during a run would be counted in.
 /// </para>
 /// </summary>
 public class PgStatStatementsDiagnoser : IDiagnoser
 {
-    private readonly ConcurrentDictionary<BenchmarkCase, List<double>> _perOperation = new();
-    private long _before;
-
     private static readonly string? ConnectionString =
         Environment.GetEnvironmentVariable(PostgresServerFixture.ConnectionStringVariable);
+
+    private readonly ConcurrentDictionary<BenchmarkCase, (long Statements, long Jobs)> _deltas = new();
+    private (long Statements, long Jobs) _before;
 
     public IEnumerable<string> Ids => ["PgStatStatements"];
 
@@ -66,32 +63,32 @@ public class PgStatStatementsDiagnoser : IDiagnoser
         switch (signal)
         {
             case HostSignal.BeforeActualRun:
-                _before = ReadTotalCalls();
+                _before = ReadCounters();
                 break;
 
             case HostSignal.AfterActualRun:
-                var delta = ReadTotalCalls() - _before;
-                _perOperation.GetOrAdd(parameters.BenchmarkCase, _ => []).Add(delta / (double)UnitsOfWork(parameters.BenchmarkCase));
+                var after = ReadCounters();
+                var delta = (Statements: after.Statements - _before.Statements, Jobs: after.Jobs - _before.Jobs);
+
+                _deltas.AddOrUpdate(
+                    parameters.BenchmarkCase,
+                    delta,
+                    (_, existing) => (existing.Statements + delta.Statements, existing.Jobs + delta.Jobs));
+                break;
+
+            default:
                 break;
         }
     }
 
     public IEnumerable<Metric> ProcessResults(DiagnoserResults results)
     {
-        if (!_perOperation.TryGetValue(results.BenchmarkCase, out var samples) || samples.Count == 0)
+        if (!_deltas.TryGetValue(results.BenchmarkCase, out var delta) || delta.Jobs <= 0)
         {
             yield break;
         }
 
-        // The MEDIAN, not the mean. A single cold first iteration is enough to drag a mean of three
-        // somewhere no run actually was, and the first iteration against a fresh database reliably is
-        // cold — that trap cost a whole measurement session once already.
-        var ordered = samples.Order().ToArray();
-        var median = ordered.Length % 2 == 1
-            ? ordered[ordered.Length / 2]
-            : (ordered[(ordered.Length / 2) - 1] + ordered[ordered.Length / 2]) / 2;
-
-        yield return new Metric(StatementsPerOperationDescriptor.Instance, median);
+        yield return new Metric(StatementsPerJobDescriptor.Instance, delta.Statements / (double)delta.Jobs);
     }
 
     public void DisplayResults(ILogger logger)
@@ -104,33 +101,28 @@ public class PgStatStatementsDiagnoser : IDiagnoser
         {
             yield return new ValidationError(
                 false,
-                "PgStatStatementsDiagnoser has no connection string; statements per operation will not be reported.");
+                $"{PostgresServerFixture.ConnectionStringVariable} is not set, so statements per job will not be reported.");
         }
     }
 
     /// <summary>
-    /// How many JOBS one measured iteration moved, so the metric is per job rather than per
-    /// invocation.
+    /// Reads the statement count and the number of job rows written, in one query over one window.
     /// <para>
-    /// A benchmark here invokes once and drains thousands of jobs, so a raw per-invocation figure is
-    /// six digits wide and comparable to nothing. Dividing by the <c>JobCount</c> parameter puts it in
-    /// the same units as every published claim and as the lab's own <c>statements/job</c>, which is the
-    /// whole point of measuring it. A benchmark without that parameter falls back to per invocation.
+    /// Taking the numerator AND the denominator from the same view is what makes this independent of
+    /// BenchmarkDotNet's own accounting, and both alternatives to it were tried and were wrong.
+    /// <c>BeforeActualRun</c>/<c>AfterActualRun</c> bracket the whole measured phase rather than one
+    /// iteration, so dividing by a single iteration's jobs over-reported by the iteration count — 42
+    /// statements per job against the lab's 13.6 for the same work. Dividing by
+    /// <c>DiagnoserResults.TotalOperations</c> then under-reported at 5.3, because that counts every
+    /// phase including warmup and jitting. Counting the job rows actually inserted inside the window
+    /// answers the question directly, and is checkable against the lab, which measures the same thing.
+    /// </para>
+    /// <para>
+    /// The read excludes itself: it is issued against <c>pg_stat_statements</c>, so without the filter
+    /// the instrument would count its own traffic.
     /// </para>
     /// </summary>
-    private static long UnitsOfWork(BenchmarkCase benchmarkCase)
-    {
-        var invocations = Math.Max(benchmarkCase.Job.Run.InvocationCount, 1);
-
-        var jobCount = benchmarkCase.Parameters.Items
-            .Where(x => string.Equals(x.Name, "JobCount", StringComparison.Ordinal))
-            .Select(x => x.Value as int?)
-            .FirstOrDefault();
-
-        return invocations * Math.Max(jobCount ?? 1, 1);
-    }
-
-    private static long ReadTotalCalls()
+    private static (long Statements, long Jobs) ReadCounters()
     {
         try
         {
@@ -138,34 +130,34 @@ public class PgStatStatementsDiagnoser : IDiagnoser
             connection.Open();
 
             using var command = connection.CreateCommand();
-
-            // Scoped to this database, and the read itself is excluded — it is issued against
-            // pg_stat_statements, so without the filter the instrument would count itself.
             command.CommandText = """
-                SELECT COALESCE(SUM(calls), 0)
+                SELECT
+                    COALESCE(SUM(calls) FILTER (WHERE query NOT LIKE '%pg_stat_statements%'), 0) AS statements,
+                    COALESCE(SUM(rows) FILTER (WHERE query ILIKE 'INSERT INTO warp.job (%'), 0) AS jobs
                 FROM pg_stat_statements
-                WHERE query NOT LIKE '%pg_stat_statements%'
                 """;
 
-            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+            using var reader = command.ExecuteReader();
+
+            return reader.Read() ? (reader.GetInt64(0), reader.GetInt64(1)) : (0, 0);
         }
         catch (NpgsqlException)
         {
             // A diagnoser must never take down the run it is observing: a missing extension or a
             // container already torn down is a lost measurement, not a failed benchmark.
-            return 0;
+            return (0, 0);
         }
     }
 
-    private sealed class StatementsPerOperationDescriptor : IMetricDescriptor
+    private sealed class StatementsPerJobDescriptor : IMetricDescriptor
     {
-        public static readonly StatementsPerOperationDescriptor Instance = new();
+        public static readonly StatementsPerJobDescriptor Instance = new();
 
         public string Id => "StatementsPerJob";
 
         public string DisplayName => "Statements/job";
 
-        public string Legend => "Database statements per job (pg_stat_statements, median of iterations)";
+        public string Legend => "Database statements per job (pg_stat_statements, measured over the run)";
 
         public string NumberFormat => "N2";
 
