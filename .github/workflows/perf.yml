@@ -26,12 +26,17 @@ concurrency:
 jobs:
   # ---------------------------------------------------------------------------------------------
   # Tier A — microbenchmarks. Microseconds per iteration, so the sample size needed to resolve a few
-  # percent is free. Allocations AND time are both gated here; BenchmarkDotNet's own statistical test
-  # decides significance, so a noisy runner widens the interval and declines to call it rather than
-  # producing a flaky red build.
+  # percent IS affordable here — but this job does not yet spend it on a version comparison.
+  #
+  # What it does today: runs the benchmarks on this PR, fails if any distribution is multimodal (where
+  # a median describes nothing), and keeps the results as an artifact. The `--statisticalTest` flag
+  # compares the benchmarks in a class against that class's own `[Benchmark(Baseline = true)]` — which
+  # is MediatR-vs-Warp, not head-vs-base. Version comparison for this tier is a follow-up; it needs a
+  # reader for BenchmarkDotNet's own report schema, and shipping an untested one would be worse than
+  # saying plainly that it is not here yet. Tier B below is the one that compares versions.
   # ---------------------------------------------------------------------------------------------
   microbenchmarks:
-    name: Microbenchmarks (alloc + time)
+    name: Microbenchmarks (collect + multimodal check)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -44,7 +49,7 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Run BenchmarkDotNet against the merge base
+      - name: Run BenchmarkDotNet on this PR
         working-directory: src/benchmarks/Warp.Benchmarks
         run: |
           dotnet run -c Release -- \

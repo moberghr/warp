@@ -130,6 +130,13 @@ machinery does exactly what it is built for:
 - **Gate on time** via `--statisticalTest 5%` (Mann-Whitney U). Let BDN decide significance rather
   than thresholding a raw percentage: if the runner is noisy the interval widens and the test simply
   declines to call it, which fails toward silence instead of toward a flaky red build.
+
+**Status: only partly landed.** The first cut of `perf.yml` runs the benchmarks on the PR and checks
+for multimodality, but does **not** compare against the base. `--statisticalTest` compares a class's
+benchmarks against its own `[Benchmark(Baseline = true)]`, which here is MediatR-versus-Warp rather
+than head-versus-base — so the gating above is still to build. It needs a reader for BenchmarkDotNet's
+report JSON (`Benchmarks[].Memory.BytesAllocatedPerOperation`), built against a real exported file
+rather than a guessed schema, and the same merge-base swap Tier B uses.
 - Fail the job on any benchmark BDN marks **multimodal**, rather than reading its median. That warning
   is what would have caught the bimodal claim plan the 7.1.0 revalidation found by hand.
 - Set `MinIterationCount` high enough that a pilot run on a slow runner cannot settle for a sample too
