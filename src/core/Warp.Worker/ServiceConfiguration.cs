@@ -233,14 +233,33 @@ public static class ServiceConfiguration
             configurator.Configure(options, sp);
             options.AddWarpInterceptors();
 
-            // Keep the autonomous server loops' SQL out of the application's command logs: demote the
-            // server context's command-executed event to Debug (app stays at Information). The user's
-            // own DbContext is unaffected. Opt back in with opt.EnableServerCommandLogging = true.
+            // One ConfigureWarnings call rather than one per setting: this callback runs for every server
+            // context created, several per job, and each call clones EF's options extensions.
             var serverConfig = sp.GetService<IOptions<WarpServerConfiguration>>()?.Value;
-            if (serverConfig is null || !serverConfig.EnableServerCommandLogging)
+            var demoteCommandLogging = serverConfig is null || !serverConfig.EnableServerCommandLogging;
+            options.ConfigureWarnings(w =>
             {
-                options.ConfigureWarnings(w => w.Log((RelationalEventId.CommandExecuted, LogLevel.Debug)));
-            }
+                // Keep the autonomous server loops' SQL out of the application's command logs: demote
+                // the server context's command-executed event to Debug (app stays at Information). The
+                // user's own DbContext is unaffected. Opt back in with opt.EnableServerCommandLogging.
+                if (demoteCommandLogging)
+                {
+                    w.Log((RelationalEventId.CommandExecuted, LogLevel.Debug));
+                }
+
+                // The server's sweeps take a bounded slice with Take(batchSize) and no OrderBy, which
+                // EF warns about on every execution — ExpirationCleanup alone runs nine of them per
+                // tick, so an idle server fills the application's log with a warning about its own
+                // internals.
+                //
+                // Unordered is CORRECT for these, not an oversight: "delete any N expired rows" has no
+                // meaningful order, the sweep repeats until the table drains, and imposing one would buy
+                // a sort for nothing. EF offers no per-query suppression, so the suppression is scoped to
+                // this context instead — the one the autonomous server loops run on (rule 2.14).
+                // Anything on the user's own TContext, including every dashboard query that pages with
+                // Skip/Take, still warns, which is where the warning earns its keep.
+                w.Ignore(CoreEventId.RowLimitingOperationWithoutOrderByWarning);
+            });
         });
 
         // AddDbContext also appends a non-generic DbContextOptions forwarder (plain Add, not TryAdd)

@@ -79,7 +79,8 @@ public class WarpDispatcherHost<TContext> : IHostedService
                 _timeProvider,
                 _pauseStateHolder,
                 registration.GroupEntityId,
-                _dispatcherRegistry);
+                _dispatcherRegistry,
+                _signals);
 
             await dispatcher.StartAsync(cancellationToken);
             _workers.Add(dispatcher);

@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core.ClientObservability;
+using Warp.Core.Logging;
 using Warp.Http.ClientObservability;
 
 namespace Warp.Tests.ClientObservability;
@@ -26,6 +27,11 @@ public sealed class ClientIngestMeterTests : IAsyncLifetime
     private const string Path = "/warp/ingest";
     private const string Origin = "https://shop.test";
 
+    // The Warp meter is process-wide, so a listener also hears every OTHER test that posts client
+    // events in parallel; this one once counted 4 of its own 3. Its own application name, and a
+    // listener that counts only that application, keep it to the events this test sent.
+    private readonly string _application = "meter-test-" + Guid.NewGuid().ToString("N");
+
     public async ValueTask InitializeAsync()
     {
         var builder = WebApplication.CreateSlimBuilder();
@@ -34,7 +40,7 @@ public sealed class ClientIngestMeterTests : IAsyncLifetime
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.Configure<WarpClientObservabilityOptions>(o =>
         {
-            o.AddIngestKey("shop", "pk_test");
+            o.AddIngestKey(_application, "pk_test");
             o.AllowedOrigins.Add(Origin);
             o.MaxEventsPerBatch = 10;
             o.RateLimitPerMinute = 100;
@@ -62,7 +68,7 @@ public sealed class ClientIngestMeterTests : IAsyncLifetime
         var eventCount = 0L;
         var vitalNames = new List<string>();
 
-        using var events = CounterListener("warp.client.events", value => eventCount += value);
+        using var events = CounterListener("warp.client.events", _application, value => Interlocked.Add(ref eventCount, value));
         using var vitals = VitalListener(vitalNames);
 
         await PostAsync(new
@@ -92,7 +98,7 @@ public sealed class ClientIngestMeterTests : IAsyncLifetime
         (await _client.SendAsync(request, Xunit.TestContext.Current.CancellationToken)).EnsureSuccessStatusCode();
     }
 
-    private static MeterListener CounterListener(string instrumentName, Action<long> onValue)
+    private static MeterListener CounterListener(string instrumentName, string application, Action<long> onValue)
     {
         var listener = new MeterListener
         {
@@ -106,7 +112,18 @@ public sealed class ClientIngestMeterTests : IAsyncLifetime
             },
         };
 
-        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) => onValue(value));
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+        {
+            foreach (var tag in tags)
+            {
+                if (string.Equals(tag.Key, WarpTelemetryAttributes.MeterApplication, StringComparison.Ordinal)
+                    && tag.Value is string name
+                    && string.Equals(name, application, StringComparison.Ordinal))
+                {
+                    onValue(value);
+                }
+            }
+        });
         listener.Start();
 
         return listener;

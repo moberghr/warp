@@ -67,22 +67,33 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         // are just as bad. Fresh statistics also fix it, which is why `ANALYZE` looks like a cure,
         // but that is a race against a backlog that swings from empty to full between autovacuum
         // ticks; the scalar form removes the race instead of running it. See docs/perf-results.md.
+        //
+        // The limited SELECT is an ARRAY sub-select — an InitPlan, evaluated exactly ONCE — not a
+        // subquery joined in FROM. Joined in FROM, the planner was free to put the full table on the
+        // outer side of a nested loop and re-run the subquery per outer row, and it did so whenever it
+        // believed the table empty: reltuples = 0 with pages still allocated, which is what autovacuum
+        // leaves after vacuuming a queue that drained, until the next analyze. Every re-run skips the
+        // row this statement has just updated and returns the next one, so one LIMIT 1 claimed every
+        // row whose id also sorted later: 2-7 at random UUIDs, all of them at ascending ids. The
+        // worker runs only the first row returned, and the surplus sat in Processing until
+        // StaleJobRecovery. Captured in CI at 650 multi-row claims, all under that statistics state,
+        // and replayed by ClaimPlanStabilityTests. A MATERIALIZED CTE also runs once, but it still
+        // walks the whole table to join against it. This form is a primary-key lookup whatever the
+        // statistics say.
         _claimEnqueuedJobsSql = $@"
             UPDATE {table} AS t
             SET ""{_n.CurrentState}"" = {(int)State.Processing},
                 ""{_n.CurrentWorkerId}"" = {{0}},
                 ""{_n.LastKeepAlive}"" = {{1}}
-            FROM (
-                SELECT ""{_n.Id}"" AS id
+            WHERE t.""{_n.Id}"" = ANY(ARRAY(
+                SELECT ""{_n.Id}""
                 FROM {table}
                 WHERE ""{_n.Kind}"" = {(int)JobKind.Job}
                   AND ""{_n.CurrentState}"" = {(int)State.Enqueued}
                   AND ""{_n.Queue}"" = {{2}}
                 ORDER BY ""{_n.ScheduleTime}""
                 LIMIT {{3}}
-                FOR UPDATE SKIP LOCKED
-            ) AS c
-            WHERE t.""{_n.Id}"" = c.id
+                FOR UPDATE SKIP LOCKED))
             RETURNING t.*";
 
         // Atomic batch-claim for the message router. Mirrors _claimEnqueuedJobsSql shape: an
@@ -92,19 +103,19 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         // one-at-a-time LockNextEnqueuedMessage pattern — that path required per-message commit
         // (otherwise the next select would re-fetch the same uncommitted row), so it could not
         // scale beyond ~commit-RTT messages per second.
+        // The limited SELECT is an ARRAY sub-select for the same reason as the job claim above: joined
+        // in FROM it can be re-run per outer row and claim past its limit.
         _claimEnqueuedMessagesSql = $@"
             UPDATE {table} AS t
             SET ""{_n.CurrentState}"" = {(int)State.Processing}
-            FROM (
-                SELECT ""{_n.Id}"" AS id
+            WHERE t.""{_n.Id}"" = ANY(ARRAY(
+                SELECT ""{_n.Id}""
                 FROM {table}
                 WHERE ""{_n.Kind}"" = {(int)JobKind.Message}
                   AND ""{_n.CurrentState}"" = {(int)State.Enqueued}
                 ORDER BY ""{_n.Queue}"", ""{_n.ScheduleTime}""
                 LIMIT {{0}}
-                FOR NO KEY UPDATE SKIP LOCKED
-            ) AS c
-            WHERE t.""{_n.Id}"" = c.id
+                FOR NO KEY UPDATE SKIP LOCKED))
             RETURNING t.*";
 
         _lockStaleProcessingJobsSql = $@"

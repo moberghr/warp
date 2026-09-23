@@ -9,6 +9,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 
 namespace Warp.Worker;
 
@@ -29,6 +30,7 @@ public class WarpDispatcher<TContext> : BackgroundService
     private readonly Guid _workerGroupId;
     private readonly SemaphoreSlim _signal = new(0);
     private readonly IDisposable _registration;
+    private readonly ServerTaskSignals<TContext> _signals;
 
     public WarpDispatcher(
         IServiceScopeFactory scopeFactory,
@@ -38,7 +40,8 @@ public class WarpDispatcher<TContext> : BackgroundService
         TimeProvider timeProvider,
         PauseStateHolder pauseStateHolder,
         Guid workerGroupId,
-        DispatcherRegistry registry)
+        DispatcherRegistry registry,
+        ServerTaskSignals<TContext> signals)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
@@ -60,6 +63,7 @@ public class WarpDispatcher<TContext> : BackgroundService
         });
 
         _registration = registry.Register(_signal);
+        _signals = signals;
     }
 
     public ChannelReader<Job> JobReader => _jobChannel.Reader;
@@ -72,6 +76,25 @@ public class WarpDispatcher<TContext> : BackgroundService
         var max = _groupConfiguration.MaxPollingInterval;
         var factor = _groupConfiguration.PollingIntervalFactor;
         var currentDelay = floor;
+
+        // Same in-process wake as the bare WarpWorker (rule 2.9): a Publisher, MessageRouter or
+        // ScheduledJobActivation commit on THIS server fires JobEnqueued, which must cut the backoff
+        // short. The registry above only carries the cross-process wake from DB push, so without this
+        // a dispatcher without UseDatabasePush() sat out its backoff — up to MaxPollingInterval —
+        // before seeing work enqueued in its own process. The dispatcher benchmarks measured it:
+        // ~21 s to drain 1,000 jobs against ~2.3 s single-worker. Same lock-guarded release as
+        // WarpWorker, so a burst of signals leaves at most one pending wake.
+        var signalLock = new Lock();
+        using var subscription = _signals.Subscribe(ServerTaskSignal.JobEnqueued, () =>
+        {
+            lock (signalLock)
+            {
+                if (_signal.CurrentCount == 0)
+                {
+                    _signal.Release();
+                }
+            }
+        });
 
         // Cleanup MUST run even if an unexpected exception escapes the loop body — the channel
         // writer must be completed so DispatcherWorkers waiting on WaitToReadAsync can exit.

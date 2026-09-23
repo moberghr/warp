@@ -12,7 +12,8 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// Measures total memory allocation per workload across ALL threads.
 ///
 /// [MemoryDiagnoser] tracks the benchmark thread (publishing + waiting).
-/// TotalAllocatedDiagnoser tracks allocations across all threads (workers + background tasks).
+/// MemoryDiagnoser's Allocated is process-wide, so it already covers the worker and background-task
+/// threads where this server does its work (see AllocationAttributionBenchmark).
 /// </summary>
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]

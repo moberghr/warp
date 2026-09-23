@@ -1,0 +1,317 @@
+name: Performance
+
+# Compares THIS pull request against its merge base, both measured on the SAME runner in the SAME
+# job, interleaved. Never against a stored historical number: that comparison measures the runners.
+#
+# What is gated and what is not is a measurement question, not a policy preference — see
+# docs/plans/2026-09-22-performance-ci.md. Short version: counts are gated because they reproduce to
+# a few percent; server-arm timings are reported because their measured spread reached 417%.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/core/**'
+      - 'src/benchmarks/**'
+      - '.github/workflows/perf.yml'
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: 'Baseline commit, tag or branch (default: the merge base)'
+        required: false
+        type: string
+      head_ref:
+        description: 'Commit, tag or branch to measure (default: this branch)'
+        required: false
+        type: string
+
+env:
+  DOTNET_VERSION: '10.0'
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The two commits under comparison, resolved once. Every benchmark job measures the same pair, so
+  # resolving it in each would only repeat the same answer eight times, and print it eight times.
+  refs:
+    name: Resolve commits
+    runs-on: ubuntu-24.04
+    outputs:
+      head: ${{ steps.refs.outputs.head }}
+      base: ${{ steps.refs.outputs.base }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the two commits under comparison
+        id: refs
+        run: |
+          if [ -n "${{ inputs.head_ref }}" ]; then
+            HEAD_SHA=$(git rev-parse "${{ inputs.head_ref }}^{commit}")
+          else
+            HEAD_SHA=$(git rev-parse HEAD)
+          fi
+
+          if [ -n "${{ inputs.base_ref }}" ]; then
+            BASE_SHA=$(git rev-parse "${{ inputs.base_ref }}^{commit}")
+          elif [ -n "${{ github.base_ref }}" ]; then
+            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          else
+            BASE_SHA=$(git merge-base origin/main HEAD)
+          fi
+
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------------------------
+  # BenchmarkDotNet, gating the one quantity calibrated to survive a shared runner: database
+  # statements per job, at 10%. Allocations are reported but not gated, because they moved 2-3%
+  # between identical builds (BDN's figure is process-wide, background server tasks included). Time is
+  # reported and never gated: these benchmarks have measured an Error of 108 s against a 25 s mean. A
+  # benchmark that produced no measurement on either side fails the job instead of passing silently.
+  #
+  # PostgreSQL is shared between the two runs and named in the environment rather than started per
+  # process. That is not a convenience: BenchmarkDotNet runs benchmarks in a child process while
+  # diagnosers run in the host, so a container the child creates cannot be reached by the diagnoser
+  # that has to read pg_stat_statements from it.
+  # ---------------------------------------------------------------------------------------------
+  benchmarks:
+    name: Benchmarks (${{ matrix.benchmark.name }})
+    needs: refs
+
+    # Pinned, not ubuntu-latest. This workflow measures, and the latest label migrates to Ubuntu 26 in
+    # October 2026 - a change of CPU, kernel and Docker underneath the numbers. Gating survives it
+    # regardless, since base and head run on the same image inside one job, but absolute figures stay
+    # comparable across runs only while the image is fixed. Bump it deliberately, and expect the
+    # absolute numbers to step when you do.
+    runs-on: ubuntu-24.04
+
+    # One job per benchmark. BenchmarkDotNet is sequential within a process, so running all four in one
+    # job took 69 minutes against the lab's 12 - and a migration that trades a twelve-minute gate for a
+    # sixty-nine-minute one is not an improvement whatever it measures. Split across jobs they run in
+    # parallel and the wall clock is the slowest single benchmark rather than the sum.
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        benchmark:
+          - name: dispatcher
+            filter: '*DispatcherModeBenchmark*'
+            sqlserver: true
+          - name: completion-batch
+            filter: '*CompletionBatchBenchmark*'
+          - name: payload
+            filter: '*PayloadSizeBenchmark*'
+          - name: concurrency
+            filter: '*ConcurrencyBenchmark*'
+          - name: failure-path
+            filter: '*FailurePathBenchmark*'
+          - name: publish
+            filter: '*PublishBenchmark*'
+          - name: message-routing
+            filter: '*MessageRoutingBenchmark*'
+          - name: scheduled-activation
+            filter: '*ScheduledActivationBenchmark*'
+    env:
+      WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
+      WARP_BENCH_SQLSERVER: "Server=localhost,1433;User Id=sa;Password=Warp!Bench1;TrustServerCertificate=True;Database=master"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Start PostgreSQL
+        run: |
+          docker run -d --name warpbench -p 5432:5432 \
+            -e POSTGRES_PASSWORD=postgres \
+            postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db \
+            -c shared_preload_libraries=pg_stat_statements \
+            -c pg_stat_statements.track=top
+
+          # Not pg_isready. The image initialises on a TEMPORARY server, then stops it and starts the
+          # real one, and pg_isready answers yes for the temporary one: a CREATE EXTENSION sent then
+          # was cut off by the shutdown ("terminating connection due to administrator command") and
+          # failed the job before any benchmark ran. So retry the step that matters until it succeeds,
+          # and only accept a server that can then read the extension's view.
+          # The init-complete line marks the end of the temporary phase, so nothing below can land on it.
+          for i in $(seq 1 90); do
+            if docker logs warpbench 2>&1 | grep -q "PostgreSQL init process complete" \
+              && docker exec warpbench psql -U postgres -q -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" > /dev/null 2>&1 \
+              && docker exec warpbench psql -U postgres -tAc "SELECT count(*) FROM pg_stat_statements" > /dev/null 2>&1; then
+              echo "postgres ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::PostgreSQL did not become ready"
+          docker logs warpbench
+          exit 1
+
+      # Started for every benchmark job, because the provider sweep is a benchmark PARAMETER and not a
+      # matrix dimension: one BenchmarkDotNet process runs both sides, so both servers must be up.
+      - name: Start SQL Server
+        if: matrix.benchmark.sqlserver
+        run: |
+          docker run -d --name warpbench-mssql -p 1433:1433             -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=Warp!Bench1'             mcr.microsoft.com/mssql/server:2022-latest
+
+          for i in $(seq 1 90); do
+            if docker exec warpbench-mssql /opt/mssql-tools18/bin/sqlcmd                  -S localhost -U sa -P 'Warp!Bench1' -C -Q "SELECT 1" > /dev/null 2>&1; then
+              echo "sql server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::SQL Server did not become ready"
+          docker logs warpbench-mssql
+          exit 1
+
+      # Only src/core is ever swapped, so the HARNESS is identical on both sides and the two numbers
+      # differ by the library alone. That is what makes an arbitrary pair comparable: building each
+      # side from its own commit would compare two instruments as much as two libraries, and the 7.0.0
+      # tag cannot run these benchmarks at all — the scenarios and --warmup postdate it.
+      - name: Run benchmarks on the head commit
+        run: |
+          git checkout ${{ needs.refs.outputs.head }} -- src/core
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            --filter '${{ matrix.benchmark.filter }}' \
+            --exporters json \
+            --artifacts "${{ github.workspace }}/bench/head"
+          git checkout HEAD -- src/core
+
+      - name: Run benchmarks on the base commit
+        id: basebench
+        continue-on-error: true
+        run: |
+          git checkout ${{ needs.refs.outputs.base }} -- src/core
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            --filter '${{ matrix.benchmark.filter }}' \
+            --exporters json \
+            --artifacts "${{ github.workspace }}/bench/base"
+          git checkout HEAD -- src/core
+
+      - name: Compare
+        if: steps.basebench.outcome == 'success'
+        run: |
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            compare-bdn \
+            --base="${{ github.workspace }}/bench/base" \
+            --head="${{ github.workspace }}/bench/head" \
+            --tolerance=5 \
+            --summary="${{ github.workspace }}/bench/section.md"
+
+      - name: Explain an incompatible base
+        if: steps.basebench.outcome == 'failure'
+        run: |
+          echo "::warning::The benchmarks do not build against the base commit, so nothing was compared."
+          echo "::warning::That happens when the change adds an API the benchmark uses."
+          {
+            echo "<!-- verdict: skipped -->"
+            echo "### ➖ ${{ matrix.benchmark.name }}"
+            echo
+            echo "Not compared: the benchmark does not build against the base commit. That happens when the change adds an API the benchmark uses."
+          } > "${{ github.workspace }}/bench/section.md"
+
+      - name: Fail on a multimodal distribution
+        run: |
+          # A multimodal benchmark means the median describes nothing. This is the check that would
+          # have caught the bimodal claim plan found by hand during the 7.1.0 revalidation.
+          if grep -rqi "multimodal" "${{ github.workspace }}/bench/head"; then
+            echo "::error::BenchmarkDotNet reported a multimodal distribution - investigate before"
+            echo "::error::reading any comparison from this run."
+            grep -ri "multimodal" "${{ github.workspace }}/bench/head" || true
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: benchmark-results-${{ matrix.benchmark.name }}
+          path: ${{ github.workspace }}/bench
+
+  # ---------------------------------------------------------------------------------------------
+  # One page for the whole run. Each benchmark job leaves its section in its artifact; this puts them
+  # in order under a single header, so the commits are named once and the verdict is read at a glance.
+  # Runs whatever the benchmarks did: a failing run is exactly the one whose report matters.
+  # ---------------------------------------------------------------------------------------------
+  report:
+    name: Report
+    needs: [refs, benchmarks]
+    if: always() && needs.refs.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: benchmark-results-*
+          path: results
+
+      - name: Write the report
+        env:
+          HEAD_SHA: ${{ needs.refs.outputs.head }}
+          BASE_SHA: ${{ needs.refs.outputs.base }}
+        run: |
+          # Matrix order, so the page reads the same way every run.
+          scenarios="dispatcher completion-batch payload concurrency failure-path publish message-routing scheduled-activation"
+
+          passed=0; failed=0; missing=0
+          for name in $scenarios; do
+            file="results/benchmark-results-$name/section.md"
+            if [ ! -f "$file" ]; then missing=$((missing + 1))
+            elif grep -q "verdict: pass" "$file"; then passed=$((passed + 1))
+            elif grep -q "verdict: fail" "$file"; then failed=$((failed + 1))
+            else missing=$((missing + 1)); fi
+          done
+          total=$((passed + failed + missing))
+
+          if [ "$failed" -gt 0 ]; then
+            headline="❌ $failed of $total scenarios got worse"
+          elif [ "$missing" -gt 0 ]; then
+            headline="⚠️ $passed of $total scenarios compared, $missing did not produce a comparison"
+          else
+            headline="✅ All $total scenarios within the gate"
+          fi
+
+          {
+            echo "## Performance: $headline"
+            echo
+            echo "**Head** \`$(git rev-parse --short "$HEAD_SHA")\` $(git log -1 --format=%s "$HEAD_SHA")  "
+            echo "**Base** \`$(git rev-parse --short "$BASE_SHA")\` $(git log -1 --format=%s "$BASE_SHA")"
+            echo
+            echo "Each scenario runs the same benchmark code against both commits on one runner. Only \`src/core\` differs between the two sides."
+            echo
+            for name in $scenarios; do
+              file="results/benchmark-results-$name/section.md"
+              if [ -f "$file" ]; then
+                cat "$file"
+              else
+                echo "### ⚠️ $name"
+                echo
+                echo "No result: the job did not get far enough to compare. Open the job log for why."
+              fi
+              echo
+            done
+            echo "<details><summary>How to read this</summary>"
+            echo
+            echo "- Tables follow BenchmarkDotNet's summary. Each case has two rows, **base** then **head**, the way BDN shows a benchmark beside its baseline."
+            echo "- **Ratio** is head time ÷ base time: below 1.00 is faster. **Alloc Ratio** is the same for memory. **Error** is half the 99.9% confidence interval and **StdDev** the standard deviation, both over the iterations BDN ran."
+            echo "- **Gate** is the verdict on the head row. **Statements/job** fails a scenario above +10%: it is a count from the database's own statistics, so it reproduces run to run. **Jobs/s** fails only on a collapse, a drop of more than half, because identical code moves about 15% between runs here."
+            echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. **WAL/job** is the write side (PostgreSQL only). Both are reported, not gated, until their noise is measured."
+            echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
+            echo "- ⚠️ means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"

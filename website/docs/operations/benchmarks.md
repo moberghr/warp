@@ -29,11 +29,22 @@ How much memory does processing a single job cost?
 
 The full worker cycle includes two transactions, two DbContext scopes, JSON deserialization, handler execution, and counter + log writes.
 
+:::caution Figures predate a measurement fix
+
+The tables below were produced when the benchmarks either could not run at all or reported a column
+that measured the wrong process, so treat them as indicative until they are re-measured. Two defects
+were found and fixed: the fixture never registered a database provider, so every server benchmark
+reported `NA`; and a custom "Total Allocated (all threads)" diagnoser read the host process while the
+work happened in a child, reporting `0 GB` beside a real 2.87 GB. That diagnoser has been removed as
+redundant — `MemoryDiagnoser` already measures process-wide.
+
+:::
+
 ## Server Throughput
 
-Full server with **5 workers** and all 9 background tasks. `Total Allocated` tracks memory across all threads (workers + background tasks), not just the publishing thread.
+Full server with **5 workers** and the background tasks. `Allocated` is process-wide, so it covers the worker and background-task threads rather than only the publishing thread.
 
-| Workload | Jobs | Mean | Total Allocated | Per Job |
+| Workload | Jobs | Mean | Allocated | Per Job |
 |----------|------|------|-----------------|---------|
 | Simple jobs | 200 | 935 ms | 10 MB | 50 KB |
 | Simple jobs | 2,000 | 6.3 s | 100 MB | 50 KB |

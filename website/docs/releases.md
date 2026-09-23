@@ -86,6 +86,38 @@ separate overload rather than an optional parameter, so existing compiled call s
 **SQL Server is unaffected** — `sp_reset_connection` is a single call, so there is no equivalent
 amplification to remove.
 
+### Fixed
+
+**PostgreSQL: a worker could claim several jobs and run only one.** The claim took its jobs with a
+limited `SELECT ... FOR UPDATE SKIP LOCKED` joined into the `UPDATE`. When PostgreSQL believed the
+job table empty, it re-ran that subquery once per table row, so one claim could mark several jobs
+`Processing`. The worker ran the first, and the rest stayed claimed with nothing running them until
+`StaleJobRecovery` requeued them after their keep-alive expired, **minutes of delay, not loss**. The same
+plan made each claim walk the whole table: **4.3 s per claim at 300k rows**.
+
+The window is short but ordinary: a queue drains to empty, autovacuum records the table as having
+no rows while its pages are still allocated, and a burst of jobs arrives before the next autoanalyze.
+The job claim (single-worker and dispatcher) and the message router's claim were both affected. The
+claim now selects its ids once, as an `ARRAY` sub-select, and updates exactly those rows, so it
+cannot take more than its limit under any plan. Normal-case cost is unchanged: same index, same
+buffers within 0.5%. In the empty-table window a claim takes 0.24 ms instead of 4.3 s. **SQL Server was
+not affected**: its claim updates a `TOP (n)` CTE directly, with no join to re-run.
+
+**Dispatcher mode picks up a job enqueued on the same server immediately.** A bare worker wakes on
+an enqueue in its own process (a `Publisher` save, the message router, scheduled activation), but the
+dispatcher was only woken by a database push. Without `UseDatabasePush()`, a dispatcher that had
+backed off after an idle spell waited out its backoff, up to `MaxPollingInterval`, before seeing new
+work. It now wakes on the same in-process signal. Measured on the benchmark: 1,000 jobs drained in
+about 2 s instead of 21 s.
+
+**Each finished job no longer throws an exception internally.** The per-job monitor was stopped by
+cancelling a delay and catching the result, which cost one first-chance exception per job on both
+worker paths. Behaviour is unchanged.
+
+**The server no longer logs EF's row-limiting warning about its own queries.** Warp's cleanup
+sweeps take bounded, deliberately unordered batches, and EF warned on every one. The warning is now
+suppressed on Warp's internal server context only. Queries on your own `DbContext` still warn.
+
 ## 7.0.0
 
 *2026-09-19*
