@@ -306,11 +306,11 @@ jobs:
             done
             echo "<details><summary>How to read this</summary>"
             echo
-            echo "- **before → after (change)**: base commit, then head commit, then the change from one to the other."
-            echo "- **Statements / job** is the main gate: a scenario fails if it rises more than 10%. It is a count from the database's own statistics, so it reproduces run to run."
-            echo "- **Buffers / job** is the database pages touched per job, cached or read. It catches work a statement count cannot see: a slower plan issues the same statements but touches far more pages. **WAL / job** is the write side (PostgreSQL only). Both are reported, not gated, until their noise is measured."
-            echo "- **Jobs / s** is reported, and fails only on a collapse: a drop of more than half. Identical code moves about 15% between runs on a shared runner, so anything finer would fail at random."
-            echo "- **Memory / run** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ marks a rise over 5%."
+            echo "- Tables follow BenchmarkDotNet's summary. Each case has two rows, **base** then **head**, the way BDN shows a benchmark beside its baseline."
+            echo "- **Ratio** is head time ÷ base time: below 1.00 is faster. **Alloc Ratio** is the same for memory. **Error** is half the 99.9% confidence interval and **StdDev** the standard deviation, both over the iterations BDN ran."
+            echo "- **Gate** is the verdict on the head row. **Statements/job** fails a scenario above +10%: it is a count from the database's own statistics, so it reproduces run to run. **Jobs/s** fails only on a collapse, a drop of more than half, because identical code moves about 15% between runs here."
+            echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. **WAL/job** is the write side (PostgreSQL only). Both are reported, not gated, until their noise is measured."
+            echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
             echo "- ⚠️ means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
             echo
             echo "</details>"

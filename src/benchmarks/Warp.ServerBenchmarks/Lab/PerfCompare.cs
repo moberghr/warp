@@ -275,24 +275,45 @@ public static class PerfCompare
             .GroupBy(x => x.Name, StringComparer.Ordinal)
             .Where(x => x.Select(y => y.Value).Distinct(StringComparer.Ordinal).Count() > 1)
             .Select(x => x.Key)
-            .ToHashSet(StringComparer.Ordinal);
+            .ToList();
         var severalMethods = cases.Select(x => x.Method).Distinct(StringComparer.Ordinal).Count() > 1;
-
         var declared = headRun.Keys.Concat(baseRun.Keys).Distinct(StringComparer.Ordinal).ToList();
+
+        // BenchmarkDotNet's own layout: one column per parameter, then the statistics, one row per
+        // result. A comparison is two rows per case, base then head, the way BDN shows a benchmark
+        // against its Baseline: the base row carries Ratio 1.00 and the head row its ratio to it.
+        var columns = new List<string>();
+        if (severalMethods)
+        {
+            columns.Add("Method");
+        }
+
+        columns.AddRange(varying);
+        var header = string.Join(" | ", columns.Append("Commit")) + " | Mean | Error | StdDev | Ratio | Jobs/s | Statements/job | Buffers/job | WAL/job | Allocated | Alloc Ratio | Gate";
+        var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
 
         // Declared order, the order BenchmarkDotNet ran them in. Sorting by name put "Keys: 10000"
         // before "Keys: 8".
         foreach (var benchmark in cases.OrderBy(x => declared.IndexOf(x.FullName)))
         {
-            var name = CaseName(benchmark, varying, severalMethods, labels);
+            var cells = new List<string>();
+            if (severalMethods)
+            {
+                cells.Add(benchmark.Method);
+            }
+
+            cells.AddRange(varying.Select(x => ParameterCell(benchmark, x, labels)));
+            var prefix = string.Join(" | ", cells);
+            prefix = prefix.Length == 0 ? string.Empty : prefix + " | ";
+
             var hasBase = baseRun.TryGetValue(benchmark.FullName, out var b);
             var hasHead = headRun.TryGetValue(benchmark.FullName, out var h);
 
             if (!hasBase || !hasHead || b is null || h is null)
             {
                 // A case only one side has is new or removed, not a regression.
-                var side = hasHead ? "new in head" : "removed in head";
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | {side} | | | | | ➖ |");
+                var side = hasHead ? "head only (new)" : "base only (removed)";
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}{side} | | | | | | | | | | | ➖ |");
                 continue;
             }
 
@@ -304,7 +325,8 @@ public static class PerfCompare
             if (b.Bytes is null || h.Bytes is null)
             {
                 var missing = MissingSide(b.Bytes, h.Bytes);
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | no measurement from {missing} | | | | | ⚠️ |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {(b.Bytes is null ? "NA" : Seconds(b.Mean))} | | | | | | | | | | |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {(h.Bytes is null ? "NA" : Seconds(h.Mean))} | | | | | | | | | | ⚠️ no measurement from {missing} |");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: {missing} produced no measurement, so nothing was compared"));
@@ -315,22 +337,21 @@ public static class PerfCompare
             double? stmtChange = b.StatementsPerJob is null or 0 || h.StatementsPerJob is null
                 ? null
                 : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
-            var allocChange = b.Bytes == 0 ? 0 : (h.Bytes.Value - b.Bytes.Value) / (double)b.Bytes.Value * 100;
             var jobs = JobCountOf(benchmark);
             double? baseRate = jobs is null || b.Mean <= 0 ? null : jobs.Value / (b.Mean / 1e9);
             double? headRate = jobs is null || h.Mean <= 0 ? null : jobs.Value / (h.Mean / 1e9);
             double? rateChange = baseRate is null || headRate is null ? null : (headRate.Value - baseRate.Value) / baseRate.Value * 100;
 
-            // Statements per job is the only gate. Allocations are REPORTED, not gated: they were gated
-            // at 2% on the strength of one run showing byte-identical numbers, and later runs moved 2-3%
-            // with no code change that could explain it. Until the noise floor is measured — a null
-            // comparison, the same commit on both sides — a threshold there is a guess, and a guess that
-            // fails builds is worse than none. Statements get 10% because they are read from a shared
-            // server, where background tasks ticking on timers add a little jitter.
-            var verdict = "✅";
+            // Statements per job is the gate. Allocations are REPORTED, not gated: they were gated at
+            // 2% on the strength of one run showing byte-identical numbers, and later runs moved 2-3%
+            // with no code change that could explain it. Statements get 10% because they are read from
+            // a shared server, where background tasks ticking on timers add a little jitter.
+            var gate = stmtChange is null
+                ? "✅"
+                : string.Create(CultureInfo.InvariantCulture, $"✅ stmt {stmtChange:+0.0;−0.0;0.0}%");
             if (stmtChange > StatementTolerancePct)
             {
-                verdict = string.Create(CultureInfo.InvariantCulture, $"❌ statements over {StatementTolerancePct:0}%");
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ stmt {stmtChange:+0.0;−0.0;0.0}% (limit +{StatementTolerancePct:0}%)");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
@@ -342,26 +363,23 @@ public static class PerfCompare
             // comes near it.
             if (rateChange < -ThroughputCollapsePct)
             {
-                verdict = string.Create(CultureInfo.InvariantCulture, $"❌ jobs/s down over {ThroughputCollapsePct:0}%");
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ jobs/s {rateChange:+0.0;−0.0;0.0}% (limit −{ThroughputCollapsePct:0}%)");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
             }
 
-            var statements = stmtChange is null
-                ? "not measured"
-                : Pair(Number(b.StatementsPerJob!.Value), Number(h.StatementsPerJob!.Value), string.Empty, stmtChange.Value);
-            var memory = Pair(Megabytes(b.Bytes.Value), Megabytes(h.Bytes.Value), "MB", allocChange, flagAbove: tolerancePct);
-            var buffers = PairOf(b.BuffersPerJob, h.BuffersPerJob, x => x.ToString("N1", CultureInfo.InvariantCulture), string.Empty);
-            var wal = PairOf(b.WalBytesPerJob, h.WalBytesPerJob, x => (x / 1024).ToString("N1", CultureInfo.InvariantCulture), "KB");
-            var timeChange = h.Mean <= 0 || b.Mean <= 0 ? 0 : (h.Mean - b.Mean) / b.Mean * 100;
+            var ratio = b.Mean <= 0 ? "?" : (h.Mean / b.Mean).ToString("N2", CultureInfo.InvariantCulture);
+            var allocRatio = b.Bytes.Value <= 0 ? "?" : (h.Bytes.Value / (double)b.Bytes.Value).ToString("N2", CultureInfo.InvariantCulture);
 
-            // jobs/s where the case has a job count, which is every CI scenario; mean time otherwise.
-            var rate = rateChange is null
-                ? PairDuration(b.Mean, h.Mean, timeChange)
-                : Pair(baseRate!.Value.ToString("N0", CultureInfo.InvariantCulture), headRate!.Value.ToString("N0", CultureInfo.InvariantCulture), string.Empty, rateChange.Value);
+            // Reported, not gated: a large rise is still worth a glance, so it is marked, not failed.
+            if (b.Bytes.Value > 0 && (h.Bytes.Value - b.Bytes.Value) / (double)b.Bytes.Value * 100 > tolerancePct)
+            {
+                allocRatio += " ↑";
+            }
 
-            rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | {statements} | {buffers} | {wal} | {rate} | {memory} | {verdict} |");
+            rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {Row(b)} | 1.00 | {Rate(baseRate)} | {Row2(b)} | 1.00 | |");
+            rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {Row(h)} | {ratio} | {Rate(headRate)} | {Row2(h)} | {allocRatio} | {gate} |");
         }
 
         var failed = failures.Count > failuresBefore;
@@ -384,8 +402,29 @@ public static class PerfCompare
         }
 
         section.AppendLine();
-        section.AppendLine("| case | statements / job · gated | buffers / job | WAL / job | jobs / s | memory / run | |");
-        section.AppendLine("| --- | --- | --- | --- | --- | --- | --- |");
+
+        // The environment block BenchmarkDotNet prints above every summary. Per scenario, not per run:
+        // each scenario ran on its own runner, and the hardware under one is not the hardware under the next.
+        var environment = cases
+            .Select(x => headRun.TryGetValue(x.FullName, out var r) ? r : null)
+            .FirstOrDefault(x => x?.Host is not null);
+        if (environment?.Host is { } host)
+        {
+            section.AppendLine("```");
+            section.AppendLine(CultureInfo.InvariantCulture, $"BenchmarkDotNet v{host.BenchmarkDotNetVersion}, {host.OsVersion}");
+            section.AppendLine(CultureInfo.InvariantCulture, $"{host.ProcessorName}, {host.PhysicalProcessorCount} CPU, {host.LogicalCoreCount} logical and {host.PhysicalCoreCount} physical cores");
+            section.AppendLine(CultureInfo.InvariantCulture, $".NET SDK {host.DotNetCliVersion}, {host.RuntimeVersion}, {host.Architecture}");
+            if (environment.Job is { Length: > 0 } job)
+            {
+                section.AppendLine(job);
+            }
+
+            section.AppendLine("```");
+            section.AppendLine();
+        }
+
+        section.AppendLine("| " + header + " |");
+        section.AppendLine("| " + alignment + " |");
         section.Append(rows);
 
         // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL
@@ -396,83 +435,64 @@ public static class PerfCompare
             && cases.Any(x => x.Parameters.Any(y => string.Equals(y.Value, "PostgreSql", StringComparison.Ordinal))))
         {
             section.AppendLine();
-            section.AppendLine("<sub>PostgreSQL and SQL Server count statements with different instruments, so read each row against itself, not against the other provider.</sub>");
+            section.AppendLine("<sub>PostgreSQL and SQL Server count statements with different instruments, so compare base with head within a provider, not across providers.</sub>");
         }
 
         return section.ToString();
     }
 
-    private static string CaseName(BdnCase benchmark, HashSet<string> varying, bool severalMethods, List<CaseLabelAttribute> labels)
+    /// <summary>Mean, Error, StdDev — in BenchmarkDotNet's own time format.</summary>
+    private static string Row(BdnResult result) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"{Seconds(result.Mean)} | {Seconds(result.Error)} | {Seconds(result.StdDev)}");
+
+    private static string Rate(double? jobsPerSecond) =>
+        jobsPerSecond is null ? "—" : jobsPerSecond.Value.ToString("N0", CultureInfo.InvariantCulture);
+
+    /// <summary>The runs' database counters per job, then allocation, as BenchmarkDotNet prints its metric columns.</summary>
+    private static string Row2(BdnResult result) =>
+        string.Join(
+            " | ",
+            FormatMetric(result.StatementsPerJob, "N2"),
+            FormatMetric(result.BuffersPerJob, "N1"),
+            result.WalBytesPerJob is null ? "—" : FormatBytes(result.WalBytesPerJob.Value),
+            result.Bytes is null ? "NA" : FormatBytes(result.Bytes.Value));
+
+    private static string FormatMetric(double? value, string format) =>
+        value is null ? "—" : value.Value.ToString(format, CultureInfo.InvariantCulture);
+
+    /// <summary>BenchmarkDotNet's size format: B, KB, MB with two decimals.</summary>
+    private static string FormatBytes(double bytes)
     {
-        var parts = benchmark.Parameters
-            .Where(x => varying.Contains(x.Name))
-            .Select(x => labels
-                .Where(y => string.Equals(y.Parameter, x.Name, StringComparison.Ordinal))
-                .Where(y => string.Equals(y.Value, x.Value, StringComparison.Ordinal))
-                .Select(y => y.Label)
-                .FirstOrDefault() ?? $"{x.Name} = {x.Value}")
-            .ToList();
-
-        if (severalMethods)
+        if (bytes >= 1024 * 1024)
         {
-            parts.Insert(0, benchmark.Method);
+            return (bytes / 1024 / 1024).ToString("N2", CultureInfo.InvariantCulture) + " MB";
         }
 
-        if (parts.Count > 0)
-        {
-            return string.Join(" · ", parts);
-        }
-
-        // A scenario with one case: say how big it is rather than naming nothing.
-        var jobs = benchmark.Parameters
-            .Where(x => string.Equals(x.Name, "JobCount", StringComparison.Ordinal))
-            .Select(x => int.TryParse(x.Value, CultureInfo.InvariantCulture, out var n) ? n.ToString("N0", CultureInfo.InvariantCulture) + " jobs" : null)
-            .FirstOrDefault();
-
-        return jobs ?? "single case";
+        return bytes >= 1024
+            ? (bytes / 1024).ToString("N2", CultureInfo.InvariantCulture) + " KB"
+            : bytes.ToString("N0", CultureInfo.InvariantCulture) + " B";
     }
 
-    /// <summary>"before → after unit (change)".</summary>
-    private static string Pair(string before, string after, string unit, double change, double? flagAbove = null)
+    /// <summary>BenchmarkDotNet reports nanoseconds; its summary shows s or ms to three decimals.</summary>
+    private static string Seconds(double nanoseconds) =>
+        nanoseconds >= 1e9
+            ? (nanoseconds / 1e9).ToString("N3", CultureInfo.InvariantCulture) + " s"
+            : (nanoseconds / 1e6).ToString("N3", CultureInfo.InvariantCulture) + " ms";
+
+    private static string ParameterCell(BdnCase benchmark, string parameter, List<CaseLabelAttribute> labels)
     {
-        var delta = change.ToString("+0.0;−0.0;0.0", CultureInfo.InvariantCulture) + "%";
+        var value = benchmark.Parameters
+            .Where(x => string.Equals(x.Name, parameter, StringComparison.Ordinal))
+            .Select(x => x.Value)
+            .FirstOrDefault() ?? "?";
 
-        // Reported, not gated: a large move is still worth a glance, so it is marked rather than failed.
-        if (flagAbove is { } limit && change > limit)
-        {
-            delta += " ↑";
-        }
-
-        var suffix = unit.Length == 0 ? string.Empty : " " + unit;
-
-        return string.Create(CultureInfo.InvariantCulture, $"{before} → {after}{suffix} ({delta})");
-    }
-
-    /// <summary>
-    /// BenchmarkDotNet reports nanoseconds. These runs take seconds and publishing takes milliseconds, so
-    /// the unit follows the value, and is written once when both sides share it.
-    /// </summary>
-    private static string PairDuration(double beforeNs, double afterNs, double change)
-    {
-        var (before, beforeUnit) = Duration(beforeNs);
-        var (after, afterUnit) = Duration(afterNs);
-
-        return string.Equals(beforeUnit, afterUnit, StringComparison.Ordinal)
-            ? Pair(before, after, afterUnit, change)
-            : Pair(before + " " + beforeUnit, after, afterUnit, change);
-    }
-
-    /// <summary>A reported metric that one provider may not have: SQL Server has no WAL figure.</summary>
-    private static string PairOf(double? before, double? after, Func<double, string> format, string unit)
-    {
-        if (before is null || after is null)
-        {
-            return "—";
-        }
-
-        var change = before.Value <= 0 ? 0 : (after.Value - before.Value) / before.Value * 100;
-
-        return Pair(format(before.Value), format(after.Value), unit, change);
+        return labels
+            .Where(x => string.Equals(x.Parameter, parameter, StringComparison.Ordinal))
+            .Where(x => string.Equals(x.Value, value, StringComparison.Ordinal))
+            .Select(x => x.Label)
+            .FirstOrDefault() ?? value;
     }
 
     private static int? JobCountOf(BdnCase benchmark) =>
@@ -480,16 +500,6 @@ public static class PerfCompare
             .Where(x => string.Equals(x.Name, "JobCount", StringComparison.Ordinal))
             .Select(x => int.TryParse(x.Value, CultureInfo.InvariantCulture, out var n) ? n : (int?)null)
             .FirstOrDefault();
-
-    private static string Number(double value) => value.ToString("N2", CultureInfo.InvariantCulture);
-
-    private static string Megabytes(long bytes) =>
-        (bytes / 1024d / 1024d).ToString("N1", CultureInfo.InvariantCulture);
-
-    private static (string Value, string Unit) Duration(double nanoseconds) =>
-        nanoseconds >= 1e9
-            ? ((nanoseconds / 1e9).ToString("N2", CultureInfo.InvariantCulture), "s")
-            : ((nanoseconds / 1e6).ToString("N1", CultureInfo.InvariantCulture), "ms");
 
     private static string MissingSide(long? baseBytes, long? headBytes)
     {
@@ -531,13 +541,42 @@ public static class PerfCompare
                 results[benchmark.FullName] = new BdnResult(
                     benchmark.Memory?.BytesAllocatedPerOperation,
                     benchmark.Statistics?.Mean ?? 0,
+                    benchmark.Statistics?.ConfidenceInterval?.Margin ?? 0,
+                    benchmark.Statistics?.StandardDeviation ?? 0,
                     MetricOf(benchmark, "StatementsPerJob"),
                     MetricOf(benchmark, "BuffersPerJob"),
-                    MetricOf(benchmark, "WalBytesPerJob"));
+                    MetricOf(benchmark, "WalBytesPerJob"),
+                    JobLine(benchmark.DisplayInfo),
+                    report?.HostEnvironmentInfo);
             }
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// BenchmarkDotNet's job line, from the case's display text:
+    /// <c>ShortRun(InvocationCount=1, IterationCount=3)</c> becomes <c>Job=ShortRun  InvocationCount=1  IterationCount=3</c>.
+    /// </summary>
+    private static string? JobLine(string? displayInfo)
+    {
+        var colon = displayInfo?.IndexOf(": ", StringComparison.Ordinal) ?? -1;
+        var bracket = displayInfo?.IndexOf(" [", StringComparison.Ordinal) ?? -1;
+        if (displayInfo is null || colon < 0)
+        {
+            return null;
+        }
+
+        var job = (bracket > colon ? displayInfo[(colon + 2)..bracket] : displayInfo[(colon + 2)..]).Trim();
+        var open = job.IndexOf('(', StringComparison.Ordinal);
+        if (open < 0 || !job.EndsWith(')'))
+        {
+            return "Job=" + job;
+        }
+
+        var settings = job[(open + 1)..^1].Split(", ", StringSplitOptions.RemoveEmptyEntries);
+
+        return "Job=" + job[..open] + "  " + string.Join("  ", settings);
     }
 
     private static double? MetricOf(BdnBenchmark benchmark, string id) =>
@@ -584,17 +623,40 @@ public static class PerfCompare
         public string Short { get; }
     }
 
-    private sealed record BdnResult(long? Bytes, double Mean, double? StatementsPerJob, double? BuffersPerJob, double? WalBytesPerJob);
+    private sealed record BdnResult(
+        long? Bytes,
+        double Mean,
+        double Error,
+        double StdDev,
+        double? StatementsPerJob,
+        double? BuffersPerJob,
+        double? WalBytesPerJob,
+        string? Job,
+        BdnHost? Host);
 
-    private sealed record BdnReport(List<BdnBenchmark>? Benchmarks);
+    private sealed record BdnHost(
+        string? BenchmarkDotNetVersion,
+        string? OsVersion,
+        string? ProcessorName,
+        int PhysicalProcessorCount,
+        int PhysicalCoreCount,
+        int LogicalCoreCount,
+        string? RuntimeVersion,
+        string? Architecture,
+        string? DotNetCliVersion);
 
-    private sealed record BdnBenchmark(string? FullName, BdnStatistics? Statistics, BdnMemory? Memory, List<BdnMetric>? Metrics);
+    private sealed record BdnReport(List<BdnBenchmark>? Benchmarks, BdnHost? HostEnvironmentInfo);
+
+    private sealed record BdnBenchmark(string? FullName, string? DisplayInfo, BdnStatistics? Statistics, BdnMemory? Memory, List<BdnMetric>? Metrics);
 
     private sealed record BdnMetric(double Value, BdnMetricDescriptor? Descriptor);
 
     private sealed record BdnMetricDescriptor(string? Id);
 
-    private sealed record BdnStatistics(double? Mean);
+    private sealed record BdnStatistics(double? Mean, double? StandardDeviation, BdnConfidenceInterval? ConfidenceInterval);
+
+    // BenchmarkDotNet's "Error" column: half the 99.9% confidence interval.
+    private sealed record BdnConfidenceInterval(double? Margin);
 
     // Nullable, because BenchmarkDotNet writes null for a case that produced no measurement — an arm
     // that errored, or was reported NA. Reading it as a long crashed the comparator outright, which
