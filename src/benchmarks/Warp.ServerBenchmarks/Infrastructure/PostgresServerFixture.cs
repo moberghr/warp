@@ -135,6 +135,11 @@ public class PostgresServerFixture : IAsyncDisposable
                     config.CompletionBatchSize = completionBatchSize;
                     config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
                 });
+
+                if (Environment.GetEnvironmentVariable("WARP_BENCH_AUDIT_CLAIMS") is not null)
+                {
+                    ClaimAudit<TestContext>.Install(services);
+                }
             })
             .Build();
 
