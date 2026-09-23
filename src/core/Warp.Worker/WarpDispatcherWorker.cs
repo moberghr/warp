@@ -621,11 +621,11 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, jobCts.Token);
         while (!linked.IsCancellationRequested)
         {
-            try
-            {
-                await Task.Delay(tickInterval, linked.Token);
-            }
-            catch (OperationCanceledException)
+            // SuppressThrowing, not try/catch: the monitor is cancelled at the end of EVERY job, so a
+            // throwing Delay cost one first-chance exception per execution — a stack capture on the hot
+            // path, and the whole of BenchmarkDotNet's `// Exceptions: N` count on a healthy run.
+            await Task.Delay(tickInterval, linked.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            if (linked.IsCancellationRequested)
             {
                 return;
             }
