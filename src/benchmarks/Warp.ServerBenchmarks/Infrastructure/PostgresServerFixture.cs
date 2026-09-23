@@ -135,11 +135,6 @@ public class PostgresServerFixture : IAsyncDisposable
                     config.CompletionBatchSize = completionBatchSize;
                     config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
                 });
-
-                if (Environment.GetEnvironmentVariable("WARP_BENCH_AUDIT_CLAIMS") is not null)
-                {
-                    ClaimAudit<TestContext>.Install(services);
-                }
             })
             .Build();
 
@@ -265,9 +260,17 @@ public class PostgresServerFixture : IAsyncDisposable
                 .ToListAsync();
 
             report.AppendLine($"  processing grouped by (worker, claim time), largest first:");
+            var workerIds = await ctx.Set<Warp.Core.Data.Entities.Worker>().AsNoTracking().Select(x => x.Id).ToListAsync();
+            var groupIds = await ctx.Set<WorkerGroup>().AsNoTracking().Select(x => x.Id).ToListAsync();
+            var servers = await ctx.Set<Server>().AsNoTracking().CountAsync();
+            report.AppendLine($"  servers={servers} workers={workerIds.Count} groups={groupIds.Count}");
+
             foreach (var claim in claims)
             {
-                report.AppendLine($"    {claim.Count,5} rows  worker={claim.CurrentWorkerId} keepalive={claim.LastKeepAlive:O}");
+                // A worker claims one row stamped with its own id; the dispatcher claims a batch stamped
+                // with its GROUP id. Which one owns a stuck batch says which path claimed it.
+                var owner = OwnerOf(claim.CurrentWorkerId, workerIds, groupIds);
+                report.AppendLine($"    {claim.Count,5} rows  {owner} {claim.CurrentWorkerId} keepalive={claim.LastKeepAlive:O}");
             }
 
             var stuck = await ctx.Set<Job>()
@@ -374,6 +377,21 @@ public class PostgresServerFixture : IAsyncDisposable
         }
 
         return report.ToString();
+    }
+
+    private static string OwnerOf(Guid? id, List<Guid> workerIds, List<Guid> groupIds)
+    {
+        if (id is not { } value)
+        {
+            return "none";
+        }
+
+        if (workerIds.Contains(value))
+        {
+            return "worker";
+        }
+
+        return groupIds.Contains(value) ? "GROUP" : "unknown";
     }
 
     /// <summary>
