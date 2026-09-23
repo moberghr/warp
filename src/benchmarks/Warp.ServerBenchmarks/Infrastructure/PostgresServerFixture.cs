@@ -1,8 +1,10 @@
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using Testcontainers.MsSql;
 using Testcontainers.PostgreSql;
 using Warp.Core;
 using Warp.Core.Concurrency;
@@ -11,6 +13,7 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Provider.PostgreSql;
+using Warp.Provider.SqlServer;
 using Warp.Worker;
 
 namespace Warp.ServerBenchmarks.Infrastructure;
@@ -34,6 +37,9 @@ public class PostgresServerFixture : IAsyncDisposable
     /// </summary>
     public const string ConnectionStringVariable = "WARP_BENCH_POSTGRES";
 
+    /// <summary>The SQL Server equivalent, so a run can cover both providers on one machine.</summary>
+    public const string SqlServerConnectionStringVariable = "WARP_BENCH_SQLSERVER";
+
     private readonly PostgreSqlContainer? _container = Environment.GetEnvironmentVariable(ConnectionStringVariable) is null
         ? new PostgreSqlBuilder()
             .WithImage("postgres:latest")
@@ -48,8 +54,10 @@ public class PostgresServerFixture : IAsyncDisposable
             .Build()
         : null;
 
+    private MsSqlContainer? _sqlContainer;
     private IHost? _host;
     private string _connectionString = null!;
+    private BenchmarkProvider _provider = BenchmarkProvider.PostgreSql;
 
     public bool IsInitialized => _host != null;
 
@@ -63,8 +71,10 @@ public class PostgresServerFixture : IAsyncDisposable
         bool useDispatcher = false,
         int completionBatchSize = 50,
         TimeSpan? completionFlushInterval = null,
-        bool addConcurrency = false)
+        bool addConcurrency = false,
+        BenchmarkProvider provider = BenchmarkProvider.PostgreSql)
     {
+        _provider = provider;
         _connectionString = await ResolveConnectionStringAsync();
 
         // Boot full Warp server
@@ -72,18 +82,21 @@ public class PostgresServerFixture : IAsyncDisposable
             .ConfigureLogging(logging => logging.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning))
             .ConfigureServices(services =>
             {
-                services.AddDbContext<TestContext>(options =>
-                {
-                    options.UseNpgsql(_connectionString)
-                        .UseSnakeCaseNamingConvention();
-                });
+                services.AddDbContext<TestContext>(options => ConfigureProvider(options));
 
                 services.AddWarpServer<TestContext>(config =>
                 {
                     // Registers IWarpLockProvider and IWarpSqlQueries. Without it ServerTaskHost
                     // cannot be activated, every benchmark using this fixture reports NA, and the
                     // failure is quiet - BenchmarkDotNet prints a table of NA rather than failing.
-                    config.UsePostgreSql();
+                    if (_provider == BenchmarkProvider.SqlServer)
+                    {
+                        config.UseSqlServer();
+                    }
+                    else
+                    {
+                        config.UsePostgreSql();
+                    }
 
                     // Opt-in addon (rule 8.6): without this, WithMutex stamps metadata that no
                     // behaviour reads, so a concurrency benchmark measures the plain baseline and
@@ -135,11 +148,7 @@ public class PostgresServerFixture : IAsyncDisposable
             .ConfigureLogging(logging => logging.SetMinimumLevel(LogLevel.Warning))
             .ConfigureServices(services =>
             {
-                services.AddDbContext<TestContext>(options =>
-                {
-                    options.UseNpgsql(_connectionString)
-                        .UseSnakeCaseNamingConvention();
-                });
+                services.AddDbContext<TestContext>(options => ConfigureProvider(options));
 
                 services.AddWarpServer<TestContext>(config =>
                 {
@@ -147,7 +156,14 @@ public class PostgresServerFixture : IAsyncDisposable
                     // so its absence was latent rather than fatal on this path - but latent is how the
                     // same omission sat unnoticed in InitializeAsync while every server benchmark
                     // reported NA.
-                    config.UsePostgreSql();
+                    if (_provider == BenchmarkProvider.SqlServer)
+                    {
+                        config.UseSqlServer();
+                    }
+                    else
+                    {
+                        config.UsePostgreSql();
+                    }
 
                     config.WorkerCount = 1;
                     config.Queues = ["default"];
@@ -219,8 +235,27 @@ public class PostgresServerFixture : IAsyncDisposable
     /// Each run gets a fresh database on the shared server, so arms cannot contaminate each other
     /// through leftover rows or a warmed cache.
     /// </summary>
+    private void ConfigureProvider(DbContextOptionsBuilder options)
+    {
+        if (_provider == BenchmarkProvider.SqlServer)
+        {
+            // No snake_case here: SQL Server keeps Warp's default naming, and forcing the Postgres
+            // convention would rename every table underneath the provider's own SQL.
+            options.UseSqlServer(_connectionString);
+
+            return;
+        }
+
+        options.UseNpgsql(_connectionString).UseSnakeCaseNamingConvention();
+    }
+
     private async Task<string> ResolveConnectionStringAsync()
     {
+        if (_provider == BenchmarkProvider.SqlServer)
+        {
+            return await ResolveSqlServerConnectionStringAsync();
+        }
+
         var external = Environment.GetEnvironmentVariable(ConnectionStringVariable);
 
         if (external is null)
@@ -247,6 +282,35 @@ public class PostgresServerFixture : IAsyncDisposable
         return builder.ConnectionString;
     }
 
+    private async Task<string> ResolveSqlServerConnectionStringAsync()
+    {
+        var external = Environment.GetEnvironmentVariable(SqlServerConnectionStringVariable);
+
+        if (external is null)
+        {
+            _sqlContainer = new MsSqlBuilder().Build();
+            await _sqlContainer.StartAsync();
+
+            return _sqlContainer.GetConnectionString();
+        }
+
+        var builder = new SqlConnectionStringBuilder(external);
+        var database = $"warpbench_{Guid.NewGuid():N}";
+
+        var adminConnectionString = new SqlConnectionStringBuilder(external) { InitialCatalog = "master" }.ConnectionString;
+        await using (var admin = new SqlConnection(adminConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = admin.CreateCommand();
+            create.CommandText = $"CREATE DATABASE [{database}]";
+            await create.ExecuteNonQueryAsync();
+        }
+
+        builder.InitialCatalog = database;
+
+        return builder.ConnectionString;
+    }
+
     public async ValueTask DisposeAsync()
     {
         GC.SuppressFinalize(this);
@@ -259,6 +323,11 @@ public class PostgresServerFixture : IAsyncDisposable
         if (_container is not null)
         {
             await _container.DisposeAsync();
+        }
+
+        if (_sqlContainer is not null)
+        {
+            await _sqlContainer.DisposeAsync();
         }
     }
 }

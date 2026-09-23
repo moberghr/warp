@@ -249,6 +249,22 @@ public static class PerfCompare
             CultureInfo.InvariantCulture,
             $"Allocations gated at {tolerancePct}%, statements per job at {StatementTolerancePct}%. Time is not gated: on these benchmarks it has measured an Error of 108 s against a 25 s mean.");
 
+        // Only when a run actually swept providers, so a single-provider summary stays uncluttered.
+        // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL
+        // Server row reading 25 looks like a verdict on the providers, when the two numbers come from
+        // different instruments - pg_stat_statements counts every execution, dm_exec_query_stats only
+        // those whose plans are still cached. Each row is evidence about ITSELF across two commits.
+        if (headRun.Keys.Any(x => x.Contains("Provider: SqlServer", StringComparison.Ordinal))
+            && headRun.Keys.Any(x => x.Contains("Provider: PostgreSql", StringComparison.Ordinal)))
+        {
+            report.AppendLine();
+            report.AppendLine(
+                "**Rows are comparable to themselves, not to each other.** PostgreSQL and SQL Server "
+                + "statement counts come from different instruments and different accounting; a "
+                + "difference between two providers' rows is not a finding. What each row answers is "
+                + "whether that arm moved between base and head.");
+        }
+
         Console.WriteLine(report.ToString());
 
         if (!string.IsNullOrEmpty(summaryPath))

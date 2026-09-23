@@ -29,7 +29,7 @@ public class ServerBenchmarkConfig : ManualConfig
         // BenchmarkDotNet invokes. AllocationAttributionBenchmark measures exactly this, and is the
         // reason no separate all-threads diagnoser exists any more.
         AddDiagnoser(new MemoryDiagnoser(new MemoryDiagnoserConfig(false)));
-        AddDiagnoser(new PgStatStatementsDiagnoser());
+        AddDiagnoser(new DatabaseStatementsDiagnoser());
         // BenchmarkDotNet's default build timeout is two minutes. That suits a microbenchmark, but
         // this project's benchmark assembly pulls in the whole server and its provider, and on a
         // loaded machine the generated build overruns it. The run is then reported as NA, which reads

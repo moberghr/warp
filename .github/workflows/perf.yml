@@ -82,6 +82,7 @@ jobs:
             filter: '*ScheduledActivationBenchmark*'
     env:
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
+      WARP_BENCH_SQLSERVER: "Server=localhost,1433;User Id=sa;Password=Warp!Bench1;TrustServerCertificate=True;Database=master"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -110,6 +111,24 @@ jobs:
 
           echo "::error::PostgreSQL did not become ready"
           docker logs warpbench
+          exit 1
+
+      # Started for every benchmark job, because the provider sweep is a benchmark PARAMETER and not a
+      # matrix dimension: one BenchmarkDotNet process runs both sides, so both servers must be up.
+      - name: Start SQL Server
+        run: |
+          docker run -d --name warpbench-mssql -p 1433:1433             -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=Warp!Bench1'             mcr.microsoft.com/mssql/server:2022-latest
+
+          for i in $(seq 1 90); do
+            if docker exec warpbench-mssql /opt/mssql-tools18/bin/sqlcmd                  -S localhost -U sa -P 'Warp!Bench1' -C -Q "SELECT 1" > /dev/null 2>&1; then
+              echo "sql server ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::SQL Server did not become ready"
+          docker logs warpbench-mssql
           exit 1
 
       # Only src/core is ever swapped, so the HARNESS is identical on both sides and the two numbers

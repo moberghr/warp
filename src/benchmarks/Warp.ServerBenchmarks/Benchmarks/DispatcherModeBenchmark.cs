@@ -34,11 +34,22 @@ public class DispatcherModeBenchmark
     [Params(false, true)]
     public bool UseDispatcher { get; set; }
 
+    /// <summary>
+    /// Swept because nothing else checks the two providers have not drifted. They are kept
+    /// shape-identical by hand — rule 6.9 applied the scalar claim predicate to both and records SQL
+    /// Server's plans as unmeasured — and every performance number this project publishes is
+    /// PostgreSQL's. The statement counts are NOT comparable across providers (different instruments,
+    /// and dm_exec_query_stats only sees cached plans); each is compared against itself on the other
+    /// commit, which is what a drift in one provider alone would show up in.
+    /// </summary>
+    [Params(BenchmarkProvider.PostgreSql, BenchmarkProvider.SqlServer)]
+    public BenchmarkProvider Provider { get; set; }
+
     [GlobalSetup]
     public async Task Setup()
     {
         _fixture = new PostgresServerFixture();
-        await _fixture.InitializeAsync(workerCount: 10, useDispatcher: UseDispatcher);
+        await _fixture.InitializeAsync(workerCount: 10, useDispatcher: UseDispatcher, provider: Provider);
 
         var publisher = _fixture.CreatePublisher();
         for (var i = 0; i < 100; i++)
