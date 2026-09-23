@@ -40,6 +40,13 @@ public class PostgresServerFixture : IAsyncDisposable
     /// <summary>The SQL Server equivalent, so a run can cover both providers on one machine.</summary>
     public const string SqlServerConnectionStringVariable = "WARP_BENCH_SQLSERVER";
 
+    /// <summary>
+    /// Records, inside PostgreSQL, every statement that moves job rows into Processing: how many rows,
+    /// which ones, from which backend, and the statement's own text. Diagnostic only — it adds a
+    /// trigger to the job table — for tracing jobs that were claimed and never run.
+    /// </summary>
+    public const string ClaimAuditVariable = "WARP_BENCH_AUDIT_CLAIMS";
+
     private readonly PostgreSqlContainer? _container = Environment.GetEnvironmentVariable(ConnectionStringVariable) is null
         ? new PostgreSqlBuilder()
             .WithImage("postgres:latest")
@@ -142,6 +149,11 @@ public class PostgresServerFixture : IAsyncDisposable
         await using var scope = _host.Services.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
         await ctx.Database.EnsureCreatedAsync();
+
+        if (_provider == BenchmarkProvider.PostgreSql && Environment.GetEnvironmentVariable(ClaimAuditVariable) is not null)
+        {
+            await InstallClaimAuditAsync();
+        }
 
         await _host.StartAsync();
     }
@@ -321,6 +333,8 @@ public class PostgresServerFixture : IAsyncDisposable
                     }
                 }
 
+                await DescribeClaimAuditAsync(connection, report);
+
                 // The plan the claim gets NOW, with this database's current statistics. The claim is
                 // `UPDATE ... FROM (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`, and whether the
                 // subquery can be re-executed depends on which side of the join the planner puts it.
@@ -377,6 +391,110 @@ public class PostgresServerFixture : IAsyncDisposable
         }
 
         return report.ToString();
+    }
+
+    // From the enum, not a literal: Processing is 3 (Awaiting is 2), and a hand-typed value made the
+    // first version of this audit record nothing at all.
+    private static readonly string Processing = ((int)State.Processing).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private async Task InstallClaimAuditAsync()
+    {
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+
+        // Statement-level with transition tables, so one row is written per claiming STATEMENT, and
+        // it runs inside the server rather than in the process whose timing is being investigated.
+        command.CommandText = @"
+            CREATE TABLE warp.claim_audit (
+                at timestamptz NOT NULL DEFAULT clock_timestamp(),
+                pid int NOT NULL,
+                app text,
+                xid bigint,
+                row_count int NOT NULL,
+                ids uuid[] NOT NULL,
+                worker_ids uuid[] NOT NULL,
+                query text);
+
+            CREATE FUNCTION warp.audit_claims() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO warp.claim_audit (pid, app, xid, row_count, ids, worker_ids, query)
+                SELECT pg_backend_pid(), current_setting('application_name'), txid_current(),
+                       count(*), array_agg(n.id), array_agg(DISTINCT n.current_worker_id), left(current_query(), 400)
+                FROM new_rows n JOIN old_rows o ON o.id = n.id
+                WHERE n.current_state = " + Processing + @" AND o.current_state <> " + Processing + @"
+                HAVING count(*) > 0;
+                RETURN NULL;
+            END $$;
+
+            CREATE TRIGGER audit_claims AFTER UPDATE ON warp.job
+                REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+                FOR EACH STATEMENT EXECUTE FUNCTION warp.audit_claims();";
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task DescribeClaimAuditAsync(NpgsqlConnection connection, System.Text.StringBuilder report)
+    {
+        await using var exists = connection.CreateCommand();
+        exists.CommandText = "SELECT to_regclass('warp.claim_audit') IS NOT NULL";
+        if (await exists.ExecuteScalarAsync() is not true)
+        {
+            return;
+        }
+
+        await using var summary = connection.CreateCommand();
+        summary.CommandText = @"
+            SELECT row_count, count(*), min(at), max(at) FROM warp.claim_audit GROUP BY row_count ORDER BY row_count";
+        await using (var reader = await summary.ExecuteReaderAsync())
+        {
+            report.AppendLine("  claim audit — statements by rows moved to Processing:");
+            while (await reader.ReadAsync())
+            {
+                report.AppendLine($"    {reader.GetValue(0)} rows x {reader.GetValue(1)} statements ({reader.GetValue(2):O} .. {reader.GetValue(3):O})");
+            }
+        }
+
+        // Which statement claimed each job that is still stuck — the question every earlier dump left open.
+        await using var owners = connection.CreateCommand();
+        owners.CommandText = @"
+            SELECT a.at, a.pid, a.app, a.xid, a.row_count, a.worker_ids, regexp_replace(a.query, '\s+', ' ', 'g'), count(*) AS stuck_here
+            FROM warp.job j
+            JOIN LATERAL (
+                SELECT * FROM warp.claim_audit a WHERE j.id = ANY(a.ids) ORDER BY a.at DESC LIMIT 1) a ON true
+            WHERE j.current_state = " + Processing + @"
+            GROUP BY a.at, a.pid, a.app, a.xid, a.row_count, a.worker_ids, a.query
+            ORDER BY stuck_here DESC, a.at
+            LIMIT 12";
+        await using (var reader = await owners.ExecuteReaderAsync())
+        {
+            report.AppendLine("  claim audit — the statement that last claimed each stuck job:");
+            while (await reader.ReadAsync())
+            {
+                report.AppendLine(
+                    $"    {reader.GetValue(7)} stuck | {reader.GetValue(0):O} pid={reader.GetValue(1)} app={reader.GetValue(2)} "
+                    + $"xid={reader.GetValue(3)} rows={reader.GetValue(4)} workers={string.Join(",", (Guid[])reader.GetValue(5))}");
+                report.AppendLine($"      {reader.GetString(6)}");
+            }
+        }
+
+        await using var unclaimed = connection.CreateCommand();
+        unclaimed.CommandText = @"
+            SELECT count(*) FROM warp.job j
+            WHERE j.current_state = " + Processing + @" AND NOT EXISTS (SELECT 1 FROM warp.claim_audit a WHERE j.id = ANY(a.ids))";
+        report.AppendLine($"  stuck jobs with NO claiming statement recorded: {await unclaimed.ExecuteScalarAsync()}");
+
+        await using var backends = connection.CreateCommand();
+        backends.CommandText = @"
+            SELECT application_name, state, count(*) FROM pg_stat_activity
+            WHERE datname = current_database() GROUP BY 1, 2 ORDER BY 3 DESC";
+        await using (var reader = await backends.ExecuteReaderAsync())
+        {
+            report.AppendLine("  backends on this database:");
+            while (await reader.ReadAsync())
+            {
+                report.AppendLine($"    {reader.GetValue(2)} x app={reader.GetValue(0)} state={reader.GetValue(1)}");
+            }
+        }
     }
 
     private static string OwnerOf(Guid? id, List<Guid> workerIds, List<Guid> groupIds)
