@@ -34,10 +34,11 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------------------------
-  # BenchmarkDotNet, gating the two quantities that survive a shared runner: allocated bytes per
-  # operation and database statements per job. Both are counts, and counts reproduce; the timings of
-  # these same benchmarks have measured an Error of 108 s against a 25 s mean, so time is reported and
-  # never gated.
+  # BenchmarkDotNet, gating the one quantity calibrated to survive a shared runner: database
+  # statements per job, at 10%. Allocations are reported but not gated, because they moved 2-3%
+  # between identical builds (BDN's figure is process-wide, background server tasks included). Time is
+  # reported and never gated: these benchmarks have measured an Error of 108 s against a 25 s mean. A
+  # benchmark that produced no measurement on either side fails the job instead of passing silently.
   #
   # PostgreSQL is shared between the two runs and named in the environment rather than started per
   # process. That is not a convenience: BenchmarkDotNet runs benchmarks in a child process while
