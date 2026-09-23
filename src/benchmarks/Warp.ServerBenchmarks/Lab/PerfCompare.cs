@@ -340,6 +340,11 @@ public static class PerfCompare
                     benchmark.Memory?.BytesAllocatedPerOperation ?? 0,
                     benchmark.Statistics?.Mean ?? 0,
                     statements);
+
+                if (benchmark.Memory?.BytesAllocatedPerOperation is null)
+                {
+                    Console.Error.WriteLine($"  no measurement for {benchmark.FullName} — it reported NA");
+                }
             }
         }
 
@@ -360,9 +365,13 @@ public static class PerfCompare
 
     private sealed record BdnMetricDescriptor(string? Id);
 
-    private sealed record BdnStatistics(double Mean);
+    private sealed record BdnStatistics(double? Mean);
 
-    private sealed record BdnMemory(long BytesAllocatedPerOperation);
+    // Nullable, because BenchmarkDotNet writes null for a case that produced no measurement — an arm
+    // that errored, or was reported NA. Reading it as a long crashed the comparator outright, which
+    // turned "one arm did not run" into "the whole comparison is unavailable" and hid which arm it
+    // was.
+    private sealed record BdnMemory(long? BytesAllocatedPerOperation);
 
     private sealed record MetricPolicy(string Metric, bool Gated, double? TolerancePct, Direction BadDirection);
 }

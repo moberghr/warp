@@ -222,12 +222,17 @@ public class PostgresServerFixture : IAsyncDisposable
     {
         await using var scope = Host.Services.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        await ctx.Database.ExecuteSqlRawAsync(
-            """
-            DELETE FROM warp.job_log;
-            DELETE FROM warp.counter;
-            DELETE FROM warp.job;
-            """);
+
+        // Through EF rather than raw SQL, because the two providers do not name these tables the same
+        // way: PostgreSQL runs under the snake_case convention and SQL Server keeps Warp's default. The
+        // raw `DELETE FROM warp.job_log` this replaces worked on one and failed on the other, and it
+        // failed in IterationCleanup - where BenchmarkDotNet reports the fallout as NA rather than as
+        // an error, so every SQL Server arm looked like a benchmark that would not run.
+        //
+        // Order matters: job_log and counter reference nothing, but job is the parent of job_log.
+        await ctx.Set<JobLog>().ExecuteDeleteAsync();
+        await ctx.Set<Counter>().ExecuteDeleteAsync();
+        await ctx.Set<Job>().ExecuteDeleteAsync();
     }
 
     /// <summary>
