@@ -33,6 +33,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The two commits under comparison, resolved once. Every benchmark job measures the same pair, so
+  # resolving it in each would only repeat the same answer eight times, and print it eight times.
+  refs:
+    name: Resolve commits
+    runs-on: ubuntu-24.04
+    outputs:
+      head: ${{ steps.refs.outputs.head }}
+      base: ${{ steps.refs.outputs.base }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the two commits under comparison
+        id: refs
+        run: |
+          if [ -n "${{ inputs.head_ref }}" ]; then
+            HEAD_SHA=$(git rev-parse "${{ inputs.head_ref }}^{commit}")
+          else
+            HEAD_SHA=$(git rev-parse HEAD)
+          fi
+
+          if [ -n "${{ inputs.base_ref }}" ]; then
+            BASE_SHA=$(git rev-parse "${{ inputs.base_ref }}^{commit}")
+          elif [ -n "${{ github.base_ref }}" ]; then
+            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          else
+            BASE_SHA=$(git merge-base origin/main HEAD)
+          fi
+
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------------------------------------
   # BenchmarkDotNet, gating the one quantity calibrated to survive a shared runner: database
   # statements per job, at 10%. Allocations are reported but not gated, because they moved 2-3%
@@ -47,6 +80,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   benchmarks:
     name: Benchmarks (${{ matrix.benchmark.name }})
+    needs: refs
 
     # Pinned, not ubuntu-latest. This workflow measures, and the latest label migrates to Ubuntu 26 in
     # October 2026 - a change of CPU, kernel and Docker underneath the numbers. Gating survives it
@@ -138,39 +172,9 @@ jobs:
       # differ by the library alone. That is what makes an arbitrary pair comparable: building each
       # side from its own commit would compare two instruments as much as two libraries, and the 7.0.0
       # tag cannot run these benchmarks at all — the scenarios and --warmup postdate it.
-      - name: Resolve the two commits under comparison
-        id: refs
-        run: |
-          if [ -n "${{ inputs.head_ref }}" ]; then
-            HEAD_SHA=$(git rev-parse "${{ inputs.head_ref }}^{commit}")
-          else
-            HEAD_SHA=$(git rev-parse HEAD)
-          fi
-
-          if [ -n "${{ inputs.base_ref }}" ]; then
-            BASE_SHA=$(git rev-parse "${{ inputs.base_ref }}^{commit}")
-          elif [ -n "${{ github.base_ref }}" ]; then
-            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
-          else
-            BASE_SHA=$(git merge-base origin/main HEAD)
-          fi
-
-          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
-
-          {
-            echo "### Comparing"
-            echo
-            echo "| side | commit | subject |"
-            echo "| --- | --- | --- |"
-            echo "| head | \`$(git rev-parse --short "$HEAD_SHA")\` | $(git log -1 --format=%s "$HEAD_SHA") |"
-            echo "| base | \`$(git rev-parse --short "$BASE_SHA")\` | $(git log -1 --format=%s "$BASE_SHA") |"
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Run benchmarks on the head commit
         run: |
-          git checkout ${{ steps.refs.outputs.head }} -- src/core
+          git checkout ${{ needs.refs.outputs.head }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             --filter '${{ matrix.benchmark.filter }}' \
             --exporters json \
@@ -181,7 +185,7 @@ jobs:
         id: basebench
         continue-on-error: true
         run: |
-          git checkout ${{ steps.refs.outputs.base }} -- src/core
+          git checkout ${{ needs.refs.outputs.base }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             --filter '${{ matrix.benchmark.filter }}' \
             --exporters json \
@@ -195,14 +199,20 @@ jobs:
             compare-bdn \
             --base="${{ github.workspace }}/bench/base" \
             --head="${{ github.workspace }}/bench/head" \
-            --tolerance=2 \
-            --summary="$GITHUB_STEP_SUMMARY"
+            --tolerance=5 \
+            --summary="${{ github.workspace }}/bench/section.md"
 
       - name: Explain an incompatible base
         if: steps.basebench.outcome == 'failure'
         run: |
-          echo "::warning::The benchmarks do not build against the merge base, so nothing was compared."
-          echo "::warning::That happens when the PR adds an API the benchmark uses."
+          echo "::warning::The benchmarks do not build against the base commit, so nothing was compared."
+          echo "::warning::That happens when the change adds an API the benchmark uses."
+          {
+            echo "<!-- verdict: skipped -->"
+            echo "### ➖ ${{ matrix.benchmark.name }}"
+            echo
+            echo "Not compared: the benchmark does not build against the base commit. That happens when the change adds an API the benchmark uses."
+          } > "${{ github.workspace }}/bench/section.md"
 
       - name: Fail on a multimodal distribution
         run: |
@@ -220,3 +230,79 @@ jobs:
         with:
           name: benchmark-results-${{ matrix.benchmark.name }}
           path: ${{ github.workspace }}/bench
+
+  # ---------------------------------------------------------------------------------------------
+  # One page for the whole run. Each benchmark job leaves its section in its artifact; this puts them
+  # in order under a single header, so the commits are named once and the verdict is read at a glance.
+  # Runs whatever the benchmarks did: a failing run is exactly the one whose report matters.
+  # ---------------------------------------------------------------------------------------------
+  report:
+    name: Report
+    needs: [refs, benchmarks]
+    if: always() && needs.refs.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: benchmark-results-*
+          path: results
+
+      - name: Write the report
+        env:
+          HEAD_SHA: ${{ needs.refs.outputs.head }}
+          BASE_SHA: ${{ needs.refs.outputs.base }}
+        run: |
+          # Matrix order, so the page reads the same way every run.
+          scenarios="dispatcher completion-batch payload concurrency failure-path publish message-routing scheduled-activation"
+
+          passed=0; failed=0; missing=0
+          for name in $scenarios; do
+            file="results/benchmark-results-$name/section.md"
+            if [ ! -f "$file" ]; then missing=$((missing + 1))
+            elif grep -q "verdict: pass" "$file"; then passed=$((passed + 1))
+            elif grep -q "verdict: fail" "$file"; then failed=$((failed + 1))
+            else missing=$((missing + 1)); fi
+          done
+          total=$((passed + failed + missing))
+
+          if [ "$failed" -gt 0 ]; then
+            headline="❌ $failed of $total scenarios got worse"
+          elif [ "$missing" -gt 0 ]; then
+            headline="⚠️ $passed of $total scenarios compared, $missing did not produce a comparison"
+          else
+            headline="✅ All $total scenarios within the gate"
+          fi
+
+          {
+            echo "## Performance: $headline"
+            echo
+            echo "**Head** \`$(git rev-parse --short "$HEAD_SHA")\` $(git log -1 --format=%s "$HEAD_SHA")  "
+            echo "**Base** \`$(git rev-parse --short "$BASE_SHA")\` $(git log -1 --format=%s "$BASE_SHA")"
+            echo
+            echo "Each scenario runs the same benchmark code against both commits on one runner. Only \`src/core\` differs between the two sides."
+            echo
+            for name in $scenarios; do
+              file="results/benchmark-results-$name/section.md"
+              if [ -f "$file" ]; then
+                cat "$file"
+              else
+                echo "### ⚠️ $name"
+                echo
+                echo "No result: the job did not get far enough to compare. Open the job log for why."
+              fi
+              echo
+            done
+            echo "<details><summary>How to read this</summary>"
+            echo
+            echo "- **before → after (change)**: base commit, then head commit, then the change from one to the other."
+            echo "- **Statements per job** is the only gate. A scenario fails if it rises more than 10%. It is a count read from the database's own statistics, so it reproduces run to run."
+            echo "- **Memory per run** is everything allocated while the case ran, background server work included. It is reported, not gated: it moves 2–3% between identical builds. ↑ marks a rise over 5%."
+            echo "- **Mean time** is reported, not gated. On a shared runner it varies far more than any change worth catching."
+            echo "- ⚠️ means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -26,6 +26,13 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// choice they make without much guidance.
 /// </para>
 /// </summary>
+[CiScenario(
+    "Publishing",
+    "Enqueues 1,000 jobs with no server running, saving after every job or once for all 1,000.",
+    "What the calling application pays to hand work to Warp, with no worker activity mixed in.",
+    Order = 60)]
+[CaseLabel(nameof(BatchSize), "1", "save after every job")]
+[CaseLabel(nameof(BatchSize), "1000", "one save for 1,000")]
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class PublishBenchmark

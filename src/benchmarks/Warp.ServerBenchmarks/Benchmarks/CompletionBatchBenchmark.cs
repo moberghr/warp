@@ -22,6 +22,13 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// Workload: <see cref="JobCount"/> empty-handler jobs, 10 workers, handler logging off.
 /// </para>
 /// </summary>
+[CiScenario(
+    "Completion batching",
+    "A dispatcher with 10 workers drains 1,000 jobs, writing each completion on its own or grouping up to 50 into one transaction.",
+    "Completion writes are the largest share of database work per job. Batching them is what saves it, and this catches that saving being lost.",
+    Order = 20)]
+[CaseLabel(nameof(CompletionBatchSize), "1", "one write per job")]
+[CaseLabel(nameof(CompletionBatchSize), "50", "batched, up to 50")]
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class CompletionBatchBenchmark

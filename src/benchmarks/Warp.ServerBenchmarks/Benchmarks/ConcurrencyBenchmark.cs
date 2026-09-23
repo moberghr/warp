@@ -22,6 +22,13 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// sixteen workers is the middle where surplus claims are rejected and requeued in bulk.
 /// </para>
 /// </summary>
+[CiScenario(
+    "Mutex under contention",
+    "16 workers drain 1,000 jobs that each hold a [Mutex] in Wait mode for 5 ms. With 8 keys most claims are refused and requeued; with 10,000 keys almost nothing contends.",
+    "The cost of the concurrency addon and of every refused claim. This scenario also exposed the PostgreSQL claim that took several jobs at once.",
+    Order = 40)]
+[CaseLabel(nameof(Keys), "8", "8 keys, heavy contention")]
+[CaseLabel(nameof(Keys), "10000", "10,000 keys, no contention")]
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class ConcurrencyBenchmark

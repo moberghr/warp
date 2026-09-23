@@ -1,6 +1,9 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
+
+using Warp.ServerBenchmarks.Infrastructure;
 
 namespace Warp.ServerBenchmarks.Lab;
 
@@ -208,106 +211,32 @@ public static class PerfCompare
         var baseRun = ReadBdn(basePath);
         var headRun = ReadBdn(headPath);
 
-        var report = new StringBuilder();
         var failures = new List<string>();
+        var report = new StringBuilder();
 
-        report.AppendLine("### Benchmarks — allocations and database statements");
-        report.AppendLine();
-        report.AppendLine("| benchmark | base alloc | head alloc | alloc | base stmt/job | head stmt/job | stmt | verdict |");
-        report.AppendLine("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |");
+        // One section per benchmark class, in the order the classes declare. A CI job runs one class,
+        // so its file holds one section; a local run over several gets them all, in the same order the
+        // combined CI report uses.
+        var scenarios = headRun.Keys
+            .Concat(baseRun.Keys)
+            .Distinct(StringComparer.Ordinal)
+            .Select(x => new BdnCase(x))
+            .GroupBy(x => x.TypeName, StringComparer.Ordinal)
+            .Select(x => (Type: typeof(PerfCompare).Assembly.GetType(x.Key), Cases: x.ToList()))
+            .OrderBy(x => x.Type?.GetCustomAttribute<CiScenarioAttribute>()?.Order ?? int.MaxValue)
+            .ThenBy(x => x.Cases[0].TypeName, StringComparer.Ordinal);
 
-        foreach (var head in headRun.OrderBy(x => x.Key, StringComparer.Ordinal))
+        foreach (var (type, cases) in scenarios)
         {
-            if (!baseRun.TryGetValue(head.Key, out var b))
-            {
-                // A benchmark the base does not have is new, not a regression.
-                report.AppendLine(
-                    CultureInfo.InvariantCulture,
-                    $"| `{Shorten(head.Key)}` | — | {Format(head.Value.Bytes)} | new | — | {Format(head.Value.StatementsPerJob)} | new | new |");
-                continue;
-            }
-
-            var h = head.Value;
-
-            // A side that measured NOTHING is not a pass. BenchmarkDotNet writes null for an arm that
-            // errored or timed out, and coercing that to zero made the row read "base 0, head 346M,
-            // 0.0%, ok" — a green verdict for a comparison that never happened. Left alone it would
-            // hide the gate breaking entirely: if the base build stopped producing results, every pull
-            // request would sail through reporting success.
-            if (b.Bytes is null || h.Bytes is null)
-            {
-                var missing = MissingSide(b.Bytes, h.Bytes);
-
-                report.AppendLine(
-                    CultureInfo.InvariantCulture,
-                    $"| `{Shorten(head.Key)}` | {Format(b.Bytes)} | {Format(h.Bytes)} | — | {Format(b.StatementsPerJob)} | {Format(h.StatementsPerJob)} | — | **NO MEASUREMENT** |");
-
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{Shorten(head.Key)}: {missing} produced no measurement, so nothing was compared"));
-
-                continue;
-            }
-
-            var allocChange = b.Bytes == 0 ? 0 : (h.Bytes.Value - b.Bytes.Value) / (double)b.Bytes.Value * 100;
-            var stmtChange = b.StatementsPerJob is null or 0 || h.StatementsPerJob is null
-                ? 0
-                : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
-
-            var verdict = "ok";
-
-            // Allocations are REPORTED, not gated. They were gated at 2% on the strength of one run
-            // showing byte-identical numbers, and the assumption did not survive: later runs moved
-            // 2-3% systematically with no code change that could explain it, and the gate fired on
-            // arms whose statement counts were clean. Until the noise floor is measured — a null
-            // comparison, the same commit on both sides — a threshold here is a guess, and a guess
-            // that fails builds is worse than no guess at all.
-            if (allocChange > tolerancePct)
-            {
-                verdict = "alloc +" + allocChange.ToString("N1", CultureInfo.InvariantCulture) + "%";
-            }
-
-            // Statements get their own, looser bound: unlike allocations they are read from a shared
-            // server, so background tasks ticking on timers add a little jitter that bytes do not have.
-            if (stmtChange > StatementTolerancePct)
-            {
-                verdict = "**REGRESSION**";
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{Shorten(head.Key)}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
-            }
-
-            report.AppendLine(
-                CultureInfo.InvariantCulture,
-                $"| `{Shorten(head.Key)}` | {Format(b.Bytes)} | {Format(h.Bytes)} | {allocChange:+0.0;-0.0;0.0}% | {Format(b.StatementsPerJob)} | {Format(h.StatementsPerJob)} | {FormatChange(b.StatementsPerJob, h.StatementsPerJob, stmtChange)} | {verdict} |");
-        }
-
-        report.AppendLine();
-        report.AppendLine(
-            CultureInfo.InvariantCulture,
-            $"Statements per job is the only gated metric, at {StatementTolerancePct}%. Allocations and time are reported: allocations have moved 2-3% between identical builds, and time has measured an Error of 108 s against a 25 s mean. A move worth acting on in either is still visible in the table.");
-
-        // Only when a run actually swept providers, so a single-provider summary stays uncluttered.
-        // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL
-        // Server row reading 25 looks like a verdict on the providers, when the two numbers come from
-        // different instruments - pg_stat_statements counts every execution, dm_exec_query_stats only
-        // those whose plans are still cached. Each row is evidence about ITSELF across two commits.
-        if (headRun.Keys.Any(x => x.Contains("Provider: SqlServer", StringComparison.Ordinal))
-            && headRun.Keys.Any(x => x.Contains("Provider: PostgreSql", StringComparison.Ordinal)))
-        {
+            report.Append(RenderScenario(type, cases, baseRun, headRun, tolerancePct, failures));
             report.AppendLine();
-            report.AppendLine(
-                "**Rows are comparable to themselves, not to each other.** PostgreSQL and SQL Server "
-                + "statement counts come from different instruments and different accounting; a "
-                + "difference between two providers' rows is not a finding. What each row answers is "
-                + "whether that arm moved between base and head.");
         }
 
         Console.WriteLine(report.ToString());
 
         if (!string.IsNullOrEmpty(summaryPath))
         {
-            File.AppendAllText(summaryPath, report.ToString() + Environment.NewLine);
+            File.AppendAllText(summaryPath, report.ToString());
         }
 
         if (failures.Count == 0)
@@ -324,35 +253,208 @@ public static class PerfCompare
         return 1;
     }
 
+    private static string RenderScenario(
+        Type? type,
+        List<BdnCase> cases,
+        Dictionary<string, (long? Bytes, double Mean, double? StatementsPerJob)> baseRun,
+        Dictionary<string, (long? Bytes, double Mean, double? StatementsPerJob)> headRun,
+        double tolerancePct,
+        List<string> failures)
+    {
+        var scenario = type?.GetCustomAttribute<CiScenarioAttribute>();
+        var labels = type?.GetCustomAttributes<CaseLabelAttribute>().ToList() ?? [];
+        var failuresBefore = failures.Count;
+        var rows = new StringBuilder();
+
+        // A parameter with one value is the same on every row: it belongs to the scenario, not the case.
+        var varying = cases
+            .SelectMany(x => x.Parameters)
+            .GroupBy(x => x.Name, StringComparer.Ordinal)
+            .Where(x => x.Select(y => y.Value).Distinct(StringComparer.Ordinal).Count() > 1)
+            .Select(x => x.Key)
+            .ToHashSet(StringComparer.Ordinal);
+        var severalMethods = cases.Select(x => x.Method).Distinct(StringComparer.Ordinal).Count() > 1;
+
+        var declared = headRun.Keys.Concat(baseRun.Keys).Distinct(StringComparer.Ordinal).ToList();
+
+        // Declared order, the order BenchmarkDotNet ran them in. Sorting by name put "Keys: 10000"
+        // before "Keys: 8".
+        foreach (var benchmark in cases.OrderBy(x => declared.IndexOf(x.FullName)))
+        {
+            var name = CaseName(benchmark, varying, severalMethods, labels);
+            var hasBase = baseRun.TryGetValue(benchmark.FullName, out var b);
+            var hasHead = headRun.TryGetValue(benchmark.FullName, out var h);
+
+            if (!hasBase || !hasHead)
+            {
+                // A case only one side has is new or removed, not a regression.
+                var side = hasHead ? "new in head" : "removed in head";
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | {side} | | | ➖ |");
+                continue;
+            }
+
+            // A side that measured NOTHING is not a pass. BenchmarkDotNet writes null for an arm that
+            // errored or timed out, and coercing that to zero made the row read "base 0, head 346M,
+            // 0.0%, ok" — a green verdict for a comparison that never happened. Left alone it would
+            // hide the gate breaking entirely: if the base build stopped producing results, every pull
+            // request would sail through reporting success.
+            if (b.Bytes is null || h.Bytes is null)
+            {
+                var missing = MissingSide(b.Bytes, h.Bytes);
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | no measurement from {missing} | | | ⚠️ |");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: {missing} produced no measurement, so nothing was compared"));
+
+                continue;
+            }
+
+            double? stmtChange = b.StatementsPerJob is null or 0 || h.StatementsPerJob is null
+                ? null
+                : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
+            var allocChange = b.Bytes == 0 ? 0 : (h.Bytes.Value - b.Bytes.Value) / (double)b.Bytes.Value * 100;
+            var timeChange = b.Mean <= 0 ? 0 : (h.Mean - b.Mean) / b.Mean * 100;
+
+            // Statements per job is the only gate. Allocations are REPORTED, not gated: they were gated
+            // at 2% on the strength of one run showing byte-identical numbers, and later runs moved 2-3%
+            // with no code change that could explain it. Until the noise floor is measured — a null
+            // comparison, the same commit on both sides — a threshold there is a guess, and a guess that
+            // fails builds is worse than none. Statements get 10% because they are read from a shared
+            // server, where background tasks ticking on timers add a little jitter.
+            var verdict = "✅";
+            if (stmtChange > StatementTolerancePct)
+            {
+                verdict = string.Create(CultureInfo.InvariantCulture, $"❌ over {StatementTolerancePct:0}%");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
+            }
+
+            var statements = stmtChange is null
+                ? "not measured"
+                : Pair(Number(b.StatementsPerJob!.Value), Number(h.StatementsPerJob!.Value), string.Empty, stmtChange.Value);
+            var memory = Pair(Megabytes(b.Bytes.Value), Megabytes(h.Bytes.Value), "MB", allocChange, flagAbove: tolerancePct);
+            var time = PairDuration(b.Mean, h.Mean, timeChange);
+
+            rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | {statements} | {memory} | {time} | {verdict} |");
+        }
+
+        var failed = failures.Count > failuresBefore;
+        var section = new StringBuilder();
+
+        // Read by the report job to count passes without re-deriving anything.
+        section.AppendLine(failed ? "<!-- verdict: fail -->" : "<!-- verdict: pass -->");
+        section.AppendLine(CultureInfo.InvariantCulture, $"### {(failed ? "❌" : "✅")} {scenario?.Title ?? type?.Name ?? cases[0].TypeName}");
+        section.AppendLine();
+
+        if (scenario is null)
+        {
+            section.AppendLine("_No description. Add `[CiScenario]` to the benchmark class so this report can say what it tests._");
+        }
+        else
+        {
+            section.AppendLine(scenario.Measures);
+            section.AppendLine();
+            section.AppendLine(CultureInfo.InvariantCulture, $"**Why it matters:** {scenario.Why}");
+        }
+
+        section.AppendLine();
+        section.AppendLine("| case | statements per job · gated | memory per run | mean time | |");
+        section.AppendLine("| --- | --- | --- | --- | --- |");
+        section.Append(rows);
+
+        // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL
+        // Server row reading 4 looks like a verdict on the providers, when the two numbers come from
+        // different instruments — pg_stat_statements counts every execution, dm_exec_query_stats only
+        // those whose plans are still cached. Each row is evidence about ITSELF across two commits.
+        if (cases.Any(x => x.Parameters.Any(y => string.Equals(y.Value, "SqlServer", StringComparison.Ordinal)))
+            && cases.Any(x => x.Parameters.Any(y => string.Equals(y.Value, "PostgreSql", StringComparison.Ordinal))))
+        {
+            section.AppendLine();
+            section.AppendLine("<sub>PostgreSQL and SQL Server count statements with different instruments, so read each row against itself, not against the other provider.</sub>");
+        }
+
+        return section.ToString();
+    }
+
+    private static string CaseName(BdnCase benchmark, HashSet<string> varying, bool severalMethods, List<CaseLabelAttribute> labels)
+    {
+        var parts = benchmark.Parameters
+            .Where(x => varying.Contains(x.Name))
+            .Select(x => labels
+                .Where(y => string.Equals(y.Parameter, x.Name, StringComparison.Ordinal))
+                .Where(y => string.Equals(y.Value, x.Value, StringComparison.Ordinal))
+                .Select(y => y.Label)
+                .FirstOrDefault() ?? $"{x.Name} = {x.Value}")
+            .ToList();
+
+        if (severalMethods)
+        {
+            parts.Insert(0, benchmark.Method);
+        }
+
+        if (parts.Count > 0)
+        {
+            return string.Join(" · ", parts);
+        }
+
+        // A scenario with one case: say how big it is rather than naming nothing.
+        var jobs = benchmark.Parameters
+            .Where(x => string.Equals(x.Name, "JobCount", StringComparison.Ordinal))
+            .Select(x => int.TryParse(x.Value, CultureInfo.InvariantCulture, out var n) ? n.ToString("N0", CultureInfo.InvariantCulture) + " jobs" : null)
+            .FirstOrDefault();
+
+        return jobs ?? "single case";
+    }
+
+    /// <summary>"before → after unit (change)".</summary>
+    private static string Pair(string before, string after, string unit, double change, double? flagAbove = null)
+    {
+        var delta = change.ToString("+0.0;−0.0;0.0", CultureInfo.InvariantCulture) + "%";
+
+        // Reported, not gated: a large move is still worth a glance, so it is marked rather than failed.
+        if (flagAbove is { } limit && change > limit)
+        {
+            delta += " ↑";
+        }
+
+        var suffix = unit.Length == 0 ? string.Empty : " " + unit;
+
+        return string.Create(CultureInfo.InvariantCulture, $"{before} → {after}{suffix} ({delta})");
+    }
+
+    /// <summary>
+    /// BenchmarkDotNet reports nanoseconds. These runs take seconds and publishing takes milliseconds, so
+    /// the unit follows the value, and is written once when both sides share it.
+    /// </summary>
+    private static string PairDuration(double beforeNs, double afterNs, double change)
+    {
+        var (before, beforeUnit) = Duration(beforeNs);
+        var (after, afterUnit) = Duration(afterNs);
+
+        return string.Equals(beforeUnit, afterUnit, StringComparison.Ordinal)
+            ? Pair(before, after, afterUnit, change)
+            : Pair(before + " " + beforeUnit, after, afterUnit, change);
+    }
+
+    private static string Number(double value) => value.ToString("N2", CultureInfo.InvariantCulture);
+
+    private static string Megabytes(long bytes) =>
+        (bytes / 1024d / 1024d).ToString("N1", CultureInfo.InvariantCulture);
+
+    private static (string Value, string Unit) Duration(double nanoseconds) =>
+        nanoseconds >= 1e9
+            ? ((nanoseconds / 1e9).ToString("N2", CultureInfo.InvariantCulture), "s")
+            : ((nanoseconds / 1e6).ToString("N1", CultureInfo.InvariantCulture), "ms");
+
     private static string MissingSide(long? baseBytes, long? headBytes)
     {
         if (baseBytes is null && headBytes is null)
         {
-            return "neither side";
+            return "either side";
         }
 
         return baseBytes is null ? "the base" : "the head";
-    }
-
-    private static string Format(long? value) => value is null ? "—" : value.Value.ToString("N0", CultureInfo.InvariantCulture);
-
-    private static string Format(double? value) => value is null ? "—" : value.Value.ToString("N2", CultureInfo.InvariantCulture);
-
-    private static string FormatChange(double? baseValue, double? headValue, double change) =>
-        baseValue is null || headValue is null
-            ? "—"
-            : string.Create(CultureInfo.InvariantCulture, $"{change:+0.0;-0.0;0.0}%");
-
-    /// <summary>Trims the namespace off a BDN FullName so the table stays readable.</summary>
-    private static string Shorten(string fullName)
-    {
-        var parameters = fullName.IndexOf('(', StringComparison.Ordinal);
-        var head = parameters < 0 ? fullName : fullName[..parameters];
-        var tail = parameters < 0 ? string.Empty : fullName[parameters..];
-        var lastDot = head.LastIndexOf('.');
-        var secondLast = lastDot <= 0 ? -1 : head.LastIndexOf('.', lastDot - 1);
-
-        return (secondLast < 0 ? head : head[(secondLast + 1)..]) + tail;
     }
 
     /// <summary>
@@ -400,6 +502,39 @@ public static class PerfCompare
     {
         Higher = 1,
         Lower = 2,
+    }
+
+    /// <summary>A BenchmarkDotNet case name, split: <c>Ns.Type.Method(A: 1, B: x)</c>.</summary>
+    private sealed class BdnCase
+    {
+        public BdnCase(string fullName)
+        {
+            FullName = fullName;
+            var open = fullName.IndexOf('(', StringComparison.Ordinal);
+            var qualified = open < 0 ? fullName : fullName[..open];
+            var lastDot = qualified.LastIndexOf('.');
+            TypeName = lastDot < 0 ? qualified : qualified[..lastDot];
+            Method = lastDot < 0 ? qualified : qualified[(lastDot + 1)..];
+            Parameters = open < 0
+                ? []
+                : [.. fullName[(open + 1)..fullName.LastIndexOf(')')]
+                    .Split(", ", StringSplitOptions.RemoveEmptyEntries)
+                    .Select(x => x.Split(": ", 2))
+                    .Where(x => x.Length == 2)
+                    .Select(x => (Name: x[0], Value: x[1])),];
+            Short = TypeName[(TypeName.LastIndexOf('.') + 1)..] + "." + Method + (open < 0 ? string.Empty : fullName[open..]);
+        }
+
+        public string FullName { get; }
+
+        public string TypeName { get; }
+
+        public string Method { get; }
+
+        public List<(string Name, string Value)> Parameters { get; }
+
+        /// <summary>Without the namespace, for the failure lines in the log.</summary>
+        public string Short { get; }
     }
 
     private sealed record BdnReport(List<BdnBenchmark>? Benchmarks);

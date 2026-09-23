@@ -15,6 +15,15 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// </list>
 /// Same workload, same worker count, same handler.
 /// </summary>
+[CiScenario(
+    "Worker modes",
+    "A server with 10 workers drains 1,000 empty jobs, once with every worker claiming its own job and once with a dispatcher claiming batches for them, on PostgreSQL and on SQL Server.",
+    "The baseline cost of running a job. Every other scenario is this plus one feature, so a move here moves all of them.",
+    Order = 10)]
+[CaseLabel(nameof(UseDispatcher), "False", "single-worker")]
+[CaseLabel(nameof(UseDispatcher), "True", "dispatcher")]
+[CaseLabel(nameof(Provider), "PostgreSql", "PostgreSQL")]
+[CaseLabel(nameof(Provider), "SqlServer", "SQL Server")]
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class DispatcherModeBenchmark

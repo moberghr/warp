@@ -22,6 +22,11 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// difference between the two is what a failure costs over a success.
 /// </para>
 /// </summary>
+[CiScenario(
+    "Failing jobs",
+    "10 workers drain 1,000 jobs whose handler throws, so every job ends Failed.",
+    "A failure writes more than a success: the exception, an error-grouping entry, the failure counters. This keeps that path from quietly getting more expensive.",
+    Order = 50)]
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class FailurePathBenchmark

@@ -23,6 +23,11 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// suite exercises it at all.
 /// </para>
 /// </summary>
+[CiScenario(
+    "Message routing",
+    "10 workers process 1,000 published messages, each routed by the message router into the jobs its handlers run.",
+    "Messages pass through a server task before any worker sees them. This covers that extra hop.",
+    Order = 70)]
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class MessageRoutingBenchmark

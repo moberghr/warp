@@ -24,6 +24,11 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// what the activation sweep exists to pick up.
 /// </para>
 /// </summary>
+[CiScenario(
+    "Scheduled backlog",
+    "1,000 jobs are scheduled for the same moment, already past, so the activation task moves the whole backlog to Enqueued at once; 10 workers then drain it.",
+    "The activation sweep has no row limit. This shows what a large backlog coming due at once costs.",
+    Order = 80)]
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class ScheduledActivationBenchmark

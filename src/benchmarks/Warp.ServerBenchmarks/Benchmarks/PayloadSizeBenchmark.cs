@@ -20,6 +20,11 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// Replaces the lab's <c>dispatcher-4kb</c> arm, which measured 9.9 statements per job.
 /// </para>
 /// </summary>
+[CiScenario(
+    "Large payloads",
+    "A dispatcher with 16 workers drains 1,000 jobs that each carry a 4 KB random payload, random so the database cannot compress it away.",
+    "Checks that a payload is read and written once as it moves through the pipeline, not copied into extra statements or allocations.",
+    Order = 30)]
 [Config(typeof(ServerBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class PayloadSizeBenchmark
