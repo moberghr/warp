@@ -80,7 +80,16 @@ public class PostgresServerFixture : IAsyncDisposable
 
         // Boot full Warp server
         _host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
-            .ConfigureLogging(logging => logging.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning))
+            .ConfigureLogging(logging => logging
+                .SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning)
+
+                // The worker loop swallows a DbUpdateConcurrencyException at Debug and claims again.
+                // Raised here so that path is visible if it is what orphans claimed jobs.
+                .AddFilter("Warp.Worker.WarpWorker", Microsoft.Extensions.Logging.LogLevel.Debug)
+
+                // Filters match by prefix, so the rule above also caught WarpWorkerService, which logs
+                // every job it runs. The longer prefix wins.
+                .AddFilter("Warp.Worker.WarpWorkerService", Microsoft.Extensions.Logging.LogLevel.Warning))
             .ConfigureServices(services =>
             {
                 services.AddDbContext<TestContext>(options => ConfigureProvider(options));
@@ -239,6 +248,23 @@ public class PostgresServerFixture : IAsyncDisposable
 
             report.AppendLine($"now={now:O} states: {string.Join(", ", byState.Select(x => $"{x.State}={x.Count}"))}");
 
+            // One claim statement per row, or several rows per statement? Rows a single claim took share
+            // its worker and its `now` parameter (LastKeepAlive), so this separates the two readings.
+            var claims = await ctx.Set<Job>()
+                .AsNoTracking()
+                .Where(x => x.CurrentState == State.Processing)
+                .GroupBy(x => new { x.CurrentWorkerId, x.LastKeepAlive })
+                .Select(x => new { x.Key.CurrentWorkerId, x.Key.LastKeepAlive, Count = x.Count() })
+                .OrderByDescending(x => x.Count)
+                .Take(10)
+                .ToListAsync();
+
+            report.AppendLine($"  processing grouped by (worker, claim time), largest first:");
+            foreach (var claim in claims)
+            {
+                report.AppendLine($"    {claim.Count,5} rows  worker={claim.CurrentWorkerId} keepalive={claim.LastKeepAlive:O}");
+            }
+
             var stuck = await ctx.Set<Job>()
                 .AsNoTracking()
                 .Where(x => x.CurrentState == State.Enqueued || x.CurrentState == State.Processing || x.CurrentState == State.Awaiting)
@@ -276,13 +302,37 @@ public class PostgresServerFixture : IAsyncDisposable
                     FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
                     WHERE l.locktype = 'advisory' AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
                     ORDER BY a.pid";
-                await using var reader = await command.ExecuteReaderAsync();
-                report.AppendLine("  advisory locks:");
-                while (await reader.ReadAsync())
+                await using (var reader = await command.ExecuteReaderAsync())
                 {
-                    report.AppendLine(
-                        $"    {reader.GetValue(0)}/{reader.GetValue(1)} granted={reader.GetValue(2)} pid={reader.GetValue(3)} "
-                        + $"app={reader.GetValue(4)} state={reader.GetValue(5)} for={reader.GetValue(6)} last={reader.GetValue(7)}");
+                    report.AppendLine("  advisory locks:");
+                    while (await reader.ReadAsync())
+                    {
+                        report.AppendLine(
+                            $"    {reader.GetValue(0)}/{reader.GetValue(1)} granted={reader.GetValue(2)} pid={reader.GetValue(3)} "
+                            + $"app={reader.GetValue(4)} state={reader.GetValue(5)} for={reader.GetValue(6)} last={reader.GetValue(7)}");
+                    }
+                }
+
+                // The claim asks for LIMIT 1. rows > calls here means a statement returned more than it
+                // was asked for, and the worker runs only the first — the rest are orphaned Processing.
+                await using var claimStats = connection.CreateCommand();
+                claimStats.CommandText = @"
+                    SELECT calls, rows, left(regexp_replace(query, '\s+', ' ', 'g'), 100)
+                    FROM pg_stat_statements
+                    WHERE query ILIKE '%current_worker_id%' AND query ILIKE 'UPDATE%'
+                    ORDER BY calls DESC LIMIT 5";
+                try
+                {
+                    await using var reader = await claimStats.ExecuteReaderAsync();
+                    report.AppendLine("  claim statements (server-wide, pg_stat_statements):");
+                    while (await reader.ReadAsync())
+                    {
+                        report.AppendLine($"    calls={reader.GetValue(0)} rows={reader.GetValue(1)} {reader.GetValue(2)}");
+                    }
+                }
+                catch (PostgresException e)
+                {
+                    report.AppendLine($"  (pg_stat_statements unavailable: {e.MessageText})");
                 }
             }
         }
