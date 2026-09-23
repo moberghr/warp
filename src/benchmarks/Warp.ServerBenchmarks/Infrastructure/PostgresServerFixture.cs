@@ -414,16 +414,61 @@ public class PostgresServerFixture : IAsyncDisposable
                 row_count int NOT NULL,
                 ids uuid[] NOT NULL,
                 worker_ids uuid[] NOT NULL,
-                query text);
+                query text,
+
+                -- What the planner believed about the table when this statement ran, and what was true.
+                -- Recorded on every claim so a bad one can be set against the good ones either side.
+                reltuples real,
+                relpages int,
+                relallvisible int,
+                actual_pages bigint);
+
+            -- Column statistics at the moment of an over-claim, in the shape pg_restore_attribute_stats
+            -- takes, so the planner's exact view can be replayed into a local database.
+            CREATE TABLE warp.claim_stats (
+                at timestamptz NOT NULL DEFAULT clock_timestamp(),
+                reltuples real,
+                relpages int,
+                relallvisible int,
+                attname name,
+                inherited bool,
+                null_frac real,
+                avg_width int,
+                n_distinct real,
+                most_common_vals text,
+                most_common_freqs real[],
+                histogram_bounds text,
+                correlation real);
 
             CREATE FUNCTION warp.audit_claims() RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE
+                moved int;
+                taken timestamptz := clock_timestamp();
             BEGIN
-                INSERT INTO warp.claim_audit (pid, app, xid, row_count, ids, worker_ids, query)
+                INSERT INTO warp.claim_audit
+                    (pid, app, xid, row_count, ids, worker_ids, query, reltuples, relpages, relallvisible, actual_pages)
                 SELECT pg_backend_pid(), current_setting('application_name'), txid_current(),
-                       count(*), array_agg(n.id), array_agg(DISTINCT n.current_worker_id), left(current_query(), 400)
+                       count(*), array_agg(n.id), array_agg(DISTINCT n.current_worker_id), left(current_query(), 400),
+                       c.reltuples, c.relpages, c.relallvisible, pg_relation_size('warp.job') / current_setting('block_size')::int
                 FROM new_rows n JOIN old_rows o ON o.id = n.id
+                CROSS JOIN (SELECT reltuples, relpages, relallvisible FROM pg_class WHERE oid = 'warp.job'::regclass) c
                 WHERE n.current_state = " + Processing + @" AND o.current_state <> " + Processing + @"
-                HAVING count(*) > 0;
+                GROUP BY c.reltuples, c.relpages, c.relallvisible
+                HAVING count(*) > 0
+                RETURNING row_count INTO moved;
+
+                IF moved > 1 AND NOT EXISTS (
+                    SELECT 1 FROM warp.claim_stats WHERE at > taken - interval '2 seconds') THEN
+                    INSERT INTO warp.claim_stats
+                        (at, reltuples, relpages, relallvisible, attname, inherited, null_frac, avg_width, n_distinct,
+                         most_common_vals, most_common_freqs, histogram_bounds, correlation)
+                    SELECT taken, c.reltuples, c.relpages, c.relallvisible, s.attname, s.inherited, s.null_frac, s.avg_width,
+                           s.n_distinct, s.most_common_vals::text, s.most_common_freqs, s.histogram_bounds::text, s.correlation
+                    FROM pg_class c
+                    LEFT JOIN pg_stats s ON s.schemaname = 'warp' AND s.tablename = 'job'
+                    WHERE c.oid = 'warp.job'::regclass;
+                END IF;
+
                 RETURN NULL;
             END $$;
 
@@ -451,6 +496,26 @@ public class PostgresServerFixture : IAsyncDisposable
             while (await reader.ReadAsync())
             {
                 report.AppendLine($"    {reader.GetValue(0)} rows x {reader.GetValue(1)} statements ({reader.GetValue(2):O} .. {reader.GetValue(3):O})");
+            }
+        }
+
+        // The planner's view of the table against the truth, claim by claim. If over-claims cluster at one
+        // statistics state, that state is what a local test has to reproduce.
+        await using var byStats = connection.CreateCommand();
+        byStats.CommandText = @"
+            SELECT reltuples, relpages, relallvisible, min(actual_pages), max(actual_pages), count(*),
+                   count(*) FILTER (WHERE row_count > 1), min(at), max(at)
+            FROM warp.claim_audit
+            GROUP BY reltuples, relpages, relallvisible
+            ORDER BY min(at)";
+        await using (var reader = await byStats.ExecuteReaderAsync())
+        {
+            report.AppendLine("  claims by planner statistics (reltuples/relpages/allvisible, actual pages, claims, multi-row):");
+            while (await reader.ReadAsync())
+            {
+                report.AppendLine(
+                    $"    {reader.GetValue(0)}/{reader.GetValue(1)}/{reader.GetValue(2)} actual={reader.GetValue(3)}..{reader.GetValue(4)} "
+                    + $"claims={reader.GetValue(5)} multi-row={reader.GetValue(6)} ({reader.GetValue(7):O} .. {reader.GetValue(8):O})");
             }
         }
 
