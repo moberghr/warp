@@ -75,6 +75,7 @@ public class PostgresServerFixture : IAsyncDisposable
         BenchmarkProvider provider = BenchmarkProvider.PostgreSql)
     {
         _provider = provider;
+        ExceptionTally.StartIfRequested();
         _connectionString = await ResolveConnectionStringAsync();
 
         // Boot full Warp server
@@ -212,7 +213,85 @@ public class PostgresServerFixture : IAsyncDisposable
             await Task.Delay(100);
         }
 
-        throw new TimeoutException("Not all jobs completed within timeout");
+        throw new TimeoutException($"Not all jobs completed within timeout{Environment.NewLine}{await DescribeStuckJobsAsync()}");
+    }
+
+    /// <summary>
+    /// What the database looked like when a drain gave up, so an intermittent hang in CI leaves
+    /// evidence rather than only a stack trace: jobs per state, a sample of the ones still live with
+    /// their latest log lines, and — on PostgreSQL — the advisory locks held and by whom.
+    /// </summary>
+    private async Task<string> DescribeStuckJobsAsync()
+    {
+        var report = new System.Text.StringBuilder();
+
+        try
+        {
+            await using var scope = Host.Services.CreateAsyncScope();
+            var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
+            var now = DateTime.UtcNow;
+
+            var byState = await ctx.Set<Job>()
+                .AsNoTracking()
+                .GroupBy(x => x.CurrentState)
+                .Select(x => new { State = x.Key, Count = x.Count() })
+                .ToListAsync();
+
+            report.AppendLine($"now={now:O} states: {string.Join(", ", byState.Select(x => $"{x.State}={x.Count}"))}");
+
+            var stuck = await ctx.Set<Job>()
+                .AsNoTracking()
+                .Where(x => x.CurrentState == State.Enqueued || x.CurrentState == State.Processing || x.CurrentState == State.Awaiting)
+                .OrderBy(x => x.ScheduleTime)
+                .Take(5)
+                .Select(x => new { x.Id, x.CurrentState, x.ScheduleTime, x.Queue, x.Metadata })
+                .ToListAsync();
+
+            foreach (var job in stuck)
+            {
+                report.AppendLine($"  job {job.Id} {job.CurrentState} queue={job.Queue} scheduled={job.ScheduleTime:O} meta={job.Metadata}");
+
+                var logs = await ctx.Set<JobLog>()
+                    .AsNoTracking()
+                    .Where(x => x.JobId == job.Id)
+                    .OrderByDescending(x => x.Timestamp)
+                    .Take(4)
+                    .Select(x => new { x.Timestamp, x.EventType, x.WorkerId, x.Message })
+                    .ToListAsync();
+
+                foreach (var log in logs)
+                {
+                    report.AppendLine($"    {log.Timestamp:O} {log.EventType} worker={log.WorkerId} {log.Message}");
+                }
+            }
+
+            if (_provider == BenchmarkProvider.PostgreSql)
+            {
+                await using var connection = new NpgsqlConnection(_connectionString);
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = @"
+                    SELECT l.classid, l.objid, l.granted, a.pid, a.application_name, a.state,
+                           now() - a.state_change AS idle_for, left(a.query, 120)
+                    FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                    WHERE l.locktype = 'advisory' AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                    ORDER BY a.pid";
+                await using var reader = await command.ExecuteReaderAsync();
+                report.AppendLine("  advisory locks:");
+                while (await reader.ReadAsync())
+                {
+                    report.AppendLine(
+                        $"    {reader.GetValue(0)}/{reader.GetValue(1)} granted={reader.GetValue(2)} pid={reader.GetValue(3)} "
+                        + $"app={reader.GetValue(4)} state={reader.GetValue(5)} for={reader.GetValue(6)} last={reader.GetValue(7)}");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            report.AppendLine($"(could not describe stuck jobs: {e.GetType().Name}: {e.Message})");
+        }
+
+        return report.ToString();
     }
 
     /// <summary>
@@ -319,6 +398,7 @@ public class PostgresServerFixture : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         GC.SuppressFinalize(this);
+        ExceptionTally.Report();
         if (_host != null)
         {
             await _host.StopAsync();

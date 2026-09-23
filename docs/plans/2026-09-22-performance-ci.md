@@ -242,3 +242,14 @@ deliberately regressed branch (reintroduce `queue = ANY(...)`) proving it *does*
 Batches 1 and 2 are independent of 3-5 and deliver most of the protection for the least machinery —
 do them first and separately. Batch 3 and Batch 4 share only `perf.yml` and can otherwise proceed in
 parallel.
+
+## Update — the lab job is retired from CI
+
+Batch 4's `server-counters` job (the lab's `load` + `compare`, three arms) is removed from `perf.yml`.
+Every arm now has a BenchmarkDotNet equivalent measuring the same quantity through the same instrument
+(`pg_stat_statements`), and they agree with the lab: `baseline` → `DispatcherModeBenchmark`
+(non-dispatcher, PostgreSQL; 14.00 vs 13.63 statements/job), `mutex-8` → `ConcurrencyBenchmark` Keys=8,
+`dispatcher-4kb` → `PayloadSizeBenchmark` 4096. Keeping both measured every claim twice, and the lab job
+had a defect of its own: it took its base from `github.base_ref`, which is empty on `workflow_dispatch`,
+so a manual run ignored the `base_ref`/`head_ref` inputs every other job honours. The lab and its
+`compare` subcommand stay in the binary for running by hand.
