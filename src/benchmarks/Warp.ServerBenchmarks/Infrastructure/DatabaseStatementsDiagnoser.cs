@@ -192,11 +192,24 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             connection.Open();
 
             using var command = connection.CreateCommand();
+
+            // Every database on the instance, resolved by name per database: the connection is to
+            // master while the fixture writes to a warpbench_* database whose name the host never
+            // learns, so DB_ID()/OBJECT_ID() here resolved in master and counted master's inserts.
+            // index_id 0/1 is the heap or clustered index only — leaf_insert_count is per index, so
+            // summing every index multiplied each job row by the table's index count.
             command.CommandText = @"
                 SELECT
-                    (SELECT COALESCE(SUM(execution_count), 0) FROM sys.dm_exec_query_stats) AS statements,
-                    (SELECT COALESCE(SUM(leaf_insert_count), 0)
-                     FROM sys.dm_db_index_operational_stats(DB_ID(), OBJECT_ID('warp.Job'), NULL, NULL)) AS jobs";
+                    (SELECT COALESCE(SUM(qs.execution_count), 0)
+                     FROM sys.dm_exec_query_stats qs
+                     CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+                     WHERE st.text NOT LIKE '%dm_exec_query_stats%') AS statements,
+                    (SELECT COALESCE(SUM(os.leaf_insert_count), 0)
+                     FROM sys.dm_db_index_operational_stats(NULL, NULL, NULL, NULL) os
+                     WHERE os.index_id IN (0, 1)
+                       AND os.database_id > 4
+                       AND OBJECT_SCHEMA_NAME(os.object_id, os.database_id) = 'warp'
+                       AND OBJECT_NAME(os.object_id, os.database_id) = 'Job') AS jobs";
 
             using var reader = command.ExecuteReader();
 
