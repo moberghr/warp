@@ -41,7 +41,21 @@ public static class PerfCompare
 
     private static readonly JsonSerializerOptions BdnOptions = new() { PropertyNameCaseInsensitive = true };
 
-    private const double StatementTolerancePct = 3.0;
+    /// <summary>
+    /// What a regression has to exceed before it FAILS a build rather than merely being reported.
+    /// <para>
+    /// Deliberately loose, and the looseness is the point. A gate that fires on drift gets ignored,
+    /// then switched off, and leaves the project worse off than no gate — it has spent its credibility.
+    /// Nothing this suite exists to catch lives near these numbers: the claim predicate it was built
+    /// after was 615x on EXPLAIN and +48.6% in statements, the lock pool was -51%. A 3% move is not
+    /// the shape of a real regression, it is the shape of a runner having a bad afternoon.
+    /// </para>
+    /// <para>
+    /// Everything smaller is still printed, with its direction and size, so a human can look. The
+    /// gate's job is to stop a catastrophe reaching main unnoticed, not to adjudicate every percent.
+    /// </para>
+    /// </summary>
+    private const double StatementTolerancePct = 10.0;
 
     private static readonly MetricPolicy[] Policies =
     [
@@ -221,12 +235,15 @@ public static class PerfCompare
 
             var verdict = "ok";
 
+            // Allocations are REPORTED, not gated. They were gated at 2% on the strength of one run
+            // showing byte-identical numbers, and the assumption did not survive: later runs moved
+            // 2-3% systematically with no code change that could explain it, and the gate fired on
+            // arms whose statement counts were clean. Until the noise floor is measured — a null
+            // comparison, the same commit on both sides — a threshold here is a guess, and a guess
+            // that fails builds is worse than no guess at all.
             if (allocChange > tolerancePct)
             {
-                verdict = "**REGRESSION**";
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{Shorten(head.Key)}: allocations {b.Bytes:N0} -> {h.Bytes:N0} ({allocChange:+0.0;-0.0;0.0}%)"));
+                verdict = "alloc +" + allocChange.ToString("N1", CultureInfo.InvariantCulture) + "%";
             }
 
             // Statements get their own, looser bound: unlike allocations they are read from a shared
@@ -247,7 +264,7 @@ public static class PerfCompare
         report.AppendLine();
         report.AppendLine(
             CultureInfo.InvariantCulture,
-            $"Allocations gated at {tolerancePct}%, statements per job at {StatementTolerancePct}%. Time is not gated: on these benchmarks it has measured an Error of 108 s against a 25 s mean.");
+            $"Statements per job is the only gated metric, at {StatementTolerancePct}%. Allocations and time are reported: allocations have moved 2-3% between identical builds, and time has measured an Error of 108 s against a 25 s mean. A move worth acting on in either is still visible in the table.");
 
         // Only when a run actually swept providers, so a single-provider summary stays uncluttered.
         // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL

@@ -66,6 +66,7 @@ jobs:
         benchmark:
           - name: dispatcher
             filter: '*DispatcherModeBenchmark*'
+            sqlserver: true
           - name: completion-batch
             filter: '*CompletionBatchBenchmark*'
           - name: payload
@@ -101,7 +102,7 @@ jobs:
             -c shared_preload_libraries=pg_stat_statements \
             -c pg_stat_statements.track=top
 
-          for i in $(seq 1 30); do
+          for i in $(seq 1 90); do
             if docker exec warpbench pg_isready -U postgres > /dev/null 2>&1; then
               docker exec warpbench psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
               exit 0
@@ -116,6 +117,7 @@ jobs:
       # Started for every benchmark job, because the provider sweep is a benchmark PARAMETER and not a
       # matrix dimension: one BenchmarkDotNet process runs both sides, so both servers must be up.
       - name: Start SQL Server
+        if: matrix.benchmark.sqlserver
         run: |
           docker run -d --name warpbench-mssql -p 1433:1433             -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=Warp!Bench1'             mcr.microsoft.com/mssql/server:2022-latest
 
