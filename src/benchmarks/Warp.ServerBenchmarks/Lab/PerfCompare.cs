@@ -223,12 +223,33 @@ public static class PerfCompare
                 // A benchmark the base does not have is new, not a regression.
                 report.AppendLine(
                     CultureInfo.InvariantCulture,
-                    $"| `{Shorten(head.Key)}` | — | {head.Value.Bytes:N0} | new | — | {Format(head.Value.StatementsPerJob)} | new | new |");
+                    $"| `{Shorten(head.Key)}` | — | {Format(head.Value.Bytes)} | new | — | {Format(head.Value.StatementsPerJob)} | new | new |");
                 continue;
             }
 
             var h = head.Value;
-            var allocChange = b.Bytes == 0 ? 0 : (h.Bytes - b.Bytes) / (double)b.Bytes * 100;
+
+            // A side that measured NOTHING is not a pass. BenchmarkDotNet writes null for an arm that
+            // errored or timed out, and coercing that to zero made the row read "base 0, head 346M,
+            // 0.0%, ok" — a green verdict for a comparison that never happened. Left alone it would
+            // hide the gate breaking entirely: if the base build stopped producing results, every pull
+            // request would sail through reporting success.
+            if (b.Bytes is null || h.Bytes is null)
+            {
+                var missing = MissingSide(b.Bytes, h.Bytes);
+
+                report.AppendLine(
+                    CultureInfo.InvariantCulture,
+                    $"| `{Shorten(head.Key)}` | {Format(b.Bytes)} | {Format(h.Bytes)} | — | {Format(b.StatementsPerJob)} | {Format(h.StatementsPerJob)} | — | **NO MEASUREMENT** |");
+
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{Shorten(head.Key)}: {missing} produced no measurement, so nothing was compared"));
+
+                continue;
+            }
+
+            var allocChange = b.Bytes == 0 ? 0 : (h.Bytes.Value - b.Bytes.Value) / (double)b.Bytes.Value * 100;
             var stmtChange = b.StatementsPerJob is null or 0 || h.StatementsPerJob is null
                 ? 0
                 : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
@@ -258,7 +279,7 @@ public static class PerfCompare
 
             report.AppendLine(
                 CultureInfo.InvariantCulture,
-                $"| `{Shorten(head.Key)}` | {b.Bytes:N0} | {h.Bytes:N0} | {allocChange:+0.0;-0.0;0.0}% | {Format(b.StatementsPerJob)} | {Format(h.StatementsPerJob)} | {FormatChange(b.StatementsPerJob, h.StatementsPerJob, stmtChange)} | {verdict} |");
+                $"| `{Shorten(head.Key)}` | {Format(b.Bytes)} | {Format(h.Bytes)} | {allocChange:+0.0;-0.0;0.0}% | {Format(b.StatementsPerJob)} | {Format(h.StatementsPerJob)} | {FormatChange(b.StatementsPerJob, h.StatementsPerJob, stmtChange)} | {verdict} |");
         }
 
         report.AppendLine();
@@ -303,6 +324,18 @@ public static class PerfCompare
         return 1;
     }
 
+    private static string MissingSide(long? baseBytes, long? headBytes)
+    {
+        if (baseBytes is null && headBytes is null)
+        {
+            return "neither side";
+        }
+
+        return baseBytes is null ? "the base" : "the head";
+    }
+
+    private static string Format(long? value) => value is null ? "—" : value.Value.ToString("N0", CultureInfo.InvariantCulture);
+
     private static string Format(double? value) => value is null ? "—" : value.Value.ToString("N2", CultureInfo.InvariantCulture);
 
     private static string FormatChange(double? baseValue, double? headValue, double change) =>
@@ -329,9 +362,9 @@ public static class PerfCompare
     /// <see cref="JsonOptions"/> — that one carries the snake_case policy the lab's own files use.
     /// </para>
     /// </summary>
-    private static Dictionary<string, (long Bytes, double Mean, double? StatementsPerJob)> ReadBdn(string directory)
+    private static Dictionary<string, (long? Bytes, double Mean, double? StatementsPerJob)> ReadBdn(string directory)
     {
-        var results = new Dictionary<string, (long Bytes, double Mean, double? StatementsPerJob)>(StringComparer.Ordinal);
+        var results = new Dictionary<string, (long? Bytes, double Mean, double? StatementsPerJob)>(StringComparer.Ordinal);
         var files = Directory.GetFiles(directory, "*-report-full-compressed.json", SearchOption.AllDirectories);
 
         if (files.Length == 0)
@@ -354,14 +387,9 @@ public static class PerfCompare
                     ?.Value;
 
                 results[benchmark.FullName] = (
-                    benchmark.Memory?.BytesAllocatedPerOperation ?? 0,
+                    benchmark.Memory?.BytesAllocatedPerOperation,
                     benchmark.Statistics?.Mean ?? 0,
                     statements);
-
-                if (benchmark.Memory?.BytesAllocatedPerOperation is null)
-                {
-                    Console.Error.WriteLine($"  no measurement for {benchmark.FullName} — it reported NA");
-                }
             }
         }
 
