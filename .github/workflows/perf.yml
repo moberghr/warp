@@ -137,9 +137,17 @@ jobs:
             -c shared_preload_libraries=pg_stat_statements \
             -c pg_stat_statements.track=top
 
+          # Not pg_isready. The image initialises on a TEMPORARY server, then stops it and starts the
+          # real one, and pg_isready answers yes for the temporary one: a CREATE EXTENSION sent then
+          # was cut off by the shutdown ("terminating connection due to administrator command") and
+          # failed the job before any benchmark ran. So retry the step that matters until it succeeds,
+          # and only accept a server that can then read the extension's view.
+          # The init-complete line marks the end of the temporary phase, so nothing below can land on it.
           for i in $(seq 1 90); do
-            if docker exec warpbench pg_isready -U postgres > /dev/null 2>&1; then
-              docker exec warpbench psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
+            if docker logs warpbench 2>&1 | grep -q "PostgreSQL init process complete" \
+              && docker exec warpbench psql -U postgres -q -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" > /dev/null 2>&1 \
+              && docker exec warpbench psql -U postgres -tAc "SELECT count(*) FROM pg_stat_statements" > /dev/null 2>&1; then
+              echo "postgres ready after ${i}s"
               exit 0
             fi
             sleep 1
