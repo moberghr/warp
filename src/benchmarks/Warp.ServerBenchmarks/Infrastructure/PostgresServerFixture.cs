@@ -313,26 +313,53 @@ public class PostgresServerFixture : IAsyncDisposable
                     }
                 }
 
-                // The claim asks for LIMIT 1. rows > calls here means a statement returned more than it
-                // was asked for, and the worker runs only the first — the rest are orphaned Processing.
-                await using var claimStats = connection.CreateCommand();
-                claimStats.CommandText = @"
-                    SELECT calls, rows, left(regexp_replace(query, '\s+', ' ', 'g'), 100)
-                    FROM pg_stat_statements
-                    WHERE query ILIKE '%current_worker_id%' AND query ILIKE 'UPDATE%'
-                    ORDER BY calls DESC LIMIT 5";
-                try
+                // The plan the claim gets NOW, with this database's current statistics. The claim is
+                // `UPDATE ... FROM (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`, and whether the
+                // subquery can be re-executed depends on which side of the join the planner puts it.
+                await using (var explain = connection.CreateCommand())
                 {
-                    await using var reader = await claimStats.ExecuteReaderAsync();
-                    report.AppendLine("  claim statements (server-wide, pg_stat_statements):");
+                    explain.CommandText = @"
+                        EXPLAIN UPDATE warp.job AS t SET current_state = 2
+                        FROM (SELECT id FROM warp.job WHERE kind = 1 AND current_state = 1 AND queue = 'default'
+                              ORDER BY schedule_time LIMIT 1 FOR UPDATE SKIP LOCKED) AS c
+                        WHERE t.id = c.id RETURNING t.id";
+                    await using var reader = await explain.ExecuteReaderAsync();
+                    report.AppendLine("  claim plan now:");
                     while (await reader.ReadAsync())
                     {
-                        report.AppendLine($"    calls={reader.GetValue(0)} rows={reader.GetValue(1)} {reader.GetValue(2)}");
+                        report.AppendLine($"    {reader.GetString(0)}");
                     }
                 }
-                catch (PostgresException e)
+
+                // The claim asks for LIMIT 1, so rows > calls means a statement returned more than it was
+                // asked for — and the worker runs only the first, orphaning the rest in Processing. Read
+                // through the ADMIN database: the extension is created there, not in this fresh one.
+                var admin = Environment.GetEnvironmentVariable(ConnectionStringVariable);
+                if (admin is not null)
                 {
-                    report.AppendLine($"  (pg_stat_statements unavailable: {e.MessageText})");
+                    try
+                    {
+                        await using var adminConnection = new NpgsqlConnection(admin);
+                        await adminConnection.OpenAsync();
+                        await using var claimStats = adminConnection.CreateCommand();
+                        claimStats.CommandText = @"
+                            SELECT calls, rows, left(regexp_replace(query, '\s+', ' ', 'g'), 110)
+                            FROM pg_stat_statements
+                            WHERE dbid = (SELECT oid FROM pg_database WHERE datname = @db)
+                              AND query ILIKE 'UPDATE%' AND query ILIKE '%current_worker_id%'
+                            ORDER BY calls DESC LIMIT 5";
+                        claimStats.Parameters.AddWithValue("db", connection.Database);
+                        await using var reader = await claimStats.ExecuteReaderAsync();
+                        report.AppendLine("  claim statements in this database (pg_stat_statements):");
+                        while (await reader.ReadAsync())
+                        {
+                            report.AppendLine($"    calls={reader.GetValue(0)} rows={reader.GetValue(1)} {reader.GetValue(2)}");
+                        }
+                    }
+                    catch (PostgresException e)
+                    {
+                        report.AppendLine($"  (pg_stat_statements unavailable: {e.MessageText})");
+                    }
                 }
             }
         }

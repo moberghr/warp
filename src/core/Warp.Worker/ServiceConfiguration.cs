@@ -233,9 +233,8 @@ public static class ServiceConfiguration
             configurator.Configure(options, sp);
             options.AddWarpInterceptors();
 
-            // ONE ConfigureWarnings call, not one per setting. This callback runs for every server
-            // context created — several per job — and each call clones EF's options extensions, so a
-            // second call measured about 2% more allocation on every benchmark arm.
+            // One ConfigureWarnings call rather than one per setting: this callback runs for every server
+            // context created, several per job, and each call clones EF's options extensions.
             var serverConfig = sp.GetService<IOptions<WarpServerConfiguration>>()?.Value;
             var demoteCommandLogging = serverConfig is null || !serverConfig.EnableServerCommandLogging;
             options.ConfigureWarnings(w =>
