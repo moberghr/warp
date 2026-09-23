@@ -60,6 +60,9 @@ public static class PerfCompare
     /// </summary>
     private const double StatementTolerancePct = 10.0;
 
+    // Only a collapse fails. See the verdict in RenderScenario for why nothing finer is gated.
+    private const double ThroughputCollapsePct = 50.0;
+
     private static readonly MetricPolicy[] Policies =
     [
         new("statements_per_job", Gated: true, TolerancePct: 3.0, BadDirection: Direction.Higher),
@@ -256,8 +259,8 @@ public static class PerfCompare
     private static string RenderScenario(
         Type? type,
         List<BdnCase> cases,
-        Dictionary<string, (long? Bytes, double Mean, double? StatementsPerJob)> baseRun,
-        Dictionary<string, (long? Bytes, double Mean, double? StatementsPerJob)> headRun,
+        Dictionary<string, BdnResult> baseRun,
+        Dictionary<string, BdnResult> headRun,
         double tolerancePct,
         List<string> failures)
     {
@@ -285,11 +288,11 @@ public static class PerfCompare
             var hasBase = baseRun.TryGetValue(benchmark.FullName, out var b);
             var hasHead = headRun.TryGetValue(benchmark.FullName, out var h);
 
-            if (!hasBase || !hasHead)
+            if (!hasBase || !hasHead || b is null || h is null)
             {
                 // A case only one side has is new or removed, not a regression.
                 var side = hasHead ? "new in head" : "removed in head";
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | {side} | | | ➖ |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | {side} | | | | | ➖ |");
                 continue;
             }
 
@@ -301,7 +304,7 @@ public static class PerfCompare
             if (b.Bytes is null || h.Bytes is null)
             {
                 var missing = MissingSide(b.Bytes, h.Bytes);
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | no measurement from {missing} | | | ⚠️ |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | no measurement from {missing} | | | | | ⚠️ |");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: {missing} produced no measurement, so nothing was compared"));
@@ -313,7 +316,10 @@ public static class PerfCompare
                 ? null
                 : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
             var allocChange = b.Bytes == 0 ? 0 : (h.Bytes.Value - b.Bytes.Value) / (double)b.Bytes.Value * 100;
-            var timeChange = b.Mean <= 0 ? 0 : (h.Mean - b.Mean) / b.Mean * 100;
+            var jobs = JobCountOf(benchmark);
+            double? baseRate = jobs is null || b.Mean <= 0 ? null : jobs.Value / (b.Mean / 1e9);
+            double? headRate = jobs is null || h.Mean <= 0 ? null : jobs.Value / (h.Mean / 1e9);
+            double? rateChange = baseRate is null || headRate is null ? null : (headRate.Value - baseRate.Value) / baseRate.Value * 100;
 
             // Statements per job is the only gate. Allocations are REPORTED, not gated: they were gated
             // at 2% on the strength of one run showing byte-identical numbers, and later runs moved 2-3%
@@ -324,19 +330,38 @@ public static class PerfCompare
             var verdict = "✅";
             if (stmtChange > StatementTolerancePct)
             {
-                verdict = string.Create(CultureInfo.InvariantCulture, $"❌ over {StatementTolerancePct:0}%");
+                verdict = string.Create(CultureInfo.InvariantCulture, $"❌ statements over {StatementTolerancePct:0}%");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
+            }
+
+            // Throughput is far too noisy on a shared runner to gate a 10% change — identical code has
+            // moved 15% between runs — but a collapse is not noise. Halving is what a plan regression
+            // looks like (the over-claiming claim cost 4.3 s a call), and no run-to-run spread seen here
+            // comes near it.
+            if (rateChange < -ThroughputCollapsePct)
+            {
+                verdict = string.Create(CultureInfo.InvariantCulture, $"❌ jobs/s down over {ThroughputCollapsePct:0}%");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
             }
 
             var statements = stmtChange is null
                 ? "not measured"
                 : Pair(Number(b.StatementsPerJob!.Value), Number(h.StatementsPerJob!.Value), string.Empty, stmtChange.Value);
             var memory = Pair(Megabytes(b.Bytes.Value), Megabytes(h.Bytes.Value), "MB", allocChange, flagAbove: tolerancePct);
-            var time = PairDuration(b.Mean, h.Mean, timeChange);
+            var buffers = PairOf(b.BuffersPerJob, h.BuffersPerJob, x => x.ToString("N1", CultureInfo.InvariantCulture), string.Empty);
+            var wal = PairOf(b.WalBytesPerJob, h.WalBytesPerJob, x => (x / 1024).ToString("N1", CultureInfo.InvariantCulture), "KB");
+            var timeChange = h.Mean <= 0 || b.Mean <= 0 ? 0 : (h.Mean - b.Mean) / b.Mean * 100;
 
-            rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | {statements} | {memory} | {time} | {verdict} |");
+            // jobs/s where the case has a job count, which is every CI scenario; mean time otherwise.
+            var rate = rateChange is null
+                ? PairDuration(b.Mean, h.Mean, timeChange)
+                : Pair(baseRate!.Value.ToString("N0", CultureInfo.InvariantCulture), headRate!.Value.ToString("N0", CultureInfo.InvariantCulture), string.Empty, rateChange.Value);
+
+            rows.AppendLine(CultureInfo.InvariantCulture, $"| {name} | {statements} | {buffers} | {wal} | {rate} | {memory} | {verdict} |");
         }
 
         var failed = failures.Count > failuresBefore;
@@ -359,8 +384,8 @@ public static class PerfCompare
         }
 
         section.AppendLine();
-        section.AppendLine("| case | statements per job · gated | memory per run | mean time | |");
-        section.AppendLine("| --- | --- | --- | --- | --- |");
+        section.AppendLine("| case | statements / job · gated | buffers / job | WAL / job | jobs / s | memory / run | |");
+        section.AppendLine("| --- | --- | --- | --- | --- | --- | --- |");
         section.Append(rows);
 
         // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL
@@ -437,6 +462,25 @@ public static class PerfCompare
             : Pair(before + " " + beforeUnit, after, afterUnit, change);
     }
 
+    /// <summary>A reported metric that one provider may not have: SQL Server has no WAL figure.</summary>
+    private static string PairOf(double? before, double? after, Func<double, string> format, string unit)
+    {
+        if (before is null || after is null)
+        {
+            return "—";
+        }
+
+        var change = before.Value <= 0 ? 0 : (after.Value - before.Value) / before.Value * 100;
+
+        return Pair(format(before.Value), format(after.Value), unit, change);
+    }
+
+    private static int? JobCountOf(BdnCase benchmark) =>
+        benchmark.Parameters
+            .Where(x => string.Equals(x.Name, "JobCount", StringComparison.Ordinal))
+            .Select(x => int.TryParse(x.Value, CultureInfo.InvariantCulture, out var n) ? n : (int?)null)
+            .FirstOrDefault();
+
     private static string Number(double value) => value.ToString("N2", CultureInfo.InvariantCulture);
 
     private static string Megabytes(long bytes) =>
@@ -464,9 +508,9 @@ public static class PerfCompare
     /// <see cref="JsonOptions"/> — that one carries the snake_case policy the lab's own files use.
     /// </para>
     /// </summary>
-    private static Dictionary<string, (long? Bytes, double Mean, double? StatementsPerJob)> ReadBdn(string directory)
+    private static Dictionary<string, BdnResult> ReadBdn(string directory)
     {
-        var results = new Dictionary<string, (long? Bytes, double Mean, double? StatementsPerJob)>(StringComparer.Ordinal);
+        var results = new Dictionary<string, BdnResult>(StringComparer.Ordinal);
         var files = Directory.GetFiles(directory, "*-report-full-compressed.json", SearchOption.AllDirectories);
 
         if (files.Length == 0)
@@ -484,19 +528,22 @@ public static class PerfCompare
                     continue;
                 }
 
-                var statements = benchmark.Metrics
-                    ?.FirstOrDefault(x => string.Equals(x.Descriptor?.Id, "StatementsPerJob", StringComparison.Ordinal))
-                    ?.Value;
-
-                results[benchmark.FullName] = (
+                results[benchmark.FullName] = new BdnResult(
                     benchmark.Memory?.BytesAllocatedPerOperation,
                     benchmark.Statistics?.Mean ?? 0,
-                    statements);
+                    MetricOf(benchmark, "StatementsPerJob"),
+                    MetricOf(benchmark, "BuffersPerJob"),
+                    MetricOf(benchmark, "WalBytesPerJob"));
             }
         }
 
         return results;
     }
+
+    private static double? MetricOf(BdnBenchmark benchmark, string id) =>
+        benchmark.Metrics
+            ?.FirstOrDefault(x => string.Equals(x.Descriptor?.Id, id, StringComparison.Ordinal))
+            ?.Value;
 
     private enum Direction
     {
@@ -536,6 +583,8 @@ public static class PerfCompare
         /// <summary>Without the namespace, for the failure lines in the log.</summary>
         public string Short { get; }
     }
+
+    private sealed record BdnResult(long? Bytes, double Mean, double? StatementsPerJob, double? BuffersPerJob, double? WalBytesPerJob);
 
     private sealed record BdnReport(List<BdnBenchmark>? Benchmarks);
 

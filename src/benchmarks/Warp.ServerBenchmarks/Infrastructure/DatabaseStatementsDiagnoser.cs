@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using BenchmarkDotNet.Analysers;
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Diagnosers;
@@ -41,8 +42,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     private static readonly string? SqlServerConnectionString =
         Environment.GetEnvironmentVariable(PostgresServerFixture.SqlServerConnectionStringVariable);
 
-    private readonly ConcurrentDictionary<BenchmarkCase, (long Statements, long Jobs)> _deltas = new();
-    private (long Statements, long Jobs) _before;
+    private readonly ConcurrentDictionary<BenchmarkCase, Counters> _deltas = new();
+    private Counters _before;
 
     public IEnumerable<string> Ids => ["DatabaseStatements"];
 
@@ -70,13 +71,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 break;
 
             case HostSignal.AfterActualRun:
-                var after = ReadCounters(provider);
-                var delta = (Statements: after.Statements - _before.Statements, Jobs: after.Jobs - _before.Jobs);
-
-                _deltas.AddOrUpdate(
-                    parameters.BenchmarkCase,
-                    delta,
-                    (_, existing) => (existing.Statements + delta.Statements, existing.Jobs + delta.Jobs));
+                var delta = ReadCounters(provider) - _before;
+                _deltas.AddOrUpdate(parameters.BenchmarkCase, delta, (_, existing) => existing + delta);
                 break;
 
             default:
@@ -91,7 +87,14 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             yield break;
         }
 
-        yield return new Metric(StatementsPerJobDescriptor.Instance, delta.Statements / (double)delta.Jobs);
+        yield return new Metric(PerJobDescriptor.Statements, delta.Statements / (double)delta.Jobs);
+        yield return new Metric(PerJobDescriptor.Buffers, delta.Buffers / (double)delta.Jobs);
+
+        // SQL Server has no WAL figure in dm_exec_query_stats; a zero there is "not measured", not "none".
+        if (delta.WalBytes > 0)
+        {
+            yield return new Metric(PerJobDescriptor.WalBytes, delta.WalBytes / (double)delta.Jobs);
+        }
     }
 
     public void DisplayResults(ILogger logger)
@@ -126,7 +129,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     private static string? ConnectionStringFor(BenchmarkProvider provider) =>
         provider == BenchmarkProvider.SqlServer ? SqlServerConnectionString : PostgresConnectionString;
 
-    private static (long Statements, long Jobs) ReadCounters(BenchmarkProvider provider) =>
+    private static Counters ReadCounters(BenchmarkProvider provider) =>
         provider == BenchmarkProvider.SqlServer ? ReadSqlServerCounters() : ReadPostgresCounters();
 
     /// <summary>
@@ -137,7 +140,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// Counting the job rows actually written inside the window answers it directly, and is checkable
     /// against the lab, which measures the same thing.
     /// </summary>
-    private static (long Statements, long Jobs) ReadPostgresCounters()
+    private static Counters ReadPostgresCounters()
     {
         try
         {
@@ -148,21 +151,30 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
             // The read excludes itself: it is issued against pg_stat_statements, so without the filter
             // the instrument would count its own traffic.
+            //
+            // Buffers are the pages each statement touched, cached or read. They are the measure of work
+            // a statement count cannot see: the PostgreSQL claim that took several jobs issued the SAME
+            // number of statements while each one walked the whole table, 4.3 s a claim at 300k rows.
+            // WAL bytes are the write side of the same question.
             command.CommandText = @"
                 SELECT
                     COALESCE(SUM(calls) FILTER (WHERE query NOT LIKE '%pg_stat_statements%'), 0) AS statements,
-                    COALESCE(SUM(rows) FILTER (WHERE query ILIKE 'INSERT INTO warp.job (%'), 0) AS jobs
+                    COALESCE(SUM(rows) FILTER (WHERE query ILIKE 'INSERT INTO warp.job (%'), 0) AS jobs,
+                    COALESCE(SUM(shared_blks_hit + shared_blks_read) FILTER (WHERE query NOT LIKE '%pg_stat_statements%'), 0) AS buffers,
+                    COALESCE(SUM(wal_bytes) FILTER (WHERE query NOT LIKE '%pg_stat_statements%'), 0) AS wal
                 FROM pg_stat_statements";
 
             using var reader = command.ExecuteReader();
 
-            return reader.Read() ? (reader.GetInt64(0), reader.GetInt64(1)) : (0, 0);
+            return reader.Read()
+                ? new Counters(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), Convert.ToInt64(reader.GetValue(3)))
+                : default;
         }
         catch (NpgsqlException)
         {
             // A diagnoser must never take down the run it is observing: a missing extension or a
             // container already torn down is a lost measurement, not a failed benchmark.
-            return (0, 0);
+            return default;
         }
     }
 
@@ -184,7 +196,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// rows written, measured at the storage engine rather than reconstructed from statement text.
     /// </para>
     /// </summary>
-    private static (long Statements, long Jobs) ReadSqlServerCounters()
+    private static Counters ReadSqlServerCounters()
     {
         try
         {
@@ -204,6 +216,10 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                      FROM sys.dm_exec_query_stats qs
                      CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
                      WHERE st.text NOT LIKE '%dm_exec_query_stats%') AS statements,
+                    (SELECT COALESCE(SUM(qs.total_logical_reads), 0)
+                     FROM sys.dm_exec_query_stats qs
+                     CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+                     WHERE st.text NOT LIKE '%dm_exec_query_stats%') AS buffers,
                     (SELECT COALESCE(SUM(os.leaf_insert_count), 0)
                      FROM sys.dm_db_index_operational_stats(NULL, NULL, NULL, NULL) os
                      WHERE os.index_id IN (0, 1)
@@ -214,30 +230,53 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             using var reader = command.ExecuteReader();
 
             return reader.Read()
-                ? (Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(1)))
-                : (0, 0);
+                ? new Counters(Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(2)), Convert.ToInt64(reader.GetValue(1)), 0)
+                : default;
         }
         catch (SqlException)
         {
-            return (0, 0);
+            return default;
         }
     }
 
-    private sealed class StatementsPerJobDescriptor : IMetricDescriptor
+    /// <summary>A server-wide counter reading, and the difference between two.</summary>
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct Counters(long Statements, long Jobs, long Buffers, long WalBytes)
     {
-        public static readonly StatementsPerJobDescriptor Instance = new();
+        public static Counters operator -(Counters a, Counters b) =>
+            new(a.Statements - b.Statements, a.Jobs - b.Jobs, a.Buffers - b.Buffers, a.WalBytes - b.WalBytes);
 
-        public string Id => "StatementsPerJob";
+        public static Counters operator +(Counters a, Counters b) =>
+            new(a.Statements + b.Statements, a.Jobs + b.Jobs, a.Buffers + b.Buffers, a.WalBytes + b.WalBytes);
+    }
 
-        public string DisplayName => "Statements/job";
+    private sealed class PerJobDescriptor : IMetricDescriptor
+    {
+        public static readonly PerJobDescriptor Statements = new("StatementsPerJob", "Statements/job", "Database statements per job, measured over the run", "stmt");
 
-        public string Legend => "Database statements per job, measured over the run";
+        public static readonly PerJobDescriptor Buffers = new("BuffersPerJob", "Buffers/job", "Database pages touched per job, cached or read", "blk");
+
+        public static readonly PerJobDescriptor WalBytes = new("WalBytesPerJob", "WAL/job", "Write-ahead log bytes per job (PostgreSQL)", "B");
+
+        private PerJobDescriptor(string id, string displayName, string legend, string unit)
+        {
+            Id = id;
+            DisplayName = displayName;
+            Legend = legend;
+            Unit = unit;
+        }
+
+        public string Id { get; }
+
+        public string DisplayName { get; }
+
+        public string Legend { get; }
 
         public string NumberFormat => "N2";
 
         public UnitType UnitType => UnitType.Dimensionless;
 
-        public string Unit => "stmt";
+        public string Unit { get; }
 
         public bool TheGreaterTheBetter => false;
 

@@ -103,6 +103,13 @@ cannot take more than its limit under any plan. Normal-case cost is unchanged: s
 buffers within 0.5%. In the empty-table window a claim takes 0.24 ms instead of 4.3 s. **SQL Server was
 not affected**: its claim updates a `TOP (n)` CTE directly, with no join to re-run.
 
+**Dispatcher mode picks up a job enqueued on the same server immediately.** A bare worker wakes on
+an enqueue in its own process (a `Publisher` save, the message router, scheduled activation), but the
+dispatcher was only woken by a database push. Without `UseDatabasePush()`, a dispatcher that had
+backed off after an idle spell waited out its backoff, up to `MaxPollingInterval`, before seeing new
+work. It now wakes on the same in-process signal. Measured on the benchmark: 1,000 jobs drained in
+about 2 s instead of 21 s.
+
 **Each finished job no longer throws an exception internally.** The per-job monitor was stopped by
 cancelling a delay and catching the result, which cost one first-chance exception per job on both
 worker paths. Behaviour is unchanged.
