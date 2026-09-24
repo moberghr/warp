@@ -34,7 +34,7 @@ public sealed record ArmResult(string Scenario, ArmParameters Parameters, int N,
 /// reported so a human can look, and never failed on. See docs/plans/2026-09-22-performance-ci.md.
 /// </para>
 /// </summary>
-public static class PerfCompare
+public static partial class PerfCompare
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -217,10 +217,11 @@ public static class PerfCompare
     /// (<c>Job.WithNuGet</c>), where both versions run interleaved in one process.
     /// </para>
     /// </summary>
-    public static int RunBdn(string basePath, string headPath, double tolerancePct, string? summaryPath)
+    public static int RunBdn(string basePath, string headPath, double tolerancePct, string? summaryPath, string? releasePath = null)
     {
         var baseRun = ReadBdn(basePath);
         var headRun = ReadBdn(headPath);
+        var release = LoadReleaseBaseline(releasePath);
 
         var failures = new List<string>();
         var report = new StringBuilder();
@@ -239,7 +240,7 @@ public static class PerfCompare
 
         foreach (var (type, cases) in scenarios)
         {
-            report.Append(RenderScenario(type, cases, baseRun, headRun, tolerancePct, failures));
+            report.Append(RenderScenario(type, cases, baseRun, headRun, tolerancePct, failures, release));
             report.AppendLine();
         }
 
@@ -270,7 +271,8 @@ public static class PerfCompare
         Dictionary<string, BdnResult> baseRun,
         Dictionary<string, BdnResult> headRun,
         double tolerancePct,
-        List<string> failures)
+        List<string> failures,
+        ReleaseBenchmarks? release)
     {
         var scenario = type?.GetCustomAttribute<CiScenarioAttribute>();
         var labels = type?.GetCustomAttributes<CaseLabelAttribute>().ToList() ?? [];
@@ -441,6 +443,10 @@ public static class PerfCompare
             rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {Row(h)} | {ratio} | {Rate(headRate)} | {Row2(h)} | {allocRatio} | {gate} |");
         }
 
+        // Before the verdict, so a scenario that fails only on creep since the last release gets its ❌.
+        var sinceRelease = new StringBuilder();
+        AppendSinceRelease(sinceRelease, cases, headRun, release, failures);
+
         var failed = failures.Count > failuresBefore;
         var section = new StringBuilder();
 
@@ -485,6 +491,7 @@ public static class PerfCompare
         section.AppendLine("| " + header + " |");
         section.AppendLine("| " + alignment + " |");
         section.Append(rows);
+        section.Append(sinceRelease);
 
         // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL
         // Server row reading 4 looks like a verdict on the providers, when the two numbers come from

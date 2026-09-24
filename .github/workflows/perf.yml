@@ -24,6 +24,14 @@ on:
         description: 'Commit, tag or branch to measure (default: this branch)'
         required: false
         type: string
+      record_release:
+        description: 'Measure this release tag with the current benchmarks and attach the results to it (no comparison)'
+        required: false
+        type: string
+  # A published release is measured and its results attached to it as benchmarks.json, which never
+  # expires. Every later run compares against the latest of those, and charts them release over release.
+  release:
+    types: [published]
 
 env:
   DOTNET_VERSION: '10.0'
@@ -41,6 +49,8 @@ jobs:
     outputs:
       head: ${{ steps.refs.outputs.head }}
       base: ${{ steps.refs.outputs.base }}
+      record: ${{ steps.refs.outputs.record }}
+      latest_release: ${{ steps.refs.outputs.latest_release }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,8 +66,14 @@ jobs:
             git rev-parse --verify --quiet "$1^{commit}"               || git rev-parse --verify --quiet "origin/$1^{commit}"               || { echo "::error::Cannot resolve '$1' to a commit"; exit 1; }
           }
 
+          # Record mode measures one release and compares it with nothing: a published release, or a
+          # tag given by hand to backfill one or re-measure it after the measurement version changed.
+          RECORD="${{ github.event_name == 'release' && github.event.release.tag_name || inputs.record_release }}"
+
           if [ -n "${{ inputs.head_ref }}" ]; then
             HEAD_SHA=$(resolve "${{ inputs.head_ref }}")
+          elif [ -n "$RECORD" ]; then
+            HEAD_SHA=$(resolve "$RECORD")
           else
             HEAD_SHA=$(git rev-parse HEAD)
           fi
@@ -72,6 +88,14 @@ jobs:
 
           echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "record=$RECORD" >> "$GITHUB_OUTPUT"
+
+          # The release a run is also compared with, for creep that each change's own gate misses.
+          # Empty when there is none yet; the comparison is then simply absent.
+          LATEST=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          echo "latest_release=$LATEST" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   # ---------------------------------------------------------------------------------------------
   # BenchmarkDotNet, gating what was calibrated to survive a shared runner: statements per job at 5%,
@@ -212,6 +236,7 @@ jobs:
 
       - name: Run benchmarks on the base commit
         id: basebench
+        if: needs.refs.outputs.record == ''
         continue-on-error: true
         run: |
           git checkout --no-overlay ${{ needs.refs.outputs.base }} -- src/core
@@ -221,6 +246,15 @@ jobs:
             --artifacts "${{ github.workspace }}/bench/base"
           git checkout --no-overlay HEAD -- src/core
 
+      - name: Fetch the latest release's results
+        if: needs.refs.outputs.record == '' && needs.refs.outputs.latest_release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Absent until a release has been recorded; the comparison is then left out, not faked.
+          gh release download "${{ needs.refs.outputs.latest_release }}" -p benchmarks.json \
+            -D "${{ github.workspace }}/release" || echo "No benchmarks.json on ${{ needs.refs.outputs.latest_release }} yet."
+
       - name: Compare
         if: steps.basebench.outcome == 'success'
         run: |
@@ -229,7 +263,17 @@ jobs:
             --base="${{ github.workspace }}/bench/base" \
             --head="${{ github.workspace }}/bench/head" \
             --tolerance=5 \
+            --release="${{ github.workspace }}/release/benchmarks.json" \
             --summary="${{ github.workspace }}/bench/section.md"
+
+      # The measured side, as cases, for a release's record and for the history chart.
+      - name: Export the head results
+        if: always()
+        run: |
+          if [ -d "${{ github.workspace }}/bench/head" ]; then
+            dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+              export-bdn --results="${{ github.workspace }}/bench/head" --out="${{ github.workspace }}/bench/export.json"
+          fi
 
       - name: Explain an incompatible base
         if: steps.basebench.outcome == 'failure'
@@ -261,6 +305,39 @@ jobs:
           path: ${{ github.workspace }}/bench
 
   # ---------------------------------------------------------------------------------------------
+  # Attaches a release's results to it. The only job that writes, and only in record mode.
+  # ---------------------------------------------------------------------------------------------
+  record:
+    name: Record release
+    needs: [refs, benchmarks]
+    if: needs.refs.outputs.record != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: benchmark-results-*
+          path: results
+
+      - name: Attach benchmarks.json to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            record-release --exports=results --release="${{ needs.refs.outputs.record }}" \
+            --commit="${{ needs.refs.outputs.head }}" --out=benchmarks.json
+          gh release upload "${{ needs.refs.outputs.record }}" benchmarks.json --clobber
+          echo "### Recorded benchmark results for ${{ needs.refs.outputs.record }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------
   # One page for the whole run. Each benchmark job leaves its section in its artifact; this puts them
   # in order under a single header, so the commits are named once and the verdict is read at a glance.
   # Runs whatever the benchmarks did: a failing run is exactly the one whose report matters.
@@ -280,11 +357,47 @@ jobs:
           pattern: benchmark-results-*
           path: results
 
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Every release's recorded results, for the release-over-release history. A release recorded
+      # before this existed simply has none.
+      - name: Fetch every release's results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p releases
+          for tag in $(gh release list --limit 50 --exclude-drafts --json tagName -q '.[].tagName'); do
+            gh release download "$tag" -p benchmarks.json -O "releases/$tag.json" 2>/dev/null || true
+          done
+          ls releases
+
+      - name: Build the history
+        run: |
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            history-bdn --releases=releases --exports=results \
+            --label="${{ needs.refs.outputs.record || 'this run' }}" --out=history.md
+
       - name: Write the report
         env:
           HEAD_SHA: ${{ needs.refs.outputs.head }}
           BASE_SHA: ${{ needs.refs.outputs.base }}
+          RECORD: ${{ needs.refs.outputs.record }}
         run: |
+          # Record mode compares nothing: the page says what was measured, and shows the history.
+          if [ -n "$RECORD" ]; then
+            {
+              echo "## Performance: recorded $RECORD"
+              echo
+              echo "Measured \`$(git rev-parse --short "$HEAD_SHA")\` with the current benchmarks and attached the results to the release as \`benchmarks.json\`. Nothing was compared."
+              echo
+              cat history.md
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           # Matrix order, so the page reads the same way every run.
           scenarios="dispatcher completion-batch payload concurrency failure-path retries publish message-routing scheduled-activation large-table batches idle"
 
@@ -335,4 +448,6 @@ jobs:
             echo "- ⚠️ means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
             echo
             echo "</details>"
+            echo
+            cat history.md
           } >> "$GITHUB_STEP_SUMMARY"
