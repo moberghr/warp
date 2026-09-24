@@ -110,6 +110,12 @@ backed off after an idle spell waited out its backoff, up to `MaxPollingInterval
 work. It now wakes on the same in-process signal. Measured on the benchmark: 1,000 jobs drained in
 about 2 s instead of 21 s.
 
+**A continuation is picked up as soon as its parent finishes.** When a batch completed, the
+Orchestrator released its continuation's jobs to `Enqueued` without announcing them, so idle workers
+kept sleeping through their backoff before they noticed. Every other site that makes a job runnable
+already announced it. The Orchestrator now does too. Measured on the benchmark: five batches of 100,
+each with a continuation of 100, drained in about 3 s instead of 22 s.
+
 **Each finished job no longer throws an exception internally.** The per-job monitor was stopped by
 cancelling a delay and catching the result, which cost one first-chance exception per job on both
 worker paths. Behaviour is unchanged.

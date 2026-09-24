@@ -3,6 +3,7 @@ using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Tests.Fixtures;
 using Warp.Worker.Services;
 
@@ -383,6 +384,72 @@ public abstract class OrchestrationTaskTestsBase : IAsyncLifetime
             gc.ShouldNotBeNull();
             gc.CurrentState.ShouldBe(State.Enqueued);
         }
+    }
+
+    [TimedFact]
+    public async Task RunOrchestration_ActivatesContinuation_SignalsJobEnqueued()
+    {
+        // Activating a continuation flips rows from Awaiting to Enqueued, so it is an enqueue site and must
+        // announce it (rule 6.3). It did not, and idle workers slept through their backoff before seeing a
+        // released continuation: five batch-and-continuation pairs took ~22 s where the same 1,000 jobs
+        // published directly took ~3 s. No ambient transaction here, so the wake fires at once rather than
+        // from OnCommittedAsync.
+        var ctx = _fixture.CreateContext();
+        var parentBatchId = Guid.NewGuid();
+        var continuationBatchId = Guid.NewGuid();
+
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = parentBatchId,
+            Kind = JobKind.Batch,
+            CurrentState = State.Awaiting,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            JobCount = 1,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Completed,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = parentBatchId,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = continuationBatchId,
+            Kind = JobKind.Batch,
+            CurrentState = State.Awaiting,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = parentBatchId,
+            JobCount = 1,
+        });
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Awaiting,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+            ParentJobId = continuationBatchId,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var signals = new ServerTaskSignals<TestContext>();
+        var wakes = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobEnqueued, () => Interlocked.Increment(ref wakes));
+
+        // Two passes: the first finalizes the parent, the second (at the latest) releases the continuation.
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), signals: signals).RunOrchestrationCoreAsync(CancellationToken.None);
+        await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), signals: signals).RunOrchestrationCoreAsync(CancellationToken.None);
+
+        wakes.ShouldBe(1, "one continuation released, one queue: exactly one wake");
     }
 
     [TimedFact]

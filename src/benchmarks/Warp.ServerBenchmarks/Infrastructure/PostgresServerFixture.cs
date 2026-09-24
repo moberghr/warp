@@ -79,7 +79,8 @@ public class PostgresServerFixture : IAsyncDisposable
         int completionBatchSize = 50,
         TimeSpan? completionFlushInterval = null,
         bool addConcurrency = false,
-        BenchmarkProvider provider = BenchmarkProvider.PostgreSql)
+        BenchmarkProvider provider = BenchmarkProvider.PostgreSql,
+        Action<WarpServerBuilder<TestContext>>? configure = null)
     {
         _provider = provider;
         ExceptionTally.StartIfRequested();
@@ -141,6 +142,9 @@ public class PostgresServerFixture : IAsyncDisposable
                     config.UseDispatcher = useDispatcher;
                     config.CompletionBatchSize = completionBatchSize;
                     config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
+
+                    // Last, so a scenario can add an addon or override any default above.
+                    configure?.Invoke(config);
                 });
             })
             .Build();
@@ -210,6 +214,13 @@ public class PostgresServerFixture : IAsyncDisposable
         return scope.ServiceProvider.GetRequiredService<IPublisher>();
     }
 
+    public IBatchPublisher CreateBatchPublisher()
+    {
+        var scope = Host.Services.CreateScope();
+
+        return scope.ServiceProvider.GetRequiredService<IBatchPublisher>();
+    }
+
     /// <summary>
     /// Polls until all jobs reach a terminal state.
     /// </summary>
@@ -224,7 +235,8 @@ public class PostgresServerFixture : IAsyncDisposable
                 .CountAsync(x =>
                     x.CurrentState == State.Enqueued ||
                     x.CurrentState == State.Processing ||
-                    x.CurrentState == State.Awaiting);
+                    x.CurrentState == State.Awaiting ||
+                    x.CurrentState == State.Scheduled);
 
             if (activeJobs == 0)
             {
@@ -335,16 +347,15 @@ public class PostgresServerFixture : IAsyncDisposable
 
                 await DescribeClaimAuditAsync(connection, report);
 
-                // The plan the claim gets NOW, with this database's current statistics. The claim is
-                // `UPDATE ... FROM (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`, and whether the
-                // subquery can be re-executed depends on which side of the join the planner puts it.
+                // The plan the claim gets NOW, with this database's current statistics, in the shape
+                // PostgresWarpSqlQueries issues: the limited SELECT as an ARRAY sub-select.
                 await using (var explain = connection.CreateCommand())
                 {
                     explain.CommandText = @"
-                        EXPLAIN UPDATE warp.job AS t SET current_state = 2
-                        FROM (SELECT id FROM warp.job WHERE kind = 1 AND current_state = 1 AND queue = 'default'
-                              ORDER BY schedule_time LIMIT 1 FOR UPDATE SKIP LOCKED) AS c
-                        WHERE t.id = c.id RETURNING t.id";
+                        EXPLAIN UPDATE warp.job AS t SET current_state = " + Processing + @"
+                        WHERE t.id = ANY(ARRAY(SELECT id FROM warp.job WHERE kind = 1 AND current_state = " + Enqueued + @"
+                              AND queue = 'default' ORDER BY schedule_time LIMIT 1 FOR UPDATE SKIP LOCKED))
+                        RETURNING t.id";
                     await using var reader = await explain.ExecuteReaderAsync();
                     report.AppendLine("  claim plan now:");
                     while (await reader.ReadAsync())
@@ -396,6 +407,8 @@ public class PostgresServerFixture : IAsyncDisposable
     // From the enum, not a literal: Processing is 3 (Awaiting is 2), and a hand-typed value made the
     // first version of this audit record nothing at all.
     private static readonly string Processing = ((int)State.Processing).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private static readonly string Enqueued = ((int)State.Enqueued).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private async Task InstallClaimAuditAsync()
     {
@@ -580,7 +593,13 @@ public class PostgresServerFixture : IAsyncDisposable
     /// <summary>
     /// Deletes all job-related rows between benchmark iterations.
     /// </summary>
-    public async Task CleanJobTables()
+    public Task CleanJobTables() => CleanJobTables(createdAfter: null);
+
+    /// <summary>
+    /// Deletes the jobs created after <paramref name="createdAfter"/>, or every job when it is null, so a
+    /// scenario that seeds a standing history can clear each iteration's jobs without deleting it.
+    /// </summary>
+    public async Task CleanJobTables(DateTime? createdAfter)
     {
         await using var scope = Host.Services.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
@@ -594,6 +613,13 @@ public class PostgresServerFixture : IAsyncDisposable
         // Order matters: job_log and counter reference nothing, but job is the parent of job_log.
         await ctx.Set<JobLog>().ExecuteDeleteAsync();
         await ctx.Set<Counter>().ExecuteDeleteAsync();
+        if (createdAfter is { } since)
+        {
+            await ctx.Set<Job>().Where(x => x.CreateTime > since).ExecuteDeleteAsync();
+
+            return;
+        }
+
         await ctx.Set<Job>().ExecuteDeleteAsync();
     }
 

@@ -5,6 +5,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Events;
+using Warp.Core.Notifications;
 
 namespace Warp.Worker.Services;
 
@@ -14,6 +15,14 @@ namespace Warp.Worker.Services;
 /// children of deleted parents. Wake-up on <c>JobFinalized</c> events (worker completions
 /// and push notifications) is routed through
 /// <see cref="ServerTaskSignals{TContext}.SignalJobFinalized"/>.
+/// <para>
+/// Activating a continuation is an enqueue site (rule 6.3): it flips rows from Awaiting to Enqueued, so it
+/// announces them, built from the flip itself because <c>NotificationDispatch.CapturePending</c> sees only
+/// Added rows. Buffered and fired from <see cref="OnCommittedAsync"/> like
+/// <c>ScheduledJobActivation</c>, since <see cref="ExecuteAsync"/> runs inside the host's lock transaction.
+/// Without it, idle workers slept through their backoff before seeing a released continuation: 1,000 jobs
+/// in five batch-and-continuation pairs took ~22 s against ~3 s for the same jobs published directly.
+/// </para>
 /// </summary>
 public sealed class Orchestrator<TContext> : IServerTask
     where TContext : DbContext
@@ -21,15 +30,22 @@ public sealed class Orchestrator<TContext> : IServerTask
     private readonly DbContext _context;
     private readonly TimeProvider _time;
     private readonly WarpServerConfiguration _configuration;
+    private readonly IWarpNotificationTransport _transport;
+    private readonly ServerTaskSignals<TContext> _signals;
+    private readonly List<Notification> _pendingNotifications = [];
 
     public Orchestrator(
         IWarpServerContext serverContext,
         TimeProvider time,
-        IOptions<WarpServerConfiguration> configuration)
+        IOptions<WarpServerConfiguration> configuration,
+        IWarpNotificationTransport transport,
+        ServerTaskSignals<TContext> signals)
     {
         _context = serverContext.Context;
         _time = time;
         _configuration = configuration.Value;
+        _transport = transport;
+        _signals = signals;
     }
 
     public string Name => "Orchestration";
@@ -45,6 +61,23 @@ public sealed class Orchestrator<TContext> : IServerTask
         var workDone = await RunOrchestrationCoreAsync(ct);
 
         return workDone ? "Orchestration pass completed" : null;
+    }
+
+    // Post-commit hook (§8.25): called only after the lock transaction has committed, never on a
+    // rollback, which leaves the buffer to die with this scoped instance.
+    public async Task OnCommittedAsync(CancellationToken ct)
+    {
+        if (_pendingNotifications.Count == 0)
+        {
+            return;
+        }
+
+        var notifications = _pendingNotifications.ToList();
+        _pendingNotifications.Clear();
+
+        // CancellationToken.None: the activations are committed, so workers should hear about them even
+        // if shutdown began mid-iteration.
+        await NotificationDispatch.DispatchAsync(notifications, _signals, _transport, CancellationToken.None);
     }
 
     internal async Task<bool> RunOrchestrationCoreAsync(CancellationToken ct)
@@ -175,6 +208,7 @@ public sealed class Orchestrator<TContext> : IServerTask
         }
 
         var activated = 0;
+        var queues = new HashSet<string>(StringComparer.Ordinal);
         foreach (var child in awaitingChildren)
         {
             var childId = child.Id;
@@ -184,19 +218,66 @@ public sealed class Orchestrator<TContext> : IServerTask
                     .Where(x => x.Id == childId && x.CurrentState == State.Awaiting)
                     .ExecuteUpdateAsync(x => x.SetProperty(p => p.CurrentState, State.Processing), ct);
 
-                activated += await _context.Set<Job>()
+                // The batch's children are what become runnable, and they may sit on other queues than
+                // the batch row; read theirs before the flip, while the Awaiting filter still finds them.
+                var childQueues = await _context.Set<Job>()
+                    .AsNoTracking()
+                    .Where(x => x.ParentJobId == childId && x.CurrentState == State.Awaiting && x.Kind == JobKind.Job)
+                    .Select(x => x.Queue)
+                    .Distinct()
+                    .ToListAsync(ct);
+
+                var flipped = await _context.Set<Job>()
                     .Where(x => x.ParentJobId == childId && x.CurrentState == State.Awaiting && x.Kind == JobKind.Job)
                     .ExecuteUpdateAsync(x => x.SetProperty(p => p.CurrentState, State.Enqueued), ct);
+
+                if (flipped > 0)
+                {
+                    queues.UnionWith(childQueues);
+                }
+
+                activated += flipped;
             }
             else
             {
-                activated += await _context.Set<Job>()
+                var flipped = await _context.Set<Job>()
                     .Where(x => x.Id == childId && x.CurrentState == State.Awaiting)
                     .ExecuteUpdateAsync(x => x.SetProperty(p => p.CurrentState, State.Enqueued), ct);
+
+                if (flipped > 0)
+                {
+                    queues.Add(child.Queue);
+                }
+
+                activated += flipped;
             }
         }
 
+        await AnnounceAsync(queues, ct);
+
         return activated;
+    }
+
+    private async Task AnnounceAsync(HashSet<string> queues, CancellationToken ct)
+    {
+        if (queues.Count == 0)
+        {
+            return;
+        }
+
+        var notifications = queues.Select(x => new Notification(NotificationKind.JobEnqueued, x)).ToList();
+
+        // Under the task host there is an ambient lock transaction and nothing above is durable yet, so the
+        // wake waits for OnCommittedAsync. A direct caller (a test) has none: each update committed on its
+        // own, and nothing would call the hook for it.
+        if (_context.Database.CurrentTransaction != null)
+        {
+            _pendingNotifications.AddRange(notifications);
+
+            return;
+        }
+
+        await NotificationDispatch.DispatchAsync(notifications, _signals, _transport, ct);
     }
 
     private async Task<int> FailChildrenOfDeletedParentsAsync(TimeSpan jobExpirationTimeout, CancellationToken ct)

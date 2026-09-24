@@ -58,10 +58,18 @@ public static class PerfCompare
     /// gate's job is to stop a catastrophe reaching main unnoticed, not to adjudicate every percent.
     /// </para>
     /// </summary>
-    private const double StatementTolerancePct = 10.0;
+    private const double StatementTolerancePct = 5.0;
 
-    // Only a collapse fails. See the verdict in RenderScenario for why nothing finer is gated.
-    private const double ThroughputCollapsePct = 50.0;
+    // WAL bytes per job, PostgreSQL only. Calibrated the same way as statements: across three no-op
+    // comparisons (42 cases, the same commit on both sides) statements moved at most 1.8% and WAL at
+    // most 2.5%, so each gate sits at roughly three to four times the worst noise measured.
+    private const double WalTolerancePct = 10.0;
+
+    // Only a collapse fails: head must be this many times slower than base. A no-op comparison — the
+    // same commit on both sides — measured anywhere from 0.70x to 1.43x, so halving (2x) sat too close
+    // to noise. Both real regressions found so far were far past 3x: the dispatcher sat out its backoff
+    // at 10x, and the over-claiming claim walked the table.
+    private const double ThroughputCollapseFactor = 3.0;
 
     private static readonly MetricPolicy[] Policies =
     [
@@ -289,7 +297,11 @@ public static class PerfCompare
         }
 
         columns.AddRange(varying);
-        var header = string.Join(" | ", columns.Append("Commit")) + " | Mean | Error | StdDev | Ratio | Jobs/s | Statements/job | Buffers/job | WAL/job | Allocated | Alloc Ratio | Gate";
+        // An idle scenario runs no jobs, so the diagnoser reports its counters per second instead, into
+        // the same columns. The headers say which.
+        var perSecond = cases.All(x => JobCountOf(x) is null);
+        var per = perSecond ? "s" : "job";
+        var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | Allocated | Alloc Ratio | Gate";
         var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
 
         // Declared order, the order BenchmarkDotNet ran them in. Sorting by name put "Keys: 10000"
@@ -334,6 +346,34 @@ public static class PerfCompare
                 continue;
             }
 
+            // A database figure on one side only is a measurement that failed, not a pass: the diagnoser
+            // yields nothing when a counter read failed or the window wrote no job. Likewise a per-second
+            // figure on one side against a per-job one on the other compares two different units.
+            string? unmeasured = null;
+            if ((b.StatementsPerJob is null) != (h.StatementsPerJob is null))
+            {
+                unmeasured = "statements measured on one side only";
+            }
+            else if (!perSecond && (b.WalBytesPerJob is null) != (h.WalBytesPerJob is null))
+            {
+                unmeasured = "WAL measured on one side only";
+            }
+            else if (b.PerSecond != h.PerSecond)
+            {
+                unmeasured = "per-job figures on one side, per-second on the other";
+            }
+
+            if (unmeasured is not null)
+            {
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {Seconds(b.Mean)} | | | | | | | | | | |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {Seconds(h.Mean)} | | | | | | | | | | ⚠️ {unmeasured} |");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: {unmeasured}, so nothing was compared"));
+
+                continue;
+            }
+
             double? stmtChange = b.StatementsPerJob is null or 0 || h.StatementsPerJob is null
                 ? null
                 : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
@@ -342,13 +382,23 @@ public static class PerfCompare
             double? headRate = jobs is null || h.Mean <= 0 ? null : jobs.Value / (h.Mean / 1e9);
             double? rateChange = baseRate is null || headRate is null ? null : (headRate.Value - baseRate.Value) / baseRate.Value * 100;
 
-            // Statements per job is the gate. Allocations are REPORTED, not gated: they were gated at
-            // 2% on the strength of one run showing byte-identical numbers, and later runs moved 2-3%
-            // with no code change that could explain it. Statements get 10% because they are read from
-            // a shared server, where background tasks ticking on timers add a little jitter.
-            var gate = stmtChange is null
-                ? "✅"
-                : string.Create(CultureInfo.InvariantCulture, $"✅ stmt {stmtChange:+0.0;−0.0;0.0}%");
+            // Statements and WAL per job are the gates; see StatementTolerancePct and WalTolerancePct
+            // for where the lines sit. Allocations are REPORTED, not gated: across the same no-op runs
+            // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%,
+            // with cache state and vacuum timing, and are reported for a human to read.
+            // Per-second counters (an idle server) have not had their noise measured: a background tick
+            // landing just inside or outside the window moves them. Reported until calibrated.
+            if (perSecond)
+            {
+                stmtChange = null;
+            }
+
+            var gate = perSecond ? "reported" : "✅";
+            if (stmtChange is not null)
+            {
+                gate = string.Create(CultureInfo.InvariantCulture, $"✅ stmt {stmtChange:+0.0;−0.0;0.0}%");
+            }
+
             if (stmtChange > StatementTolerancePct)
             {
                 gate = string.Create(CultureInfo.InvariantCulture, $"❌ stmt {stmtChange:+0.0;−0.0;0.0}% (limit +{StatementTolerancePct:0}%)");
@@ -357,13 +407,22 @@ public static class PerfCompare
                     $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
             }
 
-            // Throughput is far too noisy on a shared runner to gate a 10% change — identical code has
-            // moved 15% between runs — but a collapse is not noise. Halving is what a plan regression
-            // looks like (the over-claiming claim cost 4.3 s a call), and no run-to-run spread seen here
-            // comes near it.
-            if (rateChange < -ThroughputCollapsePct)
+            double? walChange = perSecond || b.WalBytesPerJob is null or 0 || h.WalBytesPerJob is null
+                ? null
+                : (h.WalBytesPerJob.Value - b.WalBytesPerJob.Value) / b.WalBytesPerJob.Value * 100;
+            if (walChange > WalTolerancePct)
             {
-                gate = string.Create(CultureInfo.InvariantCulture, $"❌ jobs/s {rateChange:+0.0;−0.0;0.0}% (limit −{ThroughputCollapsePct:0}%)");
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ WAL {walChange:+0.0;−0.0;0.0}% (limit +{WalTolerancePct:0}%)");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: WAL/job {b.WalBytesPerJob:N0} -> {h.WalBytesPerJob:N0} bytes ({walChange:+0.0;-0.0;0.0}%)"));
+            }
+
+            // Throughput is far too noisy on a shared runner to gate a small change, but a collapse is
+            // not noise. See ThroughputCollapseFactor for where the line sits and why.
+            if (baseRate is not null && headRate is not null && headRate.Value * ThroughputCollapseFactor < baseRate.Value)
+            {
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ jobs/s {baseRate.Value / headRate.Value:0.0}× slower (limit {ThroughputCollapseFactor:0}×)");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
@@ -543,9 +602,10 @@ public static class PerfCompare
                     benchmark.Statistics?.Mean ?? 0,
                     benchmark.Statistics?.ConfidenceInterval?.Margin ?? 0,
                     benchmark.Statistics?.StandardDeviation ?? 0,
-                    MetricOf(benchmark, "StatementsPerJob"),
-                    MetricOf(benchmark, "BuffersPerJob"),
-                    MetricOf(benchmark, "WalBytesPerJob"),
+                    MetricOf(benchmark, "StatementsPerJob") is null && MetricOf(benchmark, "StatementsPerSecond") is not null,
+                    MetricOf(benchmark, "StatementsPerJob") ?? MetricOf(benchmark, "StatementsPerSecond"),
+                    MetricOf(benchmark, "BuffersPerJob") ?? MetricOf(benchmark, "BuffersPerSecond"),
+                    MetricOf(benchmark, "WalBytesPerJob") ?? MetricOf(benchmark, "WalBytesPerSecond"),
                     JobLine(benchmark.DisplayInfo),
                     report?.HostEnvironmentInfo);
             }
@@ -628,6 +688,7 @@ public static class PerfCompare
         double Mean,
         double Error,
         double StdDev,
+        bool PerSecond,
         double? StatementsPerJob,
         double? BuffersPerJob,
         double? WalBytesPerJob,
