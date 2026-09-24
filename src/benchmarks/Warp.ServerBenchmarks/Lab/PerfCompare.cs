@@ -60,8 +60,11 @@ public static class PerfCompare
     /// </summary>
     private const double StatementTolerancePct = 10.0;
 
-    // Only a collapse fails. See the verdict in RenderScenario for why nothing finer is gated.
-    private const double ThroughputCollapsePct = 50.0;
+    // Only a collapse fails: head must be this many times slower than base. A no-op comparison — the
+    // same commit on both sides — measured anywhere from 0.70x to 1.43x, so halving (2x) sat too close
+    // to noise. Both real regressions found so far were far past 3x: the dispatcher sat out its backoff
+    // at 10x, and the over-claiming claim walked the table.
+    private const double ThroughputCollapseFactor = 3.0;
 
     private static readonly MetricPolicy[] Policies =
     [
@@ -357,13 +360,11 @@ public static class PerfCompare
                     $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
             }
 
-            // Throughput is far too noisy on a shared runner to gate a 10% change — identical code has
-            // moved 15% between runs — but a collapse is not noise. Halving is what a plan regression
-            // looks like (the over-claiming claim cost 4.3 s a call), and no run-to-run spread seen here
-            // comes near it.
-            if (rateChange < -ThroughputCollapsePct)
+            // Throughput is far too noisy on a shared runner to gate a small change, but a collapse is
+            // not noise. See ThroughputCollapseFactor for where the line sits and why.
+            if (baseRate is not null && headRate is not null && headRate.Value * ThroughputCollapseFactor < baseRate.Value)
             {
-                gate = string.Create(CultureInfo.InvariantCulture, $"❌ jobs/s {rateChange:+0.0;−0.0;0.0}% (limit −{ThroughputCollapsePct:0}%)");
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ jobs/s {baseRate.Value / headRate.Value:0.0}× slower (limit {ThroughputCollapseFactor:0}×)");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
