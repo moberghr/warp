@@ -79,7 +79,8 @@ public class PostgresServerFixture : IAsyncDisposable
         int completionBatchSize = 50,
         TimeSpan? completionFlushInterval = null,
         bool addConcurrency = false,
-        BenchmarkProvider provider = BenchmarkProvider.PostgreSql)
+        BenchmarkProvider provider = BenchmarkProvider.PostgreSql,
+        Action<WarpServerBuilder<TestContext>>? configure = null)
     {
         _provider = provider;
         ExceptionTally.StartIfRequested();
@@ -141,6 +142,9 @@ public class PostgresServerFixture : IAsyncDisposable
                     config.UseDispatcher = useDispatcher;
                     config.CompletionBatchSize = completionBatchSize;
                     config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
+
+                    // Last, so a scenario can add an addon or override any default above.
+                    configure?.Invoke(config);
                 });
             })
             .Build();
@@ -208,6 +212,13 @@ public class PostgresServerFixture : IAsyncDisposable
         var scope = Host.Services.CreateScope();
 
         return scope.ServiceProvider.GetRequiredService<IPublisher>();
+    }
+
+    public IBatchPublisher CreateBatchPublisher()
+    {
+        var scope = Host.Services.CreateScope();
+
+        return scope.ServiceProvider.GetRequiredService<IBatchPublisher>();
     }
 
     /// <summary>
@@ -580,7 +591,13 @@ public class PostgresServerFixture : IAsyncDisposable
     /// <summary>
     /// Deletes all job-related rows between benchmark iterations.
     /// </summary>
-    public async Task CleanJobTables()
+    public Task CleanJobTables() => CleanJobTables(createdAfter: null);
+
+    /// <summary>
+    /// Deletes the jobs created after <paramref name="createdAfter"/>, or every job when it is null, so a
+    /// scenario that seeds a standing history can clear each iteration's jobs without deleting it.
+    /// </summary>
+    public async Task CleanJobTables(DateTime? createdAfter)
     {
         await using var scope = Host.Services.CreateAsyncScope();
         var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
@@ -594,6 +611,13 @@ public class PostgresServerFixture : IAsyncDisposable
         // Order matters: job_log and counter reference nothing, but job is the parent of job_log.
         await ctx.Set<JobLog>().ExecuteDeleteAsync();
         await ctx.Set<Counter>().ExecuteDeleteAsync();
+        if (createdAfter is { } since)
+        {
+            await ctx.Set<Job>().Where(x => x.CreateTime > since).ExecuteDeleteAsync();
+
+            return;
+        }
+
         await ctx.Set<Job>().ExecuteDeleteAsync();
     }
 

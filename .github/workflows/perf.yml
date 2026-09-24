@@ -123,6 +123,16 @@ jobs:
             filter: '*MessageRoutingBenchmark*'
           - name: scheduled-activation
             filter: '*ScheduledActivationBenchmark*'
+          # Exact class filters: '*BatchBenchmark*' also matched CompletionBatchBenchmark.
+          - name: retries
+            filter: '*.RetryBenchmark.*'
+          - name: large-table
+            filter: '*.LargeTableBenchmark.*'
+          - name: batches
+            filter: '*.BatchBenchmark.*'
+          - name: idle
+            filter: '*.IdleServerBenchmark.*'
+            sqlserver: true
     env:
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
       WARP_BENCH_SQLSERVER: "Server=localhost,1433;User Id=sa;Password=Warp!Bench1;TrustServerCertificate=True;Database=master"
@@ -272,7 +282,7 @@ jobs:
           BASE_SHA: ${{ needs.refs.outputs.base }}
         run: |
           # Matrix order, so the page reads the same way every run.
-          scenarios="dispatcher completion-batch payload concurrency failure-path publish message-routing scheduled-activation"
+          scenarios="dispatcher completion-batch payload concurrency failure-path retries publish message-routing scheduled-activation large-table batches idle"
 
           passed=0; failed=0; missing=0
           for name in $scenarios; do

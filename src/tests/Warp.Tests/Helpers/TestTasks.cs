@@ -183,7 +183,9 @@ public static class TestTasks
         TContext context,
         TimeProvider timeProvider,
         TimeSpan jobExpirationTimeout,
-        int? serverTaskBatchSize = null)
+        int? serverTaskBatchSize = null,
+        IWarpNotificationTransport? transport = null,
+        ServerTaskSignals<TContext>? signals = null)
         where TContext : DbContext
     {
         var configuration = new WarpServerConfiguration
@@ -199,7 +201,9 @@ public static class TestTasks
         return new Orchestrator<TContext>(
             new TestServerContext(context),
             timeProvider,
-            Options.Create(configuration));
+            Options.Create(configuration),
+            transport ?? NullTransport,
+            signals ?? new ServerTaskSignals<TContext>());
     }
 
     public static RecurringJobScheduler<TContext> CreateRecurringJobScheduler<TContext>(

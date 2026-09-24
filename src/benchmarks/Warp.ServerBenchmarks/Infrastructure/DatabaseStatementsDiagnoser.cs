@@ -43,7 +43,9 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         Environment.GetEnvironmentVariable(PostgresServerFixture.SqlServerConnectionStringVariable);
 
     private readonly ConcurrentDictionary<BenchmarkCase, Counters> _deltas = new();
+    private readonly ConcurrentDictionary<BenchmarkCase, TimeSpan> _elapsed = new();
     private Counters _before;
+    private long _beforeTimestamp;
 
     public IEnumerable<string> Ids => ["DatabaseStatements"];
 
@@ -68,11 +70,14 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         {
             case HostSignal.BeforeActualRun:
                 _before = ReadCounters(provider);
+                _beforeTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                 break;
 
             case HostSignal.AfterActualRun:
                 var delta = ReadCounters(provider) - _before;
+                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(_beforeTimestamp);
                 _deltas.AddOrUpdate(parameters.BenchmarkCase, delta, (_, existing) => existing + delta);
+                _elapsed.AddOrUpdate(parameters.BenchmarkCase, elapsed, (_, existing) => existing + elapsed);
                 break;
 
             default:
@@ -82,8 +87,25 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
     public IEnumerable<Metric> ProcessResults(DiagnoserResults results)
     {
-        if (!_deltas.TryGetValue(results.BenchmarkCase, out var delta) || delta.Jobs <= 0)
+        if (!_deltas.TryGetValue(results.BenchmarkCase, out var delta))
         {
+            yield break;
+        }
+
+        // A window that wrote no jobs is an idle server: its cost is per second, not per job. Timed
+        // between the same two readings the counters came from, so both halves cover one window.
+        if (delta.Jobs <= 0)
+        {
+            if (_elapsed.TryGetValue(results.BenchmarkCase, out var window) && window.TotalSeconds > 0)
+            {
+                yield return new Metric(PerJobDescriptor.StatementsPerSecond, delta.Statements / window.TotalSeconds);
+                yield return new Metric(PerJobDescriptor.BuffersPerSecond, delta.Buffers / window.TotalSeconds);
+                if (delta.WalBytes > 0)
+                {
+                    yield return new Metric(PerJobDescriptor.WalBytesPerSecond, delta.WalBytes / window.TotalSeconds);
+                }
+            }
+
             yield break;
         }
 
@@ -257,6 +279,12 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         public static readonly PerJobDescriptor Buffers = new("BuffersPerJob", "Buffers/job", "Database pages touched per job, cached or read", "blk");
 
         public static readonly PerJobDescriptor WalBytes = new("WalBytesPerJob", "WAL/job", "Write-ahead log bytes per job (PostgreSQL)", "B");
+
+        public static readonly PerJobDescriptor StatementsPerSecond = new("StatementsPerSecond", "Statements/s", "Database statements per second, with no jobs running", "stmt");
+
+        public static readonly PerJobDescriptor BuffersPerSecond = new("BuffersPerSecond", "Buffers/s", "Database pages touched per second, with no jobs running", "blk");
+
+        public static readonly PerJobDescriptor WalBytesPerSecond = new("WalBytesPerSecond", "WAL/s", "Write-ahead log bytes per second, with no jobs running (PostgreSQL)", "B");
 
         private PerJobDescriptor(string id, string displayName, string legend, string unit)
         {

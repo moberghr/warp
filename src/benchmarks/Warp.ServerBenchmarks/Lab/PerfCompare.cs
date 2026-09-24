@@ -297,7 +297,11 @@ public static class PerfCompare
         }
 
         columns.AddRange(varying);
-        var header = string.Join(" | ", columns.Append("Commit")) + " | Mean | Error | StdDev | Ratio | Jobs/s | Statements/job | Buffers/job | WAL/job | Allocated | Alloc Ratio | Gate";
+        // An idle scenario runs no jobs, so the diagnoser reports its counters per second instead, into
+        // the same columns. The headers say which.
+        var perSecond = cases.All(x => JobCountOf(x) is null);
+        var per = perSecond ? "s" : "job";
+        var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | Allocated | Alloc Ratio | Gate";
         var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
 
         // Declared order, the order BenchmarkDotNet ran them in. Sorting by name put "Keys: 10000"
@@ -354,9 +358,19 @@ public static class PerfCompare
             // for where the lines sit. Allocations are REPORTED, not gated: across the same no-op runs
             // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%,
             // with cache state and vacuum timing, and are reported for a human to read.
-            var gate = stmtChange is null
-                ? "✅"
-                : string.Create(CultureInfo.InvariantCulture, $"✅ stmt {stmtChange:+0.0;−0.0;0.0}%");
+            // Per-second counters (an idle server) have not had their noise measured: a background tick
+            // landing just inside or outside the window moves them. Reported until calibrated.
+            if (perSecond)
+            {
+                stmtChange = null;
+            }
+
+            var gate = perSecond ? "reported" : "✅";
+            if (stmtChange is not null)
+            {
+                gate = string.Create(CultureInfo.InvariantCulture, $"✅ stmt {stmtChange:+0.0;−0.0;0.0}%");
+            }
+
             if (stmtChange > StatementTolerancePct)
             {
                 gate = string.Create(CultureInfo.InvariantCulture, $"❌ stmt {stmtChange:+0.0;−0.0;0.0}% (limit +{StatementTolerancePct:0}%)");
@@ -365,7 +379,7 @@ public static class PerfCompare
                     $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
             }
 
-            double? walChange = b.WalBytesPerJob is null or 0 || h.WalBytesPerJob is null
+            double? walChange = perSecond || b.WalBytesPerJob is null or 0 || h.WalBytesPerJob is null
                 ? null
                 : (h.WalBytesPerJob.Value - b.WalBytesPerJob.Value) / b.WalBytesPerJob.Value * 100;
             if (walChange > WalTolerancePct)
@@ -560,9 +574,9 @@ public static class PerfCompare
                     benchmark.Statistics?.Mean ?? 0,
                     benchmark.Statistics?.ConfidenceInterval?.Margin ?? 0,
                     benchmark.Statistics?.StandardDeviation ?? 0,
-                    MetricOf(benchmark, "StatementsPerJob"),
-                    MetricOf(benchmark, "BuffersPerJob"),
-                    MetricOf(benchmark, "WalBytesPerJob"),
+                    MetricOf(benchmark, "StatementsPerJob") ?? MetricOf(benchmark, "StatementsPerSecond"),
+                    MetricOf(benchmark, "BuffersPerJob") ?? MetricOf(benchmark, "BuffersPerSecond"),
+                    MetricOf(benchmark, "WalBytesPerJob") ?? MetricOf(benchmark, "WalBytesPerSecond"),
                     JobLine(benchmark.DisplayInfo),
                     report?.HostEnvironmentInfo);
             }
