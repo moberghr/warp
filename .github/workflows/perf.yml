@@ -49,14 +49,21 @@ jobs:
       - name: Resolve the two commits under comparison
         id: refs
         run: |
+          # A branch name only exists locally when it is the one checked out, so a dispatch from any
+          # other branch with base_ref=main found no "main" and failed here. Accept what was given — a
+          # SHA, a tag, a local branch — and fall back to the remote-tracking branch of that name.
+          resolve () {
+            git rev-parse --verify --quiet "$1^{commit}"               || git rev-parse --verify --quiet "origin/$1^{commit}"               || { echo "::error::Cannot resolve '$1' to a commit"; exit 1; }
+          }
+
           if [ -n "${{ inputs.head_ref }}" ]; then
-            HEAD_SHA=$(git rev-parse "${{ inputs.head_ref }}^{commit}")
+            HEAD_SHA=$(resolve "${{ inputs.head_ref }}")
           else
             HEAD_SHA=$(git rev-parse HEAD)
           fi
 
           if [ -n "${{ inputs.base_ref }}" ]; then
-            BASE_SHA=$(git rev-parse "${{ inputs.base_ref }}^{commit}")
+            BASE_SHA=$(resolve "${{ inputs.base_ref }}")
           elif [ -n "${{ github.base_ref }}" ]; then
             BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
           else
