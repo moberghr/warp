@@ -113,7 +113,7 @@ public static partial class PerfCompare
         }
         else
         {
-            report.AppendLine(CultureInfo.InvariantCulture, $"Statements per job, release by release, for every release measured on measurement version {MeasurementVersion.Current}. Counts only: jobs/s is not comparable across runners.");
+            report.AppendLine(CultureInfo.InvariantCulture, $"Statements per job, release by release, for every release measured on measurement version {MeasurementVersion.Current}. Counts only: jobs/s is not comparable across runners. — means the release produced no measurement for that case, for example because it did not finish.");
             report.AppendLine();
             AppendHistoryTables(report, points);
         }
@@ -200,7 +200,9 @@ public static partial class PerfCompare
                 .OrderBy(x => x.FullName, StringComparer.Ordinal)
                 .ToList();
 
-            report.AppendLine(CultureInfo.InvariantCulture, $"**{scenario.Key}**");
+            // An idle server runs no jobs; its counters are per second, and are labelled so.
+            var unit = scenario.All(x => x.PerSecond) ? "statements / s" : "statements / job";
+            report.AppendLine(CultureInfo.InvariantCulture, $"**{scenario.Key}** ({unit})");
             report.AppendLine();
             report.AppendLine("| case | " + string.Join(" | ", points.Select(x => x.Label)) + " |");
             report.AppendLine("| :--- | " + string.Join(" | ", points.Select(_ => "---:")) + " |");
@@ -230,7 +232,7 @@ public static partial class PerfCompare
                     report.AppendLine("xychart-beta");
                     report.AppendLine(CultureInfo.InvariantCulture, $"    title \"{scenario.Key}: {caseName}\"");
                     report.AppendLine("    x-axis [" + string.Join(", ", points.Select(x => "\"" + x.Label + "\"")) + "]");
-                    report.AppendLine(CultureInfo.InvariantCulture, $"    y-axis \"statements / job\" 0 --> {top:0}");
+                    report.AppendLine(CultureInfo.InvariantCulture, $"    y-axis \"{unit}\" 0 --> {top:0}");
                     report.AppendLine("    line [" + string.Join(", ", values.Select(x => (x ?? 0).ToString("0.00", CultureInfo.InvariantCulture))) + "]");
                     report.AppendLine("```");
                 }
@@ -261,12 +263,15 @@ public static partial class PerfCompare
         typeof(PerfCompare).Assembly.GetType(benchmark.TypeName)?.GetCustomAttribute<CiScenarioAttribute>()?.Title
         ?? benchmark.TypeName[(benchmark.TypeName.LastIndexOf('.') + 1)..];
 
-    /// <summary>Every parameter's label except the job count, which is the same on every case.</summary>
+    /// <summary>
+    /// The labels of the parameters the benchmark labels. A parameter with no <c>[CaseLabel]</c> is one the
+    /// scenario holds fixed — the job count, the payload size — and says nothing about which case this is.
+    /// </summary>
     private static string CaseLabelOf(BdnCase benchmark)
     {
         var labels = typeof(PerfCompare).Assembly.GetType(benchmark.TypeName)?.GetCustomAttributes<CaseLabelAttribute>().ToList() ?? [];
         var parts = benchmark.Parameters
-            .Where(x => !string.Equals(x.Name, "JobCount", StringComparison.Ordinal))
+            .Where(x => labels.Any(y => string.Equals(y.Parameter, x.Name, StringComparison.Ordinal)))
             .Select(x => ParameterCell(benchmark, x.Name, labels))
             .ToList();
 
