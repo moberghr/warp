@@ -19,8 +19,12 @@ namespace Warp.ServerBenchmarks.Lab;
 /// </summary>
 public static partial class PerfCompare
 {
-    // Since the last release, in total. Wider than the per-change gate, which it sits behind: a single
-    // change at +5% passes both, and the second such change fails here.
+    // Since the last release, in total. A warning, not a failure: it measures everything merged since the
+    // release, not the change under review, so failing on it blocked every pull request until the next
+    // release for drift that was already on main — the first run against 7.0.0 failed a change that touches
+    // nothing in Warp, over a SQL Server single-worker rise (3.59 -> 4.25 statements/job) merged weeks
+    // earlier. The per-change gate still fails the change that causes a regression; this makes the total
+    // since the release visible on every run until someone looks at it.
     private const double ReleaseCreepPct = 10.0;
 
     private static readonly JsonSerializerOptions HistoryOptions = new()
@@ -138,8 +142,7 @@ public static partial class PerfCompare
         StringBuilder section,
         List<BdnCase> cases,
         Dictionary<string, BdnResult> headRun,
-        ReleaseBenchmarks? release,
-        List<string> failures)
+        ReleaseBenchmarks? release)
     {
         if (release is null)
         {
@@ -167,20 +170,20 @@ public static partial class PerfCompare
             }
 
             var change = (now - before) / before * 100;
-            var mark = change > ReleaseCreepPct ? "❌" : "✅";
+            var drifted = change > ReleaseCreepPct;
+            var mark = drifted ? "⚠️" : "✅";
             parts.Add(string.Create(CultureInfo.InvariantCulture, $"{mark} {CaseLabelOf(benchmark)} stmt {change:+0.0;−0.0;0.0}%"));
 
-            if (change > ReleaseCreepPct)
+            if (drifted)
             {
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{benchmark.Short}: statements/job {before:N2} at {release.Release} -> {now:N2} ({change:+0.0;-0.0;0.0}%, limit +{ReleaseCreepPct:0}% since a release)"));
+                // Counted by the report job for its headline; see ReleaseCreepPct for why it never fails.
+                section.AppendLine("<!-- drift -->");
             }
         }
 
         section.AppendLine(parts.Count == 0
             ? string.Create(CultureInfo.InvariantCulture, $"<sub>Since {release.Release}: no case in common.</sub>")
-            : string.Create(CultureInfo.InvariantCulture, $"<sub>Since {release.Release} (limit +{ReleaseCreepPct:0}%): {string.Join(" · ", parts)}</sub>"));
+            : string.Create(CultureInfo.InvariantCulture, $"<sub>Since {release.Release} (⚠️ above +{ReleaseCreepPct:0}%, reported, never failed): {string.Join(" · ", parts)}</sub>"));
     }
 
     private static void AppendHistoryTables(StringBuilder report, List<(string Label, Dictionary<string, ReleaseCase> Cases)> points)

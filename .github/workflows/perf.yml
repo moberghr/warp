@@ -385,6 +385,7 @@ jobs:
           HEAD_SHA: ${{ needs.refs.outputs.head }}
           BASE_SHA: ${{ needs.refs.outputs.base }}
           RECORD: ${{ needs.refs.outputs.record }}
+          LATEST_RELEASE: ${{ needs.refs.outputs.latest_release }}
         run: |
           # Record mode compares nothing: the page says what was measured, and shows the history.
           if [ -n "$RECORD" ]; then
@@ -411,12 +412,20 @@ jobs:
           done
           total=$((passed + failed + missing))
 
+          # Cases whose statements per job rose more than 10% since the latest release. Reported in the
+          # headline, never failed: it measures everything merged since that release, not this change.
+          drift=$(cat results/benchmark-results-*/section.md 2>/dev/null | grep -c "<!-- drift -->" || true)
+
           if [ "$failed" -gt 0 ]; then
             headline="❌ $failed of $total scenarios got worse"
           elif [ "$missing" -gt 0 ]; then
             headline="⚠️ $passed of $total scenarios compared, $missing did not produce a comparison"
           else
             headline="✅ All $total scenarios within the gate"
+          fi
+
+          if [ "${drift:-0}" -gt 0 ]; then
+            headline="$headline · ⚠️ $drift case(s) up more than 10% since ${LATEST_RELEASE}"
           fi
 
           {
@@ -445,7 +454,8 @@ jobs:
             echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, or **Jobs/s** collapses to a third. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
             echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. Reported, not gated: it moves up to 55% between identical builds, with cache state and vacuum timing."
             echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
-            echo "- ⚠️ means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
+            echo "- ⚠️ in a Gate cell means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
+            echo "- **Since** the latest release: the head's statements per job against the numbers recorded on that release. ⚠️ above +10% is reported and never fails, because it measures everything merged since the release, not this change."
             echo
             echo "</details>"
             echo

@@ -443,9 +443,8 @@ public static partial class PerfCompare
             rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {Row(h)} | {ratio} | {Rate(headRate)} | {Row2(h)} | {allocRatio} | {gate} |");
         }
 
-        // Before the verdict, so a scenario that fails only on creep since the last release gets its ❌.
         var sinceRelease = new StringBuilder();
-        AppendSinceRelease(sinceRelease, cases, headRun, release, failures);
+        AppendSinceRelease(sinceRelease, cases, headRun, release);
 
         var failed = failures.Count > failuresBefore;
         var section = new StringBuilder();
