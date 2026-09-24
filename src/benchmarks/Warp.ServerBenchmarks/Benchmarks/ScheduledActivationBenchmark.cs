@@ -1,8 +1,11 @@
 using System.Diagnostics.CodeAnalysis;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
+using Microsoft.Extensions.DependencyInjection;
+using Warp.Core;
+using Warp.Core.Entities;
+using Warp.Core.Enums;
 using Warp.Core.Handlers;
-using Warp.Core.Helper;
 using Warp.ServerBenchmarks.Infrastructure;
 using Warp.Test.Shared.Handlers;
 
@@ -33,8 +36,6 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class ScheduledActivationBenchmark
 {
-    private const int PublishBatchSize = 1000;
-
     private PostgresServerFixture _fixture = null!;
 
     [Params(1_000)]
@@ -44,7 +45,12 @@ public class ScheduledActivationBenchmark
     public async Task Setup()
     {
         _fixture = new PostgresServerFixture();
-        await _fixture.InitializeAsync(workerCount: 10, useDispatcher: false);
+        // The sweep runs on its interval, not on a signal (rule 2.8), so at the 10 s default most of each
+        // iteration would be spent waiting for its next tick. 1 s keeps the scenario about the sweep.
+        await _fixture.InitializeAsync(
+            workerCount: 10,
+            useDispatcher: false,
+            configure: x => x.ScheduledActivationInterval = TimeSpan.FromSeconds(1));
 
         await PublishAsync(100);
         await _fixture.WaitForCompletion();
@@ -70,23 +76,33 @@ public class ScheduledActivationBenchmark
         await _fixture.WaitForCompletion();
     }
 
+    /// <summary>
+    /// Inserts the backlog directly as <see cref="State.Scheduled"/>, already due.
+    /// <para>
+    /// Not through the publisher. A job published with a past <c>ScheduleTime</c> is created straight
+    /// into <c>Enqueued</c> — <c>JobHelper</c> schedules only a FUTURE time — so this scenario used to be
+    /// the plain drain again and never reached the activation sweep at all. Rows in Scheduled with a time
+    /// that has passed are exactly what the sweep exists to pick up.
+    /// </para>
+    /// </summary>
     private async Task PublishAsync(int count)
     {
-        var scheduleTime = DateTime.UtcNow.AddSeconds(-1);
-        var remaining = count;
+        var due = DateTime.UtcNow.AddSeconds(-1);
+        var type = typeof(EmptyRequest).AssemblyQualifiedName;
 
-        while (remaining > 0)
+        await using var scope = _fixture.Host.Services.CreateAsyncScope();
+        var context = scope.ServiceProvider.GetRequiredService<TestContext>();
+        context.Set<Job>().AddRange(Enumerable.Range(0, count).Select(_ => new Job
         {
-            var publisher = _fixture.CreatePublisher();
-            var batch = Math.Min(PublishBatchSize, remaining);
-
-            for (var i = 0; i < batch; i++)
-            {
-                await publisher.Enqueue(new EmptyRequest(), new JobParameters { ScheduleTime = scheduleTime });
-            }
-
-            await publisher.SaveChangesAsync();
-            remaining -= batch;
-        }
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Scheduled,
+            Type = type,
+            Message = "{}",
+            CreateTime = due,
+            ScheduleTime = due,
+            Queue = "default",
+        }));
+        await context.SaveChangesAsync();
     }
 }

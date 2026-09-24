@@ -235,7 +235,8 @@ public class PostgresServerFixture : IAsyncDisposable
                 .CountAsync(x =>
                     x.CurrentState == State.Enqueued ||
                     x.CurrentState == State.Processing ||
-                    x.CurrentState == State.Awaiting);
+                    x.CurrentState == State.Awaiting ||
+                    x.CurrentState == State.Scheduled);
 
             if (activeJobs == 0)
             {
@@ -346,16 +347,15 @@ public class PostgresServerFixture : IAsyncDisposable
 
                 await DescribeClaimAuditAsync(connection, report);
 
-                // The plan the claim gets NOW, with this database's current statistics. The claim is
-                // `UPDATE ... FROM (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`, and whether the
-                // subquery can be re-executed depends on which side of the join the planner puts it.
+                // The plan the claim gets NOW, with this database's current statistics, in the shape
+                // PostgresWarpSqlQueries issues: the limited SELECT as an ARRAY sub-select.
                 await using (var explain = connection.CreateCommand())
                 {
                     explain.CommandText = @"
-                        EXPLAIN UPDATE warp.job AS t SET current_state = 2
-                        FROM (SELECT id FROM warp.job WHERE kind = 1 AND current_state = 1 AND queue = 'default'
-                              ORDER BY schedule_time LIMIT 1 FOR UPDATE SKIP LOCKED) AS c
-                        WHERE t.id = c.id RETURNING t.id";
+                        EXPLAIN UPDATE warp.job AS t SET current_state = " + Processing + @"
+                        WHERE t.id = ANY(ARRAY(SELECT id FROM warp.job WHERE kind = 1 AND current_state = " + Enqueued + @"
+                              AND queue = 'default' ORDER BY schedule_time LIMIT 1 FOR UPDATE SKIP LOCKED))
+                        RETURNING t.id";
                     await using var reader = await explain.ExecuteReaderAsync();
                     report.AppendLine("  claim plan now:");
                     while (await reader.ReadAsync())
@@ -407,6 +407,8 @@ public class PostgresServerFixture : IAsyncDisposable
     // From the enum, not a literal: Processing is 3 (Awaiting is 2), and a hand-typed value made the
     // first version of this audit record nothing at all.
     private static readonly string Processing = ((int)State.Processing).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private static readonly string Enqueued = ((int)State.Enqueued).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private async Task InstallClaimAuditAsync()
     {

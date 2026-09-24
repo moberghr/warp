@@ -346,6 +346,34 @@ public static class PerfCompare
                 continue;
             }
 
+            // A database figure on one side only is a measurement that failed, not a pass: the diagnoser
+            // yields nothing when a counter read failed or the window wrote no job. Likewise a per-second
+            // figure on one side against a per-job one on the other compares two different units.
+            string? unmeasured = null;
+            if ((b.StatementsPerJob is null) != (h.StatementsPerJob is null))
+            {
+                unmeasured = "statements measured on one side only";
+            }
+            else if (!perSecond && (b.WalBytesPerJob is null) != (h.WalBytesPerJob is null))
+            {
+                unmeasured = "WAL measured on one side only";
+            }
+            else if (b.PerSecond != h.PerSecond)
+            {
+                unmeasured = "per-job figures on one side, per-second on the other";
+            }
+
+            if (unmeasured is not null)
+            {
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {Seconds(b.Mean)} | | | | | | | | | | |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {Seconds(h.Mean)} | | | | | | | | | | ⚠️ {unmeasured} |");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: {unmeasured}, so nothing was compared"));
+
+                continue;
+            }
+
             double? stmtChange = b.StatementsPerJob is null or 0 || h.StatementsPerJob is null
                 ? null
                 : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
@@ -574,6 +602,7 @@ public static class PerfCompare
                     benchmark.Statistics?.Mean ?? 0,
                     benchmark.Statistics?.ConfidenceInterval?.Margin ?? 0,
                     benchmark.Statistics?.StandardDeviation ?? 0,
+                    MetricOf(benchmark, "StatementsPerJob") is null && MetricOf(benchmark, "StatementsPerSecond") is not null,
                     MetricOf(benchmark, "StatementsPerJob") ?? MetricOf(benchmark, "StatementsPerSecond"),
                     MetricOf(benchmark, "BuffersPerJob") ?? MetricOf(benchmark, "BuffersPerSecond"),
                     MetricOf(benchmark, "WalBytesPerJob") ?? MetricOf(benchmark, "WalBytesPerSecond"),
@@ -659,6 +688,7 @@ public static class PerfCompare
         double Mean,
         double Error,
         double StdDev,
+        bool PerSecond,
         double? StatementsPerJob,
         double? BuffersPerJob,
         double? WalBytesPerJob,

@@ -44,7 +44,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
     private readonly ConcurrentDictionary<BenchmarkCase, Counters> _deltas = new();
     private readonly ConcurrentDictionary<BenchmarkCase, TimeSpan> _elapsed = new();
-    private Counters _before;
+    private Counters? _before;
     private long _beforeTimestamp;
 
     public IEnumerable<string> Ids => ["DatabaseStatements"];
@@ -74,7 +74,15 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 break;
 
             case HostSignal.AfterActualRun:
-                var delta = ReadCounters(provider) - _before;
+                // A failed read on either side leaves the case with no metric, which the comparer reports
+                // as a missing measurement. Recording zero instead made one side's delta the server's whole
+                // cumulative total, or negative.
+                if (_before is not { } before || ReadCounters(provider) is not { } after)
+                {
+                    break;
+                }
+
+                var delta = after - before;
                 var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(_beforeTimestamp);
                 _deltas.AddOrUpdate(parameters.BenchmarkCase, delta, (_, existing) => existing + delta);
                 _elapsed.AddOrUpdate(parameters.BenchmarkCase, elapsed, (_, existing) => existing + elapsed);
@@ -151,7 +159,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     private static string? ConnectionStringFor(BenchmarkProvider provider) =>
         provider == BenchmarkProvider.SqlServer ? SqlServerConnectionString : PostgresConnectionString;
 
-    private static Counters ReadCounters(BenchmarkProvider provider) =>
+    private static Counters? ReadCounters(BenchmarkProvider provider) =>
         provider == BenchmarkProvider.SqlServer ? ReadSqlServerCounters() : ReadPostgresCounters();
 
     /// <summary>
@@ -162,7 +170,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// Counting the job rows actually written inside the window answers it directly, and is checkable
     /// against the lab, which measures the same thing.
     /// </summary>
-    private static Counters ReadPostgresCounters()
+    private static Counters? ReadPostgresCounters()
     {
         try
         {
@@ -190,13 +198,13 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
             return reader.Read()
                 ? new Counters(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), Convert.ToInt64(reader.GetValue(3)))
-                : default;
+                : null;
         }
         catch (NpgsqlException)
         {
             // A diagnoser must never take down the run it is observing: a missing extension or a
             // container already torn down is a lost measurement, not a failed benchmark.
-            return default;
+            return null;
         }
     }
 
@@ -218,7 +226,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// rows written, measured at the storage engine rather than reconstructed from statement text.
     /// </para>
     /// </summary>
-    private static Counters ReadSqlServerCounters()
+    private static Counters? ReadSqlServerCounters()
     {
         try
         {
@@ -253,11 +261,11 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
             return reader.Read()
                 ? new Counters(Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(2)), Convert.ToInt64(reader.GetValue(1)), 0)
-                : default;
+                : null;
         }
         catch (SqlException)
         {
-            return default;
+            return null;
         }
     }
 

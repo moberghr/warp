@@ -65,9 +65,9 @@ jobs:
           if [ -n "${{ inputs.base_ref }}" ]; then
             BASE_SHA=$(resolve "${{ inputs.base_ref }}")
           elif [ -n "${{ github.base_ref }}" ]; then
-            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" "$HEAD_SHA")
           else
-            BASE_SHA=$(git merge-base origin/main HEAD)
+            BASE_SHA=$(git merge-base origin/main "$HEAD_SHA")
           fi
 
           echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
@@ -197,25 +197,29 @@ jobs:
       # differ by the library alone. That is what makes an arbitrary pair comparable: building each
       # side from its own commit would compare two instruments as much as two libraries, and the 7.0.0
       # tag cannot run these benchmarks at all — the scenarios and --warmup postdate it.
+      # --no-overlay, not a plain checkout: a plain `git checkout <sha> -- src/core` only overwrites and
+      # adds, so a file that exists on one side but not the other survived the swap. A file the head
+      # added stayed in place for the base build, which then measured head code and could show a real
+      # regression as 0%.
       - name: Run benchmarks on the head commit
         run: |
-          git checkout ${{ needs.refs.outputs.head }} -- src/core
+          git checkout --no-overlay ${{ needs.refs.outputs.head }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             --filter '${{ matrix.benchmark.filter }}' \
             --exporters json \
             --artifacts "${{ github.workspace }}/bench/head"
-          git checkout HEAD -- src/core
+          git checkout --no-overlay HEAD -- src/core
 
       - name: Run benchmarks on the base commit
         id: basebench
         continue-on-error: true
         run: |
-          git checkout ${{ needs.refs.outputs.base }} -- src/core
+          git checkout --no-overlay ${{ needs.refs.outputs.base }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             --filter '${{ matrix.benchmark.filter }}' \
             --exporters json \
             --artifacts "${{ github.workspace }}/bench/base"
-          git checkout HEAD -- src/core
+          git checkout --no-overlay HEAD -- src/core
 
       - name: Compare
         if: steps.basebench.outcome == 'success'
