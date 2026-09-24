@@ -74,11 +74,11 @@ jobs:
           echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------------------------
-  # BenchmarkDotNet, gating the one quantity calibrated to survive a shared runner: database
-  # statements per job, at 10%. Allocations are reported but not gated, because they moved 2-3%
-  # between identical builds (BDN's figure is process-wide, background server tasks included). Time is
-  # reported and never gated: these benchmarks have measured an Error of 108 s against a 25 s mean. A
-  # benchmark that produced no measurement on either side fails the job instead of passing silently.
+  # BenchmarkDotNet, gating what was calibrated to survive a shared runner: statements per job at 5%,
+  # WAL bytes per job at 10% (PostgreSQL), and throughput only on a collapse to a third. Each line is
+  # three to four times the worst noise from comparing main with itself over three runs. Buffers and
+  # allocations are reported: they moved up to 55% and 4.9% between identical builds. A benchmark that
+  # produced no measurement on either side fails the job instead of passing silently.
   #
   # PostgreSQL is shared between the two runs and named in the environment rather than started per
   # process. That is not a convenience: BenchmarkDotNet runs benchmarks in a child process while
@@ -315,8 +315,8 @@ jobs:
             echo
             echo "- Tables follow BenchmarkDotNet's summary. Each case has two rows, **base** then **head**, the way BDN shows a benchmark beside its baseline."
             echo "- **Ratio** is head time ÷ base time: below 1.00 is faster. **Alloc Ratio** is the same for memory. **Error** is half the 99.9% confidence interval and **StdDev** the standard deviation, both over the iterations BDN ran."
-            echo "- **Gate** is the verdict on the head row. **Statements/job** fails a scenario above +10%: it is a count from the database's own statistics, so it reproduces run to run. **Jobs/s** fails only on a collapse, head 3× slower than base, because identical code has measured anywhere from 0.70× to 1.43× between runs here."
-            echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. **WAL/job** is the write side (PostgreSQL only). Both are reported, not gated, until their noise is measured."
+            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, or **Jobs/s** collapses to a third. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
+            echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. Reported, not gated: it moves up to 55% between identical builds, with cache state and vacuum timing."
             echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
             echo "- ⚠️ means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
             echo

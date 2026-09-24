@@ -58,7 +58,12 @@ public static class PerfCompare
     /// gate's job is to stop a catastrophe reaching main unnoticed, not to adjudicate every percent.
     /// </para>
     /// </summary>
-    private const double StatementTolerancePct = 10.0;
+    private const double StatementTolerancePct = 5.0;
+
+    // WAL bytes per job, PostgreSQL only. Calibrated the same way as statements: across three no-op
+    // comparisons (42 cases, the same commit on both sides) statements moved at most 1.8% and WAL at
+    // most 2.5%, so each gate sits at roughly three to four times the worst noise measured.
+    private const double WalTolerancePct = 10.0;
 
     // Only a collapse fails: head must be this many times slower than base. A no-op comparison — the
     // same commit on both sides — measured anywhere from 0.70x to 1.43x, so halving (2x) sat too close
@@ -345,10 +350,10 @@ public static class PerfCompare
             double? headRate = jobs is null || h.Mean <= 0 ? null : jobs.Value / (h.Mean / 1e9);
             double? rateChange = baseRate is null || headRate is null ? null : (headRate.Value - baseRate.Value) / baseRate.Value * 100;
 
-            // Statements per job is the gate. Allocations are REPORTED, not gated: they were gated at
-            // 2% on the strength of one run showing byte-identical numbers, and later runs moved 2-3%
-            // with no code change that could explain it. Statements get 10% because they are read from
-            // a shared server, where background tasks ticking on timers add a little jitter.
+            // Statements and WAL per job are the gates; see StatementTolerancePct and WalTolerancePct
+            // for where the lines sit. Allocations are REPORTED, not gated: across the same no-op runs
+            // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%,
+            // with cache state and vacuum timing, and are reported for a human to read.
             var gate = stmtChange is null
                 ? "✅"
                 : string.Create(CultureInfo.InvariantCulture, $"✅ stmt {stmtChange:+0.0;−0.0;0.0}%");
@@ -358,6 +363,17 @@ public static class PerfCompare
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
+            }
+
+            double? walChange = b.WalBytesPerJob is null or 0 || h.WalBytesPerJob is null
+                ? null
+                : (h.WalBytesPerJob.Value - b.WalBytesPerJob.Value) / b.WalBytesPerJob.Value * 100;
+            if (walChange > WalTolerancePct)
+            {
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ WAL {walChange:+0.0;−0.0;0.0}% (limit +{WalTolerancePct:0}%)");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: WAL/job {b.WalBytesPerJob:N0} -> {h.WalBytesPerJob:N0} bytes ({walChange:+0.0;-0.0;0.0}%)"));
             }
 
             // Throughput is far too noisy on a shared runner to gate a small change, but a collapse is
