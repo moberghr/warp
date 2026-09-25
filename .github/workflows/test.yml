@@ -13,7 +13,7 @@ env:
 jobs:
   ui-tests:
     name: UI unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -34,7 +34,7 @@ jobs:
 
   test:
     name: ${{ matrix.database }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
