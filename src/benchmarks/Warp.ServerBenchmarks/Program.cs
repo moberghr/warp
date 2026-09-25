@@ -276,10 +276,15 @@ else if (args.Length > 0 && string.Equals(args[0], "compare-bdn", StringComparis
     var bdnHead = string.Empty;
     var bdnTolerance = 2.0;
     string? bdnSummary = null;
+    string? bdnRelease = null;
 
     for (var i = 1; i < args.Length; i++)
     {
-        if (args[i].StartsWith("--base=", StringComparison.OrdinalIgnoreCase))
+        if (args[i].StartsWith("--release=", StringComparison.OrdinalIgnoreCase))
+        {
+            bdnRelease = args[i]["--release=".Length..];
+        }
+        else if (args[i].StartsWith("--base=", StringComparison.OrdinalIgnoreCase))
         {
             bdnBase = args[i]["--base=".Length..];
         }
@@ -297,7 +302,30 @@ else if (args.Length > 0 && string.Equals(args[0], "compare-bdn", StringComparis
         }
     }
 
-    Environment.ExitCode = PerfCompare.RunBdn(bdnBase, bdnHead, bdnTolerance, bdnSummary);
+    Environment.ExitCode = PerfCompare.RunBdn(bdnBase, bdnHead, bdnTolerance, bdnSummary, bdnRelease);
+}
+else if (args.Length > 0 && string.Equals(args[0], "export-bdn", StringComparison.OrdinalIgnoreCase))
+{
+    var results = Value(args, "--results=") ?? string.Empty;
+    var output = Value(args, "--out=") ?? "export.json";
+
+    Environment.ExitCode = PerfCompare.ExportBdn(results, output);
+}
+else if (args.Length > 0 && string.Equals(args[0], "record-release", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = PerfCompare.RecordRelease(
+        Value(args, "--exports=") ?? string.Empty,
+        Value(args, "--release=") ?? string.Empty,
+        Value(args, "--commit=") ?? string.Empty,
+        Value(args, "--out=") ?? "benchmarks.json");
+}
+else if (args.Length > 0 && string.Equals(args[0], "history-bdn", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = PerfCompare.History(
+        Value(args, "--releases=") ?? string.Empty,
+        Value(args, "--exports="),
+        Value(args, "--label="),
+        Value(args, "--out=") ?? "history.md");
 }
 else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.OrdinalIgnoreCase))
 {
@@ -423,3 +451,10 @@ else
 {
     BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);
 }
+
+// One --name=value argument, or null when it was not given.
+static string? Value(string[] args, string prefix) =>
+    args.Skip(1)
+        .Where(x => x.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        .Select(x => x[prefix.Length..])
+        .FirstOrDefault();
