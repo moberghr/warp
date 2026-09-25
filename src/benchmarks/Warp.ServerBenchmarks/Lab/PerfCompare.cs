@@ -289,6 +289,11 @@ public static partial class PerfCompare
         var severalMethods = cases.Select(x => x.Method).Distinct(StringComparer.Ordinal).Count() > 1;
         var declared = headRun.Keys.Concat(baseRun.Keys).Distinct(StringComparer.Ordinal).ToList();
 
+        // Worked out before the rows, so a case that drifted since the latest release says so in its own
+        // row and in the heading. On the line under the table alone it was easy to miss beside a ✅.
+        var sinceRelease = SinceRelease(cases, headRun, release);
+        var drifted = sinceRelease.Values.Count(x => x > ReleaseCreepPct);
+
         // BenchmarkDotNet's own layout: one column per parameter, then the statistics, one row per
         // result. A comparison is two rows per case, base then head, the way BDN shows a benchmark
         // against its Baseline: the base row carries Ratio 1.00 and the head row its ratio to it.
@@ -440,18 +445,31 @@ public static partial class PerfCompare
             }
 
             rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {Row(b)} | 1.00 | {Rate(baseRate)} | {Row2(b)} | 1.00 | |");
+            if (sinceRelease.TryGetValue(benchmark.FullName, out var drift) && drift > ReleaseCreepPct)
+            {
+                gate += string.Create(CultureInfo.InvariantCulture, $" · ⚠️ {drift:+0.0;−0.0;0.0}% since {release!.Release}");
+            }
+
             rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {Row(h)} | {ratio} | {Rate(headRate)} | {Row2(h)} | {allocRatio} | {gate} |");
         }
 
-        var sinceRelease = new StringBuilder();
-        AppendSinceRelease(sinceRelease, cases, headRun, release);
+        var sinceLine = new StringBuilder();
+        AppendSinceRelease(sinceLine, cases, headRun, release, sinceRelease);
 
         var failed = failures.Count > failuresBefore;
         var section = new StringBuilder();
 
         // Read by the report job to count passes without re-deriving anything.
         section.AppendLine(failed ? "<!-- verdict: fail -->" : "<!-- verdict: pass -->");
-        section.AppendLine(CultureInfo.InvariantCulture, $"### {(failed ? "❌" : "✅")} {scenario?.Title ?? type?.Name ?? cases[0].TypeName}");
+
+        var driftNote = string.Empty;
+        if (drifted > 0)
+        {
+            var noun = drifted == 1 ? "case" : "cases";
+            driftNote = string.Create(CultureInfo.InvariantCulture, $" · ⚠️ {drifted} {noun} drifted since {release!.Release}");
+        }
+
+        section.AppendLine(CultureInfo.InvariantCulture, $"### {(failed ? "❌" : "✅")} {scenario?.Title ?? type?.Name ?? cases[0].TypeName}{driftNote}");
         section.AppendLine();
 
         if (scenario is null)
@@ -490,7 +508,7 @@ public static partial class PerfCompare
         section.AppendLine("| " + header + " |");
         section.AppendLine("| " + alignment + " |");
         section.Append(rows);
-        section.Append(sinceRelease);
+        section.Append(sinceLine);
 
         // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL
         // Server row reading 4 looks like a verdict on the providers, when the two numbers come from

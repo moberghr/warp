@@ -332,3 +332,7 @@ options.Queues = ["a-critical", "b-default", "c-low"];
 ```
 
 A worker always picks up jobs from `a-critical` before `b-default`, and `b-default` before `c-low`. Within a queue, jobs are ordered by schedule time.
+
+A queue is drained **completely** before the next one is looked at — priority here is strict, not weighted, so a permanently busy `a-critical` starves `b-default` indefinitely. That is also true of the implicit group, which binds `[DefaultQueue, "warp:webhooks"]`: webhook deliveries wait for the default queue to drain. If one queue must not be starved by another, give it its own worker group (`opt.AddWorkerGroup()`) with its own workers rather than relying on ordering.
+
+Ordering is **ordinal** (`StringComparer.Ordinal`), not your database's collation — for ASCII queue names the two agree, which is every name Warp itself produces. A worker subscribed to several queues issues one claim statement per queue and spends its budget down queue by queue; a worker subscribed to one queue — the common case — issues exactly one.

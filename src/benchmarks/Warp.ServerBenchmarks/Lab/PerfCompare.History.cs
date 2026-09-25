@@ -137,12 +137,39 @@ public static partial class PerfCompare
         return 0;
     }
 
-    /// <summary>The since-last-release line under a scenario's table, and its gate.</summary>
+    /// <summary>
+    /// Each case's change in statements per job since the latest release, for the cases both sides measured
+    /// on the same measurement version. Empty when there is no comparable release.
+    /// </summary>
+    private static Dictionary<string, double> SinceRelease(List<BdnCase> cases, Dictionary<string, BdnResult> headRun, ReleaseBenchmarks? release)
+    {
+        var changes = new Dictionary<string, double>(StringComparer.Ordinal);
+        if (release is null || release.MeasurementVersion != MeasurementVersion.Current)
+        {
+            return changes;
+        }
+
+        var baseline = release.Cases.ToDictionary(x => x.FullName, StringComparer.Ordinal);
+        foreach (var name in cases.Select(x => x.FullName))
+        {
+            if (headRun.TryGetValue(name, out var head) && !head.PerSecond
+                && head.StatementsPerJob is { } now
+                && baseline.TryGetValue(name, out var then) && then.StatementsPerJob is { } before && before > 0)
+            {
+                changes[name] = (now - before) / before * 100;
+            }
+        }
+
+        return changes;
+    }
+
+    /// <summary>The since-last-release line under a scenario's table.</summary>
     private static void AppendSinceRelease(
         StringBuilder section,
         List<BdnCase> cases,
         Dictionary<string, BdnResult> headRun,
-        ReleaseBenchmarks? release)
+        ReleaseBenchmarks? release,
+        Dictionary<string, double> changes)
     {
         if (release is null)
         {
@@ -158,21 +185,13 @@ public static partial class PerfCompare
             return;
         }
 
-        var baseline = release.Cases.ToDictionary(x => x.FullName, StringComparer.Ordinal);
         var parts = new List<string>();
-        foreach (var benchmark in cases)
+        foreach (var benchmark in cases.Where(x => changes.ContainsKey(x.FullName) && headRun.ContainsKey(x.FullName)))
         {
-            if (!headRun.TryGetValue(benchmark.FullName, out var head) || head.PerSecond
-                || head.StatementsPerJob is not { } now
-                || !baseline.TryGetValue(benchmark.FullName, out var then) || then.StatementsPerJob is not { } before || before <= 0)
-            {
-                continue;
-            }
-
-            var change = (now - before) / before * 100;
+            var change = changes[benchmark.FullName];
             var drifted = change > ReleaseCreepPct;
-            var mark = drifted ? "⚠️" : "✅";
-            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{mark} {CaseLabelOf(benchmark)} stmt {change:+0.0;−0.0;0.0}%"));
+            var text = string.Create(CultureInfo.InvariantCulture, $"{CaseLabelOf(benchmark)} stmt {change:+0.0;−0.0;0.0}%");
+            parts.Add(drifted ? "⚠️ **" + text + "**" : "✅ " + text);
 
             if (drifted)
             {

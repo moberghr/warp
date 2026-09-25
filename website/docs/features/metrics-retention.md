@@ -22,6 +22,8 @@ The write path emits at the **fine** tier (same number of counter rows as before
 
 The roll **sums into the coarser bucket before deleting the finer one**, inside the task's lock transaction — so a crash mid-run can never double-count, and no detail is dropped (unlike the old prune, which simply deleted expired hourly rows). It runs on `StatisticRollupInterval` (default 10 minutes), off the worker hot path.
 
+One tick rolls at most **20,000 source rows**, shared across both passes, and re-runs back-to-back while a backlog remains. The cap is not a throttle you should want removed: the whole of the task runs inside one lock transaction, and an open transaction pins the vacuum horizon for as long as it lasts — the failure mode is a rollup that holds a transaction open long enough for dead tuples to accumulate in the `job` table, which slows the very workers the metrics describe. Deferring is safe because nothing is dropped: a fine bucket held back by the cap whose hourly parent was rolled away in the same tick simply re-creates that hourly bucket next tick and rolls on the one after, preserving the summed value. The tick you are most likely to notice is the **first after upgrading to 3.10 or later**, when every legacy hourly row rolls to daily at once — it now spreads across consecutive ticks instead of running as one long transaction.
+
 ## Why it exists
 
 - **Bounded storage** — instead of hourly buckets accumulating (or being deleted outright), each dimension keeps a fixed number of buckets: a few hours of 5-minute, a few days of hourly, then daily. Old history is retained coarsely rather than lost.

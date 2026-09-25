@@ -733,6 +733,14 @@ full suite passes on both (PostgreSql 1,236 / SqlServer 1,229, zero failures) �
 
 #### End-to-end: the lab does not reproduce the bad state, and that is the finding
 
+> **Superseded, 2026-09-21.** This subsection's conclusion did not survive re-measurement on the
+> release tree. The lab *does* reproduce the bad state at 120,000 jobs — the old predicate took it in
+> 2 of 6 runs, reading 78-85 M blocks against 6.9 M and losing about 24% throughput, while the scalar
+> form took it in 0 of 12. The error was reading medians: the two arms' medians are close because the
+> old arm is **bimodal**, which the "-29% is really bimodality" note below half-saw and then set aside.
+> See "Revalidation for the 7.1.0 release" at the end of this file. The rest of this subsection is
+> kept as measured.
+
 The `EXPLAIN` result above is a **conditional** failure mode, not a steady-state cost, so it was run
 through the real worker to see what it is worth in a running system. Interleaved arms, dispatcher mode,
 `--warmup=1 --repeats=2`, fresh database and `VACUUM (ANALYZE)` between runs, quiet machine.
@@ -1438,3 +1446,230 @@ which looked like a 33% win. But the same default configuration had measured 626
 run — 29% run-to-run variance, the same size as the effect. **That comparison is void**, and this
 result removes its premise anyway: if dead tuples are not slowing the worker, tuning vacuum to remove
 them cannot be what helps.
+
+
+## Revalidation for the 7.1.0 release (PostgreSQL 18, 2026-09-21)
+
+Every performance claim this release ships was re-measured on the release tree, because two of them
+were taken on a tree that is not the one shipping: the completion-flush and claim-predicate results
+(#301) predate the advisory-lock pool split (#302). Most reproduced. **Three claims changed, and one
+of them reverses a conclusion.**
+
+**Method.** Same lab, same container (`warppg-pa02`, PostgreSQL 18.3, `max_connections = 100`,
+`shared_buffers = 128MB`), quiet machine, lab running in-container on the `warplab` network. Each
+"before" arm is the release tree with exactly ONE file reverted to its pre-change version, so nothing
+else moves between arms:
+
+| arm | build | reverted |
+|---|---|---|
+| A, E | `nolockpool` | `PostgreSqlServiceConfiguration.cs` @ `af9fba42^` |
+| B | `wideupdate` | `CompletionBatch.cs` @ `c63c9df3^` |
+| F | `anyqueue` | `PostgresWarpSqlQueries.cs` @ `c63c9df3^` |
+
+Fresh database per run, `--warmup=1`, medians of three runs per invocation, each arm run as two
+interleaved before/after passes.
+
+### A. The lock pool split: reproduces
+
+Statements per job, 10,000 jobs, 16 workers, 5 ms handler on the concurrency arms:
+
+| arm | before | after | delta | published |
+|---|---:|---:|---:|---|
+| baseline, no concurrency keys | 17.00 | 13.71 | **-19%** | 16.87 -> 13.76 |
+| `[Mutex]`, one key per job (no contention) | 51.18 | 25.10 | **-51%** | 50.40 -> 24.84 |
+| `[Mutex]`, 8 keys | 84.28 | 37.00 | **-56%** | 80.77 -> 35.75 |
+| `[Semaphore]`, 2 keys x 2 slots | 114.09 | 49.49 | **-57%** | 97.73 -> 40.91 (4 slots) |
+| `[Mutex]`, 1 key | 379.88 | 181.10 | **-52%** | 289.82 -> 111.84 |
+
+Statement counts reproduce to under 1% between passes. The last two arms sit materially higher in
+absolute terms than first published while their reductions hold, because the original rows recorded
+only "4 slots" and "1 group" without the shape that produced them, and a concurrency arm's absolute
+count depends on how many claim/reject/requeue cycles the workers get through. Arms are now labelled
+with the shape they ran.
+
+**The mechanism is visible directly**, which is the part worth keeping. On the before build
+`DISCARD ALL` **does not appear in the census at all**, while `RESET ALL` and
+`SELECT pg_advisory_unlock_all()` each show 53,197 calls against 10,000 jobs -- 5.32 granular resets
+per job, seven statements each, **37.2 statements/job of pure connection hygiene**, which is the "~38"
+originally claimed. On the after build `DISCARD ALL` is back at 42,744 calls and the granular reset
+statements have left the top of the census.
+
+**Throughput unchanged**, as published: across the same passes the jobs/sec delta ranged -22% to +9%
+with within-arm spreads reaching 19%, and the sign was inconsistent between passes of the same arm.
+DB ms/job remains unusable at this scale (spreads to 44%) and is not quoted.
+
+### B. The completion flush: mechanism holds, headline was overstated
+
+30,000 jobs, 4 KB payloads, dispatcher mode, three interleaved passes of two runs each (nine runs per
+arm for the statement-level figures):
+
+| | before | after | delta | published |
+|---|---:|---:|---:|---|
+| DB ms/job | 0.549 | 0.455 | **-17%** | 0.514 -> 0.377 (-26.7%) |
+| completion `UPDATE` exec | 5,555 ms | 2,233 ms | **-60%** | -58% |
+| completion `UPDATE` blocks | 1,253,774 | 687,511 | **-45%** | -49% |
+| statements/job | 9.881 | 9.914 | +0.3% | (unchanged, as expected) |
+
+The `UPDATE`'s before and after ranges do not overlap (4,889-6,076 ms against 2,081-2,448 ms), and the
+statement is identifiable in the census from its first assignment: `SET application = $1, ...` before
+against `SET cancellation_mode = $1, ...` after, `application` being simply the first column
+finalization does not touch.
+
+**Correction: the whole-workload figure was too high.** -26.7% does not reproduce; three interleaved
+passes give -17.7%, -14.3% and -22.4%, median **-17%**. The statement-level result is if anything
+slightly stronger than claimed. The corrected figure is now used in the release notes, §6.10 and
+`connection-pooling.md`.
+
+### C. The claim predicate under stale statistics: reproduces, mechanism exact
+
+300,000 rows, real column set and all seven indexes, `message` at ~500 B, age-correlated insert,
+`parent_job_id` on 20%, 54,000 rows made claimable AFTER `VACUUM (ANALYZE)` with
+`autovacuum_enabled = false` so the condition cannot repair itself. `PREPARE`/`EXECUTE`, six
+executions before measuring, `EXPLAIN (ANALYZE, BUFFERS)` in a rolled-back transaction.
+`pg_stats` confirms the stale state: `most_common_vals = {4}` at frequency 1, i.e. the planner
+believes every row is `Completed`.
+
+| variant | plan | buffers | exec |
+|---|---|---:|---:|
+| `ANY($1)`, LIMIT 20 -- old | Sort, external merge 2,584 kB, over `(kind, current_state, create_time)`; `queue` demoted to Filter | 5,139 + 584 temp | **44.604 ms** |
+| `= $1` scalar, LIMIT 20 -- new | Index Cond on the claim index, no Sort | **26** | **0.062 ms** |
+| `ANY($1)`, LIMIT 1 -- single-worker | same bad plan | 5,120 + 584 temp | 42.124 ms |
+| `= $1` scalar, LIMIT 1 | Index Cond | 5 | 0.050 ms |
+| literal `ANY(ARRAY[...])` | same bad plan | 5,139 | 40.771 ms |
+| literal `IN (...)` | same bad plan | 5,139 | 40.163 ms |
+| control: `ANY($1)` with FRESH statistics | Index Cond on the claim index, estimate 49,385 | 26 | 0.046 ms |
+
+**720x on 198x fewer buffers.** Every qualitative claim holds: the external merge is 2,584 kB to the
+byte, the single-worker `LIMIT 1` path is hit identically, literals are as bad as parameters so it is
+not parameter opacity, and fresh statistics repair the old form completely. The absolute buffer counts
+differ from the original (5,139 against 52,088 for the bad plan) -- a seed difference, since the ratio
+and the plan shape are identical. The ratios in the release notes are the ones measured here.
+
+### F. The claim predicate end to end: the earlier conclusion was WRONG
+
+This is the finding. Gate 1b concluded that "the lab never enters the pathological state, at either
+scale", and that the change was therefore insurance rather than a measurable improvement. That does
+not survive re-measurement.
+
+120,000 jobs published up front then drained -- which is what produces a standing backlog -- dispatcher
+mode, `--warmup=1 --repeats=2`, two interleaved passes. Every run, both arms:
+
+| arm | run | jobs/sec | claim exec | claim blocks |
+|---|---|---:|---:|---:|
+| `ANY(array)` | p1 r1 | 913 | 57,414 ms | **85,461,530** |
+| `ANY(array)` | p1 r2 | 1,200 | 12,113 ms | 6,950,437 |
+| `ANY(array)` | p1 r3 | 905 | 49,717 ms | **78,731,186** |
+| `ANY(array)` | p2 r1 | 1,138 | 11,806 ms | 6,920,006 |
+| `ANY(array)` | p2 r2 | 1,169 | 11,355 ms | 6,881,569 |
+| `ANY(array)` | p2 r3 | 1,198 | 11,905 ms | 6,951,285 |
+| scalar | six runs | 1,179-1,254 | 10,599-11,798 ms | 6,472,470-7,070,963 |
+
+**The old predicate took the bad plan in 2 of 6 runs. The scalar form took it in 0 of 12.** When it
+flips, the claim reads twelve times the blocks and throughput falls about 24% (1,170-1,200 -> ~910
+jobs/sec).
+
+**Why the earlier session concluded otherwise: it read medians.** The two arms' medians are close
+precisely because the old arm is bimodal, and Gate 1b half-saw this -- it noted the -29% at 30,000 jobs
+was "mostly because the old arm is bimodal while the new one is not" and then set the observation
+aside rather than treating the bimodality itself as the result. A median is the wrong instrument for a
+distribution with two modes. The right summary is the failure rate and the cost when it fires.
+
+The block count is the reliable tell, as Gate 1b itself said: the bad plan costs an order of magnitude
+more buffers, and that separation is unambiguous in every run above.
+
+### E. Peak connection use: reproduces
+
+Contended mutex arm (8 keys, 16 workers, 10,000 jobs), `pg_stat_activity` sampled every 500 ms, two
+interleaved passes:
+
+| arm | pass 1 | pass 2 | per-pool maxima |
+|---|---:|---:|---|
+| one pool (before) | 29 | 30 | `(none)` 29-30 |
+| two pools (after) | **44** | **47** | `(none)` 27-30, `warp-locks` **17 in both** |
+
+Published was 30-31 -> 46 with per-pool maxima 30 and 17. The lock pool reaching exactly 17 in both
+passes against 16 workers and only 8 holdable locks is the "sizes to lock ATTEMPTS, not holds"
+claim (§2.18) reproducing precisely.
+
+**A measurement trap worth recording.** The first attempt at this arm was void: the sampler ran as
+`docker exec ... bash -c 'while ...'`, and killing the local `docker exec` client does NOT kill the
+loop inside the container. Four samplers accumulated and each kept writing into its own file through
+the *following* runs, so the before-arm's sample file contained `warp-locks` backends that build
+cannot produce. It was caught only because that impossibility is visible; a subtler overlap would not
+have been. Samplers are now killed inside the container (`pkill -f`) before and after every run, and
+each sample carries a timestamp.
+
+### D. The unbounded rollup tick: reproduces
+
+500,000-row `statistic` table, keys in the legacy unmarked-hourly shape:
+
+| operation | time | buffers | published |
+|---|---:|---:|---|
+| the scan (`LIKE '%:%'`, seq scan) | 43 ms | 7,132 | 116 ms / 4,851 |
+| 300,000-key delete (uncapped tick) | **3,472 ms** | 317,259 | 3,280 ms / 313,962 |
+| 20,000-key delete (the cap) | **462 ms** | 34,727 | not measured |
+
+The delete reproduces closely and the conclusion is unchanged: the scan is cheap, the write is what
+holds the transaction open. The capped tick is the new number -- it turns the worst tick from a
+multi-second transaction into a sub-second one, which is the whole point of the cap.
+
+### G. The aggregate: 7.0.0 against the release, every workload behind a claim
+
+The arms above isolate one change each, which attributes the gain but does not tell an operator what
+upgrading delivers. This arm answers that: **7.0.0's runtime against HEAD on an identical harness.**
+
+The lab could not simply be published from the `7.0.0` tag — the mutex and semaphore scenarios and
+`--warmup` were themselves added after it, in #301/#302, so a tag build cannot run most of these
+workloads and would also be measuring with different instrumentation. The build is therefore HEAD's
+harness with all five runtime files reverted to `7.0.0`:
+
+```
+src/core/Warp.Worker/CompletionBatch.cs
+src/core/Warp.Worker/Services/StatisticRollup.cs
+src/core/providers/Warp.Provider.PostgreSql/PostgreSqlServiceConfiguration.cs
+src/core/providers/Warp.Provider.PostgreSql/PostgresWarpSqlQueries.cs
+src/core/providers/Warp.Provider.SqlServer/SqlServerWarpSqlQueries.cs
+```
+
+The three source-generator files that also changed (`WARP003`) are build-time only and cannot affect a
+running server. 16 workers, fresh database per run, `--warmup=1`, medians of three runs, interleaved.
+
+| workload | 7.0.0 | HEAD | statements/job | jobs/sec | DB ms/job |
+|---|---:|---:|---:|---:|---:|
+| ordinary jobs, no addon | 18.68 | 13.73 | **-26.5%** | -30.1% | -35.9% |
+| `[Mutex]`, key per job | 51.09 | 25.17 | **-50.7%** | +19.6% | n/a |
+| `[Mutex]`, 8 groups | 78.17 | 37.36 | **-52.2%** | +36.9% | -12.7% |
+| `[Semaphore]`, 2x2 | 106.04 | 48.32 | **-54.4%** | +6.0% | -46.2% |
+| `[Mutex]`, 1 group | 326.42 | 144.05 | **-55.9%** | -7.0% | -5.9% |
+| dispatcher, 4 KB payload | 15.22 | 9.86 | **-35.2%** | +0.7% | **-16.0%** |
+| dispatcher, 0 B payload | 15.03 | 9.79 | **-34.8%** | -1.7% | **-1.2%** |
+| dispatcher, 120,000 jobs | 17.85 | 9.86 | **-44.8%** | +1.1% | +8.1% |
+
+**Read the statements column and ignore the jobs/sec column**, and the reason is in the spreads: the
+7.0.0 side reached 27%, 29%, 56% and 22% within-arm spread on four of these workloads, and DB ms/job
+reached 417% and 545% on two of them (a single cold outlier dominates a three-run median). A -30% and
+a +37% in the same table with inconsistent signs is not a throughput signal. The only arm that
+measured throughput stably — 120,000 jobs, 0.5% and 0.7% spread — gives **+1.1%**, which is the number
+to quote for "throughput unchanged".
+
+**The zero-payload control is the useful one.** The release notes claim the completion-flush benefit
+scales with payload size and vanishes at a zero-length payload. Varying only `--payload` on the same
+30,000-job dispatcher workload: DB ms/job falls **16.0%** at 4 KB and **1.2%** at 0 B. That is the
+claim confirmed by a control rather than asserted, and it also rules out the gain being some other
+dispatcher-mode difference between the two builds. Note that statements/job falls ~35% in BOTH payload
+arms, because that reduction is the connection-pool split, which is payload-independent.
+
+### What was NOT re-measured
+
+- **SQL Server**, on any arm. The providers are kept shape-identical so they cannot drift, but no SQL
+  Server plan was taken for the claim predicate, and the lock-pool change is Postgres-only by
+  construction.
+- **The historical incident figures** (51-minute aggregator transaction, 3.3 ms -> 253 ms claim,
+  567 -> 27 jobs/sec, 43% dead tuples). Those are an incident record, not a reproducible arm.
+- **The memory and allocation tables in `website/docs/operations/benchmarks.md`**, and the idle
+  queries/sec tables earlier in THIS file. The idle tables are the ones at risk: `Warp.PerfTest` counts
+  every Npgsql command through an `ActivityListener`, explicitly including the connection-reset
+  statements the lock-pool split just removed, so those counts were taken under a shared pool that no
+  longer exists. The memory tables simply predate this release and are not affected by it, but their
+  "all 9 background tasks" is stale -- there are 13 `IServerTask` implementations now -- and both the
+  number and the measurements want a re-run of their own.
