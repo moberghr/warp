@@ -32,6 +32,10 @@ Every package up to and including 7.1.0 shipped assemblies stamped `1.0.0`: the 
 
 Addresses CVE-2026-84008 (GHSA-846f-f764-76mx, high) and CVE-2026-70162 (GHSA-2fmv-rv2c-59x7, moderate), two .NET denial-of-service vulnerabilities in the `Pkcs` package that `Microsoft.Data.SqlClient` brings in transitively (9.0.11 through `DistributedLock.SqlServer`). `Moberg.Warp.Provider.SqlServer` now references the patched version directly, so it reaches your application through the package. Without it, `dotnet restore` fails under `NuGetAuditMode=all` with `TreatWarningsAsErrors`. The pin goes once `Microsoft.Data.SqlClient` depends on a patched build.
 
+### npm dependency bumps
+
+Closes the 32 open Dependabot alerts in the dashboard UI and documentation site lockfiles (`proxy-addr`, `fast-uri`, `js-yaml`, `qs`, `hono`, `undici`, `vitest` and others), all through patched transitive versions except `vitest`, raised to 4.1.11. None of the affected packages are in the shipped dashboard bundle: they come from build and test tooling (the `shadcn` CLI, Vitest, Docusaurus), so no NuGet package was exposed.
+
 ## 7.1.0
 
 *2026-09-25*
