@@ -363,6 +363,8 @@ export interface WarpAddonsInfo {
    * falls back to its historical 30s guess (lib/liveness).
    */
   instanceStaleAfterSeconds?: number;
+  /** The Warp release serving this dashboard. Optional: a pre-7.2 backend does not send it. */
+  version?: string;
 }
 
 export type {

@@ -4,6 +4,34 @@ sidebar_position: 6
 
 # Releases
 
+## 7.2.0
+
+*2026-10-14*
+
+Minor release, **no schema change, no migration, no API break**: the dashboard shows which Warp release is running, the shipped assemblies finally carry their real version, and a security bump that unblocks `dotnet restore`.
+
+### The dashboard shows the Warp version
+
+The footer now reads `Warp 7.2.0`, beside the server count and the UTC clock. It is the version of the process serving the dashboard. During a rolling deploy other servers may run a different release; their self-reported application versions are on the Applications page.
+
+The number is also on the API, as `version` on `GET {prefix}/api/addons`, and in code as `WarpVersion.Current` (`Warp.Core`). That is the informational version with the SourceLink `+{commit}` suffix removed, so a prerelease reads `7.3.0-rc.1`.
+
+### Assemblies carry their real version
+
+Every package up to and including 7.1.0 shipped assemblies stamped `1.0.0`: the release build set the package version but not the assembly version, so a 7.1.0 `Warp.Core.dll` reported `1.0.0+221d0bb9…`. From this release the assemblies match the package:
+
+| attribute | 7.1.0 | 7.2.0 |
+| --- | --- | --- |
+| `AssemblyInformationalVersion` | `1.0.0+{commit}` | `7.2.0+{commit}` |
+| `AssemblyFileVersion` | `1.0.0.0` | `7.2.0.0` |
+| `AssemblyVersion` | `1.0.0.0` | `7.0.0.0` |
+
+`AssemblyVersion` is pinned to `major.0.0.0` so binding stays stable across minor and patch upgrades. The one-time move from `1.0.0.0` to `7.0.0.0` only matters if you keep a binding redirect or a strong-name reference that names `1.0.0.0`. Nothing in .NET (Core) / .NET 5+ needs one.
+
+### `System.Security.Cryptography.Pkcs` pinned to 10.0.13
+
+Addresses CVE-2026-84008 (GHSA-846f-f764-76mx, high) and CVE-2026-70162 (GHSA-2fmv-rv2c-59x7, moderate), two .NET denial-of-service vulnerabilities in the `Pkcs` package that `Microsoft.Data.SqlClient` brings in transitively (9.0.11 through `DistributedLock.SqlServer`). `Moberg.Warp.Provider.SqlServer` now references the patched version directly, so it reaches your application through the package. Without it, `dotnet restore` fails under `NuGetAuditMode=all` with `TreatWarningsAsErrors`. The pin goes once `Microsoft.Data.SqlClient` depends on a patched build.
+
 ## 7.1.0
 
 *2026-09-25*

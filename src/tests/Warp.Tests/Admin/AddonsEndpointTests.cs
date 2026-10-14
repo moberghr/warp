@@ -292,4 +292,24 @@ public class AddonsEndpointTests
             await app.DisposeAsync();
         }
     }
+
+    [TimedFact]
+    public async Task GetAddons_Always_ReportsRunningWarpVersion()
+    {
+        var (app, client) = await CreateApp();
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+            info!.Version.ShouldNotBeNullOrWhiteSpace();
+            info.Version.ShouldNotContain('+');
+            info.Version.ShouldBe(WarpVersion.Current);
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
 }

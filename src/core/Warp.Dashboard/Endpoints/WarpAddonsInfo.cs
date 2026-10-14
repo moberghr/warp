@@ -49,4 +49,13 @@ public sealed class WarpAddonsInfo
     /// number here the browser re-derives exactly what the server would answer at any later instant.
     /// </remarks>
     public int InstanceStaleAfterSeconds { get; init; }
+
+    /// <summary>
+    /// The Warp release serving this dashboard (<see cref="Warp.Core.WarpVersion.Current"/>), shown in the footer.
+    /// </summary>
+    /// <remarks>
+    /// The version of THIS process only. Every other process sharing the database may run a different release
+    /// mid rolling-deploy; their self-reported application versions are on the Applications page.
+    /// </remarks>
+    public string Version { get; init; } = string.Empty;
 }

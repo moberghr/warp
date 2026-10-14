@@ -241,6 +241,7 @@ public static class WarpEndpoints
                 // itself. Floored at one second: a sub-second grace would truncate to 0 and read every
                 // instance as stale on arrival.
                 InstanceStaleAfterSeconds = Math.Max(1, (int)Math.Round(configuration.Value.ApplicationInstanceStaleGrace.TotalSeconds)),
+                Version = WarpVersion.Current,
             }));
 
         apiGroup.MapGet("concurrency", async ([FromServices] IConcurrencyLimitManager? mgr, CancellationToken ct) =>
