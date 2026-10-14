@@ -514,6 +514,7 @@ export default function MainLayout({ extensions = [] }: { extensions?: Extension
       <footer className="border-t bg-card px-4 md:px-6 py-3 text-xs text-muted-foreground flex flex-wrap items-center justify-between gap-2">
         <span>{stats?.databaseConnection ?? 'Warp Dashboard'}</span>
         <div className="flex items-center gap-4 tabular-nums">
+          {addons?.version && <span>Warp {addons.version}</span>}
           {stats && <span>Servers: {stats.servers} · Workers active</span>}
           <span>UTC: {new Date().toISOString().replace('T', ' ').substring(0, 19)}</span>
         </div>
