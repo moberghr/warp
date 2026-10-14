@@ -225,26 +225,36 @@ jobs:
       # adds, so a file that exists on one side but not the other survived the swap. A file the head
       # added stayed in place for the base build, which then measured head code and could show a real
       # regression as 0%.
+      # The restore runs from an EXIT trap, not as the last line: bash -e leaves on the first failure, and
+      # a failed base build used to strand the base src/core in the workspace, so every later step
+      # (export, compare) built the base code and failed on its errors instead of reporting the head.
       - name: Run benchmarks on the head commit
         run: |
+          trap 'git checkout --no-overlay HEAD -- src/core' EXIT
           git checkout --no-overlay ${{ needs.refs.outputs.head }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             --filter '${{ matrix.benchmark.filter }}' \
             --exporters json \
             --artifacts "${{ github.workspace }}/bench/head"
-          git checkout --no-overlay HEAD -- src/core
 
+      # NuGet audit is off for the BASE build only. The base is an already-released commit measured as a
+      # reference, never shipped from here, and an advisory published after its release would otherwise
+      # take away the comparison for exactly the PR that patches it. The head build and the Test
+      # workflow keep the full audit. MSBuild reads the variable as a property, so it reaches
+      # BenchmarkDotNet's child builds too.
       - name: Run benchmarks on the base commit
         id: basebench
         if: needs.refs.outputs.record == ''
         continue-on-error: true
+        env:
+          NuGetAudit: 'false'
         run: |
+          trap 'git checkout --no-overlay HEAD -- src/core' EXIT
           git checkout --no-overlay ${{ needs.refs.outputs.base }} -- src/core
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             --filter '${{ matrix.benchmark.filter }}' \
             --exporters json \
             --artifacts "${{ github.workspace }}/bench/base"
-          git checkout --no-overlay HEAD -- src/core
 
       - name: Fetch the latest release's results
         if: needs.refs.outputs.record == '' && needs.refs.outputs.latest_release != ''
