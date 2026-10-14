@@ -11,6 +11,8 @@
 		<PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.9" />
 		<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.1" />
 		<PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
+		<!-- Transitive via Microsoft.Data.SqlClient 6.1.1 (from EF SqlServer; no DistributedLock here, unlike the provider), which resolves 9.0.4 — vulnerable to CVE-2026-84008 / CVE-2026-70162. -->
+		<PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
 	</ItemGroup>
 
 	<ItemGroup>
