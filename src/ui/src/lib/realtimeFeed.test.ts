@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startRealtimeFeed, stopRealtimeFeed } from './realtimeFeed';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useRealtimeStore } from '@/stores/realtime';
+import { setTabVisibility } from './visibility.testUtils';
 
 // realtimeFeed keeps module-level sampler/poller timers, so stop it after every test.
 describe('realtimeFeed', () => {
@@ -33,6 +34,18 @@ describe('realtimeFeed', () => {
 
     vi.advanceTimersByTime(3000);
     expect(useDashboardStore.getState().fetchStats).not.toHaveBeenCalled();
+  });
+
+  it('does not poll fetchStats while the tab is hidden', () => {
+    useRealtimeStore.setState({ status: 'reconnecting' });
+    startRealtimeFeed();
+    setTabVisibility('hidden');
+    try {
+      vi.advanceTimersByTime(5000);
+      expect(useDashboardStore.getState().fetchStats).not.toHaveBeenCalled();
+    } finally {
+      setTabVisibility('visible');
+    }
   });
 
   it('polls fetchStats at 1 Hz when push is not delivering (reconnecting)', () => {

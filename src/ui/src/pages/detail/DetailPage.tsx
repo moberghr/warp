@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { toast } from 'sonner';
 import { useParams, Link } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -11,10 +12,12 @@ import { shortType, formatDateTime, shortId } from '@/utils/format';
 import { addonChips } from '@/lib/addonChips';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { useRealtimeRefetch } from '@/hooks/useRealtimeRefetch';
+import { useLivePoll } from '@/hooks/useLivePoll';
 import { State } from '@/types';
-import type { UnifiedJobDetailModel, JobLogModel } from '@/types';
+import type { UnifiedJobDetailModel, JobLogModel, JobProgressModel, PagedSlice } from '@/types';
 import * as api from '@/api';
 import { Hint } from '@/components/ui/tooltip';
+import { Pagination } from '@/components/Pagination';
 
 type DetailPendingAction = 'cancel' | 'requeue' | 'delete' | 'cancelBatch';
 
@@ -97,6 +100,175 @@ function ExpandableJsonBlock({ heading, content }: { heading: string; content: s
   );
 }
 
+// How often handler output and reported progress are re-read while the job is live. The worker
+// persists both about once a second, so faster than this shows nothing new.
+const LIVE_POLL_MS = 2_000;
+
+// Handler output is fetched separately from the detail, newest first and paged: a chatty
+// job can write tens of thousands of rows, which used to ship (and render) in one response.
+// The server returns no total (counting every line on each poll is the cost paging avoids), so
+// paging is previous/next on `hasMore`.
+//
+// While the job is `live` (not yet finished) the first page is re-read every LIVE_POLL_MS, so
+// new lines appear at the top as the handler writes them. `live` rather than "processing": the
+// detail only learns a job started on its next refresh, which for a short job is the finalize,
+// so gating on Processing would miss the whole run. Later pages are not polled, since new lines
+// would shift every row down by one under the reader. When the job finishes the page is read
+// once more and then goes quiet; a requeue makes it live again.
+//
+// The slot wrapper always renders so a UI extension targeting `detail.logs` finds it on first
+// paint, whether or not the job has output.
+function HandlerOutput({ jobId, jobContext, live }: { jobId: string; jobContext: string; live: boolean }) {
+  const [loaded, setLoaded] = useState<PagedSlice<JobLogModel> | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(100);
+  // Responses can land out of order (a tailing refetch of page 1 finishing after the user moved
+  // to page 4); only the latest request may write state.
+  const latestRequest = useRef(0);
+
+  const fetchLogs = useCallback(() => {
+    const request = ++latestRequest.current;
+    api.getJobLogs(jobId, page, pageSize)
+      .then((result) => {
+        if (request !== latestRequest.current) return;
+        setLoaded(result);
+        setFailed(false);
+      })
+      .catch(() => {
+        if (request !== latestRequest.current) return;
+        setFailed(true);
+      });
+  }, [jobId, page, pageSize]);
+
+  useEffect(() => { fetchLogs(); }, [fetchLogs, live]);
+  useLivePoll(fetchLogs, live && page === 0, LIVE_POLL_MS);
+
+  // What is on screen must be the page the pager names. While the requested page is loading the
+  // previous lines stay, dimmed; if its request failed, the error replaces them.
+  const current = loaded && loaded.page === page && loaded.pageSize === pageSize ? loaded : null;
+  const nothingYet = !loaded && !failed;
+  const noOutput = current !== null && page === 0 && current.items.length === 0;
+
+  return (
+    <div data-warp-slot="detail.logs" data-warp-context={jobContext}>
+      {/* An empty first page hides the card, unless a refresh is failing: that must stay visible. */}
+      {nothingYet || (noOutput && !failed) ? null : (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">
+              Handler Output
+              {failed && current && <span className="ml-2 font-normal text-xs text-red-600 dark:text-red-400">refresh failed</span>}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {failed && !current ? (
+              <p className="text-sm text-red-600 dark:text-red-400">
+                Unable to load handler output.{' '}
+                <button type="button" onClick={fetchLogs} className="underline hover:no-underline">Retry</button>
+              </p>
+            ) : (
+              <div className={`space-y-1 font-mono text-xs max-h-[80vh] overflow-auto ${current ? '' : 'opacity-50'}`}>
+                {(current ?? loaded)?.items.map((log) => (
+                  <div key={log.id} className={`flex gap-2 ${
+                    log.level === 'Error' ? 'text-red-600' :
+                    log.level === 'Warning' ? 'text-yellow-600' :
+                    'text-muted-foreground'
+                  }`}>
+                    <span className="text-muted-foreground shrink-0">{formatDateTime(log.timestamp)}</span>
+                    <span className="shrink-0 w-20">[{log.level}]</span>
+                    <span className="break-all">{log.message}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {(page > 0 || current?.hasMore) && (
+              <Pagination
+                page={page}
+                pageCount={0}
+                hasNext={current?.hasMore ?? false}
+                onPageChange={setPage}
+                pageSize={pageSize}
+                onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
+              />
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// Reported progress has its own small endpoint (latest value per bar) so the bars can move while
+// the job runs without refetching the whole detail. Polls while `live` (see HandlerOutput for why
+// not "processing"); when that flips it reads once more, so a finished job shows its final values
+// and then goes quiet.
+function ReportedProgress({ jobId, jobContext, live }: { jobId: string; jobContext: string; live: boolean }) {
+  const [bars, setBars] = useState<JobProgressModel[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const latestRequest = useRef(0);
+
+  const fetchProgress = useCallback(() => {
+    const request = ++latestRequest.current;
+    api.getJobProgress(jobId)
+      .then((result) => {
+        if (request !== latestRequest.current) return;
+        setBars(result);
+        setFailed(false);
+      })
+      .catch(() => {
+        if (request !== latestRequest.current) return;
+        setFailed(true);
+      });
+  }, [jobId]);
+
+  useEffect(() => { fetchProgress(); }, [fetchProgress, live]);
+  useLivePoll(fetchProgress, live, LIVE_POLL_MS);
+
+  return (
+    <div data-warp-slot="detail.reportedProgress" data-warp-context={jobContext}>
+      {failed && !bars ? (
+        <Card>
+          <CardHeader className="pb-2"><CardTitle className="text-sm">Reported Progress</CardTitle></CardHeader>
+          <CardContent>
+            <p className="text-sm text-red-600 dark:text-red-400">
+              Unable to load progress.{' '}
+              <button type="button" onClick={fetchProgress} className="underline hover:no-underline">Retry</button>
+            </p>
+          </CardContent>
+        </Card>
+      ) : bars && bars.length > 0 ? (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">
+              Reported Progress
+              {failed && <span className="ml-2 font-normal text-xs text-red-600 dark:text-red-400">refresh failed</span>}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {bars.map((bar) => (
+                <div key={bar.name}>
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="text-muted-foreground">{bar.name === '' ? 'Progress' : bar.name}</span>
+                    <span className="font-medium">{bar.value}%</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 transition-all"
+                      style={{ width: `${bar.value}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+    </div>
+  );
+}
+
 function kindLabel(kind: number) {
   if (kind === 3) return 'Batch';
   if (kind === 2) return 'Message';
@@ -120,10 +292,13 @@ export default function DetailPage() {
     api.getDetail(id).then(setJob).catch(() => {});
   }, [id]);
 
-  // Refetch on every JobFinalized — the event is broadcast-only (no per-job scope in v1),
-  // so we refetch even if the finalize is for an unrelated job. At normal dashboard usage
-  // (<10 detail pages open) this is cheap; per-job groups are a v2 optimization.
-  useRealtimeRefetch('JobFinalized', refresh);
+  // Refetch on every JobFinalized while the job can still change — the event is broadcast-only
+  // (no per-job scope), so it fires for unrelated jobs too, up to ~10 times a second under load.
+  // Once the job has finished, only its related jobs' states can still move, so it falls back to
+  // the hook's 30s safety interval; this page's own actions refresh it directly.
+  const finished = job != null
+    && (job.currentState === State.Completed || job.currentState === State.Failed || job.currentState === State.Deleted);
+  useRealtimeRefetch(finished ? [] : 'JobFinalized', refresh);
 
   const handleCountsUpdate = useCallback((counts: Record<string, number>) => {
     setJobCounts(counts);
@@ -132,18 +307,7 @@ export default function DetailPage() {
   if (error) return <ErrorState message={error} />;
   if (!job) return <LoadingState />;
 
-  const systemEvents = job.logs.filter(l => l.eventType !== 'Log' && l.eventType !== 'Progress').reverse();
-  const handlerLogs = job.logs.filter(l => l.eventType === 'Log');
-
-  // Reported progress: latest value per bar name. Progress rows are append-only with
-  // dedup-on-no-change, so the most recent entry per name is the current value.
-  const progressByName = new Map<string, number>();
-  for (const log of job.logs) {
-    if (log.eventType !== 'Progress' || log.value == null) continue;
-    const name = log.name ?? '';
-    progressByName.set(name, log.value);
-  }
-  const progressBars = Array.from(progressByName.entries());
+  const systemEvents = [...job.logs].reverse();
 
   // Batch progress
   const totalJobs = Object.keys(jobCounts).length > 0
@@ -161,6 +325,10 @@ export default function DetailPage() {
   const isJob = job.kind === 1;
 
   const jobContext = JSON.stringify({ jobId: job.id });
+  // A job that has not finished can still write output and progress, so those cards keep polling.
+  // Batches and messages never write either, so they are read once and not polled.
+  const isLive = isJob
+    && job.currentState !== State.Completed && job.currentState !== State.Failed && job.currentState !== State.Deleted;
 
   return (
     <div>
@@ -276,7 +444,9 @@ export default function DetailPage() {
               parentJob={job.parentJob}
               spawnedByJob={job.spawnedByJob}
               continuations={job.continuations}
+              continuationCount={job.continuationCount}
               spawnedJobs={job.spawnedJobs}
+              spawnedJobCount={job.spawnedJobCount}
             />
           </div>
         </div>
@@ -284,31 +454,12 @@ export default function DetailPage() {
         {/* Right column: Progress + History + Logs */}
         <div className="space-y-4">
           {/* Reported progress (handler-supplied via IJobContext.ReportProgress) */}
-          {progressBars.length > 0 && (
-            <div data-warp-slot="detail.reportedProgress" data-warp-context={jobContext} key={`reported-progress-${job.id}`}>
-              <Card>
-                <CardHeader className="pb-2"><CardTitle className="text-sm">Reported Progress</CardTitle></CardHeader>
-                <CardContent>
-                  <div className="space-y-2">
-                    {progressBars.map(([name, value]) => (
-                      <div key={name}>
-                        <div className="flex items-center justify-between text-xs mb-1">
-                          <span className="text-muted-foreground">{name === '' ? 'Progress' : name}</span>
-                          <span className="font-medium">{value}%</span>
-                        </div>
-                        <div className="h-2 bg-muted rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-blue-500 transition-all"
-                            style={{ width: `${value}%` }}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          )}
+          <ReportedProgress
+            key={`progress-${job.id}`}
+            jobId={job.id}
+            jobContext={jobContext}
+            live={isLive}
+          />
 
           {/* State History */}
           {systemEvents.length > 0 && (
@@ -343,28 +494,12 @@ export default function DetailPage() {
           )}
 
           {/* Handler Logs */}
-          {handlerLogs.length > 0 && (
-            <div data-warp-slot="detail.logs" data-warp-context={jobContext} key={`logs-${job.id}`}>
-              <Card>
-                <CardHeader className="pb-2"><CardTitle className="text-sm">Handler Output ({handlerLogs.length})</CardTitle></CardHeader>
-                <CardContent>
-                  <div className="space-y-1 font-mono text-xs max-h-[80vh] overflow-auto">
-                    {handlerLogs.map((log) => (
-                      <div key={log.id} className={`flex gap-2 ${
-                        log.level === 'Error' ? 'text-red-600' :
-                        log.level === 'Warning' ? 'text-yellow-600' :
-                        'text-muted-foreground'
-                      }`}>
-                        <span className="text-muted-foreground shrink-0">{formatDateTime(log.timestamp)}</span>
-                        <span className="shrink-0 w-20">[{log.level}]</span>
-                        <span className="break-all">{log.message}</span>
-                      </div>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          )}
+          <HandlerOutput
+            key={`logs-${job.id}`}
+            jobId={job.id}
+            jobContext={jobContext}
+            live={isLive}
+          />
         </div>
       </div>
 
@@ -413,9 +548,14 @@ export default function DetailPage() {
         confirmLabel={pending === 'requeue' ? 'Requeue' : pending === 'cancel' ? 'Cancel job' : pending === 'cancelBatch' ? 'Cancel batch' : 'Delete'}
         variant={pending === 'delete' || pending === 'cancel' || pending === 'cancelBatch' ? 'destructive' : 'default'}
         onConfirm={() => {
-          if (pending === 'cancel' || pending === 'delete') api.deleteJob(job.id);
-          else if (pending === 'requeue') api.requeueJob(job.id);
-          else if (pending === 'cancelBatch') api.cancelBatch(job.id);
+          const action =
+            pending === 'cancel' || pending === 'delete' ? api.deleteJob(job.id)
+              : pending === 'requeue' ? api.requeueJob(job.id)
+                : pending === 'cancelBatch' ? api.cancelBatch(job.id)
+                  : null;
+          action
+            ?.then(refresh)
+            .catch((err: unknown) => toast.error(err instanceof Error ? err.message : 'The action failed'));
           setPending(null);
         }}
       />

@@ -1,4 +1,3 @@
-using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -28,7 +27,7 @@ public interface IDashboardStatsService
 
     Task<List<ServerTaskSummary>> GetServerTaskSummaries(Guid serverId);
 
-    Task<PagedList<WorkerJobLogModel>> GetWorkerJobLogs(Guid workerId, BaseListRequest request);
+    Task<PagedSlice<WorkerJobLogModel>> GetWorkerJobLogs(Guid workerId, BaseListRequest request);
 
     Task<WorkerDetailModel?> GetWorkerById(Guid workerId);
 }
@@ -36,6 +35,18 @@ public interface IDashboardStatsService
 public class DashboardStatsService<TContext> : IDashboardStatsService
     where TContext : DbContext
 {
+    /// <summary>
+    /// Longest counters-history window served: the default daily retention (90 days) plus a margin.
+    /// The window comes from the query string, so it is clamped rather than trusted.
+    /// </summary>
+    private const int MaxCountersHistoryHours = 92 * 24;
+
+    /// <summary>
+    /// Windows longer than this many days match any bucket key instead of one pattern per day, so the
+    /// OR chain stays short.
+    /// </summary>
+    private const int MaxDayPatterns = 14;
+
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
 
@@ -424,11 +435,13 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
     {
         // Merge aggregated Statistic rows with pending Counter rows so the page reflects the
         // same view as the dashboard's metric cards (which use GetCombinedStatValue per key).
-        var aggregated = await _context.Set<Statistic>()
+        // Time-bucket keys are most of both tables and none of them are shown here, so they are
+        // dropped in SQL; IsHourlyKey below still has the exact word.
+        var aggregated = await BucketKeyFilters.WithoutBucketKeys(_context.Set<Statistic>(), x => x.Key)
             .Select(x => new { x.Key, x.Value })
             .ToListAsync();
 
-        var pending = await _context.Set<Counter>()
+        var pending = await BucketKeyFilters.WithoutBucketKeys(_context.Set<Counter>(), x => x.Key)
             .GroupBy(x => x.Key)
             .Select(g => new { Key = g.Key, Value = (long)g.Sum(c => c.Value) })
             .ToListAsync();
@@ -471,15 +484,20 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
     {
         // All hourly buckets within the window, merged from Statistic + pending Counter rows so
         // a freshly-written counter row shows up immediately even if the aggregator hasn't run.
-        var since = _timeProvider.GetUtcNow().UtcDateTime.AddHours(-hours);
+        hours = Math.Clamp(hours, 1, MaxCountersHistoryHours);
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var since = now.AddHours(-hours);
 
-        var aggregated = await _context.Set<Statistic>()
-            .Where(x => EF.Functions.Like(x.Key, "%:%"))
+        // Only the buckets dated inside the window are read: the table holds every retained bucket
+        // of every family (90 days of daily ones by default). The exact hour cut is applied below.
+        var bucketPatterns = BucketKeyFilters.ForWindow(since, now, MaxDayPatterns);
+        var aggregated = await BucketKeyFilters.WhereKeyLikeAny(_context.Set<Statistic>(), x => x.Key, bucketPatterns)
+            .Where(x => !EF.Functions.Like(x.Key, "%:pcth:%"))
             .Select(x => new { x.Key, x.Value })
             .ToListAsync();
 
-        var pending = await _context.Set<Counter>()
-            .Where(x => EF.Functions.Like(x.Key, "%:%"))
+        var pending = await BucketKeyFilters.WhereKeyLikeAny(_context.Set<Counter>(), x => x.Key, bucketPatterns)
+            .Where(x => !EF.Functions.Like(x.Key, "%:pcth:%"))
             .GroupBy(x => x.Key)
             .Select(g => new { Key = g.Key, Value = (long)g.Sum(c => c.Value) })
             .ToListAsync();
@@ -595,27 +613,54 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
         };
     }
 
-    public async Task<PagedList<WorkerJobLogModel>> GetWorkerJobLogs(Guid workerId, BaseListRequest request)
+    /// <summary>
+    /// One page of the log rows a worker wrote, newest first, with each row's job type.
+    /// </summary>
+    /// <remarks>
+    /// Paged previous/next with no total: nothing indexes <c>JobLog.WorkerId</c>, so a COUNT read the
+    /// whole of the largest table on every visit, on top of the page itself. The job types are read in
+    /// a second query for just this page's jobs (§5.2) instead of a lookup inside the projection.
+    /// </remarks>
+    public async Task<PagedSlice<WorkerJobLogModel>> GetWorkerJobLogs(Guid workerId, BaseListRequest request)
     {
-        return await _context.Set<JobLog>()
+        var page = await _context.Set<JobLog>()
             .Where(x => x.WorkerId == workerId)
             .OrderByDescending(x => x.Timestamp)
-            .Select(x => new WorkerJobLogModel
-            {
-                Id = x.Id,
-                JobId = x.JobId,
-                JobType = _context.Set<Job>()
-                    .Where(j => j.Id == x.JobId)
-                    .Select(j => j.Type)
-                    .FirstOrDefault(),
-                EventType = x.EventType,
-                Timestamp = x.Timestamp,
-                Level = x.Level,
-                Message = x.Message,
-                Exception = x.Exception,
-                DurationMs = x.DurationMs,
-            })
-            .ToPagedListAsync(request);
+            .ThenByDescending(x => x.Id)
+            .Select(x =>
+                new WorkerJobLogModel
+                {
+                    Id = x.Id,
+                    JobId = x.JobId,
+                    EventType = x.EventType,
+                    Timestamp = x.Timestamp,
+                    Level = x.Level,
+                    Message = x.Message,
+                    Exception = x.Exception,
+                    DurationMs = x.DurationMs,
+                })
+            .ToPagedSliceAsync(request);
+
+        var jobIds = page.Items
+            .Select(x => x.JobId)
+            .Distinct()
+            .ToList();
+        var types = await _context.Set<Job>()
+            .Where(x => jobIds.Contains(x.Id))
+            .Select(x =>
+                new
+                {
+                    x.Id,
+                    x.Type,
+                })
+            .ToDictionaryAsync(x => x.Id, x => x.Type);
+
+        foreach (var row in page.Items)
+        {
+            row.JobType = types.GetValueOrDefault(row.JobId);
+        }
+
+        return page;
     }
 
     private async Task<int> GetProcessingJobsCount()

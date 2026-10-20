@@ -1,0 +1,1 @@
+function e(){return typeof document<`u`&&document.visibilityState===`hidden`}function t(e){let t=()=>{document.visibilityState===`visible`&&e()};return document.addEventListener(`visibilitychange`,t),()=>document.removeEventListener(`visibilitychange`,t)}export{t as n,e as t};

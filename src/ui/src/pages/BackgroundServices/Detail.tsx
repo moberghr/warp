@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useLivePoll } from '@/hooks/useLivePoll';
 import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -115,19 +116,10 @@ export default function BackgroundServiceDetail() {
     setLevelFilter(val);
   };
 
-  useEffect(() => {
-    void fetchDetail();
-    const detailInterval = setInterval(fetchDetail, 2000);
-
-    return () => clearInterval(detailInterval);
-  }, [fetchDetail]);
-
-  useEffect(() => {
-    void fetchLogs();
-    const logsInterval = setInterval(fetchLogs, 2000);
-
-    return () => clearInterval(logsInterval);
-  }, [fetchLogs]);
+  useEffect(() => { void fetchDetail(); }, [fetchDetail]);
+  useEffect(() => { void fetchLogs(); }, [fetchLogs]);
+  useLivePoll(() => { void fetchDetail(); }, true, 2000);
+  useLivePoll(() => { void fetchLogs(); }, true, 2000);
 
   if (gone) {
     return (

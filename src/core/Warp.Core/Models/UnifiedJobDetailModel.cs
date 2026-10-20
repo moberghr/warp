@@ -6,6 +6,12 @@ namespace Warp.Core.Models;
 
 public class UnifiedJobDetailModel
 {
+    /// <summary>
+    /// How many continuations and spawned jobs the detail lists. A fan-out handler can spawn tens of
+    /// thousands, and the dashboard refetches the detail while it is open.
+    /// </summary>
+    public const int MaxRelatedJobs = 50;
+
     // Core (always present)
     public Guid Id { get; set; }
 
@@ -46,9 +52,25 @@ public class UnifiedJobDetailModel
 
     public ContinuationInfo? SpawnedByJob { get; set; }
 
+    /// <summary>
+    /// The first <see cref="MaxRelatedJobs"/> continuations, oldest first. <see cref="ContinuationCount"/> has the total.
+    /// </summary>
     public List<ContinuationInfo> Continuations { get; set; } = [];
 
+    /// <summary>
+    /// How many continuations exist, including any beyond the <see cref="Continuations"/> cap.
+    /// </summary>
+    public int ContinuationCount { get; set; }
+
+    /// <summary>
+    /// The first <see cref="MaxRelatedJobs"/> jobs this job's handler spawned, oldest first. <see cref="SpawnedJobCount"/> has the total.
+    /// </summary>
     public List<ContinuationInfo> SpawnedJobs { get; set; } = [];
+
+    /// <summary>
+    /// How many jobs this job's handler spawned, including any beyond the <see cref="SpawnedJobs"/> cap.
+    /// </summary>
+    public int SpawnedJobCount { get; set; }
 
     // Origin: the inbound HTTP request that started this trace (reverse drill-down)
     public JobOriginModel? Origin { get; set; }

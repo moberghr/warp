@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import { useRealtimeRefetch } from './useRealtimeRefetch';
+import { setTabVisibility } from '@/lib/visibility.testUtils';
 import { emit } from '@/lib/realtimeBus';
 import { signalDue, resetDueSignalForTests, DUE_SIGNAL_COALESCE_MS } from '@/lib/dueSignal';
 
@@ -77,6 +78,39 @@ describe('useRealtimeRefetch', () => {
 
     signalDue();
     vi.advanceTimersByTime(DUE_SIGNAL_COALESCE_MS);
+
+    expect(refetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('useRealtimeRefetch in a hidden tab', () => {
+  beforeEach(() => vi.useFakeTimers());
+
+  afterEach(() => {
+    setTabVisibility('visible');
+    vi.useRealTimers();
+  });
+
+  it('skips events and safety ticks while hidden, then refetches once when shown', () => {
+    const refetch = vi.fn();
+    renderHook(() => useRealtimeRefetch('JobFinalized', refetch, 10_000));
+
+    setTabVisibility('hidden');
+    emit('JobFinalized');
+    emit('JobFinalized');
+    vi.advanceTimersByTime(30_000);
+    expect(refetch).not.toHaveBeenCalled();
+
+    setTabVisibility('visible');
+    expect(refetch).toHaveBeenCalledOnce();
+  });
+
+  it('does not refetch on becoming visible when nothing was missed', () => {
+    const refetch = vi.fn();
+    renderHook(() => useRealtimeRefetch('JobFinalized', refetch, 10_000));
+
+    setTabVisibility('hidden');
+    setTabVisibility('visible');
 
     expect(refetch).not.toHaveBeenCalled();
   });

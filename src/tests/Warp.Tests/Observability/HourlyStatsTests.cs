@@ -326,4 +326,72 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
         // Addon-defined hourly metrics surface alongside built-ins.
         history.Any(p => string.Equals(p.Key, "addon:custom-metric", StringComparison.Ordinal) && p.Value == 7).ShouldBeTrue();
     }
+
+    [TimedFact]
+    public async Task GetCountersHistory_MarkedTiers_ReadsOnlyBucketsInsideTheWindow()
+    {
+        var ctx = _fixture.CreateContext();
+        var now = DateTime.UtcNow;
+        var fine = MetricTiers.Suffix(MetricTier.Fine, now.AddMinutes(-30), 5);
+        var hourly = MetricTiers.Suffix(MetricTier.Hourly, now.AddHours(-3), 5);
+        var dailyOld = MetricTiers.Suffix(MetricTier.Daily, now.AddDays(-20), 5);
+
+        ctx.Set<Statistic>().Add(new Statistic { Key = $"jobstat:type:Acme.Work:hist:succeeded{fine}", Value = 4 });
+        ctx.Set<Statistic>().Add(new Statistic { Key = $"jobstat:type:Acme.Work:hist:succeeded{hourly}", Value = 6 });
+        ctx.Set<Statistic>().Add(new Statistic { Key = $"jobstat:type:Acme.Work:hist:succeeded{dailyOld}", Value = 999 });
+        ctx.Set<Statistic>().Add(new Statistic { Key = $"jobstat:type:Acme.Work:pcth:500{fine}", Value = 888 });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var history = await svc.GetCountersHistory(24);
+
+        history.Where(p => string.Equals(p.Key, "jobstat:type:Acme.Work:hist:succeeded", StringComparison.Ordinal)).Sum(p => p.Value).ShouldBe(10);
+        history.Any(p => p.Value is 999 or 888).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task GetCountersHistory_HugeWindow_ClampedInsteadOfFailing()
+    {
+        var ctx = _fixture.CreateContext();
+        var lastHour = MetricTiers.Suffix(MetricTier.Hourly, DateTime.UtcNow.AddHours(-1), 5);
+        ctx.Set<Statistic>().Add(new Statistic { Key = $"stats:succeeded{lastHour}", Value = 3 });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var history = await svc.GetCountersHistory(int.MaxValue);
+
+        history.ShouldContain(p => string.Equals(p.Key, "stats:succeeded", StringComparison.Ordinal) && p.Value == 3);
+    }
+
+    [TimedFact]
+    public async Task GetCounters_LifetimeKeyWithTierLikeSegment_StaysInTheTable()
+    {
+        // A queue, application or adapter can be named "h1": its lifetime counters are not buckets.
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Statistic>().Add(new Statistic { Key = "qwait:h1:count", Value = 3 });
+        ctx.Set<Counter>().Add(new Counter { Key = "adapter:d1:total", Value = 4 });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var counters = await svc.GetCounters();
+
+        counters.Select(x => x.Key).ShouldBe(["adapter:d1:total", "qwait:h1:count"]);
+    }
+
+    [TimedFact]
+    public async Task GetCounters_MarkedTierBuckets_ExcludedFromTheTable()
+    {
+        var ctx = _fixture.CreateContext();
+        var now = DateTime.UtcNow;
+        ctx.Set<Statistic>().Add(new Statistic { Key = "jobstat:type:Acme.Work:succeeded", Value = 12 });
+        ctx.Set<Statistic>().Add(new Statistic { Key = $"jobstat:type:Acme.Work:hist:succeeded{MetricTiers.Suffix(MetricTier.Fine, now, 5)}", Value = 1 });
+        ctx.Set<Statistic>().Add(new Statistic { Key = $"jobstat:type:Acme.Work:hist:succeeded{MetricTiers.Suffix(MetricTier.Hourly, now, 5)}", Value = 1 });
+        ctx.Set<Counter>().Add(new Counter { Key = $"jobstat:type:Acme.Work:hist:succeeded{MetricTiers.Suffix(MetricTier.Daily, now, 5)}", Value = 1 });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var counters = await svc.GetCounters();
+
+        counters.ShouldHaveSingleItem().Key.ShouldBe("jobstat:type:Acme.Work:succeeded");
+    }
 }

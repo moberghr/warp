@@ -4,6 +4,49 @@ sidebar_position: 6
 
 # Releases
 
+## 7.3.0
+
+*2026-10-20*
+
+Dashboard release, **no schema change, a few API changes**: job output is paged and tails live, and the dashboard asks the database for far less, both per page and in total. Read [Upgrading](#upgrading) first.
+
+### Handler output is paged, newest first, and tails live
+
+The job detail page used to load every line a handler logged in a single response and render them oldest first. A job that writes tens of thousands of lines made the page slow to open and slow to scroll. The **Handler Output** card now shows the newest line at the top, 100 per page by default (up to 500), with previous and next buttons. It shows no total line count: counting a large job's output on every refresh would cost the scan the paging avoids.
+
+Until the job finishes, the first page refreshes every 2 seconds, so new lines appear at the top as the handler writes them. That includes a job that was still waiting when you opened it, so a run that starts later is not missed. Later pages hold still while you read them. Once the job finishes, the card reads once more and stops.
+
+Lines logged within the same clock tick now keep the order the handler wrote them in: the worker gives each of a job's lines a timestamp at least one microsecond after the previous one.
+
+Reported progress moved off the detail too. The **Reported Progress** bars read their own small endpoint and update on the same 2-second cadence, instead of only when the whole detail page refreshed.
+
+### The dashboard asks the database for less
+
+- **Push broadcasts at most once a second.** With `AddDashboardPush()`, every finished job anywhere in the cluster triggered a broadcast (up to about ten a second under load). Each one ran the dashboard's stats queries and made every open tab refetch what it shows. Broadcasts now go out at most once per `WarpDashboardPushConfiguration.MinBroadcastInterval` (default 1 second, allowed 0 to 1 minute, rejected at startup otherwise; `TimeSpan.Zero` restores the old behaviour), and the events in between are folded into the next one, which still carries fresh stats. The first event after a quiet spell is not delayed.
+- **No stats queries when nobody is watching.** A server with no dashboard connected to its hub skips the stats snapshot and broadcasts the bare event. A dashboard that receives an event without a snapshot (through a SignalR backplane, or because fetching it failed) now fetches `/status` itself, at most once a second; before, its counts stayed put until the next event that carried one.
+- **Hidden tabs go quiet.** A background tab no longer polls or refetches on realtime events. It catches up once when you switch back. Without push, that alone stops a 1-per-second `/status` poll (about twenty queries) per open tab.
+- **Job detail lists are capped.** Continuations and spawned jobs show the first 50, with the total in the heading and a "Showing the first 50 of N" line, instead of every one (a fan-out handler could put 50,000 rows in one response). A finished job's detail no longer refetches on every finished job in the cluster; the page's own Requeue, Delete and Cancel refresh it straight away.
+- **Saga detail** no longer reads handler output or progress for the up to 200 invocations it shows, and returns only the last five lifecycle events of each.
+- **Worker detail** pages previous/next with no total, and no longer looks up each row's job type inside the query (§5.2).
+- **Counters** filters out time-bucket keys in SQL and reads only the buckets inside the chart's window, instead of loading the whole statistic and counter tables. It refreshes every 30 seconds rather than on every finished job.
+- **Trace job graph** shows a trace's first 500 jobs and says when there are more. A 100,000-job batch used to load every job into the graph and freeze the browser.
+- **Client session timeline** shows the most recent 500 client events and 500 server calls, and says when a session is longer.
+- **List endpoints clamp paging.** Every dashboard list now caps `pageSize` at 500 and treats a negative `page` as 0. `?pageSize=1000000` used to return the whole table, and a negative page returned a 500.
+
+### Upgrading
+
+**API changes.** Nothing below fails at compile time unless noted, so check code that reads these:
+
+- **`IJobQueryService.GetJobDetailById` no longer returns handler output or reported progress.** `UnifiedJobDetailModel.Logs` now holds only the lifecycle events (Created, Processing, Completed, Failed, Requeued, …). Both now come from the new **`IJobLogQueryService`**, registered by `AddWarp`:
+  - **`GetHandlerLogs(jobId, request)`** returns a `PagedSlice<JobLogModel>`: the page's lines newest first (`Items`), whether an older page exists (`HasMore`), and the `Page` and `PageSize` actually used. It clamps `PageSize` to 1..500 and treats a negative `Page` as 0. Over HTTP: `GET {prefix}/api/jobs/{jobId}/logs?page=&pageSize=`.
+  - **`GetProgress(jobId)`** returns the current value of each progress bar as `JobProgressModel` (`Name`, `Value`, `UpdatedAt`), ordered by name, with `""` for the unnamed bar. The full history of values is no longer exposed. Over HTTP: `GET {prefix}/api/jobs/{jobId}/progress`.
+- **`UnifiedJobDetailModel.Continuations` and `SpawnedJobs` hold at most 50** (`UnifiedJobDetailModel.MaxRelatedJobs`); the new `ContinuationCount` and `SpawnedJobCount` carry the totals. `JobGroupDetailModel` (message/batch detail) gets the same cap and a `ContinuationCount`, and its `Logs` drop handler output and progress.
+- **`IDashboardStatsService.GetWorkerJobLogs` returns `PagedSlice<WorkerJobLogModel>`** instead of `PagedList<WorkerJobLogModel>`, with no total count. This one **is** a compile-time break for code that calls it or implements the interface.
+- **`IJobQueryService.GetTraceGraph(traceId)`** is new: the dashboard's capped job graph (`TraceGraphModel`, 500 jobs plus `IsTruncated`). It has a default implementation, so existing implementations of `IJobQueryService` still compile. **`GetTraceTree` is unchanged and still returns every job**, so code that checks a whole trace has finished keeps working. Over HTTP, `GET {prefix}/api/trace/{traceId}` now returns `{ jobs, isTruncated }` instead of a bare array.
+- **`ClientSessionModel`** holds the most recent 500 entries per source and gains `IsTruncated`.
+- **`ISagaQueryService.GetSagaActivity`** returns only lifecycle events, at most five per invocation.
+- **`DashboardBroadcaster<TContext>`** has a new constructor taking a `DashboardConnectionCounter`; the old one is kept and always attaches stats. `WarpDashboardHub` now takes the counter in its constructor, registered by `AddDashboardPush()`.
+
 ## 7.2.0
 
 *2026-10-14*

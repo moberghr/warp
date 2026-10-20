@@ -30,6 +30,25 @@ public interface IJobQueryService
 
     Task<List<TraceJobModel>> GetTraceTree(Guid traceId);
 
+    /// <summary>
+    /// The trace's earliest jobs for the dashboard's job graph, capped at <see cref="TraceGraphModel.MaxJobs"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="GetTraceTree"/> stays uncapped: callers use it to check that every job in a trace has
+    /// finished. This default reads through it and trims, so an existing implementation of this interface
+    /// keeps compiling; the built-in one overrides it to cap in SQL.
+    /// </remarks>
+    async Task<TraceGraphModel> GetTraceGraph(Guid traceId)
+    {
+        var jobs = await GetTraceTree(traceId);
+
+        return new TraceGraphModel
+        {
+            Jobs = [.. jobs.Take(TraceGraphModel.MaxJobs)],
+            IsTruncated = jobs.Count > TraceGraphModel.MaxJobs,
+        };
+    }
+
     Task<UnifiedJobDetailModel?> GetJobDetailById(Guid id);
 
     Task<int> CountProcessingJobs();
@@ -239,6 +258,38 @@ public class JobQueryService<TContext> : IJobQueryService
             .ToListAsync();
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Reads one row past the cap to learn whether the trace is truncated, served by the TraceId index.
+    /// </remarks>
+    public async Task<TraceGraphModel> GetTraceGraph(Guid traceId)
+    {
+        var jobs = await _context.Set<Job>()
+            .Where(x => x.TraceId == traceId)
+            .OrderBy(x => x.CreateTime)
+            .ThenBy(x => x.Id)
+            .Take(TraceGraphModel.MaxJobs + 1)
+            .Select(x =>
+                new TraceJobModel
+                {
+                    Id = x.Id,
+                    Kind = x.Kind,
+                    Type = x.Type,
+                    HandlerType = x.HandlerType,
+                    CurrentState = x.CurrentState,
+                    ParentJobId = x.ParentJobId,
+                    SpawnedByJobId = x.SpawnedByJobId,
+                    CreateTime = x.CreateTime,
+                })
+            .ToListAsync();
+
+        return new TraceGraphModel
+        {
+            Jobs = [.. jobs.Take(TraceGraphModel.MaxJobs)],
+            IsTruncated = jobs.Count > TraceGraphModel.MaxJobs,
+        };
+    }
+
     public async Task<UnifiedJobDetailModel?> GetJobDetailById(Guid id)
     {
         var job = await _context.Set<Job>()
@@ -266,9 +317,12 @@ public class JobQueryService<TContext> : IJobQueryService
             return null;
         }
 
-        // Logs
+        // Lifecycle rows only. Handler output and reported progress grow with the job (a chatty
+        // handler writes tens of thousands of rows) and are read through IJobLogQueryService.
         job.Logs = await _context.Set<JobLog>()
             .Where(x => x.JobId == id)
+            .Where(x => x.EventType != JobLogEventTypes.Log)
+            .Where(x => x.EventType != JobLogEventTypes.Progress)
             .OrderBy(x => x.Timestamp)
             .Select(x => new JobLogModel
             {
@@ -280,8 +334,6 @@ public class JobQueryService<TContext> : IJobQueryService
                 Exception = x.Exception,
                 DurationMs = x.DurationMs,
                 WorkerId = x.WorkerId,
-                Name = x.Name,
-                Value = x.Value,
             })
             .ToListAsync();
 
@@ -369,8 +421,12 @@ public class JobQueryService<TContext> : IJobQueryService
             continuationsQuery = continuationsQuery.Where(x => x.Kind != JobKind.Job);
         }
 
+        // Both lists are capped: a fan-out handler can spawn tens of thousands of jobs, and the
+        // detail is refetched while the dashboard is open. The counts say how many exist.
+        job.ContinuationCount = await continuationsQuery.CountAsync();
         job.Continuations = await continuationsQuery
             .OrderBy(x => x.CreateTime)
+            .Take(UnifiedJobDetailModel.MaxRelatedJobs)
             .Select(x => new ContinuationInfo
             {
                 Id = x.Id,
@@ -382,9 +438,12 @@ public class JobQueryService<TContext> : IJobQueryService
             .ToListAsync();
 
         // Spawned jobs (created by this job's handler)
-        job.SpawnedJobs = await _context.Set<Job>()
-            .Where(x => x.SpawnedByJobId == id)
+        var spawnedQuery = _context.Set<Job>()
+            .Where(x => x.SpawnedByJobId == id);
+        job.SpawnedJobCount = await spawnedQuery.CountAsync();
+        job.SpawnedJobs = await spawnedQuery
             .OrderBy(x => x.CreateTime)
+            .Take(UnifiedJobDetailModel.MaxRelatedJobs)
             .Select(x => new ContinuationInfo
             {
                 Id = x.Id,

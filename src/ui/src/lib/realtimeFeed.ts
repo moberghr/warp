@@ -1,6 +1,7 @@
 import { useDashboardStore } from '@/stores/dashboard';
 import { useRealtimeStore, type RealtimeStatus } from '@/stores/realtime';
 import { isDemoMode } from '@/lib/demoMode';
+import { isTabHidden } from '@/lib/visibility';
 
 /**
  * Realtime data feed for the dashboard's per-second chart.
@@ -44,8 +45,10 @@ function applyMode(status: RealtimeStatus) {
     return;
   }
 
+  // Without push this polls /status (about twenty queries) every second, so a hidden tab skips it.
   if (pollerId === null) {
     pollerId = setInterval(() => {
+      if (isTabHidden()) return;
       void useDashboardStore.getState().fetchStats();
     }, POLL_INTERVAL_MS);
   }

@@ -3,6 +3,7 @@ import { HubConnection, HubConnectionBuilder, HubConnectionState, LogLevel } fro
 import { getHubUrl, type RealtimeEvent } from '@/api/realtime';
 import { emit } from '@/lib/realtimeBus';
 import { useDashboardStore } from '@/stores/dashboard';
+import { isTabHidden, onTabVisible } from '@/lib/visibility';
 import type { DashboardStatistics } from '@/types';
 
 export type RealtimeStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'disabled';
@@ -16,6 +17,59 @@ interface RealtimeStore {
 }
 
 let bootInflight: Promise<void> | null = null;
+
+// An event can arrive without a stats snapshot: the server skips it when it has no dashboard client
+// of its own (the event then reached us through a SignalR backplane), or when fetching it failed.
+// The 1 Hz /status poll is off while push is connected, so without this the navbar and dashboard
+// counts would freeze. At most one fetch per second, with a trailing one so the last event of a
+// burst is never dropped; a hidden tab waits and fetches once when shown.
+const STATS_FALLBACK_MIN_MS = 1000;
+let lastStatsFallbackAt = Number.NEGATIVE_INFINITY;
+let statsFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+let statsFallbackMissedWhileHidden = false;
+
+function fetchStatsNow() {
+  if (isTabHidden()) {
+    statsFallbackMissedWhileHidden = true;
+
+    return;
+  }
+
+  lastStatsFallbackAt = Date.now();
+  void useDashboardStore.getState().fetchStats();
+}
+
+function refreshStatsWithoutSnapshot() {
+  if (statsFallbackTimer !== null) return;
+
+  const wait = lastStatsFallbackAt + STATS_FALLBACK_MIN_MS - Date.now();
+  if (wait <= 0) {
+    fetchStatsNow();
+
+    return;
+  }
+
+  statsFallbackTimer = setTimeout(() => {
+    statsFallbackTimer = null;
+    fetchStatsNow();
+  }, wait);
+}
+
+if (typeof document !== 'undefined') {
+  onTabVisible(() => {
+    if (!statsFallbackMissedWhileHidden) return;
+    statsFallbackMissedWhileHidden = false;
+    refreshStatsWithoutSnapshot();
+  });
+}
+
+/** Test hook: forgets the fallback's throttle state between tests. */
+export function resetStatsFallbackForTests() {
+  if (statsFallbackTimer !== null) clearTimeout(statsFallbackTimer);
+  statsFallbackTimer = null;
+  lastStatsFallbackAt = Number.NEGATIVE_INFINITY;
+  statsFallbackMissedWhileHidden = false;
+}
 
 function bridgeEvent(connection: HubConnection, event: RealtimeEvent) {
   // Each HubConnection is a fresh object — bind unconditionally. A module-level
@@ -33,6 +87,8 @@ function bridgeEvent(connection: HubConnection, event: RealtimeEvent) {
   connection.on(event, (payload?: DashboardStatistics) => {
     if (payload && typeof payload === 'object' && 'totalSucceeded' in payload) {
       useDashboardStore.setState({ stats: payload, error: null });
+    } else {
+      refreshStatsWithoutSnapshot();
     }
     useRealtimeStore.setState({ lastEventAt: Date.now() });
     emit(event);

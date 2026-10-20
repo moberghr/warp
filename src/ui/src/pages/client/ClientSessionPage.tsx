@@ -37,6 +37,11 @@ export default function ClientSessionPage() {
           {data.application && <> · {data.application}</>}
           {' · '}client events and the server calls they triggered, in order.
         </p>
+        {data.isTruncated && (
+          <p className="text-sm text-muted-foreground mt-1">
+            A long session: showing its most recent 500 client events and 500 server calls.
+          </p>
+        )}
       </div>
 
       <Card>

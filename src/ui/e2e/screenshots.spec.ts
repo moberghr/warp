@@ -19,6 +19,8 @@ const pages = [
   { name: '07-recurring', path: '/recurring' },
   { name: '08-applications', path: '/applications' },
   { name: '09-job-detail-failed', path: `/detail/${DEMO_IDS.failedJob}` },
+  // A running job: paged, newest-first handler output that tails live, and reported progress bars.
+  { name: '30-job-detail-running', path: `/detail/${DEMO_IDS.processingJob}` },
   { name: '16-job-detail-retry-extension', path: `/detail/${DEMO_IDS.failedJob}` },
   { name: '10-batch-detail', path: `/detail/${DEMO_IDS.batch1}` },
   { name: '22-message-detail', path: `/detail/${DEMO_IDS.message1}` },

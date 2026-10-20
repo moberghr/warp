@@ -99,6 +99,11 @@ public class DeploymentShapeTests
             {
                 "/warp/api/addons",
                 "/warp/api/services",
+
+                // Job output, progress and the trace graph read through services AddWarp registers.
+                $"/warp/api/jobs/{Guid.NewGuid()}/logs?page=0&pageSize=10",
+                $"/warp/api/jobs/{Guid.NewGuid()}/progress",
+                $"/warp/api/trace/{Guid.NewGuid()}",
             })
             {
                 var response = await client.GetAsync(path, CancellationToken.None);

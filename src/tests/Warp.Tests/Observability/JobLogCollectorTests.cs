@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core.Logging;
 
@@ -21,6 +22,39 @@ public class JobLogCollectorTests
 
         // Second drain should be empty
         collector.Drain().Count.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public void Add_WithinOneClockTick_StampsStrictlyIncreasingMicroseconds()
+    {
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 10, 19, 12, 0, 0, TimeSpan.Zero));
+        var collector = new JobLogCollector { JobId = Guid.NewGuid(), TimeProvider = clock };
+        collector.Add("Information", "first");
+        collector.Add("Information", "second");
+        collector.Add("Information", "third");
+
+        var entries = collector.Drain();
+
+        entries.Select(x => x.Timestamp).ShouldBe(
+        [
+            clock.GetUtcNow().UtcDateTime,
+            clock.GetUtcNow().UtcDateTime.AddMicroseconds(1),
+            clock.GetUtcNow().UtcDateTime.AddMicroseconds(2),
+        ]);
+    }
+
+    [TimedFact]
+    public void Add_ClockAheadOfLastStamp_UsesTheClock()
+    {
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 10, 19, 12, 0, 0, TimeSpan.Zero));
+        var collector = new JobLogCollector { JobId = Guid.NewGuid(), TimeProvider = clock };
+        collector.Add("Information", "first");
+        clock.Advance(TimeSpan.FromSeconds(1));
+        collector.Add("Information", "second");
+
+        var entries = collector.Drain();
+
+        entries[1].Timestamp.ShouldBe(clock.GetUtcNow().UtcDateTime);
     }
 
     [TimedFact]

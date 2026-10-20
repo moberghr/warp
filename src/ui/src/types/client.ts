@@ -96,5 +96,8 @@ export interface ClientSessionEntry {
 export interface ClientSession {
   sessionId: string;
   application: string | null;
+  /** The most recent 500 client events and 500 server calls, merged in time order. */
   entries: ClientSessionEntry[];
+  /** Either source had older entries than the timeline shows. */
+  isTruncated: boolean;
 }

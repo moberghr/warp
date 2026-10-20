@@ -148,7 +148,7 @@ export default function SagaDetailPage() {
                   </div>
                   {entry.logs.length > 0 && (
                     <div className="mt-1 text-xs text-muted-foreground space-y-0.5">
-                      {entry.logs.slice(-5).map(log => (
+                      {entry.logs.map(log => (
                         <div key={log.id}>
                           <span className="inline-block w-16 text-xs">{log.eventType}</span>
                           <span>{log.message}</span>

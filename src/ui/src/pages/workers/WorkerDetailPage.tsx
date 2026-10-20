@@ -8,7 +8,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import { Badge } from '@/components/ui/badge';
 import { shortId, shortType } from '@/utils/format';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
-import type { WorkerDetailModel, WorkerJobLogModel, PagedList } from '@/types';
+import type { WorkerDetailModel, WorkerJobLogModel, PagedSlice } from '@/types';
 import * as api from '@/api';
 
 const eventColors: Record<string, string> = {
@@ -29,7 +29,7 @@ const levelColors: Record<string, string> = {
 export default function WorkerDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [worker, setWorker] = useState<WorkerDetailModel | null>(null);
-  const [data, setData] = useState<PagedList<WorkerJobLogModel> | null>(null);
+  const [data, setData] = useState<PagedSlice<WorkerJobLogModel> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = usePersistedPageSize();
@@ -110,7 +110,6 @@ export default function WorkerDetailPage() {
 
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold">Job Activity</h2>
-        <span className="text-sm text-muted-foreground">{data.totalCount} log entries</span>
       </div>
 
       <div className="rounded-md border">
@@ -162,7 +161,8 @@ export default function WorkerDetailPage() {
         </Table>
       </div>
 
-      <Pagination page={page} pageCount={data.pageCount} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} />
+      {/* No total: the server pages previous/next so it never counts the worker's whole history. */}
+      <Pagination page={page} pageCount={0} hasNext={data.hasMore} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} />
     </div>
   );
 }

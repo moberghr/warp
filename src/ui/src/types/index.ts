@@ -74,6 +74,27 @@ export interface JobLogModel {
   value: number | null;
 }
 
+/**
+ * One page of a list that pages previous/next instead of by count (handler output, worker logs).
+ * No total: counting a list that grows without bound costs a scan on every refresh.
+ */
+export interface PagedSlice<T> {
+  items: T[];
+  hasMore: boolean;
+  /** The page actually read, after the server clamped it. */
+  page: number;
+  /** The page size actually used, after the server clamped it. */
+  pageSize: number;
+}
+
+/** Current value of one bar a handler reported via IJobContext.ReportProgress. */
+export interface JobProgressModel {
+  /** Empty for the unnamed ReportProgress(int) bar. */
+  name: string;
+  value: number;
+  updatedAt: string;
+}
+
 
 export interface JobGroupModel {
   id: string;
@@ -103,7 +124,10 @@ export interface JobGroupDetailModel extends JobGroupModel {
   parentJobKind: number | null;
   traceId: string | null;
   spawnedJobsCount: number;
+  /** First 50 continuation batches; continuationCount has the total. */
   continuations: ContinuationInfo[];
+  continuationCount: number;
+  /** Lifecycle events only; handler output and progress come from their own endpoints. */
   logs: JobLogModel[];
 }
 
@@ -127,8 +151,12 @@ export interface UnifiedJobDetailModel {
   traceId: string | null;
   parentJob: ContinuationInfo | null;
   spawnedByJob: ContinuationInfo | null;
+  /** First UnifiedJobDetailModel.MaxRelatedJobs (50) continuations; continuationCount has the total. */
   continuations: ContinuationInfo[];
+  continuationCount: number;
+  /** First 50 spawned jobs; spawnedJobCount has the total. */
   spawnedJobs: ContinuationInfo[];
+  spawnedJobCount: number;
   origin: JobOriginModel | null;
   metadata: Record<string, string> | null;
   logs: JobLogModel[];
@@ -151,6 +179,12 @@ export interface TraceJobModel {
   parentJobId: string | null;
   spawnedByJobId: string | null;
   createTime: string;
+}
+
+/** The trace's earliest jobs for the job graph, capped at 500; `isTruncated` says the trace has more. */
+export interface TraceGraph {
+  jobs: TraceJobModel[];
+  isTruncated: boolean;
 }
 
 export interface RecurringJobModel {

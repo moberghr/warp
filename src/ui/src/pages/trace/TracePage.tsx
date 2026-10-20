@@ -20,7 +20,7 @@ import { shortType, shortId } from '@/utils/format';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { Briefcase, Mail, Layers } from 'lucide-react';
 import type { State } from '@/types';
-import type { TraceJobModel } from '@/types';
+import type { TraceJobModel, TraceGraph } from '@/types';
 import * as api from '@/api';
 import TraceWaterfall from './TraceWaterfall';
 
@@ -332,7 +332,8 @@ function buildGraph(jobs: TraceJobModel[], highlightId?: string): { nodes: Node[
 
 export default function TracePage() {
   const { traceId: rawTraceId, highlightId } = useParams<{ traceId: string; highlightId?: string }>();
-  const [jobs, setJobs] = useState<TraceJobModel[] | null>(null);
+  const [graph, setGraph] = useState<TraceGraph | null>(null);
+  const jobs = graph?.jobs ?? null;
   const [error, setError] = useState<string | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
 
@@ -346,7 +347,7 @@ export default function TracePage() {
 
   useEffect(() => {
     if (traceId) {
-      api.getTraceTree(traceId).then(setJobs).catch(() => setError('Unable to load trace'));
+      api.getTraceTree(traceId).then(setGraph).catch(() => setError('Unable to load trace'));
     }
   }, [traceId]);
 
@@ -404,7 +405,9 @@ export default function TracePage() {
     <div>
       <div className="flex items-center gap-4 mb-4">
         <h1 className="text-2xl font-bold">Trace <span className="font-mono text-lg">{traceIdDisplay}</span></h1>
-        <span className="text-sm text-muted-foreground">{jobs.length} jobs</span>
+        <span className="text-sm text-muted-foreground">
+          {graph?.isTruncated ? `First ${jobs.length} jobs shown; the trace has more` : `${jobs.length} jobs`}
+        </span>
       </div>
       {traceId && <TraceWaterfall traceId={traceId} />}
       <h2 className="text-sm font-semibold text-muted-foreground uppercase mb-2">Job graph</h2>

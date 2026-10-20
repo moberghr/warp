@@ -38,6 +38,11 @@ public sealed class DashboardBroadcaster<TContext> : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<DashboardBroadcaster<TContext>> _logger;
 
+    /// <summary>
+    /// This process's connected dashboard clients; null when constructed without one (always fetch stats).
+    /// </summary>
+    private readonly DashboardConnectionCounter? _connections;
+
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly Lock _wakeGate = new();
 
@@ -47,6 +52,15 @@ public sealed class DashboardBroadcaster<TContext> : BackgroundService
     private int _messageEnqueuedPending;
     private bool _disposed;
 
+    /// <summary>
+    /// When the last broadcast went out, for <see cref="WarpDashboardPushConfiguration.MinBroadcastInterval"/>.
+    /// </summary>
+    private DateTimeOffset _lastBroadcastAt = DateTimeOffset.MinValue;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DashboardBroadcaster{TContext}"/> class that attaches
+    /// a stats snapshot to every broadcast, connected clients or not.
+    /// </summary>
     public DashboardBroadcaster(
         ServerTaskSignals<TContext> signals,
         IHubContext<WarpDashboardHub> hub,
@@ -54,6 +68,22 @@ public sealed class DashboardBroadcaster<TContext> : BackgroundService
         TimeProvider time,
         IServiceScopeFactory scopeFactory,
         ILogger<DashboardBroadcaster<TContext>> logger)
+        : this(signals, hub, configuration, time, scopeFactory, logger, connections: null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DashboardBroadcaster{TContext}"/> class that skips the
+    /// stats snapshot while <paramref name="connections"/> reports no connected clients.
+    /// </summary>
+    public DashboardBroadcaster(
+        ServerTaskSignals<TContext> signals,
+        IHubContext<WarpDashboardHub> hub,
+        WarpDashboardPushConfiguration configuration,
+        TimeProvider time,
+        IServiceScopeFactory scopeFactory,
+        ILogger<DashboardBroadcaster<TContext>> logger,
+        DashboardConnectionCounter? connections)
     {
         _signals = signals;
         _hub = hub;
@@ -61,6 +91,7 @@ public sealed class DashboardBroadcaster<TContext> : BackgroundService
         _time = time;
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _connections = connections;
     }
 
     public override Task StartAsync(CancellationToken cancellationToken)
@@ -95,6 +126,19 @@ public sealed class DashboardBroadcaster<TContext> : BackgroundService
                 if (window > TimeSpan.Zero)
                 {
                     await Task.Delay(window, _time, stoppingToken);
+                }
+
+                // Hold back until the floor has passed since the last broadcast; signals arriving
+                // meanwhile are counted and collapse into this one. Measured as elapsed time, so the
+                // first broadcast (no previous one) never waits.
+                var floor = _configuration.MinBroadcastInterval;
+                if (floor > TimeSpan.Zero && _lastBroadcastAt != DateTimeOffset.MinValue)
+                {
+                    var wait = floor - (_time.GetUtcNow() - _lastBroadcastAt);
+                    if (wait > TimeSpan.Zero)
+                    {
+                        await Task.Delay(wait, _time, stoppingToken);
+                    }
                 }
 
                 await DrainAndBroadcastAsync(stoppingToken);
@@ -138,19 +182,35 @@ public sealed class DashboardBroadcaster<TContext> : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Sends the pending events, all carrying one stats snapshot taken for this drain.
+    /// </summary>
     private async Task DrainAndBroadcastAsync(CancellationToken ct)
     {
         var jobRepeats = RepeatsFor(Interlocked.Exchange(ref _jobFinalizedPending, 0));
-        for (var i = 0; i < jobRepeats; i++)
+        var messageRepeats = RepeatsFor(Interlocked.Exchange(ref _messageEnqueuedPending, 0));
+        if (jobRepeats + messageRepeats == 0)
         {
-            await BroadcastAsync(JobFinalizedEvent, ct);
+            return;
         }
 
-        var messageRepeats = RepeatsFor(Interlocked.Exchange(ref _messageEnqueuedPending, 0));
+        // One snapshot per drain, and none while nobody here is connected: the stats are about
+        // twenty queries, and an unwatched process ran them on every broadcast. The event still
+        // goes out without it, so clients reached some other way (a backplane) fall back to
+        // their own /status fetch.
+        var payload = _connections is { Count: 0 } ? null : await TryFetchStatsAsync(ct);
+
+        for (var i = 0; i < jobRepeats; i++)
+        {
+            await BroadcastAsync(JobFinalizedEvent, payload, ct);
+        }
+
         for (var i = 0; i < messageRepeats; i++)
         {
-            await BroadcastAsync(MessageEnqueuedEvent, ct);
+            await BroadcastAsync(MessageEnqueuedEvent, payload, ct);
         }
+
+        _lastBroadcastAt = _time.GetUtcNow();
     }
 
     private int RepeatsFor(int pending)
@@ -163,15 +223,16 @@ public sealed class DashboardBroadcaster<TContext> : BackgroundService
         return _configuration.CoalesceWindow > TimeSpan.Zero ? 1 : pending;
     }
 
-    private async Task BroadcastAsync(string method, CancellationToken ct)
+    /// <summary>
+    /// Sends one event to every connected client, with the drain's stats snapshot when there is one.
+    /// </summary>
+    /// <remarks>
+    /// Every connected client receives the same snapshot, which saves each of them a GET /api/status.
+    /// The snapshot is best-effort: without one the event still goes out and clients fall through to
+    /// their REST refetch path.
+    /// </remarks>
+    private async Task BroadcastAsync(string method, DashboardStatistics? payload, CancellationToken ct)
     {
-        // Fetch the current aggregate snapshot once per broadcast — every connected
-        // client receives the same DTO, eliminating the per-client GET /api/status
-        // refetch that would otherwise multiply with the connected-client count.
-        // Stats fetch is best-effort: on failure we still broadcast the event so
-        // clients fall through to their REST refetch path.
-        var payload = await TryFetchStatsAsync(ct);
-
         try
         {
             if (payload is null)

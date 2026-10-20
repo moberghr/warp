@@ -33,15 +33,22 @@ Click any job to see its full detail in a two-column layout:
 **Left column:**
 - **Payload** — The serialized job data
 - **Details** — Type, handler, timestamps, retry count
-- **Flow** — Trace ID, spawned-by link, message link, continuation link
+- **Flow** — Trace ID, spawned-by link, message link, continuations and spawned jobs (the first 50 of each, with the total)
 - **Trace** — All jobs sharing the same TraceId (click to navigate)
 - **Sibling Jobs** — Other jobs from the same message
 - **Child Jobs** — Continuation jobs waiting on this one
 
 **Right column:**
+- **Reported Progress** — One bar per name the handler passed to `IJobContext.ReportProgress`, showing its latest value. Refreshes every 2 seconds until the job finishes
 - **History** — Colored state cards (Created → Processing → Completed/Failed) with timestamps and durations
-- **Handler Output** — Pipeline behavior logs and ILogger output captured during execution
+- **Handler Output** — Pipeline behavior logs and ILogger output captured during execution, newest first, with previous/next paging (100 lines per page by default). Until the job finishes, the first page refreshes every 2 seconds
 - **Exception** — Full stack trace on failed jobs
+
+### Running Job
+
+While a job runs, the newest handler output sits at the top and the first page refreshes every 2 seconds, so you can watch it work. A chatty job pages back through older lines with the previous and next buttons; those pages hold still while you read them. Background tabs pause until you return.
+
+<Screenshot light="/img/screenshots/30-job-detail-running.png" dark="/img/screenshots/30-job-detail-running-dark.png" alt="Running Job Detail" />
 
 ### Completed Job with Trace
 

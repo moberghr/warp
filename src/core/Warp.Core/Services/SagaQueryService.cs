@@ -93,6 +93,11 @@ public class SagaQueryService<TContext> : ISagaQueryService
         // recent activity, not the full lifetime history.
         const int MaxActivityRows = 200;
 
+        // The page shows the last few lifecycle events of each invocation. Handler output and progress
+        // grow with the handler (tens of thousands of rows for a chatty one) and are read on the job's
+        // own detail page, so they are never loaded here.
+        const int MaxLogsPerInvocation = 5;
+
         var totalInvocations = await _context.Set<SagaJobLink>()
             .AsNoTracking()
             .LongCountAsync(l => l.SagaId == id);
@@ -131,6 +136,8 @@ public class SagaQueryService<TContext> : ISagaQueryService
         var logs = await _context.Set<JobLog>()
             .AsNoTracking()
             .Where(l => jobIds.Contains(l.JobId))
+            .Where(l => l.EventType != JobLogEventTypes.Log)
+            .Where(l => l.EventType != JobLogEventTypes.Progress)
             .OrderBy(l => l.Timestamp)
             .Select(l => new
             {
@@ -148,7 +155,9 @@ public class SagaQueryService<TContext> : ISagaQueryService
             })
             .ToListAsync();
 
-        var logsByJob = logs.GroupBy(x => x.JobId).ToDictionary(g => g.Key, g => g.Select(x => x.Log).ToList());
+        var logsByJob = logs
+            .GroupBy(x => x.JobId)
+            .ToDictionary(x => x.Key, x => x.Select(y => y.Log).TakeLast(MaxLogsPerInvocation).ToList());
         var jobsById = jobs.ToDictionary(j => j.Id);
 
         var entries = jobIds
