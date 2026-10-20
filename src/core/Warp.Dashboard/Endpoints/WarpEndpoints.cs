@@ -34,6 +34,7 @@ public static class WarpEndpoints
         // host's process-wide ConfigureHttpJsonOptions — see WarpDashboardJson. Registered first so it
         // wraps every route under the prefix, extension sub-groups included.
         apiGroup.AddEndpointFilter(WarpDashboardJson.NormalizeAsync);
+        apiGroup.AddEndpointFilter(DashboardPaging.ClampAsync);
 
         apiGroup.MapGet("status", async ([FromServices] IDashboardStatsService statsService) => await statsService.GetWarpStatus());
 
@@ -74,7 +75,7 @@ public static class WarpEndpoints
 
         apiGroup.MapGet("jobs/{jobId}/trace", async ([FromServices] IJobQueryService jobQueryService, Guid jobId, [AsParameters] BaseListRequest request) => await jobQueryService.GetTraceJobs(jobId, request));
 
-        apiGroup.MapGet("trace/{traceId}", async ([FromServices] IJobQueryService jobQueryService, Guid traceId) => await jobQueryService.GetTraceTree(traceId));
+        apiGroup.MapGet("trace/{traceId}", async ([FromServices] IJobQueryService jobQueryService, Guid traceId) => await jobQueryService.GetTraceGraph(traceId));
 
         // Unified trace view (§8.28): everything for a trace id — client request + endpoint call + jobs +
         // outbound adapter calls — unioned from existing rows. Superset of the job-only GetTraceTree above.
@@ -90,6 +91,10 @@ public static class WarpEndpoints
             var result = await jobQueryService.GetJobDetailById(id);
             return result is null ? Results.NotFound() : Results.Ok(result);
         });
+
+        apiGroup.MapGet("jobs/{jobId}/progress", async ([FromServices] IJobLogQueryService jobLogQueryService, Guid jobId) => await jobLogQueryService.GetProgress(jobId));
+
+        apiGroup.MapGet("jobs/{jobId}/logs", async ([FromServices] IJobLogQueryService jobLogQueryService, Guid jobId, [AsParameters] BaseListRequest request) => await jobLogQueryService.GetHandlerLogs(jobId, request));
 
         apiGroup.MapPost("jobs/{jobId}/requeue", async ([FromServices] IJobCommandService jobCommandService, Guid jobId) => await jobCommandService.RequeueJob(jobId));
 
@@ -486,7 +491,7 @@ public static class WarpEndpoints
                 return Results.NotFound();
             }
 
-            var request = new BaseListRequest { Page = page, PageSize = pageSize > 0 ? pageSize : 20 };
+            var request = DashboardPaging.Clamp(new BaseListRequest { Page = page, PageSize = pageSize > 0 ? pageSize : 20 });
             var result = await svc.GetSagas(request, type, key);
 
             return Results.Ok(result);

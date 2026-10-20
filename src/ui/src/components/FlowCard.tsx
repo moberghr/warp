@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { StateBadge } from '@/components/StateBadge';
-import { shortId, shortType } from '@/utils/format';
+import { DASHBOARD_LOCALE, shortId, shortType } from '@/utils/format';
 import type { ContinuationInfo } from '@/types';
 
 interface FlowCardProps {
@@ -11,7 +11,11 @@ interface FlowCardProps {
   parentJob?: ContinuationInfo | null;
   spawnedByJob?: ContinuationInfo | null;
   continuations: ContinuationInfo[];
+  /** Total continuations; the list holds at most the first 50. */
+  continuationCount: number;
   spawnedJobs: ContinuationInfo[];
+  /** Total spawned jobs; the list holds at most the first 50. */
+  spawnedJobCount: number;
 }
 
 function kindLabel(kind: number | null | undefined) {
@@ -36,6 +40,19 @@ function FlowRow({ item }: { item: ContinuationInfo }) {
   );
 }
 
+// Shown under a list the server capped, so a fan-out of thousands doesn't read as complete.
+function TruncationRow({ shown, total }: { shown: number; total: number }) {
+  if (total <= shown) return null;
+
+  return (
+    <TableRow>
+      <TableCell colSpan={5} className="text-xs text-muted-foreground py-1.5">
+        Showing the first {shown} of {total.toLocaleString(DASHBOARD_LOCALE)}.
+      </TableCell>
+    </TableRow>
+  );
+}
+
 function GroupHeader({ label, count }: { label: string; count: number }) {
   return (
     <TableRow className="bg-muted/50">
@@ -46,7 +63,7 @@ function GroupHeader({ label, count }: { label: string; count: number }) {
   );
 }
 
-export function FlowCard({ jobId, traceId, parentJob, spawnedByJob, continuations, spawnedJobs }: FlowCardProps) {
+export function FlowCard({ jobId, traceId, parentJob, spawnedByJob, continuations, continuationCount, spawnedJobs, spawnedJobCount }: FlowCardProps) {
   const hasTable = parentJob || spawnedByJob || continuations.length > 0 || spawnedJobs.length > 0;
   const hasContent = traceId || hasTable;
   if (!hasContent) return null;
@@ -87,14 +104,16 @@ export function FlowCard({ jobId, traceId, parentJob, spawnedByJob, continuation
               )}
               {continuations.length > 0 && (
                 <>
-                  <GroupHeader label="Continuations" count={continuations.length} />
+                  <GroupHeader label="Continuations" count={continuationCount} />
                   {continuations.map(c => <FlowRow key={c.id} item={c} />)}
+                  <TruncationRow shown={continuations.length} total={continuationCount} />
                 </>
               )}
               {spawnedJobs.length > 0 && (
                 <>
-                  <GroupHeader label="Spawned jobs" count={spawnedJobs.length} />
+                  <GroupHeader label="Spawned jobs" count={spawnedJobCount} />
                   {spawnedJobs.map(c => <FlowRow key={c.id} item={c} />)}
+                  <TruncationRow shown={spawnedJobs.length} total={spawnedJobCount} />
                 </>
               )}
             </TableBody>

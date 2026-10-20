@@ -1212,7 +1212,9 @@ export const jobDetailFailed: UnifiedJobDetailModel = {
   parentJob: null,
   spawnedByJob: null,
   continuations: [],
+  continuationCount: 0,
   spawnedJobs: [],
+  spawnedJobCount: 0,
   origin: null,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata: { correlationId: 'order-1042', source: 'OrderService', MaxRetries: 3, RetriedTimes: 3, RetryDelays: [15, 60, 300] } as any,
@@ -1279,9 +1281,11 @@ export const jobDetailCompleted: UnifiedJobDetailModel = {
   continuations: [
     { id: IDS.trShipmentBatch, kind: 3, currentState: State.Completed, type: null, handlerType: null },
   ],
+  continuationCount: 1,
   spawnedJobs: [
     { id: IDS.trCalculateTax, kind: 1, currentState: State.Completed, type: 'Acme.Billing.CalculateTaxRequest', handlerType: 'Acme.Billing.CalculateTaxHandler' },
   ],
+  spawnedJobCount: 1,
   origin: { method: 'POST', routeTemplate: '/orders', user: 'alice', callId: '00000000-0000-0000-0000-0000000000aa', endpointId: 'UE9TVCAvb3JkZXJz' },
   metadata: { correlationId: 'order-2847', source: 'WebApp', priority: 'high' },
   logs: [
@@ -1321,7 +1325,9 @@ export const jobDetailProcessing: UnifiedJobDetailModel = {
   parentJob: null,
   spawnedByJob: null,
   continuations: [],
+  continuationCount: 0,
   spawnedJobs: [],
+  spawnedJobCount: 0,
   origin: null,
   metadata: { tenantId: 'acme-corp', priority: 'normal' },
   logs: [
@@ -1333,6 +1339,9 @@ export const jobDetailProcessing: UnifiedJobDetailModel = {
     makeProgress('log-p-d2', 95, 'download', 35, IDS.worker1),
     makeProgress('log-p-d3', 80, 'download', 72, IDS.worker1),
     makeProgress('log-p-d4', 60, 'download', 100, IDS.worker1),
+    // A chatty stretch so the Handler Output card has more than one page to show.
+    ...Array.from({ length: 300 }, (_, i) =>
+      makeLog(`log-p-s${i}`, 'Log', 105 - i * 0.15, `Streamed batch ${i + 1}/300 (140,000 rows)`, null, null, i % 50 === 49 ? 'Warning' : 'Information', IDS.worker1)),
     makeLog('log-p5', 'Log', 55, 'Aggregating by region...', null, null, 'Information', IDS.worker1),
     makeProgress('log-p-a1', 55, 'aggregate', 15, IDS.worker1),
     makeProgress('log-p-a2', 40, 'aggregate', 48, IDS.worker1),
@@ -1376,7 +1385,9 @@ export const batchDetailUnified: UnifiedJobDetailModel = {
   continuations: [
     { id: IDS.trPublishInvoice, kind: 1, currentState: State.Awaiting, type: 'Acme.Billing.PublishInvoiceRequest', handlerType: 'Acme.Billing.PublishInvoiceHandler' },
   ],
+  continuationCount: 1,
   spawnedJobs: [],
+  spawnedJobCount: 0,
   origin: null,
   metadata: null,
   logs: [
@@ -1459,7 +1470,9 @@ export const messageDetailUnified: UnifiedJobDetailModel = {
   parentJob: null,
   spawnedByJob: null,
   continuations: [],
+  continuationCount: 0,
   spawnedJobs: [],
+  spawnedJobCount: 0,
   origin: null,
   metadata: null,
   logs: [
@@ -1840,6 +1853,7 @@ export function getClientSessionDemo(sessionId: string) {
   return {
     sessionId,
     application: 'warp-demo-spa',
+    isTruncated: false,
     entries: [
       { kind: 'client', timestamp: iso(32000), traceId: null, eventId: 'e1', type: 4, name: 'page_view', level: null, message: null, value: null, url: '/checkout', method: null, route: null, statusCode: null, durationMs: null, outcome: null },
       { kind: 'client', timestamp: iso(30000), traceId: trace, eventId: 'e2', type: 5, name: 'POST', level: null, message: null, value: 240, url: '/api/checkout', method: null, route: null, statusCode: null, durationMs: null, outcome: null },

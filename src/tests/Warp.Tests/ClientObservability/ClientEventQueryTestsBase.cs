@@ -212,6 +212,65 @@ public abstract class ClientEventQueryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetSession_LongSession_KeepsMostRecentEntriesAndFlagsTruncation()
+    {
+        var ctx = _fixture.CreateContext();
+        var start = new DateTime(2026, 7, 26, 8, 0, 0, DateTimeKind.Utc);
+        for (var i = 0; i < ClientSessionModel.MaxEntriesPerSource + 1; i++)
+        {
+            var row = Row(ClientEventType.Log, "shop");
+            row.SessionId = "long";
+            row.Timestamp = start.AddSeconds(i);
+            ctx.Set<ClientEventLog>().Add(row);
+        }
+
+        await ctx.SaveChangesAsync(Ct);
+
+        var session = await Service().GetSession("long", Ct);
+
+        session.ShouldNotBeNull();
+        session!.IsTruncated.ShouldBeTrue();
+        session.Entries.Count.ShouldBe(ClientSessionModel.MaxEntriesPerSource);
+        session.Entries[0].Timestamp.ShouldBe(start.AddSeconds(1));
+        session.Entries[^1].Timestamp.ShouldBe(start.AddSeconds(ClientSessionModel.MaxEntriesPerSource));
+    }
+
+    [TimedFact]
+    public async Task GetSession_ManyServerCalls_KeepsMostRecentCallsAndFlagsTruncation()
+    {
+        var ctx = _fixture.CreateContext();
+        var start = new DateTime(2026, 7, 26, 8, 0, 0, DateTimeKind.Utc);
+        var opened = Row(ClientEventType.Event, "shop");
+        opened.SessionId = "busy";
+        opened.Timestamp = start;
+        ctx.Set<ClientEventLog>().Add(opened);
+        for (var i = 0; i < ClientSessionModel.MaxEntriesPerSource + 1; i++)
+        {
+            ctx.Set<EndpointCallLog>().Add(new EndpointCallLog
+            {
+                Method = "GET",
+                RouteTemplate = "/api/orders",
+                Operation = "GetOrders",
+                Timestamp = start.AddSeconds(i + 1),
+                Outcome = Warp.Core.Enums.AdapterCallOutcome.Success,
+                StatusCode = 200,
+                MachineName = "srv",
+                Session = "busy",
+            });
+        }
+
+        await ctx.SaveChangesAsync(Ct);
+
+        var session = await Service().GetSession("busy", Ct);
+
+        session.ShouldNotBeNull();
+        session!.IsTruncated.ShouldBeTrue();
+        var calls = session.Entries.Where(x => string.Equals(x.Kind, "endpoint", StringComparison.Ordinal)).ToList();
+        calls.Count.ShouldBe(ClientSessionModel.MaxEntriesPerSource);
+        calls[0].Timestamp.ShouldBe(start.AddSeconds(2));
+    }
+
+    [TimedFact]
     public async Task GetSession_UnknownSession_ReturnsNull()
     {
         (await Service().GetSession("nope", Ct)).ShouldBeNull();

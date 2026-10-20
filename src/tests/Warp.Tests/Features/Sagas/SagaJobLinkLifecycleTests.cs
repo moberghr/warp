@@ -217,6 +217,51 @@ public abstract class SagaJobLinkLifecycleTestsBase : IAsyncLifetime
         activity.IsTruncated.ShouldBeFalse();
     }
 
+    [TimedFact]
+    public async Task GetSagaActivity_ChattyInvocation_ReturnsOnlyLastFiveLifecycleEvents()
+    {
+        var sagaId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var baseTime = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var arrangeCtx = _fixture.CreateContext();
+        arrangeCtx.Set<SagaState>().Add(new SagaState
+        {
+            Id = sagaId,
+            Type = "Test.ChattySaga",
+            CorrelationKey = "chatty",
+            StateJson = "{}",
+            CreatedAt = baseTime,
+            UpdatedAt = baseTime,
+        });
+        arrangeCtx.Set<SagaJobLink>().Add(new SagaJobLink { SagaId = sagaId, JobId = jobId, CreatedAt = baseTime });
+        arrangeCtx.Set<Warp.Core.Entities.Job>().Add(new Warp.Core.Entities.Job
+        {
+            Id = jobId,
+            Kind = Warp.Core.Enums.JobKind.Job,
+            CurrentState = Warp.Core.Enums.State.Completed,
+            CreateTime = baseTime,
+            ScheduleTime = baseTime,
+            Queue = "default",
+            Type = "Test.Msg",
+        });
+
+        // Seven lifecycle events interleaved with handler output and progress.
+        for (var i = 0; i < 7; i++)
+        {
+            arrangeCtx.Set<JobLog>().Add(new JobLog { JobId = jobId, EventType = $"Event{i}", Timestamp = baseTime.AddSeconds(i * 3), Level = "Information", Message = string.Empty });
+            arrangeCtx.Set<JobLog>().Add(new JobLog { JobId = jobId, EventType = "Log", Timestamp = baseTime.AddSeconds((i * 3) + 1), Level = "Information", Message = $"output {i}" });
+            arrangeCtx.Set<JobLog>().Add(new JobLog { JobId = jobId, EventType = "Progress", Timestamp = baseTime.AddSeconds((i * 3) + 2), Level = "Information", Message = string.Empty, Name = string.Empty, Value = (short)i });
+        }
+
+        await arrangeCtx.SaveChangesAsync(TestCancellation);
+
+        var query = new SagaQueryService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
+        var activity = await query.GetSagaActivity(sagaId);
+
+        activity.Entries.ShouldHaveSingleItem().Logs.Select(x => x.EventType)
+            .ShouldBe(["Event2", "Event3", "Event4", "Event5", "Event6"]);
+    }
+
     private async Task SeedSagaWithLinks(Guid sagaId, string correlationKey, int linkCount)
     {
         var ctx = _fixture.CreateContext();

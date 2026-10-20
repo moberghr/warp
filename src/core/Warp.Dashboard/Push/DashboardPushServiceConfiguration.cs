@@ -25,10 +25,21 @@ public static class DashboardPushServiceConfiguration
         var configuration = new WarpDashboardPushConfiguration();
         configure?.Invoke(configuration);
 
+        // Fail at startup rather than in the broadcast loop, where a bad value only logs a Warning on
+        // every iteration and push silently stops.
+        if (configuration.MinBroadcastInterval < TimeSpan.Zero || configuration.MinBroadcastInterval > WarpDashboardPushConfiguration.MaxMinBroadcastInterval)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(configure),
+                configuration.MinBroadcastInterval,
+                $"{nameof(WarpDashboardPushConfiguration.MinBroadcastInterval)} must be between zero and {WarpDashboardPushConfiguration.MaxMinBroadcastInterval}.");
+        }
+
         builder.Services.TryAddSingleton(configuration);
         builder.Services.TryAddSingleton<IDashboardPushMarker, DashboardPushMarker>();
 
         builder.Services.AddSignalR();
+        builder.Services.TryAddSingleton<DashboardConnectionCounter>();
         builder.Services.TryAddSingleton<DashboardBroadcaster<TContext>>();
         builder.Services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IHostedService, DashboardBroadcaster<TContext>>(

@@ -939,7 +939,10 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
 
   // Workers
   if (/^\/workers\/[^/]+\/logs$/.test(url)) {
-    return data.paginate(data.getWorkerLogs(), page, pageSize);
+    const logs = data.getWorkerLogs();
+    const start = page * pageSize;
+
+    return { items: logs.slice(start, start + pageSize), hasMore: logs.length > start + pageSize, page, pageSize };
   }
   if (/^\/workers\/[^/]+$/.test(url)) {
     const id = url.split('/').pop()!;
@@ -947,26 +950,34 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
     return data.getWorkerDetail(id);
   }
 
-  // Unified detail
+  // Unified detail. Handler output ('Log' rows) is served by /jobs/{id}/logs, as on the real API.
   if (/^\/detail\/[^/]+$/.test(url)) {
-    const id = url.split('/').pop()!;
-    if (id === data.IDS.failedJob) {
-      return data.jobDetailFailed;
-    }
-    if (id === data.IDS.completedJobWithTrace) {
-      return data.jobDetailCompleted;
-    }
-    if (id === data.IDS.batch1) {
-      return data.batchDetailUnified;
-    }
-    if (id === data.IDS.message1) {
-      return data.messageDetailUnified;
-    }
-    if (id === data.IDS.processingJob) {
-      return data.jobDetailProcessing;
+    const detail = demoJobDetail(url.split('/').pop()!);
+
+    return { ...detail, logs: detail.logs.filter((l) => l.eventType !== 'Log' && l.eventType !== 'Progress') };
+  }
+  if (/^\/jobs\/[^/]+\/progress$/.test(url)) {
+    const latest = new Map<string, { name: string; value: number; updatedAt: string }>();
+    for (const log of demoJobDetail(url.split('/')[2]).logs) {
+      if (log.eventType !== 'Progress' || log.value == null) continue;
+      const name = log.name ?? '';
+      const current = latest.get(name);
+      if (!current || log.timestamp >= current.updatedAt) {
+        latest.set(name, { name, value: log.value, updatedAt: log.timestamp });
+      }
     }
 
-    return { ...data.jobDetailCompleted, id };
+    return [...latest.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+  if (/^\/jobs\/[^/]+\/logs$/.test(url)) {
+    const detail = demoJobDetail(url.split('/')[2]);
+
+    const lines = detail.logs
+      .filter((l) => l.eventType === 'Log')
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    const start = page * pageSize;
+
+    return { items: lines.slice(start, start + pageSize), hasMore: lines.length > start + pageSize, page, pageSize };
   }
 
   // Unified trace overview (waterfall) — matched before /trace/ (distinct path).
@@ -976,7 +987,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
 
   // Trace (job DAG)
   if (/^\/trace\/[^/]+$/.test(url)) {
-    return data.traceJobs;
+    return { jobs: data.traceJobs, isTruncated: false };
   }
 
   // Job relations (siblings, children, trace)
@@ -988,4 +999,24 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   console.warn('[Demo] Unhandled GET route:', url);
 
   return {};
+}
+
+function demoJobDetail(id: string) {
+  if (id === data.IDS.failedJob) {
+    return data.jobDetailFailed;
+  }
+  if (id === data.IDS.completedJobWithTrace) {
+    return data.jobDetailCompleted;
+  }
+  if (id === data.IDS.batch1) {
+    return data.batchDetailUnified;
+  }
+  if (id === data.IDS.message1) {
+    return data.messageDetailUnified;
+  }
+  if (id === data.IDS.processingJob) {
+    return data.jobDetailProcessing;
+  }
+
+  return { ...data.jobDetailCompleted, id };
 }

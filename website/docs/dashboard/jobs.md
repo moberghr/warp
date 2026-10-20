@@ -40,7 +40,7 @@ Click any job to see its full detail in a two-column layout:
 
 **Right column:**
 - **History** — Colored state cards (Created → Processing → Completed/Failed) with timestamps and durations
-- **Handler Output** — Pipeline behavior logs and ILogger output captured during execution
+- **Handler Output** — Pipeline behavior logs and ILogger output captured during execution, newest first, with previous/next paging (100 lines per page by default). Until the job finishes, the first page refreshes every 2 seconds
 - **Exception** — Full stack trace on failed jobs
 
 ### Completed Job with Trace

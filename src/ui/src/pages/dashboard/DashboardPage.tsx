@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useLivePoll } from '@/hooks/useLivePoll';
 import { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, Tooltip as ChartTooltip, Legend } from 'chart.js';
 import { useDashboardStore } from '@/stores/dashboard';
 import { MetricCard } from '@/components/MetricCard';
@@ -68,13 +69,12 @@ export default function DashboardPage() {
   const [history, setHistory] = useState<StatsHistoryPoint[]>([]);
   const [historyHours, setHistoryHours] = useState(24);
 
-  useEffect(() => {
+  const fetchHistory = useCallback(() => {
     getStatsHistory(historyHours).then(setHistory).catch(() => {});
-    const id = setInterval(() => {
-      getStatsHistory(historyHours).then(setHistory).catch(() => {});
-    }, 60000);
-    return () => clearInterval(id);
   }, [historyHours]);
+
+  useEffect(() => { fetchHistory(); }, [fetchHistory]);
+  useLivePoll(fetchHistory, true, 60_000);
 
   if (!stats) {
     return (

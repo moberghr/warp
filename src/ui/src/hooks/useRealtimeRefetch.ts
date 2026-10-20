@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { subscribeRealtime } from '@/lib/realtimeBus';
 import { subscribeDue } from '@/lib/dueSignal';
+import { isTabHidden, onTabVisible } from '@/lib/visibility';
 import type { RealtimeEvent } from '@/api/realtime';
 
 /**
@@ -35,10 +36,26 @@ export function useRealtimeRefetch(
   const eventsKey = eventList.join(',');
 
   useEffect(() => {
-    const fire = () => savedRefetch.current();
+    // A hidden tab skips the refetch and remembers it missed one, then catches up once when shown:
+    // JobFinalized fires for every job in the cluster, and nobody is reading a background tab.
+    let missed = false;
+    const fire = () => {
+      if (isTabHidden()) {
+        missed = true;
+
+        return;
+      }
+
+      savedRefetch.current();
+    };
     const unsubs = eventList.map((event) => subscribeRealtime(event, fire));
     const unsubDue = subscribeDue(fire);
     const id = setInterval(fire, safetyMs);
+    const unsubVisible = onTabVisible(() => {
+      if (!missed) return;
+      missed = false;
+      savedRefetch.current();
+    });
 
     return () => {
       for (const unsub of unsubs) {
@@ -46,6 +63,7 @@ export function useRealtimeRefetch(
       }
 
       unsubDue();
+      unsubVisible();
       clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

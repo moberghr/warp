@@ -16,15 +16,30 @@ namespace Warp.Dashboard.Push;
 /// </remarks>
 public sealed class WarpDashboardHub : Hub
 {
+    /// <summary>
+    /// This process's connected-client count, read by the broadcaster to skip work nobody would see.
+    /// </summary>
+    private readonly DashboardConnectionCounter _connections;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="WarpDashboardHub"/> class.
+    /// </summary>
+    public WarpDashboardHub(DashboardConnectionCounter connections)
+    {
+        _connections = connections;
+    }
+
     public override async Task OnConnectedAsync()
     {
         await base.OnConnectedAsync();
+        _connections.Connected();
         WarpTelemetry.DashboardConnectionsActive.Add(1);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
         await base.OnDisconnectedAsync(exception);
+        _connections.Disconnected();
         WarpTelemetry.DashboardConnectionsActive.Add(-1);
     }
 }

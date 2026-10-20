@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useLivePoll } from '@/hooks/useLivePoll';
 import { useParams, Link } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -44,12 +45,8 @@ export default function ServerDetailPage() {
   // memory, task history — and it was fetching once and then only on the manual refresh button.
   // Keyed on fetchData rather than driven by usePolling so switching to another server's page,
   // which changes the route param without remounting, still fetches immediately.
-  useEffect(() => {
-    fetchData();
-    const timer = setInterval(fetchData, 10_000);
-
-    return () => clearInterval(timer);
-  }, [fetchData]);
+  useEffect(() => { fetchData(); }, [fetchData]);
+  useLivePoll(fetchData, true, 10_000);
 
   const handleTogglePause = async () => {
     if (!server || !id) return;

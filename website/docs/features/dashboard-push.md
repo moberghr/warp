@@ -21,6 +21,7 @@ builder.Services.AddWarp<AppDbContext>(opt =>
     opt.AddDashboardPush(o =>
     {
         o.CoalesceWindow = TimeSpan.FromMilliseconds(100);  // default
+        o.MinBroadcastInterval = TimeSpan.FromSeconds(1);   // default
     });
 });
 ```
@@ -31,16 +32,20 @@ The hub is mounted at `${RoutePrefix}/api/hub` (default `/warp/api/hub`). The fr
 
 | Event | Trigger | Payload |
 |---|---|---|
-| `JobFinalized` | A job reaches a terminal state (`Completed` / `Failed` / `Deleted` / `Cancelled`). | `DashboardStatistics` snapshot. |
-| `MessageEnqueued` | A new `IMessage` row is written and the router signals downstream consumers. | `DashboardStatistics` snapshot. |
+| `JobFinalized` | A job reaches a terminal state (`Completed` / `Failed` / `Deleted` / `Cancelled`). | `DashboardStatistics` snapshot, or none (below). |
+| `MessageEnqueued` | A new `IMessage` row is written and the router signals downstream consumers. | `DashboardStatistics` snapshot, or none (below). |
 
-Both events arrive as SignalR invocations with the DTO as the first arg. Clients update their navbar counts and chart series directly from the payload; per-view data (filtered job lists, job detail, logs) stays on event-driven REST refetch.
+Both events arrive as SignalR invocations with the DTO as the first arg. The snapshot is taken once per broadcast and only while at least one dashboard client is connected to **this** server's hub: an unwatched server sends the bare event and skips the stats queries. A client that receives an event without a snapshot (for example through a SignalR backplane) fetches `/status` itself, at most once a second, and not while its tab is hidden. Clients update their navbar counts and chart series directly from the payload; per-view data (filtered job lists, job detail, logs) stays on event-driven REST refetch.
 
 ## Coalescing
 
 Each signal sets a latched flag and releases the broadcaster's wake semaphore. The loop wakes, waits `CoalesceWindow` (default 100 ms), then emits **at most one broadcast per event kind per window**. A 50-job batch finalising in a 20 ms burst collapses to one `JobFinalized` broadcast, not 50.
 
 `CoalesceWindow = TimeSpan.Zero` disables coalescing — every signal becomes its own broadcast. Useful only for tests that need deterministic counts.
+
+Under steady throughput the window alone still allows about ten broadcasts a second, and each one runs the stats queries and makes every open tab refetch what it shows. So broadcasts are also spaced at least `MinBroadcastInterval` apart (default 1 s): signals arriving sooner are held and folded into the next broadcast, which still carries a fresh snapshot. The first signal after a quiet spell goes out after `CoalesceWindow` only. `MinBroadcastInterval = TimeSpan.Zero` removes the floor; values below zero or above one minute are rejected when `AddDashboardPush` runs.
+
+Dashboard tabs in the background ignore events and catch up once when shown again.
 
 ## Multi-server fanout requires DB push
 

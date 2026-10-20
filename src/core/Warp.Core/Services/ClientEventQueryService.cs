@@ -208,10 +208,12 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
 
     public async Task<ClientSessionModel?> GetSession(string sessionId, CancellationToken ct)
     {
+        // Each source reads its most recent entries plus one, which says whether older ones were left out.
         var events = await _context.Set<ClientEventLog>()
             .AsNoTracking()
             .Where(x => x.SessionId == sessionId)
-            .OrderBy(x => x.Timestamp)
+            .OrderByDescending(x => x.Timestamp)
+            .Take(ClientSessionModel.MaxEntriesPerSource + 1)
             .Select(x =>
                 new ClientSessionEntryModel
                 {
@@ -239,6 +241,8 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
         var serverCalls = await _context.Set<EndpointCallLog>()
             .AsNoTracking()
             .Where(x => x.Session == sessionId)
+            .OrderByDescending(x => x.Timestamp)
+            .Take(ClientSessionModel.MaxEntriesPerSource + 1)
             .Select(x =>
                 new ClientSessionEntryModel
                 {
@@ -263,7 +267,15 @@ public sealed class ClientEventQueryService<TContext> : IClientEventQueryService
         {
             SessionId = sessionId,
             Application = application,
-            Entries = [.. events.Concat(serverCalls).OrderBy(x => x.Timestamp)],
+            Entries =
+            [
+                .. events
+                    .Take(ClientSessionModel.MaxEntriesPerSource)
+                    .Concat(serverCalls.Take(ClientSessionModel.MaxEntriesPerSource))
+                    .OrderBy(x => x.Timestamp),
+            ],
+            IsTruncated = events.Count > ClientSessionModel.MaxEntriesPerSource
+                || serverCalls.Count > ClientSessionModel.MaxEntriesPerSource,
         };
     }
 

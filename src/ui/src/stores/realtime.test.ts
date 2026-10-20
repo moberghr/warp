@@ -28,9 +28,20 @@ vi.mock('@microsoft/signalr', () => {
   return { HubConnectionBuilder, HubConnectionState: { Disconnected: 'Disconnected' }, LogLevel: { Warning: 3 } };
 });
 
-import { useRealtimeStore } from './realtime';
+import { useRealtimeStore, resetStatsFallbackForTests } from './realtime';
+import { setTabVisibility } from '@/lib/visibility.testUtils';
 import { useDashboardStore } from '@/stores/dashboard';
 import { subscribeRealtime } from '@/lib/realtimeBus';
+
+// zustand copies state on every setState, so a vi.spyOn on getState() leaks into later tests; stub the
+// action through setState instead and put the real one back before each test.
+const realFetchStats = useDashboardStore.getState().fetchStats;
+function stubFetchStats() {
+  const fetchStats = vi.fn().mockResolvedValue(undefined);
+  useDashboardStore.setState({ fetchStats });
+
+  return fetchStats;
+}
 
 beforeEach(() => {
   for (const k of Object.keys(h.handlers)) delete h.handlers[k];
@@ -42,7 +53,8 @@ beforeEach(() => {
   h.conn.start.mockClear().mockResolvedValue(undefined);
   h.conn.state = 'Disconnected';
   useRealtimeStore.setState({ status: 'idle', connection: null, lastEventAt: null });
-  useDashboardStore.setState({ stats: null });
+  useDashboardStore.setState({ stats: null, fetchStats: realFetchStats });
+  resetStatsFallbackForTests();
 });
 
 describe('realtime store', () => {
@@ -92,6 +104,7 @@ describe('realtime store', () => {
 
   it('a non-stats payload still bumps lastEventAt + emits but does not overwrite stats', async () => {
     await useRealtimeStore.getState().connectIfEnabled(true);
+    stubFetchStats();
     useDashboardStore.setState({ stats: { totalSucceeded: 7 } as unknown as DashboardStatistics });
 
     const busHits: string[] = [];
@@ -102,6 +115,52 @@ describe('realtime store', () => {
     expect(useDashboardStore.getState().stats).toEqual({ totalSucceeded: 7 });
     expect(busHits).toEqual(['hit']);
     u();
+  });
+
+  describe('events without a stats snapshot', () => {
+    it('fetch /status themselves, at most once a second, keeping the last event of a burst', async () => {
+      await useRealtimeStore.getState().connectIfEnabled(true);
+      vi.useFakeTimers();
+      try {
+        const fetchStats = stubFetchStats();
+
+        h.handlers.JobFinalized(undefined);
+        expect(fetchStats).toHaveBeenCalledTimes(1);
+
+        h.handlers.JobFinalized(undefined);
+        h.handlers.JobFinalized(undefined);
+        expect(fetchStats).toHaveBeenCalledTimes(1);
+
+        vi.advanceTimersByTime(1000);
+        expect(fetchStats).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('do not fetch from a hidden tab, and fetch once when it is shown', async () => {
+      await useRealtimeStore.getState().connectIfEnabled(true);
+      const fetchStats = stubFetchStats();
+      setTabVisibility('hidden');
+      try {
+        h.handlers.JobFinalized(undefined);
+        h.handlers.JobFinalized(undefined);
+        expect(fetchStats).not.toHaveBeenCalled();
+      } finally {
+        setTabVisibility('visible');
+      }
+
+      expect(fetchStats).toHaveBeenCalledTimes(1);
+    });
+
+    it('do not fetch when the event carries a snapshot', async () => {
+      await useRealtimeStore.getState().connectIfEnabled(true);
+      const fetchStats = stubFetchStats();
+
+      h.handlers.JobFinalized({ totalSucceeded: 1 } as unknown as DashboardStatistics);
+
+      expect(fetchStats).not.toHaveBeenCalled();
+    });
   });
 
   it('falls back to disabled when the connection fails to start', async () => {

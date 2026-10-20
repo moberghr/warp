@@ -168,12 +168,26 @@ public sealed class ClientEventDetailModel
 
 public sealed class ClientSessionModel
 {
+    /// <summary>
+    /// The most entries read from each source (client events, server calls). A single-page app left open
+    /// all day produces thousands, and the timeline shows the most recent ones.
+    /// </summary>
+    public const int MaxEntriesPerSource = 500;
+
     public string SessionId { get; init; } = string.Empty;
 
     public string? Application { get; init; }
 
-    /// <summary>Client events and server endpoint calls for this session, merged and ordered by timestamp.</summary>
+    /// <summary>
+    /// Client events and server endpoint calls for this session, merged and ordered by timestamp: the most
+    /// recent <see cref="MaxEntriesPerSource"/> of each.
+    /// </summary>
     public IReadOnlyList<ClientSessionEntryModel> Entries { get; init; } = [];
+
+    /// <summary>
+    /// Whether either source had older entries than <see cref="Entries"/> holds.
+    /// </summary>
+    public bool IsTruncated { get; init; }
 }
 
 /// <summary>One row on the unified session timeline — either a client event (<c>Kind = "client"</c>) or a server endpoint call joined by trace id (<c>Kind = "endpoint"</c>).</summary>

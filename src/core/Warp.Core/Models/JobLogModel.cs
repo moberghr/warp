@@ -18,7 +18,13 @@ public class JobLogModel
 
     public Guid? WorkerId { get; set; }
 
+    /// <summary>
+    /// The progress bar's name. Set only on <c>Progress</c> rows; null on lifecycle and handler-output rows.
+    /// </summary>
     public string? Name { get; set; }
 
+    /// <summary>
+    /// The progress bar's percent. Set only on <c>Progress</c> rows; null on lifecycle and handler-output rows.
+    /// </summary>
     public short? Value { get; set; }
 }

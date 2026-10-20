@@ -108,8 +108,12 @@ public class JobGroupQueryService<TContext> : IJobGroupQueryService
 
         jobGroup.TotalJobs = jobGroup.SpawnedJobsCount;
 
+        // Lifecycle rows only, as on the job detail: handler output and progress are unbounded and
+        // are read through IJobLogQueryService.
         jobGroup.Logs = await _context.Set<JobLog>()
             .Where(x => x.JobId == id)
+            .Where(x => x.EventType != JobLogEventTypes.Log)
+            .Where(x => x.EventType != JobLogEventTypes.Progress)
             .OrderBy(x => x.Timestamp)
             .Select(x => new JobLogModel
             {
@@ -124,10 +128,14 @@ public class JobGroupQueryService<TContext> : IJobGroupQueryService
             })
             .ToListAsync();
 
-        // Find continuation batches (child batches linked via ParentJobId)
-        jobGroup.Continuations = await _context.Set<Job>()
-            .Where(x => x.ParentJobId == id && x.Kind == JobKind.Batch)
+        // Find continuation batches (child batches linked via ParentJobId), capped like the job detail's.
+        var continuations = _context.Set<Job>()
+            .Where(x => x.ParentJobId == id)
+            .Where(x => x.Kind == JobKind.Batch);
+        jobGroup.ContinuationCount = await continuations.CountAsync();
+        jobGroup.Continuations = await continuations
             .OrderBy(x => x.CreateTime)
+            .Take(UnifiedJobDetailModel.MaxRelatedJobs)
             .Select(x => new ContinuationInfo
             {
                 Id = x.Id,

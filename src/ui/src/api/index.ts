@@ -1,7 +1,7 @@
 import axios from 'axios';
 import api from './client';
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
-import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, TraceJobModel, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
+import type { DashboardStatistics, JobModel, JobGroupModel, JobGroupDetailModel, RecurringJobModel, RecurringJobDetailModel, RecurringJobHistoryModel, ServerModel, ServerTaskSummary, ServerLogModel, PagedList, BulkResult, StatsHistoryPoint, CounterModel, CounterHistoryPoint, ConcurrencyLimitInfo, RateLimitInfo, TypeCountModel, WorkerDetailModel, WorkerJobLogModel, JobLogModel, PagedSlice, JobProgressModel, TraceGraph, UnifiedJobDetailModel, SagaListItem, SagaDetail, SagaActivityResponse, SagaStats, AuthStatus, WarpAddonsInfo } from '@/types';
 import type { AdapterListItem, AdapterDetail, AdapterCallDetail, AdapterHistoryPoint } from '@/types/adapters';
 import type {
   ApplicationSummaryModel,
@@ -106,13 +106,21 @@ export const getTraceJobs = (jobId: string, page = 0, pageSize = 20) =>
   api.get<PagedList<JobModel>>(`/jobs/${jobId}/trace`, { params: { page, pageSize } }).then(r => r.data);
 
 export const getTraceTree = (traceId: string) =>
-  api.get<TraceJobModel[]>(`/trace/${traceId}`).then(r => r.data);
+  api.get<TraceGraph>(`/trace/${traceId}`).then(r => r.data);
 
 export const getTrace = (traceId: string) =>
   api.get<TraceOverview>(`/traces/${traceId}`).then(r => r.data);
 
 export const getDetail = (id: string) =>
   api.get<UnifiedJobDetailModel>(`/detail/${id}`).then(r => r.data);
+
+// Handler output, newest first. Kept off /detail/{id} because a chatty job writes tens of thousands of rows.
+export const getJobLogs = (jobId: string, page = 0, pageSize = 100) =>
+  api.get<PagedSlice<JobLogModel>>(`/jobs/${jobId}/logs`, { params: { page, pageSize } }).then(r => r.data);
+
+// Current value per progress bar. Small and cheap, so the detail page polls it while the job runs.
+export const getJobProgress = (jobId: string) =>
+  api.get<JobProgressModel[]>(`/jobs/${jobId}/progress`).then(r => r.data);
 
 export const requeueJob = (jobId: string) => api.post(`/jobs/${jobId}/requeue`);
 export const deleteJob = (jobId: string) => api.post(`/jobs/${jobId}/delete`);
@@ -186,7 +194,7 @@ export const getWorkerById = (workerId: string) =>
   api.get<WorkerDetailModel>(`/workers/${workerId}`).then(r => r.data);
 
 export const getWorkerJobLogs = (workerId: string, page = 0, pageSize = 20) =>
-  api.get<PagedList<WorkerJobLogModel>>(`/workers/${workerId}/logs`, { params: { page, pageSize } }).then(r => r.data);
+  api.get<PagedSlice<WorkerJobLogModel>>(`/workers/${workerId}/logs`, { params: { page, pageSize } }).then(r => r.data);
 
 export const pauseServer = (serverId: string) => api.post(`/servers/${serverId}/pause`);
 export const resumeServer = (serverId: string) => api.post(`/servers/${serverId}/resume`);

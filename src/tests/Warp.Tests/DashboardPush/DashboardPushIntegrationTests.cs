@@ -50,6 +50,12 @@ public abstract class DashboardPushIntegrationTestsBase : IAsyncLifetime
     {
         var fakeHub = new FakeHubContext();
 
+        // The stats snapshot is attached only while a client is connected, so one is connected
+        // before the server starts: with database push the listener's startup drain can broadcast
+        // before the test body runs.
+        var connections = new DashboardConnectionCounter();
+        await FakeDashboardClients.ConnectAsync(connections);
+
         await using var server = await WarpTestServer.StartAsync(
             fixture: _fixture,
             configure: cfg => cfg.AddDashboardPush(o => o.CoalesceWindow = TimeSpan.FromMilliseconds(50)),
@@ -57,6 +63,8 @@ public abstract class DashboardPushIntegrationTestsBase : IAsyncLifetime
             {
                 services.RemoveAll<IHubContext<WarpDashboardHub>>();
                 services.AddSingleton<IHubContext<WarpDashboardHub>>(fakeHub);
+                services.RemoveAll<DashboardConnectionCounter>();
+                services.AddSingleton(connections);
             });
 
         var publisher = server.CreatePublisher();
@@ -87,6 +95,12 @@ public abstract class DashboardPushIntegrationTestsBase : IAsyncLifetime
         // → listener fires SignalMessageEnqueued → broadcaster broadcasts.
         var fakeHub = new FakeHubContext();
 
+        // The stats snapshot is attached only while a client is connected, so one is connected
+        // before the server starts: with database push the listener's startup drain can broadcast
+        // before the test body runs.
+        var connections = new DashboardConnectionCounter();
+        await FakeDashboardClients.ConnectAsync(connections);
+
         await using var server = await WarpTestServer.StartAsync(
             fixture: _fixture,
             configure: cfg =>
@@ -98,6 +112,8 @@ public abstract class DashboardPushIntegrationTestsBase : IAsyncLifetime
             {
                 services.RemoveAll<IHubContext<WarpDashboardHub>>();
                 services.AddSingleton<IHubContext<WarpDashboardHub>>(fakeHub);
+                services.RemoveAll<DashboardConnectionCounter>();
+                services.AddSingleton(connections);
             });
 
         var publisher = server.CreatePublisher();
