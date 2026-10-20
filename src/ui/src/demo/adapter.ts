@@ -774,7 +774,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { retry: true, concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true, version: '7.2.0' };
+    return { retry: true, concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true, version: '7.3.0' };
   }
 
   // Client (browser) observability (§8.27).

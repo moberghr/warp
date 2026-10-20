@@ -4,7 +4,9 @@ sidebar_position: 6
 
 # Releases
 
-## Unreleased
+## 7.3.0
+
+*2026-10-20*
 
 Dashboard release, **no schema change, a few API changes**: job output is paged and tails live, and the dashboard asks the database for far less, both per page and in total. Read [Upgrading](#upgrading) first.
 

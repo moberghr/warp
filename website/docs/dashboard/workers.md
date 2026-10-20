@@ -12,7 +12,7 @@ The worker detail page shows:
 
 - **Status indicator** — purple when processing a job, green when idle
 - **Details card** — server link, started time, heartbeat, current job (linked with type)
-- **Job Activity** — paginated table of all log entries produced by this worker
+- **Job Activity** — the log entries this worker produced, newest first, with previous/next paging (no total, so a long-lived worker's history is never counted)
 
 Each log entry shows:
 - **Event** — Processing, Completed, Failed, Cancelled, Requeued, Log
