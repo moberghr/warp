@@ -9,6 +9,7 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import { DataTable } from '@/components/DataTable';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { useListParams } from '@/hooks/useListParams';
 import {
   useJobsList,
   useFailedJobsByType,
@@ -36,15 +37,13 @@ export default function JobListPage() {
   const activeState = state ?? 'enqueued';
   const isFailed = activeState === 'failed';
 
-  const [page, setPage] = useState(0);
+  const { page, setPage, type: selectedType, setType: setSelectedType } = useListParams();
   const [pageSize, setPageSize] = usePersistedPageSize();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [selectedType, setSelectedType] = useState<string | null>(null);
 
+  // Page and type ride the URL, so a state switch via the nav already lands on a clean query.
   useEffect(() => {
-    setPage(0);
     setSelectedIds(new Set());
-    setSelectedType(null);
   }, [state]);
 
   const listQuery = useJobsList(activeState, page, pageSize);
@@ -261,7 +260,6 @@ export default function JobListPage() {
             size="sm"
             onClick={() => {
               setSelectedType(null);
-              setPage(0);
               setSelectedIds(new Set());
             }}
           >
@@ -274,7 +272,6 @@ export default function JobListPage() {
               size="sm"
               onClick={() => {
                 setSelectedType(tc.type);
-                setPage(0);
                 setSelectedIds(new Set());
               }}
             >
