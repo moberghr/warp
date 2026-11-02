@@ -272,6 +272,50 @@ public abstract class FailedJobTypeFilterTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task RequeueFailedJobsByType_MoreThanOneRound_RequeuesOldestRoundFirst()
+    {
+        // Arrange: one round is 1000 jobs, so 1001 forces a second round. The newest job is
+        // inserted first AND carries the earliest ScheduleTime, so neither physical row order nor
+        // a ScheduleTime-ordered index scan can put it in the second round by accident.
+        var baseTime = DateTime.UtcNow;
+        var newestId = Guid.NewGuid();
+
+        var ctx = _fixture.CreateContext();
+        var newest = FailedJobCreatedAt(newestId, baseTime);
+        newest.ScheduleTime = baseTime.AddDays(-1);
+        ctx.Set<Job>().Add(newest);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var olderCtx = _fixture.CreateContext();
+        for (var i = 1; i <= 1000; i++)
+        {
+            olderCtx.Set<Job>().Add(FailedJobCreatedAt(Guid.NewGuid(), baseTime.AddMinutes(-i)));
+        }
+
+        await olderCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var svc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext());
+        var result = await svc.RequeueFailedJobsByType("OrderedType");
+
+        // Assert: the 1000 older jobs were requeued in the first round, so all of them are
+        // scheduled strictly before the newest job, which went in the second round.
+        result.Succeeded.ShouldBe(1001);
+
+        var readCtx = _fixture.CreateContext();
+        var newestScheduleTime = await readCtx.Set<Job>()
+            .Where(x => x.Id == newestId)
+            .Select(x => x.ScheduleTime)
+            .SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        var latestOlderScheduleTime = await readCtx.Set<Job>()
+            .Where(x => x.Type == "OrderedType")
+            .Where(x => x.Id != newestId)
+            .MaxAsync(x => x.ScheduleTime, Xunit.TestContext.Current.CancellationToken);
+
+        latestOlderScheduleTime.ShouldBeLessThan(newestScheduleTime);
+    }
+
+    [TimedFact]
     public async Task GetJobsByType_NoStateFilter_ReturnsAllStatesForThatType()
     {
         // #1: the clickable-type list spans every state, unlike GetFailedJobsByType.
@@ -304,6 +348,18 @@ public abstract class FailedJobTypeFilterTestsBase : IAsyncLifetime
         result.TotalCount.ShouldBe(2);
         result.Items.ShouldAllBe(j => j.CurrentState == State.Failed);
     }
+
+    private static Job FailedJobCreatedAt(Guid id, DateTime createTime) =>
+        new()
+        {
+            Id = id,
+            Kind = JobKind.Job,
+            CurrentState = State.Failed,
+            CreateTime = createTime,
+            ScheduleTime = createTime,
+            Queue = "default",
+            Type = "OrderedType",
+        };
 
     private static Job TypedJob(string type, State state) =>
         new()

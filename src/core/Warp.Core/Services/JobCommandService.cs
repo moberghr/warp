@@ -764,8 +764,13 @@ public class JobCommandService<TContext> : IJobCommandService
         var result = new BulkResultModel();
         while (true)
         {
+            // Oldest first: each round stamps a later ScheduleTime than the one before it, and the
+            // worker claim orders by ScheduleTime, so paging oldest-first runs the oldest failures first.
+            // Within a round every row shares one ScheduleTime, so pickup order inside it is not guaranteed.
             var ids = await _context.Set<Job>()
                 .Where(x => x.Kind == JobKind.Job && x.CurrentState == State.Failed && x.Type == type)
+                .OrderBy(x => x.CreateTime)
+                .ThenBy(x => x.Id)
                 .Select(x => x.Id)
                 .Take(1000)
                 .ToListAsync();
