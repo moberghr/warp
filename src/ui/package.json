@@ -66,6 +66,7 @@
     "vitest": "^4.1.12"
   },
   "overrides": {
-    "@hono/node-server": ">=2.0.5"
+    "@hono/node-server": ">=2.0.5",
+    "minimatch": "^11.0.1"
   }
 }
