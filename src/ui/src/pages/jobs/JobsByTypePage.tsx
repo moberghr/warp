@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
@@ -9,6 +9,7 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { DataTable } from '@/components/DataTable';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
+import { useListParams } from '@/hooks/useListParams';
 import { useJobsByType } from '@/api/hooks/useJobs';
 import * as api from '@/api';
 import type { JobModel } from '@/types';
@@ -22,12 +23,9 @@ export default function JobsByTypePage() {
     // A hand-crafted URL with a stray "%" throws in decodeURIComponent — fall back to the raw value.
     try { return decodeURIComponent(rawType); } catch { return rawType; }
   }, [rawType]);
-  const [page, setPage] = useState(0);
+  const { page, setPage } = useListParams();
   const [pageSize, setPageSize] = usePersistedPageSize();
   const [dimension, setDimension] = useState<'type' | 'handler'>('type');
-
-  // Reset paging when navigating between types (the route component instance is reused).
-  useEffect(() => { setPage(0); }, [type]);
 
   const { data, isLoading, isError } = useJobsByType(type, page, pageSize);
 
