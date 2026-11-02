@@ -1,0 +1,1 @@
+import{T as e}from"./format-Ct-NFNIl.js";function t(){let[t,n]=e(),r=Number(t.get(`page`)),i=Number.isInteger(r)&&r>0?r:0,a=t.get(`type`)||null,o=e=>n(t=>{let n=new URLSearchParams(t);for(let[t,r]of Object.entries(e))r?n.set(t,r):n.delete(t);return n},{replace:!0});return{page:i,type:a,setPage:e=>o({page:e>0?String(e):null}),setType:e=>o({type:e,page:null})}}export{t};

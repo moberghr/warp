@@ -4,6 +4,41 @@ sidebar_position: 6
 
 # Releases
 
+## 7.4.0
+
+*2026-11-02*
+
+Minor release, **no schema change, no migration, no API break**: you can now publish jobs on a `DbContext` you created yourself, the job list remembers its page and type filter, and npm dependency bumps close 24 Dependabot alerts.
+
+### Publish on a context from `IDbContextFactory`
+
+`IPublisher` always staged jobs on the scoped `DbContext`. Code that writes through a context from `IDbContextFactory<TContext>`, which is the usual Blazor Server pattern because the scoped context lives as long as the circuit, could not put its jobs in the same commit as its own write. It took two commits, and the job could be lost after the business write had landed.
+
+The new **`IPublisherFactory<TContext>`**, registered by `AddWarp`, hands out a publisher bound to the context you pass it:
+
+```csharp
+await using var db = await dbFactory.CreateDbContextAsync(ct);
+order.Status = OrderStatus.Completed;
+
+var publisher = publishers.Create(db);
+await publisher.Enqueue(new SendReceipt { OrderId = order.Id });
+await publisher.SaveChangesAsync(ct); // one commit: the order and the job
+```
+
+`CreateBatch(db)` does the same for `IBatchPublisher`. The bound publisher runs the same `IPublishPipelineBehavior<T>` chain as the scoped one, and its `SaveChangesAsync` sends the same enqueue notifications. You own the context: the publisher never disposes it. If you were building `Publisher<TContext>` yourself with `ActivatorUtilities`, switch to the factory: that workaround depends on the constructor, which can change in any release. See [Contexts From `IDbContextFactory`](features/outbox-pattern.md#contexts-from-idbcontextfactory).
+
+Commit through the publisher's `SaveChangesAsync`. A plain `db.SaveChangesAsync()` commits the job too, but sends no enqueue notification, so a worker only finds it on its next poll (up to 5 minutes with `UseDatabasePush()`).
+
+### The job list keeps its page and type filter
+
+The jobs list kept its page number and type filter only in memory, so Back, a refresh or a shared link always landed on the first unfiltered page. Both now live in the URL (`?page=&type=`), and picking a different filter starts from the first page again. The jobs-by-type page keeps its page number in the URL the same way. The page size is still remembered per browser.
+
+### npm dependency bumps
+
+Closes 24 of the 26 open Dependabot alerts in the dashboard UI and documentation site lockfiles, along with every other `npm audit` finding that has a fix. The dashboard build moves to `vite` 8.3.5, `vitest` 4.1.12 and `happy-dom` 21.0.4, and patched transitive versions take care of `undici`, `body-parser`, `fast-uri`, `follow-redirects`, `zod`, `qs` and others. Two packages are forced past what their parents ask for: `tinypool` 2.x for Docusaurus (two critical alerts; Docusaurus still asks for 1.x) and `minimatch` 11.x in the dashboard UI. None of the affected packages are in the shipped dashboard bundle: they come from build and test tooling (Vite, Vitest, the `shadcn` CLI, Docusaurus), so no NuGet package was exposed.
+
+Three advisories have no fix yet and remain open: `braces` (a withdrawn advisory with no patched release), `deepmerge` (no patched release) and `minimatch` under Docusaurus's local preview server (`docusaurus serve`), which cannot take the fixed major version.
+
 ## 7.3.0
 
 *2026-10-20*
