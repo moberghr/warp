@@ -152,6 +152,25 @@ public static class ServiceConfiguration
             x.GetRequiredService<IWarpNotificationTransport>(),
             x.GetRequiredService<ServerTaskSignals<TContext>>()));
 
+        // Publishers bound to a caller-supplied context (IDbContextFactory, Blazor Server). Built from
+        // the same pieces as the scoped publishers above, so the publish pipeline and the post-save
+        // notifications are identical. Resolves without a scoped TContext registration.
+        services.AddScoped<IPublisherFactory<TContext>>(x => new PublisherFactory<TContext>(
+            context => new Publisher<TContext>(
+                context,
+                x.GetRequiredService<IOptions<WarpConfiguration>>(),
+                x.GetRequiredService<TimeProvider>(),
+                x,
+                x.GetRequiredService<IWarpNotificationTransport>(),
+                x.GetRequiredService<ServerTaskSignals<TContext>>()),
+            context => new BatchPublisher<TContext>(
+                context,
+                x.GetRequiredService<IOptions<WarpConfiguration>>(),
+                x.GetRequiredService<TimeProvider>(),
+                x,
+                x.GetRequiredService<IWarpNotificationTransport>(),
+                x.GetRequiredService<ServerTaskSignals<TContext>>())));
+
         services.AddScoped<JobContext>();
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
 
