@@ -71,6 +71,37 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 When the publisher calls `Enqueue()`, it writes a `Job` entity to the same `DbContext` your controller/service is using. A single `SaveChangesAsync()` commits everything.
 
+## Contexts From `IDbContextFactory`
+
+Sometimes the business write runs on a context that is not the scoped one. The usual case is Blazor Server: the DI scope lives as long as the circuit, so code there creates a short-lived context per operation with `IDbContextFactory<TContext>`. The scoped `IPublisher` stages onto the scoped context, so using it next to a factory-made context gives you two commits, and the second can fail after the first has landed.
+
+Inject `IPublisherFactory<TContext>` and bind a publisher to the context you are writing with:
+
+```csharp
+public class CompleteOrderHandler(
+    IDbContextFactory<AppDbContext> dbFactory,
+    IPublisherFactory<AppDbContext> publishers) : IRequestHandler<CompleteOrder>
+{
+    public async Task Handle(CompleteOrder request, CancellationToken ct)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var order = await db.Orders.FindAsync([request.OrderId], ct);
+        order!.Status = OrderStatus.Completed;
+
+        var publisher = publishers.Create(db);
+        await publisher.Enqueue(new SendReceipt { OrderId = order.Id });
+
+        await publisher.SaveChangesAsync(ct); // one commit: the order and the job
+    }
+}
+```
+
+`CreateBatch(db)` does the same for `IBatchPublisher`. The bound publisher runs the same `IPublishPipelineBehavior<T>` chain as the scoped one. You own the context: the publisher never disposes it.
+
+Commit through the publisher's `SaveChangesAsync`, not `db.SaveChangesAsync()`. Both commit the job, but only the publisher's sends the enqueue notification. Without it, a worker finds the job on its next poll, which can take up to 5 minutes with `UseDatabasePush()`.
+
+`IPublisherFactory<TContext>` is registered by `AddWarp`, so it resolves in any process that publishes.
+
 ## Multiple Jobs in One Transaction
 
 You can create any number of jobs within a single scope. They all share the same transaction:

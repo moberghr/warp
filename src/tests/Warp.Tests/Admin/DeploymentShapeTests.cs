@@ -10,12 +10,14 @@ using Shouldly;
 using Warp.Core;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Queries;
+using Warp.Core.Entities;
 using Warp.Core.Handlers;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
 using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Tests.TestData.BackgroundServices;
+using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 using Warp.Worker.BackgroundServices;
 using Warp.Worker.Services;
@@ -165,6 +167,29 @@ public class DeploymentShapeTests
             "IBackgroundServiceStateService leaked into AddWarp — it's worker-only.");
         scope.ServiceProvider.GetService<IBackgroundServiceLeaseCoordinator>().ShouldBeNull(
             "IBackgroundServiceLeaseCoordinator leaked into AddWarp — it's worker-only.");
+    }
+
+    // Pins the IDbContextFactory-only shape (issue #315): a host that registers TContext only through
+    // AddDbContextFactory (no scoped TContext, e.g. Blazor Server) can still resolve the publisher
+    // factory and get a publisher bound to a factory-made context.
+    [TimedFact]
+    public async Task DbContextFactoryOnlyShape_AddWarp_PublisherFactoryResolvesAndBinds()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddDbContextFactory<TestContext>(o => o.UseInMemoryDatabase($"factory-{Guid.NewGuid():N}"));
+        services.AddWarp<TestContext>();
+
+        await using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        await using var scope = sp.CreateAsyncScope();
+        var factory = scope.ServiceProvider.GetRequiredService<IPublisherFactory<TestContext>>();
+        await using var db = await scope.ServiceProvider.GetRequiredService<IDbContextFactory<TestContext>>().CreateDbContextAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var jobId = await factory.Create(db).Enqueue(new UnitRequest());
+
+        db.ChangeTracker.Entries<Job>().ShouldContain(x => x.Entity.Id == jobId && x.State == EntityState.Added);
+        Should.Throw<ArgumentNullException>(() => factory.Create(null!));
+        Should.Throw<ArgumentNullException>(() => factory.CreateBatch(null!));
     }
 
     // Pins the full server shape (worker on by default): AddWarpServer registers the worker hosts,
@@ -351,6 +376,7 @@ public class DeploymentShapeTests
         scoped.GetRequiredService<TestContext>().ShouldNotBeNull();
         scoped.GetRequiredService<IPublisher>().ShouldNotBeNull();
         scoped.GetRequiredService<IBatchPublisher>().ShouldNotBeNull();
+        scoped.GetRequiredService<IPublisherFactory<TestContext>>().ShouldNotBeNull();
         scoped.GetRequiredService<IMediator>().ShouldNotBeNull();
         scoped.GetRequiredService<IJobCommandService>().ShouldNotBeNull();
         scoped.GetRequiredService<IJobQueryService>().ShouldNotBeNull();
