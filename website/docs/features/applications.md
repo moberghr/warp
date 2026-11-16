@@ -91,7 +91,7 @@ The application detail page lists the deploys as `previous → new` per environm
 - `GET {prefix}/api/applications/{id}/deploys?from=&to=` for one application (`{id}` is the URL-safe id, as on the other application routes).
 - `GET {prefix}/api/applications/deploys?application=&from=&to=` across applications, with `application` as the application **name**.
 
-`from` (inclusive) and `to` (exclusive) are ISO 8601 instants and either can be left out. At most 500 deploys are returned. `IApplicationQueryService.GetDeploys(application, since, until)` is the same read in code.
+`from` (inclusive) and `to` (exclusive) are ISO 8601 instants and either can be left out. At most 500 deploys are returned. `IApplicationDeployQueryService.GetDeploys(application, since, until)` is the same read in code. It is a separate interface from `IApplicationQueryService`, so a host that registered its own `IApplicationQueryService` before `AddWarp` keeps compiling and still gets the deploy history from the database.
 
 ### Post-deploy verdict
 

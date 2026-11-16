@@ -1038,7 +1038,7 @@ public static class WarpEndpoints
         // Detected deploys (§8.23) across every application, newest first; ?application= narrows to one by NAME (the
         // Metrics page's application filter is a name, not a route id). A literal segment, so it wins over {id}.
         apiGroup.MapGet("applications/deploys", async (
-            [FromServices] IApplicationQueryService svc,
+            [FromServices] IApplicationDeployQueryService svc,
             [FromQuery] string? application,
             [FromQuery] DateTime? from,
             [FromQuery] DateTime? to,
@@ -1079,7 +1079,7 @@ public static class WarpEndpoints
         });
 
         apiGroup.MapGet("applications/{id}/deploys", async (
-            [FromServices] IApplicationQueryService svc,
+            [FromServices] IApplicationDeployQueryService svc,
             string id,
             [FromQuery] DateTime? from,
             [FromQuery] DateTime? to,

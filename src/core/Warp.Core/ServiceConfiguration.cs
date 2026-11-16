@@ -194,6 +194,13 @@ public static class ServiceConfiguration
             x.GetRequiredService<TimeProvider>(),
             x.GetRequiredService<IOptions<WarpConfiguration>>()));
 
+        // Deploy history (#325) on its own interface: a host that registered its own IApplicationQueryService before
+        // AddWarp (the TryAdd seam) keeps compiling, and still gets Warp's DB-backed deploy reads here.
+        services.TryAddScoped<IApplicationDeployQueryService>(x => new ApplicationQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>()));
+
         // Adapter call-scope primitive is always available (§2.15 telemetry is unconditional): every
         // BeginCall emits its Activity + meters, and manual scopes (e.g. the webhook executor) can record
         // regardless of AddAdapters(). AddAdapters() runs earlier in the AddWarp lambda and TryAdds the real

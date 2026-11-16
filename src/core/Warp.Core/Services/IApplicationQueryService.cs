@@ -33,15 +33,4 @@ public interface IApplicationQueryService
     /// its most-recent lifecycle events. Returns null when no instance matches the pair.
     /// </summary>
     Task<ApplicationInstanceDetailModel?> GetInstanceDetail(string application, Guid instanceId, CancellationToken ct = default);
-
-    /// <summary>
-    /// Detected deploys (first instance of a new <c>ApplicationVersion</c>, §8.23), newest first, capped at
-    /// <see cref="MaxDeploys"/> rows. <paramref name="application"/> null ⇒ every application. <paramref name="since"/>
-    /// (inclusive) and <paramref name="until"/> (exclusive) bound <c>FirstSeenAt</c>; null leaves that side open, so
-    /// <c>GetDeploys(app, null, null)</c>'s first row is the application's latest deploy.
-    /// </summary>
-    Task<IReadOnlyList<ApplicationDeployModel>> GetDeploys(string? application, DateTime? since, DateTime? until, CancellationToken ct = default);
-
-    /// <summary>The most rows <see cref="GetDeploys"/> returns.</summary>
-    public const int MaxDeploys = 500;
 }

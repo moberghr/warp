@@ -22,12 +22,12 @@ public interface IDeployVerdictService
 /// <summary><see cref="IDeployVerdictService"/> over the existing read services: it adds no query of its own.</summary>
 public sealed class DeployVerdictService : IDeployVerdictService
 {
-    private readonly IApplicationQueryService _applications;
+    private readonly IApplicationDeployQueryService _applications;
     private readonly IMetricBoardQueryService _board;
     private readonly ISloQueryService _slos;
     private readonly TimeProvider _timeProvider;
 
-    public DeployVerdictService(IApplicationQueryService applications, IMetricBoardQueryService board, ISloQueryService slos, TimeProvider timeProvider)
+    public DeployVerdictService(IApplicationDeployQueryService applications, IMetricBoardQueryService board, ISloQueryService slos, TimeProvider timeProvider)
     {
         _applications = applications;
         _board = board;

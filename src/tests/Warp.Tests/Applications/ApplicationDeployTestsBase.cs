@@ -417,7 +417,7 @@ public abstract class ApplicationDeployTestsBase : IAsyncLifetime
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.WebHost.UseDefaultServiceProvider(o => o.ValidateScopes = true);
-        builder.Services.AddScoped<IApplicationQueryService>(_ => CreateService());
+        builder.Services.AddScoped<IApplicationDeployQueryService>(_ => CreateService());
 
         var app = builder.Build();
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);

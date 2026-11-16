@@ -14,7 +14,7 @@ namespace Warp.Core.Services;
 /// as live/stale (servers heartbeat faster on the 3s server <c>Heartbeat</c>, but the same generous grace
 /// still marks a healthy server live, so one window keeps the projection simple).
 /// </summary>
-public class ApplicationQueryService<TContext> : IApplicationQueryService
+public class ApplicationQueryService<TContext> : IApplicationQueryService, IApplicationDeployQueryService
     where TContext : DbContext
 {
     // Cap the per-instance lifecycle timeline so the detail page stays bounded; older rows remain within
@@ -119,7 +119,7 @@ public class ApplicationQueryService<TContext> : IApplicationQueryService
         var rows = await query
             .OrderByDescending(x => x.FirstSeenAt)
             .ThenBy(x => x.Application)
-            .Take(IApplicationQueryService.MaxDeploys)
+            .Take(IApplicationDeployQueryService.MaxDeploys)
             .Select(x =>
                 new
                 {
