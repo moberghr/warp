@@ -9,6 +9,11 @@ namespace Warp.Core.Services;
 public interface ISloCommandService
 {
     /// <summary>Insert (Id == 0) or update an objective. Returns its id.</summary>
+    /// <remarks>
+    /// Persists <paramref name="definition"/> as given: it does not validate. Callers must first validate (and
+    /// normalize) it with <see cref="Slo.SloValidation.TryValidate(SloDefinition, TimeSpan?, MetricKind?, MetricKind?, out string?)"/>;
+    /// the dashboard upsert endpoint does, returning a 400 on failure.
+    /// </remarks>
     Task<int> Upsert(SloDefinition definition, CancellationToken ct);
 
     Task<bool> Delete(int id, CancellationToken ct);
@@ -62,6 +67,16 @@ public sealed class SloCommandService<TContext> : ISloCommandService
         existing.Percentile = definition.Percentile;
         existing.WindowSeconds = definition.WindowSeconds;
         existing.Enabled = definition.Enabled;
+
+        // Metric-kind fields. The caller validated (SloValidation), which cleared every field that does not apply to
+        // the kind, so copying them as they are also clears a field left over from the objective's previous kind.
+        existing.TagFilter = definition.TagFilter;
+        existing.SecondaryMetric = definition.SecondaryMetric;
+        existing.SecondaryTagFilter = definition.SecondaryTagFilter;
+        existing.RatioTag = definition.RatioTag;
+        existing.GoodValues = definition.GoodValues;
+        existing.BadValues = definition.BadValues;
+        existing.BaselineDays = definition.BaselineDays;
         existing.UpdatedAt = now;
         await _context.SaveChangesAsync(ct);
         _logger.LogInformation("SLO objective {Id} updated", existing.Id);

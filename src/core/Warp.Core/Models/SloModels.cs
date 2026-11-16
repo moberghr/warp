@@ -27,6 +27,27 @@ public sealed class SloObjectiveModel
 
     public bool Enabled { get; init; }
 
+    /// <summary>Metric kinds: tag filter applied to the primary instrument (held in <see cref="Dimension"/>).</summary>
+    public string? TagFilter { get; init; }
+
+    /// <summary><see cref="SloKind.MetricGap"/>: the instrument subtracted from the primary one.</summary>
+    public string? SecondaryMetric { get; init; }
+
+    /// <summary><see cref="SloKind.MetricGap"/>: tag filter applied to <see cref="SecondaryMetric"/>.</summary>
+    public string? SecondaryTagFilter { get; init; }
+
+    /// <summary><see cref="SloKind.MetricRatio"/>: the tag whose value classifies an event as good or bad.</summary>
+    public string? RatioTag { get; init; }
+
+    /// <summary><see cref="SloKind.MetricRatio"/>: CSV of good values.</summary>
+    public string? GoodValues { get; init; }
+
+    /// <summary><see cref="SloKind.MetricRatio"/>: CSV of bad values.</summary>
+    public string? BadValues { get; init; }
+
+    /// <summary>Baseline offset in days (1 or 7) for volume-floor and baseline-ratio objectives.</summary>
+    public int? BaselineDays { get; init; }
+
     /// <summary>False until the evaluator has produced a status for this objective.</summary>
     public bool Evaluated { get; init; }
 

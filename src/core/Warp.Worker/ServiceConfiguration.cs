@@ -10,6 +10,7 @@ using Warp.Core.BackgroundServices;
 using Warp.Core.Diagnostics;
 using Warp.Core.Events;
 using Warp.Core.Logging;
+using Warp.Core.Metrics;
 using Warp.Core.Services;
 using Warp.Worker.BackgroundServices;
 using Warp.Worker.Services;
@@ -110,6 +111,16 @@ public static class ServiceConfiguration
                 + "a non-positive value leaves the flusher spinning instead of waiting.");
         }
 
+        // Fail fast on a non-positive custom-metrics rollup interval. null is the supported way to switch the
+        // MetricRollup loop off (like StatisticRollupInterval); zero or a negative value is a typo that would
+        // otherwise reach the server-task loop as a delay it cannot honour.
+        if (builder.MetricRollupInterval is { } metricRollupInterval && metricRollupInterval <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException(
+                $"MetricRollupInterval must be greater than zero when set (was {metricRollupInterval}); "
+                + "set it to null to disable the metric rollup loop.");
+        }
+
         // Fail fast when the singleton background-service lease cannot survive a missed renewal. Heartbeat
         // renews the lease, so HealthCheckInterval is the renewal cadence and BackgroundServiceLeaseTtl is
         // the deadline — but they are configured independently, so a TTL under three cadences leaves barely
@@ -171,13 +182,12 @@ public static class ServiceConfiguration
         services.AddSingleton<WarpCounterBuffer>();
         services.AddHostedService<CounterBufferFlusher<TContext>>();
 
-        // Job-only server tasks — routing, orchestration, scheduling, recovery, stat aggregation.
+        // Job-only server tasks — routing, orchestration, scheduling, recovery, backlog sampling.
         // Deliberately NOT part of AddServerHostCore: a service-only server has no jobs to drive.
+        // (CounterAggregator, ErrorGroupAggregator and SloEvaluator are cluster-locked and fold
+        // data any process can write, so they live in AddServerHostCore.)
         services.AddScoped<IServerTask, StaleJobRecovery<TContext>>();
-        services.AddScoped<IServerTask, CounterAggregator<TContext>>();
-        services.AddScoped<IServerTask, ErrorGroupAggregator<TContext>>();
         services.AddScoped<IServerTask, BacklogSampler<TContext>>();
-        services.AddScoped<IServerTask, SloEvaluator<TContext>>();
         services.AddScoped<IServerTask, RecurringJobScheduler<TContext>>();
         services.AddScoped<IServerTask, ScheduledJobActivation<TContext>>();
         services.AddScoped<IServerTask, Orchestrator<TContext>>();
@@ -195,8 +205,8 @@ public static class ServiceConfiguration
 
     // Server-host infrastructure shared by every Warp server (worker or service-only): everything
     // needed to register the server, run the Heartbeat / ServerCleanup / ExpirationCleanup server
-    // tasks, and host WarpBackgroundService instances — but none of the job worker hosts or
-    // job-only server tasks.
+    // tasks, aggregate counters/errors/SLOs, and host WarpBackgroundService instances — but none
+    // of the job worker hosts or job-only server tasks.
     private static void AddServerHostCore<TContext>(
         IServiceCollection services)
         where TContext : DbContext
@@ -336,11 +346,24 @@ public static class ServiceConfiguration
         // Server-infrastructure tasks: heartbeat (renews singleton lease + bumps instance
         // heartbeat), stale-server cleanup (releases dead-server leases/instances), and expiration
         // cleanup (background-service log retention + orphaned-definition GC; its job-cleanup half
-        // no-ops with no jobs). Job-only tasks are added by AddWarpServerCore instead.
+        // no-ops with no jobs). Also the cluster-locked aggregation tasks — counter folding, error
+        // grouping, statistic and custom-metric rollup and SLO evaluation — which fold rows that any process (including
+        // a service-only server's custom metrics) writes. Job-only tasks are added by
+        // AddWarpServerCore instead.
         services.AddScoped<IServerTask, Heartbeat<TContext>>();
         services.AddScoped<IServerTask, ServerCleanup<TContext>>();
         services.AddScoped<IServerTask, ExpirationCleanup<TContext>>();
         services.AddScoped<IServerTask, StatisticRollup<TContext>>();
+        services.AddScoped<IServerTask, MetricRollup<TContext>>();
+        services.AddScoped<IServerTask, CounterAggregator<TContext>>();
+        services.AddScoped<IServerTask, ErrorGroupAggregator<TContext>>();
+        services.AddScoped<IServerTask, SloEvaluator<TContext>>();
+
+        // Custom-metrics sink for the per-process MetricFlusher: a server writes on the server context (§2.14).
+        // Replace, not TryAdd: AddMetrics registers the AddWarp-side TContext sink with TryAdd, and Replace
+        // swaps it out when AddMetrics ran first while leaving this one in place when it ran second, so the
+        // server sink wins whatever the call order. Registered for every server — it costs nothing without AddMetrics.
+        services.Replace(ServiceDescriptor.Scoped<IMetricPointSink, ServerMetricPointSink>());
 
         // WarpServerRegistration MUST be registered before ServerTaskHost / BackgroundServiceHost
         // (and, in worker mode, the worker hosts) so its StartAsync populates ServerRegistrationState

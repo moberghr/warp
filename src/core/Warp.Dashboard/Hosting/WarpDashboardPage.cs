@@ -29,6 +29,7 @@ public enum WarpDashboardPage
     Slo = 15,
     Counters = 16,
     Applications = 17,
+    Metrics = 18,
 }
 
 /// <summary>
@@ -60,6 +61,7 @@ internal static class WarpDashboardPageIds
         WarpDashboardPage.Slo => "slo",
         WarpDashboardPage.Counters => "counters",
         WarpDashboardPage.Applications => "applications",
+        WarpDashboardPage.Metrics => "metrics",
         _ => throw new ArgumentOutOfRangeException(nameof(page), page, "Unknown dashboard page."),
     };
 }

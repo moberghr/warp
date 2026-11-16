@@ -391,6 +391,8 @@ export interface WarpAddonsInfo {
   webhooks: boolean;
   applications: boolean;
   slo: boolean;
+  /** Custom application metrics page. True where AddMetrics() ran (or the host forced ShowMetrics()). */
+  metrics: boolean;
   /**
    * Seconds of silence after which an instance stops counting as live — the server's own
    * ApplicationInstanceStaleGrace. Optional: a pre-6.2 backend does not send it, and the dashboard

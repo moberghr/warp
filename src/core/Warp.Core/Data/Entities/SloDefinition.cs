@@ -36,6 +36,27 @@ public class SloDefinition
 
     public bool Enabled { get; set; } = true;
 
+    /// <summary>Metric kinds: tag filter (<c>k=v[,k=v]</c>, trailing <c>*</c> prefix match) applied to the primary instrument held in <see cref="Dimension"/>.</summary>
+    public string? TagFilter { get; set; }
+
+    /// <summary><see cref="SloKind.MetricGap"/>: the instrument subtracted from the primary one.</summary>
+    public string? SecondaryMetric { get; set; }
+
+    /// <summary><see cref="SloKind.MetricGap"/>: tag filter applied to <see cref="SecondaryMetric"/>.</summary>
+    public string? SecondaryTagFilter { get; set; }
+
+    /// <summary><see cref="SloKind.MetricRatio"/>: the tag whose value classifies an event as good or bad.</summary>
+    public string? RatioTag { get; set; }
+
+    /// <summary><see cref="SloKind.MetricRatio"/>: CSV of <see cref="RatioTag"/> values counted as good; a value may end in <c>*</c>.</summary>
+    public string? GoodValues { get; set; }
+
+    /// <summary><see cref="SloKind.MetricRatio"/>: CSV of <see cref="RatioTag"/> values counted as bad; a value may end in <c>*</c>. Other values are ignored.</summary>
+    public string? BadValues { get; set; }
+
+    /// <summary>Baseline offset in days (1 or 7): <see cref="SloKind.MetricVolumeFloor"/> (required) and <see cref="SloKind.MetricRatio"/> (optional, turns the target into a maximum drop).</summary>
+    public int? BaselineDays { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime UpdatedAt { get; set; }

@@ -234,6 +234,13 @@ public static class ServiceConfiguration
         services.TryAddScoped<ISloQueryService>(x => new SloQueryService<TContext>(x.GetRequiredService<TContext>()));
         services.TryAddScoped<ISloCommandService, SloCommandService<TContext>>();
 
+        // Collected application metrics read service. Registered in AddWarp (not AddMetrics) so dashboard-only
+        // hosts resolve it; the metric_point/metric_instrument tables are always in the schema (§2.11), and
+        // AddMetrics() gates only the collector, the flusher and the addons flag.
+        services.TryAddScoped<IMetricQueryService>(x => new MetricQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>()));
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
@@ -445,6 +452,8 @@ public static class ServiceConfiguration
         AddErrorOccurrenceEntity(modelBuilder, schema);
         AddSloDefinitionEntity(modelBuilder, schema);
         AddSloEvaluationEntity(modelBuilder, schema);
+        AddMetricPointEntity(modelBuilder, schema);
+        AddMetricInstrumentEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -1185,6 +1194,13 @@ public static class ServiceConfiguration
         slo.Property(p => p.Percentile);
         slo.Property(p => p.WindowSeconds);
         slo.Property(p => p.Enabled);
+        slo.Property(p => p.TagFilter).HasMaxLength(512);
+        slo.Property(p => p.SecondaryMetric).HasMaxLength(128);
+        slo.Property(p => p.SecondaryTagFilter).HasMaxLength(512);
+        slo.Property(p => p.RatioTag).HasMaxLength(64);
+        slo.Property(p => p.GoodValues).HasMaxLength(512);
+        slo.Property(p => p.BadValues).HasMaxLength(512);
+        slo.Property(p => p.BaselineDays);
         slo.Property(p => p.CreatedAt);
         slo.Property(p => p.UpdatedAt);
 
@@ -1215,6 +1231,57 @@ public static class ServiceConfiguration
         eval.Property(p => p.LastEvaluatedAt);
 
         eval.Metadata.SetSchema(schema);
+    }
+
+    public static void AddMetricPointEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var point = modelBuilder.Entity<MetricPoint>();
+
+        point.Property(p => p.Id);
+        point.HasKey(p => p.Id);
+
+        point.Property(p => p.Instrument).HasMaxLength(128);
+        point.Property(p => p.Application).HasMaxLength(128);
+        point.Property(p => p.Tags).HasMaxLength(512);
+        point.Property(p => p.Tier).HasConversion<int>();
+        point.Property(p => p.BucketStart);
+        point.Property(p => p.Count);
+        point.Property(p => p.Sum);
+        point.Property(p => p.Min);
+        point.Property(p => p.Max);
+        point.Property(p => p.Buckets).HasMaxLength(512);
+        point.Property(p => p.Bounds).HasMaxLength(256);
+        point.Property(p => p.Compacted);
+
+        // Reads: one instrument, one tier, a time range.
+        point.HasIndex(p => new { p.Instrument, p.Tier, p.BucketStart });
+
+        // The rollup's scans: uncompacted rows of a tier, oldest bucket first.
+        point.HasIndex(p => new { p.Tier, p.Compacted, p.BucketStart });
+
+        point.Metadata.SetSchema(schema);
+    }
+
+    public static void AddMetricInstrumentEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var instrument = modelBuilder.Entity<MetricInstrument>();
+
+        // The PK is the instrument name — caller-supplied, never generated.
+        instrument.Property(p => p.Name).HasMaxLength(128).ValueGeneratedNever();
+        instrument.HasKey(p => p.Name);
+
+        instrument.Property(p => p.Meter).HasMaxLength(128);
+        instrument.Property(p => p.Kind).HasConversion<int>();
+        instrument.Property(p => p.Unit).HasMaxLength(32);
+        instrument.Property(p => p.Description).HasMaxLength(256);
+        instrument.Property(p => p.Bounds).HasMaxLength(256);
+        instrument.Property(p => p.TagKeys).HasMaxLength(256);
+        instrument.Property(p => p.FirstSeenAt);
+        instrument.Property(p => p.LastSeenAt);
+        instrument.Property(p => p.CollapsedAt);
+        instrument.Property(p => p.CollapsedTags).HasMaxLength(256);
+
+        instrument.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)

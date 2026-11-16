@@ -145,4 +145,11 @@ public sealed record SloBreachedEvent : WarpOperationalEvent
 
     /// <summary>The objective's rolling window in seconds.</summary>
     public required int WindowSeconds { get; init; }
+
+    /// <summary>
+    /// Metric kinds only: a label of what the objective reads, built from the objective's own definition, e.g.
+    /// <c>payment.results (result: success / error)</c> or <c>http.server.request.duration [http.route=/api/*]</c>.
+    /// Never carries a tag value observed in the data (§1.2). Null for the job-system kinds.
+    /// </summary>
+    public string? Metric { get; init; }
 }

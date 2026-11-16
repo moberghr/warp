@@ -205,6 +205,26 @@ public class WarpConfiguration
     public TimeSpan? SloEvaluationInterval { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
+    /// How often each process's <c>MetricFlusher</c> writes the custom application metrics it aggregated in memory
+    /// (collected through <c>opt.AddMetrics(...)</c>) as partial <c>metric_point</c> rows, and reads its observable
+    /// instruments. A flush also runs once on graceful shutdown; an ungraceful exit loses at most one interval. An
+    /// idle interval does no database work. Only meaningful where <c>AddMetrics</c> ran. <b>Must be greater than
+    /// zero</b> (validated by <c>AddMetrics</c>). Default 30 seconds. A process whose flush interval is longer than the
+    /// rollup host's can flush into a fine bucket that was already compacted; the late partial row is merged safely by
+    /// the next compaction (reads sum partial rows on read, so nothing is lost or counted twice).
+    /// </summary>
+    public TimeSpan MetricFlushInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How often the <c>MetricRollup</c> server task compacts closed fine buckets of <c>metric_point</c> and rolls
+    /// them up to the hourly and daily tiers (the tier ages are <see cref="FineResolutionRetention"/>,
+    /// <see cref="HourlyStatisticsRetention"/> and <see cref="DailyStatisticsRetention"/>). Set to <c>null</c> to
+    /// disable the rollup loop entirely, like <c>StatisticRollupInterval</c> — metric rows then accumulate. Must be
+    /// greater than zero when set. Default 1 minute.
+    /// </summary>
+    public TimeSpan? MetricRollupInterval { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
     /// Where per-job-TYPE / per-HANDLER execution aggregate <b>metrics</b> are written. The OTel
     /// <c>warp.job.execution.*</c> meters (§2.15) emit <b>unconditionally</b> regardless of this setting
     /// (null-listener ⇒ zero cost); this knob only gates the write-optimised <c>jobstat</c> <c>Counter</c>

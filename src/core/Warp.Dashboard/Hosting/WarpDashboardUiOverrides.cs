@@ -23,4 +23,6 @@ internal sealed class WarpDashboardUiOverrides
     public bool? Client { get; set; }
 
     public bool? Slo { get; set; }
+
+    public bool? Metrics { get; set; }
 }

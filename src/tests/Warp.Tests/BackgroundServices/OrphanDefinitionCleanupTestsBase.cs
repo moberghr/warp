@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using Shouldly;
 using Warp.Core.BackgroundServices;
 using Warp.Core.Data.Entities;
+using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
 using Warp.Worker;
 using Warp.Worker.Services;
@@ -213,5 +214,55 @@ public abstract class OrphanDefinitionCleanupTestsBase : IAsyncLifetime
 
         names.ShouldContain("StillRunning");
         names.ShouldNotContain("OldRenamed");
+    }
+
+    // The metric instrument registry is the same orphan shape: a row nothing has reported for longer than the
+    // daily metric retention describes data that no longer exists.
+    [TimedFact]
+    public async Task CleanupStaleMetricInstrumentsAsync_DeletesOnlyInstrumentsUnseenPastDailyRetention()
+    {
+        await InsertMetricInstrumentsAsync(MetricInstrumentRow("stale", DateTime.UtcNow.AddDays(-91)), MetricInstrumentRow("fresh", DateTime.UtcNow.AddDays(-1)));
+
+        var deleted = await CreateMetricCleanup(TimeSpan.FromDays(90)).CleanupStaleMetricInstrumentsAsync(Xunit.TestContext.Current.CancellationToken);
+
+        deleted.ShouldBe(1);
+        var names = await _fixture.CreateContext().Set<MetricInstrument>()
+            .Select(x => x.Name)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        names.ShouldBe(["fresh"]);
+    }
+
+    [TimedFact]
+    public async Task CleanupStaleMetricInstrumentsAsync_NullDailyRetention_DeletesNothing()
+    {
+        await InsertMetricInstrumentsAsync(MetricInstrumentRow("stale", DateTime.UtcNow.AddDays(-1000)));
+
+        var deleted = await CreateMetricCleanup(null).CleanupStaleMetricInstrumentsAsync(Xunit.TestContext.Current.CancellationToken);
+
+        deleted.ShouldBe(0);
+        (await _fixture.CreateContext().Set<MetricInstrument>().CountAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBe(1);
+    }
+
+    private static MetricInstrument MetricInstrumentRow(string name, DateTime lastSeenAt) => new()
+    {
+        Name = name,
+        Meter = "m",
+        Kind = MetricKind.Counter,
+        FirstSeenAt = lastSeenAt,
+        LastSeenAt = lastSeenAt,
+    };
+
+    private ExpirationCleanup<TestContext> CreateMetricCleanup(TimeSpan? dailyRetention)
+        => new(
+            new Warp.Tests.Helpers.TestServerContext(_fixture.CreateContext()),
+            TimeProvider.System,
+            Options.Create(new WarpServerConfiguration { DailyStatisticsRetention = dailyRetention }),
+            Warp.Tests.Helpers.TestNotifiers.EmptyDispatcher());
+
+    private async Task InsertMetricInstrumentsAsync(params MetricInstrument[] instruments)
+    {
+        var ctx = _fixture.CreateContext();
+        ctx.Set<MetricInstrument>().AddRange(instruments);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
     }
 }

@@ -1,4 +1,5 @@
-import { SloKind, SloState, SloStateLabel, isRatioKind } from '@/types/slo';
+import { SloState, SloStateLabel, isRatioKind, type SloKind } from '@/types/slo';
+import { isCountKind } from './sloForm';
 
 export const inputClass =
   'w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-1.5 text-sm';
@@ -8,7 +9,7 @@ export function formatObjectiveValue(kind: SloKind, value: number): string {
   if (isRatioKind(kind)) {
     return `${(value * 100).toFixed(2)}%`;
   }
-  if (kind === SloKind.BacklogDepth) {
+  if (isCountKind(kind)) {
     return `${Math.round(value)}`;
   }
   return `${Math.round(value)} ms`;

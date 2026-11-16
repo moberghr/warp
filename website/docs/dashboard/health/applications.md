@@ -60,7 +60,9 @@ Click an application to see its instances, and an instance to see its detail.
 ## Background tasks
 
 Each Warp **server** runs a set of background tasks for orchestration and maintenance. A service-only
-server (`opt.DisableWorker()`) runs only the shared ones — `Heartbeat`, `ServerCleanup`, `ExpirationCleanup`.
+server (`opt.DisableWorker()`) runs the shared ones — `Heartbeat`, `ServerCleanup`, `ExpirationCleanup` — plus
+the cluster-locked aggregation tasks: `CounterAggregator`, `ErrorGroupAggregator`, `SloEvaluator`,
+`StatisticRollup` and `MetricRollup`. It runs no job-only task (`BacklogSampler` included) and claims no job.
 
 | Task | Default interval | Purpose |
 |---|---|---|
@@ -77,6 +79,7 @@ server (`opt.DisableWorker()`) runs only the shared ones — `Heartbeat`, `Serve
 | **EvaluateSlos** | 1m (`SloEvaluationInterval`) | Computes attainment, error budget and burn rate for each objective |
 | **ExpirationCleanup** | 5m (`ExpirationCleanupInterval`) | Deletes expired jobs, call logs, deliveries and other retention-capped rows |
 | **RollupStatistics** | 10m (`StatisticRollupInterval`) | Downsamples time-bucketed statistics fine → hourly → daily |
+| **RollupMetrics** | 1m (`MetricRollupInterval`) | Compacts and downsamples [custom application metric](/docs/features/custom-metrics) points fine → hourly → daily |
 
 Every interval is configurable — see [Configuration](/docs/operations/configuration#background-task-intervals).
 Setting one to `null` disables that task.

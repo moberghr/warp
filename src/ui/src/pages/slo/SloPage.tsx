@@ -1,17 +1,33 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getSlos, upsertSlo, deleteSlo, ackSlo } from '@/api';
+import { getSlos, upsertSlo, deleteSlo, ackSlo, getMetrics } from '@/api';
+import { queryKeys } from '@/lib/queryClient';
+import type { MetricInstrument } from '@/types/metrics';
 import {
   SloKind,
   SloKindLabel,
   SloState,
   type SloObjective,
   type SloUpsertRequest,
+  isMetricKind,
   isRatioKind,
 } from '@/types/slo';
 import { formatObjectiveValue, formatBudget, SloStatePill, inputClass } from './shared';
 import { PageHeading } from '@/components/PageHeading';
+import {
+  MIN_METRIC_WINDOW_SECONDS,
+  buildUpsertRequest,
+  changeKind,
+  errorMessage,
+  fieldsFor,
+  fractionToPercent,
+  objectiveToDraft,
+  percentToFraction,
+  selectableInstruments,
+  validateMetricDraft,
+} from './sloForm';
+import { showsSloValues } from './sloDisplay';
 
 const emptyDraft: SloUpsertRequest = {
   id: 0,
@@ -36,7 +52,8 @@ export default function SloPage() {
   const [draft, setDraft] = useState<SloUpsertRequest | null>(null);
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['slos'] });
-  const saveMutation = useMutation({ mutationFn: upsertSlo, onSuccess: () => { setDraft(null); invalidate(); } });
+  const saveMutation = useMutation({ mutationFn: (d: SloUpsertRequest) => upsertSlo(buildUpsertRequest(d)), onSuccess: () => { setDraft(null); invalidate(); } });
+  const openDraft = (d: SloUpsertRequest | null) => { saveMutation.reset(); setDraft(d); };
   const deleteMutation = useMutation({ mutationFn: deleteSlo, onSuccess: invalidate });
   const ackMutation = useMutation({ mutationFn: (id: number) => ackSlo(id, 60), onSuccess: invalidate });
 
@@ -53,7 +70,7 @@ export default function SloPage() {
         </div>
         <button
           type="button"
-          onClick={() => setDraft({ ...emptyDraft })}
+          onClick={() => openDraft({ ...emptyDraft })}
           className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700"
         >
           New objective
@@ -89,7 +106,7 @@ export default function SloPage() {
                 <ObjectiveRow
                   key={o.id}
                   objective={o}
-                  onEdit={() => setDraft(toDraft(o))}
+                  onEdit={() => openDraft(objectiveToDraft(o))}
                   onDelete={() => deleteMutation.mutate(o.id)}
                   onAck={() => ackMutation.mutate(o.id)}
                 />
@@ -103,9 +120,10 @@ export default function SloPage() {
         <ObjectiveForm
           draft={draft}
           onChange={setDraft}
-          onCancel={() => setDraft(null)}
+          onCancel={() => openDraft(null)}
           onSave={() => saveMutation.mutate(draft)}
           saving={saveMutation.isPending}
+          serverError={saveMutation.isError ? errorMessage(saveMutation.error) : null}
         />
       )}
     </div>
@@ -124,6 +142,7 @@ function ObjectiveRow({
   onAck: () => void;
 }) {
   const o = objective;
+  const hasValues = showsSloValues(o);
   const budget = o.budgetRemaining;
   const barColor = budget < 0 ? 'bg-red-500' : budget < 0.25 ? 'bg-amber-500' : 'bg-green-500';
   const width = Math.max(0, Math.min(100, budget * 100));
@@ -139,17 +158,17 @@ function ObjectiveRow({
         {o.application && <span className="ml-1 text-xs text-gray-400">@{o.application}</span>}
       </td>
       <td className="px-4 py-3 text-right tabular-nums">{formatObjectiveValue(o.kind, o.targetValue)}</td>
-      <td className="px-4 py-3 text-right tabular-nums">{o.evaluated ? formatObjectiveValue(o.kind, o.attainment) : '—'}</td>
+      <td className="px-4 py-3 text-right tabular-nums">{hasValues ? formatObjectiveValue(o.kind, o.attainment) : '—'}</td>
       <td className="px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="h-2 w-24 rounded bg-gray-200 dark:bg-gray-700 overflow-hidden">
-            <div className={`h-full ${barColor}`} style={{ width: `${width}%` }} />
+            {hasValues && <div className={`h-full ${barColor}`} style={{ width: `${width}%` }} />}
           </div>
-          <span className="text-xs tabular-nums w-12 text-right">{o.evaluated ? formatBudget(budget) : '—'}</span>
+          <span className="text-xs tabular-nums w-12 text-right">{hasValues ? formatBudget(budget) : '—'}</span>
         </div>
       </td>
       <td className="px-4 py-3 text-right tabular-nums text-xs">
-        {o.evaluated ? `${o.burnRateShort.toFixed(1)}× / ${o.burnRateLong.toFixed(1)}×` : '—'}
+        {hasValues ? `${o.burnRateShort.toFixed(1)}× / ${o.burnRateLong.toFixed(1)}×` : '—'}
       </td>
       <td className="px-4 py-3"><SloStatePill state={o.state} enabled={o.enabled} /></td>
       <td className="px-4 py-3 text-right whitespace-nowrap">
@@ -169,43 +188,102 @@ function ObjectiveForm({
   onCancel,
   onSave,
   saving,
+  serverError,
 }: {
   draft: SloUpsertRequest;
   onChange: (d: SloUpsertRequest) => void;
   onCancel: () => void;
   onSave: () => void;
   saving: boolean;
+  serverError: string | null;
 }) {
   const set = (patch: Partial<SloUpsertRequest>) => onChange({ ...draft, ...patch });
+  const metric = isMetricKind(draft.kind);
+  const fields = fieldsFor(draft.kind);
   const ratio = isRatioKind(draft.kind);
+
+  const { data: metrics } = useQuery({ queryKey: queryKeys.metrics, queryFn: getMetrics, enabled: metric });
+  const instruments = selectableInstruments(metrics ?? []);
+  const primary = instruments.find((x) => x.name === draft.dimension);
+  const clientError = validateMetricDraft(draft);
+  const saveDisabled = saving || !draft.name || !draft.dimension || clientError !== null;
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onCancel}>
-      <div className="bg-white dark:bg-gray-900 rounded-xl p-6 w-full max-w-md shadow-xl" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white dark:bg-gray-900 rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto shadow-xl" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-semibold mb-4">{draft.id ? 'Edit objective' : 'New objective'}</h2>
         <div className="space-y-3 text-sm">
           <Field label="Name">
             <input className={inputClass} value={draft.name} onChange={(e) => set({ name: e.target.value })} />
           </Field>
           <Field label="Kind">
-            <select className={inputClass} value={draft.kind} onChange={(e) => set({ kind: Number(e.target.value) as SloKind, percentile: null })}>
+            <select className={inputClass} value={draft.kind} onChange={(e) => onChange(changeKind(draft, Number(e.target.value) as SloKind))}>
               {Object.entries(SloKindLabel).map(([k, label]) => (
                 <option key={k} value={k}>{label}</option>
               ))}
             </select>
           </Field>
-          <Field label="Dimension (queue / job type / *)">
-            <input className={`${inputClass} font-mono`} value={draft.dimension} onChange={(e) => set({ dimension: e.target.value })} />
-          </Field>
-          <Field label={ratio ? 'Target ratio (0–1)' : 'Target (ms / count)'}>
-            <input className="input tabular-nums" type="number" step="any" value={draft.targetValue} onChange={(e) => set({ targetValue: Number(e.target.value) })} />
-          </Field>
-          {(draft.kind === SloKind.QueueWaitLatency || draft.kind === SloKind.ExecutionLatency) && (
-            <Field label="Percentile (90 / 95 / 99)">
-              <input className="input tabular-nums" type="number" value={draft.percentile ?? 95} onChange={(e) => set({ percentile: Number(e.target.value) })} />
-            </Field>
+
+          {metric ? (
+            <>
+              <Field label={fields.secondary ? 'Primary instrument' : 'Instrument'}>
+                <InstrumentSelect value={draft.dimension} instruments={instruments} onChange={(dimension) => set({ dimension })} />
+              </Field>
+              {fields.ratio && (
+                <>
+                  <Field label="Ratio tag">
+                    <TagKeyInput value={draft.ratioTag ?? ''} keys={primary?.tagKeys ?? []} onChange={(ratioTag) => set({ ratioTag })} />
+                  </Field>
+                  <Field label="Good values (comma-separated, trailing * allowed)">
+                    <input className={`${inputClass} font-mono`} placeholder="success,authorised" value={draft.goodValues ?? ''} onChange={(e) => set({ goodValues: e.target.value })} />
+                  </Field>
+                  <Field label="Bad values (comma-separated, trailing * allowed)">
+                    <input className={`${inputClass} font-mono`} placeholder="failed,refused" value={draft.badValues ?? ''} onChange={(e) => set({ badValues: e.target.value })} />
+                  </Field>
+                  <Field label="Compare with baseline (optional)">
+                    <BaselineSelect value={draft.baselineDays ?? null} allowNone onChange={(baselineDays) => set({ baselineDays })} />
+                  </Field>
+                </>
+              )}
+              {fields.tagFilter && (
+                <Field label={fields.secondary ? 'Primary tag filter (k=v,k=v; trailing * allowed)' : 'Tag filter (k=v,k=v; trailing * allowed)'}>
+                  <input className={`${inputClass} font-mono`} placeholder="http.response.status_code=5*" value={draft.tagFilter ?? ''} onChange={(e) => set({ tagFilter: e.target.value })} />
+                </Field>
+              )}
+              {fields.baseline === 'required' && (
+                <Field label="Baseline">
+                  <BaselineSelect value={draft.baselineDays ?? null} onChange={(baselineDays) => set({ baselineDays })} />
+                </Field>
+              )}
+              {fields.secondary && (
+                <>
+                  <Field label="Secondary instrument">
+                    <InstrumentSelect value={draft.secondaryMetric ?? ''} instruments={instruments} onChange={(secondaryMetric) => set({ secondaryMetric })} />
+                  </Field>
+                  <Field label="Secondary tag filter">
+                    <input className={`${inputClass} font-mono`} value={draft.secondaryTagFilter ?? ''} onChange={(e) => set({ secondaryTagFilter: e.target.value })} />
+                  </Field>
+                </>
+              )}
+              <MetricTarget draft={draft} onChange={(targetValue) => set({ targetValue })} />
+            </>
+          ) : (
+            <>
+              <Field label="Dimension (queue / job type / *)">
+                <input className={`${inputClass} font-mono`} value={draft.dimension} onChange={(e) => set({ dimension: e.target.value })} />
+              </Field>
+              <Field label={ratio ? 'Target ratio (0–1)' : 'Target (ms / count)'}>
+                <input className="input tabular-nums" type="number" step="any" value={draft.targetValue} onChange={(e) => set({ targetValue: Number(e.target.value) })} />
+              </Field>
+              {fields.percentile && (
+                <Field label="Percentile (90 / 95 / 99)">
+                  <input className="input tabular-nums" type="number" value={draft.percentile ?? 95} onChange={(e) => set({ percentile: Number(e.target.value) })} />
+                </Field>
+              )}
+            </>
           )}
-          <Field label="Window (seconds)">
+
+          <Field label={metric ? `Window (seconds, minimum ${MIN_METRIC_WINDOW_SECONDS})` : 'Window (seconds)'}>
             <input className="input tabular-nums" type="number" value={draft.windowSeconds} onChange={(e) => set({ windowSeconds: Number(e.target.value) })} />
           </Field>
           <Field label="Application (optional)">
@@ -216,14 +294,99 @@ function ObjectiveForm({
             <span>Enabled</span>
           </label>
         </div>
+        {clientError && <p className="mt-4 text-xs text-amber-600">{clientError}</p>}
+        {serverError && <p role="alert" className="mt-2 text-sm text-red-600">{serverError}</p>}
         <div className="flex justify-end gap-2 mt-6">
           <button type="button" onClick={onCancel} className="px-4 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800">Cancel</button>
-          <button type="button" onClick={onSave} disabled={saving || !draft.name || !draft.dimension} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+          <button type="button" onClick={onSave} disabled={saveDisabled} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
             {saving ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>
     </div>
+  );
+}
+
+function InstrumentSelect({
+  value,
+  instruments,
+  onChange,
+}: {
+  value: string;
+  instruments: MetricInstrument[];
+  onChange: (name: string) => void;
+}) {
+  // An objective may reference an instrument that has not reported yet (or aged out of the registry): keep it selectable.
+  const known = instruments.some((x) => x.name === value);
+
+  return (
+    <select className={`${inputClass} font-mono`} value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Select an instrument…</option>
+      {value !== '' && !known && <option value={value}>{value}</option>}
+      {instruments.map((x) => (
+        <option key={x.name} value={x.name}>{x.name}</option>
+      ))}
+    </select>
+  );
+}
+
+function TagKeyInput({ value, keys, onChange }: { value: string; keys: string[]; onChange: (v: string) => void }) {
+  if (keys.length === 0) {
+    return <input className={`${inputClass} font-mono`} value={value} onChange={(e) => onChange(e.target.value)} />;
+  }
+
+  return (
+    <select className={`${inputClass} font-mono`} value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Select a tag…</option>
+      {value !== '' && !keys.includes(value) && <option value={value}>{value}</option>}
+      {keys.map((k) => (
+        <option key={k} value={k}>{k}</option>
+      ))}
+    </select>
+  );
+}
+
+function BaselineSelect({
+  value,
+  allowNone,
+  onChange,
+}: {
+  value: number | null;
+  allowNone?: boolean;
+  onChange: (days: number | null) => void;
+}) {
+  return (
+    <select className={inputClass} value={value ?? ''} onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}>
+      {allowNone && <option value="">No baseline</option>}
+      <option value="1">Same window 1 day earlier</option>
+      <option value="7">Same window 7 days earlier</option>
+    </select>
+  );
+}
+
+function MetricTarget({ draft, onChange }: { draft: SloUpsertRequest; onChange: (target: number) => void }) {
+  const percent = isRatioKind(draft.kind);
+  const label =
+    draft.kind === SloKind.MetricRatio
+      ? draft.baselineDays == null
+        ? 'Target (good ratio ≥ %)'
+        : 'Max drop vs baseline (percentage points)'
+      : draft.kind === SloKind.MetricVolumeFloor
+        ? 'Minimum fraction of baseline (%)'
+        : draft.kind === SloKind.MetricGap
+          ? 'Max gap (primary − secondary events)'
+          : 'Max events in window';
+
+  return (
+    <Field label={label}>
+      <input
+        className={`${inputClass} tabular-nums`}
+        type="number"
+        step="any"
+        value={percent ? fractionToPercent(draft.targetValue) : draft.targetValue}
+        onChange={(e) => onChange(percent ? percentToFraction(Number(e.target.value)) : Number(e.target.value))}
+      />
+    </Field>
   );
 }
 
@@ -234,18 +397,4 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </label>
   );
-}
-
-function toDraft(o: SloObjective): SloUpsertRequest {
-  return {
-    id: o.id,
-    name: o.name,
-    kind: o.kind,
-    dimension: o.dimension,
-    application: o.application,
-    targetValue: o.targetValue,
-    percentile: o.percentile,
-    windowSeconds: o.windowSeconds,
-    enabled: o.enabled,
-  };
 }

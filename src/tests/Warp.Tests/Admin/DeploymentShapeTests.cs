@@ -193,7 +193,7 @@ public class DeploymentShapeTests
     }
 
     // Pins the full server shape (worker on by default): AddWarpServer registers the worker hosts,
-    // the six job-only server tasks, AND the server infrastructure + background-service host.
+    // the job-only server tasks, AND the server infrastructure + background-service host.
     [TimedFact]
     public void ServerWithWorkerShape_AddWarpServer_RegistersWorkerAndBgServices()
     {
@@ -228,7 +228,7 @@ public class DeploymentShapeTests
     }
 
     // The service-only shape: opt.DisableWorker() leaves the server infrastructure + background
-    // services but NO job worker hosts and NONE of the six job-only server tasks.
+    // services and the aggregation tasks but NO job worker hosts and NONE of the job-only server tasks.
     [TimedFact]
     public void ServiceOnlyShape_AddWarpServerDisableWorker_OmitsWorker()
     {
@@ -261,18 +261,21 @@ public class DeploymentShapeTests
 
         var taskTypes = scope.ServiceProvider.GetServices<IServerTask>().Select(x => x.GetType()).ToList();
 
-        // The three server-infrastructure tasks run.
+        // The server-infrastructure tasks run, plus the cluster-locked aggregation tasks that fold
+        // rows any process writes.
         taskTypes.ShouldContain(typeof(Heartbeat<TestContext>));
         taskTypes.ShouldContain(typeof(ServerCleanup<TestContext>));
         taskTypes.ShouldContain(typeof(ExpirationCleanup<TestContext>));
+        taskTypes.ShouldContain(typeof(CounterAggregator<TestContext>));
+        taskTypes.ShouldContain(typeof(ErrorGroupAggregator<TestContext>));
+        taskTypes.ShouldContain(typeof(SloEvaluator<TestContext>));
 
-        // None of the seven job-only tasks.
+        // None of the job-only tasks.
         taskTypes.ShouldNotContain(typeof(Orchestrator<TestContext>));
         taskTypes.ShouldNotContain(typeof(MessageRouter<TestContext>));
         taskTypes.ShouldNotContain(typeof(ScheduledJobActivation<TestContext>));
         taskTypes.ShouldNotContain(typeof(RecurringJobScheduler<TestContext>));
         taskTypes.ShouldNotContain(typeof(StaleJobRecovery<TestContext>));
-        taskTypes.ShouldNotContain(typeof(CounterAggregator<TestContext>));
         taskTypes.ShouldNotContain(typeof(BacklogSampler<TestContext>));
     }
 

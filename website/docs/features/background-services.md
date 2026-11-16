@@ -98,7 +98,11 @@ The two executing-server shapes:
 | `AddWarpServer<TContext>` + `opt.DisableWorker()` | ✅ | ✅ | ❌ |
 | `AddWarpServer<TContext>` (default) | ✅ | ✅ | ✅ |
 
-A service-only server still registers itself and runs the supporting server tasks — `Heartbeat` (renews the singleton lease), `ServerCleanup` (releases leases held by departed servers), and `ExpirationCleanup` (background-service log retention + orphaned-definition GC) — so `Singleton` coordination and cleanup work exactly as under the full worker. It does **not** register the job worker hosts or the job-only server tasks (Orchestrator, MessageRouter, ScheduledJobActivation, RecurringJobScheduler, StaleJobRecovery, CounterAggregator), so it takes no job-routing locks and creates no `Worker`/`WorkerGroup` rows. A provider (`UsePostgreSql`/`UseSqlServer`) is still required — the server tasks take distributed locks.
+A service-only server still registers itself and runs the supporting server tasks — `Heartbeat` (renews the singleton lease), `ServerCleanup` (releases leases held by departed servers), and `ExpirationCleanup` (background-service log retention + orphaned-definition GC) — so `Singleton` coordination and cleanup work exactly as under the full worker. It also runs the cluster-locked aggregation tasks that fold rows any process can write: `CounterAggregator`, `ErrorGroupAggregator`, `SloEvaluator`, `StatisticRollup` and `MetricRollup` (the [custom application metrics](./custom-metrics.md) rollup). That makes `DisableWorker()` the natural shape for a process that owns the observability folds without ever claiming a job. It does **not** register the job worker hosts or the job-only server tasks (Orchestrator, MessageRouter, ScheduledJobActivation, RecurringJobScheduler, StaleJobRecovery, BacklogSampler), so it takes no job-routing locks, claims no job, and creates no `Worker`/`WorkerGroup` rows. A provider (`UsePostgreSql`/`UseSqlServer`) is still required — the server tasks take distributed locks.
+
+:::note Behaviour change in 7.5.0
+Before 7.5.0 a `DisableWorker()` server did not run `CounterAggregator`, `ErrorGroupAggregator` or `SloEvaluator`; they ran only on servers with a worker. They are cluster-locked, so a mixed cluster still runs each tick once, but a cluster made up only of service-only servers now folds counters, groups errors and evaluates SLOs where it previously did none of that.
+:::
 
 ## Scope
 

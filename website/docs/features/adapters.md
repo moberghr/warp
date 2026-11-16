@@ -230,6 +230,16 @@ opt.AddAdapter("acme-payments", a =>
 
 Keep group values and tags tokenised too — they render in the dashboard. Hash tenant identifiers; don't put raw emails in a group name.
 
+### PCI: payment processors
+
+Adapters that call a payment processor, card scheme or acquirer carry cardholder data (PAN, expiry, CVV, names, addresses) in their requests and responses. For those adapters:
+
+- **Leave `CaptureRequestBodies`, `CaptureResponseBodies` and `CaptureHeaders` at `None`** (the default). Do not use `OnFailure` or `Always`: a failed authorisation response is exactly where the processor echoes card details back.
+- **Never use `ForceCapture` on them.** `WithWarpForceCapture()` (per request) and `WarpAdapterCall.ForceCapture()` (per async scope) override the capture tier, even `None`, store request and response bodies and headers at full fidelity, and bypass `SampleRate` and `RecordCalls`. The header denylist still applies, but bodies are stored as they are. Warp does not detect card data in a body, and it does not block the override.
+- Keep `group` and `tags` free of PAN and customer identifiers, since the dashboard renders both.
+
+The same rule covers the tag values of [custom application metrics](./custom-metrics.md#pci-and-pii): Warp cannot detect PII in a free string.
+
 ## Recording volume — `RecordCalls`
 
 `RecordCalls` decides whether a call-log **row** exists at all; it is orthogonal to capture (which controls how much payload a row carries):

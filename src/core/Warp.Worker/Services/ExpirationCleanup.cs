@@ -70,6 +70,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupExpiredErrorGroupsAsync(ct);
         await CleanupErrorGroupsByCountAsync(ct);
         await CleanupOrphanErrorOccurrencesAsync(ct);
+        await CleanupStaleMetricInstrumentsAsync(ct);
 
         var total = timeExpired + countCleaned;
         if (total == 0)
@@ -727,6 +728,50 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 .ExecuteDeleteAsync(ct);
 
             if (ids.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // Deletes custom-metric registry rows (MetricInstrument) no process has reported for longer than the daily
+    // retention: by then MetricRollup has pruned every point the row described. Never runs when daily retention is
+    // null (points are kept forever, so the registry row must stay to describe them). No model guard: the entity is
+    // always in the Warp model (§2.11) and mirrored by the server context (§2.14), like MetricRollup's MetricPoint.
+    // Batched + MaxSweepBatchesPerTick-capped like the other sweeps.
+    internal async Task<int> CleanupStaleMetricInstrumentsAsync(CancellationToken ct)
+    {
+        if (_configuration.DailyStatisticsRetention is not { } retention)
+        {
+            return 0;
+        }
+
+        var cutoff = _time.GetUtcNow().UtcDateTime - retention;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var names = await _context.Set<MetricInstrument>()
+                .Where(x => x.LastSeenAt < cutoff)
+                .Select(x => x.Name)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (names.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<MetricInstrument>()
+                .Where(x => names.Contains(x.Name))
+                .ExecuteDeleteAsync(ct);
+
+            if (names.Count < batchSize)
             {
                 break;
             }

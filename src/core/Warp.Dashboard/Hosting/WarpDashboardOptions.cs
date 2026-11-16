@@ -75,6 +75,9 @@ public class WarpDashboardOptions
     /// <summary>Shows the <b>SLOs</b> nav item regardless of whether <c>AddSlo()</c> ran in this process.</summary>
     public WarpDashboardOptions ShowSlo(bool show = true) => Declare(x => x.Slo = show);
 
+    /// <summary>Shows the <b>Metrics</b> nav item regardless of whether <c>AddMetrics()</c> ran in this process.</summary>
+    public WarpDashboardOptions ShowMetrics(bool show = true) => Declare(x => x.Metrics = show);
+
     /// <summary>
     /// The host's <c>Show*</c> declarations, read by the <c>GET /api/addons</c> endpoint.
     /// </summary>

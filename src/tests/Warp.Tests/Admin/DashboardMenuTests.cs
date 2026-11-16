@@ -43,6 +43,17 @@ public class DashboardMenuTests
     }
 
     [TimedFact]
+    public async Task Menu_MetricsPage_SerializesAsTheMetricsId()
+    {
+        // navModel.ts joins on "metrics"; the distinct-id sweep below would not catch a rename to another unique id.
+        var shell = await GetShellAsync(o => o.ConfigureMenu(m => m.Pages(WarpDashboardPage.Metrics)));
+
+        var entries = ReadMenu(shell).GetProperty("entries");
+
+        entries.EnumerateArray().Select(Describe).ShouldBe(["page:metrics"]);
+    }
+
+    [TimedFact]
     public async Task Menu_WithOnlyPages_DeclaresNoGroupsAndLeavesTheRestToTheOverflow()
     {
         // A bar-only layout is a first-class shape: N pages up front, everything else in one dropdown.

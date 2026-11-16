@@ -380,3 +380,6 @@ tasks/todo.md
 **/.claude/analytics.json
 .mtk/
 .claude.local.md
+
+# MTK session telemetry
+.claude/observability/

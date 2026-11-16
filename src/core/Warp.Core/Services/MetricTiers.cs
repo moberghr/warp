@@ -8,7 +8,7 @@ namespace Warp.Core.Services;
 /// coarser tiers as they age (Fine → Hourly → Daily) so recent data stays detailed while long history stays
 /// cheap. Values start at 1 (§8.11).
 /// </summary>
-internal enum MetricTier
+public enum MetricTier
 {
     /// <summary>5-minute (configurable) buckets — the finest tier, kept only for the recent window.</summary>
     Fine = 1,

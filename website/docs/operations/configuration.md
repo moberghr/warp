@@ -23,6 +23,15 @@ builder.Services.AddWarp<AppDbContext>(options =>
 | `DefaultQueue` | `string` | `"default"` | Queue used when no queue is specified at publish time. The implicit worker group follows it when `Queues` is left untouched (see the worker options below). |
 | `JobExpirationTimeout` | `TimeSpan` | `1 day` | How long completed/deleted jobs are kept before cleanup. Failed jobs never expire. |
 
+### Custom application metrics
+
+Set on `AddWarp` (or `AddWarpServer`, which inherits them) and only meaningful where `opt.AddMetrics(...)` ran. See [Custom application metrics](/docs/features/custom-metrics).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `MetricFlushInterval` | `TimeSpan` | `30 seconds` | How often each process writes the metrics it aggregated in memory as partial `metric_point` rows, and reads its observable instruments. A flush also runs on graceful shutdown; **an ungraceful exit loses at most one interval.** An idle interval does no database work. Must be greater than zero (`AddMetrics` throws otherwise). Raise it on emit-only processes to cut insert volume. |
+| `MetricRollupInterval` | `TimeSpan?` | `1 minute` | How often the `MetricRollup` server task compacts closed 5-minute buckets and rolls them up to hourly and daily rows. `null` disables the rollup loop (metric rows then accumulate). It runs on every `AddWarpServer` process, including `DisableWorker()` ones. Tier ages come from `FineResolutionRetention` (6h), `HourlyStatisticsRetention` (7d) and `DailyStatisticsRetention` (90d, `null` keeps forever). |
+
 ### Naming Conventions
 
 Warp's entity configurations do **not** hardcode table or column names. If you use a naming convention plugin (e.g., `UseSnakeCaseNamingConvention()`), it will transform Warp's tables and columns just like your own entities:
@@ -322,6 +331,7 @@ Failed jobs have `ExpireAt = null` and are never automatically deleted. They mus
 | `ServerCleanupInterval` | `TimeSpan` | `30 seconds` | Dead server cleanup interval |
 | `StaleJobRecoveryInterval` | `TimeSpan` | `30 seconds` | Stale job recovery interval |
 | `ExpirationCleanupInterval` | `TimeSpan` | `5 minutes` | Expiration cleanup interval |
+| `MetricRollupInterval` | `TimeSpan?` | `1 minute` | How often `MetricRollup` compacts and downsamples custom application metric rows (inherited from `WarpConfiguration`; see [Custom application metrics](#custom-application-metrics)). `null` disables the scheduled run |
 
 ## Queue Ordering
 

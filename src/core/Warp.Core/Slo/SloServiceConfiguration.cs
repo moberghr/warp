@@ -3,8 +3,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Services;
 
 namespace Warp.Core.Slo;
 
@@ -48,6 +50,122 @@ public sealed class SloOptions
         if (!SloValidation.TryValidate(definition, out var error))
         {
             throw new ArgumentException($"Invalid SLO objective ({kind} {dimension}): {error}", nameof(target));
+        }
+
+        Seeded.Add(definition);
+
+        return this;
+    }
+
+    /// <summary>
+    /// Good-event ratio over a custom metric (<paramref name="instrument"/>): events whose <paramref name="ratioTag"/>
+    /// matches <paramref name="goodValues"/> over good + <paramref name="badValues"/> (CSV, trailing <c>*</c> allowed)
+    /// must stay at or above <paramref name="target"/>. With <paramref name="baselineDays"/> (1 or 7) the target is
+    /// the maximum drop in ratio points against the same window that many days earlier.
+    /// </summary>
+    public SloOptions AddMetricRatio(
+        string name,
+        string instrument,
+        string ratioTag,
+        string goodValues,
+        string badValues,
+        double target,
+        int windowSeconds = 3600,
+        string? application = null,
+        string? tagFilter = null,
+        int? baselineDays = null,
+        bool enabled = true)
+        => AddMetric(new SloDefinition
+        {
+            Name = name,
+            Kind = SloKind.MetricRatio,
+            Dimension = instrument,
+            TargetValue = target,
+            WindowSeconds = windowSeconds,
+            Application = application,
+            TagFilter = tagFilter,
+            RatioTag = ratioTag,
+            GoodValues = goodValues,
+            BadValues = badValues,
+            BaselineDays = baselineDays,
+            Enabled = enabled,
+        });
+
+    /// <summary>Matching events of <paramref name="instrument"/> in the window must not exceed <paramref name="maxEvents"/> (0 allowed).</summary>
+    public SloOptions AddMetricThreshold(
+        string name,
+        string instrument,
+        double maxEvents,
+        int windowSeconds = 3600,
+        string? application = null,
+        string? tagFilter = null,
+        bool enabled = true)
+        => AddMetric(new SloDefinition
+        {
+            Name = name,
+            Kind = SloKind.MetricThreshold,
+            Dimension = instrument,
+            TargetValue = maxEvents,
+            WindowSeconds = windowSeconds,
+            Application = application,
+            TagFilter = tagFilter,
+            Enabled = enabled,
+        });
+
+    /// <summary>Matching events must stay at or above <paramref name="minRatio"/> times the same window <paramref name="baselineDays"/> (1 or 7) earlier.</summary>
+    public SloOptions AddMetricVolumeFloor(
+        string name,
+        string instrument,
+        double minRatio,
+        int baselineDays,
+        int windowSeconds = 3600,
+        string? application = null,
+        string? tagFilter = null,
+        bool enabled = true)
+        => AddMetric(new SloDefinition
+        {
+            Name = name,
+            Kind = SloKind.MetricVolumeFloor,
+            Dimension = instrument,
+            TargetValue = minRatio,
+            WindowSeconds = windowSeconds,
+            Application = application,
+            TagFilter = tagFilter,
+            BaselineDays = baselineDays,
+            Enabled = enabled,
+        });
+
+    /// <summary>Events of <paramref name="instrument"/> minus events of <paramref name="secondaryMetric"/> must not exceed <paramref name="maxGap"/> (0 allowed).</summary>
+    public SloOptions AddMetricGap(
+        string name,
+        string instrument,
+        string secondaryMetric,
+        double maxGap,
+        int windowSeconds = 3600,
+        string? application = null,
+        string? tagFilter = null,
+        string? secondaryTagFilter = null,
+        bool enabled = true)
+        => AddMetric(new SloDefinition
+        {
+            Name = name,
+            Kind = SloKind.MetricGap,
+            Dimension = instrument,
+            TargetValue = maxGap,
+            WindowSeconds = windowSeconds,
+            Application = application,
+            TagFilter = tagFilter,
+            SecondaryMetric = secondaryMetric,
+            SecondaryTagFilter = secondaryTagFilter,
+            Enabled = enabled,
+        });
+
+    // The retention check (R29) needs WarpConfiguration, which the options do not have: the seeder re-validates with it.
+    private SloOptions AddMetric(SloDefinition definition)
+    {
+        if (!SloValidation.TryValidate(definition, out var error))
+        {
+            throw new ArgumentException($"Invalid SLO objective ({definition.Kind} {definition.Dimension}): {error}", nameof(definition));
         }
 
         Seeded.Add(definition);
@@ -110,13 +228,15 @@ internal sealed class SloSeeder<TContext> : IHostedService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly SloOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly WarpConfiguration _configuration;
     private readonly ILogger<SloSeeder<TContext>> _logger;
 
-    public SloSeeder(IServiceScopeFactory scopeFactory, SloOptions options, TimeProvider timeProvider, ILogger<SloSeeder<TContext>> logger)
+    public SloSeeder(IServiceScopeFactory scopeFactory, SloOptions options, TimeProvider timeProvider, IOptions<WarpConfiguration> configuration, ILogger<SloSeeder<TContext>> logger)
     {
         _scopeFactory = scopeFactory;
         _options = options;
         _timeProvider = timeProvider;
+        _configuration = configuration.Value;
         _logger = logger;
     }
 
@@ -126,14 +246,36 @@ internal sealed class SloSeeder<TContext> : IHostedService
         {
             using var scope = _scopeFactory.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<TContext>();
+            var metrics = scope.ServiceProvider.GetRequiredService<IMetricQueryService>();
             var now = _timeProvider.GetUtcNow().UtcDateTime;
             var added = 0;
 
             foreach (var seed in _options.Seeded)
             {
-                var exists = await context.Set<SloDefinition>().AnyAsync(
-                    x => x.Kind == seed.Kind && x.Dimension == seed.Dimension && x.Application == seed.Application && x.Percentile == seed.Percentile,
-                    cancellationToken);
+                // The same validator as the dashboard upsert: a metric objective is checked against the registry kind
+                // of its instruments (a gauge, primary or a gap's secondary, has no event count) and the retention.
+                var isMetric = SloValidation.IsMetricKind(seed.Kind);
+                if (isMetric)
+                {
+                    var (ok, metricError) = await SloDefinitionValidator.ValidateAsync(seed, metrics, _configuration.HourlyStatisticsRetention, cancellationToken);
+                    if (!ok)
+                    {
+                        _logger.LogError("SLO objective '{Name}' was NOT seeded: {Error}", seed.Name, metricError);
+
+                        continue;
+                    }
+                }
+
+                // Metric kinds put the instrument in Dimension, so two objectives on one instrument are told apart
+                // by their filter, secondary instrument and ratio tag.
+                var exists = isMetric
+                    ? await context.Set<SloDefinition>().AnyAsync(
+                        x => x.Kind == seed.Kind && x.Dimension == seed.Dimension && x.Application == seed.Application && x.Percentile == seed.Percentile
+                            && x.TagFilter == seed.TagFilter && x.SecondaryMetric == seed.SecondaryMetric && x.RatioTag == seed.RatioTag,
+                        cancellationToken)
+                    : await context.Set<SloDefinition>().AnyAsync(
+                        x => x.Kind == seed.Kind && x.Dimension == seed.Dimension && x.Application == seed.Application && x.Percentile == seed.Percentile,
+                        cancellationToken);
 
                 if (exists)
                 {

@@ -1,0 +1,1 @@
+var e={Counter:1,UpDownCounter:2,Histogram:3,Gauge:4},t={Fine:1,Hourly:2,Daily:3};export{t as n,e as t};
