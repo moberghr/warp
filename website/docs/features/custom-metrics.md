@@ -107,11 +107,15 @@ Every measurement is converted to `double` and added to an in-memory aggregate f
 |---|---|---|---|
 | `Counter<T>` | Counter | count of measurements, sum | sum |
 | `ObservableCounter<T>` | Counter | per-series **delta** from the last cumulative value this process saw (the first observation is a baseline only; a total that went down is a reset and the new total is the delta) | sum |
-| `UpDownCounter<T>`, `ObservableUpDownCounter<T>` | UpDownCounter | sum of deltas | sum |
+| `UpDownCounter<T>`, `ObservableUpDownCounter<T>` | UpDownCounter | sum of deltas | **net change** in the bucket (sum of deltas), not the level |
 | `Histogram<T>` | Histogram | count, sum, min, max, bucket counts | count (rates); percentiles from the buckets |
 | `Gauge<T>`, `ObservableGauge<T>` | Gauge | count, sum, min, max | average (sum / count), min, max |
 
 Observable instruments are read once per flush, just before the aggregates are written out. Non-finite values (`NaN`, infinities) are ignored.
+
+:::caution Up-down counters chart the net change, not the level
+An `UpDownCounter` or `ObservableUpDownCounter` is stored as deltas, so each bucket on the chart (and the value an SLO reads) is the **net change during that bucket**, not the current level. For an observable up-down counter the first observed total is only a baseline, so the level cannot be rebuilt from what is stored. Instrumenting "in-flight requests" with an up-down counter therefore draws a line hovering around 0, and the Metrics page labels the axis **Net change** for this kind. **To chart a level** (in-flight requests, queue length, pool size), publish it with an `ObservableGauge<T>`, which is charted as the average of the observed values per bucket.
+:::
 
 **Series identity.** `application` is the sanitized `ApplicationName` (or none). It is added automatically as a dimension and is never read from a tag. The tag set is `k1=v1,k2=v2`, sorted by key (ordinal) after the allowlist. Values are formatted with the invariant culture, trimmed and **truncated to 64 characters**; a null or empty value becomes `{none}`; `,` and `=` become `-` and control characters are removed. A tag set that would exceed 512 characters loses its trailing keys. If two meters publish an instrument with the same name, the first one wins and a later one that differs in meter, kind or bounds is not collected (reason `name_conflict`). Instrument names longer than 128 characters are refused (`name_too_long`).
 

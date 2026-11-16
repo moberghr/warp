@@ -25,6 +25,16 @@ export function kindLabel(kind: MetricKind): string {
   return KIND_LABELS[kind] ?? 'Unknown';
 }
 
+/**
+ * What a chart of this kind shows when that is not obvious from the kind. An up-down counter is stored as deltas, so
+ * each bucket is its net change, not the level; an ObservableGauge is the instrument for a level.
+ */
+export function kindChartNote(kind: MetricKind): string | null {
+  return kind === MetricKind.UpDownCounter
+    ? 'Charted as the net change per bucket, not the current level. Record a level with an ObservableGauge.'
+    : null;
+}
+
 /** OTel units are UCUM codes (`ms`, `s`, `By`, `1`); show the ones people read, pass the rest through. */
 export function unitLabel(unit: string | null | undefined): string {
   if (!unit || unit === '1') {
@@ -566,6 +576,9 @@ export function axisTitles(kind: MetricKind, unit: string | null | undefined, ra
       return { y: 'Measurements', y1: suffix ? `Percentile (${suffix})` : 'Percentile' };
     case MetricKind.Gauge:
       return { y: suffix ? `Average (${suffix})` : 'Average', y1: '' };
+    case MetricKind.UpDownCounter:
+      // Stored as deltas, so a bucket is the net change inside it, never the level (an in-flight count hovers near 0).
+      return { y: suffix ? `Net change (${suffix})` : 'Net change', y1: '' };
     default:
       return { y: suffix ? `Sum (${suffix})` : 'Sum', y1: '' };
   }

@@ -36,6 +36,7 @@ import {
   chipToText,
   collapseTooltip,
   isRatioActive,
+  kindChartNote,
   kindLabel,
   percentileLabel,
   removeChip,
@@ -169,6 +170,7 @@ export default function MetricDetailPage() {
   }
 
   const unit = unitLabel(instrument.unit);
+  const kindNote = kindChartNote(instrument.kind);
   const addChip = () => {
     const chip = parseFilterChip(`${chipDraft.key}=${chipDraft.value}`);
     if (!chip) {
@@ -186,7 +188,9 @@ export default function MetricDetailPage() {
         <span className="font-mono">{instrument.name}</span>
       </PageHeading>
       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground mb-4">
-        <span>{kindLabel(instrument.kind)}</span>
+        <Hint text={kindNote ?? undefined}>
+          <span className={kindNote ? 'underline decoration-dotted underline-offset-2' : undefined}>{kindLabel(instrument.kind)}</span>
+        </Hint>
         {unit && <span>· {unit}</span>}
         <span>· {instrument.meter}</span>
         {instrument.collapsedAt && (

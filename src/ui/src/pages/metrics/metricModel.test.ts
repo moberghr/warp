@@ -5,6 +5,7 @@ import {
   DEFAULT_CONTROLS,
   REST_NAME,
   alignOverlay,
+  axisTitles,
   breakdownValues,
   buildDatasets,
   buildNumeratorQuery,
@@ -16,6 +17,7 @@ import {
   collapseTooltip,
   formatPercentileValue,
   isRatioActive,
+  kindChartNote,
   kindLabel,
   orderedLineNames,
   pointValue,
@@ -464,5 +466,32 @@ describe('isRatioActive', () => {
     expect(isRatioActive(on, MetricKind.UpDownCounter)).toBe(false);
     expect(isRatioActive({ ...on, breakdown: null }, MetricKind.Counter)).toBe(false);
     expect(isRatioActive({ ...on, view: 'values' }, MetricKind.Counter)).toBe(false);
+  });
+});
+
+describe('axisTitles', () => {
+  it('labels an up-down counter as net change, never as a level or a sum', () => {
+    expect(axisTitles(MetricKind.UpDownCounter, null, false).y).toBe('Net change');
+    expect(axisTitles(MetricKind.UpDownCounter, 'By', false).y).toBe('Net change (bytes)');
+  });
+
+  it('keeps sum, measurements and average for the other kinds', () => {
+    expect(axisTitles(MetricKind.Counter, 'ms', false)).toEqual({ y: 'Sum (ms)', y1: '' });
+    expect(axisTitles(MetricKind.Histogram, 'ms', false)).toEqual({ y: 'Measurements', y1: 'Percentile (ms)' });
+    expect(axisTitles(MetricKind.Gauge, null, false)).toEqual({ y: 'Average', y1: '' });
+    expect(axisTitles(MetricKind.Counter, null, true)).toEqual({ y: 'Share of total (%)', y1: '' });
+  });
+});
+
+describe('kindChartNote', () => {
+  it('explains the up-down counter chart and points at ObservableGauge for a level', () => {
+    expect(kindChartNote(MetricKind.UpDownCounter)).toContain('net change per bucket');
+    expect(kindChartNote(MetricKind.UpDownCounter)).toContain('ObservableGauge');
+  });
+
+  it('says nothing for the kinds whose chart is self-explanatory', () => {
+    expect(kindChartNote(MetricKind.Counter)).toBeNull();
+    expect(kindChartNote(MetricKind.Histogram)).toBeNull();
+    expect(kindChartNote(MetricKind.Gauge)).toBeNull();
   });
 });
