@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Metrics;
 
 namespace Warp.Core.Services;
@@ -9,8 +10,9 @@ namespace Warp.Core.Services;
 public interface IMetricBoardCommandService
 {
     /// <summary>
-    /// Insert (Id == 0) or update a tile; returns its id, or null when an insert would take the board past
-    /// <see cref="MetricBoardValidation.MaxTiles"/>. An insert with Position 0 is appended after the last tile.
+    /// Insert (Id == 0) or update a tile; returns its id, null when an insert would take the board past
+    /// <see cref="MetricBoardValidation.MaxTiles"/>, or 0 when Id &gt; 0 names no tile (deleted meanwhile: an edit never
+    /// re-creates it). An insert with Position 0 is appended after the last tile.
     /// </summary>
     /// <remarks>
     /// Persists <paramref name="tile"/> as given: callers validate (and normalize) it first with
@@ -23,7 +25,8 @@ public interface IMetricBoardCommandService
 
 /// <summary>
 /// <see cref="IMetricBoardCommandService"/> over the user's <typeparamref name="TContext"/>: a low-contention optimistic
-/// load-set-save with a structured audit log, mirroring <c>SloCommandService</c>.
+/// load-set-save with a structured audit log, mirroring <c>SloCommandService</c>. An insert counts and adds under the
+/// transaction-scoped board lock it shares with the config seeder, so two inserts at once cannot both pass the cap.
 /// </summary>
 public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandService
     where TContext : DbContext
@@ -31,12 +34,16 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<MetricBoardCommandService<TContext>> _logger;
+    private readonly IWarpSqlQueries<TContext>? _sqlQueries;
 
-    public MetricBoardCommandService(TContext context, TimeProvider timeProvider, ILogger<MetricBoardCommandService<TContext>> logger)
+    // sqlQueries: the provider's queries, for the board lock; absent in a host without a provider (the insert then runs
+    // unguarded, as before).
+    public MetricBoardCommandService(TContext context, TimeProvider timeProvider, ILogger<MetricBoardCommandService<TContext>> logger, IWarpSqlQueries<TContext>? sqlQueries = null)
     {
         _context = context;
         _timeProvider = timeProvider;
         _logger = logger;
+        _sqlQueries = sqlQueries;
     }
 
     public async Task<int?> Upsert(MetricBoardTile tile, CancellationToken ct)
@@ -50,26 +57,20 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
                 .FirstOrDefaultAsync(ct)
             : null;
 
+        if (tile.Id > 0 && existing is null)
+        {
+            return 0;
+        }
+
         if (existing is null)
         {
-            if (await _context.Set<MetricBoardTile>().CountAsync(ct) >= MetricBoardValidation.MaxTiles)
+            var id = await TransactionLock.RunAsync(_sqlQueries, _context, TransactionLock.MetricBoardKey, TransactionLock.CommandTimeout, (x, token) => InsertAsync(x, tile, now, token), ct);
+            if (id is not null)
             {
-                return null;
+                _logger.LogInformation("Metric board tile '{Name}' created", tile.Name);
             }
 
-            if (tile.Position == 0)
-            {
-                tile.Position = (await _context.Set<MetricBoardTile>().MaxAsync(x => (int?)x.Position, ct) ?? 0) + 1;
-            }
-
-            tile.Id = 0;
-            tile.CreatedAt = now;
-            tile.UpdatedAt = now;
-            _context.Set<MetricBoardTile>().Add(tile);
-            await _context.SaveChangesAsync(ct);
-            _logger.LogInformation("Metric board tile '{Name}' created", tile.Name);
-
-            return tile.Id;
+            return id;
         }
 
         // The caller validated, which cleared every field that does not apply to the kind and rule, so copying them as
@@ -95,6 +96,26 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
         _logger.LogInformation("Metric board tile {Id} updated", existing.Id);
 
         return existing.Id;
+    }
+
+    private static async Task<int?> InsertAsync(DbContext context, MetricBoardTile tile, DateTime now, CancellationToken ct)
+    {
+        if (await context.Set<MetricBoardTile>().CountAsync(ct) >= MetricBoardValidation.MaxTiles)
+        {
+            return null;
+        }
+
+        if (tile.Position == 0)
+        {
+            tile.Position = (await context.Set<MetricBoardTile>().MaxAsync(x => (int?)x.Position, ct) ?? 0) + 1;
+        }
+
+        tile.CreatedAt = now;
+        tile.UpdatedAt = now;
+        context.Set<MetricBoardTile>().Add(tile);
+        await context.SaveChangesAsync(ct);
+
+        return tile.Id;
     }
 
     public async Task<bool> Delete(int id, CancellationToken ct)

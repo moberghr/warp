@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Shouldly;
@@ -17,6 +18,8 @@ using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
+using Warp.Tests.Observability;
+using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Slo;
 
@@ -211,6 +214,90 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         var options = new SloOptions().AddMetricThreshold("5xx", "a", 0);
 
         Should.Throw<ArgumentException>(() => options.AddMetricThreshold("5xx", "b", 0));
+    }
+
+    [TimedTheory]
+    [InlineData("5XX", null)]
+    [InlineData("5xx", "API")]
+    public void AddMetric_NameOrApplicationDifferingOnlyByCase_Throws(string name, string? application)
+    {
+        // The seeder matches names in SQL: on SQL Server's case-insensitive collation these would be one objective.
+        var options = new SloOptions().AddMetricThreshold("5xx", "a", 0, application: application is null ? null : "api");
+
+        Should.Throw<ArgumentException>(() => options.AddMetricThreshold(name, "b", 0, application: application));
+    }
+
+    [TimedFact]
+    public async Task Seeder_TwoReplicasStartAtOnce_SeedOneCopy()
+    {
+        // Two replicas with the same config. The first is pinned inside the seed lock after its existence checks
+        // (BarrierSignal, N=2); the second must not get to check until the first commits, or both insert.
+        static void Configure(SloOptions o) => o
+            .AddMetricThreshold("5xx", "http.server.request.duration", 0, tagFilter: "status=5*")
+            .AddObjective(SloKind.SuccessRate, "SendEmail", 0.99);
+        var barrier = new BarrierSignal();
+
+        async Task Pin(CancellationToken ct)
+        {
+            barrier.Running.Release();
+            await barrier.CanFinish.WaitAsync(ct);
+        }
+
+        var first = SeedFromConfigAsync(Configure, Pin);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        var second = SeedFromConfigAsync(Configure, Pin);
+
+        // The second replica is held at the lock, so it cannot reach the pin while the first is inside.
+        (await barrier.Running.WaitAsync(TimeSpan.FromMilliseconds(500), Ct)).ShouldBeFalse();
+        barrier.CanFinish.Release(2);
+        await Task.WhenAll(first, second);
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().OrderBy(x => x.Kind).ToListAsync(Ct);
+        rows.Select(x => x.Kind).ShouldBe([SloKind.SuccessRate, SloKind.MetricThreshold]);
+    }
+
+    [TimedFact]
+    public async Task Seeder_StoredObjectiveWithTheSameNameButOtherFields_IsKeptAndTheSkipIsLogged()
+    {
+        await SeedFromConfigAsync(o => o.AddMetricThreshold("5xx", "http.server.request.duration", 0, tagFilter: "status=5*"));
+        var logs = new CapturingLoggerProvider();
+
+        await SeedFromConfigAsync(o => o.AddMetricThreshold("5xx", "http.server.duration", 0, tagFilter: "code=5*"), logs: logs);
+
+        var row = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct);
+        row.Dimension.ShouldBe("http.server.request.duration");
+        var log = logs.Logs.ShouldHaveSingleItem();
+        log.Level.ShouldBe(LogLevel.Information);
+        log.Fields["Name"].ShouldBe("5xx");
+        log.Fields["Kind"].ShouldBe(SloKind.MetricThreshold);
+        log.Fields["Fields"].ShouldBe("Dimension, TagFilter");
+
+        // Field names only: never the filter's tag values (§1.2).
+        log.Message.ShouldNotContain("code=5*");
+    }
+
+    [TimedFact]
+    public async Task Upsert_EditOfADeletedObjective_ReturnsZeroAndRecreatesNothing()
+    {
+        var id = await Command().Upsert(Objective("X", SloKind.SuccessRate, "SendEmail", 0.99), Ct);
+        (await Command().Delete(id, Ct)).ShouldBeTrue();
+
+        var result = await Command().Upsert(new SloDefinition { Id = id, Name = "Y", Kind = SloKind.SuccessRate, Dimension = "SendEmail", TargetValue = 0.95, WindowSeconds = 3600 }, Ct);
+
+        result.ShouldBe(0);
+        (await _fixture.CreateContext().Set<SloDefinition>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task PostSlo_EditOfADeletedObjective_Returns404AndRecreatesNothing()
+    {
+        var id = await Command().Upsert(Objective("X", SloKind.SuccessRate, "SendEmail", 0.99), Ct);
+        (await Command().Delete(id, Ct)).ShouldBeTrue();
+
+        var status = await PostObjectiveAsync(new { id, name = "Y", kind = (int)SloKind.SuccessRate, dimension = "SendEmail", targetValue = 0.99, windowSeconds = 3600, enabled = true });
+
+        status.ShouldBe(HttpStatusCode.NotFound);
+        (await _fixture.CreateContext().Set<SloDefinition>().AnyAsync(Ct)).ShouldBeFalse();
     }
 
     [TimedFact]
@@ -501,20 +588,27 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
 
     private SloQueryService<TestContext> Query() => new(_fixture.CreateContext());
 
-    private async Task SeedFromConfigAsync(Action<SloOptions> configure)
+    private async Task SeedFromConfigAsync(Action<SloOptions> configure, Func<CancellationToken, Task>? beforeSave = null, CapturingLoggerProvider? logs = null)
     {
         var options = new SloOptions();
         configure(options);
         var services = new ServiceCollection();
         services.AddScoped(_ => _fixture.CreateContext());
         services.AddScoped<IMetricQueryService>(_ => new MetricQueryService<TestContext>(_fixture.CreateContext(), Options.Create(new WarpConfiguration())));
+        services.AddSingleton(TestTasks.QueriesFor(_fixture.CreateContext()));
         await using var provider = services.BuildServiceProvider();
+        var logger = logs is null
+            ? NullLogger<SloSeeder<TestContext>>.Instance
+            : new CapturingLoggerFactory(logs).CreateLogger<SloSeeder<TestContext>>();
         var seeder = new SloSeeder<TestContext>(
             provider.GetRequiredService<IServiceScopeFactory>(),
             options,
             TimeProvider.System,
             Options.Create(new WarpConfiguration()),
-            NullLogger<SloSeeder<TestContext>>.Instance);
+            logger)
+        {
+            BeforeSave = beforeSave,
+        };
 
         await seeder.StartAsync(Ct);
     }

@@ -752,7 +752,8 @@ public static class WarpEndpoints
 
             var id = await svc.Upsert(definition, ct);
 
-            return Results.Ok(new { id });
+            // 0: the edited objective was deleted meanwhile; an edit never re-creates it.
+            return id == 0 ? Results.NotFound() : Results.Ok(new { id });
         });
 
         apiGroup.MapDelete("slo/{id:int}", async ([FromServices] ISloCommandService svc, int id, CancellationToken ct) =>
@@ -843,6 +844,11 @@ public static class WarpEndpoints
             }
 
             var id = await svc.Upsert(tile, ct);
+            if (id == 0)
+            {
+                // The edited tile was deleted meanwhile; an edit never re-creates it.
+                return Results.NotFound();
+            }
 
             return id is null
                 ? Results.BadRequest($"A metric board holds at most {Warp.Core.Metrics.MetricBoardValidation.MaxTiles} tiles.")

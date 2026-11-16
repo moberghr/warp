@@ -20,6 +20,9 @@ using Warp.Core.Services;
 using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
+using Warp.Tests.Observability;
+using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Metrics;
 
@@ -99,6 +102,34 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Upsert_EditOfADeletedTile_ReturnsZeroAndRecreatesNothing()
+    {
+        var id = await Command().Upsert(Tile("Volume", "c"), Ct);
+        (await Command().Delete(id!.Value, Ct)).ShouldBeTrue();
+        var edit = Tile("Volume edited", "c");
+        edit.Id = id.Value;
+
+        var result = await Command().Upsert(edit, Ct);
+
+        result.ShouldBe(0);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Upsert_EditOfATileOnAFullBoard_IsNotCapped()
+    {
+        await SeedTilesAsync([.. Enumerable.Range(0, MetricBoardValidation.MaxTiles).Select(x => Tile($"t{x}", "c", position: x + 1))]);
+        var stored = await _fixture.CreateContext().Set<MetricBoardTile>().Where(x => x.Name == "t0").SingleAsync(Ct);
+        var edit = Tile("t0 renamed", "c", position: 1);
+        edit.Id = stored.Id;
+
+        var result = await Command().Upsert(edit, Ct);
+
+        result.ShouldBe(stored.Id);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().Where(x => x.Name == "t0 renamed").CountAsync(Ct)).ShouldBe(1);
+    }
+
+    [TimedFact]
     public async Task Delete_ExistingAndUnknown_RemovesOnlyTheExistingOne()
     {
         var id = await Command().Upsert(Tile("Volume", "c"), Ct);
@@ -141,6 +172,65 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         var tile = (await Query().GetTiles(Ct)).ShouldHaveSingleItem();
         tile.Name.ShouldBe("Server errors");
         tile.Threshold.ShouldBe(10);
+    }
+
+    [TimedFact]
+    public async Task Seeder_TwoReplicasStartAtOnce_SeedOneCopy()
+    {
+        // Two replicas with the same config. The first is pinned inside the board lock after it read the empty board
+        // (BarrierSignal, N=2); the second must not get to read the board until the first commits, or both insert.
+        static void Configure(MetricBoardOptions b) => b.Value("Volume", "c").Value("Errors", "e");
+        var barrier = new BarrierSignal();
+
+        async Task Pin(CancellationToken ct)
+        {
+            barrier.Running.Release();
+            await barrier.CanFinish.WaitAsync(ct);
+        }
+
+        var first = SeedFromConfigAsync(Configure, Pin);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        var second = SeedFromConfigAsync(Configure, Pin);
+
+        // The second replica is held at the lock, so it cannot reach the pin while the first is inside.
+        (await barrier.Running.WaitAsync(TimeSpan.FromMilliseconds(500), Ct)).ShouldBeFalse();
+        barrier.CanFinish.Release(2);
+        await Task.WhenAll(first, second);
+
+        var tiles = await Query().GetTiles(Ct);
+        tiles.Select(x => x.Name).ShouldBe(["Volume", "Errors"]);
+    }
+
+    [TimedFact]
+    public async Task Seeder_StoredTileWithTheSameNameButOtherFields_IsKeptAndTheSkipIsLogged()
+    {
+        await SeedTilesAsync(Tile("Errors", "http", rule: MetricTileStatusRule.Threshold, threshold: 10, comparison: SloComparison.AtMost));
+        var logs = new CapturingLoggerProvider();
+
+        await SeedFromConfigAsync(b => b.Value("Errors", "http.server", tagFilter: "status=5*", check: MetricTileCheck.AtMost(5)), logs: logs);
+
+        var tile = (await Query().GetTiles(Ct)).ShouldHaveSingleItem();
+        tile.Instrument.ShouldBe("http");
+        tile.Threshold.ShouldBe(10);
+        var log = logs.Logs.ShouldHaveSingleItem();
+        log.Level.ShouldBe(LogLevel.Information);
+        log.Fields["Name"].ShouldBe("Errors");
+        log.Fields["Kind"].ShouldBe(MetricTileKind.Value);
+        log.Fields["Fields"].ShouldBe("Instrument, TagFilter, Threshold");
+
+        // Field names only: never the filter's tag values (§1.2).
+        log.Message.ShouldNotContain("status=5*");
+    }
+
+    [TimedFact]
+    public async Task Seeder_BoardAtTheCap_SkipsTheSeed()
+    {
+        await SeedTilesAsync([.. Enumerable.Range(0, MetricBoardValidation.MaxTiles).Select(x => Tile($"t{x}", "c", position: x + 1))]);
+
+        await SeedFromConfigAsync(b => b.Value("One too many", "other"));
+
+        (await _fixture.CreateContext().Set<MetricBoardTile>().CountAsync(Ct)).ShouldBe(MetricBoardValidation.MaxTiles);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(x => x.Name == "One too many", Ct)).ShouldBeFalse();
     }
 
     [TimedFact]
@@ -447,6 +537,19 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task PostTile_EditOfADeletedTile_ReturnsNotFoundAndRecreatesNothing()
+    {
+        var id = await Command().Upsert(Tile("Volume", "c"), Ct);
+        (await Command().Delete(id!.Value, Ct)).ShouldBeTrue();
+        await using var host = await CreateDashboardHostAsync();
+
+        var response = await host.Client.PostAsJsonAsync("/warp/api/metrics/board/tiles", new { id, name = "Volume", instrument = "c" }, Ct);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
     public async Task DeleteTile_Route_RemovesItThenReportsNotFound()
     {
         var id = await Command().Upsert(Tile("Volume", "c"), Ct);
@@ -585,7 +688,11 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         => new(_fixture.CreateContext(), Options.Create(new WarpConfiguration()), new FakeTimeProvider(new DateTimeOffset(Now)));
 
     private MetricBoardCommandService<TestContext> Command()
-        => new(_fixture.CreateContext(), TimeProvider.System, NullLogger<MetricBoardCommandService<TestContext>>.Instance);
+    {
+        var context = _fixture.CreateContext();
+
+        return new(context, TimeProvider.System, NullLogger<MetricBoardCommandService<TestContext>>.Instance, TestTasks.QueriesFor(context));
+    }
 
     private async Task SeedAsync(MetricInstrument[] instruments, MetricPoint[] points)
     {
@@ -609,19 +716,29 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         await context.SaveChangesAsync(Ct);
     }
 
-    private async Task SeedFromConfigAsync(Action<MetricBoardOptions> configure)
+    private async Task SeedFromConfigAsync(
+        Action<MetricBoardOptions> configure,
+        Func<CancellationToken, Task>? beforeSave = null,
+        CapturingLoggerProvider? logs = null)
     {
         var options = new MetricBoardOptions();
         configure(options);
         var services = new ServiceCollection();
         services.AddScoped(_ => _fixture.CreateContext());
         services.AddScoped<IMetricQueryService>(_ => new MetricQueryService<TestContext>(_fixture.CreateContext(), Options.Create(new WarpConfiguration())));
+        services.AddSingleton(TestTasks.QueriesFor(_fixture.CreateContext()));
         await using var provider = services.BuildServiceProvider();
+        var logger = logs is null
+            ? NullLogger<MetricBoardSeeder<TestContext>>.Instance
+            : new CapturingLoggerFactory(logs).CreateLogger<MetricBoardSeeder<TestContext>>();
         var seeder = new MetricBoardSeeder<TestContext>(
             provider.GetRequiredService<IServiceScopeFactory>(),
             options,
             TimeProvider.System,
-            NullLogger<MetricBoardSeeder<TestContext>>.Instance);
+            logger)
+        {
+            BeforeSave = beforeSave,
+        };
 
         await seeder.StartAsync(Ct);
     }

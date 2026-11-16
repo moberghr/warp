@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Enums;
 using Warp.Core.Services;
 
@@ -221,9 +222,11 @@ public static class MetricBoardServiceConfiguration
 /// <summary>
 /// Startup seeder for config-defined health-board tiles (#326), the <c>SloSeeder</c> shape: insert-if-absent by name or
 /// by fields (<see cref="MetricBoardOptions.SameFields"/>), so a dashboard edit of either survives a restart. Each seed
-/// is validated against the registry kind of its instrument (a ratio on a gauge is skipped, logged at Error). The schema
-/// is migrator-gated present, so a failure is a real error, logged at Error and non-fatal (tiles can still be authored
-/// in the dashboard).
+/// is validated against the registry kind of its instrument (a ratio on a gauge is skipped, logged at Error). The read,
+/// the cap and the inserts run under the transaction-scoped <c>warp:metric-board</c> lock (§2.16), shared with the dashboard's tile
+/// insert: N replicas starting at once would otherwise each find the board empty and each seed a copy. The schema is
+/// migrator-gated present, so a failure is a real error, logged at Error and non-fatal (tiles can still be authored in
+/// the dashboard).
 /// </summary>
 internal sealed class MetricBoardSeeder<TContext> : IHostedService
     where TContext : DbContext
@@ -241,6 +244,10 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
         _logger = logger;
     }
 
+    // Test seam: runs inside the lock after the stored tiles were read and before the inserts are saved, so a race test
+    // can pin one seeder there (N=2 BarrierSignal) and prove the other cannot read the board until it commits.
+    internal Func<CancellationToken, Task>? BeforeSave { get; init; }
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         try
@@ -248,52 +255,22 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
             using var scope = _scopeFactory.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<TContext>();
             var metrics = scope.ServiceProvider.GetRequiredService<IMetricQueryService>();
-            var now = _timeProvider.GetUtcNow().UtcDateTime;
-            var stored = await context.Set<MetricBoardTile>()
-                .AsNoTracking()
-                .ToListAsync(cancellationToken);
-            var position = stored.Count == 0 ? 0 : stored.Max(x => x.Position);
-            var count = stored.Count;
-            var added = 0;
+            var queries = scope.ServiceProvider.GetService<IWarpSqlQueries<TContext>>();
 
+            // Validated before the lock (one registry read per seed), so the locked section is the board read and the inserts.
+            var seeds = new List<(MetricBoardTile Tile, bool Ok, string? Error)>();
             foreach (var seed in _options.Seeded)
             {
                 // Validated first, so the match sees the normalized fields the stored row was written with (a gauge's
-                // default aggregate). Matched in memory, ordinally: the board is a handful of rows, and a
-                // case-insensitive collation must not make two tiles that differ only by case read as one.
+                // default aggregate).
                 var tile = Copy(seed);
                 var (ok, error) = await MetricBoardTileValidator.ValidateAsync(tile, metrics, cancellationToken);
-                if (stored.Exists(x => string.Equals(x.Name, tile.Name, StringComparison.Ordinal) || MetricBoardOptions.SameFields(x, tile)))
-                {
-                    continue;
-                }
-
-                if (!ok)
-                {
-                    _logger.LogError("Metric board tile '{Name}' was NOT seeded: {Error}", seed.Name, error);
-
-                    continue;
-                }
-
-                if (count >= MetricBoardValidation.MaxTiles)
-                {
-                    _logger.LogError("Metric board tile '{Name}' was NOT seeded: the board already holds {Max} tiles.", seed.Name, MetricBoardValidation.MaxTiles);
-
-                    continue;
-                }
-
-                tile.Position = ++position;
-                tile.CreatedAt = now;
-                tile.UpdatedAt = now;
-                context.Set<MetricBoardTile>().Add(tile);
-                stored.Add(tile);
-                count++;
-                added++;
+                seeds.Add((tile, ok, error));
             }
 
+            var added = await TransactionLock.RunAsync(queries, context, TransactionLock.MetricBoardKey, TransactionLock.SeedTimeout, (x, ct) => SeedAsync(x, seeds, ct), cancellationToken);
             if (added > 0)
             {
-                await context.SaveChangesAsync(cancellationToken);
                 _logger.LogInformation("Seeded {Count} metric board tile(s) from config", added);
             }
         }
@@ -304,6 +281,102 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // The names of the fields two tiles disagree on, for the skip log: field names only, never a value (§1.2: a filter
+    // holds tag values).
+    internal static IEnumerable<string> DifferingFields(MetricBoardTile stored, MetricBoardTile seed)
+    {
+        var fields = new (string Name, bool Same)[]
+        {
+            (nameof(MetricBoardTile.Instrument), string.Equals(stored.Instrument, seed.Instrument, StringComparison.Ordinal)),
+            (nameof(MetricBoardTile.Kind), stored.Kind == seed.Kind),
+            (nameof(MetricBoardTile.Application), string.Equals(stored.Application, seed.Application, StringComparison.Ordinal)),
+            (nameof(MetricBoardTile.TagFilter), string.Equals(stored.TagFilter, seed.TagFilter, StringComparison.Ordinal)),
+            (nameof(MetricBoardTile.RatioTag), string.Equals(stored.RatioTag, seed.RatioTag, StringComparison.Ordinal)),
+            (nameof(MetricBoardTile.GoodValues), string.Equals(stored.GoodValues, seed.GoodValues, StringComparison.Ordinal)),
+            (nameof(MetricBoardTile.BadValues), string.Equals(stored.BadValues, seed.BadValues, StringComparison.Ordinal)),
+            (nameof(MetricBoardTile.GaugeAggregate), stored.GaugeAggregate == seed.GaugeAggregate),
+            (nameof(MetricBoardTile.StatusRule), stored.StatusRule == seed.StatusRule),
+            (nameof(MetricBoardTile.Comparison), stored.Comparison == seed.Comparison),
+            (nameof(MetricBoardTile.Threshold), Nullable.Equals(stored.Threshold, seed.Threshold)),
+            (nameof(MetricBoardTile.BaselineDays), stored.BaselineDays == seed.BaselineDays),
+            (nameof(MetricBoardTile.MaxDeviation), Nullable.Equals(stored.MaxDeviation, seed.MaxDeviation)),
+            (nameof(MetricBoardTile.DeviationDirection), stored.DeviationDirection == seed.DeviationDirection),
+        };
+
+        return fields
+            .Where(x => !x.Same)
+            .Select(x => x.Name);
+    }
+
+    private async Task<int> SeedAsync(DbContext context, List<(MetricBoardTile Tile, bool Ok, string? Error)> seeds, CancellationToken ct)
+    {
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var stored = await context.Set<MetricBoardTile>()
+            .AsNoTracking()
+            .ToListAsync(ct);
+        var position = stored.Count == 0 ? 0 : stored.Max(x => x.Position);
+        var count = stored.Count;
+        var added = 0;
+
+        foreach (var (tile, ok, error) in seeds)
+        {
+            // Matched in memory, ordinally: the board is a handful of rows, and a case-insensitive collation must not make
+            // two tiles that differ only by case read as one.
+            if (stored.Exists(x => MetricBoardOptions.SameFields(x, tile)))
+            {
+                continue;
+            }
+
+            var named = stored.Find(x => string.Equals(x.Name, tile.Name, StringComparison.Ordinal));
+            if (named is not null)
+            {
+                // The stored tile wins (a dashboard edit survives a restart), but say so: a changed seed that never takes
+                // effect is otherwise silent. Information, not Warning: an intended dashboard edit logs this every boot.
+                _logger.LogInformation(
+                    "Metric board tile '{Name}' ({Kind}) was not seeded: a stored tile already has that name and differs in {Fields}. The stored tile is kept; rename the seed or delete the stored tile to apply the config.",
+                    tile.Name,
+                    tile.Kind,
+                    string.Join(", ", DifferingFields(named, tile)));
+
+                continue;
+            }
+
+            if (!ok)
+            {
+                _logger.LogError("Metric board tile '{Name}' was NOT seeded: {Error}", tile.Name, error);
+
+                continue;
+            }
+
+            if (count >= MetricBoardValidation.MaxTiles)
+            {
+                _logger.LogError("Metric board tile '{Name}' was NOT seeded: the board already holds {Max} tiles.", tile.Name, MetricBoardValidation.MaxTiles);
+
+                continue;
+            }
+
+            tile.Position = ++position;
+            tile.CreatedAt = now;
+            tile.UpdatedAt = now;
+            context.Set<MetricBoardTile>().Add(tile);
+            stored.Add(tile);
+            count++;
+            added++;
+        }
+
+        if (BeforeSave is not null)
+        {
+            await BeforeSave(ct);
+        }
+
+        if (added > 0)
+        {
+            await context.SaveChangesAsync(ct);
+        }
+
+        return added;
+    }
 
     // The options keep their own instances: a seed is copied so the tracked entity never aliases the singleton.
     private static MetricBoardTile Copy(MetricBoardTile x) => new()

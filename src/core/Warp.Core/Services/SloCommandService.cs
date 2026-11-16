@@ -8,7 +8,10 @@ namespace Warp.Core.Services;
 /// <summary>Operator commands over SLO objectives (§8.31). Registered by <c>AddWarp</c> so any dashboard host resolves it.</summary>
 public interface ISloCommandService
 {
-    /// <summary>Insert (Id == 0) or update an objective. Returns its id.</summary>
+    /// <summary>
+    /// Insert (Id == 0) or update an objective. Returns its id, or 0 when Id &gt; 0 names no objective (deleted meanwhile:
+    /// an edit never re-creates it; the dashboard route answers 404).
+    /// </summary>
     /// <remarks>
     /// Persists <paramref name="definition"/> as given: it does not validate. Callers must first validate (and
     /// normalize) it with <see cref="Slo.SloValidation.TryValidate(SloDefinition, TimeSpan?, MetricKind?, MetricKind?, out string?)"/>;
@@ -47,6 +50,11 @@ public sealed class SloCommandService<TContext> : ISloCommandService
         var existing = definition.Id > 0
             ? await _context.Set<SloDefinition>().FirstOrDefaultAsync(x => x.Id == definition.Id, ct)
             : null;
+
+        if (definition.Id > 0 && existing is null)
+        {
+            return 0;
+        }
 
         if (existing is null)
         {

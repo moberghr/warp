@@ -1335,8 +1335,10 @@ public static class ServiceConfiguration
         tile.Property(p => p.CreatedAt);
         tile.Property(p => p.UpdatedAt);
 
-        // A board is a handful of rows read whole, in board order. Not unique: the seeder and the command layer keep
-        // names apart, as for SloDefinition (NULL-uniqueness differs across providers).
+        // A board is a handful of rows read whole, in board order. Names are NOT unique: only the config seeds are kept
+        // apart (MetricBoardOptions rejects a repeat), the dashboard may create a tile under any name, and the seeder skips
+        // a seed whose name a stored tile already has. No unique index, as for SloDefinition (NULL-uniqueness differs
+        // across providers).
         tile.HasIndex(p => new { p.Position, p.Id });
 
         tile.Metadata.SetSchema(schema);
