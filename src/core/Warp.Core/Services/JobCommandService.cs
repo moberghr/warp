@@ -355,12 +355,8 @@ public class JobCommandService<TContext> : IJobCommandService
             .AsNoTracking()
             .Where(x => x.Id == batchId)
             .Select(x => (JobKind?)x.Kind)
-            .FirstOrDefaultAsync();
-
-        if (kind is null)
-        {
-            throw new ArgumentException("Batch not found.", nameof(batchId));
-        }
+            .FirstOrDefaultAsync()
+            ?? throw new ArgumentException("Batch not found.", nameof(batchId));
 
         if (kind != JobKind.Batch)
         {
