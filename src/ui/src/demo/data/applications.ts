@@ -14,6 +14,8 @@ import { IDS } from '@/demo/data';
 import { ApplicationInstanceEventType } from '@/types/applications';
 import type {
   ApplicationDeployModel,
+  DeployVerdictCheck,
+  DeployVerdictModel,
   ApplicationSummaryModel,
   ApplicationDetailModel,
   ApplicationInstanceDetailModel,
@@ -280,6 +282,72 @@ export function filterDemoDeploys(application?: string, from?: string, to?: stri
   return demoDeploys
     .filter((x) => !application || x.application === application)
     .filter((x) => Date.parse(x.firstSeenAt) >= lower && Date.parse(x.firstSeenAt) < upper);
+}
+
+// ============================================================
+// Post-deploy verdicts (GET /applications/verdict). orders-api 2.3.1 warns (latency up against its 7-day baseline, a
+// known-noise tile acknowledged); checkout-worker passes; billing-service has no tile or SLO scoped to it.
+// ============================================================
+
+const demoVerdictChecks: Record<string, DeployVerdictCheck[]> = {
+  'orders-api': [
+    { source: 'tile', id: 1, name: 'Checkout success', application: 'orders-api', state: 'healthy', unacknowledgedState: null, acknowledged: false, value: 0.994, baseline: 0.993, target: 0.02, budgetRemaining: null, reason: 'Healthy: 0.994 vs 7-day baseline 0.993 (max drop 0.02).' },
+    { source: 'tile', id: 2, name: 'Order latency p95', application: 'orders-api', state: 'warning', unacknowledgedState: null, acknowledged: false, value: 412, baseline: 340, target: 0.25, budgetRemaining: null, reason: 'Warning: 412 vs 7-day baseline 340 (max rise 0.25).' },
+    { source: 'tile', id: 3, name: 'Payment 5xx', application: null, state: 'acknowledged', unacknowledgedState: 'breaching', acknowledged: true, value: 14, baseline: null, target: 5, budgetRemaining: null, reason: 'Acknowledged noise (would be breaching): 14 vs at most 5.' },
+    { source: 'slo', id: 1, name: 'Orders API availability', application: 'orders-api', state: 'healthy', unacknowledgedState: null, acknowledged: false, value: 0.9991, baseline: null, target: 0.999, budgetRemaining: 0.41, reason: 'Healthy: observed 0.9991 vs target 0.999, budget remaining 0.41.' },
+  ],
+  'checkout-worker': [
+    { source: 'tile', id: 4, name: 'Checkout jobs', application: 'checkout-worker', state: 'healthy', unacknowledgedState: null, acknowledged: false, value: 1842, baseline: 1790, target: 0.5, budgetRemaining: null, reason: 'Healthy: 1842 vs 1-day baseline 1790 (max change 0.5).' },
+    { source: 'slo', id: 2, name: 'Checkout success rate', application: 'checkout-worker', state: 'healthy', unacknowledgedState: null, acknowledged: false, value: 0.998, baseline: null, target: 0.99, budgetRemaining: 0.8, reason: 'Healthy: observed 0.998 vs target 0.99, budget remaining 0.8.' },
+  ],
+};
+
+/** The demo router's verdict: the deploy picked like the server does (newest match), checks from the fixtures above. */
+export function demoDeployVerdict(application?: string, version?: string, environment?: string): DeployVerdictModel | null {
+  const history = demoDeploys
+    .filter((x) => x.application === application)
+    .sort((a, b) => Date.parse(b.firstSeenAt) - Date.parse(a.firstSeenAt));
+  const deploy = history
+    .filter((x) => !version || x.version === version)
+    .find((x) => !environment || (x.environment ?? '') === environment);
+  if (!deploy) {
+    return null;
+  }
+
+  const sameEnvironment = history.filter((x) => (x.environment ?? '') === (deploy.environment ?? ''));
+  const index = sameEnvironment.indexOf(deploy);
+  const next = index > 0 ? sameEnvironment[index - 1] : null;
+  const checks = next ? [] : (demoVerdictChecks[deploy.application] ?? []);
+  const verdict = checks.some((x) => x.state === 'breaching')
+    ? 'fail'
+    : checks.some((x) => x.state === 'warning')
+      ? 'warn'
+      : checks.some((x) => x.state === 'healthy' || x.state === 'acknowledged') ? 'pass' : 'noData';
+  const summary = checks.length === 0
+    ? `${verdict}: no board tile with a rule and no SLO covers this application`
+    : `${verdict}: ${checks.length} checks`;
+
+  return {
+    verdict,
+    summary,
+    deploy: {
+      application: deploy.application,
+      version: deploy.version,
+      environment: deploy.environment,
+      firstSeenAt: deploy.firstSeenAt,
+      instanceName: deploy.instanceName,
+      previousVersion: sameEnvironment[index + 1]?.version ?? null,
+      supersededBy: next?.version ?? null,
+    },
+    window: {
+      from: deploy.firstSeenAt,
+      to: next?.firstSeenAt ?? ago(0),
+      minWindowSeconds: 300,
+      settlesAt: new Date(Date.parse(deploy.firstSeenAt) + 300_000).toISOString(),
+      settled: true,
+    },
+    checks,
+  };
 }
 
 // URL-safe base64 of the application name → the name, so the demo router maps the {id} path segment

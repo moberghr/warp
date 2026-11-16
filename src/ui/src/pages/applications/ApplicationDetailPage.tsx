@@ -7,6 +7,8 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { Spread, InstancesTable, fromInstanceView } from './shared';
 import { withPreviousVersion, type DeployRow } from './deployModel';
+import { checkStateLabel, describeDeploy, orderChecks, verdictClass, verdictLabel, verdictRefetchMs } from './verdictModel';
+import type { DeployVerdictModel } from '@/types/applications';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { RelativeTime } from '@/components/RelativeTime';
 import { DASHBOARD_LOCALE } from '@/utils/format';
@@ -39,6 +41,16 @@ export default function ApplicationDetailPage() {
   });
 
   const deploys = useMemo(() => withPreviousVersion(deploysQuery.data ?? []), [deploysQuery.data]);
+
+  // Post-deploy verdict of the latest deploy, from the same endpoint a CI step calls. Only asked once there is a deploy
+  // to judge; it polls while pending so the panel settles on its own.
+  const applicationName = detailQuery.data?.name;
+  const verdictQuery = useQuery({
+    queryKey: ['applications', 'verdict', applicationName] as const,
+    queryFn: () => api.getDeployVerdict({ application: applicationName! }),
+    enabled: !!applicationName && deploys.length > 0,
+    refetchInterval: (query) => verdictRefetchMs(query.state.data?.verdict),
+  });
 
   const detail = detailQuery.data;
 
@@ -114,6 +126,8 @@ export default function ApplicationDetailPage() {
         </CardContent>
       </Card>
 
+      {verdictQuery.data && <VerdictCard verdict={verdictQuery.data} />}
+
       <Card className="mt-4">
         <CardHeader><CardTitle className="text-base">Deploys</CardTitle></CardHeader>
         <CardContent className="p-0">
@@ -159,6 +173,55 @@ function DeploysTable({ deploys }: { deploys: DeployRow[] }) {
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+function VerdictCard({ verdict }: { verdict: DeployVerdictModel }) {
+  const checks = orderChecks(verdict.checks);
+
+  return (
+    <Card className="mt-4">
+      <CardHeader>
+        <CardTitle className="text-base flex flex-wrap items-center gap-2">
+          Latest deploy verdict
+          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${verdictClass(verdict.verdict)}`}>
+            {verdictLabel(verdict.verdict)}
+          </span>
+        </CardTitle>
+        <p className="text-sm text-muted-foreground">
+          <span className="font-mono">{describeDeploy(verdict.deploy)}</span>
+          {' · deployed '}
+          <RelativeTime date={verdict.deploy.firstSeenAt} />
+          {' · '}
+          {verdict.summary}
+        </p>
+      </CardHeader>
+      {checks.length > 0 && (
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Check</TableHead>
+                <TableHead className="w-32">State</TableHead>
+                <TableHead className="hidden md:table-cell">Reason</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {checks.map((x) => (
+                <TableRow key={`${x.source}-${x.id}`}>
+                  <TableCell className="text-sm">
+                    <span className="text-muted-foreground text-xs uppercase mr-2">{x.source === 'tile' ? 'Tile' : 'SLO'}</span>
+                    {x.name}
+                  </TableCell>
+                  <TableCell className="text-sm">{checkStateLabel(x.state)}</TableCell>
+                  <TableCell className="hidden md:table-cell text-sm text-muted-foreground">{x.reason}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      )}
+    </Card>
   );
 }
 

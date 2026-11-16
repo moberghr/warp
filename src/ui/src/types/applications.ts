@@ -87,6 +87,50 @@ export interface ApplicationDeployModel {
   instanceName: string | null;
 }
 
+/** Post-deploy verdict values (GET /applications/verdict). Mirrors Warp.Core/Models/DeployVerdictModels.cs. */
+export type DeployVerdictValue = 'pass' | 'warn' | 'fail' | 'pending' | 'noData';
+
+export type DeployVerdictCheckState = 'healthy' | 'warning' | 'breaching' | 'acknowledged' | 'noData';
+
+export interface DeployVerdictCheck {
+  source: 'tile' | 'slo';
+  id: number;
+  name: string;
+  /** Null when the tile or SLO covers every application. */
+  application: string | null;
+  state: DeployVerdictCheckState;
+  /** For an acknowledged tile, the state its rule gives. */
+  unacknowledgedState: DeployVerdictCheckState | null;
+  acknowledged: boolean;
+  value: number | null;
+  baseline: number | null;
+  target: number | null;
+  budgetRemaining: number | null;
+  reason: string;
+}
+
+export interface DeployVerdictModel {
+  verdict: DeployVerdictValue;
+  summary: string;
+  deploy: {
+    application: string;
+    version: string;
+    environment: string | null;
+    firstSeenAt: string;
+    instanceName: string | null;
+    previousVersion: string | null;
+    supersededBy: string | null;
+  };
+  window: {
+    from: string;
+    to: string;
+    minWindowSeconds: number;
+    settlesAt: string;
+    settled: boolean;
+  };
+  checks: DeployVerdictCheck[];
+}
+
 /** Execution metrics for a single job type or handler, folded from the durable Statistic aggregates. */
 export interface JobExecutionStatModel {
   /** The job Type or HandlerType assembly-qualified name this row aggregates. */

@@ -13,6 +13,7 @@ import {
   demoJobMetrics,
   decodeAppId,
   filterDemoDeploys,
+  demoDeployVerdict,
 } from './data/applications';
 import { demoSlos, demoSloDetail } from './data/slo';
 import { demoBoardTiles, demoMetricBoard } from './data/metricBoard';
@@ -592,6 +593,17 @@ function routeApplications(
     const params: Record<string, string | undefined> = config.params ?? {};
 
     return resolve(filterDemoDeploys(params.application, params.from, params.to), config);
+  }
+
+  // GET /applications/verdict?application=&version=&environment= — post-deploy verdict (a literal segment, like deploys).
+  if (method === 'get' && (url === '/applications/verdict' || url.startsWith('/applications/verdict?'))) {
+    const params: Record<string, string | undefined> = config.params ?? {};
+    const verdict = demoDeployVerdict(params.application, params.version, params.environment);
+    if (!verdict) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+    }
+
+    return resolve(verdict, config);
   }
 
   // GET /applications/{id}/deploys — one application's deploys.
