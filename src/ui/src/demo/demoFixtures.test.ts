@@ -7,7 +7,9 @@ import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import { MetricKind } from '@/types/metrics';
 import type { MetricInstrument, MetricSeries } from '@/types/metrics';
 import type { WarpAddonsInfo } from '@/types';
-import type { MetricBoard, MetricBoardTile } from '@/types/metricBoard';
+import { MetricTileStatusRule, type MetricBoard, type MetricBoardTile } from '@/types/metricBoard';
+import type { ApplicationDeployModel, DeployVerdictModel } from '@/types/applications';
+import { demoDeploys } from './data/applications';
 import { MetricAnnotationTarget, type MetricAnnotationList } from '@/types/annotations';
 import { demoSlos } from './data/slo';
 
@@ -244,5 +246,99 @@ describe('demo annotation fixtures', () => {
     expect(board.tiles.some((x) => x.annotations.length > 0)).toBe(true);
     await expect(call('post', '/annotations')).resolves.toEqual({ id: 0 });
     await expect(call('delete', '/annotations/1')).resolves.toEqual({});
+  });
+});
+
+// The post-deploy verdict (#325 follow-up) and the deploy history are on the Applications detail page, and the deploys
+// also mark the metric charts, so demo mode serves both. A verdict check must name a tile or objective the reader can
+// find on the Board and SLOs pages, and must follow the server's rules (scope, superseded, coverage).
+describe('demo deploy and verdict fixtures', () => {
+  const adapter = createDemoAdapter(false);
+  const call = async <T>(method: string, url: string, params?: Record<string, string>): Promise<T> => {
+    const response = await adapter({ url, baseURL: '', method, params } as InternalAxiosRequestConfig);
+
+    return response.data as T;
+  };
+  const verdictOf = (application: string, extra: Record<string, string> = {}) =>
+    call<DeployVerdictModel>('get', '/applications/verdict', { application, ...extra });
+
+  it('filters the deploys by application and a [from, to) window, newest first', async () => {
+    const all = await call<ApplicationDeployModel[]>('get', '/applications/deploys');
+    const orders = await call<ApplicationDeployModel[]>('get', '/applications/deploys', { application: 'orders-api' });
+    const newest = Date.parse(orders[0].firstSeenAt);
+    const window = await call<ApplicationDeployModel[]>('get', '/applications/deploys', {
+      application: 'orders-api',
+      from: new Date(newest).toISOString(),
+      to: new Date(newest + 1).toISOString(),
+    });
+    const byId = await call<ApplicationDeployModel[]>('get', `/applications/${encodeUrlSafeId('orders-api')}/deploys`);
+
+    expect(all.length).toBeGreaterThan(orders.length);
+    expect(orders.every((x) => x.application === 'orders-api')).toBe(true);
+    expect(orders.map((x) => Date.parse(x.firstSeenAt))).toEqual([...orders.map((x) => Date.parse(x.firstSeenAt))].sort((a, b) => b - a));
+    expect(window.map((x) => x.id)).toEqual([orders[0].id]);
+    expect(byId).toEqual(orders);
+  });
+
+  it('every check names a demo tile with a status rule or an enabled demo objective, in scope for the application', async () => {
+    const tiles = await call<MetricBoardTile[]>('get', '/metrics/board/tiles');
+    const objectives = demoSlos().items;
+    const problems: string[] = [];
+
+    for (const application of ['orders-api', 'checkout-worker', 'billing-service']) {
+      const verdict = await verdictOf(application);
+      for (const check of verdict.checks) {
+        const source = check.source === 'tile'
+          ? tiles.find((x) => x.id === check.id && x.statusRule !== MetricTileStatusRule.None)
+          : objectives.find((x) => x.id === check.id && x.enabled);
+        if (!source || source.name !== check.name || source.application !== check.application) {
+          problems.push(`${application}: ${check.source} ${check.id} "${check.name}"`);
+        }
+        if (check.application !== null && check.application !== application) {
+          problems.push(`${application}: ${check.source} ${check.id} is scoped to ${check.application}`);
+        }
+      }
+    }
+
+    expect(problems).toEqual([]);
+  });
+
+  it('gives the demo applications different verdicts, with the coverage counted from the checks', async () => {
+    const verdicts = await Promise.all(['orders-api', 'checkout-worker', 'billing-service'].map((x) => verdictOf(x)));
+
+    expect(new Set(verdicts.map((x) => x.verdict)).size).toBe(3);
+    for (const verdict of verdicts) {
+      expect(verdict.checksTotal).toBe(verdict.checks.length);
+      expect(verdict.checksWithData).toBe(verdict.checks.filter((x) => x.state !== 'noData').length);
+      expect(verdict.summary).toContain(`(${verdict.checksWithData} of ${verdict.checksTotal} checks had data)`);
+    }
+  });
+
+  it('judges a superseded deploy over its own lifetime, with tile checks and no SLO checks', async () => {
+    const verdict = await verdictOf('orders-api', { version: '2.3.0' });
+
+    expect(verdict.deploy.supersededBy).toBe('2.3.1');
+    expect(verdict.window.to).toBe(demoDeploys.find((x) => x.id === 'dep-oa-231')!.firstSeenAt);
+    expect(verdict.window.settled).toBe(true);
+    expect(verdict.checks.length).toBeGreaterThan(0);
+    expect(verdict.checks.every((x) => x.source === 'tile')).toBe(true);
+  });
+
+  it('turns a thin pass into noData under minCoverage, but never hides a failure', async () => {
+    const pass = await verdictOf('orders-api');
+    const fail = await verdictOf('billing-service');
+
+    expect(pass.checksWithData).toBeLessThan(pass.checksTotal);
+    expect((await verdictOf('orders-api', { minCoverage: '1' })).verdict).toBe('noData');
+    expect((await verdictOf('orders-api', { minCoverage: '0.5' })).verdict).toBe(pass.verdict);
+    expect(fail.verdict).toBe('fail');
+    expect((await verdictOf('billing-service', { minCoverage: '1' })).verdict).toBe('fail');
+  });
+
+  it('answers 404 with the server { error } body when no deploy matches', async () => {
+    await expect(verdictOf('orders-api', { version: '9.9.9' })).rejects.toMatchObject({
+      response: { status: 404, data: { error: expect.stringContaining('No recorded deploy') } },
+    });
+    await expect(verdictOf('no-such-app')).rejects.toMatchObject({ response: { status: 404 } });
   });
 });

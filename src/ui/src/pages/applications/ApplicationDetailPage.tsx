@@ -8,8 +8,19 @@ import * as api from '@/api';
 import { Spread, InstancesTable } from './shared';
 import { fromInstanceView } from './instanceModel';
 import { withPreviousVersion, type DeployRow } from './deployModel';
-import { checkStateLabel, describeDeploy, orderChecks, verdictClass, verdictLabel, verdictRefetchMs } from './verdictModel';
-import type { DeployVerdictModel } from '@/types/applications';
+import {
+  checkStateLabel,
+  coverageLabel,
+  describeDeploy,
+  orderChecks,
+  shouldLoadVerdict,
+  verdictClass,
+  verdictLabel,
+  verdictPanel,
+  verdictRefetchMs,
+  type VerdictPanel,
+} from './verdictModel';
+import { errorMessage } from '@/lib/apiError';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { RelativeTime } from '@/components/RelativeTime';
 import { DASHBOARD_LOCALE } from '@/utils/format';
@@ -43,15 +54,17 @@ export default function ApplicationDetailPage() {
 
   const deploys = useMemo(() => withPreviousVersion(deploysQuery.data ?? []), [deploysQuery.data]);
 
-  // Post-deploy verdict of the latest deploy, from the same endpoint a CI step calls. Only asked once there is a deploy
-  // to judge; it polls while pending so the panel settles on its own.
+  // Post-deploy verdict of the latest deploy, from the same endpoint a CI step calls. Asked once there is a deploy to
+  // judge (or the deploy history failed to load, so the verdict can still answer); it polls while pending so the panel
+  // settles on its own.
   const applicationName = detailQuery.data?.name;
   const verdictQuery = useQuery({
     queryKey: ['applications', 'verdict', applicationName] as const,
     queryFn: () => api.getDeployVerdict({ application: applicationName! }),
-    enabled: !!applicationName && deploys.length > 0,
+    enabled: shouldLoadVerdict(applicationName, { isError: deploysQuery.isError, count: deploys.length }),
     refetchInterval: (query) => verdictRefetchMs(query.state.data?.verdict),
   });
+  const verdict = verdictPanel({ data: verdictQuery.data, isError: verdictQuery.isError, error: verdictQuery.error });
 
   const detail = detailQuery.data;
 
@@ -127,12 +140,20 @@ export default function ApplicationDetailPage() {
         </CardContent>
       </Card>
 
-      {verdictQuery.data && <VerdictCard verdict={verdictQuery.data} />}
+      {verdict.kind !== 'hidden' && <VerdictCard panel={verdict} />}
 
       <Card className="mt-4">
         <CardHeader><CardTitle className="text-base">Deploys</CardTitle></CardHeader>
         <CardContent className="p-0">
-          <DeploysTable deploys={deploys} />
+          {deploysQuery.isError ? (
+            <p role="alert" className="text-sm text-destructive py-4 text-center">
+              Unable to load the deploys: {errorMessage(deploysQuery.error, 'the request failed.')}
+            </p>
+          ) : deploysQuery.isLoading ? (
+            <p className="text-sm text-muted-foreground py-4 text-center">Loading…</p>
+          ) : (
+            <DeploysTable deploys={deploys} />
+          )}
         </CardContent>
       </Card>
     </div>
@@ -177,7 +198,23 @@ function DeploysTable({ deploys }: { deploys: DeployRow[] }) {
   );
 }
 
-function VerdictCard({ verdict }: { verdict: DeployVerdictModel }) {
+function VerdictCard({ panel }: { panel: Exclude<VerdictPanel, { kind: 'hidden' }> }) {
+  if (panel.kind !== 'verdict') {
+    return (
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle className="text-base">Latest deploy verdict</CardTitle>
+          {panel.kind === 'noMatch' ? (
+            <p className="text-sm text-muted-foreground">No matching deploy: none of this application's recorded deploys matches.</p>
+          ) : (
+            <p role="alert" className="text-sm text-destructive">Unable to load the verdict: {panel.message}</p>
+          )}
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  const { verdict } = panel;
   const checks = orderChecks(verdict.checks);
 
   return (
@@ -188,7 +225,11 @@ function VerdictCard({ verdict }: { verdict: DeployVerdictModel }) {
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${verdictClass(verdict.verdict)}`}>
             {verdictLabel(verdict.verdict)}
           </span>
+          <span className="text-xs font-normal text-muted-foreground">{coverageLabel(verdict)}</span>
         </CardTitle>
+        {panel.staleError && (
+          <p role="alert" className="text-sm text-destructive">Showing the last verdict; refreshing it failed: {panel.staleError}</p>
+        )}
         <p className="text-sm text-muted-foreground">
           <span className="font-mono">{describeDeploy(verdict.deploy)}</span>
           {' · deployed '}

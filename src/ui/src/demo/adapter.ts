@@ -595,12 +595,14 @@ function routeApplications(
     return resolve(filterDemoDeploys(params.application, params.from, params.to), config);
   }
 
-  // GET /applications/verdict?application=&version=&environment= — post-deploy verdict (a literal segment, like deploys).
+  // GET /applications/verdict?application=&version=&environment=&minCoverage= — post-deploy verdict (a literal segment, like deploys).
   if (method === 'get' && (url === '/applications/verdict' || url.startsWith('/applications/verdict?'))) {
     const params: Record<string, string | undefined> = config.params ?? {};
-    const verdict = demoDeployVerdict(params.application, params.version, params.environment);
+    const verdict = demoDeployVerdict(params.application, params.version, params.environment, Number(params.minCoverage ?? 0) || 0);
     if (!verdict) {
-      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config } });
+      const data = { error: 'No recorded deploy of that application matches the version and environment.' };
+
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data, headers: {}, config } });
     }
 
     return resolve(verdict, config);

@@ -1,5 +1,5 @@
 // Static SLO fixtures (§8.31) for hosted demo mode + docs screenshots. Mirrors SloList / SloObjective
-// (src/ui/src/types/slo.ts). Values are hand-picked to show one healthy, one warning, and one breaching
+// (src/ui/src/types/slo.ts). Some are scoped to a demo application so each one's post-deploy verdict differs. Values are hand-picked to show one healthy, one warning, and one breaching
 // objective (plus one metric SLO of each metric kind, ids 4-9: healthy, breaching, no data, healthy, healthy, breaching) so the state pills and budget bars all appear on the /slo page.
 import { SloComparison, SloGaugeAggregate, SloKind, SloState, type SloObjective, type SloList } from '@/types/slo';
 
@@ -9,7 +9,7 @@ const objectives: SloObjective[] = [
     name: 'Email success rate ≥ 99.5%',
     kind: SloKind.SuccessRate,
     dimension: 'Shop.Jobs.SendReceiptEmail',
-    application: null,
+    application: 'checkout-worker',
     targetValue: 0.995,
     percentile: null,
     windowSeconds: 3600,
@@ -28,7 +28,7 @@ const objectives: SloObjective[] = [
     name: 'Default queue-wait p95 < 30s',
     kind: SloKind.QueueWaitLatency,
     dimension: 'default',
-    application: null,
+    application: 'checkout-worker',
     targetValue: 30000,
     percentile: 95,
     windowSeconds: 3600,
@@ -47,7 +47,7 @@ const objectives: SloObjective[] = [
     name: 'Charge deadline attainment ≥ 99%',
     kind: SloKind.DeadlineAttainment,
     dimension: 'Shop.Jobs.ChargeOrder',
-    application: null,
+    application: 'billing-service',
     targetValue: 0.99,
     percentile: null,
     windowSeconds: 21600,
@@ -89,7 +89,7 @@ const objectives: SloObjective[] = [
     name: 'Adyen 5xx = 0',
     kind: SloKind.MetricThreshold,
     dimension: 'http.server.request.duration',
-    application: null,
+    application: 'billing-service',
     targetValue: 0,
     percentile: null,
     windowSeconds: 1800,
@@ -150,7 +150,7 @@ const objectives: SloObjective[] = [
     name: 'Checkout p95 ≤ 0.5 s',
     kind: SloKind.MetricLatency,
     dimension: 'http.server.request.duration',
-    application: null,
+    application: 'orders-api',
     targetValue: 0.5,
     percentile: 95,
     windowSeconds: 3600,
@@ -170,7 +170,7 @@ const objectives: SloObjective[] = [
     name: 'Webhook queue depth ≤ 500',
     kind: SloKind.MetricGaugeThreshold,
     dimension: 'webhooks.queue.depth',
-    application: null,
+    application: 'billing-service',
     targetValue: 500,
     percentile: 95,
     windowSeconds: 3600,

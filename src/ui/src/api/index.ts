@@ -229,7 +229,7 @@ export const getDeploys = (params: { application?: string; from?: string; to?: s
 
 // Post-deploy verdict: pass / warn / fail / pending / noData for one deploy of an application (by NAME). No version =
 // the latest deploy; no environment = the newest match in any environment.
-export const getDeployVerdict = (params: { application: string; version?: string; environment?: string; minWindowMinutes?: number }) =>
+export const getDeployVerdict = (params: { application: string; version?: string; environment?: string; minWindowMinutes?: number; minCoverage?: number }) =>
   api.get<DeployVerdictModel>('/applications/verdict', { params }).then(r => r.data);
 
 export const getStatsHistory = (hours = 24) =>

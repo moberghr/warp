@@ -112,6 +112,10 @@ export interface DeployVerdictCheck {
 export interface DeployVerdictModel {
   verdict: DeployVerdictValue;
   summary: string;
+  /** How many of `checks` had data (any state but noData); a pass resting on few checks is weak evidence. */
+  checksWithData: number;
+  /** The number of `checks`. */
+  checksTotal: number;
   deploy: {
     application: string;
     version: string;

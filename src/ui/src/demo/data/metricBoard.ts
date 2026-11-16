@@ -1,6 +1,7 @@
 // Demo fixtures for the metrics health board (#326). Tiles point at the demo instruments (data/metrics.ts); each tile's
 // numbers and sparkline are generated for whatever window is asked for from a deterministic curve, so the board honours
 // the range selector and "since last deploy" the way the real API does. Same window, same picture: nothing is random.
+// Two tiles are scoped to billing-service, so the post-deploy verdicts of the demo applications differ (applications.ts).
 
 import { MetricKind, MetricTier } from '@/types/metrics';
 import { MetricDeviationDirection, MetricTileKind, MetricTileStatusRule } from '@/types/metricBoard';
@@ -37,6 +38,7 @@ export const demoBoardTiles: MetricBoardTile[] = [
     id: 1,
     name: 'Payment success',
     instrument: 'payment.results',
+    application: 'billing-service',
     kind: MetricTileKind.Ratio,
     ratioTag: 'result',
     goodValues: 'ok',
@@ -59,6 +61,7 @@ export const demoBoardTiles: MetricBoardTile[] = [
     id: 3,
     name: 'Server errors (5xx)',
     instrument: 'http.server.request.duration',
+    application: 'billing-service',
     tagFilter: 'http.response.status_code=5*',
     statusRule: MetricTileStatusRule.Threshold,
     comparison: SloComparison.AtMost,
