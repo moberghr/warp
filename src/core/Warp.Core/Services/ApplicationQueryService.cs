@@ -97,6 +97,59 @@ public class ApplicationQueryService<TContext> : IApplicationQueryService
         };
     }
 
+    public async Task<IReadOnlyList<ApplicationDeployModel>> GetDeploys(string? application, DateTime? since, DateTime? until, CancellationToken ct = default)
+    {
+        var query = _context.Set<ApplicationDeploy>().AsNoTracking();
+
+        if (application is not null)
+        {
+            query = query.Where(x => x.Application == application);
+        }
+
+        if (since is { } lower)
+        {
+            query = query.Where(x => x.FirstSeenAt >= lower);
+        }
+
+        if (until is { } upper)
+        {
+            query = query.Where(x => x.FirstSeenAt < upper);
+        }
+
+        var rows = await query
+            .OrderByDescending(x => x.FirstSeenAt)
+            .ThenBy(x => x.Application)
+            .Take(IApplicationQueryService.MaxDeploys)
+            .Select(x =>
+                new
+                {
+                    x.Id,
+                    x.Application,
+                    x.Version,
+                    x.Environment,
+                    x.FirstSeenAt,
+                    x.InstanceId,
+                    x.InstanceName,
+                })
+            .ToListAsync(ct);
+
+        // The empty-string environment is the storage sentinel for "none" (it keeps the unique key NULL-free).
+        return
+        [
+            .. rows.Select(x =>
+                new ApplicationDeployModel
+                {
+                    Id = x.Id,
+                    Application = x.Application,
+                    Version = x.Version,
+                    Environment = x.Environment.Length == 0 ? null : x.Environment,
+                    FirstSeenAt = x.FirstSeenAt,
+                    InstanceId = x.InstanceId,
+                    InstanceName = x.InstanceName,
+                }),
+        ];
+    }
+
     // Reads Server rows (with a non-null Application — the feature is opt-in) and ApplicationInstance rows
     // separately, projects each into the unified InstanceView, and merges them in memory. A supplied
     // application scopes both reads to that name. IsLive is computed once against a single "now" snapshot.

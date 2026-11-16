@@ -71,6 +71,22 @@ export interface ApplicationInstanceDetailModel {
   recentEvents: ApplicationInstanceLogModel[];
 }
 
+/**
+ * One detected deploy (#325): the first instance of an application to register with a version not seen
+ * before for that application + environment. Mirrors Warp.Core/Models/ApplicationDeployModel.cs.
+ */
+export interface ApplicationDeployModel {
+  id: string;
+  application: string;
+  version: string;
+  /** Null when the reporting instance set no ApplicationEnvironment. */
+  environment: string | null;
+  firstSeenAt: string;
+  /** The first instance seen with this version (a server or a non-server process) — it may since be gone. */
+  instanceId: string;
+  instanceName: string | null;
+}
+
 /** Execution metrics for a single job type or handler, folded from the durable Statistic aggregates. */
 export interface JobExecutionStatModel {
   /** The job Type or HandlerType assembly-qualified name this row aggregates. */

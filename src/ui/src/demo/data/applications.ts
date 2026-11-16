@@ -13,6 +13,7 @@ import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { IDS } from '@/demo/data';
 import { ApplicationInstanceEventType } from '@/types/applications';
 import type {
+  ApplicationDeployModel,
   ApplicationSummaryModel,
   ApplicationDetailModel,
   ApplicationInstanceDetailModel,
@@ -255,6 +256,31 @@ export const demoJobMetrics: JobExecutionMetricsModel = {
     { identifier: 'Acme.Billing.PublishInvoiceHandler', executedCount: 15330, errorCount: 24, errorRate: 24 / 15330, avgDurationMs: 305.2, p95DurationMs: 640.0, p99DurationMs: 1320.0 },
   ],
 };
+
+// ============================================================
+// Detected deploys (GET /applications/deploys, GET /applications/{id}/deploys), newest first.
+// orders-api is mid rolling-deploy (2.3.0 and 2.3.1 instances live), so its newest deploy is recent.
+// ============================================================
+
+export const demoDeploys: ApplicationDeployModel[] = [
+  { id: 'dep-oa-231', application: 'orders-api', version: '2.3.1', environment: 'production', firstSeenAt: ago(60 * 20), instanceId: ORDERS_API_2, instanceName: 'orders-api-4b2d' },
+  { id: 'dep-cw-231', application: 'checkout-worker', version: '2.3.1', environment: 'production', firstSeenAt: ago(60 * 26), instanceId: IDS.server1, instanceName: 'warp-worker-01' },
+  { id: 'dep-bs-220s', application: 'billing-service', version: '2.2.0', environment: 'staging', firstSeenAt: ago(60 * 30), instanceId: BILLING_PROC, instanceName: 'billing-cron-2' },
+  { id: 'dep-oa-230', application: 'orders-api', version: '2.3.0', environment: 'production', firstSeenAt: ago(60 * 24 * 3), instanceId: ORDERS_API_1, instanceName: 'orders-api-7c9f' },
+  { id: 'dep-cw-230', application: 'checkout-worker', version: '2.3.0', environment: 'production', firstSeenAt: ago(60 * 24 * 3 + 40), instanceId: IDS.server2, instanceName: 'warp-worker-02' },
+  { id: 'dep-bs-220', application: 'billing-service', version: '2.2.0', environment: 'production', firstSeenAt: ago(60 * 24 * 5), instanceId: BILLING_SERVER, instanceName: 'billing-01' },
+  { id: 'dep-oa-220', application: 'orders-api', version: '2.2.0', environment: 'production', firstSeenAt: ago(60 * 24 * 9), instanceId: ORDERS_API_1, instanceName: 'orders-api-7c9f' },
+];
+
+/** The demo router's filter over demoDeploys: by application name and a [from, to) range, either side optional. */
+export function filterDemoDeploys(application?: string, from?: string, to?: string): ApplicationDeployModel[] {
+  const lower = from ? Date.parse(from) : -Infinity;
+  const upper = to ? Date.parse(to) : Infinity;
+
+  return demoDeploys
+    .filter((x) => !application || x.application === application)
+    .filter((x) => Date.parse(x.firstSeenAt) >= lower && Date.parse(x.firstSeenAt) < upper);
+}
 
 // URL-safe base64 of the application name → the name, so the demo router maps the {id} path segment
 // back to a fixture key. One codec shared with the other name-addressed routes (see lib/urlSafeId).

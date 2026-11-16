@@ -12,6 +12,7 @@ import {
   demoInstanceDetails,
   demoJobMetrics,
   decodeAppId,
+  filterDemoDeploys,
 } from './data/applications';
 import { demoSlos, demoSloDetail } from './data/slo';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
@@ -548,6 +549,20 @@ function routeApplications(
   // GET /applications — roster
   if (method === 'get' && (url === '/applications' || url.startsWith('/applications?'))) {
     return resolve(demoApplications, config);
+  }
+
+  // GET /applications/deploys?application=&from=&to= — deploys across applications (a literal segment, so it is
+  // matched before the {id} route, as on the server).
+  if (method === 'get' && (url === '/applications/deploys' || url.startsWith('/applications/deploys?'))) {
+    const params: Record<string, string | undefined> = config.params ?? {};
+
+    return resolve(filterDemoDeploys(params.application, params.from, params.to), config);
+  }
+
+  // GET /applications/{id}/deploys — one application's deploys.
+  const deploysMatch = url.match(/^\/applications\/([^/?]+)\/deploys$/);
+  if (method === 'get' && deploysMatch) {
+    return resolve(filterDemoDeploys(decodeAppId(decodeURIComponent(deploysMatch[1]))), config);
   }
 
   // GET /applications/{id}/instances/{instanceId} — single-instance detail (checked before the {id} route).

@@ -6,6 +6,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { Spread, InstancesTable, fromInstanceView } from './shared';
+import { withPreviousVersion, type DeployRow } from './deployModel';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { RelativeTime } from '@/components/RelativeTime';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
 import { useLiveInstanceCount } from '@/hooks/useTicking';
@@ -27,6 +30,15 @@ export default function ApplicationDetailPage() {
     queryFn: () => api.getApplicationJobStats(id),
     enabled: !!id,
   });
+
+  // Detected deploys (#325) — first instance of each new version; kept after the instances are gone.
+  const deploysQuery = useQuery({
+    queryKey: ['applications', 'deploys', id] as const,
+    queryFn: () => api.getApplicationDeploys(id),
+    enabled: !!id,
+  });
+
+  const deploys = useMemo(() => withPreviousVersion(deploysQuery.data ?? []), [deploysQuery.data]);
 
   const detail = detailQuery.data;
 
@@ -101,7 +113,52 @@ export default function ApplicationDetailPage() {
           <InstancesTable instances={instances} />
         </CardContent>
       </Card>
+
+      <Card className="mt-4">
+        <CardHeader><CardTitle className="text-base">Deploys</CardTitle></CardHeader>
+        <CardContent className="p-0">
+          <DeploysTable deploys={deploys} />
+        </CardContent>
+      </Card>
     </div>
+  );
+}
+
+function DeploysTable({ deploys }: { deploys: DeployRow[] }) {
+  if (deploys.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground py-4 text-center">
+        No deploys recorded. Set <code className="font-mono text-xs">ApplicationVersion</code> to track them.
+      </p>
+    );
+  }
+
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Version</TableHead>
+          <TableHead className="hidden sm:table-cell w-32">Environment</TableHead>
+          <TableHead className="hidden md:table-cell">First instance</TableHead>
+          <TableHead className="w-40">Deployed</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {deploys.map((x) => (
+          <TableRow key={x.id}>
+            <TableCell className="font-mono text-sm">
+              {x.previousVersion && <span className="text-muted-foreground">{x.previousVersion} &rarr; </span>}
+              {x.version}
+            </TableCell>
+            <TableCell className="hidden sm:table-cell text-sm text-muted-foreground">{x.environment ?? '—'}</TableCell>
+            <TableCell className="hidden md:table-cell text-sm text-muted-foreground">{x.instanceName ?? x.instanceId}</TableCell>
+            <TableCell className="text-sm text-muted-foreground" title={new Date(x.firstSeenAt).toLocaleString(DASHBOARD_LOCALE)}>
+              <RelativeTime date={x.firstSeenAt} />
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   );
 }
 

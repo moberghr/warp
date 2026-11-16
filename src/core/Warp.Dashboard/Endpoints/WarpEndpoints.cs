@@ -924,6 +924,43 @@ public static class WarpEndpoints
         apiGroup.MapGet("applications", async ([FromServices] IApplicationQueryService svc, CancellationToken ct) =>
             Results.Ok(await svc.GetApplications(ct)));
 
+        // Detected deploys (§8.23) across every application, newest first; ?application= narrows to one by NAME (the
+        // Metrics page's application filter is a name, not a route id). A literal segment, so it wins over {id}.
+        apiGroup.MapGet("applications/deploys", async (
+            [FromServices] IApplicationQueryService svc,
+            [FromQuery] string? application,
+            [FromQuery] DateTime? from,
+            [FromQuery] DateTime? to,
+            CancellationToken ct) =>
+        {
+            if (from >= to)
+            {
+                return Results.BadRequest(new { error = "'from' must be before 'to'." });
+            }
+
+            var name = string.IsNullOrEmpty(application) ? null : application;
+
+            return Results.Ok(await svc.GetDeploys(name, ToUtc(from), ToUtc(to), ct));
+        });
+
+        apiGroup.MapGet("applications/{id}/deploys", async (
+            [FromServices] IApplicationQueryService svc,
+            string id,
+            [FromQuery] DateTime? from,
+            [FromQuery] DateTime? to,
+            CancellationToken ct) =>
+        {
+            var application = UrlSafeId.TryDecode(id);
+            if (application is null)
+            {
+                return Results.NotFound();
+            }
+
+            return from >= to
+                ? Results.BadRequest(new { error = "'from' must be before 'to'." })
+                : Results.Ok(await svc.GetDeploys(application, ToUtc(from), ToUtc(to), ct));
+        });
+
         apiGroup.MapGet("applications/{id}", async ([FromServices] IApplicationQueryService svc, string id, CancellationToken ct) =>
         {
             var application = UrlSafeId.TryDecode(id);
@@ -990,6 +1027,18 @@ public static class WarpEndpoints
     // against it. A malformed id, an empty name, and a name no definition matches are all the same
     // answer over HTTP — 404 — so the ArgumentException IRecurringJobService throws for an unknown
     // name (and its normalizer throws for an unusable one) does not surface as a 500.
+    // Query-bound instants are compared with UTC columns: an offset-bearing value is converted, a bare one is read as UTC.
+    private static DateTime? ToUtc(DateTime? value)
+    {
+        return value switch
+        {
+            null => null,
+            { Kind: DateTimeKind.Local } local => local.ToUniversalTime(),
+            { Kind: DateTimeKind.Unspecified } unspecified => DateTime.SpecifyKind(unspecified, DateTimeKind.Utc),
+            { } utc => utc,
+        };
+    }
+
     private static async Task<IResult> RecurringAction(string id, Func<string, Task<IResult>> action)
     {
         var name = UrlSafeId.TryDecode(id);

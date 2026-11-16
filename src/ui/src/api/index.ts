@@ -7,6 +7,7 @@ import type {
   ApplicationSummaryModel,
   ApplicationDetailModel,
   ApplicationInstanceDetailModel,
+  ApplicationDeployModel,
   JobExecutionMetricsModel,
 } from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
@@ -215,6 +216,15 @@ export const getInstanceDetail = (id: string, instanceId: string) =>
 
 export const getApplicationJobStats = (id: string) =>
   api.get<JobExecutionMetricsModel>(`/applications/${encodeURIComponent(id)}/jobstats`).then(r => r.data);
+
+// Detected deploys (#325), newest first. The per-application route takes the URL-safe id; the cross-application
+// route takes the application NAME (the Metrics page's application filter is a name). from/to are ISO instants,
+// either side optional.
+export const getApplicationDeploys = (id: string) =>
+  api.get<ApplicationDeployModel[]>(`/applications/${encodeURIComponent(id)}/deploys`).then(r => r.data);
+
+export const getDeploys = (params: { application?: string; from?: string; to?: string } = {}) =>
+  api.get<ApplicationDeployModel[]>('/applications/deploys', { params }).then(r => r.data);
 
 export const getStatsHistory = (hours = 24) =>
   api.get<StatsHistoryPoint[]>('/stats/history', { params: { hours } }).then(r => r.data);

@@ -449,6 +449,7 @@ public static class ServiceConfiguration
         AddClientEventLogEntity(modelBuilder, schema);
         AddApplicationInstanceEntity(modelBuilder, schema);
         AddApplicationInstanceLogEntity(modelBuilder, schema);
+        AddApplicationDeployEntity(modelBuilder, schema);
         AddErrorGroupEntity(modelBuilder, schema);
         AddErrorOccurrenceEntity(modelBuilder, schema);
         AddSloDefinitionEntity(modelBuilder, schema);
@@ -1385,6 +1386,36 @@ public static class ServiceConfiguration
         log.HasIndex(p => p.ExpireAt);
 
         log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddApplicationDeployEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var deploy = modelBuilder.Entity<ApplicationDeploy>();
+
+        deploy.Property(p => p.Id);
+        deploy.HasKey(p => p.Id);
+
+        deploy.Property(p => p.Application).HasMaxLength(200).IsRequired();
+        deploy.Property(p => p.Version).HasMaxLength(200).IsRequired();
+        deploy.Property(p => p.Environment).HasMaxLength(200).IsRequired();
+        deploy.Property(p => p.FirstSeenAt);
+
+        // InstanceId is a soft reference (Server.Id OR ApplicationInstance.Id) — no FK, the instance is swept
+        // long before its deploy record.
+        deploy.Property(p => p.InstanceId);
+        deploy.Property(p => p.InstanceName).HasMaxLength(256);
+
+        // One deploy per (application, environment, version): the race between two instances of a new version
+        // registering at once is settled here, and the loser treats its duplicate-key error as "already recorded".
+        deploy.HasIndex(p => new { p.Application, p.Environment, p.Version }).IsUnique();
+
+        // Deploy history for one application within a time range, newest first.
+        deploy.HasIndex(p => new { p.Application, p.FirstSeenAt });
+
+        // Deploy history across applications, and the retention sweep.
+        deploy.HasIndex(p => p.FirstSeenAt);
+
+        deploy.Metadata.SetSchema(schema);
     }
 
     public static void AddBackgroundServiceLogEntity(ModelBuilder modelBuilder, string? schema)

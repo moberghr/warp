@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -23,6 +25,7 @@ public class WarpServerRegistration<TContext> : IHostedService
     private readonly TimeProvider _timeProvider;
     private readonly PauseStateHolder _pauseStateHolder;
     private readonly ServerRegistrationState _state;
+    private readonly ILogger<WarpServerRegistration<TContext>> _logger;
 
     public WarpServerRegistration(
         IOptions<WarpServerConfiguration> configuration,
@@ -30,7 +33,8 @@ public class WarpServerRegistration<TContext> : IHostedService
         IServiceScopeFactory serviceScopeFactory,
         TimeProvider timeProvider,
         PauseStateHolder pauseStateHolder,
-        ServerRegistrationState state)
+        ServerRegistrationState state,
+        ILogger<WarpServerRegistration<TContext>>? logger = null)
     {
         _configuration = configuration.Value;
         _resolvedConfiguration = resolvedConfiguration.Value;
@@ -38,6 +42,7 @@ public class WarpServerRegistration<TContext> : IHostedService
         _timeProvider = timeProvider;
         _pauseStateHolder = pauseStateHolder;
         _state = state;
+        _logger = logger ?? NullLogger<WarpServerRegistration<TContext>>.Instance;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -135,6 +140,8 @@ public class WarpServerRegistration<TContext> : IHostedService
 
         await context.SaveChangesAsync(cancellationToken);
 
+        await RecordDeployAsync(context, server, now, cancellationToken);
+
         _state.Set(registrations);
 
         // Initialize PauseStateHolder from DB before workers start, so they never see a stale
@@ -192,5 +199,20 @@ public class WarpServerRegistration<TContext> : IHostedService
 
         context.Set<Server>().Remove(server);
         await context.SaveChangesAsync(ct);
+    }
+
+    // A server is an application instance (§8.23), so its registration records a deploy when it is the first instance
+    // of a new ApplicationVersion — after the Server row committed, in its own SaveChanges, so a duplicate-key race
+    // never rolls registration back. Deploy history is a diagnostic: any other failure is logged, never fatal.
+    private async Task RecordDeployAsync(DbContext context, Server server, DateTime now, CancellationToken ct)
+    {
+        try
+        {
+            await ApplicationDeployRecorder.RecordAsync(context, _configuration, server.Id, server.ServerName, now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to record the deploy of application version {Version} for server {ServerId}.", _configuration.ApplicationVersion, server.Id);
+        }
     }
 }

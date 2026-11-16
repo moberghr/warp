@@ -75,6 +75,24 @@ Job execution metrics — count, average/percentile duration, and error rate —
 
 A unified `ApplicationInstanceLog` records lifecycle events for **all** instances (server and non-server): `Registered`, `HeartbeatLost`, `Recovered`, `Stopped`, `StaleSwept`. This is distinct from `ServerLog`, which stays server-task-execution history and is relabeled **"Server tasks"** in the UI.
 
+### Deploy history
+
+Warp detects deploys from `ApplicationVersion` without any CI integration. A **deploy** is the first instance of an application to register with a version not seen before for that application in that environment: one `ApplicationDeploy` row (application, version, environment, first-seen time, and the first instance) is written at instance registration, by the server's registration for a server and by the heartbeat host for a non-server process. Nothing is added to the worker path.
+
+- **Exactly one record per rollout.** Ten replicas of `2.4.1` starting at once produce one deploy, timestamped at the first one. A unique index on (application, environment, version) settles the race; the instance that loses it reads its duplicate-key error as "already recorded".
+- **Needs both settings.** With `ApplicationName` or `ApplicationVersion` unset, nothing is recorded.
+- **Per environment.** The same version reaching `staging` and then `production` is two deploys. A process with no `ApplicationEnvironment` counts as its own environment.
+- **A rollback to a version already recorded is not a new deploy.** The version is not new for the application, so the original record stands.
+- **Independent of instance liveness.** The stale-instance sweep and the lifecycle-log retention never delete deploy history. It has its own retention, `ApplicationDeployRetention`, which keeps it forever by default. When you set it, the newest deploy of each application and environment is always kept, so a long-running version is not recorded again as a fresh deploy the next time one of its instances starts.
+- **Best effort.** A failure to record a deploy (for example, a database not yet migrated) is logged as a warning and never fails startup. The next instance of that version to start records it.
+
+The application detail page lists the deploys as `previous → new` per environment. The API serves them newest first:
+
+- `GET {prefix}/api/applications/{id}/deploys?from=&to=` for one application (`{id}` is the URL-safe id, as on the other application routes).
+- `GET {prefix}/api/applications/deploys?application=&from=&to=` across applications, with `application` as the application **name**.
+
+`from` (inclusive) and `to` (exclusive) are ISO 8601 instants and either can be left out. At most 500 deploys are returned. `IApplicationQueryService.GetDeploys(application, since, until)` is the same read in code.
+
 ### Tracing
 
 Activities carry a `warp.application` OpenTelemetry attribute when `ApplicationName` is set (absent when `null`), so you can correlate a request across applications in your trace backend.
@@ -106,6 +124,7 @@ All knobs live on `WarpConfiguration` (set inside the `AddWarp` / `AddWarpServer
 | `ApplicationInstanceStaleGrace` | `TimeSpan` | `2m` | Liveness window; instances not heard from within it are shown offline and swept. Kept comfortably above the heartbeat interval so a merely-slow instance isn't reaped. |
 | `ApplicationInstanceLogRetention` | `TimeSpan` | `7d` | Age cap for `ApplicationInstanceLog` rows. |
 | `ApplicationInstanceLogRetentionCount` | `int?` | `null` (off) | Count cap — keep at most N lifecycle-log rows, deleting the oldest. |
+| `ApplicationDeployRetention` | `TimeSpan?` | `null` (keep forever) | Age cap for deploy history, by first-seen time. The newest deploy of each application and environment is always kept. |
 
 ## Migration and upgrade
 
@@ -119,6 +138,7 @@ dotnet ef database update
 ```
 
 - **Rolling-deploy safe.** Old-version processes ignore the new columns/tables (EF never `SELECT *`s), write `null`, and don't register instances. New-version processes write the full set. Legacy `null`-application rows read as **"(unassigned)"**.
+- **Deploy history** adds one more table, `application_deploy`, with a unique index on (`application`, `environment`, `version`). It is additive like the rest; until it exists, a new-version process logs a warning instead of recording its deploy.
 - **Metrics reads are cross-version-safe.** The per-app metrics use a **disjoint** counter-key namespace, so the existing keys are byte-for-byte unchanged and old readers never see the new ones.
 
 :::note[Who owns migrations in a shared schema]
