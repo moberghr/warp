@@ -28,10 +28,8 @@ public class AdapterFlusherDrainTests
             (batch, ct) => Task.Delay(Timeout.Infinite, ct),
             budget: TimeSpan.FromMilliseconds(250));
 
-        var completed = await Task.WhenAny(drain, Task.Delay(TimeSpan.FromSeconds(3)));
-
-        completed.ShouldBe(drain, "the drain must return once its budget elapses, even mid-persist");
-        await drain;
+        // The drain must return once its budget elapses, even mid-persist; WaitAsync throws TimeoutException if not.
+        await drain.WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None);
     }
 
     [TimedFact]

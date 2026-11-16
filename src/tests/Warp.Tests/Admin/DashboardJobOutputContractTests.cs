@@ -80,6 +80,6 @@ public class DashboardJobOutputContractTests
         var text = await response.Content.ReadAsStringAsync(CancellationToken.None);
         response.StatusCode.ShouldBe(HttpStatusCode.OK, text);
 
-        return JsonDocument.Parse(text).RootElement.Clone();
+        return JsonElement.Parse(text);
     }
 }

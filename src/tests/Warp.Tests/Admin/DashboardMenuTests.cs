@@ -263,7 +263,7 @@ public class DashboardMenuTests
         var start = shell.IndexOf(Marker, StringComparison.Ordinal) + Marker.Length;
         var json = shell[start..shell.IndexOf(";</script>", start, StringComparison.Ordinal)];
 
-        return JsonDocument.Parse(json).RootElement;
+        return JsonElement.Parse(json);
     }
 
     private static async Task MapAsync(Action<WarpDashboardOptions> configure)
