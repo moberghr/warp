@@ -37,6 +37,7 @@ public static class IdleLoopSwitches
             ["backlog-sampler"] = c => c.BacklogSampleInterval = null,
             ["slo-evaluator"] = c => c.SloEvaluationInterval = null,
             ["statistic-rollup"] = c => c.StatisticRollupInterval = null,
+            ["metric-rollup"] = c => c.MetricRollupInterval = null,
 
             // ScheduledActivationInterval is a non-nullable TimeSpan — the loop cannot be
             // switched off through config the way the others can. Pushing it well past the
@@ -52,6 +53,7 @@ public static class IdleLoopSwitches
         "error-grouping",
         "slo-evaluator",
         "statistic-rollup",
+        "metric-rollup",
     ];
 
     public static IReadOnlyCollection<string> Names => Switches.Keys;

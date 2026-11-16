@@ -180,3 +180,33 @@
 - **A tracked-entity delete that must affect a row turns a missing row into a failed job.** Marking a stub `Deleted` costs no round trip because it joins the caller's `SaveChanges`, but EF raises `DbUpdateConcurrencyException` when it affects nothing — inside finalisation that surfaced as the JOB failing, across 97 tests, all of which seed `Job` rows directly rather than through `IPublisher`. The same shape is reachable in production for any row written by a pre-upgrade process. **Rule:** cleanup is idempotent or it is a bug; `ExecuteDelete` and a round trip beat an exception on a path that must not fail.
 - **A second state table needs every job-delete site, including the test harness's own.** A 300-job run reported 500 queue rows: the lab's `ClearJobTablesAsync` deleted `JobLog`, `Counter` and `Job` but not the new table, so the warm-up's 200 were orphaned and would have grown across arms. **Rule:** when adding a table keyed on an existing one, grep every delete of the parent — fixtures included — before measuring anything.
 - **Production code hidden in a measurement commit escapes review.** A commit titled "Measure what a claim actually does" contained a primary-key change, both worker finalisation hooks and a new config flag. **Rule:** docs and measurements commit separately from the code they justify, and a commit message that says "measure" should have no `src/core` in its diff.
+
+## 2026-11-16: Custom application metrics (7.5.0)
+
+- **A tiered store must be read across every overlapping tier.** The first spec read one tier per chart range (24h/7d → hourly only). Fine rows roll to hourly only after `FineResolutionRetention` (6h), so a "last 24h" chart would have silently lacked the newest ~6h, the part you look at after a deploy. The implementer flagged it, and the engineer approved a spec amendment.
+  - **Rule:** any reader over tiered/rolled-up data reads every tier overlapping `[from,to)` and re-bins to the display resolution.
+  - **Why it's safe:** a value lives in exactly one tier at a time, because rollup deletes its sources in the same transaction it adds them to the parent.
+  - **Applies to:** any windowed reader over `Statistic`/`metric_point` tiers, including SLO windows and baselines.
+- **`Classify(NaN)` reads Healthy.** `SloMath`'s new evaluators return an all-NaN `NoDataResult` for non-finite or overflowing input.
+  - **Rule:** check `IsNoData(result)` before `Classify`, every time. A NaN budget compared with `<` is false, so it falls through to Healthy: a false green on exactly the overflow you would want to page on.
+  - **Applies to:** any new `SloMath` arm.
+- **A measurement seed with one instrument proves nothing about the index.** SC9's first run reported "index not used" and a 7d read of 372 ms. With one instrument, `instrument = X` matches every row, so a sequential scan is the *correct* plan. The seed also overlapped hourly and fine rows in time, which rollup makes impossible.
+  - **Rule:** seed several instruments with realistic, non-overlapping tiers before reading a plan or a latency.
+  - **Cost found:** the real cost was .NET materialisation (SQL 32 ms of 372 ms). Fixed by totalling in SQL when there is no breakdown, and parsing bucket CSVs only for a percentile. Re-measured at 31 ms.
+- **`MeterListener` tests: match instruments by name, never by `ReferenceEquals` on a static field.**
+  - **What happened:** a listener that starts before `WarpTelemetry`'s static initializer sees the counter published *inside* the initializer, before the field is assigned. The reference compare then sees null, the instrument is never enabled, and the test counts 0. Whether that happens depends on whether an earlier test touched `WarpTelemetry`.
+  - **Rule:** match on the meter-name const plus the instrument name, filter on a GUID-unique instrument name, and create the listener before the code under test.
+  - **Applies to:** every `MeterListener` assertion. `BacklogSamplerTestsBase` and `QueueWaitClaimTestsBase` still use the reference pattern.
+- **`dotnet format --include` paths are relative to the working directory, and a non-matching include exits 0.** A subagent's "format clean" evidence ran from `src/ui` and matched no files.
+  - **Rule:** run format from the repo root, or run the whole solution without `--include`, and treat an `--include` run from elsewhere as no evidence.
+  - **Applies to:** every format gate.
+- **A UI edit form must round-trip every server field.** The SLO form hid `TagFilter` for `MetricRatio` and posted `tagFilter: null` on any edit. That silently widened the objective, and on restart the seeder's match key (which includes `TagFilter`) re-inserted the seed, giving duplicate objectives and duplicate alerts.
+  - **Rule:** for every kind, a vitest round-trip `objective → draft → request` that checks every field survives.
+  - **Applies to:** any dashboard edit form over a polymorphic entity.
+- **On this host the harness kills long background test runs for low memory, and leaves an orphaned `Warp.Tests.exe`** (~850 MB, process-kill denied).
+  - **Rule:** run DB gates one at a time in the foreground, and wait out any auto-backgrounded run instead of abandoning it.
+  - **After a kill:** wait for the orphan to exit, then re-run the gate once.
+  - **Also:** a session restart can leave Docker Desktop down. Check `docker version` before blaming tests.
+- **A TestServer-bound `HttpClient` never emits `http.client.request.duration`.** `System.Net.Http` records it only in the `SocketsHttpHandler`/`HttpClientHandler` pipeline, and a TestServer client uses TestServer's own handler.
+  - **Rule:** pin the HttpClient preset's contents with a NoDb options test, and verify the meter itself against a real socket handler if ever needed.
+- **`.claude/rules/testing.md` §4.2/§4.3 name a `FixtureKind` that does not exist.** The source generator takes plain `[GenerateDatabaseTests]`, with optional `WithPush`/`SerializeInCollection`. Several briefs copied the stale text, and the agents' first builds failed on it. Fix the rule text.

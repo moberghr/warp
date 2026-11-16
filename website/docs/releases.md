@@ -4,6 +4,95 @@ sidebar_position: 6
 
 # Releases
 
+## 7.5.0
+
+*2026-11-16*
+
+Minor release with **an additive schema change (you generate one migration)**, **one behaviour change for `DisableWorker()` servers**, and no breaking API change: Warp can now collect the metrics your own code emits with the standard .NET `System.Diagnostics.Metrics` API, chart them on a new Metrics page, and hold them to four new kinds of SLO. Read [Upgrading](#upgrading-from-74x) first.
+
+### Custom application metrics
+
+`opt.AddMetrics(...)` turns on a collector for the meters you name. Your code keeps using `IMeterFactory`, `Counter<T>` and `Histogram<T>` and takes no Warp dependency:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddMetrics(m => m
+        .CollectMeter("Shop.Payments")
+        .CollectAspNetCoreHttp()      // http.server.request.duration: route, method, status
+        .CollectHttpClient());        // http.client.request.duration: method, host, status, error
+});
+```
+
+- **A collector, not an emit API.** A `MeterListener` enables only the instruments of the meters you name (never Warp's own `Warp` meter), projects each measurement's tags through an optional per-instrument `KeepTags` allowlist, and adds it to an in-memory aggregate per series and 5-minute bucket: count, sum, min, max and histogram buckets. The callback does no I/O and never throws into your code. Measured for a warm series with three tags: about 253 ns for a counter and 249 ns for a histogram per measurement, with no managed allocation.
+- **Every `AddWarp` process collects and flushes.** A per-process flusher writes the aggregates as partial `metric_point` rows every `MetricFlushInterval` (30 s) and once more on graceful shutdown. An ungraceful exit loses at most one interval. Measurements are not transactional.
+- **Storage and rollup.** A new `MetricRollup` server task compacts the partial rows of each closed bucket into one row per series, then rolls fine rows into hourly and hourly into daily on the existing `FineResolutionRetention`, `HourlyStatisticsRetention` and `DailyStatisticsRetention` settings. It is bounded per tick and defers rather than drops. Readers sum on read, so a measurement is visible within about one flush interval.
+- **Cardinality is capped per process** (6 tags per instrument, 100 values per tag, 500 series per instrument, 300 instruments). A tag value over a cap becomes `{other}`; the collapse is reported by a Warning log, the `warp.metrics.collapsed{instrument, reason}` meter and a badge on the Metrics page, and never includes a value.
+- **New settings:** `MetricFlushInterval` (30 s) and `MetricRollupInterval` (1 min; `null` disables the rollup). See [Configuration](/docs/operations/configuration#custom-application-metrics).
+
+**Tag values must never carry PII, PAN or customer identifiers.** Warp cannot detect PII in a free string. Use `KeepTags` allowlists on any instrument whose tags you do not control. The two presets keep only route, method and status (server) and method, `server.address`, status and `error.type` (client). If you take card payments through [adapters](/docs/features/adapters#pci-payment-processors), also keep their capture at `None` and never use `ForceCapture` on them. See [Custom application metrics](/docs/features/custom-metrics).
+
+### The Metrics page
+
+The dashboard gains a **Metrics** page: a list of every collected instrument (kind, unit, tag keys, last seen, collapse badge) and a detail page with a range picker (1 h to 30 d), an application picker, **break down by tag** (top 10 values plus `(rest)`), filters (`key=value`, a trailing `*` prefix, `{none}`), **1-day and 7-day compare overlays**, histogram **percentiles**, and a **ratio view** (for example status `5*` over total).
+
+A series read covers **every tier that overlaps the range** and re-bins it into the display resolution, so the newest data that has not rolled up yet is included exactly once; each series is labelled with the resolution it was served at. The nav item shows where `AddMetrics` ran in the dashboard's own process; a dashboard-only host uses `ShowMetrics()`. The API is `GET {prefix}/api/metrics` and `GET {prefix}/api/metrics/{id}/series`, served by any `AddWarp` process.
+
+### Four new SLO kinds on your metrics
+
+[SLOs](/docs/features/slo-error-budget#metric-objectives) can now target a custom metric, with the same error budget, burn rate, No data, once-per-edge alert and acknowledge behaviour:
+
+| Kind | Breaching when |
+|---|---|
+| `MetricRatio` | good ÷ (good + bad) falls below the target, split by one tag (values in neither list, such as `refused`, are ignored); or, with `BaselineDays`, the ratio drops by more than the target against 1 or 7 days earlier |
+| `MetricThreshold` | matching events exceed N (0 allowed, so "5xx = 0" works) |
+| `MetricVolumeFloor` | matching events fall below a fraction of the same window 1 or 7 days earlier |
+| `MetricGap` | events of one instrument minus events of another exceed N |
+
+The builder gains `AddMetricRatio`, `AddMetricThreshold`, `AddMetricVolumeFloor` and `AddMetricGap`, and `SloBreachedEvent` gains a nullable `Metric` label. Metric objectives need a window of at least 10 minutes, and **a 7-day baseline requires `HourlyStatisticsRetention` of at least 7 days + the window + 1 hour**, so with the default of exactly 7 days it is rejected until you raise it. The SLOs page has the matching form, with an instrument picker.
+
+### Behaviour change: `DisableWorker()` servers now run the aggregation tasks
+
+`CounterAggregator`, `ErrorGroupAggregator` and `SloEvaluator` used to be registered only on servers with a worker. They now run on **every** server, beside `StatisticRollup` and the new `MetricRollup`, so a `DisableWorker()` server runs all five. All five are cluster-locked, so a cluster that mixes worker and service-only servers still runs each tick once. A `DisableWorker()` server still never claims a job and still runs none of the job-only tasks (`Orchestrator`, `MessageRouter`, `ScheduledJobActivation`, `RecurringJobScheduler`, `StaleJobRecovery`, `BacklogSampler`).
+
+What this means for you:
+
+- A cluster made up **only** of `DisableWorker()` servers (the shape [alongside Hangfire or Jobly](/docs/features/custom-metrics#alongside-hangfire-or-jobly)) now folds `Counter` rows, groups errors into Issues and evaluates SLOs where it previously did none of that.
+- Those servers do a little more database work. No data changes, and no setting is needed.
+- To switch a fold off, use its existing interval (`CounterAggregationInterval`, `ErrorGroupingInterval`, `SloEvaluationInterval`, set to `null`).
+
+### Schema change: one additive migration
+
+After upgrading, run your normal `dotnet ef migrations add <Name>` and apply it. The migration is **additive** and generated by your own `dotnet ef`, since Warp's tables live in your `DbContext`:
+
+- **two new tables:** `metric_point` and `metric_instrument` (in the Warp schema, always present whether or not you call `AddMetrics`);
+- **seven new nullable columns on `slo_definition`:** `TagFilter`, `SecondaryMetric`, `SecondaryTagFilter`, `RatioTag`, `GoodValues`, `BadValues` and `BaselineDays`.
+
+Nothing is dropped or renamed. Old binaries ignore the new tables and columns, so a rolling deploy is safe, and rolling back leaves the migration in place harmlessly.
+
+### Coexistence
+
+New tests and documentation cover running Warp next to code that already exists, with **no behaviour change**: a host `SaveChangesInterceptor` and MediatR 12.5 behave identically with and without `AddWarp`, and a `DisableWorker()` server claims no job. The caveats are written up in [EF Core Integration](/docs/operations/ef-core-integration#coexisting-with-your-own-ef-core-and-mediator-setup): `AddDbContext` must come before `AddWarp` (otherwise the hook silently does nothing), Warp replaces a custom `IModelCustomizer` (call `ApplyWarpModel` in `OnModelCreating` instead), Warp's one interceptor is async-only and touches only `IConcurrencyToken` entities, and MediatR and Warp share type names (alias them to avoid CS0104).
+
+### API additions
+
+Additive only: `AddMetrics`, `WarpMetricsOptions`, `IMetricQueryService`, `MetricPoint`, `MetricInstrument`, `MetricKind`, `SloKind` members 6 to 9 (a `switch` over `SloKind` in your code gets four new cases), the `SloDefinition` and SLO read-model fields above, `SloBreachedEvent.Metric`, `ShowMetrics()`, `WarpDashboardPage.Metrics`, and `Warp.Core.Services.MetricTier`, which was `internal` and is now `public` because `MetricPoint` exposes it.
+
+### Known limits
+
+- SQL Server's case-insensitive collation merges tag sets that differ only by letter case into one series on read.
+- Under locking `READ COMMITTED` (SQL Server without RCSI), a read racing a rollup can transiently double-count one bucket.
+- Baselines older than 6 hours are hour resolution and prorated.
+- Reads at the 500-series cap, measured on PostgreSQL with 1.58 M rows: a 24 h or 7 d read without a breakdown or percentile takes about 31 ms, a 7 d breakdown about 1 s, a 7 d percentile plus breakdown about 0.8 s.
+- This is a collector and an explorer, not a time-series database or Grafana. An OpenTelemetry exporter on the same meters keeps working in parallel.
+
+### Upgrading from 7.4.x
+
+1. Generate and apply the migration (above).
+2. If you run `DisableWorker()` servers, expect them to start running the counter, error-group and SLO tasks.
+3. Nothing is collected until you call `AddMetrics`. When you do, review the tags your meters use and add `KeepTags` allowlists where you do not control them.
+
 ## 7.4.0
 
 *2026-11-02*

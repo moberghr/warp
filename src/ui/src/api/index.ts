@@ -391,6 +391,16 @@ export const deleteSlo = (id: number) => api.delete(`/slo/${id}`);
 
 export const ackSlo = (id: number, minutes: number) => api.post(`/slo/${id}/ack`, { minutes });
 
+// Custom application metrics. IMetricQueryService is registered by AddWarp, so these resolve in
+// dashboard-only processes; the Metrics nav is gated on addons.metrics. The series id is the URL-safe
+// base64 of the instrument name, and the query string is pre-built (see buildSeriesQuery) because `filter`
+// repeats.
+export const getMetrics = () =>
+  api.get<import('@/types/metrics').MetricInstrument[]>('/metrics').then(r => r.data);
+
+export const getMetricSeries = (instrument: string, query: string) =>
+  api.get<import('@/types/metrics').MetricSeries>(`/metrics/${encodeUrlSafeId(instrument)}/series?${query}`).then(r => r.data);
+
 // Extensions
 export const getExtensions = () =>
   api.get<ExtensionManifest[]>('/extensions').then(r => r.data);

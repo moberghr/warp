@@ -1,11 +1,14 @@
+using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Metrics;
 using Warp.Core.Notifiers;
 using Warp.Core.Services;
+using Warp.Core.Slo;
 
 namespace Warp.Worker.Services;
 
@@ -14,20 +17,34 @@ namespace Warp.Worker.Services;
 /// their rolling <see cref="SloEvaluation"/> status — the actionable layer over the metrics jobstat / queue-wait /
 /// backlog / deadline already fold. Runs off the worker hot path as a periodic <see cref="IServerTask"/> (the
 /// analogue of <c>CounterAggregator</c> / <c>ErrorGroupAggregator</c>); reads only, plus the one status row per
-/// objective. Rate objectives (success-rate, deadline-attainment) are windowed via the hourly history buckets;
-/// latency objectives read the lifetime percentile histogram; backlog reads the current gauge. A healthy→breaching
-/// edge buffers a <see cref="SloBreachedEvent"/> (or <c>BacklogBreached</c> for a depth objective), dispatched
-/// post-commit from <see cref="OnCommittedAsync"/> (§8.25).
+/// objective. Rate objectives (success-rate, deadline-attainment) are windowed over the tiered history buckets
+/// (fine / hourly / daily, §8.30); latency objectives read the tiered <c>pcth</c> percentile histogram over the
+/// window; backlog reads the current gauge. Metric kinds 6–9 (ratio, threshold, volume floor, gap) read
+/// <see cref="MetricPoint"/> rows across every tier overlapping the window (and baseline), prorated by overlap. A
+/// healthy→breaching edge buffers a <see cref="SloBreachedEvent"/> (or <c>BacklogBreached</c> for a depth
+/// objective), dispatched post-commit from <see cref="OnCommittedAsync"/> (§8.25).
 /// </summary>
 public sealed class SloEvaluator<TContext> : IServerTask
     where TContext : DbContext
 {
+    // Scale applied to prorated metric events before EvaluateRate's integer counts, and the largest total that
+    // still fits a long once scaled.
+    private const double RateScale = 1_000;
+    private const double MaxRateEvents = 1e15;
+
+    // The one "no observations" shape every arm reports, the unknown-kind arm included; the caller maps
+    // HasData: false to NoData.
+    private static EvalResult NoDataResult => new(1.0, 1.0, 0.0, 0.0, HasData: false);
+
     private readonly DbContext _context;
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
     private readonly WarpNotifierDispatcher _notifierDispatcher;
     private readonly ILogger<SloEvaluator<TContext>> _logger;
     private readonly List<WarpOperationalEvent> _pendingAlerts = [];
+    private readonly Dictionary<MetricReadKey, List<MetricRawRow>> _metricReads = [];
+    private readonly Dictionary<string, MetricKind?> _instrumentKinds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Dictionary<string, string>> _parsedTags = new(StringComparer.Ordinal);
 
     public SloEvaluator(
         IWarpServerContext serverContext,
@@ -43,6 +60,9 @@ public sealed class SloEvaluator<TContext> : IServerTask
         _logger = logger;
     }
 
+    // Test seam: how many metric reads this instance served from the total-only (tier, bucket) shape.
+    internal int TotalOnlyReads { get; private set; }
+
     public string Name => "EvaluateSlos";
 
     public string? LockKey => "warp:slo-eval";
@@ -56,6 +76,9 @@ public sealed class SloEvaluator<TContext> : IServerTask
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
         _pendingAlerts.Clear();
+        _metricReads.Clear();
+        _instrumentKinds.Clear();
+        _parsedTags.Clear();
 
         var definitions = await _context.Set<SloDefinition>()
             .Where(x => x.Enabled)
@@ -66,6 +89,8 @@ public sealed class SloEvaluator<TContext> : IServerTask
             return null;
         }
 
+        await LoadInstrumentKindsAsync(definitions, ct);
+
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var existing = await _context.Set<SloEvaluation>().ToDictionaryAsync(x => x.SloDefinitionId, ct);
 
@@ -75,7 +100,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
 
         foreach (var def in definitions)
         {
-            var result = await ComputeAsync(def, now, cache, ct);
+            var result = await ComputeIsolatedAsync(def, now, cache, ct);
 
             existing.TryGetValue(def.Id, out var eval);
             var ackActive = eval?.AcknowledgedUntil is { } until && until > now;
@@ -115,6 +140,31 @@ public sealed class SloEvaluator<TContext> : IServerTask
         }
     }
 
+    // One objective's failure (corrupt stored data driving the arithmetic out of range, an unexpected value) must not
+    // stop every other objective's evaluation: it is logged at Error with the objective's id and name and reported
+    // as NoData, and the tick goes on. A database error is the exception: it aborts the task's transaction on
+    // PostgreSQL, so the tick's save fails anyway and the next tick retries everything.
+    private async Task<EvalResult> ComputeIsolatedAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
+    {
+        try
+        {
+            return await ComputeAsync(def, now, cache, ct);
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
+        {
+            // The message stays type-only (an exception message can quote stored data); the stack goes to Debug.
+            _logger.LogError(
+                "SLO objective {Id} '{Name}' ({Kind}) failed to evaluate ({ExceptionType}) — reported as NoData; the other objectives were evaluated.",
+                def.Id,
+                def.Name,
+                def.Kind,
+                ex.GetType().FullName);
+            _logger.LogDebug(ex, "SLO objective {Id} evaluation failure detail.", def.Id);
+
+            return NoDataResult;
+        }
+    }
+
     private Task<EvalResult> ComputeAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
         => def.Kind switch
         {
@@ -123,6 +173,10 @@ public sealed class SloEvaluator<TContext> : IServerTask
             SloKind.ExecutionLatency => ComputeExecutionLatencyAsync(def, now, cache, ct),
             SloKind.QueueWaitLatency => ComputeQueueWaitLatencyAsync(def, now, cache, ct),
             SloKind.BacklogDepth => ComputeBacklogAsync(def, cache, ct),
+            SloKind.MetricRatio => ComputeMetricRatioAsync(def, now, ct),
+            SloKind.MetricThreshold => ComputeMetricThresholdAsync(def, now, ct),
+            SloKind.MetricVolumeFloor => ComputeMetricVolumeFloorAsync(def, now, ct),
+            SloKind.MetricGap => ComputeMetricGapAsync(def, now, ct),
             _ => UnsupportedKindAsync(def),
         };
 
@@ -137,7 +191,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
             def.Name,
             (int)def.Kind);
 
-        return Task.FromResult(new EvalResult(1.0, 1.0, 0.0, 0.0, HasData: false));
+        return Task.FromResult(NoDataResult);
     }
 
     private async Task<EvalResult> ComputeSuccessRateAsync(SloDefinition def, DateTime now, Dictionary<string, IReadOnlyList<KeyVal>> cache, CancellationToken ct)
@@ -294,6 +348,461 @@ public sealed class SloEvaluator<TContext> : IServerTask
         return new EvalResult(att, budget, burn, burn, HasData: found);
     }
 
+    // MetricRatio (§E): good = events whose RatioTag matches GoodValues, bad = events matching BadValues, every other
+    // value ignored. With BaselineDays the target is the maximum drop against the same window that many days earlier.
+    private async Task<EvalResult> ComputeMetricRatioAsync(SloDefinition def, DateTime now, CancellationToken ct)
+    {
+        if (!TryParseFilter(def, def.TagFilter, out var filter)
+            || string.IsNullOrEmpty(def.RatioTag)
+            || !MetricValueList.TryParse(def.GoodValues, out var good, out _)
+            || !MetricValueList.TryParse(def.BadValues, out var bad, out _))
+        {
+            return CorruptDefinition(def);
+        }
+
+        var current = await LoadWindowAsync(def, def.Dimension, now, TimeSpan.Zero, byTags: true, ct);
+        if (current is null)
+        {
+            return NoDataResult;
+        }
+
+        var ratioTag = def.RatioTag;
+
+        // One pass per window: the filter is checked once per row, then the ratio tag's value is tested against both
+        // lists (independently, as two separate predicates always were).
+        (double Good, double Bad) GoodAndBad(MetricWindow window, DateTime from)
+        {
+            double goodEvents = 0;
+            double badEvents = 0;
+            foreach (var row in window.Rows)
+            {
+                var fraction = Overlap(row, from, window.To, window.Now);
+                if (fraction > 0 && filter.Matches(row.Tags))
+                {
+                    var value = row.Tags.GetValueOrDefault(ratioTag);
+                    if (good.Matches(value))
+                    {
+                        goodEvents += row.Events * fraction;
+                    }
+
+                    if (bad.Matches(value))
+                    {
+                        badEvents += row.Events * fraction;
+                    }
+                }
+            }
+
+            return (goodEvents, badEvents);
+        }
+
+        var (goodW, badW) = GoodAndBad(current, current.From);
+        var (goodS, badS) = GoodAndBad(current, current.ShortFrom);
+
+        // A ratio has two totals, so it refuses a negative one on either side (TryEvents' rule, applied to the pair).
+        if (goodW < 0 || badW < 0)
+        {
+            return NegativeEvents(def);
+        }
+
+        if (goodW + badW <= 0)
+        {
+            return NoDataResult;
+        }
+
+        if (def.BaselineDays is not { } days)
+        {
+            return FromMath(Rate(goodW, badW, def.TargetValue), Rate(goodS, badS, def.TargetValue));
+        }
+
+        var previous = await LoadWindowAsync(def, def.Dimension, now, TimeSpan.FromDays(days), byTags: true, ct);
+        if (previous is null)
+        {
+            return NoDataResult;
+        }
+
+        var (goodB, badB) = GoodAndBad(previous, previous.From);
+        if (goodB + badB <= 0)
+        {
+            return NoDataResult;
+        }
+
+        var baselineRatio = goodB / (goodB + badB);
+        var wide = SloMath.EvaluateRatioDrop(baselineRatio, goodW / (goodW + badW), def.TargetValue);
+        var recent = goodS + badS > 0
+            ? SloMath.EvaluateRatioDrop(baselineRatio, goodS / (goodS + badS), def.TargetValue)
+            : SloMath.NoDataResult;
+
+        return FromMath(wide, recent);
+    }
+
+    // MetricThreshold (§E): matching events must not exceed N. NoData only when the instrument has no rows at all in
+    // the window — traffic with zero matches is Healthy at 0, so "5xx = 0" is not a false NoData.
+    private async Task<EvalResult> ComputeMetricThresholdAsync(SloDefinition def, DateTime now, CancellationToken ct)
+    {
+        if (!TryParseFilter(def, def.TagFilter, out var filter))
+        {
+            return CorruptDefinition(def);
+        }
+
+        var window = await LoadWindowAsync(def, def.Dimension, now, TimeSpan.Zero, byTags: !filter.IsEmpty, ct);
+        if (window is null || !HasRows(window))
+        {
+            return NoDataResult;
+        }
+
+        if (!TryEvents(window, filter.Matches, window.From, out var observed))
+        {
+            return NegativeEvents(def);
+        }
+
+        var observedShort = Events(window, filter.Matches, window.ShortFrom);
+
+        return FromMath(SloMath.EvaluateCount(observed, def.TargetValue), SloMath.EvaluateCount(observedShort, def.TargetValue));
+    }
+
+    // MetricVolumeFloor (§E): matching events now vs the same window BaselineDays earlier, prorated by overlap.
+    private async Task<EvalResult> ComputeMetricVolumeFloorAsync(SloDefinition def, DateTime now, CancellationToken ct)
+    {
+        if (!TryParseFilter(def, def.TagFilter, out var filter) || def.BaselineDays is not { } days)
+        {
+            return CorruptDefinition(def);
+        }
+
+        var current = await LoadWindowAsync(def, def.Dimension, now, TimeSpan.Zero, byTags: !filter.IsEmpty, ct);
+        var previous = await LoadWindowAsync(def, def.Dimension, now, TimeSpan.FromDays(days), byTags: !filter.IsEmpty, ct);
+        if (current is null || previous is null)
+        {
+            return NoDataResult;
+        }
+
+        if (!TryEvents(previous, filter.Matches, previous.From, out var baseline))
+        {
+            return NegativeEvents(def);
+        }
+
+        if (baseline <= 0)
+        {
+            return NoDataResult;
+        }
+
+        if (!TryEvents(current, filter.Matches, current.From, out var observed))
+        {
+            return NegativeEvents(def);
+        }
+
+        var observedShort = Events(current, filter.Matches, current.ShortFrom);
+        var baselineShort = Events(previous, filter.Matches, previous.ShortFrom);
+        var recent = baselineShort > 0
+            ? SloMath.EvaluateVolumeFloor(observedShort, baselineShort, def.TargetValue)
+            : SloMath.NoDataResult;
+
+        return FromMath(SloMath.EvaluateVolumeFloor(observed, baseline, def.TargetValue), recent);
+    }
+
+    // MetricGap (§E): events(primary, TagFilter) − events(secondary, SecondaryTagFilter) must not exceed N. NoData when
+    // neither instrument has rows in the window. A gap may legitimately be negative, so it does not use TryEvents.
+    private async Task<EvalResult> ComputeMetricGapAsync(SloDefinition def, DateTime now, CancellationToken ct)
+    {
+        if (!TryParseFilter(def, def.TagFilter, out var filter)
+            || !TryParseFilter(def, def.SecondaryTagFilter, out var secondaryFilter)
+            || string.IsNullOrEmpty(def.SecondaryMetric))
+        {
+            return CorruptDefinition(def);
+        }
+
+        var primary = await LoadWindowAsync(def, def.Dimension, now, TimeSpan.Zero, byTags: !filter.IsEmpty, ct);
+        var secondary = await LoadWindowAsync(def, def.SecondaryMetric, now, TimeSpan.Zero, byTags: !secondaryFilter.IsEmpty, ct);
+        if (primary is null || secondary is null || (!HasRows(primary) && !HasRows(secondary)))
+        {
+            return NoDataResult;
+        }
+
+        var gap = Events(primary, filter.Matches, primary.From) - Events(secondary, secondaryFilter.Matches, secondary.From);
+        var gapShort = Events(primary, filter.Matches, primary.ShortFrom) - Events(secondary, secondaryFilter.Matches, secondary.ShortFrom);
+
+        return FromMath(SloMath.EvaluateCount(gap, def.TargetValue), SloMath.EvaluateCount(gapShort, def.TargetValue));
+    }
+
+    // The metric maths return SloMath.NoDataResult (all NaN) for non-finite input or an overflowing result, and
+    // Classify(NaN) would read Healthy — so NoData is decided HERE, before the shared classification. A non-finite
+    // short window only zeroes the fast-burn signal.
+    private static EvalResult FromMath((double Attainment, double BudgetRemaining, double BurnRate) wide, (double Attainment, double BudgetRemaining, double BurnRate) recent)
+    {
+        if (SloMath.IsNoData(wide))
+        {
+            return NoDataResult;
+        }
+
+        var burnShort = SloMath.IsNoData(recent) ? 0.0 : recent.BurnRate;
+
+        return new EvalResult(wide.Attainment, wide.BudgetRemaining, burnShort, wide.BurnRate);
+    }
+
+    // EvaluateRate takes integer counts; prorated (or fractional counter) events are scaled so the ratio keeps its
+    // precision. Negative or absurd totals (an up-down counter driven below zero) are NoData, never a rate.
+    private static (double Attainment, double BudgetRemaining, double BurnRate) Rate(double good, double bad, double target)
+    {
+        var total = good + bad;
+        if (good < 0 || bad < 0 || !double.IsFinite(total) || total > MaxRateEvents)
+        {
+            return SloMath.NoDataResult;
+        }
+
+        return SloMath.EvaluateRate((long)Math.Round(good * RateScale), (long)Math.Round(total * RateScale), target);
+    }
+
+    // The objective's window [now - WindowSeconds, now) and its fast-burn start, both shifted back by `shift` (zero for
+    // the current window, BaselineDays for a baseline), with the instrument's rows over it. Null when the objective
+    // cannot be evaluated against this instrument, which the caller reports as NoData.
+    private async Task<MetricWindow?> LoadWindowAsync(SloDefinition def, string instrument, DateTime now, TimeSpan shift, bool byTags, CancellationToken ct)
+    {
+        var from = now.AddSeconds(-def.WindowSeconds) - shift;
+        var rows = await LoadMetricAsync(def, instrument, from, now - shift, byTags, ct);
+
+        return rows is null ? null : new MetricWindow(rows, from, ShortWindowStart(def, now) - shift, now - shift, now);
+    }
+
+    // Every tier overlapping [from, to) for one instrument (and the objective's application), summed in SQL per
+    // (tier, bucket, tags) - or per (tier, bucket) alone when nothing reads the tags (an empty filter on a kind
+    // other than ratio, the total-only shape MetricQueryService uses) - and cached for the tick. The range filter is
+    // MetricPointQueries.InRange, shared with MetricQueryService and applied here to the server context's own set
+    // (§2.14: the query service runs on the user's TContext). Rollup deletes a source in the transaction
+    // that sums it into its parent, so a value lives in exactly one tier and nothing is counted twice. Returns null
+    // when the objective cannot be evaluated against this instrument (a gauge, or rows the registry has not named
+    // yet), which the caller reports as NoData.
+    private async Task<List<MetricEventRow>?> LoadMetricAsync(SloDefinition def, string instrument, DateTime from, DateTime to, bool byTags, CancellationToken ct)
+    {
+        var kind = await InstrumentKindAsync(instrument, ct);
+        if (kind == MetricKind.Gauge)
+        {
+            // Validation rejects gauges at upsert and seed; reaching here means the instrument changed kind since.
+            _logger.LogError(
+                "SLO objective {Id} '{Name}' reads gauge instrument '{Instrument}', which has no event count — reported as NoData.",
+                def.Id,
+                def.Name,
+                instrument);
+
+            return null;
+        }
+
+        var key = new MetricReadKey(instrument, def.Application, from, to, byTags);
+        if (!_metricReads.TryGetValue(key, out var raw))
+        {
+            raw = await ReadMetricRowsAsync(instrument, def.Application, from, to, byTags, ct);
+            _metricReads[key] = raw;
+        }
+
+        if (kind is null)
+        {
+            // The flusher writes the registry row in a second SaveChanges after the points, so rows without a kind
+            // are a brief race; without the kind the event quantity (Sum vs Count) is unknown. A registry row that
+            // never arrives (its upsert keeps failing, or it was cleaned up while points remain) would otherwise read
+            // as NoData forever without a word, so say so — throttled, naming only the objective and instrument.
+            if (raw.Count == 0)
+            {
+                return [];
+            }
+
+            if (SloEvaluatorWarnings.ShouldWarnUnregistered(def.Id, instrument, _timeProvider.GetUtcNow().UtcDateTime))
+            {
+                _logger.LogWarning(
+                    "SLO objective {Id} '{Name}' reads instrument '{Instrument}', which has metric points but no instrument registry row, so its event quantity is unknown — reported as NoData until the registry row is written.",
+                    def.Id,
+                    def.Name,
+                    instrument);
+            }
+
+            return null;
+        }
+
+        var eventKind = kind.Value;
+
+        return raw.ConvertAll(x => new MetricEventRow(x.Tier, x.BucketStart, ParsedTags(x.Tags), MetricPointQueries.EventQuantity(eventKind, x.Count, x.Sum)));
+    }
+
+    private async Task<List<MetricRawRow>> ReadMetricRowsAsync(string instrument, string? application, DateTime from, DateTime to, bool byTags, CancellationToken ct)
+    {
+        // The same tier-bounded range filter as the dashboard read, on this task's own (server) context.
+        var points = MetricPointQueries.InRange(
+            _context.Set<MetricPoint>().AsNoTracking(),
+            instrument,
+            from,
+            to,
+            application,
+            FineMinutes);
+
+        if (!byTags)
+        {
+            TotalOnlyReads++;
+        }
+
+        // The same grouped projection as the dashboard read (MetricPointQueries.Summed), run on this context.
+        var grouped = await MetricPointQueries.Summed(points, byTags).ToListAsync(ct);
+
+        return grouped.ConvertAll(x => new MetricRawRow(x.Tier, DateTime.SpecifyKind(x.BucketStart, DateTimeKind.Utc), byTags ? x.Tags : MetricSeries.NoTags, x.Count, x.Sum));
+    }
+
+    // The registry kind of every instrument an enabled metric objective reads, loaded in one query at the start of the
+    // tick into the per-tick cache. A name with no ordinal match is left out, so InstrumentKindAsync looks it up on its
+    // own under the database collation, exactly as before (a case-insensitive SQL Server collation still resolves a
+    // differently-cased name, and an unregistered name still reads as null).
+    private async Task LoadInstrumentKindsAsync(List<SloDefinition> definitions, CancellationToken ct)
+    {
+        var names = definitions
+            .Where(x => x.Kind is SloKind.MetricRatio or SloKind.MetricThreshold or SloKind.MetricVolumeFloor or SloKind.MetricGap)
+            .SelectMany(x => new[] { x.Dimension, x.Kind == SloKind.MetricGap ? x.SecondaryMetric : null })
+            .OfType<string>()
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (names.Count == 0)
+        {
+            return;
+        }
+
+        var kinds = await _context.Set<MetricInstrument>()
+            .AsNoTracking()
+            .Where(x => names.Contains(x.Name))
+            .Select(x =>
+                new
+                {
+                    x.Name,
+                    x.Kind,
+                })
+            .ToListAsync(ct);
+
+        foreach (var row in kinds)
+        {
+            _instrumentKinds[row.Name] = row.Kind;
+        }
+    }
+
+    private async Task<MetricKind?> InstrumentKindAsync(string instrument, CancellationToken ct)
+    {
+        if (_instrumentKinds.TryGetValue(instrument, out var cached))
+        {
+            return cached;
+        }
+
+        var kind = await _context.Set<MetricInstrument>()
+            .AsNoTracking()
+            .Where(x => x.Name == instrument)
+            .Select(x => (MetricKind?)x.Kind)
+            .FirstOrDefaultAsync(ct);
+        _instrumentKinds[instrument] = kind;
+
+        return kind;
+    }
+
+    private Dictionary<string, string> ParsedTags(string canonical)
+    {
+        if (!_parsedTags.TryGetValue(canonical, out var tags))
+        {
+            tags = MetricFilter.ParseCanonicalTags(canonical);
+            _parsedTags[canonical] = tags;
+        }
+
+        return tags;
+    }
+
+    // Events of the window's rows matching the predicate, each weighted by how much of its bucket overlaps
+    // [from, window.To). The bucket still being written (it straddles `now`) holds only events up to now, so its width
+    // is clipped at now before prorating — otherwise the newest, partial bucket would be scaled down a second time.
+    private double Events(MetricWindow window, Func<IReadOnlyDictionary<string, string>, bool> matches, DateTime from)
+    {
+        double total = 0;
+        foreach (var row in window.Rows)
+        {
+            var fraction = Overlap(row, from, window.To, window.Now);
+            if (fraction > 0 && matches(row.Tags))
+            {
+                total += row.Events * fraction;
+            }
+        }
+
+        return total;
+    }
+
+    // Events, refusing a total below zero (an up-down counter driven negative is not a count of events; the caller
+    // reports it through NegativeEvents). The gap arm does not use it: a gap may legitimately be negative.
+    private bool TryEvents(MetricWindow window, Func<IReadOnlyDictionary<string, string>, bool> matches, DateTime from, out double events)
+    {
+        events = Events(window, matches, from);
+
+        return events is not < 0;
+    }
+
+    private bool HasRows(MetricWindow window)
+        => window.Rows.Exists(x => Overlap(x, window.From, window.To, window.Now) > 0);
+
+    private double Overlap(MetricEventRow row, DateTime from, DateTime to, DateTime now)
+    {
+        var width = row.Tier switch
+        {
+            MetricTier.Fine => TimeSpan.FromMinutes(FineMinutes),
+            MetricTier.Hourly => TimeSpan.FromHours(1),
+            _ => TimeSpan.FromDays(1),
+        };
+
+        var written = now - row.BucketStart;
+        if (written < width)
+        {
+            width = written;
+        }
+
+        return SloMath.OverlapFraction(row.BucketStart, width, from, to);
+    }
+
+    private int FineMinutes => Math.Max(1, _configuration.FineResolutionMinutes);
+
+    private bool TryParseFilter(SloDefinition def, string? text, out MetricFilter filter)
+    {
+        if (MetricFilter.TryParse(text, out filter, out var error))
+        {
+            return true;
+        }
+
+        _logger.LogError("SLO objective {Id} '{Name}' has an invalid tag filter: {Error} — reported as NoData.", def.Id, def.Name, error);
+
+        return false;
+    }
+
+    // An event total below zero (an up-down counter driven negative) is not a count of events: NoData, never a rate
+    // or a count. Debug only — it is a property of the data, not a fault, and it recurs every tick while it lasts.
+    private EvalResult NegativeEvents(SloDefinition def)
+    {
+        _logger.LogDebug("SLO objective {Id} '{Name}' ({Kind}) saw a negative event total — reported as NoData.", def.Id, def.Name, def.Kind);
+
+        return NoDataResult;
+    }
+
+    // A stored definition that no longer parses (edited past validation, or version skew): loud, and NoData.
+    private EvalResult CorruptDefinition(SloDefinition def)
+    {
+        _logger.LogError("SLO objective {Id} '{Name}' ({Kind}) is missing a required field — reported as NoData.", def.Id, def.Name, def.Kind);
+
+        return NoDataResult;
+    }
+
+    // The breach event's description of what a metric objective reads. Built only from the objective's own
+    // definition (instrument names, filters, value lists), never from a tag value observed in the data (§1.2).
+    private static string? MetricLabel(SloDefinition def)
+    {
+        var baseline = def.BaselineDays is { } days ? $" vs {days}d baseline" : string.Empty;
+
+        return def.Kind switch
+        {
+            SloKind.MetricRatio => $"{def.Dimension}{FilterLabel(def.TagFilter)} ({def.RatioTag}: {def.GoodValues} / {def.BadValues}){baseline}",
+            SloKind.MetricThreshold => $"{def.Dimension}{FilterLabel(def.TagFilter)}",
+            SloKind.MetricVolumeFloor => $"{def.Dimension}{FilterLabel(def.TagFilter)}{baseline}",
+            SloKind.MetricGap => $"{def.Dimension}{FilterLabel(def.TagFilter)} - {def.SecondaryMetric}{FilterLabel(def.SecondaryTagFilter)}",
+            _ => null,
+        };
+    }
+
+    private static string FilterLabel(string? filter)
+        => string.IsNullOrWhiteSpace(filter) ? string.Empty : $" [{filter}]";
+
     // Windowed threshold latency: observed = percentile over the window's pcth buckets; burnShort = percentile
     // over the recent (fine) buckets, so a latency spike in the fast-burn window is caught.
     private static EvalResult ThresholdWindowed(Dictionary<int, long> wide, Dictionary<int, long> recent, SloDefinition def)
@@ -374,6 +883,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
             BurnRateShort = result.BurnShort,
             BurnRateLong = result.BurnLong,
             WindowSeconds = def.WindowSeconds,
+            Metric = MetricLabel(def),
         });
     }
 
@@ -412,7 +922,57 @@ public sealed class SloEvaluator<TContext> : IServerTask
 
     private readonly record struct KeyVal(string Key, long Value);
 
+    private readonly record struct MetricReadKey(string Instrument, string? Application, DateTime From, DateTime To, bool ByTags);
+
+    private sealed record MetricRawRow(MetricTier Tier, DateTime BucketStart, string Tags, long Count, double Sum);
+
+    // One objective window's rows and bounds: [From, To) with its fast-burn start, read at `Now` (To differs from Now
+    // only for a baseline window).
+    private sealed record MetricWindow(List<MetricEventRow> Rows, DateTime From, DateTime ShortFrom, DateTime To, DateTime Now);
+
+    // Events = Sum for counters and up-down counters, Count for histograms (§E).
+    private sealed record MetricEventRow(MetricTier Tier, DateTime BucketStart, IReadOnlyDictionary<string, string> Tags, double Events);
+
     // HasData is false when no observation matched the objective's dimension in the window — the caller maps that
     // to SloState.NoData so a misconfigured dimension is visible instead of a false-green Healthy.
     private sealed record EvalResult(double Attainment, double Budget, double BurnShort, double BurnLong, bool HasData = true);
+}
+
+/// <summary>
+/// Throttle state for the evaluator's recurring warnings. The evaluator is scoped (a fresh instance per tick), so the
+/// state lives here, outside the generic type (one copy per process, not per <c>TContext</c>).
+/// </summary>
+internal static class SloEvaluatorWarnings
+{
+    internal static readonly TimeSpan UnregisteredInterval = TimeSpan.FromMinutes(10);
+
+    private static readonly ConcurrentDictionary<(int ObjectiveId, string Instrument), DateTime> LastUnregistered = new();
+
+    /// <summary>True at most once per <see cref="UnregisteredInterval"/> per (objective, instrument).</summary>
+    public static bool ShouldWarnUnregistered(int objectiveId, string instrument, DateTime now)
+    {
+        var key = (objectiveId, instrument);
+        while (true)
+        {
+            if (!LastUnregistered.TryGetValue(key, out var last))
+            {
+                if (LastUnregistered.TryAdd(key, now))
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if (now - last < UnregisteredInterval)
+            {
+                return false;
+            }
+
+            if (LastUnregistered.TryUpdate(key, now, last))
+            {
+                return true;
+            }
+        }
+    }
 }

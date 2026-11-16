@@ -220,6 +220,28 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 });
 ```
 
+## Coexisting with your own EF Core and mediator setup
+
+Warp lives in your `DbContext` and ships its own mediator, so it has to share both with code that already exists. Five things to know when you adopt it in an application that has its own interceptors, its own `IModelCustomizer` or MediatR. The first four are about EF Core and the last one about MediatR.
+
+**1. `AddDbContext` must come before `AddWarp`.** Warp attaches its model customizer and its interceptor by wrapping the `DbContextOptions<TContext>` registration that `AddDbContext` made. `AddWarp` looks for that registration when it runs. If there is no factory-built `DbContextOptions<TContext>` at that point (a context you registered by hand, or an options registration that comes later), the wrapping silently does nothing. There is no error: the Warp model customizer and interceptor are simply not attached, and the Warp tables are missing from your model. `AddWarp` only fails fast when `TContext` itself is not registered as scoped. Call `AddDbContext` first, then `AddWarp`.
+
+**2. Warp replaces a custom `IModelCustomizer`.** The wrapping calls `ReplaceService<IModelCustomizer, WarpModelCustomizer>()`, so a customizer you configured with `ReplaceService` or `UseModelCustomizer` stops running. Do not try to chain it. Move that logic into `OnModelCreating` and declare Warp's model there with [`ApplyWarpModel`](#explicit-model-registration-with-applywarpmodel-recommended-for-migrator--multi-host). `ApplyWarpModel` is idempotent, so the runtime customizer then finds the model already present and does nothing.
+
+**3. Warp adds one interceptor, and it leaves yours alone.** It is a `SaveChangesInterceptor` that overrides only the **async** path (`SavingChangesAsync`) and touches only entities that implement `IConcurrencyToken` (Warp's own `RecurringJob` and `SagaState`; it stamps a new `Version`). Your own interceptors, sync and async, fire the same number of times with the same effects with and without Warp, and an entity of yours that does not implement `IConcurrencyToken` is never modified by it. `HostDbContextCoexistenceTests` covers this with a host interceptor that stamps an audit column.
+
+**4. Warp's tables come through your normal migrations.** There is no separate Warp migration tool. `dotnet ef migrations add` on your context produces create-table operations for every table in the `warp` schema (including the custom-metrics tables `metric_point` and `metric_instrument`), under whatever naming convention you use. Every Warp release that adds a table or a column is picked up by the next `dotnet ef migrations add` the same way. See [Design-time tooling](#design-time-tooling-dotnet-ef-migrations) if the migration comes out empty.
+
+**5. MediatR and Warp share type names.** `Warp.Core.Handlers` and `MediatR` both define `IRequest`, `IRequestHandler`, `IPipelineBehavior` and `IMediator`. A file that imports both namespaces fails with CS0104 (ambiguous reference). Alias the one you use less, or fully qualify it:
+
+```csharp
+using WarpMediator = Warp.Core.Handlers.IMediator;
+
+public sealed class Checkout(MediatR.ISender mediatr, WarpMediator warp) { /* … */ }
+```
+
+The two do not cross-register. `AddWarp` registers no MediatR request, handler or pipeline-behavior type, and `AddMediatR` (even when scanning the assembly that holds your Warp handlers) registers no handler for a Warp request. A MediatR request runs through your MediatR behaviors exactly once, and a Warp request runs through Warp's own mediator and its `IPipelineBehavior` chain. `MediatRCoexistenceTests` pins this against MediatR 12.5.0. Warp does not bridge the two: a Warp handler cannot be sent through `ISender`, and the other way round.
+
 ## Connection string vs `NpgsqlDataSource`
 
 Both work. If a runtime uses an `NpgsqlDataSource` (Aspire's `AddAzureNpgsqlDataSource` / `AddNpgsqlDataSource`, AWS RDS IAM auth, Cloud SQL, Managed Identity, custom SSL / password providers), Warp's notification transport, lock, semaphore, and server-context connections thread that same data source through — so they inherit its auth and encryption settings instead of opening from a bare connection string that would drop them. If you pass a connection string instead, Warp uses that.

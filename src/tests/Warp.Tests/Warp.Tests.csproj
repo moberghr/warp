@@ -49,6 +49,9 @@
 		<PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.1.0" />
 		<PackageReference Include="Moq" Version="4.20.72" />
 		<PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
+		<!-- Test-only: proves Warp coexists with MediatR (R31). Pinned to 12.5.0, the last Apache-2.0 line
+		     (v13 is commercially licensed). -->
+		<PackageReference Include="MediatR" Version="12.5.0" />
 		<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.1" />
 		<PackageReference Include="Respawn" Version="7.0.0" />
 		<PackageReference Include="Shouldly" Version="4.3.0" />

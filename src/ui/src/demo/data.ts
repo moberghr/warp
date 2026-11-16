@@ -2035,3 +2035,6 @@ export function getTraceOverviewDemo() {
     ],
   };
 }
+
+// Custom application metrics fixtures (Metrics page); served by routeMetrics in adapter.ts.
+export { demoMetrics, demoMetricSeries } from './data/metrics';

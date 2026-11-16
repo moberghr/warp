@@ -201,7 +201,7 @@ describe('clampPanelLeft', () => {
 describe('gateEntries — group gating', () => {
   const addons: WarpAddonsInfo = {
     retry: false, concurrency: false, rateLimits: false, push: false, sagas: false, adapters: false,
-    endpoints: false, client: false, webhooks: false, applications: false, slo: false,
+    endpoints: false, client: false, webhooks: false, applications: false, slo: false, metrics: false,
   };
 
   // These assertions used to run against gateGroups, which MainLayout no longer calls. Pointed at the
@@ -216,6 +216,21 @@ describe('gateEntries — group gating', () => {
     const health = gatedGroups(addons).find((x) => x.label === 'Health');
 
     expect(health?.items.map((x) => x.label)).toEqual(['Issues', 'Counters', 'Applications']);
+  });
+
+  it('shows the Metrics entry only when the metrics flag is true', () => {
+    const healthLabels = (a: WarpAddonsInfo | null) =>
+      gatedGroups(a).find((x) => x.label === 'Health')?.items.map((x) => x.label);
+
+    expect(healthLabels(addons)).not.toContain('Metrics');
+    expect(healthLabels(null)).not.toContain('Metrics');
+    expect(healthLabels({ ...addons, metrics: true })).toEqual(['Issues', 'Metrics', 'Counters', 'Applications']);
+  });
+
+  it('gates Metrics independently of SLOs', () => {
+    const health = gatedGroups({ ...addons, slo: true }).find((x) => x.label === 'Health');
+
+    expect(health?.items.map((x) => x.label)).toEqual(['Issues', 'SLOs', 'Counters', 'Applications']);
   });
 
   it('renders a group as soon as one of its items is registered', () => {
@@ -367,7 +382,7 @@ describe('applyMenuLayout', () => {
     ]);
     expect(groupsOf(entries)[0].items.map((x) => x.page)).toEqual([
       'messages', 'batches', 'services', 'adapters', 'endpoints',
-      'client', 'webhooks', 'concurrency', 'ratelimits', 'sagas', 'slo', 'counters',
+      'client', 'webhooks', 'concurrency', 'ratelimits', 'sagas', 'slo', 'metrics', 'counters',
     ]);
   });
 
@@ -506,7 +521,7 @@ describe('gateEntries', () => {
   it('keeps the built-in bar intact once its addons are registered', () => {
     const addons = {
       adapters: true, endpoints: true, client: true, webhooks: true,
-      concurrency: true, rateLimits: true, sagas: true, slo: true,
+      concurrency: true, rateLimits: true, sagas: true, slo: true, metrics: true,
     } as WarpAddonsInfo;
 
     expect(labels(gateEntries(applyMenuLayout(TOP_LEVEL_NAV_ITEMS, NAV_GROUPS, null), addons))).toEqual([

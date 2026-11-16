@@ -1,9 +1,11 @@
 import { Link, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getSlo, ackSlo } from '@/api';
-import { SloKind, SloKindLabel, SloState } from '@/types/slo';
+import { SloKind, SloKindLabel, SloState, isMetricKind, type SloObjective } from '@/types/slo';
 import { formatObjectiveValue, formatBudget, SloStatePill } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
+import { baselineLabel, describeMetricKind } from './sloForm';
+import { sloValueDisplay } from './sloDisplay';
 
 export default function SloDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -33,6 +35,7 @@ export default function SloDetailPage() {
     );
   }
 
+  const display = sloValueDisplay(o);
   const budget = o.budgetRemaining;
   const barColor = budget < 0 ? 'bg-red-500' : budget < 0.25 ? 'bg-amber-500' : 'bg-green-500';
   const width = Math.max(0, Math.min(100, budget * 100));
@@ -48,6 +51,7 @@ export default function SloDetailPage() {
             {SloKindLabel[o.kind]}{o.percentile ? ` p${o.percentile}` : ''} · <span className="font-mono">{o.dimension}</span>
             {o.application && <span className="text-gray-400"> @{o.application}</span>}
           </p>
+          {isMetricKind(o.kind) && <MetricScope objective={o} />}
         </div>
         <div className="flex items-center gap-3">
           <SloStatePill state={o.state} enabled={o.enabled} />
@@ -59,9 +63,13 @@ export default function SloDetailPage() {
         </div>
       </div>
 
-      {!o.evaluated ? (
+      {display === 'not-evaluated' ? (
         <div className="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-8 text-center text-gray-500">
           Not evaluated yet — the SloEvaluator will produce a status on its next tick.
+        </div>
+      ) : display === 'no-data' ? (
+        <div className="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-8 text-center text-gray-500">
+          No data — nothing matched this objective in its window, so there is no attainment, budget or burn rate to show.
         </div>
       ) : (
         <>
@@ -89,6 +97,7 @@ export default function SloDetailPage() {
         {o.lastEvaluatedAt && <div>Last evaluated: {new Date(o.lastEvaluatedAt).toLocaleString(DASHBOARD_LOCALE)}</div>}
         {o.acknowledgedUntil && <div>Acknowledged until: {new Date(o.acknowledgedUntil).toLocaleString(DASHBOARD_LOCALE)}</div>}
         {isThreshold(o.kind) && <div>Latency/depth objectives compare the windowed observed value to the target (lower is better).</div>}
+        {isMetricKind(o.kind) && <div>{describeMetricKind(o.kind)}</div>}
       </div>
     </div>
   );
@@ -103,6 +112,34 @@ function Stat({ label, value, danger }: { label: string; value: string; danger?:
   );
 }
 
+// Latency/depth kinds only: MetricThreshold/MetricGap are event counts ("count ≤ N"), explained by describeMetricKind.
 function isThreshold(kind: SloKind): boolean {
   return kind === SloKind.QueueWaitLatency || kind === SloKind.ExecutionLatency || kind === SloKind.BacklogDepth;
+}
+
+function MetricScope({ objective: o }: { objective: SloObjective }) {
+  const baseline = baselineLabel(o.baselineDays);
+  const mono = 'font-mono text-gray-700 dark:text-gray-300';
+
+  return (
+    <dl className="mt-2 text-xs text-gray-500 space-y-0.5">
+      <div>Instrument: <span className={mono}>{o.dimension}</span>{o.tagFilter && <> where <span className={mono}>{o.tagFilter}</span></>}</div>
+      {o.kind === SloKind.MetricRatio && (
+        <div>
+          Tag <span className={mono}>{o.ratioTag}</span>: good = <span className={mono}>{o.goodValues}</span>, bad = <span className={mono}>{o.badValues}</span>
+        </div>
+      )}
+      {o.kind === SloKind.MetricGap && (
+        <div>
+          Minus: <span className={mono}>{o.secondaryMetric}</span>{o.secondaryTagFilter && <> where <span className={mono}>{o.secondaryTagFilter}</span></>}
+        </div>
+      )}
+      {baseline && (
+        <div>
+          Baseline: same window {baseline}
+          {o.kind === SloKind.MetricRatio && ' (target is the maximum drop in ratio points)'}
+        </div>
+      )}
+    </dl>
+  );
 }

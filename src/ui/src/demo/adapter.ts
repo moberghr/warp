@@ -113,6 +113,13 @@ export function createDemoAdapter(isLoginMode: boolean) {
       return sloResult;
     }
 
+    // Metrics: /addons reports metrics:true in demo mode (see routeGet), so the nav is visible and
+    // these routes serve the generated instrument registry and series.
+    const metricsResult = routeMetrics(method, url, config);
+    if (metricsResult !== undefined) {
+      return metricsResult;
+    }
+
     // All POST/DELETE routes return success
     if (method === 'post') {
       if (url.includes('/bulk/')) {
@@ -492,6 +499,43 @@ function routeSlo(
   return undefined;
 }
 
+function routeMetrics(
+  method: string,
+  url: string,
+  config: InternalAxiosRequestConfig,
+): Promise<AxiosResponse> | undefined {
+  if (method !== 'get' || !url.startsWith('/metrics')) {
+    return undefined;
+  }
+
+  // GET /metrics/{id}/series?... — the id is the URL-safe base64 of the instrument name.
+  const seriesMatch = url.match(/^\/metrics\/([^/?]+)\/series(?:\?(.*))?$/);
+  if (seriesMatch) {
+    let name: string;
+    try {
+      name = decodeUrlSafeId(seriesMatch[1]);
+    } catch {
+      name = '';
+    }
+
+    const found = data.demoMetricSeries(name, seriesMatch[2] ?? '');
+    if (found) {
+      return resolve(found, config);
+    }
+
+    return Promise.reject({
+      response: { status: 404, statusText: 'Not Found', data: {}, headers: {}, config },
+    });
+  }
+
+  // GET /metrics — the instrument registry.
+  if (url === '/metrics' || url.startsWith('/metrics?')) {
+    return resolve(data.demoMetrics, config);
+  }
+
+  return undefined;
+}
+
 function routeApplications(
   method: string,
   url: string,
@@ -774,7 +818,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { retry: true, concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true, version: '7.4.0' };
+    return { retry: true, concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true, metrics: true, version: '7.5.0' };
   }
 
   // Client (browser) observability (§8.27).

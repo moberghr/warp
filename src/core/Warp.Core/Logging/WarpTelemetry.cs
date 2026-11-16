@@ -198,6 +198,11 @@ public static class WarpTelemetry
         unit: "{requeue}",
         description: "A job was put back on the queue instead of settling terminal. Emitted unconditionally at finalization. Tags: job.type, queue, reason (retry|concurrency|ratelimit|saga), application (executor app when set). Concurrency and rate-limit keys are deliberately NOT tags — they are unbounded and PII-adjacent, and stay on the span.");
 
+    public static readonly Counter<long> MetricsCollapsed = Meter.CreateCounter<long>(
+        "warp.metrics.collapsed",
+        unit: "{collapse}",
+        description: "A measurement from a collected host instrument (AddMetrics) was collapsed, dropped or failed. Tags: instrument, reason (tag_values|series|tag_count|tags_truncated|instrument_cap|name_conflict|name_too_long|bounds|unsupported|non_finite|dropped|error). Instrument is {other} for instrument_cap and {observable} for a failing observable callback. Tag values are never tags.");
+
     // Backlog is a point-in-time gauge sampled periodically by the BacklogSampler server task, so it uses
     // ObservableGauges over a snapshot the sampler replaces each tick (SetBacklogSnapshot) — the callbacks
     // report the last sample on the exporter's collection schedule. Empty snapshot ⇒ no measurements.

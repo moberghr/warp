@@ -5,6 +5,7 @@ import {
   Briefcase,
   Bug,
   Cable,
+  ChartLine,
   Gauge,
   GitBranch,
   KeyRound,
@@ -43,6 +44,7 @@ export type NavPageId =
   | 'sagas'
   | 'issues'
   | 'slo'
+  | 'metrics'
   | 'counters'
   | 'applications';
 
@@ -116,6 +118,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // Issues (error grouping §8.29) is a Core feature — always shown, not gated on an addon flag.
       { to: '/issues', label: 'Issues', icon: Bug, hint: 'grouped failures', page: 'issues' },
       { to: '/slo', label: 'SLOs', icon: Gauge, hint: 'burn rate', addon: 'slo', page: 'slo' },
+      { to: '/metrics', label: 'Metrics', icon: ChartLine, hint: 'custom instruments', addon: 'metrics', page: 'metrics' },
       { to: '/counters', label: 'Counters', icon: Gauge, hint: 'time series', page: 'counters' },
       { to: '/applications', label: 'Applications', icon: Server, hint: 'servers & instances', page: 'applications' },
     ],

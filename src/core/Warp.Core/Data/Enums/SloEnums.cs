@@ -22,6 +22,22 @@ public enum SloKind
 
     /// <summary>Fraction of <c>Total</c>-scope jobs that met their deadline (§8.7). Target is a ratio, e.g. 0.99.</summary>
     DeadlineAttainment = 5,
+
+    /// <summary>
+    /// Good-event ratio over a custom application metric: events whose <c>RatioTag</c> matches <c>GoodValues</c>
+    /// divided by good + bad (<c>BadValues</c>). Target is a ratio in (0, 1). With <c>BaselineDays</c> the target
+    /// is instead the maximum drop in ratio points against the same window that many days earlier.
+    /// </summary>
+    MetricRatio = 6,
+
+    /// <summary>Matching events of a custom metric in the window must not exceed <c>TargetValue</c> (0 allowed, e.g. "5xx = 0").</summary>
+    MetricThreshold = 7,
+
+    /// <summary>Matching events of a custom metric must stay at or above <c>TargetValue</c> times the same window <c>BaselineDays</c> earlier.</summary>
+    MetricVolumeFloor = 8,
+
+    /// <summary>Primary minus secondary event count (<c>SecondaryMetric</c>) must not exceed <c>TargetValue</c> (e.g. started minus finished).</summary>
+    MetricGap = 9,
 }
 
 /// <summary>

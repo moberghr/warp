@@ -1,0 +1,1540 @@
+{
+  "slug": "custom-application-metrics",
+  "date": "2026-11-13",
+  "scope": "new-feature",
+  "spec_mode": "extended",
+  "supersedes": "docs/specs/2026-11-12-custom-application-metrics.md",
+  "change_manifest": [
+    {
+      "path": "src/core/Warp.Worker/ServiceConfiguration.cs",
+      "action": "modify",
+      "purpose": "Move CounterAggregator/ErrorGroupAggregator/SloEvaluator into AddServerHostCore",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/WarpMetricsOptions.cs",
+      "action": "create",
+      "purpose": "CollectMeter/Instrument/KeepTags/Buckets/presets/caps",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/MetricsServiceConfiguration.cs",
+      "action": "create",
+      "purpose": "AddMetrics(IWarpBuilder) + registrations",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/IMetricsMarker.cs",
+      "action": "create",
+      "purpose": "Dashboard flag marker",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/WarpMeterCollector.cs",
+      "action": "create",
+      "purpose": "MeterListener: enable, callbacks, observable deltas",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/MetricCollectorHost.cs",
+      "action": "create",
+      "purpose": "IHostedService start/dispose of the listener",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/MetricAggregator.cs",
+      "action": "create",
+      "purpose": "In-memory series x bucket aggregates; lossless drain + merge-back",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/MetricSeries.cs",
+      "action": "create",
+      "purpose": "Tag projection, canonical tag set, sanitization",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/MetricBuckets.cs",
+      "action": "create",
+      "purpose": "Bounds resolution (config > advice > unit default); bucket index",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/MetricCardinalityGuard.cs",
+      "action": "create",
+      "purpose": "Caps + reporting",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Data/Enums/MetricKind.cs",
+      "action": "create",
+      "purpose": "Counter=1, UpDownCounter=2, Histogram=3, Gauge=4",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Logging/WarpTelemetry.cs",
+      "action": "modify",
+      "purpose": "warp.metrics.collapsed meter",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Data/Entities/MetricPoint.cs",
+      "action": "create",
+      "purpose": "Typed metric point entity",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Data/Entities/MetricInstrument.cs",
+      "action": "create",
+      "purpose": "Instrument registry entity",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Services/MetricTiers.cs",
+      "action": "modify",
+      "purpose": "Promote existing internal MetricTier enum to public (entity property type); no value change",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/ServiceConfiguration.cs",
+      "action": "modify",
+      "purpose": "EF config for MetricPoint/MetricInstrument; query service; SloDefinition facets",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Configuration.cs",
+      "action": "modify",
+      "purpose": "MetricFlushInterval (30s), MetricRollupInterval (1m), validated > 0",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/IMetricPointSink.cs",
+      "action": "create",
+      "purpose": "Internal sink seam",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/ContextMetricPointSink.cs",
+      "action": "create",
+      "purpose": "TContext sink for AddWarp-only processes",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/MetricFlusher.cs",
+      "action": "create",
+      "purpose": "Per-process flush + registry upsert",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Worker/Services/ServerMetricPointSink.cs",
+      "action": "create",
+      "purpose": "IWarpServerContext sink",
+      "mechanical": false
+    },
+    {
+      "path": "src/tests/Warp.Tests/Fixtures/WarpTestServer.cs",
+      "action": "modify",
+      "purpose": "Null MetricRollupInterval like the other periodic loops (SqlException 3980 neighbour contention)",
+      "mechanical": false
+    },
+    {
+      "path": "src/benchmarks/Warp.PerfTest/IdleLoopSwitches.cs",
+      "action": "modify",
+      "purpose": "Add MetricRollupInterval to the per-loop idle switches",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Worker/Services/MetricRollup.cs",
+      "action": "create",
+      "purpose": "Compact, fine->hourly, hourly->daily, prune; bounded",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Worker/Services/ExpirationCleanup.cs",
+      "action": "modify",
+      "purpose": "Stale metric_instrument sweep (FindEntityType-guarded)",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Services/IMetricQueryService.cs",
+      "action": "create",
+      "purpose": "Metrics read interface",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Services/MetricQueryService.cs",
+      "action": "create",
+      "purpose": "List + series reads",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Models/MetricModels.cs",
+      "action": "create",
+      "purpose": "Metrics read models",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Dashboard/Endpoints/WarpEndpoints.cs",
+      "action": "modify",
+      "purpose": "/api/metrics routes; SloUpsertRequest fields",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Dashboard/Endpoints/WarpAddonsInfo.cs",
+      "action": "modify",
+      "purpose": "Metrics flag",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Dashboard/Hosting/WarpDashboardOptions.cs",
+      "action": "modify",
+      "purpose": "ShowMetrics()",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Dashboard/Hosting/WarpDashboardPage.cs",
+      "action": "modify",
+      "purpose": "WarpDashboardPage.Metrics + WarpDashboardPageIds.For arm",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Dashboard/Hosting/WarpDashboardUiOverrides.cs",
+      "action": "modify",
+      "purpose": "bool? Metrics override",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/pages/metrics/MetricsPage.tsx",
+      "action": "create",
+      "purpose": "Metrics list page",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/pages/metrics/MetricDetailPage.tsx",
+      "action": "create",
+      "purpose": "Detail: breakdown, filter, overlays, ratio, percentile",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/pages/metrics/metricModel.ts",
+      "action": "create",
+      "purpose": "Pure ratio/overlay/rest/percentile maths",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/types/metrics.ts",
+      "action": "create",
+      "purpose": "Metrics types",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/api/index.ts",
+      "action": "modify",
+      "purpose": "Metrics API calls",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/App.tsx",
+      "action": "modify",
+      "purpose": "Metrics routes",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/layouts/MainLayout.tsx",
+      "action": "modify",
+      "purpose": "Metrics nav entry",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/demo/data.ts",
+      "action": "modify",
+      "purpose": "Demo fixture barrel",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/demo/data/metrics.ts",
+      "action": "create",
+      "purpose": "Demo metrics fixtures",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/demo/adapter.ts",
+      "action": "modify",
+      "purpose": "Demo routes for /api/metrics*, metrics addon flag, version 7.5.0",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/types/index.ts",
+      "action": "modify",
+      "purpose": "Addons type gains metrics flag",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/layouts/navModel.ts",
+      "action": "modify",
+      "purpose": "Metrics addon union member + nav entry",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Data/Enums/SloEnums.cs",
+      "action": "modify",
+      "purpose": "SloKind 6-9",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Data/Entities/SloDefinition.cs",
+      "action": "modify",
+      "purpose": "7 nullable metric-objective columns",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Slo/SloValidation.cs",
+      "action": "modify",
+      "purpose": "Per-kind rules + 7d-baseline retention check + min window + gauge rejection",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Slo/MetricFilter.cs",
+      "action": "create",
+      "purpose": "Filter grammar parser/matcher",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Services/SloMath.cs",
+      "action": "modify",
+      "purpose": "Count threshold, floor, gap, baseline-drop maths",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Slo/SloServiceConfiguration.cs",
+      "action": "modify",
+      "purpose": "AddMetricRatio/Threshold/VolumeFloor/Gap; seeder match key",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Worker/Services/SloEvaluator.cs",
+      "action": "modify",
+      "purpose": "Metric-kind arms reading metric_point",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Services/SloCommandService.cs",
+      "action": "modify",
+      "purpose": "Persist new fields",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Services/SloQueryService.cs",
+      "action": "modify",
+      "purpose": "Project() maps new fields",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Models/SloModels.cs",
+      "action": "modify",
+      "purpose": "Expose new fields",
+      "mechanical": false
+    },
+    {
+      "path": "src/core/Warp.Core/Notifiers/WarpOperationalEvent.cs",
+      "action": "modify",
+      "purpose": "SloBreachedEvent.Metric (nullable)",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/pages/slo/SloPage.tsx",
+      "action": "modify",
+      "purpose": "Kind-specific SLO form",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/pages/slo/shared.tsx",
+      "action": "modify",
+      "purpose": "Labels/formatting",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/types/slo.ts",
+      "action": "modify",
+      "purpose": "SLO types + SloKindLabel for kinds 6-9",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/pages/slo/SloDetailPage.tsx",
+      "action": "modify",
+      "purpose": "Metric-kind formatting (isThreshold, labels, filter/baseline display)",
+      "mechanical": false
+    },
+    {
+      "path": "src/ui/src/demo/data/slo.ts",
+      "action": "modify",
+      "purpose": "Demo metric SLO fixtures",
+      "mechanical": false
+    },
+    {
+      "path": "src/tests/Warp.Tests/Warp.Tests.csproj",
+      "action": "modify",
+      "purpose": "MediatR 12.5.0 pinned (checkpoint: human-verify)",
+      "mechanical": false
+    },
+    {
+      "path": "src/benchmarks/Warp.Benchmarks/Benchmarks/MetricCollectorBenchmarks.cs",
+      "action": "create",
+      "purpose": "SC10 callback cost benchmark",
+      "mechanical": false
+    },
+    {
+      "path": "website/docs/features/custom-metrics.md",
+      "action": "create",
+      "purpose": "Feature doc incl. presets, topology, PCI, write volume",
+      "mechanical": false
+    },
+    {
+      "path": "website/docs/features/slo-error-budget.md",
+      "action": "modify",
+      "purpose": "Metric SLO kinds + http recipes",
+      "mechanical": false
+    },
+    {
+      "path": "website/docs/features/adapters.md",
+      "action": "modify",
+      "purpose": "PCI: capture None, no ForceCapture on payment adapters",
+      "mechanical": false
+    },
+    {
+      "path": "website/docs/features/background-services.md",
+      "action": "modify",
+      "purpose": "Service-only server task set",
+      "mechanical": false
+    },
+    {
+      "path": "website/docs/dashboard/health/applications.md",
+      "action": "modify",
+      "purpose": "Service-only server task set",
+      "mechanical": false
+    },
+    {
+      "path": "website/docs/operations/ef-core-integration.md",
+      "action": "modify",
+      "purpose": "Coexistence caveats",
+      "mechanical": false
+    },
+    {
+      "path": "website/docs/operations/configuration.md",
+      "action": "modify",
+      "purpose": "New options",
+      "mechanical": false
+    },
+    {
+      "path": "website/docs/releases.md",
+      "action": "modify",
+      "purpose": "7.5.0 notes incl. DisableWorker change",
+      "mechanical": false
+    },
+    {
+      "path": "ROADMAP.md",
+      "action": "modify",
+      "purpose": "Mark shipped (System.Diagnostics.Metrics-based)",
+      "mechanical": true
+    },
+    {
+      "path": ".claude/rules/project-specific.md",
+      "action": "modify",
+      "purpose": "§8.34 new; §8.31 kinds; §8.18 task set; §8.29 correction",
+      "mechanical": false
+    },
+    {
+      "path": ".claude/rules/architecture.md",
+      "action": "modify",
+      "purpose": "§2.3/§2.13 task sets",
+      "mechanical": false
+    },
+    {
+      "path": "CLAUDE.md",
+      "action": "modify",
+      "purpose": "Project-profile line",
+      "mechanical": true
+    },
+    {
+      "path": "src/core/Warp.Core/Metrics/MetricPointQueries.cs",
+      "action": "create",
+      "purpose": "Shared tier-bound read helper (review fix ARCH-W1)",
+      "mechanical": false,
+      "added_by": "Phase 5 review fix"
+    },
+    {
+      "path": "src/core/Warp.Core/Services/MetricQueryValidationException.cs",
+      "action": "create",
+      "purpose": "Dedicated 400 exception (review fix ARCH-W3/SF-N8)",
+      "mechanical": false,
+      "added_by": "Phase 5 review fix"
+    },
+    {
+      "path": "src/core/Warp.Core/Slo/SloDefinitionValidator.cs",
+      "action": "create",
+      "purpose": "Shared SLO validation orchestration for endpoint+seeder (review fix ARCH-W4)",
+      "mechanical": false,
+      "added_by": "Phase 5 review fix"
+    },
+    {
+      "path": "src/ui/src/pages/slo/sloDisplay.ts",
+      "action": "create",
+      "purpose": "NoData display helper (review fix SF-W3)",
+      "mechanical": false,
+      "added_by": "Phase 5 review fix"
+    },
+    {
+      "path": "src/ui/src/lib/metricPattern.ts",
+      "action": "create",
+      "purpose": "Shared filter-pattern grammar (cleanup)",
+      "mechanical": false,
+      "added_by": "Phase 6 cleanup"
+    },
+    {
+      "path": "src/ui/src/lib/queryClient.ts",
+      "action": "modify",
+      "purpose": "metrics/applications query keys (cleanup)",
+      "mechanical": false,
+      "added_by": "Phase 6 cleanup"
+    }
+  ],
+  "public_contracts": [
+    {
+      "kind": "method",
+      "signature": "IWarpBuilder.AddMetrics(Action<WarpMetricsOptions>) incl. CollectMeter/Instrument/KeepTags/Buckets/CollectAspNetCoreHttp/CollectHttpClient",
+      "change": "new",
+      "surface": "external"
+    },
+    {
+      "kind": "method",
+      "signature": "SloOptions.AddMetricRatio/AddMetricThreshold/AddMetricVolumeFloor/AddMetricGap(...)",
+      "change": "new",
+      "surface": "external"
+    },
+    {
+      "kind": "endpoint",
+      "signature": "GET {prefix}/api/metrics, GET {prefix}/api/metrics/{id}/series",
+      "change": "new",
+      "surface": "external"
+    },
+    {
+      "kind": "endpoint",
+      "signature": "GET/POST {prefix}/api/slo (metric-objective fields added)",
+      "change": "modified",
+      "surface": "external"
+    },
+    {
+      "kind": "event",
+      "signature": "SloBreachedEvent.Metric (nullable)",
+      "change": "modified",
+      "surface": "external"
+    },
+    {
+      "kind": "method",
+      "signature": "SloKind 6-9; MetricKind; MetricTier enums",
+      "change": "new",
+      "surface": "external"
+    },
+    {
+      "kind": "method",
+      "signature": "WarpConfiguration.MetricFlushInterval, MetricRollupInterval; WarpDashboardOptions.ShowMetrics()",
+      "change": "new",
+      "surface": "external"
+    },
+    {
+      "kind": "method",
+      "signature": "Schema: warp.metric_point, warp.metric_instrument tables; 7 nullable columns on warp.slo_definition",
+      "change": "new",
+      "surface": "external"
+    },
+    {
+      "kind": "method",
+      "signature": "Behaviour: DisableWorker() servers now run CounterAggregator/ErrorGroupAggregator/SloEvaluator/MetricRollup",
+      "change": "modified",
+      "surface": "external"
+    }
+  ],
+  "success_criteria": [
+    {
+      "id": "SC1",
+      "description": "AddWarp-only process emits via standard Meter API with no DB I/O on the measuring thread; values reach tiered metric_point after a DisableWorker server rollup",
+      "verification": "dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-class \"*CustomMetricsEndToEndTests*\" --filter-class \"*WarpMeterCollectorTests*\"",
+      "evidence_channel": "test-run",
+      "observable": "all pass on PostgreSql and SqlServer; compacted fine + hourly rows carry expected count/sum"
+    },
+    {
+      "id": "SC2",
+      "description": "Unbounded tag values collapse to {other}, reported once, series bounded under fuzz",
+      "verification": "dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-class \"*MetricCardinalityTests*\"",
+      "evidence_channel": "test-run",
+      "observable": "distinct series <= cap+1; exactly one Warning per (instrument, tag, reason)"
+    },
+    {
+      "id": "SC3",
+      "description": "Metrics page shows breakdown by tag, 1d/7d overlays, ratio view",
+      "verification": "cd src/ui && npm test -- metricModel; dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-class \"*MetricQueryServiceTests*\"; then browser check via npm run dev",
+      "evidence_channel": "browser",
+      "observable": "tests pass and screenshot shows breakdown series, two dashed overlays and ratio view"
+    },
+    {
+      "id": "SC4",
+      "description": "Ratio/threshold/volume-floor/gap SLOs evaluate from stored aggregates, alert once per edge, never on NoData",
+      "verification": "dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-class \"*MetricSloEvaluatorTests*\" --filter-class \"*SloMathTests*\" --filter-class \"*SloValidationTests*\" --filter-class \"*MetricFilterTests*\"",
+      "evidence_channel": "test-run",
+      "observable": "all pass on both providers; recording notifier sees 1 event per edge, 0 for NoData"
+    },
+    {
+      "id": "SC5",
+      "description": "Controller metrics from built-in http.server.request.duration via CollectAspNetCoreHttp(), keyed by route/status/application, no body or header touched",
+      "verification": "dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-class \"*CustomMetricsEndToEndTests*\"",
+      "evidence_channel": "test-run",
+      "observable": "pass; stored Tags contain only http.request.method, http.response.status_code, http.route"
+    },
+    {
+      "id": "SC6",
+      "description": "Host interceptor + MediatR 12.5 unchanged by AddWarp; DisableWorker server runs tasks and claims no jobs",
+      "verification": "dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-class \"*MediatRCoexistenceTests*\" --filter-class \"*HostDbContextCoexistenceTests*\" --filter-class \"*ServiceRegistrationTopologyTests*\" --filter-class \"*DeploymentShapeTests*\"",
+      "evidence_channel": "test-run",
+      "observable": "all pass"
+    },
+    {
+      "id": "SC7",
+      "description": "Analyzer-clean build and no regression",
+      "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj",
+      "evidence_channel": "build-output",
+      "observable": "0 warnings, 0 errors; full suite green except baseline-recorded failures"
+    },
+    {
+      "id": "SC8",
+      "description": "Docs with PII/PCI guidance",
+      "verification": "grep -l PCI website/docs/features/custom-metrics.md website/docs/features/adapters.md",
+      "evidence_channel": "cli-stdout",
+      "observable": "both files listed"
+    },
+    {
+      "id": "SC9",
+      "description": "Series read cheap at the first consumer's scale",
+      "verification": "Seed ~500 series x (72 fine + 168 hourly + 90 daily) rows for one histogram on PG; EXPLAIN (ANALYZE) 24h and 7d series reads; record in PR",
+      "evidence_channel": "script-output",
+      "observable": "index scan on (Instrument, Tier, BucketStart) and each read < 250 ms; else conditional escalation fires"
+    },
+    {
+      "id": "SC10",
+      "description": "Measurement callback cheap on caller thread",
+      "verification": "dotnet run -c Release --project src/benchmarks/Warp.Benchmarks -- --filter \"*MetricCollector*\"",
+      "evidence_channel": "script-output",
+      "observable": "warm-series measurement <= 1 us and <= 1 allocation (mean), recorded in PR"
+    }
+  ],
+  "test_manifest": [
+    {
+      "path": "src/tests/Warp.Tests/Core/ServiceRegistrationTopologyTests.cs",
+      "covers": [
+        "SC6"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Admin/DeploymentShapeTests.cs",
+      "covers": [
+        "SC6",
+        "SC7"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/MetricSeriesTests.cs",
+      "covers": [
+        "SC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/MetricBucketsTests.cs",
+      "covers": [
+        "SC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/MetricCardinalityTests.cs",
+      "covers": [
+        "SC2"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/WarpMeterCollectorTests.cs",
+      "covers": [
+        "SC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/MetricAggregatorTests.cs",
+      "covers": [
+        "SC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/MetricFlusherTestsBase.cs",
+      "covers": [
+        "SC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/MetricRollupTestsBase.cs",
+      "covers": [
+        "SC1"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/MetricQueryServiceTestsBase.cs",
+      "covers": [
+        "SC3"
+      ]
+    },
+    {
+      "path": "src/ui/src/pages/metrics/metricModel.test.ts",
+      "covers": [
+        "SC3"
+      ]
+    },
+    {
+      "path": "src/ui/src/layouts/navModel.test.ts",
+      "covers": [
+        "SC3"
+      ]
+    },
+    {
+      "path": "src/ui/src/demo/demoFixtures.test.ts",
+      "covers": [
+        "SC3"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Slo/SloMathTests.cs",
+      "covers": [
+        "SC4"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Slo/SloValidationTests.cs",
+      "covers": [
+        "SC4"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Slo/MetricFilterTests.cs",
+      "covers": [
+        "SC4"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Slo/MetricSloEvaluatorTestsBase.cs",
+      "covers": [
+        "SC4"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Slo/SloCommandQueryTestsBase.cs",
+      "covers": [
+        "SC4"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Core/MediatRCoexistenceTests.cs",
+      "covers": [
+        "SC6"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Core/HostDbContextCoexistenceTestsBase.cs",
+      "covers": [
+        "SC6"
+      ]
+    },
+    {
+      "path": "src/tests/Warp.Tests/Metrics/CustomMetricsEndToEndTestsBase.cs",
+      "covers": [
+        "SC1",
+        "SC5",
+        "SC6"
+      ]
+    }
+  ],
+  "out_of_scope": [
+    "Deploy markers and post-deploy verdict endpoint (brief item 4) - dropped by engineer",
+    "CI authentication for any endpoint",
+    "Issues for host-endpoint 5xx; any Warp controller middleware (built-in meter only, engineer decision)",
+    "Changes to Warp.Http endpoint observability or the Counter/Statistic pipeline",
+    "Latency-percentile SLO kind on custom histograms",
+    "Grafana-style dashboards / query language / learned baselines",
+    "Changing IModelCustomizer replacement or AddDbContext ordering (docs only)",
+    "Re-pinning benchmark project's MediatR 12.*",
+    "WarpWorkerService / WarpDispatcher / WarpDispatcherWorker / IJobContext (hot path)"
+  ],
+  "security_impact": "pii-exposure",
+  "security_justification": "Tag values of collected instruments persisted to the operational DB; opt-in per meter, allowlists, truncation, caps, values never logged.",
+  "baseline_area": "observability/metrics",
+  "delta": {
+    "adds": [
+      "MeterListener collector (AddMetrics)",
+      "metric_point + metric_instrument store",
+      "MetricRollup server task",
+      "Metrics dashboard page",
+      "SloKind 6-9"
+    ],
+    "modifies": [
+      "CounterAggregator/ErrorGroupAggregator/SloEvaluator registered in AddServerHostCore"
+    ],
+    "removes": []
+  },
+  "assumptions": [
+    "[VERIFIED:C:/Program Files/dotnet/packs/Microsoft.NETCore.App.Ref/10.0.12/ref/net10.0/System.Diagnostics.DiagnosticSource.xml] MeterListener, InstrumentAdvice<T>.HistogramBucketBoundaries, Instrument<T>.Advice, Gauge<T>, observable instruments exist on net10.0",
+    "[VERIFIED:src/core/Warp.Core/Warp.Core.csproj] Warp.Core grants InternalsVisibleTo Warp.Worker",
+    "[VERIFIED:src/tests/Warp.Tests/Admin/DeploymentShapeTests.cs] :275 asserts old service-only task set",
+    "[VERIFIED (server) / UNVERIFIED (client): CustomMetricsEndToEndTestsBase + WarpMetricsOptionsTests] ASP.NET Core 10 http.server.request.duration carries http.route/http.request.method/http.response.status_code and System.Net.Http emits http.client.request.duration with server.address - asserted on the real stack by B10 E2E before docs",
+    "[VERIFIED:nuget + local nuspec] MediatR 12.5.0 is Apache-2.0 (commercial from v13); test-only, behind checkpoint",
+    "[ASSUMED] System.Net.Http emits http.client.request.duration with server.address via SocketsHttpHandler — preset contents pinned by WarpMetricsOptionsTests, but not exercised end-to-end (TestServer handler bypasses the HttpClient meter)"
+  ],
+  "risks": [
+    "R-A: series read cost - SC9; escalate (re-open gate) if > 250 ms",
+    "R-B: DisableWorker() servers start running 3 moved tasks + MetricRollup - release notes",
+    "R-C: partial-row insert volume across ~10 processes - compaction + docs table + tunable MetricFlushInterval",
+    "R-D: baselines older than 6h are hour-resolution, prorated - documented and labelled",
+    "R-E: PII in tag values not technically detectable - opt-in, allowlists, truncation, caps",
+    "R-F: built-in instrument names/tags may change across ASP.NET Core versions - presets are overridable config; E2E pins current names",
+    "R-G: second storage path beside Counter->Statistic - engineer decision; rollup mirrors StatisticRollup contract",
+    "trap: IWarpMetrics emit API and Counter->Statistic storage rejected (see spec Rejected alternatives)"
+  ],
+  "conditional_descopes": [
+    {
+      "condition": "SC9 series read exceeds 250 ms on PostgreSQL at the first consumer's scale",
+      "action": "stop and re-open Phase 2.5 with measured alternative (per-tag columns or pre-aggregated totals); never redesign silently",
+      "fired": true,
+      "evidence": "2026-11-15: 24h 154ms, 7d 372ms (SQL 8.5/31.7ms; .NET materialisation of ~120k rows dominates); single-instrument seed made index unused. Engineer chose: optimise (bucket parse only with percentile; SQL totals without breakdown/filter) + fix seed; 250ms kept for common reads; percentile+breakdown 7d at cap documented as worst case."
+    }
+  ],
+  "plan": {
+    "plan_path": "docs/plans/2026-11-13-custom-application-metrics.md",
+    "waves": "W0: B1 | W1: B2 | W2: B3 | W3: B4 | W4: B5 | W5: B6 B7 | W6: B8 | W7: B9 B10 | W8: B11",
+    "execution_note": "Waves express independence only; batches run SERIALLY in the single worktree. Every new NoDb test class carries [Trait(\"Category\",\"NoDb\")] and every gate must report a non-zero executed-test count.",
+    "batches": [
+      {
+        "id": "B1",
+        "files": [
+          "src/core/Warp.Worker/ServiceConfiguration.cs"
+        ],
+        "acceptance": "DisableWorker server registers CounterAggregator/ErrorGroupAggregator/SloEvaluator (StatisticRollup already there, asserted as regression only); worker server task set unchanged; DeploymentShapeTests:275 flipped and its stale comments (:231, :264-269) updated",
+        "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj",
+        "boundary": "Worker hot path untouched; job-only tasks stay worker-only; only registration blocks move",
+        "depends": [],
+        "depends_rationale": "independent: first batch, registration-only",
+        "governing_constraints": [
+          "§0.2",
+          "§2.3",
+          "§2.13",
+          "§6.2.1"
+        ],
+        "tests": [
+          "src/tests/Warp.Tests/Core/ServiceRegistrationTopologyTests.cs",
+          "src/tests/Warp.Tests/Admin/DeploymentShapeTests.cs"
+        ]
+      },
+      {
+        "id": "B2",
+        "files": [
+          "src/core/Warp.Core/Metrics/WarpMetricsOptions.cs",
+          "src/core/Warp.Core/Metrics/MetricsServiceConfiguration.cs",
+          "src/core/Warp.Core/Metrics/IMetricsMarker.cs",
+          "src/core/Warp.Core/Metrics/WarpMeterCollector.cs",
+          "src/core/Warp.Core/Metrics/MetricCollectorHost.cs",
+          "src/core/Warp.Core/Metrics/MetricAggregator.cs",
+          "src/core/Warp.Core/Metrics/MetricSeries.cs",
+          "src/core/Warp.Core/Metrics/MetricBuckets.cs",
+          "src/core/Warp.Core/Metrics/MetricCardinalityGuard.cs",
+          "src/core/Warp.Core/Data/Enums/MetricKind.cs",
+          "src/core/Warp.Core/Logging/WarpTelemetry.cs"
+        ],
+        "acceptance": "R1-R9",
+        "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=NoDb\"",
+        "boundary": "Measurement callback does in-memory work only, never throws into host code; Warp meter never collected; state per process",
+        "depends": [
+          "B1"
+        ],
+        "governing_constraints": [
+          "§1.2",
+          "§8.11",
+          "§8.19 never out-throw",
+          "§8.27 guard shape"
+        ],
+        "tests": [
+          "src/tests/Warp.Tests/Metrics/MetricSeriesTests.cs",
+          "src/tests/Warp.Tests/Metrics/MetricBucketsTests.cs",
+          "src/tests/Warp.Tests/Metrics/MetricCardinalityTests.cs",
+          "src/tests/Warp.Tests/Metrics/WarpMeterCollectorTests.cs",
+          "src/tests/Warp.Tests/Metrics/MetricAggregatorTests.cs"
+        ]
+      },
+      {
+        "id": "B3",
+        "files": [
+          "src/core/Warp.Core/Data/Entities/MetricPoint.cs",
+          "src/core/Warp.Core/Data/Entities/MetricInstrument.cs",
+          "src/core/Warp.Core/Services/MetricTiers.cs",
+          "src/core/Warp.Core/ServiceConfiguration.cs",
+          "src/core/Warp.Core/Configuration.cs",
+          "src/core/Warp.Core/Metrics/IMetricPointSink.cs",
+          "src/core/Warp.Core/Metrics/ContextMetricPointSink.cs",
+          "src/core/Warp.Core/Metrics/MetricFlusher.cs",
+          "src/core/Warp.Worker/Services/ServerMetricPointSink.cs",
+          "src/tests/Warp.Tests/Fixtures/WarpTestServer.cs",
+          "src/benchmarks/Warp.PerfTest/IdleLoopSwitches.cs",
+          "src/core/Warp.Worker/ServiceConfiguration.cs",
+          "src/core/Warp.Core/Metrics/MetricsServiceConfiguration.cs"
+        ],
+        "acceptance": "R10-R12; registry PK race tolerated",
+        "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=PostgreSql\" && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=SqlServer\"",
+        "boundary": "One flusher per process; server writes on IWarpServerContext, AddWarp-only on TContext; idle flush does no DB work; registry write never fails the point write",
+        "depends": [
+          "B2"
+        ],
+        "governing_constraints": [
+          "§2.11",
+          "§2.14",
+          "§5.3",
+          "§5.4",
+          "§5.7",
+          "§8.13",
+          "§8.32 idle-free"
+        ],
+        "tests": [
+          "src/tests/Warp.Tests/Metrics/MetricFlusherTestsBase.cs"
+        ]
+      },
+      {
+        "id": "B4",
+        "files": [
+          "src/core/Warp.Worker/Services/MetricRollup.cs",
+          "src/core/Warp.Worker/Services/ExpirationCleanup.cs",
+          "src/core/Warp.Worker/ServiceConfiguration.cs"
+        ],
+        "acceptance": "R13 for MetricRollup (extend ServiceRegistrationTopologyTests); R15-R18; stale registry sweep; MetricRollupInterval null disables the loop",
+        "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=PostgreSql\" && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=SqlServer\"",
+        "boundary": "Bounded per tick, defers never drops, returns null when idle, runs under the task-host transaction lock on the server context",
+        "depends": [
+          "B3"
+        ],
+        "governing_constraints": [
+          "§2.3",
+          "§2.14",
+          "§2.16",
+          "§6.2.1",
+          "§8.30 contract"
+        ],
+        "tests": [
+          "src/tests/Warp.Tests/Metrics/MetricRollupTestsBase.cs",
+          "src/tests/Warp.Tests/Core/ServiceRegistrationTopologyTests.cs"
+        ]
+      },
+      {
+        "id": "B5",
+        "files": [
+          "src/core/Warp.Core/Services/IMetricQueryService.cs",
+          "src/core/Warp.Core/Services/MetricQueryService.cs",
+          "src/core/Warp.Core/Models/MetricModels.cs",
+          "src/core/Warp.Dashboard/Endpoints/WarpEndpoints.cs",
+          "src/core/Warp.Dashboard/Endpoints/WarpAddonsInfo.cs",
+          "src/core/Warp.Dashboard/Hosting/WarpDashboardOptions.cs",
+          "src/core/Warp.Dashboard/Hosting/WarpDashboardPage.cs",
+          "src/core/Warp.Dashboard/Hosting/WarpDashboardUiOverrides.cs",
+          "src/core/Warp.Core/ServiceConfiguration.cs"
+        ],
+        "acceptance": "R19-R21; SC9 measured",
+        "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=PostgreSql\" && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=SqlServer\"",
+        "boundary": "Read-only AsNoTracking projections grouped in SQL; list never scans points",
+        "depends": [
+          "B4"
+        ],
+        "governing_constraints": [
+          "§1.5",
+          "§5.1",
+          "§5.2",
+          "§5.3",
+          "§6.4"
+        ],
+        "tests": [
+          "src/tests/Warp.Tests/Metrics/MetricQueryServiceTestsBase.cs"
+        ]
+      },
+      {
+        "id": "B6",
+        "files": [
+          "src/ui/src/pages/metrics/MetricsPage.tsx",
+          "src/ui/src/pages/metrics/MetricDetailPage.tsx",
+          "src/ui/src/pages/metrics/metricModel.ts",
+          "src/ui/src/types/metrics.ts",
+          "src/ui/src/api/index.ts",
+          "src/ui/src/App.tsx",
+          "src/ui/src/layouts/MainLayout.tsx",
+          "src/ui/src/demo/data.ts",
+          "src/ui/src/demo/data/metrics.ts",
+          "src/ui/src/demo/adapter.ts",
+          "src/ui/src/types/index.ts",
+          "src/ui/src/layouts/navModel.ts"
+        ],
+        "acceptance": "Breakdown, filter, overlays, ratio, percentile, collapse badge, demo renders",
+        "verification": "cd src/ui && npm run build && npm test && npm run lint",
+        "boundary": "Maths only in pure metricModel.ts",
+        "depends": [
+          "B5"
+        ],
+        "governing_constraints": [],
+        "governing_note": "no backend rule constrains this UI batch",
+        "tests": [
+          "src/ui/src/pages/metrics/metricModel.test.ts",
+          "src/ui/src/layouts/navModel.test.ts",
+          "src/ui/src/demo/demoFixtures.test.ts"
+        ]
+      },
+      {
+        "id": "B7",
+        "files": [
+          "src/core/Warp.Core/Data/Enums/SloEnums.cs",
+          "src/core/Warp.Core/Data/Entities/SloDefinition.cs",
+          "src/core/Warp.Core/Slo/SloValidation.cs",
+          "src/core/Warp.Core/Slo/MetricFilter.cs",
+          "src/core/Warp.Core/Services/SloMath.cs",
+          "src/core/Warp.Core/Slo/SloServiceConfiguration.cs",
+          "src/core/Warp.Core/ServiceConfiguration.cs"
+        ],
+        "acceptance": "Spec §E table; R29; existing kinds unchanged. Interim state until B8 (same branch, never released): a metric objective is accepted but the evaluator reports NoData + logs Error via the existing unknown-kind arm",
+        "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=NoDb\"",
+        "boundary": "SloKind 1-5 behaviour byte-for-byte unchanged; enum append-only",
+        "depends": [
+          "B5"
+        ],
+        "governing_constraints": [
+          "§8.11",
+          "§8.31",
+          "§2.11"
+        ],
+        "tests": [
+          "src/tests/Warp.Tests/Slo/SloMathTests.cs",
+          "src/tests/Warp.Tests/Slo/SloValidationTests.cs",
+          "src/tests/Warp.Tests/Slo/MetricFilterTests.cs"
+        ]
+      },
+      {
+        "id": "B8",
+        "files": [
+          "src/core/Warp.Worker/Services/SloEvaluator.cs",
+          "src/core/Warp.Core/Services/SloCommandService.cs",
+          "src/core/Warp.Core/Services/SloQueryService.cs",
+          "src/core/Warp.Core/Models/SloModels.cs",
+          "src/core/Warp.Core/Notifiers/WarpOperationalEvent.cs",
+          "src/core/Warp.Dashboard/Endpoints/WarpEndpoints.cs"
+        ],
+        "acceptance": "R22-R28; new fields round-trip through read-back",
+        "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=PostgreSql\" && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj -- --filter-trait \"Category=SqlServer\"",
+        "boundary": "Alerts only from OnCommittedAsync; evaluator reads on IWarpServerContext; classification machinery unchanged",
+        "depends": [
+          "B7",
+          "B5"
+        ],
+        "governing_constraints": [
+          "§2.14",
+          "§8.25",
+          "§8.31",
+          "§5.7"
+        ],
+        "tests": [
+          "src/tests/Warp.Tests/Slo/MetricSloEvaluatorTestsBase.cs",
+          "src/tests/Warp.Tests/Slo/SloCommandQueryTestsBase.cs"
+        ]
+      },
+      {
+        "id": "B9",
+        "files": [
+          "src/ui/src/pages/slo/SloPage.tsx",
+          "src/ui/src/pages/slo/shared.tsx",
+          "src/ui/src/types/slo.ts",
+          "src/ui/src/pages/slo/SloDetailPage.tsx",
+          "src/ui/src/demo/data/slo.ts"
+        ],
+        "acceptance": "Kind-specific fields; instrument picker; 400 surfaced",
+        "verification": "cd src/ui && npm run build && npm test && npm run lint",
+        "boundary": "Existing kinds form unchanged",
+        "depends": [
+          "B8",
+          "B6"
+        ],
+        "governing_constraints": [],
+        "governing_note": "UI-only; no backend rule constrains it",
+        "tests": []
+      },
+      {
+        "id": "B10",
+        "files": [
+          "src/tests/Warp.Tests/Warp.Tests.csproj"
+        ],
+        "acceptance": "R14, R30, R31; SC1, SC5, SC6 on default registration",
+        "verification": "dotnet build src/Warp.slnx && dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj",
+        "boundary": "Test-only; no production change",
+        "depends": [
+          "B8"
+        ],
+        "governing_constraints": [
+          "§4.2",
+          "§4.4",
+          "§4.7.1",
+          "user: pin exact NuGet versions"
+        ],
+        "checkpoint": "human-verify MediatR 12.5.0 existence + Apache-2.0 licence before install",
+        "tests": [
+          "src/tests/Warp.Tests/Core/MediatRCoexistenceTests.cs",
+          "src/tests/Warp.Tests/Core/HostDbContextCoexistenceTestsBase.cs",
+          "src/tests/Warp.Tests/Metrics/CustomMetricsEndToEndTestsBase.cs"
+        ]
+      },
+      {
+        "id": "B11",
+        "files": [
+          "src/benchmarks/Warp.Benchmarks/Benchmarks/MetricCollectorBenchmarks.cs",
+          "website/docs/features/custom-metrics.md",
+          "website/docs/features/slo-error-budget.md",
+          "website/docs/features/adapters.md",
+          "website/docs/features/background-services.md",
+          "website/docs/dashboard/health/applications.md",
+          "website/docs/operations/ef-core-integration.md",
+          "website/docs/operations/configuration.md",
+          "website/docs/releases.md",
+          "ROADMAP.md",
+          ".claude/rules/project-specific.md",
+          ".claude/rules/architecture.md",
+          "CLAUDE.md"
+        ],
+        "acceptance": "SC8, SC10; release notes call out DisableWorker change; every service-only task-set statement updated; §8.29 corrected",
+        "verification": "dotnet run -c Release --project src/benchmarks/Warp.Benchmarks -- --filter \"*MetricCollector*\" && grep -l PCI website/docs/features/custom-metrics.md website/docs/features/adapters.md",
+        "boundary": "Docs describe shipped behaviour exactly incl. stated limits",
+        "depends": [
+          "B1",
+          "B2",
+          "B3",
+          "B4",
+          "B5",
+          "B6",
+          "B7",
+          "B8",
+          "B9",
+          "B10"
+        ],
+        "governing_constraints": [
+          "§1.2",
+          "§0.1"
+        ],
+        "tests": []
+      }
+    ]
+  },
+  "verification_note": "--filter-class is the xUnit v3 MTP class filter, not quoted in CLAUDE.md; probed once at B1. Concrete fallback per SC if rejected: run the category of each listed class (NoDb classes -> --filter-trait \"Category=NoDb\"; DB classes -> PostgreSql and SqlServer runs) and confirm from the run output that each listed class executed a non-zero test count.",
+  "implement": {
+    "completed_batches": [
+      {
+        "batch_id": "B1",
+        "actual_files": [
+          "src/core/Warp.Worker/ServiceConfiguration.cs",
+          "src/tests/Warp.Tests/Admin/DeploymentShapeTests.cs",
+          "src/tests/Warp.Tests/Core/ServiceRegistrationTopologyTests.cs"
+        ],
+        "build": "0 warnings 0 errors",
+        "tests": "full 3797/3797 (baseline 3793, +4); format verify clean",
+        "behavioral_diff": "CounterAggregator/ErrorGroupAggregator/SloEvaluator registered in AddServerHostCore; DisableWorker() servers now run them; worker task set unchanged",
+        "deviations": [],
+        "implementer_model": "sonnet",
+        "notes": "implementer returned inconclusive (full-suite run killed for low host memory); orchestrator re-ran gate (verification only)"
+      },
+      {
+        "batch_id": "B2",
+        "actual_files": [
+          "src/core/Warp.Core/Metrics/WarpMetricsOptions.cs",
+          "src/core/Warp.Core/Metrics/MetricsServiceConfiguration.cs",
+          "src/core/Warp.Core/Metrics/IMetricsMarker.cs",
+          "src/core/Warp.Core/Metrics/WarpMeterCollector.cs",
+          "src/core/Warp.Core/Metrics/MetricCollectorHost.cs",
+          "src/core/Warp.Core/Metrics/MetricAggregator.cs",
+          "src/core/Warp.Core/Metrics/MetricSeries.cs",
+          "src/core/Warp.Core/Metrics/MetricBuckets.cs",
+          "src/core/Warp.Core/Metrics/MetricCardinalityGuard.cs",
+          "src/core/Warp.Core/Data/Enums/MetricKind.cs",
+          "src/core/Warp.Core/Logging/WarpTelemetry.cs",
+          "+5 test files"
+        ],
+        "build": "0 warnings 0 errors",
+        "tests": "NoDb 1320/1320 (65 new: Series 17, Buckets 15, Cardinality 8, Collector 19, Aggregator 6); format clean",
+        "behavioral_diff": "opt.AddMetrics(...) collector: MeterListener over opted-in meters (never Warp), canonical tag series, caps+collapse reporting (warp.metrics.collapsed), bounds config>advice>unit default, in-memory per (series, fine bucket) aggregates with lossless sealed-drain + MergeBack; nothing registered without AddMetrics",
+        "deviations": [
+          {
+            "kind": "other",
+            "detail": "count/sum under per-aggregate lock instead of Interlocked",
+            "justification": "sealed-drain correctness; N=2 BarrierSignal test pins losslessness"
+          }
+        ],
+        "implementer_model": "opus",
+        "review_fix": {
+          "review": "mid-loop compliance NEEDS_CHANGES (C1,W1-W5,N1-N6)",
+          "fixed_by": "opus corrective pass",
+          "tests": "NoDb 1333/1333; W4 mutation proof: seam test fails without _sealed check",
+          "api_changes": "MetricAggregator.Record returns bool; TryAdmitInstrument(MetricInstrumentInfo); WarpMeterCollector ctor has no ILogger; Collapsed() may contain {other} and {observable}"
+        }
+      },
+      {
+        "batch_id": "B3",
+        "actual_files": [
+          "src/core/Warp.Core/Services/MetricTiers.cs",
+          "src/core/Warp.Core/Data/Entities/MetricPoint.cs",
+          "src/core/Warp.Core/Data/Entities/MetricInstrument.cs",
+          "src/core/Warp.Core/ServiceConfiguration.cs",
+          "src/core/Warp.Core/Configuration.cs",
+          "src/core/Warp.Core/Metrics/IMetricPointSink.cs",
+          "src/core/Warp.Core/Metrics/ContextMetricPointSink.cs",
+          "src/core/Warp.Core/Metrics/MetricFlusher.cs",
+          "src/core/Warp.Core/Metrics/MetricsServiceConfiguration.cs",
+          "src/core/Warp.Worker/Services/ServerMetricPointSink.cs",
+          "src/core/Warp.Worker/ServiceConfiguration.cs",
+          "src/tests/Warp.Tests/Fixtures/WarpTestServer.cs",
+          "src/benchmarks/Warp.PerfTest/IdleLoopSwitches.cs",
+          "+2 test files"
+        ],
+        "build": "0 warnings 0 errors",
+        "tests": "NoDb 1341, PG 1288, MSSQL 1278 all green; MetricFlusherTests 24 (12/provider); format clean",
+        "behavioral_diff": "metric_point + metric_instrument entities (always-in-schema); MetricFlushInterval/MetricRollupInterval; AddMetrics registers MetricFlusher + context sink, server sink replaces in AddServerHostCore (all orders); idle flush no DB work; write failure MergeBack; registry upsert separate save, PK race tolerated, synthetic entries skipped",
+        "deviations": [
+          {
+            "kind": "other",
+            "detail": "[GenerateDatabaseTests] (no FixtureKind type exists)",
+            "justification": "brief/rules text referenced a non-existent enum"
+          }
+        ],
+        "implementer_model": "sonnet"
+      },
+      {
+        "batch_id": "B4",
+        "actual_files": [
+          "src/core/Warp.Worker/Services/MetricRollup.cs",
+          "src/core/Warp.Worker/Services/ExpirationCleanup.cs",
+          "src/core/Warp.Worker/ServiceConfiguration.cs",
+          "+2 test files"
+        ],
+        "build": "0 warnings 0 errors",
+        "tests": "NoDb 1343, PG 1300, MSSQL 1290 (orchestrator re-run after low-memory kill); MetricRollupTests 12/provider; mutation proof: id-based delete -> cap test fails on both providers",
+        "behavioral_diff": "MetricRollup IServerTask (warp:metric-rollup) on every server: compact closed fine partials, fine->hourly, hourly->daily, prune daily; 20k-row shared cap, defer-never-drop, null when idle; ExpirationCleanup stale metric_instrument sweep",
+        "deviations": [
+          {
+            "kind": "other",
+            "detail": "internal MaxRowsPerTick init seam for cap tests; ExpirationCleanup tests placed in MetricRollupTestsBase",
+            "justification": "StatisticRollup has no cap seam; one-method-per-test kept"
+          }
+        ],
+        "implementer_model": "opus"
+      },
+      {
+        "batch_id": "B5",
+        "actual_files": [
+          "src/core/Warp.Core/Services/IMetricQueryService.cs",
+          "src/core/Warp.Core/Services/MetricQueryService.cs",
+          "src/core/Warp.Core/Models/MetricModels.cs",
+          "src/core/Warp.Core/ServiceConfiguration.cs",
+          "src/core/Warp.Dashboard/Endpoints/WarpEndpoints.cs",
+          "src/core/Warp.Dashboard/Endpoints/WarpAddonsInfo.cs",
+          "src/core/Warp.Dashboard/Hosting/WarpDashboardOptions.cs",
+          "src/core/Warp.Dashboard/Hosting/WarpDashboardPage.cs",
+          "src/core/Warp.Dashboard/Hosting/WarpDashboardUiOverrides.cs",
+          "+MetricQueryServiceTestsBase.cs",
+          "+MetricQueryScaleMeasurement.cs"
+        ],
+        "build": "0 warnings 0 errors",
+        "tests": "MetricQueryServiceTests 78, NoDb 1349, PG 1345, MSSQL 1335, Measurement 1 (explicit)",
+        "sc9": {
+          "seed_rows": 1585000,
+          "24h_total_ms_warm": 31.5,
+          "7d_total_ms_warm": 31.0,
+          "index_used": true,
+          "7d_breakdown_ms_warm": 983,
+          "7d_pct_breakdown_ms_warm": 824,
+          "note": "gated reads pass; breakdown/percentile at 500-series cap documented worst cases"
+        },
+        "behavioral_diff": "IMetricQueryService (ListInstruments, GetSeries) with multi-tier read + re-bin (amendment), three read shapes (total in SQL / series in SQL / buckets only with percentile), overlays, top-10+rest breakdown; GET /api/metrics and /api/metrics/{id}/series; Metrics addon flag, ShowMetrics(), WarpDashboardPage.Metrics=18 id metrics",
+        "deviations": [
+          {
+            "kind": "extra-file",
+            "detail": "MetricQueryScaleMeasurement.cs (explicit, Measurement trait)",
+            "justification": "SC9 harness"
+          }
+        ],
+        "implementer_model": "sonnet"
+      },
+      {
+        "batch_id": "B6",
+        "actual_files": [
+          "src/ui/src/types/metrics.ts",
+          "src/ui/src/pages/metrics/metricModel.ts",
+          "src/ui/src/pages/metrics/MetricsPage.tsx",
+          "src/ui/src/pages/metrics/MetricDetailPage.tsx",
+          "src/ui/src/api/index.ts",
+          "src/ui/src/App.tsx",
+          "src/ui/src/types/index.ts",
+          "src/ui/src/layouts/navModel.ts",
+          "src/ui/src/demo/data/metrics.ts",
+          "src/ui/src/demo/data.ts",
+          "src/ui/src/demo/adapter.ts",
+          "+3 test files",
+          "src/core/Warp.Dashboard/dist (rebuilt bundle; to be rebuilt again after B9)"
+        ],
+        "build": "npm run build ok; tsc -b --noEmit exit 0 (orchestrator)",
+        "tests": "vitest 41 files / 396 tests green; lint clean for B6 files (5 pre-existing lint failures on untouched files)",
+        "behavioral_diff": "Metrics list + detail pages (breakdown, filters, 1d/7d dashed overlays, percentile, gauge min/max, ratio view, collapse badge, resolution labels); nav entry gated on addons.metrics; demo fixtures; demo version 7.5.0",
+        "deviations": [
+          {
+            "kind": "other",
+            "detail": "MainLayout.tsx untouched (nav via navModel.ts)",
+            "justification": "brief allowed"
+          },
+          {
+            "kind": "extra-file",
+            "detail": "src/core/Warp.Dashboard/dist rebuilt",
+            "justification": "feature PRs commit the rebuilt bundle (#295,#296,#298,#299); final rebuild after B9"
+          }
+        ],
+        "implementer_model": "sonnet"
+      },
+      {
+        "batch_id": "B7",
+        "actual_files": [
+          "src/core/Warp.Core/Data/Enums/SloEnums.cs",
+          "src/core/Warp.Core/Data/Entities/SloDefinition.cs",
+          "src/core/Warp.Core/ServiceConfiguration.cs",
+          "src/core/Warp.Core/Slo/SloValidation.cs",
+          "src/core/Warp.Core/Slo/MetricFilter.cs",
+          "src/core/Warp.Core/Services/SloMath.cs",
+          "src/core/Warp.Core/Slo/SloServiceConfiguration.cs",
+          "+3 test files"
+        ],
+        "build": "0 warnings 0 errors (orchestrator full build incl. npm)",
+        "tests": "targeted 141, NoDb 1461",
+        "behavioral_diff": "SloKind 6-9; 7 nullable SloDefinition columns; MetricFilter/MetricValueList; SloMath EvaluateRatioDrop/EvaluateCount/EvaluateVolumeFloor/OverlapFraction; SloValidation overload (retention, instrument kind) incl R29, min window 600, gauge rejection hook; AddMetric* builders; seeder match key for metric kinds + R29 re-validation",
+        "deviations": [
+          {
+            "kind": "other",
+            "detail": "AddObjective/AddMetric* validate without retention; seeder re-validates with HourlyStatisticsRetention",
+            "justification": "SloOptions has no config access"
+          }
+        ],
+        "implementer_model": "sonnet",
+        "carry_to_B8": [
+          "endpoint upsert must call TryValidate(def, retention, registryKind)",
+          "seeder metric match-key change needs DB test"
+        ]
+      },
+      {
+        "batch_id": "B8",
+        "actual_files": [
+          "src/core/Warp.Worker/Services/SloEvaluator.cs",
+          "src/core/Warp.Core/Services/SloCommandService.cs",
+          "src/core/Warp.Core/Services/SloQueryService.cs",
+          "src/core/Warp.Core/Models/SloModels.cs",
+          "src/core/Warp.Core/Notifiers/WarpOperationalEvent.cs",
+          "src/core/Warp.Dashboard/Endpoints/WarpEndpoints.cs",
+          "+MetricSloEvaluatorTestsBase.cs",
+          "+SloCommandQueryTestsBase.cs"
+        ],
+        "build": "0 warnings 0 errors",
+        "tests": "targeted 68, NoDb 1516, PG 1390, MSSQL 1380",
+        "behavioral_diff": "SloEvaluator metric arms (ratio, ratio-drop, threshold, volume floor, gap) with multi-tier prorated reads on server context, IsNoData checked before Classify, gauge/unregistered/corrupt -> NoData; SloBreachedEvent.Metric label from definition only; SLO read model/command/endpoint carry 7 new fields; POST /api/slo validates with retention + registry kind; ack route uses TimeProvider",
+        "deviations": [],
+        "implementer_model": "opus"
+      },
+      {
+        "batch_id": "B9",
+        "actual_files": [
+          "src/ui/src/types/slo.ts",
+          "src/ui/src/pages/slo/shared.tsx",
+          "src/ui/src/pages/slo/SloPage.tsx",
+          "src/ui/src/pages/slo/SloDetailPage.tsx",
+          "src/ui/src/demo/data/slo.ts",
+          "src/ui/src/pages/slo/sloForm.ts",
+          "+sloForm.test.ts",
+          "src/core/Warp.Dashboard/dist (final UI bundle)"
+        ],
+        "build": "npm run build ok",
+        "tests": "vitest 42 files / 457 (sloForm 42); lint unchanged at pre-existing baseline 12",
+        "behavioral_diff": "SLO form: instrument picker (gauges excluded) and per-kind fields for metric kinds 6-9 with client validation mirroring SloValidation and 400 surfacing; detail page MetricScope + per-kind explanations; 4 demo metric SLOs",
+        "deviations": [
+          {
+            "kind": "extra-file",
+            "detail": "sloForm.ts + sloForm.test.ts",
+            "justification": "pure tested form helpers, sanctioned by brief"
+          }
+        ],
+        "implementer_model": "sonnet"
+      },
+      {
+        "batch_id": "B10",
+        "actual_files": [
+          "src/tests/Warp.Tests/Warp.Tests.csproj",
+          "+MediatRCoexistenceTests.cs",
+          "+HostDbContextCoexistenceTestsBase.cs",
+          "+CustomMetricsEndToEndTestsBase.cs"
+        ],
+        "build": "0 warnings 0 errors",
+        "tests": "targeted 12, NoDb 1520, PG 1394, MSSQL 1384",
+        "aspnetcore_tags_verified": [
+          "http.request.method",
+          "http.response.status_code",
+          "http.route"
+        ],
+        "behavioral_diff": "test-only: R30, R31, R14, SC1, SC5, SC6 proven on default registration; MediatR 12.5.0 pinned",
+        "deviations": [
+          {
+            "kind": "other",
+            "detail": "E2E threshold filter adds http.route clause",
+            "justification": "process-global ASP.NET meter; isolates parallel tests; same shape as spec §F docs example"
+          }
+        ],
+        "implementer_model": "opus"
+      },
+      {
+        "batch_id": "B11",
+        "actual_files": [
+          "src/benchmarks/Warp.Benchmarks/Benchmarks/MetricCollectorBenchmarks.cs",
+          "website/docs/features/custom-metrics.md",
+          "website/docs/features/slo-error-budget.md",
+          "website/docs/features/adapters.md",
+          "website/docs/features/background-services.md",
+          "website/docs/dashboard/health/applications.md",
+          "website/docs/operations/ef-core-integration.md",
+          "website/docs/operations/configuration.md",
+          "website/docs/releases.md",
+          "ROADMAP.md",
+          ".claude/rules/project-specific.md",
+          ".claude/rules/architecture.md",
+          "CLAUDE.md"
+        ],
+        "build": "0 warnings 0 errors",
+        "tests": "SC8 grep ok; SC10 counter 252.6ns/0B, histogram 248.7ns/0B (ShortRun, +-50ns); docs site build skipped (no website node_modules)",
+        "behavioral_diff": "docs/rules/roadmap/release notes/benchmark",
+        "deviations": [
+          {
+            "kind": "other",
+            "detail": "ROADMAP section removed with pointer (file rule: shipped features live in release notes)",
+            "justification": "file convention"
+          }
+        ],
+        "implementer_model": "sonnet",
+        "follow_ups_outside_manifest": [
+          "website/docs/features/error-grouping.md: endpoint occurrence comes from EndpointCallFlusher",
+          ".claude/rules/testing.md: remove FixtureKind references",
+          ".claude/rules/project-specific.md §8.29 ErrorGroupingInterval default 15s vs code 60s",
+          ".claude/rules/architecture.md §2.14 task list + ef-core-integration server-logging task list stale",
+          "website/docs/dashboard/overview.md: add ShowMetrics()"
+        ]
+      }
+    ],
+    "deviations": [
+      {
+        "batch": "B3",
+        "kind": "in-manifest file added to batch",
+        "detail": "src/core/Warp.Core/Metrics/MetricsServiceConfiguration.cs",
+        "justification": "AddMetrics (B2) is where the flusher + context sink register; B3 depends on B2 so the shared file carries an edge; auto-fixable drift (in-package, no new contract)"
+      }
+    ],
+    "review_fixes": [
+      {
+        "review": "mid-loop compliance B3+B4 PASS w/ W1-W6,N1-N4",
+        "fixed": "all",
+        "tests": "targeted 152/152, NoDb 1349, PG 1306, MSSQL 1295/1296 (1 unrelated starved-run timeout, class 16/16 alone)",
+        "notes": "killed once by API 403, resumed from compiled partial state",
+        "extra_file": "src/tests/Warp.Tests/BackgroundServices/OrphanDefinitionCleanupTestsBase.cs (N3 test move)"
+      },
+      {
+        "review": "mid-loop compliance B5-B7 NEEDS_CHANGES (C1,W1-W6,N1-N7)",
+        "fixed": "all",
+        "tests": "targeted 326, NoDb 1516, PG 1371, MSSQL 1361, vitest 415, lint clean on changed files",
+        "notes": "UI ratio numerator = separate filtered request (single pattern); one filter matcher (MetricFilter) for page+SLO; rank by headline value; resolution=max(display,coarsest); 400 for date underflow/dup keys/overlong; GoodValues/BadValues overlap rejected per spec; SloMath NoDataResult for non-finite"
+      },
+      {
+        "review": "Phase 4 Stage 2 (silent-failure + architecture) fix pass A",
+        "fixed": "SF-W1..W5, ARCH-W1..W4, nits (waived: MetricFilter move, MetricSeries rename, generic AddMetrics, SF-N6, SF-N11)",
+        "tests": "targeted 368, NoDb 1541, PG 1406/1416?, MSSQL 1406, vitest 468",
+        "new_files": [
+          "src/core/Warp.Core/Metrics/MetricPointQueries.cs (internal)",
+          "src/core/Warp.Core/Services/MetricQueryValidationException.cs (public)",
+          "src/core/Warp.Core/Slo/SloDefinitionValidator.cs (public static)",
+          "src/ui/src/pages/slo/sloDisplay.ts (+test)"
+        ],
+        "new_public_surface": [
+          "MetricQueryValidationException",
+          "SloDefinitionValidator.ValidateAsync",
+          "IMetricQueryService.GetInstrumentKindAsync + MaxRangeDays/MaxFilters consts",
+          "WarpMetricsOptions.MaxPendingBuckets (default 60000)",
+          "MetricRollup ctor takes ILogger"
+        ],
+        "needs_engineer_ack": "additive public surface introduced by review fixes"
+      },
+      {
+        "review": "Phase 4 Stage 2 (test lane) fix pass B",
+        "fixed": "T-W1..T-W7, A-1, A-2, nits (T-N2 kept as one labelled E2E test to avoid 4x heavy boots)",
+        "tests": "NoDb 1567, PG 1424, MSSQL 1414; targeted NoDb 178 / DB 274",
+        "notes": "meter-listener flake root-caused (ReferenceEquals on WarpTelemetry static before init) and fixed by name match; format --include is cwd-relative (earlier per-agent format evidence possibly vacuous - whole-solution re-check run by orchestrator)"
+      }
+    ],
+    "package_checkpoint": {
+      "package": "MediatR",
+      "version": "12.5.0",
+      "exists": true,
+      "license": "Apache-2.0",
+      "verified_by": "orchestrator: dotnet package search --exact-match + local nuspec",
+      "date": "2026-11-15"
+    },
+    "cleanup": {
+      "applied": "21 of 25 simplify items",
+      "skipped": [
+        "Collapsed() synthetic filtering (tests read it)",
+        "tick-rounded bucket start (FineResolutionMinutes need not divide 60)",
+        "parser star-check removal (400 text)",
+        "KIND_SPEC table (optional)"
+      ],
+      "gates": "build 0/0; targeted 442; NoDb 1567; PG 1426; MSSQL 1416; vitest 478; lint no new; format only pre-existing JobCommandService.cs:360"
+    },
+    "final_verification": {
+      "build": "0 warnings 0 errors",
+      "tests": {
+        "NoDb": 1567,
+        "PostgreSql": 1426,
+        "SqlServer": 1416,
+        "total": 4409,
+        "baseline_total": 3793,
+        "delta": "+616 (incl. explicit SC9 measurement excluded)",
+        "vitest": 478
+      },
+      "format": "clean except inherited IDE0270 JobCommandService.cs:360 (base 70dd32d7)"
+    }
+  },
+  "amendments": [
+    {
+      "date": "2026-11-13",
+      "approved_by": "engineer (AskUserQuestion: Amend spec, re-seal)",
+      "change": "Metric reads (Metrics page §D, metric SLO windows/baselines §E) read every tier overlapping the range and re-bin to the display resolution; adds R21a",
+      "reason": "single-tier read missed newest data (fine rows roll to hourly only after 6h)",
+      "affects": [
+        "B5",
+        "B8"
+      ],
+      "scope_delta": "none (no new files/contracts/schema)"
+    },
+    {
+      "date": "2026-11-15",
+      "approved_by": "engineer (AskUserQuestion: Optimise + fix measurement)",
+      "change": "SC9 scope: 250ms gate applies to common reads (24h, 7d without percentile/breakdown); worst case measured+documented",
+      "affects": [
+        "B5"
+      ],
+      "scope_delta": "none"
+    }
+  ]
+}

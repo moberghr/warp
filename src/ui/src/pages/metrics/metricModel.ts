@@ -1,0 +1,572 @@
+// Pure model behind the Metrics pages: chart datasets, compare-overlay alignment, the ratio view, (rest)
+// handling, labels and filter-chip (de)serialisation. No React, no DOM, so every rule is unit-tested; the
+// pages only render what comes out of here.
+
+import { MetricKind, MetricTier } from '@/types/metrics';
+import { DASHBOARD_LOCALE } from '@/utils/format';
+import type { FilterChip } from '@/lib/metricPattern';
+import type { MetricInstrument, MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
+
+export const REST_NAME = '(rest)';
+export const TOTAL_NAME = 'total';
+
+// ---------------------------------------------------------------------------------------------------------------
+// Labels
+// ---------------------------------------------------------------------------------------------------------------
+
+const KIND_LABELS: Record<MetricKind, string> = {
+  [MetricKind.Counter]: 'Counter',
+  [MetricKind.UpDownCounter]: 'Up-down counter',
+  [MetricKind.Histogram]: 'Histogram',
+  [MetricKind.Gauge]: 'Gauge',
+};
+
+export function kindLabel(kind: MetricKind): string {
+  return KIND_LABELS[kind] ?? 'Unknown';
+}
+
+/** OTel units are UCUM codes (`ms`, `s`, `By`, `1`); show the ones people read, pass the rest through. */
+export function unitLabel(unit: string | null | undefined): string {
+  if (!unit || unit === '1') {
+    return '';
+  }
+
+  return unit === 'By' ? 'bytes' : unit;
+}
+
+const RESOLUTION_LABELS: Record<MetricTier, string> = {
+  [MetricTier.Fine]: 'Fine',
+  [MetricTier.Hourly]: 'Hourly',
+  [MetricTier.Daily]: 'Daily',
+};
+
+export function resolutionLabel(tier: MetricTier): string {
+  return RESOLUTION_LABELS[tier] ?? 'Unknown';
+}
+
+export function collapseTooltip(instrument: Pick<MetricInstrument, 'collapsedTags'>): string {
+  const tags = instrument.collapsedTags.length > 0 ? ` (${instrument.collapsedTags.join(', ')})` : '';
+
+  return `Some tag values were collapsed into {other}${tags}`;
+}
+
+export function percentileLabel(percentile: number): string {
+  return `p${percentile}`;
+}
+
+/** Histogram percentiles are bucket upper bounds, so they read as "at most". */
+export function formatPercentileValue(value: number | null | undefined, unit: string | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return '—';
+  }
+
+  const suffix = unitLabel(unit);
+
+  return `≤ ${formatNumber(value)}${suffix ? ` ${suffix}` : ''}`;
+}
+
+export function formatNumber(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '—';
+  }
+
+  const abs = Math.abs(value);
+  if (abs >= 1000 || Number.isInteger(value)) {
+    return Math.round(value).toLocaleString(DASHBOARD_LOCALE);
+  }
+
+  return abs >= 10 ? value.toFixed(1) : value.toFixed(3).replace(/\.?0+$/, '');
+}
+
+/** One line per overlay offset: "Current: Fine · 1d: Hourly" — so a reader knows an overlay is hour-resolution. */
+export function resolutionSummary(series: MetricSeries): string {
+  const seen = new Map<string, MetricTier>([['Current', series.resolution]]);
+  for (const line of series.series) {
+    if (line.compare !== null && !seen.has(line.compare)) {
+      seen.set(line.compare, line.resolution);
+    }
+  }
+
+  return [...seen.entries()].map(([key, tier]) => `${key}: ${resolutionLabel(tier)}`).join(' · ');
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Controls and the API query
+// ---------------------------------------------------------------------------------------------------------------
+
+export const RANGES = [
+  { id: '1h', label: '1h', ms: 3_600_000 },
+  { id: '6h', label: '6h', ms: 6 * 3_600_000 },
+  { id: '24h', label: '24h', ms: 24 * 3_600_000 },
+  { id: '7d', label: '7d', ms: 7 * 24 * 3_600_000 },
+  { id: '30d', label: '30d', ms: 30 * 24 * 3_600_000 },
+] as const;
+export type RangeId = (typeof RANGES)[number]['id'];
+
+export const PERCENTILES = [50, 90, 95, 99] as const;
+
+export interface MetricControls {
+  range: RangeId;
+  application: string | null;
+  breakdown: string | null;
+  filters: FilterChip[];
+  compareDay: boolean;
+  compareWeek: boolean;
+  /** Histograms only; null skips the percentile series. */
+  percentile: number | null;
+  view: 'values' | 'ratio';
+  /**
+   * Ratio numerator: one breakdown value or `prefix*` pattern (null until picked). One pattern, not a set, because
+   * the numerator is its own series request filtered on the breakdown tag and the API holds one filter value per
+   * key; summing several requests would double-count values two patterns share (`5*` and `503`).
+   */
+  numerator: string | null;
+  /** Gauges only: also draw the min and max lines. */
+  showMinMax: boolean;
+}
+
+export const DEFAULT_CONTROLS: MetricControls = {
+  range: '24h',
+  application: null,
+  breakdown: null,
+  filters: [],
+  compareDay: false,
+  compareWeek: false,
+  percentile: null,
+  view: 'values',
+  numerator: null,
+  showMinMax: false,
+};
+
+export function rangeMs(range: RangeId): number {
+  return RANGES.find((x) => x.id === range)?.ms ?? RANGES[2].ms;
+}
+
+/**
+ * How often a series read refetches: as often as its display resolution can change. The server picks the
+ * resolution from the range length (up to 6 hours fine, up to 7 days hourly, longer daily), so a fine chart refetches
+ * every minute, an hourly one every 5 minutes and a daily one every 30.
+ */
+export function seriesRefetchMs(range: RangeId): number {
+  const ms = rangeMs(range);
+  if (ms <= 6 * 3_600_000) {
+    return 60_000;
+  }
+
+  return ms <= 7 * 24 * 3_600_000 ? 5 * 60_000 : 30 * 60_000;
+}
+
+export function supportsRatio(kind: MetricKind): boolean {
+  return kind === MetricKind.Counter || kind === MetricKind.Histogram;
+}
+
+export function supportsPercentile(kind: MetricKind): boolean {
+  return kind === MetricKind.Histogram;
+}
+
+/** Ratio needs a breakdown to take a numerator from. */
+export function isRatioActive(controls: MetricControls, kind: MetricKind): boolean {
+  return controls.view === 'ratio' && supportsRatio(kind) && controls.breakdown !== null;
+}
+
+/**
+ * The query string for GET /api/metrics/{id}/series. Built by hand rather than through axios `params`
+ * because `filter` repeats and axios would serialise the array as `filter[]=`.
+ */
+export function buildSeriesQuery(controls: MetricControls, kind: MetricKind | null, now: number): string {
+  const parts: [string, string][] = [
+    ['from', new Date(now - rangeMs(controls.range)).toISOString()],
+    ['to', new Date(now).toISOString()],
+  ];
+
+  if (controls.application) {
+    parts.push(['application', controls.application]);
+  }
+
+  if (controls.breakdown) {
+    parts.push(['breakdown', controls.breakdown]);
+  }
+
+  for (const chip of controls.filters) {
+    parts.push(['filter', chipToQuery(chip)]);
+  }
+
+  const compare = [controls.compareDay ? '1d' : null, controls.compareWeek ? '7d' : null].filter((x) => x !== null);
+  if (compare.length > 0) {
+    parts.push(['compare', compare.join(',')]);
+  }
+
+  if (controls.percentile !== null && kind === MetricKind.Histogram && controls.view === 'values') {
+    parts.push(['percentile', String(controls.percentile)]);
+  }
+
+  return parts.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+}
+
+/**
+ * The ratio numerator's own series request: the current controls with no breakdown, plus
+ * `filter=<breakdown>:<pattern>`, so values the primary read folded into `(rest)` still count. Null when the ratio
+ * has no breakdown or no numerator. A filter chip already on the breakdown key is replaced (one value per key).
+ */
+export function buildNumeratorQuery(controls: MetricControls, kind: MetricKind | null, now: number): string | null {
+  if (controls.breakdown === null || controls.numerator === null) {
+    return null;
+  }
+
+  return buildSeriesQuery(
+    {
+      ...controls,
+      breakdown: null,
+      filters: upsertChip(controls.filters, { key: controls.breakdown, value: controls.numerator }),
+      percentile: null,
+      view: 'values',
+    },
+    kind,
+    now
+  );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Filter chips: `key=value` in the UI (parsed by lib/metricPattern), `key:value` on the wire
+// ---------------------------------------------------------------------------------------------------------------
+
+export function chipToText(chip: FilterChip): string {
+  return `${chip.key}=${chip.value}`;
+}
+
+export function chipToQuery(chip: FilterChip): string {
+  return `${chip.key}:${chip.value}`;
+}
+
+export function chipFromQuery(text: string): FilterChip | null {
+  const separator = text.indexOf(':');
+  if (separator <= 0 || separator === text.length - 1) {
+    return null;
+  }
+
+  return { key: text.slice(0, separator), value: text.slice(separator + 1) };
+}
+
+/** The API holds one value per key, so adding a chip replaces an existing one on the same key. */
+export function upsertChip(chips: FilterChip[], chip: FilterChip): FilterChip[] {
+  return [...chips.filter((x) => x.key !== chip.key), chip];
+}
+
+export function removeChip(chips: FilterChip[], key: string): FilterChip[] {
+  return chips.filter((x) => x.key !== key);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Numerator (pattern matching itself lives in lib/metricPattern, the mirror of the server's MetricValuePattern)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** Picking the selected numerator again clears it; picking another replaces it. */
+export function toggleNumerator(numerator: string | null, value: string): string | null {
+  return numerator === value ? null : value;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Series -> datasets
+// ---------------------------------------------------------------------------------------------------------------
+
+export type DatasetRole = 'value' | 'percentile' | 'min' | 'max' | 'ratio';
+
+export interface ChartPoint {
+  x: number;
+  y: number | null;
+}
+
+export interface DatasetSpec {
+  id: string;
+  label: string;
+  role: DatasetRole;
+  lineName: string;
+  compare: string | null;
+  resolution: MetricTier;
+  /** Index into the page palette; -1 for `(rest)`. Overlays share their primary's index (same colour family). */
+  colorIndex: number;
+  dashed: boolean;
+  axis: 'y' | 'y1';
+  data: ChartPoint[];
+}
+
+function isRest(name: string): boolean {
+  return name === REST_NAME;
+}
+
+/** The y value of a point for the instrument kind: sum, count or average. */
+export function pointValue(kind: MetricKind, point: MetricPoint): number {
+  switch (kind) {
+    case MetricKind.Counter:
+    case MetricKind.UpDownCounter:
+      return point.sum;
+    case MetricKind.Histogram:
+      return point.count;
+    case MetricKind.Gauge:
+      return point.value;
+    default:
+      return point.value;
+  }
+}
+
+function toMs(timestamp: string): number {
+  return new Date(timestamp).getTime();
+}
+
+function sortedPoints(line: MetricSeriesLine): MetricPoint[] {
+  return line.points
+    .filter((x) => Number.isFinite(toMs(x.timestamp)))
+    .sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
+}
+
+/**
+ * Breakdown values of the current range in the SERVER's order (ranked by |headline value over the range|, ties by
+ * ordinal value — the same ranking that picked the top 10), `(rest)` last. Excludes overlays. Not re-sorted here, so
+ * the page and the API can never disagree about which value is "biggest". This is the order lines are coloured and
+ * listed in, so an overlay can borrow its primary's colour by name.
+ */
+export function orderedLineNames(series: MetricSeries): string[] {
+  const current = series.series.filter((x) => x.compare === null);
+  const named = [...new Set(current.filter((x) => !isRest(x.name)).map((x) => x.name))];
+
+  return current.some((x) => isRest(x.name)) ? [...named, REST_NAME] : named;
+}
+
+/** The breakdown values a ratio numerator can be picked from: real tag values, never `(rest)` or `total`. */
+export function breakdownValues(series: MetricSeries | null | undefined): string[] {
+  if (!series) {
+    return [];
+  }
+
+  return orderedLineNames(series).filter((x) => !isRest(x) && x !== TOTAL_NAME);
+}
+
+function colorIndexFor(names: string[], name: string): number {
+  if (isRest(name)) {
+    return -1;
+  }
+
+  const index = names.filter((x) => !isRest(x)).indexOf(name);
+
+  return index < 0 ? names.filter((x) => !isRest(x)).length : index;
+}
+
+/** Legend text: name, overlay offset, optional series suffix, and the resolution the line was served at. */
+function lineLabel(line: MetricSeriesLine, suffix?: string): string {
+  const base = line.compare ? `${line.name} (−${line.compare})` : line.name;
+
+  return `${base}${suffix ? ` ${suffix}` : ''} · ${resolutionLabel(line.resolution)}`;
+}
+
+/**
+ * Overlay alignment. The API already shifts an overlay's timestamps forward by its offset, so an overlay
+ * point lines up with a primary point at the same instant. This verifies that: when the overlay was served
+ * at the same resolution as the primary, a primary timestamp the overlay has no point for becomes a null so
+ * the line breaks instead of drawing a straight segment across missing data. An overlay served at a coarser
+ * tier (hourly against fine) keeps its own timestamps — snapping those onto the primary grid would invent
+ * points.
+ */
+export function alignOverlay(
+  overlayPoints: ChartPoint[],
+  primaryTimestamps: number[],
+  sameResolution: boolean
+): ChartPoint[] {
+  if (!sameResolution || primaryTimestamps.length === 0) {
+    return overlayPoints;
+  }
+
+  const byTime = new Map(overlayPoints.map((x) => [x.x, x]));
+  const aligned: ChartPoint[] = primaryTimestamps.map((t) => byTime.get(t) ?? { x: t, y: null });
+  const primarySet = new Set(primaryTimestamps);
+  const extras = overlayPoints.filter((x) => !primarySet.has(x.x));
+
+  return [...aligned, ...extras].sort((a, b) => a.x - b.x);
+}
+
+function primaryTimestampsOf(series: MetricSeries, name: string): number[] {
+  const line = series.series.find((x) => x.compare === null && x.name === name);
+
+  return line ? sortedPoints(line).map((x) => toMs(x.timestamp)) : [];
+}
+
+function primaryResolutionOf(series: MetricSeries, name: string): MetricTier | null {
+  return series.series.find((x) => x.compare === null && x.name === name)?.resolution ?? null;
+}
+
+export interface DatasetOptions {
+  /** Histograms: draw the percentile the response carries. */
+  percentile: number | null;
+  /** Gauges: also draw min and max. */
+  showMinMax: boolean;
+}
+
+/** One dataset per line (top 10 + `(rest)`), plus overlays dashed in the same colour, plus percentile / min / max. */
+export function buildDatasets(series: MetricSeries, options: DatasetOptions): DatasetSpec[] {
+  const names = orderedLineNames(series);
+  const rank = (line: MetricSeriesLine) => {
+    const index = names.indexOf(line.name);
+
+    return index < 0 ? names.length : index;
+  };
+  const lines = [...series.series].sort(
+    (a, b) => Number(a.compare !== null) - Number(b.compare !== null) || (a.compare ?? '').localeCompare(b.compare ?? '') || rank(a) - rank(b)
+  );
+
+  return lines.flatMap((line) => {
+    const colorIndex = colorIndexFor(names, line.name);
+    const dashed = line.compare !== null;
+    const points = sortedPoints(line);
+    const sameResolution = line.compare === null || primaryResolutionOf(series, line.name) === line.resolution;
+    const primaryTimes = line.compare === null ? [] : primaryTimestampsOf(series, line.name);
+    const idBase = `${line.compare ?? 'now'}|${line.name}`;
+
+    const build = (role: DatasetRole, pick: (p: MetricPoint) => number | null, axis: 'y' | 'y1', suffix?: string) => {
+      const data = alignOverlay(
+        points.map((p) => {
+          const y = pick(p);
+
+          return { x: toMs(p.timestamp), y: y !== null && Number.isFinite(y) ? y : null };
+        }),
+        primaryTimes,
+        sameResolution
+      );
+      const spec: DatasetSpec = {
+        id: `${idBase}|${role}`,
+        label: lineLabel(line, suffix),
+        role,
+        lineName: line.name,
+        compare: line.compare,
+        resolution: line.resolution,
+        colorIndex,
+        dashed,
+        axis,
+        data,
+      };
+
+      return spec;
+    };
+
+    const result: DatasetSpec[] = [build('value', (p) => pointValue(series.kind, p), 'y')];
+
+    if (series.kind === MetricKind.Histogram && options.percentile !== null) {
+      result.push(build('percentile', (p) => p.percentile, 'y1', percentileLabel(options.percentile)));
+    }
+
+    if (series.kind === MetricKind.Gauge && options.showMinMax && line.compare === null) {
+      result.push(build('min', (p) => p.min, 'y', 'min'), build('max', (p) => p.max, 'y', 'max'));
+    }
+
+    return result;
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Ratio: numerator / total per bucket
+// ---------------------------------------------------------------------------------------------------------------
+
+/**
+ * numerator ÷ total per bucket, as a percentage. A bucket whose total is zero (or not finite) is null —
+ * never NaN or Infinity — so the chart leaves a gap instead of drawing a lie.
+ */
+export function ratioPercent(numerator: number, total: number): number | null {
+  if (!Number.isFinite(numerator) || !Number.isFinite(total) || total === 0) {
+    return null;
+  }
+
+  const ratio = (numerator / total) * 100;
+
+  return Number.isFinite(ratio) ? ratio : null;
+}
+
+/** Per-bucket sum of every line of one compare offset (null = the current range). */
+function sumByBucket(series: MetricSeries, compare: string | null): Map<number, number> {
+  const sums = new Map<number, number>();
+  for (const line of series.series.filter((x) => x.compare === compare)) {
+    for (const point of line.points) {
+      const t = toMs(point.timestamp);
+      if (Number.isFinite(t)) {
+        sums.set(t, (sums.get(t) ?? 0) + pointValue(series.kind, point));
+      }
+    }
+  }
+
+  return sums;
+}
+
+/**
+ * The ratio datasets: for the current range and each overlay, numerator ÷ total at each bucket.
+ *
+ * - The TOTAL is the primary (breakdown) response summed across every line, `(rest)` included — the breakdown
+ *   partitions the filtered rows, so its lines add up to the series total and no extra request is needed.
+ * - The NUMERATOR is `numeratorSeries`, the separate no-breakdown request filtered on `breakdown:<pattern>`
+ *   (`buildNumeratorQuery`). It is NOT picked out of the breakdown lines: a low-volume value (the 5xx in "5* over
+ *   total") lands in `(rest)` and would read 0% — a false green.
+ *
+ * A bucket with a zero total is null, never NaN; a bucket the numerator read has no point for counts 0.
+ */
+export function buildRatioDatasets(series: MetricSeries, numeratorSeries: MetricSeries | null | undefined, numerator: string | null): DatasetSpec[] {
+  if (numerator === null || !numeratorSeries) {
+    return [];
+  }
+
+  const compares = [...new Set(series.series.map((x) => x.compare))].sort((a, b) => (a ?? '').localeCompare(b ?? ''));
+
+  return compares.flatMap((compare) => {
+    const lines = series.series.filter((x) => x.compare === compare);
+    if (lines.length === 0) {
+      return [];
+    }
+
+    const totals = sumByBucket(series, compare);
+    const numerators = sumByBucket(numeratorSeries, compare);
+    for (const t of numerators.keys()) {
+      if (!totals.has(t)) {
+        totals.set(t, 0);
+      }
+    }
+
+    const resolution = Math.max(...lines.map((x) => x.resolution)) as MetricTier;
+    const primary = series.series.filter((x) => x.compare === null);
+    const primaryTimes = [...new Set(primary.flatMap((l) => l.points.map((p) => toMs(p.timestamp))))]
+      .filter((x) => Number.isFinite(x))
+      .sort((a, b) => a - b);
+    const points: ChartPoint[] = [...totals.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([x, total]) => ({ x, y: ratioPercent(numerators.get(x) ?? 0, total) }));
+    const spec: DatasetSpec = {
+      id: `${compare ?? 'now'}|ratio`,
+      label: `${numerator} ÷ total${compare ? ` (−${compare})` : ''} · ${resolutionLabel(resolution)}`,
+      role: 'ratio',
+      lineName: numerator,
+      compare,
+      resolution,
+      colorIndex: 0,
+      dashed: compare !== null,
+      axis: 'y',
+      data: alignOverlay(
+        points,
+        compare === null ? [] : primaryTimes,
+        compare === null || (primary.length > 0 && Math.max(...primary.map((x) => x.resolution)) === resolution)
+      ),
+    };
+
+    return [spec];
+  });
+}
+
+/** y-axis titles: what the left and right axes mean for this kind / view. */
+export function axisTitles(kind: MetricKind, unit: string | null | undefined, ratio: boolean): { y: string; y1: string } {
+  const suffix = unitLabel(unit);
+  if (ratio) {
+    return { y: 'Share of total (%)', y1: '' };
+  }
+
+  switch (kind) {
+    case MetricKind.Histogram:
+      return { y: 'Measurements', y1: suffix ? `Percentile (${suffix})` : 'Percentile' };
+    case MetricKind.Gauge:
+      return { y: suffix ? `Average (${suffix})` : 'Average', y1: '' };
+    default:
+      return { y: suffix ? `Sum (${suffix})` : 'Sum', y1: '' };
+  }
+}

@@ -101,4 +101,433 @@ public class SloValidationTests
         SloValidation.TryValidate(def, out _).ShouldBeTrue();
         def.Percentile.ShouldBeNull();
     }
+
+    private static SloDefinition Ratio(double target = 0.99, int window = 3600, int? baselineDays = null, string good = "ok", string bad = "error")
+        => new()
+        {
+            Name = "r",
+            Kind = SloKind.MetricRatio,
+            Dimension = "orders.processed",
+            TargetValue = target,
+            WindowSeconds = window,
+            RatioTag = "outcome",
+            GoodValues = good,
+            BadValues = bad,
+            BaselineDays = baselineDays,
+        };
+
+    private static SloDefinition Metric(SloKind kind, double target, int window = 3600)
+        => new() { Name = "m", Kind = kind, Dimension = "orders.processed", TargetValue = target, WindowSeconds = window };
+
+    [Fact]
+    public void TryValidate_MetricRatioValid_PassesAndClearsPercentile()
+    {
+        var def = Ratio();
+        def.Percentile = 95;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeTrue();
+        error.ShouldBeNull();
+        def.Percentile.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(1.0)]
+    [InlineData(-0.5)]
+    [InlineData(1.5)]
+    public void TryValidate_MetricRatioTargetOutsideOpenUnitInterval_Rejected(double target)
+    {
+        SloValidation.TryValidate(Ratio(target), out var error).ShouldBeFalse();
+        error.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void TryValidate_MetricRatioMissingRatioTag_Rejected()
+    {
+        var def = Ratio();
+        def.RatioTag = " ";
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("RatioTag");
+    }
+
+    [Theory]
+    [InlineData(null, "error")]
+    [InlineData("ok", null)]
+    [InlineData("", "error")]
+    public void TryValidate_MetricRatioEmptyGoodOrBad_Rejected(string? good, string? bad)
+    {
+        var def = Ratio();
+        def.GoodValues = good;
+        def.BadValues = bad;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void TryValidate_MetricRatioSameLiteralInBothSets_Rejected()
+    {
+        SloValidation.TryValidate(Ratio(good: "ok,retry", bad: "error,retry"), out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("must not overlap");
+    }
+
+    [Theory]
+    [InlineData("200,500", "5*")] // a literal under the other side's prefix
+    [InlineData("2*", "200")]
+    [InlineData("5*", "50*")] // one prefix extends the other
+    [InlineData("50*", "5*")]
+    [InlineData("*", "error")] // a bare * overlaps anything
+    [InlineData("ok", "*")]
+    public void TryValidate_MetricRatioOverlappingGoodAndBad_Rejected(string good, string bad)
+    {
+        SloValidation.TryValidate(Ratio(good: good, bad: bad), out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("must not overlap");
+    }
+
+    [Fact]
+    public void TryValidate_MetricRatioDisjointPrefixes_Passes()
+    {
+        SloValidation.TryValidate(Ratio(good: "2*,3*", bad: "5*"), out var error).ShouldBeTrue();
+        error.ShouldBeNull();
+    }
+
+    [Fact]
+    public void TryValidate_MetricRatioStarNotAtEnd_Rejected()
+    {
+        SloValidation.TryValidate(Ratio(good: "o*k"), out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("GoodValues");
+    }
+
+    [Fact]
+    public void TryValidate_MetricRatioBaselineDays_AcceptsOneAndSevenOnly()
+    {
+        SloValidation.TryValidate(Ratio(0.05, baselineDays: 1), out _).ShouldBeTrue();
+        SloValidation.TryValidate(Ratio(0.05, baselineDays: 7), out _).ShouldBeTrue();
+        SloValidation.TryValidate(Ratio(0.05, baselineDays: 3), out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("BaselineDays");
+    }
+
+    [Fact]
+    public void TryValidate_MetricRatioWithBaseline_RequiresMaxDropInOpenUnitInterval()
+    {
+        SloValidation.TryValidate(Ratio(0.05, baselineDays: 1), out _).ShouldBeTrue();
+        SloValidation.TryValidate(Ratio(0.0, baselineDays: 1), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Ratio(1.0, baselineDays: 1), out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void TryValidate_MetricThresholdTarget_AllowsZeroRejectsNegative()
+    {
+        SloValidation.TryValidate(Metric(SloKind.MetricThreshold, 0), out var error).ShouldBeTrue();
+        error.ShouldBeNull();
+        SloValidation.TryValidate(Metric(SloKind.MetricThreshold, 25), out _).ShouldBeTrue();
+        SloValidation.TryValidate(Metric(SloKind.MetricThreshold, -1), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Metric(SloKind.MetricThreshold, double.NaN), out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void TryValidate_ExistingThresholdKindsZeroTarget_Rejected()
+    {
+        SloValidation.TryValidate(Def(SloKind.BacklogDepth, 0), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Def(SloKind.ExecutionLatency, 0), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Def(SloKind.QueueWaitLatency, 0), out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void TryValidate_MetricGapWithoutSecondaryMetric_Rejected()
+    {
+        var def = Metric(SloKind.MetricGap, 0);
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("SecondaryMetric");
+
+        def.SecondaryMetric = "orders.finished";
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        SloValidation.TryValidate(Metric(SloKind.MetricGap, -1), out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void TryValidate_MetricVolumeFloor_RequiresBaselineOneOrSevenAndRatioTarget()
+    {
+        var def = Metric(SloKind.MetricVolumeFloor, 0.5);
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("BaselineDays");
+
+        def.BaselineDays = 3;
+        SloValidation.TryValidate(def, out _).ShouldBeFalse();
+
+        def.BaselineDays = 1;
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+
+        def.BaselineDays = 7;
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+
+        def.TargetValue = 0;
+        SloValidation.TryValidate(def, out _).ShouldBeFalse();
+        def.TargetValue = 1;
+        SloValidation.TryValidate(def, out _).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(599)]
+    [InlineData(60)]
+    [InlineData(1)]
+    public void TryValidate_MetricKindsWindowBelow600_Rejected(int window)
+    {
+        SloValidation.TryValidate(Metric(SloKind.MetricThreshold, 0, window), out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("600");
+    }
+
+    [Fact]
+    public void TryValidate_MetricKindsWindow600_Passes()
+    {
+        SloValidation.TryValidate(Metric(SloKind.MetricThreshold, 0, 600), out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TryValidate_ExistingKindsShortWindow_Passes()
+    {
+        SloValidation.TryValidate(Def(SloKind.SuccessRate, 0.99, windowSeconds: 60), out _).ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void TryValidate_MetricKindsBlankInstrument_Rejected(string dimension)
+    {
+        var def = Metric(SloKind.MetricThreshold, 0);
+        def.Dimension = dimension;
+
+        SloValidation.TryValidate(def, out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void TryValidate_MetricKindsInstrumentNameOver128_Rejected()
+    {
+        var def = Metric(SloKind.MetricThreshold, 0);
+        def.Dimension = new string('a', 129);
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("128");
+
+        def.Dimension = new string('a', 128);
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("status=5xx,,route=/a")]
+    [InlineData("=5")]
+    [InlineData("a=1,a=2")]
+    [InlineData("a=x*y")]
+    public void TryValidate_MetricKindsInvalidTagFilter_Rejected(string filter)
+    {
+        var def = Metric(SloKind.MetricThreshold, 0);
+        def.TagFilter = filter;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("TagFilter");
+    }
+
+    [Fact]
+    public void TryValidate_MetricGapInvalidSecondaryTagFilter_Rejected()
+    {
+        var def = Metric(SloKind.MetricGap, 0);
+        def.SecondaryMetric = "orders.finished";
+        def.SecondaryTagFilter = "a";
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("SecondaryTagFilter");
+
+        def.SecondaryTagFilter = "result=ok*";
+        def.TagFilter = "kind=a,site=eu*";
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TryValidate_MetricKindsFieldsAboveColumnLimits_Rejected()
+    {
+        var def = Metric(SloKind.MetricThreshold, 0);
+        def.TagFilter = "k=" + new string('v', 511);
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("512");
+    }
+
+    [Fact]
+    public void TryValidate_SevenDayBaselineRetentionBelowThreshold_RejectedNamingSetting()
+    {
+        var def = Ratio(0.05, window: 3600, baselineDays: 7);
+        var required = TimeSpan.FromDays(7) + TimeSpan.FromHours(1) + TimeSpan.FromHours(1);
+
+        SloValidation.TryValidate(def, required - TimeSpan.FromSeconds(1), null, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("HourlyStatisticsRetention");
+    }
+
+    [Fact]
+    public void TryValidate_SevenDayBaselineRetentionAtThreshold_Passes()
+    {
+        var def = Ratio(0.05, window: 3600, baselineDays: 7);
+        var required = TimeSpan.FromDays(7) + TimeSpan.FromHours(1) + TimeSpan.FromHours(1);
+
+        SloValidation.TryValidate(def, required, null, out var error).ShouldBeTrue();
+        error.ShouldBeNull();
+    }
+
+    [Fact]
+    public void TryValidate_VolumeFloorSevenDayBaselineShortRetention_Rejected()
+    {
+        var def = Metric(SloKind.MetricVolumeFloor, 0.5, 600);
+        def.BaselineDays = 7;
+
+        SloValidation.TryValidate(def, TimeSpan.FromDays(7), null, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("HourlyStatisticsRetention");
+        SloValidation.TryValidate(def, TimeSpan.FromDays(8), null, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TryValidate_OneDayBaselineShortRetention_Passes()
+    {
+        var def = Ratio(0.05, baselineDays: 1);
+
+        SloValidation.TryValidate(def, TimeSpan.FromHours(1), null, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TryValidate_SevenDayBaselineWithoutConfiguration_SkipsRetentionCheck()
+    {
+        SloValidation.TryValidate(Ratio(0.05, baselineDays: 7), out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TryValidate_MetricKindsOnGaugeInstrument_Rejected()
+    {
+        foreach (var kind in new[] { SloKind.MetricThreshold, SloKind.MetricGap, SloKind.MetricRatio, SloKind.MetricVolumeFloor })
+        {
+            var def = kind switch
+            {
+                SloKind.MetricRatio => Ratio(),
+                SloKind.MetricGap => new SloDefinition { Name = "g", Kind = kind, Dimension = "i", TargetValue = 0.5, WindowSeconds = 3600, SecondaryMetric = "j" },
+                SloKind.MetricVolumeFloor => new SloDefinition { Name = "v", Kind = kind, Dimension = "i", TargetValue = 0.5, WindowSeconds = 3600, BaselineDays = 1 },
+                _ => Metric(kind, 5),
+            };
+
+            SloValidation.TryValidate(def, null, MetricKind.Gauge, out var error).ShouldBeFalse(kind.ToString());
+            error.ShouldNotBeNull().ShouldContain("gauge");
+        }
+    }
+
+    [Fact]
+    public void TryValidate_MetricGapOnGaugeSecondaryInstrument_Rejected()
+    {
+        var def = new SloDefinition { Name = "g", Kind = SloKind.MetricGap, Dimension = "i", TargetValue = 0, WindowSeconds = 3600, SecondaryMetric = "j" };
+
+        SloValidation.TryValidate(def, null, MetricKind.Counter, MetricKind.Gauge, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("SecondaryMetric");
+        SloValidation.TryValidate(def, null, MetricKind.Counter, MetricKind.Histogram, out _).ShouldBeTrue();
+        SloValidation.TryValidate(def, null, MetricKind.Counter, null, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TryValidate_NonGapKindWithGaugeSecondaryKind_IgnoresIt()
+    {
+        SloValidation.TryValidate(Metric(SloKind.MetricThreshold, 0), null, MetricKind.Counter, MetricKind.Gauge, out _).ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(MetricKind.Counter)]
+    [InlineData(MetricKind.UpDownCounter)]
+    [InlineData(MetricKind.Histogram)]
+    public void TryValidate_NonGaugeOrUnknownInstrumentKind_Passes(MetricKind? kind)
+    {
+        SloValidation.TryValidate(Metric(SloKind.MetricThreshold, 0), null, kind, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TryValidate_ExistingKindsWithGaugeAndRetentionHooks_IgnoresThem()
+    {
+        SloValidation.TryValidate(Def(SloKind.SuccessRate, 0.99), TimeSpan.Zero, MetricKind.Gauge, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TryValidate_MetricKinds_ClearsFieldsOfOtherKinds()
+    {
+        var def = Metric(SloKind.MetricThreshold, 0);
+        def.RatioTag = "x";
+        def.GoodValues = "a";
+        def.BadValues = "b";
+        def.SecondaryMetric = "s";
+        def.BaselineDays = 7;
+
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        def.RatioTag.ShouldBeNull();
+        def.GoodValues.ShouldBeNull();
+        def.BadValues.ShouldBeNull();
+        def.SecondaryMetric.ShouldBeNull();
+        def.BaselineDays.ShouldBeNull();
+    }
+
+    [Fact]
+    public void TryValidate_MetricThresholdWithStraySevenDayBaselineAndShortRetention_PassesAndClearsIt()
+    {
+        // R29 runs after normalisation: a threshold never reads a baseline, so its stray BaselineDays = 7 is cleared
+        // instead of failing a retention check it has nothing to do with.
+        var def = Metric(SloKind.MetricThreshold, 0);
+        def.BaselineDays = 7;
+
+        SloValidation.TryValidate(def, TimeSpan.FromDays(1), null, out var error).ShouldBeTrue();
+        error.ShouldBeNull();
+        def.BaselineDays.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(SloKind.MetricRatio, true)]
+    [InlineData(SloKind.MetricThreshold, true)]
+    [InlineData(SloKind.MetricVolumeFloor, true)]
+    [InlineData(SloKind.MetricGap, true)]
+    [InlineData(SloKind.SuccessRate, false)]
+    [InlineData(SloKind.QueueWaitLatency, false)]
+    [InlineData(SloKind.ExecutionLatency, false)]
+    [InlineData(SloKind.BacklogDepth, false)]
+    [InlineData(SloKind.DeadlineAttainment, false)]
+    public void IsMetricKind_EachKind_ClassifiesIt(SloKind kind, bool expected)
+    {
+        SloValidation.IsMetricKind(kind).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void SloKind_Values_AreAppendOnly()
+    {
+        ((int)SloKind.DeadlineAttainment).ShouldBe(5);
+        ((int)SloKind.MetricRatio).ShouldBe(6);
+        ((int)SloKind.MetricThreshold).ShouldBe(7);
+        ((int)SloKind.MetricVolumeFloor).ShouldBe(8);
+        ((int)SloKind.MetricGap).ShouldBe(9);
+    }
+
+    [Fact]
+    public void TryValidate_ExistingKinds_KeepTheirRules()
+    {
+        // SuccessRate / DeadlineAttainment: ratio in (0,1), percentile cleared.
+        var rate = Def(SloKind.SuccessRate, 0.99, percentile: 90);
+        SloValidation.TryValidate(rate, out _).ShouldBeTrue();
+        rate.Percentile.ShouldBeNull();
+        SloValidation.TryValidate(Def(SloKind.DeadlineAttainment, 1.0), out _).ShouldBeFalse();
+
+        // Latency: default percentile 95, 1..99 enforced, target > 0.
+        var latency = Def(SloKind.ExecutionLatency, 500);
+        SloValidation.TryValidate(latency, out _).ShouldBeTrue();
+        latency.Percentile.ShouldBe(95);
+        SloValidation.TryValidate(Def(SloKind.QueueWaitLatency, 500, percentile: 100), out _).ShouldBeFalse();
+
+        // Backlog: target > 0, window > 0, no 600 floor.
+        SloValidation.TryValidate(Def(SloKind.BacklogDepth, 100, windowSeconds: 30), out _).ShouldBeTrue();
+        SloValidation.TryValidate(Def(SloKind.BacklogDepth, 100, windowSeconds: 0), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Def(SloKind.BacklogDepth, 100, dimension: " "), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Def(SloKind.BacklogDepth, 100, name: " "), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Def((SloKind)99, 1), out _).ShouldBeFalse();
+    }
 }

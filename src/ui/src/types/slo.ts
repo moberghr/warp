@@ -7,6 +7,10 @@ export const SloKind = {
   ExecutionLatency: 3,
   BacklogDepth: 4,
   DeadlineAttainment: 5,
+  MetricRatio: 6,
+  MetricThreshold: 7,
+  MetricVolumeFloor: 8,
+  MetricGap: 9,
 } as const;
 export type SloKind = (typeof SloKind)[keyof typeof SloKind];
 
@@ -16,6 +20,10 @@ export const SloKindLabel: Record<SloKind, string> = {
   [SloKind.ExecutionLatency]: 'Execution latency',
   [SloKind.BacklogDepth]: 'Backlog depth',
   [SloKind.DeadlineAttainment]: 'Deadline attainment',
+  [SloKind.MetricRatio]: 'Metric ratio',
+  [SloKind.MetricThreshold]: 'Metric threshold',
+  [SloKind.MetricVolumeFloor]: 'Metric volume floor',
+  [SloKind.MetricGap]: 'Metric gap',
 };
 
 export const SloState = {
@@ -53,6 +61,14 @@ export interface SloObjective {
   state: SloState;
   acknowledgedUntil: string | null;
   lastEvaluatedAt: string | null;
+  /** Metric kinds only (6-9); null/absent otherwise. Mirrors SloObjectiveModel. */
+  tagFilter?: string | null;
+  secondaryMetric?: string | null;
+  secondaryTagFilter?: string | null;
+  ratioTag?: string | null;
+  goodValues?: string | null;
+  badValues?: string | null;
+  baselineDays?: number | null;
 }
 
 export interface SloList {
@@ -69,8 +85,25 @@ export interface SloUpsertRequest {
   percentile: number | null;
   windowSeconds: number;
   enabled: boolean;
+  tagFilter?: string | null;
+  secondaryMetric?: string | null;
+  secondaryTagFilter?: string | null;
+  ratioTag?: string | null;
+  goodValues?: string | null;
+  badValues?: string | null;
+  baselineDays?: number | null;
 }
 
-/** True for the rate/attainment kinds whose target + attainment are ratios (0..1); false for latency/depth (ms / count). */
+/** True for the metric kinds (6-9), whose Dimension is an instrument name. */
+export const isMetricKind = (kind: SloKind): boolean =>
+  kind === SloKind.MetricRatio ||
+  kind === SloKind.MetricThreshold ||
+  kind === SloKind.MetricVolumeFloor ||
+  kind === SloKind.MetricGap;
+
+/** True for the kinds whose target + attainment are ratios (0..1); false for latency/depth/count (ms / count). */
 export const isRatioKind = (kind: SloKind): boolean =>
-  kind === SloKind.SuccessRate || kind === SloKind.DeadlineAttainment;
+  kind === SloKind.SuccessRate ||
+  kind === SloKind.DeadlineAttainment ||
+  kind === SloKind.MetricRatio ||
+  kind === SloKind.MetricVolumeFloor;

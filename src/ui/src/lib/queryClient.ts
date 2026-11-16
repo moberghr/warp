@@ -65,6 +65,10 @@ export const queryKeys = {
   rateLimits: ['rate-limits'] as const,
   trace: (id: string) => ['trace', id] as const,
   detail: (id: string) => ['detail', id] as const,
+  /** The metric instrument registry: one cache entry for the Metrics list, a metric's detail page and the SLO editor. */
+  metrics: ['metrics', 'list'] as const,
+  /** The application list (GET /applications), shared by every page that reads it. */
+  applications: ['applications', 'list'] as const,
 };
 
 /**

@@ -310,11 +310,13 @@ public class WarpTestServer : IAsyncDisposable
                     // so the next borrower hits SqlException 3980 ("another request is running in the same
                     // session" — MARS is off in the test connection string) and the worker/save fails
                     // transiently. Their feature tests drive the task directly (StatisticRollupTestsBase,
-                    // BacklogSamplerTestsBase, SloEvaluatorTestsBase), so disabling the loops here costs no
-                    // coverage; a test that needs one re-enables it via the configure callback (which runs next).
+                    // BacklogSamplerTestsBase, SloEvaluatorTestsBase, MetricRollupTestsBase), so disabling the
+                    // loops here costs no coverage; a test that needs one re-enables it via the configure
+                    // callback (which runs next).
                     config.StatisticRollupInterval = null;
                     config.BacklogSampleInterval = null;
                     config.SloEvaluationInterval = null;
+                    config.MetricRollupInterval = null;
 
                     configure?.Invoke(config);
 

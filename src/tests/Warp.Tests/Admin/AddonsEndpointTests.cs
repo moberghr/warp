@@ -3,11 +3,14 @@ using System.Net.Http.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Concurrency;
+using Warp.Core.Data.Queries;
+using Warp.Core.Metrics;
 using Warp.Core.RateLimit;
 using Warp.Core.Sagas;
 using Warp.Core.Services;
@@ -293,6 +296,67 @@ public class AddonsEndpointTests
         }
     }
 
+    /// <summary>
+    /// R19 against the real registration: <c>AddWarp</c> alone (which always registers the metrics query service)
+    /// leaves the Metrics nav off; only <c>AddMetrics</c>'s marker or an explicit <c>ShowMetrics()</c> turns it on.
+    /// </summary>
+    [TimedFact]
+    public async Task GetAddons_AddWarpWithoutAddMetrics_MetricsFalse()
+    {
+        var (app, client) = await CreateApp(services => AddWarp(services, _ => { }));
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+            info!.Metrics.ShouldBeFalse();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetAddons_AddWarpWithAddMetrics_MetricsTrue()
+    {
+        var (app, client) = await CreateApp(services =>
+            AddWarp(services, x => x.AddMetrics(y => y.CollectMeter($"addons.{Guid.NewGuid():N}"))));
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+            info!.Metrics.ShouldBeTrue();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
+    [TimedFact]
+    public async Task GetAddons_DashboardOnlyHostWithShowMetrics_MetricsTrue()
+    {
+        var (app, client) = await CreateApp(
+            services => AddWarp(services, _ => { }),
+            dashboard => dashboard.ShowMetrics());
+        try
+        {
+            var info = await client.GetFromJsonAsync<WarpAddonsInfo>("/warp/api/addons", CancellationToken.None);
+
+            info.ShouldNotBeNull();
+            info!.Metrics.ShouldBeTrue();
+        }
+        finally
+        {
+            client.Dispose();
+            await app.DisposeAsync();
+        }
+    }
+
     [TimedFact]
     public async Task GetAddons_Always_ReportsRunningWarpVersion()
     {
@@ -311,5 +375,14 @@ public class AddonsEndpointTests
             client.Dispose();
             await app.DisposeAsync();
         }
+    }
+
+    // The real AddWarp registration over an in-memory context, as a dashboard-only host would run it.
+    private static void AddWarp(IServiceCollection services, Action<WarpBuilder<TestContext>> configure)
+    {
+        services.AddDbContext<TestContext>(x => x.UseInMemoryDatabase($"addons-{Guid.NewGuid():N}"));
+        services.AddSingleton(Mock.Of<IWarpSqlQueries<TestContext>>());
+        services.AddSingleton(Mock.Of<IWarpLockProvider>());
+        services.AddWarp<TestContext>(configure);
     }
 }

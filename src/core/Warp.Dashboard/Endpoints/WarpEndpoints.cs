@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -202,6 +204,7 @@ public static class WarpEndpoints
             [FromServices] IClientObservabilityMarker? client,
             [FromServices] IWebhookRedeliveryEnqueuer? webhooks,
             [FromServices] Warp.Core.Slo.ISloMarker? slo,
+            [FromServices] Warp.Core.Metrics.IMetricsMarker? metrics,
             [FromServices] IOptions<WarpConfiguration> configuration) =>
             Results.Ok(new WarpAddonsInfo
             {
@@ -236,6 +239,10 @@ public static class WarpEndpoints
                 // ISloMarker is registered only by AddSlo(); the SLO query/command services are always
                 // registered by AddWarp, so this gates the nav, not the API.
                 Slo = options.Ui.Slo ?? slo is not null,
+
+                // IMetricsMarker is registered only by AddMetrics(); the metrics query service is always
+                // registered by AddWarp, so this gates the nav, not the API.
+                Metrics = options.Ui.Metrics ?? metrics is not null,
 
                 // Multi-app observability (§8.19). Unlike the other flags (which gate on a DI service), this
                 // reads config: the feature is on when this process set an ApplicationName. The Applications
@@ -721,10 +728,20 @@ public static class WarpEndpoints
             return objective is null ? Results.NotFound() : Results.Ok(objective);
         });
 
-        apiGroup.MapPost("slo", async ([FromServices] ISloCommandService svc, [FromBody] SloUpsertRequest body, CancellationToken ct) =>
+        apiGroup.MapPost("slo", async (
+            [FromServices] ISloCommandService svc,
+            [FromServices] IMetricQueryService metrics,
+            [FromServices] IOptions<WarpConfiguration> configuration,
+            [FromBody] SloUpsertRequest body,
+            CancellationToken ct) =>
         {
             var definition = body.ToDefinition();
-            if (!Warp.Core.Slo.SloValidation.TryValidate(definition, out var error))
+
+            // Metric kinds validate against the registry kind of both instruments (a gauge has no event count, as a
+            // primary or as a gap's secondary) and the hourly retention (R29: a 7-day baseline must still be hourly).
+            // The seeder runs the same validator.
+            var (ok, error) = await Warp.Core.Slo.SloDefinitionValidator.ValidateAsync(definition, metrics, configuration.Value.HourlyStatisticsRetention, ct);
+            if (!ok)
             {
                 return Results.BadRequest(error);
             }
@@ -741,12 +758,45 @@ public static class WarpEndpoints
             return deleted ? Results.NoContent() : Results.NotFound();
         });
 
-        apiGroup.MapPost("slo/{id:int}/ack", async ([FromServices] ISloCommandService svc, int id, [FromBody] SloAckRequest body, CancellationToken ct) =>
+        apiGroup.MapPost("slo/{id:int}/ack", async ([FromServices] ISloCommandService svc, [FromServices] TimeProvider timeProvider, int id, [FromBody] SloAckRequest body, CancellationToken ct) =>
         {
-            var until = DateTime.UtcNow.AddMinutes(body.Minutes <= 0 ? 60 : body.Minutes);
+            var until = timeProvider.GetUtcNow().UtcDateTime.AddMinutes(body.Minutes <= 0 ? 60 : body.Minutes);
             var acked = await svc.Acknowledge(id, until, ct);
 
             return acked ? Results.NoContent() : Results.NotFound();
+        });
+
+        // Collected application metrics. IMetricQueryService is always registered by AddWarp (dashboard-only
+        // processes resolve it); the nav is gated on the addons `metrics` flag, not a 404. No per-route auth —
+        // these inherit the group's conventions (§1.5). {id} is the URL-safe base64 of the instrument name.
+        apiGroup.MapGet("metrics", async ([FromServices] IMetricQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.ListInstruments(ct)));
+
+        apiGroup.MapGet("metrics/{id}/series", async ([FromServices] IMetricQueryService svc, string id, HttpRequest request, CancellationToken ct) =>
+        {
+            var instrument = UrlSafeId.TryDecode(id);
+            if (string.IsNullOrEmpty(instrument))
+            {
+                return Results.NotFound();
+            }
+
+            if (!MetricSeriesRequestParser.TryParse(request.Query, out var query, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            try
+            {
+                var series = await svc.GetSeries(instrument, query, ct);
+
+                return series is null ? Results.NotFound() : Results.Ok(series);
+            }
+            catch (MetricQueryValidationException e)
+            {
+                // The service enforces its own limits (defence in depth); what it rejects as invalid is the caller's
+                // 400. Anything else is a server fault and surfaces as a 500.
+                return Results.BadRequest(new { error = e.Message });
+            }
         });
 
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
@@ -960,9 +1010,170 @@ public static class WarpEndpoints
     }
 }
 
+// Validates the series query string at the boundary: a bad range, percentile, compare offset or filter is a 400, never a 500.
+internal static class MetricSeriesRequestParser
+{
+    // The service's own limits: it enforces them too, so the parser and the service can never disagree.
+    private const int MaxRangeDays = IMetricQueryService.MaxRangeDays;
+    private const int MaxFilters = IMetricQueryService.MaxFilters;
+    private const int MaxNameLength = 128;
+    private const int MaxFilterValueLength = 512;
+
+    // The UI sends Date.toISOString() ("...ss.fffZ"); "O" is .NET's round-trip form. Nothing else is accepted, so a
+    // culture-dependent or partial timestamp is a 400 instead of a guess.
+    private static readonly string[] InstantFormats = ["O", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.fff'Z'"];
+
+    public static bool TryParse(IQueryCollection query, [NotNullWhen(true)] out MetricSeriesQuery? parsed, [NotNullWhen(false)] out string? error)
+    {
+        parsed = null;
+
+        if (!TryParseInstant(query["from"].ToString(), out var from) || !TryParseInstant(query["to"].ToString(), out var to))
+        {
+            error = "from and to are required ISO 8601 timestamps.";
+
+            return false;
+        }
+
+        if (from >= to)
+        {
+            error = "from must be before to.";
+
+            return false;
+        }
+
+        if (from < IMetricQueryService.EarliestFrom || to > IMetricQueryService.LatestTo)
+        {
+            error = "from and to are out of the readable range.";
+
+            return false;
+        }
+
+        if (to - from > TimeSpan.FromDays(MaxRangeDays))
+        {
+            error = $"The range must not exceed {MaxRangeDays} days.";
+
+            return false;
+        }
+
+        int? percentile = null;
+        var percentileText = query["percentile"].ToString();
+        if (percentileText.Length > 0)
+        {
+            if (!int.TryParse(percentileText, NumberStyles.None, CultureInfo.InvariantCulture, out var value) || value is < 1 or > 99)
+            {
+                error = "percentile must be an integer between 1 and 99.";
+
+                return false;
+            }
+
+            percentile = value;
+        }
+
+        var compare = new List<MetricCompareOffset>();
+        foreach (var label in query["compare"].SelectMany(x => (x ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)))
+        {
+            if (!MetricCompareOffsets.TryParse(label, out var offset))
+            {
+                error = "compare must be 1d, 7d or both (comma-separated).";
+
+                return false;
+            }
+
+            compare.Add(offset.Value);
+        }
+
+        var filters = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var filter in query["filter"])
+        {
+            var separator = (filter ?? string.Empty).IndexOf(':', StringComparison.Ordinal);
+            if (filter is null || separator <= 0 || separator == filter.Length - 1)
+            {
+                error = "filter must be key:value.";
+
+                return false;
+            }
+
+            var key = filter[..separator];
+            var value = filter[(separator + 1)..];
+            if (key.Length > MaxNameLength || value.Length > MaxFilterValueLength)
+            {
+                error = $"A filter key must be at most {MaxNameLength} characters and a value at most {MaxFilterValueLength}.";
+
+                return false;
+            }
+
+            var star = value.IndexOf('*', StringComparison.Ordinal);
+            if (key.Contains('*', StringComparison.Ordinal) || (star >= 0 && star != value.Length - 1))
+            {
+                error = "A filter key must not contain '*', and a value may only use '*' as its last character.";
+
+                return false;
+            }
+
+            if (!filters.TryAdd(key, value))
+            {
+                error = $"filter key '{key}' appears more than once.";
+
+                return false;
+            }
+        }
+
+        if (filters.Count > MaxFilters)
+        {
+            error = $"At most {MaxFilters} filters are allowed.";
+
+            return false;
+        }
+
+        var application = NullIfEmpty(query["application"].ToString());
+        var breakdown = NullIfEmpty(query["breakdown"].ToString());
+        if (application?.Length > MaxNameLength || breakdown?.Length > MaxNameLength)
+        {
+            error = $"application and breakdown must be at most {MaxNameLength} characters.";
+
+            return false;
+        }
+
+        parsed = new MetricSeriesQuery
+        {
+            From = from,
+            To = to,
+            Application = application,
+            Breakdown = breakdown,
+            Filters = filters,
+            Compare = compare,
+            Percentile = percentile,
+        };
+        error = null;
+
+        return true;
+    }
+
+    private static string? NullIfEmpty(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static bool TryParseInstant(string text, out DateTime instant)
+        => DateTime.TryParseExact(text, InstantFormats, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out instant);
+}
+
 public sealed record ErrorGroupStatusRequest(ErrorGroupStatus Status);
 
-public sealed record SloUpsertRequest(int Id, string Name, SloKind Kind, string Dimension, string? Application, double TargetValue, int? Percentile, int WindowSeconds, bool Enabled)
+public sealed record SloUpsertRequest(
+    int Id,
+    string Name,
+    SloKind Kind,
+    string Dimension,
+    string? Application,
+    double TargetValue,
+    int? Percentile,
+    int WindowSeconds,
+    bool Enabled,
+    string? TagFilter = null,
+    string? SecondaryMetric = null,
+    string? SecondaryTagFilter = null,
+    string? RatioTag = null,
+    string? GoodValues = null,
+    string? BadValues = null,
+    int? BaselineDays = null)
 {
     public Warp.Core.Data.Entities.SloDefinition ToDefinition() => new()
     {
@@ -975,6 +1186,13 @@ public sealed record SloUpsertRequest(int Id, string Name, SloKind Kind, string 
         Percentile = Percentile,
         WindowSeconds = WindowSeconds,
         Enabled = Enabled,
+        TagFilter = TagFilter,
+        SecondaryMetric = SecondaryMetric,
+        SecondaryTagFilter = SecondaryTagFilter,
+        RatioTag = RatioTag,
+        GoodValues = GoodValues,
+        BadValues = BadValues,
+        BaselineDays = BaselineDays,
     };
 }
 

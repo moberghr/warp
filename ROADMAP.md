@@ -4,19 +4,7 @@ Forward-looking feature ideas only. Shipped features live in the [release notes]
 
 ## Observability intelligence
 
-The candidate arc for the next releases. Warp already owns every health signal it needs — per-job execution, queue-wait, backlog, error groups (Issues), adapter/circuit-breaker health, SLOs, and the unified trace view. The next step is turning that into intelligence a generic APM structurally can't provide, because it doesn't own all the signals and doesn't understand jobs.
-
-### Custom application metrics — front-runner
-
-Let handlers and endpoints emit their **own** metrics — counters, sums, histograms — through the same `Counter → Statistic` fold Warp already runs, so they get dashboards, retention tiers, and SLOs for free.
-
-- **Ad-hoc emit** (StatsD-style, no upfront declaration): `ctx.Metrics.Increment("card.authorizations", new { outcome, network })`, `.Add("card.authorized_amount", value, …)`, `.Record("card.auth_latency_ms", ms, …)`. The metric type is implied by the method, not a config block.
-- **Self-protecting cardinality**: a runaway tag collapses to `{other}` (the same guard client-event names use, §8.27) — necessary because the fold writes to the user's own operational DB, unlike a purpose-built TSDB.
-- **Auto-rendered dashboard**: a Metrics page (list → detail) with a "break down by tag" selector and a filter — Warp draws it, the user writes no UI.
-- **Feeds the rest**: a metric's success/fail convention lets an **SLO** target it; a metric spike shows up in the correlated incident view.
-- **Optional declaration** only for strict fail-fast validation, units, or the SLO success-fail convention.
-- **Honest boundary**: an auto-rendered explorer, not Grafana (no PromQL / custom dashboards) — power users still use the OTel sink.
-- **Driving example**: card-authorization metrics — authorizations/hour by outcome (approved/declined/error), total authorized amount, and auth-latency percentiles.
+The candidate arc for the next releases. (Custom application metrics, the arc's first item, shipped in 7.5.0, built on `System.Diagnostics.Metrics`: see the [release notes](website/docs/releases.md) and [custom metrics](website/docs/features/custom-metrics.md).) Warp already owns every health signal it needs — per-job execution, queue-wait, backlog, error groups (Issues), adapter/circuit-breaker health, SLOs, and the unified trace view. The next step is turning that into intelligence a generic APM structurally can't provide, because it doesn't own all the signals and doesn't understand jobs.
 
 ### Adaptive / anomaly SLOs
 
