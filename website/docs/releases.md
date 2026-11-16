@@ -6,7 +6,7 @@ sidebar_position: 6
 
 ## 7.5.0
 
-*2026-11-15*
+*2026-11-16*
 
 Minor release with **an additive schema change (you generate one migration)**, **one behaviour change for `DisableWorker()` servers**, and no breaking API change: Warp can now collect the metrics your own code emits with the standard .NET `System.Diagnostics.Metrics` API, chart them on a new Metrics page, and hold them to four new kinds of SLO. Read [Upgrading](#upgrading-from-74x) first.
 
