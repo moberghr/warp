@@ -400,8 +400,9 @@ The full script is in
   checkouts, and call the route at minute 2 and again at minute 11.
 - *Then* the first call returns `"verdict": "pending"` with `window.settled: false`. The second returns
   `"verdict": "fail"`, `deploy.previousVersion` set to the old version, and a `checks` entry for the 5xx tile
-  with `"state": "breaching"`. With an active acknowledged-noise annotation on that tile, the check reads
-  `"state": "acknowledged"` and no longer fails the verdict. A version that never registered returns 404.
+  with `"state": "breaching"`. With an active acknowledged-noise annotation that covers that tile (no filter,
+  or the tile's own filter or a wider one), the check reads `"state": "acknowledged"` and no longer fails the
+  verdict. A version that never registered returns 404.
   If you deploy again at minute 1, the earlier build is never left `pending`: asked by its version, it is
   judged over its one minute and settled at the second deploy.
 - `Covered by:` `DeployVerdictTestsBase`, `DeployVerdictMathTests`, `DeployVerdictQueryTests`; UI:
