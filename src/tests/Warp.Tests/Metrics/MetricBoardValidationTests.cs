@@ -204,6 +204,19 @@ public class MetricBoardValidationTests
     }
 
     [TimedFact]
+    public void Options_PastTheTileCap_Throws()
+    {
+        var options = new MetricBoardOptions();
+        for (var i = 0; i < MetricBoardValidation.MaxTiles; i++)
+        {
+            options.Value($"t{i}", $"i{i}");
+        }
+
+        Should.Throw<ArgumentException>(() => options.Value("One too many", "other"))
+            .Message.ShouldStartWith($"A metric board holds at most {MetricBoardValidation.MaxTiles} tiles.");
+    }
+
+    [TimedFact]
     public void Options_InvalidTile_Throws()
     {
         Should.Throw<ArgumentException>(() => new MetricBoardOptions().Ratio("Bad", "payments", "result", "ok", "ok"));

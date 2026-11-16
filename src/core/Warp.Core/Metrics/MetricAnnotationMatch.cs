@@ -39,9 +39,30 @@ internal static class MetricAnnotationMatch
         return !MetricFilter.TryParse(tile.TagFilter, out var tileFilter, out _) || noteFilter.Overlaps(tileFilter);
     }
 
-    // Acknowledged noise: a Warning or Breaching tile reads Acknowledged while an acknowledged-noise note that applies to
-    // it is active at the window's end. The events still count (they cannot be told apart from the rest), so only the
-    // verdict changes; Healthy and NoData are never touched.
+    // A note covers a tile when it is about EVERYTHING the tile reads: same instrument, and either no filter or a filter
+    // every one of whose constraints the tile's own filter implies (same key, the tile's pattern equal or narrower; for a
+    // trailing '*', the tile's value or prefix starts with the note's). Only a covering note may acknowledge the tile: a
+    // note on part of it ("outcome=error" on an unfiltered tile, "status=503" on a "status=5*" tile) is shown on the tile
+    // (AppliesTo) but cannot excuse a problem in the rest. An unparseable tile filter is never covered (nothing to prove).
+    public static bool Covers(MetricAnnotationModel annotation, MetricBoardTile tile)
+    {
+        if (!AppliesTo(annotation, tile)
+            || !MetricFilter.TryParse(annotation.TagFilter, out var noteFilter, out _))
+        {
+            return false;
+        }
+
+        if (noteFilter.IsEmpty)
+        {
+            return true;
+        }
+
+        return MetricFilter.TryParse(tile.TagFilter, out var tileFilter, out _) && noteFilter.Covers(tileFilter);
+    }
+
+    // Acknowledged noise: a Warning or Breaching tile reads Acknowledged while an acknowledged-noise note that COVERS it
+    // (callers pass only those, see Covers) is active at the window's end. The events still count (they cannot be told
+    // apart from the rest), so only the verdict changes; Healthy and NoData are never touched.
     public static SloState? Acknowledge(SloState? status, IEnumerable<MetricAnnotationModel> applying, DateTime to)
     {
         ArgumentNullException.ThrowIfNull(applying);

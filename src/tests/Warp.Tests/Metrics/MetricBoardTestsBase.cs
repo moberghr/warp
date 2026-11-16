@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -5,6 +6,8 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -99,6 +102,57 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
 
         id.ShouldBeNull();
         (await _fixture.CreateContext().Set<MetricBoardTile>().CountAsync(Ct)).ShouldBe(MetricBoardValidation.MaxTiles);
+    }
+
+    [TimedFact]
+    public async Task Upsert_Update_CopiesEveryField()
+    {
+        var id = await Command().Upsert(Tile("Volume", "c"), Ct);
+        var edit = new MetricBoardTile
+        {
+            Id = id!.Value,
+            Name = "Success",
+            Instrument = "p",
+            Position = 7,
+            Application = "api",
+            TagFilter = "region=eu*",
+            Kind = MetricTileKind.Ratio,
+            RatioTag = "result",
+            GoodValues = "ok",
+            BadValues = "error,timeout",
+            StatusRule = MetricTileStatusRule.Deviation,
+            BaselineDays = 7,
+            MaxDeviation = 0.02,
+            DeviationDirection = MetricDeviationDirection.Drop,
+        };
+
+        (await Command().Upsert(edit, Ct)).ShouldBe(id.Value);
+
+        var tile = (await Query().GetTiles(Ct)).ShouldHaveSingleItem();
+        tile.Name.ShouldBe("Success");
+        tile.Instrument.ShouldBe("p");
+        tile.Position.ShouldBe(7);
+        tile.Application.ShouldBe("api");
+        tile.TagFilter.ShouldBe("region=eu*");
+        tile.Kind.ShouldBe(MetricTileKind.Ratio);
+        tile.RatioTag.ShouldBe("result");
+        tile.GoodValues.ShouldBe("ok");
+        tile.BadValues.ShouldBe("error,timeout");
+        tile.StatusRule.ShouldBe(MetricTileStatusRule.Deviation);
+        tile.BaselineDays.ShouldBe(7);
+        tile.MaxDeviation.ShouldBe(0.02);
+        tile.DeviationDirection.ShouldBe(MetricDeviationDirection.Drop);
+
+        // And back to a gauge value tile: the aggregate and threshold are copied, the ratio and deviation fields cleared.
+        var pool = Tile("Pool", "pool", rule: MetricTileStatusRule.Threshold, threshold: 3, comparison: SloComparison.AtLeast, aggregate: SloGaugeAggregate.Max);
+        pool.Id = id.Value;
+        (await Command().Upsert(pool, Ct)).ShouldBe(id.Value);
+        var gauge = (await Query().GetTiles(Ct)).ShouldHaveSingleItem();
+        gauge.GaugeAggregate.ShouldBe(SloGaugeAggregate.Max);
+        gauge.Comparison.ShouldBe(SloComparison.AtLeast);
+        gauge.Threshold.ShouldBe(3);
+        gauge.RatioTag.ShouldBeNull();
+        gauge.BaselineDays.ShouldBeNull();
     }
 
     [TimedFact]
@@ -266,13 +320,175 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         var board = await Query().GetBoard(Now.AddHours(-1), Now, Ct);
 
         board.Resolution.ShouldBe(MetricTier.Fine);
+
+        // #328: the window and both baselines stop at the still-filling fine bucket (11:55 at a 30 s flush interval), so
+        // the hourly baselines count 55 of their 60 minutes, like the current window.
+        board.CompleteUntil.ShouldBe(Now.AddMinutes(-5));
         var tile = board.Tiles.ShouldHaveSingleItem();
         tile.InstrumentKind.ShouldBe(MetricKind.Counter);
         tile.Current.ShouldBe(30);
-        tile.DayAgo.ShouldBe(40);
-        tile.WeekAgo.ShouldBe(50);
+        tile.DayAgo.ShouldNotBeNull().ShouldBe(40 * 55 / 60.0, 1e-9);
+        tile.WeekAgo.ShouldNotBeNull().ShouldBe(50 * 55 / 60.0, 1e-9);
         tile.Status.ShouldBeNull();
         tile.Sparkline.Select(x => (x.Timestamp, x.Value)).ShouldBe([(Now.AddMinutes(-50), (double?)10), (Now.AddMinutes(-20), (double?)20)]);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_EventsInTheStillFillingBucket_AreLeftOutOfTheValueAndTheBaselines()
+    {
+        // Now is 12:00, the flush interval 30 s: the 11:55 bucket is still being written. It is left out of the current
+        // value, and the baselines stop at 11:55 the day and the week before, so 11:55-12:00 there is left out too.
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-10), sum: 10),
+                Point("c", Now.AddMinutes(-5), sum: 1000),
+                Point("c", Now.AddDays(-1).AddMinutes(-10), sum: 10),
+                Point("c", Now.AddDays(-1).AddMinutes(-5), sum: 500),
+                Point("c", Now.AddDays(-7).AddMinutes(-5), sum: 700),
+            ]);
+        await SeedTilesAsync(Tile("Volume", "c", rule: MetricTileStatusRule.Threshold, threshold: 100, comparison: SloComparison.AtMost));
+
+        var board = await Query().GetBoard(Now.AddMinutes(-30), Now, Ct);
+
+        board.CompleteUntil.ShouldBe(Now.AddMinutes(-5));
+        var tile = board.Tiles.ShouldHaveSingleItem();
+        tile.Current.ShouldBe(10);
+        tile.DayAgo.ShouldBe(10);
+        tile.WeekAgo.ShouldBeNull();
+        tile.Status.ShouldBe(SloState.Healthy);
+
+        // The sparkline still draws the filling bucket.
+        tile.Sparkline.Where(x => x.Timestamp == Now.AddMinutes(-5)).ShouldHaveSingleItem().Value.ShouldBe(1000);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_ConfiguredFlushInterval_MovesTheCut()
+    {
+        // A 6-minute flush interval: now - 6 min = 11:54 lies in the 11:50 bucket, so that bucket is still filling too.
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [Point("c", Now.AddMinutes(-15), sum: 3), Point("c", Now.AddMinutes(-10), sum: 1000)]);
+        await SeedTilesAsync(Tile("Volume", "c"));
+        var query = new MetricBoardQueryService<TestContext>(
+            _fixture.CreateContext(),
+            Options.Create(new WarpConfiguration { MetricFlushInterval = TimeSpan.FromMinutes(6) }),
+            new FakeTimeProvider(new DateTimeOffset(Now)));
+
+        var board = await query.GetBoard(Now.AddMinutes(-30), Now, Ct);
+
+        board.CompleteUntil.ShouldBe(Now.AddMinutes(-10));
+        board.Tiles.ShouldHaveSingleItem().Current.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_RangeThatEndedEarlier_IsNotCut()
+    {
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddHours(-2).AddMinutes(-5), sum: 4)]);
+        await SeedTilesAsync(Tile("Volume", "c"));
+
+        var board = await Query().GetBoard(Now.AddHours(-3), Now.AddHours(-2), Ct);
+
+        board.CompleteUntil.ShouldBe(Now.AddHours(-2));
+        board.Tiles.ShouldHaveSingleItem().Current.ShouldBe(4);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_RangeInsideTheFillingBucket_HasNoCompleteDataYet()
+    {
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-5), sum: 4)]);
+        await SeedTilesAsync(Tile("Volume", "c", rule: MetricTileStatusRule.Threshold, threshold: 1, comparison: SloComparison.AtMost));
+
+        var board = await Query().GetBoard(Now.AddMinutes(-3), Now, Ct);
+
+        board.CompleteUntil.ShouldBe(board.From);
+        var tile = board.Tiles.ShouldHaveSingleItem();
+        tile.Current.ShouldBeNull();
+        tile.Status.ShouldBe(SloState.NoData);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_RangeOverAWeek_ReadsDailyRowsAndProratesAStraddlingDay()
+    {
+        // 10 days minus 6 hours, so the window starts at 18:00 on the first day: that day's row counts 6 of its 24 hours.
+        var from = Now.AddDays(-10).Date.AddHours(18);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", from.Date, sum: 240, tier: MetricTier.Daily),
+                Point("c", from.Date.AddDays(3), sum: 100, tier: MetricTier.Daily),
+                Point("c", from.Date.AddDays(-1), sum: 9999, tier: MetricTier.Daily),
+            ]);
+        await SeedTilesAsync(Tile("Volume", "c"));
+
+        var board = await Query().GetBoard(from, Now, Ct);
+
+        board.Resolution.ShouldBe(MetricTier.Daily);
+        board.Tiles.ShouldHaveSingleItem().Current.ShouldNotBeNull().ShouldBe(160, 1e-9);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_RatioTileOnAGaugeInTheRegistry_IsNoData()
+    {
+        // Stored past validation (the instrument became a gauge after the tile was saved): the kind does not match.
+        await SeedAsync([Instrument("pool", MetricKind.Gauge)], [Point("pool", Now.AddMinutes(-20), sum: 5)]);
+        await SeedRawTilesAsync(new MetricBoardTile
+        {
+            Name = "Pool ratio",
+            Instrument = "pool",
+            Kind = MetricTileKind.Ratio,
+            RatioTag = "state",
+            GoodValues = "idle",
+            BadValues = "busy",
+            StatusRule = MetricTileStatusRule.Threshold,
+            Comparison = SloComparison.AtLeast,
+            Threshold = 0.5,
+        });
+
+        var tile = (await Query().GetBoard(Now.AddHours(-1), Now, Ct)).Tiles.ShouldHaveSingleItem();
+
+        tile.InstrumentKind.ShouldBe(MetricKind.Gauge);
+        tile.Current.ShouldBeNull();
+        tile.Status.ShouldBe(SloState.NoData);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_TileWithAnUnparseableFilter_IsNoData()
+    {
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-20), sum: 5)]);
+        await SeedRawTilesAsync(new MetricBoardTile
+        {
+            Name = "Broken",
+            Instrument = "c",
+            Kind = MetricTileKind.Value,
+            TagFilter = "status",
+            StatusRule = MetricTileStatusRule.Threshold,
+            Comparison = SloComparison.AtMost,
+            Threshold = 1,
+        });
+
+        var tile = (await Query().GetBoard(Now.AddHours(-1), Now, Ct)).Tiles.ShouldHaveSingleItem();
+
+        tile.InstrumentKind.ShouldBe(MetricKind.Counter);
+        tile.Current.ShouldBeNull();
+        tile.Status.ShouldBe(SloState.NoData);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_StatementCount_DoesNotGrowWithTheTiles()
+    {
+        // Tiles + registry + annotations + at most two grouped metric reads, whether the board has 3 tiles or 6.
+        await SeedAsync(
+            [.. Enumerable.Range(0, 6).Select(x => Instrument($"i{x}", MetricKind.Counter))],
+            [.. Enumerable.Range(0, 6).Select(x => Point($"i{x}", Now.AddMinutes(-20), sum: x, tags: "status=500"))]);
+        await SeedTilesAsync(Tile("t0", "i0", position: 1), Tile("t1", "i1", position: 2, filter: "status=5*"), Tile("t2", "i2", position: 3));
+        var small = await CountBoardStatementsAsync();
+        await SeedTilesAsync(Tile("t3", "i3", position: 4), Tile("t4", "i4", position: 5, filter: "status=4*"), Tile("t5", "i5", position: 6));
+
+        var large = await CountBoardStatementsAsync();
+
+        small.ShouldBeLessThanOrEqualTo(5);
+        large.ShouldBe(small);
     }
 
     [TimedFact]
@@ -716,6 +932,56 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         await context.SaveChangesAsync(Ct);
     }
 
+    // Past validation, as a stored row can be after its instrument changed kind or a hand-edited database.
+    private async Task SeedRawTilesAsync(params MetricBoardTile[] tiles)
+    {
+        var context = _fixture.CreateContext();
+        foreach (var tile in tiles)
+        {
+            tile.CreatedAt = Now;
+            tile.UpdatedAt = Now;
+        }
+
+        context.Set<MetricBoardTile>().AddRange(tiles);
+        await context.SaveChangesAsync(Ct);
+    }
+
+    private async Task<int> CountBoardStatementsAsync()
+    {
+        var counter = new StatementCounter();
+        var options = (DbContextOptions<TestContext>)_fixture.CreateContext().GetService<IDbContextOptions>();
+        await using var context = new TestContext(new DbContextOptionsBuilder<TestContext>(options).AddInterceptors(counter).Options);
+        var query = new MetricBoardQueryService<TestContext>(context, Options.Create(new WarpConfiguration()), new FakeTimeProvider(new DateTimeOffset(Now)));
+        await SeedNotesForCountAsync();
+
+        var board = await query.GetBoard(Now.AddHours(-1), Now, Ct);
+
+        board.Tiles.ShouldNotBeEmpty();
+
+        return counter.Count;
+    }
+
+    private async Task SeedNotesForCountAsync()
+    {
+        var context = _fixture.CreateContext();
+        if (await context.Set<MetricAnnotation>().AnyAsync(Ct))
+        {
+            return;
+        }
+
+        context.Set<MetricAnnotation>().Add(new MetricAnnotation
+        {
+            Target = MetricAnnotationTarget.Instrument,
+            Instrument = "i0",
+            Note = "n",
+            Author = "seed",
+            StartsAt = Now.AddHours(-2),
+            CreatedAt = Now,
+            UpdatedAt = Now,
+        });
+        await context.SaveChangesAsync(Ct);
+    }
+
     private async Task SeedFromConfigAsync(
         Action<MetricBoardOptions> configure,
         Func<CancellationToken, Task>? beforeSave = null,
@@ -757,6 +1023,20 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         await app.StartAsync(CancellationToken.None);
 
         return new DashboardHost(app, app.GetTestClient());
+    }
+
+    private sealed class StatementCounter : DbCommandInterceptor
+    {
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public override DbCommand CommandCreated(CommandEndEventData eventData, DbCommand result)
+        {
+            Interlocked.Increment(ref _count);
+
+            return result;
+        }
     }
 
     private sealed record DashboardHost(WebApplication App, HttpClient Client) : IAsyncDisposable

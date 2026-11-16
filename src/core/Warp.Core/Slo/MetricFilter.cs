@@ -130,6 +130,26 @@ internal sealed class MetricFilter
 
     public bool Constrains(string key) => Array.Exists(_clauses, x => string.Equals(x.Key, key, StringComparison.Ordinal));
 
+    // True when every tag set `narrower` matches is also matched by this filter: each clause here is implied by a clause
+    // of `narrower` on the same key whose pattern is equal or narrower. An empty filter covers everything; a key only this
+    // filter constrains is not covered (`narrower` lets every value of it through). The acknowledged-noise rule (#333):
+    // a note must cover the whole tile, not merely overlap it, to change its verdict.
+    public bool Covers(MetricFilter narrower)
+    {
+        ArgumentNullException.ThrowIfNull(narrower);
+
+        foreach (var (key, pattern) in _clauses)
+        {
+            var index = Array.FindIndex(narrower._clauses, x => string.Equals(x.Key, key, StringComparison.Ordinal));
+            if (index < 0 || !pattern.Includes(narrower._clauses[index].Value))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public bool Matches(IReadOnlyDictionary<string, string> tags)
     {
         ArgumentNullException.ThrowIfNull(tags);
@@ -208,6 +228,23 @@ internal readonly record struct MetricValuePattern(string Text, bool IsPrefix)
         return IsPrefix
             ? actual.StartsWith(Text, StringComparison.Ordinal)
             : string.Equals(actual, Text, StringComparison.Ordinal);
+    }
+
+    // True when every value `other` matches is matched here too: an equal literal, or a literal or longer prefix under
+    // this prefix. A prefix (even a bare '*') never matches the absent tag "{none}", so it never includes it.
+    public bool Includes(MetricValuePattern other)
+    {
+        if (!IsPrefix)
+        {
+            return !other.IsPrefix && string.Equals(Text, other.Text, StringComparison.Ordinal);
+        }
+
+        if (!other.IsPrefix && string.Equals(other.Text, MetricFilter.NoneValue, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return other.Text.StartsWith(Text, StringComparison.Ordinal);
     }
 
     // True when some value could match both patterns: equal literals, a literal under the other's prefix, one prefix

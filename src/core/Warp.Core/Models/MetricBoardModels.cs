@@ -98,4 +98,19 @@ public sealed class MetricBoardModel
     public MetricTier Resolution { get; init; }
 
     public IReadOnlyList<MetricBoardTileResult> Tiles { get; init; } = [];
+
+    /// <summary>
+    /// Where the tile values and their 1d / 7d baselines stop (#328): the start of the fine bucket that holds
+    /// <c>now − MetricFlushInterval</c>, clamped to the range. Data after it is still being written by the processes, so
+    /// the current window and the shifted baselines are all cut here and compare complete data with complete data. Equal
+    /// to <see cref="To"/> for a range that ended earlier; equal to <see cref="From"/> when nothing in the range is complete
+    /// yet (the values are then empty). The sparklines still run to <see cref="To"/>.
+    /// </summary>
+    public DateTime CompleteUntil { get; init; }
+
+    /// <summary>
+    /// True when more than <c>MetricAnnotationValidation.MaxPerRead</c> instrument notes overlap the range: the board then
+    /// keeps the ones active at its end (ongoing first) and acknowledged noise before the rest, newest first.
+    /// </summary>
+    public bool AnnotationsTruncated { get; init; }
 }

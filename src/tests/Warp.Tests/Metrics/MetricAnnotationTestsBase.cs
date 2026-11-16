@@ -202,14 +202,17 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
     public async Task SloDelete_RemovesTheObjectivesNotesOnly()
     {
         var sloId = await SeedSloAsync();
-        await SeedNotesAsync(SloNote(sloId, "goes"), Note("c", "stays"));
+        var otherSloId = await SeedSloAsync("Payments");
+        await SeedNotesAsync(SloNote(sloId, "goes"), SloNote(otherSloId, "other objective stays"), Note("c", "stays"));
 
         var deleted = await new SloCommandService<TestContext>(_fixture.CreateContext(), TimeProvider.System, NullLogger<SloCommandService<TestContext>>.Instance)
             .Delete(sloId, Ct);
 
         deleted.ShouldBeTrue();
-        var rows = await _fixture.CreateContext().Set<MetricAnnotation>().Select(x => x.Note).ToListAsync(Ct);
-        rows.ShouldBe(["stays"]);
+        var rows = await _fixture.CreateContext().Set<MetricAnnotation>().OrderBy(x => x.Note).Select(x => x.Note).ToListAsync(Ct);
+        rows.ShouldBe(["other objective stays", "stays"]);
+        (await _fixture.CreateContext().Set<MetricAnnotation>().Where(x => x.Note == "other objective stays").Select(x => x.SloDefinitionId).SingleAsync(Ct))
+            .ShouldBe(otherSloId);
     }
 
     [TimedFact]
@@ -235,6 +238,8 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
     [InlineData("acknowledged-ended", SloState.Breaching)]
     [InlineData("plain-note", SloState.Breaching)]
     [InlineData("acknowledged-other-filter", SloState.Breaching)]
+    [InlineData("acknowledged-same-filter", SloState.Acknowledged)]
+    [InlineData("acknowledged-wider-prefix", SloState.Acknowledged)]
     public async Task GetBoard_BreachingTile_ReadsAcknowledgedOnlyUnderAnActiveAcknowledgedNoiseNote(string scenario, SloState expected)
     {
         await SeedAsync([Instrument("http", MetricKind.Counter)], [Point("http", Now.AddMinutes(-10), sum: 7, tags: "status=500")]);
@@ -244,6 +249,8 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
             "acknowledged-ongoing" => Note("http", "known", startsAt: Now.AddDays(-1), acknowledged: true),
             "acknowledged-ended" => Note("http", "known", startsAt: Now.AddHours(-2), endsAt: Now.AddMinutes(-5), acknowledged: true),
             "plain-note" => Note("http", "known", startsAt: Now.AddDays(-1)),
+            "acknowledged-same-filter" => Note("http", "known", filter: "status=5*", startsAt: Now.AddDays(-1), acknowledged: true),
+            "acknowledged-wider-prefix" => Note("http", "known", filter: "status=*", startsAt: Now.AddDays(-1), acknowledged: true),
             _ => Note("http", "known", filter: "status=4*", startsAt: Now.AddDays(-1), acknowledged: true),
         });
 
@@ -252,6 +259,62 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
         tile.Status.ShouldBe(expected);
         tile.UnacknowledgedStatus.ShouldBe(SloState.Breaching);
         tile.Current.ShouldBe(7);
+    }
+
+    [TimedTheory]
+    [InlineData("status=503", "status=5*")]
+    [InlineData("route=/pay", "status=5*")]
+    [InlineData("outcome=error", null)]
+    public async Task GetBoard_AcknowledgedNoteOnOnlyPartOfTheTile_IsShownButDoesNotAcknowledge(string noteFilter, string? tileFilter)
+    {
+        // The note overlaps the tile (it is listed on it) but does not cover everything the tile reads: a known problem in
+        // one slice must not excuse a breach in the rest.
+        await SeedAsync([Instrument("http", MetricKind.Counter)], [Point("http", Now.AddMinutes(-10), sum: 7, tags: "status=500")]);
+        await SeedTilesAsync(Tile("Errors", "http", filter: tileFilter, rule: MetricTileStatusRule.Threshold, threshold: 5, comparison: SloComparison.AtMost));
+        await SeedNotesAsync(Note("http", "known", filter: noteFilter, startsAt: Now.AddDays(-1), acknowledged: true));
+
+        var tile = (await Board().GetBoard(Now.AddHours(-1), Now, Ct)).Tiles.ShouldHaveSingleItem();
+
+        tile.Status.ShouldBe(SloState.Breaching);
+        tile.Annotations.ShouldHaveSingleItem().AcknowledgedNoise.ShouldBeTrue();
+    }
+
+    [TimedFact]
+    public async Task GetBoard_MoreNotesThanTheCap_KeepsTheOngoingAcknowledgedNoteAndFlagsTruncation()
+    {
+        // 200 newer, ended notes and one OLD ongoing acknowledged-noise note: newest-first alone would drop the one note
+        // that changes the verdict.
+        await SeedAsync([Instrument("http", MetricKind.Counter)], [Point("http", Now.AddMinutes(-10), sum: 7)]);
+        await SeedTilesAsync(Tile("All", "http", rule: MetricTileStatusRule.Threshold, threshold: 5, comparison: SloComparison.AtMost));
+        await SeedNotesAsync(
+        [
+            Note("http", "known noise", startsAt: Now.AddDays(-30), acknowledged: true),
+            .. Enumerable.Range(0, MetricAnnotationValidation.MaxPerRead)
+                .Select(x => Note("http", $"n{x}", startsAt: Now.AddMinutes(-50).AddSeconds(x), endsAt: Now.AddMinutes(-20))),
+        ]);
+
+        var board = await Board().GetBoard(Now.AddHours(-1), Now, Ct);
+
+        board.AnnotationsTruncated.ShouldBeTrue();
+        var tile = board.Tiles.ShouldHaveSingleItem();
+        tile.Annotations.Count.ShouldBe(MetricAnnotationValidation.MaxPerRead);
+        tile.Annotations.ShouldContain(x => string.Equals(x.Note, "known noise", StringComparison.Ordinal));
+        tile.Annotations.ShouldNotContain(x => string.Equals(x.Note, "n0", StringComparison.Ordinal));
+        tile.Annotations[0].Note.ShouldBe($"n{MetricAnnotationValidation.MaxPerRead - 1}");
+        tile.Status.ShouldBe(SloState.Acknowledged);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_NotesWithinTheCap_AreNotTruncated()
+    {
+        await SeedAsync([Instrument("http", MetricKind.Counter)], []);
+        await SeedTilesAsync(Tile("All", "http"));
+        await SeedNotesAsync(Note("http", "one", startsAt: Now.AddMinutes(-30)));
+
+        var board = await Board().GetBoard(Now.AddHours(-1), Now, Ct);
+
+        board.AnnotationsTruncated.ShouldBeFalse();
+        board.Tiles.ShouldHaveSingleItem().Annotations.ShouldHaveSingleItem();
     }
 
     [TimedFact]
@@ -556,14 +619,14 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
         await context.SaveChangesAsync(Ct);
     }
 
-    private async Task<int> SeedSloAsync()
+    private async Task<int> SeedSloAsync(string name = "Checkout")
     {
         var context = _fixture.CreateContext();
         var definition = new SloDefinition
         {
-            Name = "Checkout",
+            Name = name,
             Kind = SloKind.SuccessRate,
-            Dimension = "Checkout",
+            Dimension = name,
             TargetValue = 0.99,
             WindowSeconds = 3600,
             Enabled = true,

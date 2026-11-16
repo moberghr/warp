@@ -93,7 +93,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
 
         // Annotations (#333): one more statement for the whole board, every instrument note overlapping the window,
         // matched to the tiles in memory (never a read per tile).
-        var annotations = await ReadAnnotationsAsync(names, from, to, ct);
+        var (annotations, annotationsTruncated) = await ReadAnnotationsAsync(names, from, to, ct);
 
         // Two statements at most: instruments only read without tags (no filter, no ratio on any of their tiles) are
         // summed per bucket alone; the rest per bucket and tag set. An unregistered instrument is not read at all.
@@ -114,6 +114,11 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var fineMinutes = FineMinutes;
+
+        // #328: the newest fine bucket (and up to one flush interval before it) is still being written, while the 1d and
+        // 7d baselines are complete. Cut the current window AND the shifted baselines at the same point, so a deviation
+        // compares like with like instead of reading a partial bucket as a drop.
+        var completeUntil = CompleteUntil(from, to, now, fineMinutes);
         var tagCache = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         var results = new List<MetricBoardTileResult>(tiles.Count);
         foreach (var tile in tiles)
@@ -121,6 +126,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             var known = instruments.TryGetValue(tile.Instrument, out var info);
             var spec = specs[tile.Id];
             var applying = annotations.FindAll(x => MetricAnnotationMatch.AppliesTo(x, tile));
+            var covering = applying.FindAll(x => MetricAnnotationMatch.Covers(x, tile));
             if (!known || spec is null || !MetricBoardValidation.AcceptsInstrument(tile.Kind, info.Kind))
             {
                 var unread = MetricBoardMath.Status(tile, null, null, null);
@@ -129,7 +135,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
                     Tile = Project(tile),
                     InstrumentKind = known ? info.Kind : null,
                     Unit = known ? info.Unit : null,
-                    Status = MetricAnnotationMatch.Acknowledge(unread, applying, to),
+                    Status = MetricAnnotationMatch.Acknowledge(unread, covering, to),
                     UnacknowledgedStatus = unread,
                     Annotations = applying,
                 });
@@ -142,9 +148,9 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             var scoped = application is null
                 ? tileRows
                 : tileRows.FindAll(x => string.Equals(x.Application, application, StringComparison.Ordinal));
-            var current = MetricBoardMath.WindowValue(spec, info.Kind, scoped, from, to, now, fineMinutes, tagCache);
-            var dayAgo = MetricBoardMath.WindowValue(spec, info.Kind, scoped, from.AddDays(-1), to.AddDays(-1), now, fineMinutes, tagCache);
-            var weekAgo = MetricBoardMath.WindowValue(spec, info.Kind, scoped, from.AddDays(-7), to.AddDays(-7), now, fineMinutes, tagCache);
+            var current = MetricBoardMath.WindowValue(spec, info.Kind, scoped, from, completeUntil, now, fineMinutes, tagCache);
+            var dayAgo = MetricBoardMath.WindowValue(spec, info.Kind, scoped, from.AddDays(-1), completeUntil.AddDays(-1), now, fineMinutes, tagCache);
+            var weekAgo = MetricBoardMath.WindowValue(spec, info.Kind, scoped, from.AddDays(-7), completeUntil.AddDays(-7), now, fineMinutes, tagCache);
             var sparkline = MetricBoardMath.Sparkline(spec, info.Kind, scoped, from, to, tier, fineMinutes, tagCache);
             var status = MetricBoardMath.Status(tile, current, dayAgo, weekAgo);
 
@@ -156,7 +162,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
                 Current = current,
                 DayAgo = dayAgo,
                 WeekAgo = weekAgo,
-                Status = MetricAnnotationMatch.Acknowledge(status, applying, to),
+                Status = MetricAnnotationMatch.Acknowledge(status, covering, to),
                 UnacknowledgedStatus = status,
                 Annotations = applying,
                 Sparkline = sparkline.ConvertAll(x => new MetricBoardSparkPoint { Timestamp = x.Timestamp, Value = x.Value }),
@@ -169,6 +175,8 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             To = to,
             Resolution = tier,
             Tiles = results,
+            CompleteUntil = completeUntil,
+            AnnotationsTruncated = annotationsTruncated,
         };
     }
 
@@ -201,6 +209,16 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
 
     private int FineMinutes => Math.Max(1, _options.Value.FineResolutionMinutes);
 
+    // The start of the fine bucket holding (now - MetricFlushInterval), the #328 rule MetricQueryService applies to its
+    // headlines, clamped to [from, to].
+    private DateTime CompleteUntil(DateTime from, DateTime to, DateTime now, int fineMinutes)
+    {
+        var flush = _options.Value.MetricFlushInterval > TimeSpan.Zero ? _options.Value.MetricFlushInterval : TimeSpan.Zero;
+        var cutoff = MetricTiers.BucketStart(MetricTier.Fine, now - flush, fineMinutes);
+
+        return new DateTime(Math.Clamp(cutoff.Ticks, from.Ticks, to.Ticks), DateTimeKind.Utc);
+    }
+
     private async Task<List<MetricBoardRow>> ReadRowsAsync(IReadOnlyCollection<string> instruments, DateTime from, DateTime to, bool byTags, CancellationToken ct)
     {
         if (instruments.Count == 0)
@@ -224,11 +242,14 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         });
     }
 
-    private async Task<List<MetricAnnotationModel>> ReadAnnotationsAsync(List<string> instruments, DateTime from, DateTime to, CancellationToken ct)
+    // Capped at MaxPerRead (+1 to detect truncation). When the cap bites, the notes that change a verdict must survive it:
+    // those still active at the window's end (ongoing first) and acknowledged noise come before the rest, then newest.
+    // Handed back newest first, the order every annotation read uses.
+    private async Task<(List<MetricAnnotationModel> Notes, bool Truncated)> ReadAnnotationsAsync(List<string> instruments, DateTime from, DateTime to, CancellationToken ct)
     {
         if (instruments.Count == 0)
         {
-            return [];
+            return ([], false);
         }
 
         var annotations = _context.Set<MetricAnnotation>()
@@ -236,12 +257,24 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             .Where(x => x.Target == MetricAnnotationTarget.Instrument)
             .Where(x => instruments.Contains(x.Instrument!));
 
-        return await MetricAnnotationQueries.InWindow(annotations, from, to)
-            .OrderByDescending(x => x.StartsAt)
+        var notes = await MetricAnnotationQueries.InWindow(annotations, from, to)
+            .OrderBy(x => x.EndsAt == null ? 0 : 1)
+            .ThenBy(x => x.EndsAt >= to ? 0 : 1)
+            .ThenBy(x => x.AcknowledgedNoise ? 0 : 1)
+            .ThenByDescending(x => x.StartsAt)
             .ThenByDescending(x => x.Id)
-            .Take(MetricAnnotationValidation.MaxPerRead)
+            .Take(MetricAnnotationValidation.MaxPerRead + 1)
             .Select(MetricAnnotationQueries.Projection)
             .ToListAsync(ct);
+        var truncated = notes.Count > MetricAnnotationValidation.MaxPerRead;
+
+        var kept = notes
+            .Take(MetricAnnotationValidation.MaxPerRead)
+            .OrderByDescending(x => x.StartsAt)
+            .ThenByDescending(x => x.Id)
+            .ToList();
+
+        return (kept, truncated);
     }
 
     private Task<List<MetricBoardTile>> LoadTilesAsync(CancellationToken ct)

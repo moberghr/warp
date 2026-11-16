@@ -248,7 +248,7 @@ curl -fsS -H "Authorization: Bearer $WARP_OPS_TOKEN" -H "Content-Type: applicati
         "id": 0,
         "target": 1,
         "instrument": "checkout.completed",
-        "tagFilter": "outcome=error",
+        "tagFilter": null,
         "note": "PayFast duplicate-callback race, about once a day, known (PAY-412)",
         "startsAt": "2026-11-01T00:00:00Z",
         "endsAt": null,
@@ -257,6 +257,10 @@ curl -fsS -H "Authorization: Bearer $WARP_OPS_TOKEN" -H "Content-Type: applicati
 ```
 
 The author is the signed-in dashboard user, never a body field.
+
+The note has no filter on purpose. To acknowledge a tile, a note must cover everything the tile reads. "Checkout
+success" reads both outcomes, so a note on `outcome=error` alone would be listed on the tile but would not
+acknowledge it: a note about one slice cannot excuse a problem in the rest.
 
 **Test scenario.**
 
@@ -267,6 +271,9 @@ The author is the signed-in dashboard user, never a body field.
   names the rule's own verdict (`unacknowledgedStatus` in the API), and the sparkline shows a shaded band. The
   verdict check for that tile reads `"acknowledged": true` and does not fail the deploy. The
   `metric_annotation` row has your user name as `author`.
+- *When* you change the note's `tagFilter` to `outcome=error`.
+- *Then* the note is still listed on the tile, but the tile shows its real status again: the note covers only
+  part of what the tile reads.
 - *When* you set `endsAt` to an hour ago.
 - *Then* the tile shows its real status again. Annotations never change SLO evaluation: use **Acknowledge** on
   the SLO for that.

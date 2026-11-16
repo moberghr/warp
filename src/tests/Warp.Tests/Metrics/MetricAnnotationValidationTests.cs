@@ -163,6 +163,45 @@ public class MetricAnnotationValidationTests
         MetricAnnotationMatch.AppliesTo(note, tile).ShouldBe(expected);
     }
 
+    [TimedTheory]
+    [InlineData(null, null, true)]
+    [InlineData(null, "status=500", true)]
+    [InlineData("status=500", "status=500", true)]
+    [InlineData("status=5*", "status=500", true)]
+    [InlineData("status=5*", "status=50*", true)]
+    [InlineData("status=5*", "status=5*", true)]
+    [InlineData("status=*", "status=5*", true)]
+    [InlineData("status=5*", "status=5*,route=/pay", true)]
+    [InlineData("status=500", null, false)]
+    [InlineData("status=500", "status=5*", false)]
+    [InlineData("status=50*", "status=5*", false)]
+    [InlineData("status=503", "status=500", false)]
+    [InlineData("error=duplicate", "route=/pay", false)]
+    [InlineData("status=5*,route=/pay", "status=500", false)]
+    [InlineData("status={none}", "status={none}", true)]
+    [InlineData("status=*", "status={none}", false)]
+    [InlineData("status={none}", null, false)]
+    public void Covers_NoteMustBeImpliedByTheTileFilter(string? noteFilter, string? tileFilter, bool expected)
+    {
+        var note = Model(noteFilter);
+        var tile = new MetricBoardTile { Instrument = "http", TagFilter = tileFilter };
+
+        MetricAnnotationMatch.Covers(note, tile).ShouldBe(expected);
+    }
+
+    [TimedFact]
+    public void Covers_OtherInstrument_NeverCovers()
+    {
+        MetricAnnotationMatch.Covers(Model(null, instrument: "other"), new MetricBoardTile { Instrument = "http" }).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public void Covers_UnparseableTileFilter_IsNeverCovered()
+    {
+        MetricAnnotationMatch.Covers(Model("status=5*"), new MetricBoardTile { Instrument = "http", TagFilter = "status" }).ShouldBeFalse();
+        MetricAnnotationMatch.Covers(Model(null), new MetricBoardTile { Instrument = "http", TagFilter = "status" }).ShouldBeTrue();
+    }
+
     [TimedFact]
     public void AppliesTo_OtherInstrumentOrSloNote_NeverApplies()
     {

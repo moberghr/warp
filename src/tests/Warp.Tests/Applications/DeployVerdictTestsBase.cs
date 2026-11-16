@@ -100,17 +100,37 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task GetVerdict_DeployYoungerThanTheSettleWindow_IsPendingEvenWhenBreaching()
     {
-        await SeedDeployAsync("api", "2.0.0", Now.AddMinutes(-3));
+        // Deployed 8 minutes ago with a 10-minute settle window. The complete part of its window is 11:52-11:55 (the
+        // 11:55 bucket is still filling), 3/5 of the 11:50 bucket: 60 events, over the threshold.
+        await SeedDeployAsync("api", "2.0.0", Now.AddMinutes(-8));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-10), 100));
+        await SeedTilesAsync(Tile("Errors", threshold: 10));
+
+        var verdict = await Service().GetVerdict(new DeployVerdictQuery { Application = "api", MinWindow = TimeSpan.FromMinutes(10) }, Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pending);
+        verdict.Window.Settled.ShouldBeFalse();
+        verdict.Window.SettlesAt.ShouldBe(Now.AddMinutes(2));
+        var check = verdict.Checks.ShouldHaveSingleItem();
+        check.State.ShouldBe("breaching");
+        check.Value.ShouldNotBeNull().ShouldBe(60, 1e-9);
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_EventsOnlyInTheStillFillingBucket_DoNotCountYet()
+    {
+        // #328: the bucket holding now - flush interval is still being written, so it is left out of the window (and of
+        // the baselines alike); a deploy whose only events are there has no complete data.
+        await SeedDeployAsync("api", "2.0.0", Now.AddMinutes(-30));
         await SeedMetricsAsync(Point(Now.AddMinutes(-5), 100));
         await SeedTilesAsync(Tile("Errors", threshold: 10));
 
         var verdict = await Service().GetVerdict(Query("api"), Ct);
 
         verdict.ShouldNotBeNull();
-        verdict.Verdict.ShouldBe(DeployVerdicts.Pending);
-        verdict.Window.Settled.ShouldBeFalse();
-        verdict.Window.SettlesAt.ShouldBe(Now.AddMinutes(2));
-        verdict.Checks.ShouldHaveSingleItem().State.ShouldBe("breaching");
+        verdict.Checks.ShouldHaveSingleItem().State.ShouldBe("noData");
+        verdict.Verdict.ShouldBe(DeployVerdicts.NoData);
     }
 
     [TimedTheory]
