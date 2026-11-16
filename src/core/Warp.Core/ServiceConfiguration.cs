@@ -242,6 +242,15 @@ public static class ServiceConfiguration
             x.GetRequiredService<IOptions<WarpConfiguration>>(),
             x.GetRequiredService<TimeProvider>()));
 
+        // Metrics health board (#326) read/command. Registered in AddWarp (not AddMetrics / AddMetricBoard) so a
+        // dashboard-only host serves the board without the collector; the metric_board_tile table is always in the
+        // schema (§2.11), AddMetricBoard() only seeds tiles from code.
+        services.TryAddScoped<IMetricBoardQueryService>(x => new MetricBoardQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
+            x.GetRequiredService<TimeProvider>()));
+        services.TryAddScoped<IMetricBoardCommandService, MetricBoardCommandService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
@@ -456,6 +465,7 @@ public static class ServiceConfiguration
         AddSloEvaluationEntity(modelBuilder, schema);
         AddMetricPointEntity(modelBuilder, schema);
         AddMetricInstrumentEntity(modelBuilder, schema);
+        AddMetricBoardTileEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -1287,6 +1297,39 @@ public static class ServiceConfiguration
         instrument.Property(p => p.CollapsedTags).HasMaxLength(256);
 
         instrument.Metadata.SetSchema(schema);
+    }
+
+    public static void AddMetricBoardTileEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var tile = modelBuilder.Entity<MetricBoardTile>();
+
+        tile.Property(p => p.Id);
+        tile.HasKey(p => p.Id);
+
+        tile.Property(p => p.Name).HasMaxLength(200);
+        tile.Property(p => p.Position);
+        tile.Property(p => p.Instrument).HasMaxLength(128);
+        tile.Property(p => p.Application).HasMaxLength(200);
+        tile.Property(p => p.TagFilter).HasMaxLength(512);
+        tile.Property(p => p.Kind).HasConversion<int>();
+        tile.Property(p => p.RatioTag).HasMaxLength(64);
+        tile.Property(p => p.GoodValues).HasMaxLength(512);
+        tile.Property(p => p.BadValues).HasMaxLength(512);
+        tile.Property(p => p.GaugeAggregate).HasConversion<int>();
+        tile.Property(p => p.StatusRule).HasConversion<int>();
+        tile.Property(p => p.Comparison).HasConversion<int>();
+        tile.Property(p => p.Threshold);
+        tile.Property(p => p.BaselineDays);
+        tile.Property(p => p.MaxDeviation);
+        tile.Property(p => p.DeviationDirection).HasConversion<int>();
+        tile.Property(p => p.CreatedAt);
+        tile.Property(p => p.UpdatedAt);
+
+        // A board is a handful of rows read whole, in board order. Not unique: the seeder and the command layer keep
+        // names apart, as for SloDefinition (NULL-uniqueness differs across providers).
+        tile.HasIndex(p => new { p.Position, p.Id });
+
+        tile.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)

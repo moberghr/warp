@@ -924,31 +924,12 @@ public sealed class SloEvaluator<TContext> : IServerTask
         => Overlap(row.Tier, row.BucketStart, from, to, now);
 
     private double Overlap(MetricTier tier, DateTime bucketStart, DateTime from, DateTime to, DateTime now)
-        => SloMath.OverlapFraction(bucketStart, WrittenWidth(tier, bucketStart, now), from, to);
+        => MetricWindows.Overlap(tier, bucketStart, from, to, now, FineMinutes);
 
-    // Seconds of [from, to) a bucket covers, its width clipped at now like Overlap's.
+    // Seconds of [from, to) a bucket covers, its width clipped at now like Overlap's (MetricWindows, shared with the
+    // metrics health board).
     private double CoveredSeconds(MetricTier tier, DateTime bucketStart, DateTime from, DateTime to, DateTime now)
-    {
-        var width = WrittenWidth(tier, bucketStart, now);
-
-        return SloMath.OverlapFraction(bucketStart, width, from, to) * width.TotalSeconds;
-    }
-
-    // The bucket still being written (it straddles now) has only covered the time up to now.
-    private TimeSpan WrittenWidth(MetricTier tier, DateTime bucketStart, DateTime now)
-    {
-        var width = TierWidth(tier);
-        var written = now - bucketStart;
-
-        return written < width ? written : width;
-    }
-
-    private TimeSpan TierWidth(MetricTier tier) => tier switch
-    {
-        MetricTier.Fine => TimeSpan.FromMinutes(FineMinutes),
-        MetricTier.Hourly => TimeSpan.FromHours(1),
-        _ => TimeSpan.FromDays(1),
-    };
+        => MetricWindows.CoveredSeconds(tier, bucketStart, from, to, now, FineMinutes);
 
     // A row's bucket counts split at the threshold; false for a row without bucket detail (the rollup drops it when a
     // sum would not fit the column) or with a corrupt bounds/counts CSV. Bounds are parsed once per distinct ladder.

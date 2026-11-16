@@ -130,6 +130,89 @@ internal static class SloMath
     }
 
     /// <summary>
+    /// Volume ceiling, the mirror of <see cref="EvaluateVolumeFloor"/> for a rise: <c>ratio = observed / baseline</c>,
+    /// breaching when <c>ratio &gt; maxRatio</c> (&gt; 1), budget <c>(maxRatio − ratio) / (maxRatio − 1)</c>, burn
+    /// <c>(ratio − 1) / (maxRatio − 1)</c>. A baseline of zero reads as fully healthy here; the caller reports NoData.
+    /// </summary>
+    public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateVolumeCeiling(double observed, double baseline, double maxRatio)
+    {
+        if (!AllFinite(observed, baseline, maxRatio))
+        {
+            return NoDataResult;
+        }
+
+        if (baseline <= 0)
+        {
+            return (1.0, 1.0, 0.0);
+        }
+
+        var ratio = observed / baseline;
+        var allowed = Math.Max(1e-9, maxRatio - 1.0);
+
+        return Finite((ratio, (maxRatio - ratio) / allowed, (ratio - 1.0) / allowed));
+    }
+
+    /// <summary>
+    /// A level held to a bound (metric health-board threshold tiles, #326): at most / at least <paramref name="target"/>,
+    /// equal never a violation (as <see cref="TryGaugeVerdict"/>). At most a positive target is exactly
+    /// <see cref="EvaluateCount"/> (the <c>MetricThreshold</c> maths, so "5xx ≤ 10" reads the same on a tile and an SLO);
+    /// otherwise the budget is the headroom over <c>|target|</c>, and a zero target is all-or-nothing (1, or minus the
+    /// overshoot). Attainment is the observed value; burn is <c>1 − budget</c>.
+    /// </summary>
+    public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateBound(double observed, double target, SloComparison comparison)
+    {
+        if (!AllFinite(observed, target))
+        {
+            return NoDataResult;
+        }
+
+        if (comparison != SloComparison.AtLeast && target > 0)
+        {
+            return EvaluateCount(observed, target);
+        }
+
+        var headroom = comparison == SloComparison.AtLeast ? observed - target : target - observed;
+        var scale = Math.Abs(target);
+        var allOrNothing = headroom >= 0 ? 1.0 : headroom;
+        var budget = scale < 1e-9 ? allOrNothing : headroom / scale;
+
+        return Finite((observed, budget, 1.0 - budget));
+    }
+
+    /// <summary>
+    /// How far <paramref name="current"/> moved from <paramref name="baseline"/> against a <paramref name="maxDeviation"/>
+    /// in the <paramref name="direction"/> (metric health-board deviation tiles, #326). <paramref name="ratioPoints"/>
+    /// reads both as ratios and the deviation as ratio points — a drop is <see cref="EvaluateRatioDrop"/> (the
+    /// <c>MetricRatio</c>-with-baseline maths) and a rise the same with the two swapped; otherwise the deviation is a
+    /// fraction of the baseline — a drop is <see cref="EvaluateVolumeFloor"/> at <c>1 − maxDeviation</c> (the
+    /// <c>MetricVolumeFloor</c> maths) and a rise <see cref="EvaluateVolumeCeiling"/> at <c>1 + maxDeviation</c>.
+    /// <see cref="MetricDeviationDirection.Either"/> takes whichever side has less budget. The caller reports NoData for
+    /// a missing (or, for a relative deviation, non-positive) baseline.
+    /// </summary>
+    public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateDeviation(
+        double current,
+        double baseline,
+        double maxDeviation,
+        MetricDeviationDirection direction,
+        bool ratioPoints)
+    {
+        var drop = ratioPoints
+            ? EvaluateRatioDrop(baseline, current, maxDeviation)
+            : EvaluateVolumeFloor(current, baseline, 1.0 - maxDeviation);
+        var rise = ratioPoints
+            ? EvaluateRatioDrop(current, baseline, maxDeviation)
+            : EvaluateVolumeCeiling(current, baseline, 1.0 + maxDeviation);
+
+        return direction switch
+        {
+            MetricDeviationDirection.Drop => drop,
+            MetricDeviationDirection.Rise => rise,
+            _ when IsNoData(drop) || IsNoData(rise) => NoDataResult,
+            _ => drop.BudgetRemaining <= rise.BudgetRemaining ? drop : rise,
+        };
+    }
+
+    /// <summary>
     /// Fraction (0..1) of the bucket <c>[bucketStart, bucketStart + bucketWidth)</c> that overlaps the window
     /// <c>(windowStart, windowEnd]</c>. A coarse bucket that only partly overlaps a window or baseline contributes
     /// its events scaled by this fraction (events assumed uniform within the bucket).

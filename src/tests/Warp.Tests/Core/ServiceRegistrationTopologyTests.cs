@@ -211,6 +211,50 @@ public class ServiceRegistrationTopologyTests
     }
 
     [TimedFact]
+    public void AddWarp_Only_ResolvesTheMetricBoardServicesWithoutAnyHostedSeeder()
+    {
+        // A dashboard-only host serves the health board (#326) with no AddMetrics and no AddMetricBoard.
+        var services = NewServices();
+        services.AddWarp<TestContext>(_ => { });
+
+        using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = sp.CreateScope();
+
+        scope.ServiceProvider.GetService<IMetricBoardQueryService>().ShouldNotBeNull();
+        scope.ServiceProvider.GetService<IMetricBoardCommandService>().ShouldNotBeNull();
+        services.ShouldNotContain(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>));
+    }
+
+    [TimedFact]
+    public void AddMetricBoard_CalledTwice_RegistersOneSeederAndOneMergedBoard()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddMetricBoard(y => y.Value("A", "a"));
+            x.AddMetricBoard(y => y.Value("B", "b"));
+        });
+
+        services.Count(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>)).ShouldBe(1);
+        services.Count(x => x.ServiceType == typeof(IMetricsMarker)).ShouldBe(0);
+        var options = services
+            .Where(x => x.ServiceType == typeof(MetricBoardOptions))
+            .Select(x => x.ImplementationInstance)
+            .OfType<MetricBoardOptions>()
+            .ShouldHaveSingleItem();
+        options.Seeded.Select(x => x.Name).ShouldBe(["A", "B"]);
+    }
+
+    [TimedFact]
+    public void AddMetricBoard_NoTiles_RegistersNoSeeder()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x => x.AddMetricBoard(_ => { }));
+
+        services.ShouldNotContain(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>));
+    }
+
+    [TimedFact]
     public void AddMetrics_CollectorHost_IsRegisteredBeforeTheFlusher()
     {
         // Hosted services stop in reverse registration order: the flusher must stop first, so its final drain still

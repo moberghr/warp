@@ -799,6 +799,59 @@ public static class WarpEndpoints
             }
         });
 
+        // Metrics health board (#326). IMetricBoardQueryService / IMetricBoardCommandService are always registered by
+        // AddWarp (dashboard-only hosts resolve them without AddMetrics); the board is a view of the Metrics page, so it
+        // rides the same `metrics` nav flag. Same group conventions (§1.5) as every other route, writes included, like
+        // the SLO upsert. Literal segments, so they win over metrics/{id}.
+        apiGroup.MapGet("metrics/board", async ([FromServices] IMetricBoardQueryService svc, HttpRequest request, CancellationToken ct) =>
+        {
+            if (!MetricSeriesRequestParser.TryParseRange(request.Query, out var from, out var to, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            try
+            {
+                return Results.Ok(await svc.GetBoard(from, to, ct));
+            }
+            catch (MetricQueryValidationException e)
+            {
+                return Results.BadRequest(new { error = e.Message });
+            }
+        });
+
+        apiGroup.MapGet("metrics/board/tiles", async ([FromServices] IMetricBoardQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetTiles(ct)));
+
+        apiGroup.MapPost("metrics/board/tiles", async (
+            [FromServices] IMetricBoardCommandService svc,
+            [FromServices] IMetricQueryService metrics,
+            [FromBody] MetricBoardTileUpsertRequest body,
+            CancellationToken ct) =>
+        {
+            var tile = body.ToTile();
+
+            // The seeder runs the same validator: the instrument's registry kind decides whether a ratio is allowed.
+            var (ok, error) = await Warp.Core.Metrics.MetricBoardTileValidator.ValidateAsync(tile, metrics, ct);
+            if (!ok)
+            {
+                return Results.BadRequest(error);
+            }
+
+            var id = await svc.Upsert(tile, ct);
+
+            return id is null
+                ? Results.BadRequest($"A metric board holds at most {Warp.Core.Metrics.MetricBoardValidation.MaxTiles} tiles.")
+                : Results.Ok(new { id });
+        });
+
+        apiGroup.MapDelete("metrics/board/tiles/{id:int}", async ([FromServices] IMetricBoardCommandService svc, int id, CancellationToken ct) =>
+        {
+            var deleted = await svc.Delete(id, ct);
+
+            return deleted ? Results.NoContent() : Results.NotFound();
+        });
+
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
         // registered by AddWarp (dashboard-only processes resolve them), so these data routes are
         // non-nullable; the sidebar nav is gated on the addons flag (IWebhookRedeliveryEnqueuer presence),
@@ -1072,11 +1125,12 @@ internal static class MetricSeriesRequestParser
     // culture-dependent or partial timestamp is a 400 instead of a guess.
     private static readonly string[] InstantFormats = ["O", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.fff'Z'"];
 
-    public static bool TryParse(IQueryCollection query, [NotNullWhen(true)] out MetricSeriesQuery? parsed, [NotNullWhen(false)] out string? error)
+    // The from/to pair every metric read takes (the series and the health board): ISO instants, from before to, within
+    // the readable calendar and at most MaxRangeDays apart.
+    public static bool TryParseRange(IQueryCollection query, out DateTime from, out DateTime to, [NotNullWhen(false)] out string? error)
     {
-        parsed = null;
-
-        if (!TryParseInstant(query["from"].ToString(), out var from) || !TryParseInstant(query["to"].ToString(), out var to))
+        to = default;
+        if (!TryParseInstant(query["from"].ToString(), out from) || !TryParseInstant(query["to"].ToString(), out to))
         {
             error = "from and to are required ISO 8601 timestamps.";
 
@@ -1101,6 +1155,20 @@ internal static class MetricSeriesRequestParser
         {
             error = $"The range must not exceed {MaxRangeDays} days.";
 
+            return false;
+        }
+
+        error = null;
+
+        return true;
+    }
+
+    public static bool TryParse(IQueryCollection query, [NotNullWhen(true)] out MetricSeriesQuery? parsed, [NotNullWhen(false)] out string? error)
+    {
+        parsed = null;
+
+        if (!TryParseRange(query, out var from, out var to, out error))
+        {
             return false;
         }
 
@@ -1246,6 +1314,47 @@ public sealed record SloUpsertRequest(
         BaselineDays = BaselineDays,
         Comparison = Comparison,
         GaugeAggregate = GaugeAggregate,
+    };
+}
+
+public sealed record MetricBoardTileUpsertRequest(
+    int Id,
+    string Name,
+    string Instrument,
+    MetricTileKind Kind = MetricTileKind.Value,
+    int Position = 0,
+    string? Application = null,
+    string? TagFilter = null,
+    string? RatioTag = null,
+    string? GoodValues = null,
+    string? BadValues = null,
+    SloGaugeAggregate? GaugeAggregate = null,
+    MetricTileStatusRule StatusRule = MetricTileStatusRule.None,
+    SloComparison? Comparison = null,
+    double? Threshold = null,
+    int? BaselineDays = null,
+    double? MaxDeviation = null,
+    MetricDeviationDirection? DeviationDirection = null)
+{
+    public Warp.Core.Data.Entities.MetricBoardTile ToTile() => new()
+    {
+        Id = Id,
+        Name = Name ?? string.Empty,
+        Instrument = Instrument ?? string.Empty,
+        Kind = Kind,
+        Position = Position,
+        Application = Application,
+        TagFilter = TagFilter,
+        RatioTag = RatioTag,
+        GoodValues = GoodValues,
+        BadValues = BadValues,
+        GaugeAggregate = GaugeAggregate,
+        StatusRule = StatusRule,
+        Comparison = Comparison,
+        Threshold = Threshold,
+        BaselineDays = BaselineDays,
+        MaxDeviation = MaxDeviation,
+        DeviationDirection = DeviationDirection,
     };
 }
 
