@@ -169,6 +169,50 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         rows[1].TagFilter.ShouldBe("http.response.status_code=5*");
     }
 
+    [TimedTheory]
+    [InlineData(nameof(SloDefinition.TagFilter))]
+    [InlineData(nameof(SloDefinition.SecondaryMetric))]
+    [InlineData(nameof(SloDefinition.RatioTag))]
+    public async Task Seeder_MetricObjectiveFieldEditedInDashboard_ReseedKeepsOneRowWithTheEdit(string field)
+    {
+        // #332: the dashboard edit changes a field the seeder used to match on; the restart must find the row by name.
+        await SeedFromConfigAsync(ConfigureEditable);
+        var ctx = _fixture.CreateContext();
+        var row = await ctx.Set<SloDefinition>().Where(x => x.Name == EditableNameFor(field)).SingleAsync(Ct);
+        ApplyDashboardEdit(row, field);
+        await ctx.SaveChangesAsync(Ct);
+
+        await SeedFromConfigAsync(ConfigureEditable);
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().Where(x => x.Name == EditableNameFor(field)).ToListAsync(Ct);
+        rows.Count.ShouldBe(1);
+        ReadEditedField(rows[0], field).ShouldBe("edited");
+    }
+
+    [TimedFact]
+    public async Task Seeder_MetricObjectiveRenamedInDashboard_ReseedMatchesByFieldsAndKeepsOneRow()
+    {
+        await SeedFromConfigAsync(o => o.AddMetricThreshold("5xx", "http.server.request.duration", 0, tagFilter: "status=5*"));
+        var ctx = _fixture.CreateContext();
+        var row = await ctx.Set<SloDefinition>().SingleAsync(Ct);
+        row.Name = "server errors";
+        await ctx.SaveChangesAsync(Ct);
+
+        await SeedFromConfigAsync(o => o.AddMetricThreshold("5xx", "http.server.request.duration", 0, tagFilter: "status=5*"));
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().ToListAsync(Ct);
+        rows.Count.ShouldBe(1);
+        rows[0].Name.ShouldBe("server errors");
+    }
+
+    [TimedFact]
+    public void AddMetric_SameKindNameAndApplicationTwice_Throws()
+    {
+        var options = new SloOptions().AddMetricThreshold("5xx", "a", 0);
+
+        Should.Throw<ArgumentException>(() => options.AddMetricThreshold("5xx", "b", 0));
+    }
+
     [TimedFact]
     public async Task Seeder_GapWithGaugeSecondaryInstrument_IsSkipped_AndTheValidSeedStillInserts()
     {
@@ -232,6 +276,41 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         row.BadValues.ShouldBe("error");
         row.BaselineDays.ShouldBe(1);
     }
+
+    private static void ConfigureEditable(SloOptions o) => o
+        .AddMetricThreshold("threshold", "http.server.request.duration", 0, tagFilter: "status=5*")
+        .AddMetricGap("gap", "payments.received", "payments.processed", 0)
+        .AddMetricRatio("ratio", "payment.results", "result", "success", "error", 0.99);
+
+    private static string EditableNameFor(string field) => field switch
+    {
+        nameof(SloDefinition.TagFilter) => "threshold",
+        nameof(SloDefinition.SecondaryMetric) => "gap",
+        _ => "ratio",
+    };
+
+    private static void ApplyDashboardEdit(SloDefinition row, string field)
+    {
+        switch (field)
+        {
+            case nameof(SloDefinition.TagFilter):
+                row.TagFilter = "edited";
+                break;
+            case nameof(SloDefinition.SecondaryMetric):
+                row.SecondaryMetric = "edited";
+                break;
+            default:
+                row.RatioTag = "edited";
+                break;
+        }
+    }
+
+    private static string? ReadEditedField(SloDefinition row, string field) => field switch
+    {
+        nameof(SloDefinition.TagFilter) => row.TagFilter,
+        nameof(SloDefinition.SecondaryMetric) => row.SecondaryMetric,
+        _ => row.RatioTag,
+    };
 
     private static SloDefinition Objective(string name, SloKind kind, string dimension, double target)
         => new() { Name = name, Kind = kind, Dimension = dimension, TargetValue = target, WindowSeconds = 3600, Enabled = true };

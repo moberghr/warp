@@ -81,7 +81,7 @@ opt.AddSlo(o =>
 });
 ```
 
-Seeding is insert-if-absent, and for metric kinds the match key adds `TagFilter`, `SecondaryMetric` and `RatioTag`, so two objectives on one instrument with different filters do not collide. A seeded objective is re-validated against `HourlyStatisticsRetention` when the host starts. The SLOs page has a form with an instrument picker and the fields of each kind.
+Seeding is insert-if-absent, and for metric kinds the match key adds `TagFilter`, `SecondaryMetric` and `RatioTag`, so two objectives on one instrument with different filters do not collide. A metric objective is also matched by its name (unique per kind and application; a repeated name throws at registration), so editing its filter, secondary instrument or ratio tag in the dashboard does not reseed a duplicate on restart. Renaming it alone does not either; only editing both the name and those fields does. A seeded objective is re-validated against `HourlyStatisticsRetention` when the host starts. The SLOs page has a form with an instrument picker and the fields of each kind.
 
 When a metric objective breaches, `SloBreachedEvent.Metric` (nullable, metric kinds only) carries a label of what it reads, built from the objective's own definition (for example `http.server.request.duration [http.route=/api/adyen/*,http.response.status_code=5*]`). It never contains a tag value observed in the data.
 

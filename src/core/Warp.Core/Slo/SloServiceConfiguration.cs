@@ -168,6 +168,14 @@ public sealed class SloOptions
             throw new ArgumentException($"Invalid SLO objective ({definition.Kind} {definition.Dimension}): {error}", nameof(definition));
         }
 
+        // The seeder matches a metric objective by name, so a repeated name would silently seed only the first.
+        if (Seeded.Exists(x => x.Kind == definition.Kind
+            && string.Equals(x.Name, definition.Name, StringComparison.Ordinal)
+            && string.Equals(x.Application, definition.Application, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException($"Duplicate SLO objective name '{definition.Name}' for {definition.Kind}: metric objective names must be unique per kind and application.", nameof(definition));
+        }
+
         Seeded.Add(definition);
 
         return this;
@@ -216,7 +224,7 @@ public static class SloServiceConfiguration
 
 /// <summary>
 /// Startup seeder for config-defined SLO objectives (§8.31). Insert-if-absent by (kind, dimension, application,
-/// percentile) so it never clobbers a dashboard edit. Runs once at boot; the schema is expected present because
+/// percentile; metric kinds also by name or filter fields, #332) so it never clobbers a dashboard edit. Runs once at boot; the schema is expected present because
 /// web/worker are gated on a dedicated migrator running to completion first (§ migrator gating), so a failure here
 /// is not a transient not-yet-migrated race but a real error — logged at <c>Error</c> (alertable) rather than
 /// swallowed to a Warning nobody watches. It stays non-fatal (objectives can still be authored in the dashboard),
@@ -267,11 +275,15 @@ internal sealed class SloSeeder<TContext> : IHostedService
                 }
 
                 // Metric kinds put the instrument in Dimension, so two objectives on one instrument are told apart
-                // by their filter, secondary instrument and ratio tag.
+                // by their filter, secondary instrument and ratio tag. Those are editable in the dashboard, so the
+                // name (unique per kind + application, enforced by SloOptions) matches too (#332): an edit of
+                // either the name or the fields still finds the row; only an edit of both reseeds.
                 var exists = isMetric
                     ? await context.Set<SloDefinition>().AnyAsync(
-                        x => x.Kind == seed.Kind && x.Dimension == seed.Dimension && x.Application == seed.Application && x.Percentile == seed.Percentile
-                            && x.TagFilter == seed.TagFilter && x.SecondaryMetric == seed.SecondaryMetric && x.RatioTag == seed.RatioTag,
+                        x => x.Kind == seed.Kind && x.Application == seed.Application
+                            && (x.Name == seed.Name
+                                || (x.Dimension == seed.Dimension && x.Percentile == seed.Percentile
+                                    && x.TagFilter == seed.TagFilter && x.SecondaryMetric == seed.SecondaryMetric && x.RatioTag == seed.RatioTag)),
                         cancellationToken)
                     : await context.Set<SloDefinition>().AnyAsync(
                         x => x.Kind == seed.Kind && x.Dimension == seed.Dimension && x.Application == seed.Application && x.Percentile == seed.Percentile,
