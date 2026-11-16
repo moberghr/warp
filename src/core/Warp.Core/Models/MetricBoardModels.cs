@@ -71,8 +71,18 @@ public sealed class MetricBoardTileResult
     /// <summary>The same window seven days earlier.</summary>
     public double? WeekAgo { get; init; }
 
-    /// <summary>Healthy / Warning / Breaching / NoData from the tile's rule; null when the tile has no rule.</summary>
+    /// <summary>
+    /// Healthy / Warning / Breaching / NoData from the tile's rule, or Acknowledged when it would be Warning or Breaching
+    /// and an acknowledged-noise annotation that applies to the tile is active at the window's end (#333); null when the
+    /// tile has no rule.
+    /// </summary>
     public SloState? Status { get; init; }
+
+    /// <summary>The rule's own verdict, before acknowledged noise: equal to <see cref="Status"/> unless that is Acknowledged.</summary>
+    public SloState? UnacknowledgedStatus { get; init; }
+
+    /// <summary>Instrument annotations (#333) that apply to the tile and overlap the window, newest start first.</summary>
+    public IReadOnlyList<MetricAnnotationModel> Annotations { get; init; } = [];
 
     public IReadOnlyList<MetricBoardSparkPoint> Sparkline { get; init; } = [];
 }

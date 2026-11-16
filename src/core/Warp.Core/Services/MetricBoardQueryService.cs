@@ -20,7 +20,8 @@ public interface IMetricBoardQueryService
     /// Every tile (up to <see cref="MetricBoardValidation.MaxTiles"/>) evaluated over <c>[rangeStart, rangeEnd)</c>: its value now, the
     /// same window one and seven days earlier, a status and a sparkline. The whole board is one batched, tier-bounded
     /// <c>metric_point</c> read (two grouped statements at most, whatever the tile count) plus the registry rows of its
-    /// instruments — never a scan of the days between the windows. Throws
+    /// instruments and one read of the instrument annotations overlapping the window (#333, attached per tile in memory)
+    /// — never a scan of the days between the windows. Throws
     /// <see cref="MetricQueryValidationException"/> for an empty, inverted or over-long (&gt; 90 days) range, or one too
     /// close to the ends of the calendar.
     /// </summary>
@@ -90,6 +91,10 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
                 .ToListAsync(ct);
         var instruments = registry.ToDictionary(x => x.Name, x => (x.Kind, x.Unit), StringComparer.Ordinal);
 
+        // Annotations (#333): one more statement for the whole board, every instrument note overlapping the window,
+        // matched to the tiles in memory (never a read per tile).
+        var annotations = await ReadAnnotationsAsync(names, from, to, ct);
+
         // Two statements at most: instruments only read without tags (no filter, no ratio on any of their tiles) are
         // summed per bucket alone; the rest per bucket and tag set. An unregistered instrument is not read at all.
         var tagged = tiles
@@ -115,14 +120,18 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         {
             var known = instruments.TryGetValue(tile.Instrument, out var info);
             var spec = specs[tile.Id];
+            var applying = annotations.FindAll(x => MetricAnnotationMatch.AppliesTo(x, tile));
             if (!known || spec is null || !MetricBoardValidation.AcceptsInstrument(tile.Kind, info.Kind))
             {
+                var unread = MetricBoardMath.Status(tile, null, null, null);
                 results.Add(new MetricBoardTileResult
                 {
                     Tile = Project(tile),
                     InstrumentKind = known ? info.Kind : null,
                     Unit = known ? info.Unit : null,
-                    Status = MetricBoardMath.Status(tile, null, null, null),
+                    Status = MetricAnnotationMatch.Acknowledge(unread, applying, to),
+                    UnacknowledgedStatus = unread,
+                    Annotations = applying,
                 });
 
                 continue;
@@ -137,6 +146,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             var dayAgo = MetricBoardMath.WindowValue(spec, info.Kind, scoped, from.AddDays(-1), to.AddDays(-1), now, fineMinutes, tagCache);
             var weekAgo = MetricBoardMath.WindowValue(spec, info.Kind, scoped, from.AddDays(-7), to.AddDays(-7), now, fineMinutes, tagCache);
             var sparkline = MetricBoardMath.Sparkline(spec, info.Kind, scoped, from, to, tier, fineMinutes, tagCache);
+            var status = MetricBoardMath.Status(tile, current, dayAgo, weekAgo);
 
             results.Add(new MetricBoardTileResult
             {
@@ -146,7 +156,9 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
                 Current = current,
                 DayAgo = dayAgo,
                 WeekAgo = weekAgo,
-                Status = MetricBoardMath.Status(tile, current, dayAgo, weekAgo),
+                Status = MetricAnnotationMatch.Acknowledge(status, applying, to),
+                UnacknowledgedStatus = status,
+                Annotations = applying,
                 Sparkline = sparkline.ConvertAll(x => new MetricBoardSparkPoint { Timestamp = x.Timestamp, Value = x.Value }),
             });
         }
@@ -210,6 +222,26 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             Min = x.Min,
             Max = x.Max,
         });
+    }
+
+    private async Task<List<MetricAnnotationModel>> ReadAnnotationsAsync(List<string> instruments, DateTime from, DateTime to, CancellationToken ct)
+    {
+        if (instruments.Count == 0)
+        {
+            return [];
+        }
+
+        var annotations = _context.Set<MetricAnnotation>()
+            .AsNoTracking()
+            .Where(x => x.Target == MetricAnnotationTarget.Instrument)
+            .Where(x => instruments.Contains(x.Instrument!));
+
+        return await MetricAnnotationQueries.InWindow(annotations, from, to)
+            .OrderByDescending(x => x.StartsAt)
+            .ThenByDescending(x => x.Id)
+            .Take(MetricAnnotationValidation.MaxPerRead)
+            .Select(MetricAnnotationQueries.Projection)
+            .ToListAsync(ct);
     }
 
     private Task<List<MetricBoardTile>> LoadTilesAsync(CancellationToken ct)

@@ -852,6 +852,54 @@ public static class WarpEndpoints
             return deleted ? Results.NoContent() : Results.NotFound();
         });
 
+        // Metric annotations (#333): known-issue notes on an instrument (optionally filtered) or an SLO objective. The
+        // services are always registered by AddWarp (dashboard-only hosts resolve them) and the routes carry the group's
+        // conventions (§1.5) like every other admin write. The author is the authenticated dashboard user, never a body
+        // field; the audit is the command service's structured LogInformation, naming that user.
+        apiGroup.MapGet("annotations", async ([FromServices] IMetricAnnotationQueryService svc, HttpRequest request, CancellationToken ct) =>
+        {
+            if (!MetricSeriesRequestParser.TryParseAnnotationQuery(request.Query, out var query, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            try
+            {
+                return Results.Ok(await svc.GetAnnotations(query, ct));
+            }
+            catch (MetricQueryValidationException e)
+            {
+                return Results.BadRequest(new { error = e.Message });
+            }
+        });
+
+        apiGroup.MapPost("annotations", async (
+            [FromServices] IMetricAnnotationCommandService svc,
+            [FromServices] IMetricQueryService metrics,
+            [FromServices] ISloQueryService slos,
+            [FromBody] MetricAnnotationUpsertRequest body,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var annotation = body.ToAnnotation();
+            var (ok, error) = await Warp.Core.Metrics.MetricAnnotationValidator.ValidateAsync(annotation, metrics, slos, ct);
+            if (!ok)
+            {
+                return Results.BadRequest(error);
+            }
+
+            var id = await svc.Upsert(annotation, DashboardUser.Name(http), ct);
+
+            return id is null ? Results.NotFound() : Results.Ok(new { id });
+        });
+
+        apiGroup.MapDelete("annotations/{id:int}", async ([FromServices] IMetricAnnotationCommandService svc, int id, HttpContext http, CancellationToken ct) =>
+        {
+            var deleted = await svc.Delete(id, DashboardUser.Name(http), ct);
+
+            return deleted ? Results.NoContent() : Results.NotFound();
+        });
+
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
         // registered by AddWarp (dashboard-only processes resolve them), so these data routes are
         // non-nullable; the sidebar nav is gated on the addons flag (IWebhookRedeliveryEnqueuer presence),
@@ -1266,6 +1314,66 @@ internal static class MetricSeriesRequestParser
         return true;
     }
 
+    // GET annotations: ?instrument= or ?slo= (an objective id), and an optional ?from= / ?to= window (ISO instants,
+    // either end open). Shape errors are a 400 here; both targets or an inverted window are the service's 400.
+    public static bool TryParseAnnotationQuery(IQueryCollection query, [NotNullWhen(true)] out MetricAnnotationQuery? parsed, [NotNullWhen(false)] out string? error)
+    {
+        parsed = null;
+
+        var sloText = query["slo"].ToString();
+        int? slo = null;
+        if (sloText.Length > 0)
+        {
+            if (!int.TryParse(sloText, NumberStyles.None, CultureInfo.InvariantCulture, out var id) || id <= 0)
+            {
+                error = "slo must be a positive objective id.";
+
+                return false;
+            }
+
+            slo = id;
+        }
+
+        DateTime? from = null;
+        DateTime? to = null;
+        var fromText = query["from"].ToString();
+        var toText = query["to"].ToString();
+        if (fromText.Length > 0)
+        {
+            if (!TryParseInstant(fromText, out var instant))
+            {
+                error = "from must be an ISO 8601 timestamp.";
+
+                return false;
+            }
+
+            from = DateTime.SpecifyKind(instant, DateTimeKind.Utc);
+        }
+
+        if (toText.Length > 0)
+        {
+            if (!TryParseInstant(toText, out var instant))
+            {
+                error = "to must be an ISO 8601 timestamp.";
+
+                return false;
+            }
+
+            to = DateTime.SpecifyKind(instant, DateTimeKind.Utc);
+        }
+
+        parsed = new MetricAnnotationQuery
+        {
+            Instrument = NullIfEmpty(query["instrument"].ToString()),
+            SloDefinitionId = slo,
+            From = from,
+            To = to,
+        };
+        error = null;
+
+        return true;
+    }
+
     private static string? NullIfEmpty(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static bool TryParseInstant(string text, out DateTime instant)
@@ -1355,6 +1463,32 @@ public sealed record MetricBoardTileUpsertRequest(
         BaselineDays = BaselineDays,
         MaxDeviation = MaxDeviation,
         DeviationDirection = DeviationDirection,
+    };
+}
+
+public sealed record MetricAnnotationUpsertRequest(
+    int Id,
+    string Note,
+    MetricAnnotationTarget Target = MetricAnnotationTarget.Instrument,
+    string? Instrument = null,
+    string? TagFilter = null,
+    int? SloDefinitionId = null,
+    DateTime StartsAt = default,
+    DateTime? EndsAt = null,
+    bool AcknowledgedNoise = false)
+{
+    // No author: it is the authenticated dashboard user, taken from the request by the route (DashboardUser).
+    public Warp.Core.Data.Entities.MetricAnnotation ToAnnotation() => new()
+    {
+        Id = Id,
+        Note = Note ?? string.Empty,
+        Target = Target,
+        Instrument = Instrument,
+        TagFilter = TagFilter,
+        SloDefinitionId = SloDefinitionId,
+        StartsAt = StartsAt,
+        EndsAt = EndsAt,
+        AcknowledgedNoise = AcknowledgedNoise,
     };
 }
 

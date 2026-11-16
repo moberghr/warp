@@ -25,7 +25,7 @@ public interface ISloCommandService
 /// <summary>
 /// <see cref="ISloCommandService"/> over the user's <typeparamref name="TContext"/> (§8.31). Low-contention admin
 /// actions — an optimistic load-set-save, with a structured <c>LogInformation</c> audit, mirroring
-/// <c>ErrorGroupCommandService</c>. Deleting an objective also removes its one-to-one evaluation row.
+/// <c>ErrorGroupCommandService</c>. Deleting an objective also removes its one-to-one evaluation row and its annotations (#333).
 /// </summary>
 public sealed class SloCommandService<TContext> : ISloCommandService
     where TContext : DbContext
@@ -99,6 +99,13 @@ public sealed class SloCommandService<TContext> : ISloCommandService
         {
             _context.Set<SloEvaluation>().Remove(evaluation);
         }
+
+        // Annotations on the objective (#333) are a soft reference: they go with it, in the same SaveChanges.
+        var annotations = await _context.Set<MetricAnnotation>()
+            .Where(x => x.Target == MetricAnnotationTarget.Slo)
+            .Where(x => x.SloDefinitionId == id)
+            .ToListAsync(ct);
+        _context.Set<MetricAnnotation>().RemoveRange(annotations);
 
         _context.Set<SloDefinition>().Remove(definition);
         await _context.SaveChangesAsync(ct);

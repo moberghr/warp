@@ -133,6 +133,7 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
         tables.ShouldContain("warp.metric_point");
         tables.ShouldContain("warp.metric_instrument");
         tables.ShouldContain("warp.metric_board_tile");
+        tables.ShouldContain("warp.metric_annotation");
         tables.ShouldContain(".host_order");
         operations.OfType<EnsureSchemaOperation>().ShouldContain(x => string.Equals(x.Name, "warp", StringComparison.Ordinal));
 

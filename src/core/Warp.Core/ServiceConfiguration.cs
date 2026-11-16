@@ -251,6 +251,11 @@ public static class ServiceConfiguration
             x.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<IMetricBoardCommandService, MetricBoardCommandService<TContext>>();
 
+        // Metric annotations (#333): known-issue notes on instruments and SLOs. Registered in AddWarp for the same reason
+        // as the board: a dashboard-only host edits and shows them; the metric_annotation table is always in the schema.
+        services.TryAddScoped<IMetricAnnotationQueryService, MetricAnnotationQueryService<TContext>>();
+        services.TryAddScoped<IMetricAnnotationCommandService, MetricAnnotationCommandService<TContext>>();
+
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
@@ -466,6 +471,7 @@ public static class ServiceConfiguration
         AddMetricPointEntity(modelBuilder, schema);
         AddMetricInstrumentEntity(modelBuilder, schema);
         AddMetricBoardTileEntity(modelBuilder, schema);
+        AddMetricAnnotationEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -1330,6 +1336,32 @@ public static class ServiceConfiguration
         tile.HasIndex(p => new { p.Position, p.Id });
 
         tile.Metadata.SetSchema(schema);
+    }
+
+    public static void AddMetricAnnotationEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var annotation = modelBuilder.Entity<MetricAnnotation>();
+
+        annotation.Property(p => p.Id);
+        annotation.HasKey(p => p.Id);
+
+        annotation.Property(p => p.Target).HasConversion<int>();
+        annotation.Property(p => p.Instrument).HasMaxLength(128);
+        annotation.Property(p => p.TagFilter).HasMaxLength(512);
+        annotation.Property(p => p.SloDefinitionId);
+        annotation.Property(p => p.Note).HasMaxLength(500);
+        annotation.Property(p => p.Author).HasMaxLength(200);
+        annotation.Property(p => p.StartsAt);
+        annotation.Property(p => p.EndsAt);
+        annotation.Property(p => p.AcknowledgedNoise);
+        annotation.Property(p => p.CreatedAt);
+        annotation.Property(p => p.UpdatedAt);
+
+        // Reads are per target and overlap a window: a chart / the board reads by instrument, the SLO page by objective.
+        annotation.HasIndex(p => new { p.Instrument, p.StartsAt });
+        annotation.HasIndex(p => p.SloDefinitionId);
+
+        annotation.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)

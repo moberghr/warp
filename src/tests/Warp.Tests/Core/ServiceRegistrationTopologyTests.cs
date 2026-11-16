@@ -226,6 +226,21 @@ public class ServiceRegistrationTopologyTests
     }
 
     [TimedFact]
+    public void AddWarp_Only_ResolvesTheMetricAnnotationServices()
+    {
+        // A dashboard-only host edits and shows annotations (#333) with no AddMetrics and no server.
+        var services = NewServices();
+        services.AddWarp<TestContext>(_ => { });
+
+        using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = sp.CreateScope();
+
+        scope.ServiceProvider.GetService<IMetricAnnotationQueryService>().ShouldNotBeNull();
+        scope.ServiceProvider.GetService<IMetricAnnotationCommandService>().ShouldNotBeNull();
+        services.Count(x => x.ServiceType == typeof(IMetricAnnotationCommandService)).ShouldBe(1);
+    }
+
+    [TimedFact]
     public void AddMetricBoard_CalledTwice_RegistersOneSeederAndOneMergedBoard()
     {
         var services = NewServices();

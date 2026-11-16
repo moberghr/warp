@@ -140,8 +140,37 @@ internal sealed class MetricFilter
         return true;
     }
 
+    // True when some tag set could match both filters: every key both constrain has overlapping patterns, and a key only
+    // one side constrains narrows nothing on the other. An empty filter overlaps everything. "{none}" (the absent tag) is
+    // never matched by a prefix pattern, so it overlaps only itself. The annotation-to-tile rule (#333).
+    public bool Overlaps(MetricFilter other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+
+        foreach (var (key, pattern) in _clauses)
+        {
+            var shared = Array.FindIndex(other._clauses, x => string.Equals(x.Key, key, StringComparison.Ordinal));
+            if (shared < 0)
+            {
+                continue;
+            }
+
+            var theirs = other._clauses[shared].Value;
+            var absent = IsAbsent(pattern) || IsAbsent(theirs);
+            if (absent ? pattern != theirs : !pattern.Overlaps(theirs))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     // "k1=v1,k2=v2" or "-" (the stored canonical form): the query service's parser, so the two never drift.
     public static Dictionary<string, string> ParseCanonicalTags(string? canonical) => Services.MetricSeriesMath.ParseTags(canonical);
+
+    private static bool IsAbsent(MetricValuePattern pattern)
+        => !pattern.IsPrefix && string.Equals(pattern.Text, NoneValue, StringComparison.Ordinal);
 }
 
 // One value, optionally ending in '*'. A null actual value (tag absent) is "{none}": only an exact "{none}" matches.
