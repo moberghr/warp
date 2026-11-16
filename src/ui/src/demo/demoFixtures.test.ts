@@ -139,6 +139,21 @@ describe('demo metrics fixtures', () => {
     expect(withP95.series[0].points.some((x) => x.percentile !== null)).toBe(true);
   });
 
+  it('flags the newest bucket as still filling and leaves it out of the headlines', async () => {
+    const to = Date.now();
+    const query = `from=${encodeURIComponent(new Date(to - 3_600_000).toISOString())}&to=${encodeURIComponent(new Date(to).toISOString())}&compare=1d`;
+    const result = await series('payment.results', query);
+    const current = result.series.find((x) => x.compare === null)!;
+    const overlay = result.series.find((x) => x.compare === '1d')!;
+    const complete = current.points.filter((x) => !x.incomplete);
+
+    expect(current.points[current.points.length - 1].incomplete).toBe(true);
+    expect(overlay.points.every((x) => !x.incomplete)).toBe(true);
+    expect(result.headlines.map((x) => x.compare)).toEqual([null, '1d']);
+    expect(result.headlines[0].value).toBe(complete.reduce((acc, x) => acc + x.sum, 0));
+    expect(Date.parse(result.completeUntil)).toBe(Date.parse(current.points.find((x) => x.incomplete)!.timestamp));
+  });
+
   it('answers 404 for an unknown instrument', async () => {
     await expect(series('no.such.metric')).rejects.toMatchObject({ response: { status: 404 } });
   });

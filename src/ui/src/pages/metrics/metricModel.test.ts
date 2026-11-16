@@ -13,9 +13,14 @@ import {
   buildSeriesQuery,
   chipFromQuery,
   chipToQuery,
+  changePercent,
   chipToText,
   collapseTooltip,
+  formatChange,
   formatPercentileValue,
+  headlineLabel,
+  headlineSummary,
+  incompleteTimes,
   isRatioActive,
   kindChartNote,
   kindLabel,
@@ -44,6 +49,7 @@ function point(offset: number, overrides: Partial<MetricPoint> = {}): MetricPoin
     min: null,
     max: null,
     percentile: null,
+    incomplete: false,
     ...overrides,
   };
 }
@@ -60,7 +66,9 @@ function series(kind: MetricKind, lines: MetricSeriesLine[]): MetricSeries {
     from: iso(0),
     to: iso(10),
     resolution: MetricTier.Fine,
+    completeUntil: iso(10),
     series: lines,
+    headlines: [],
   };
 }
 
@@ -493,5 +501,107 @@ describe('kindChartNote', () => {
     expect(kindChartNote(MetricKind.Counter)).toBeNull();
     expect(kindChartNote(MetricKind.Histogram)).toBeNull();
     expect(kindChartNote(MetricKind.Gauge)).toBeNull();
+  });
+});
+
+describe('the still-filling bucket', () => {
+  it('carries the flag onto the chart points of the current lines', () => {
+    const s = series(MetricKind.Histogram, [
+      line('total', [point(0, { count: 9, percentile: 100 }), point(1, { count: 2, percentile: 50, incomplete: true })]),
+    ]);
+    const datasets = buildDatasets(s, { percentile: 95, showMinMax: false });
+
+    expect(datasets.map((x) => x.data.map((y) => y.incomplete))).toEqual([
+      [false, true],
+      [false, true],
+    ]);
+  });
+
+  it('leaves overlay points unflagged', () => {
+    const s = series(MetricKind.Counter, [
+      line('total', [point(0, { sum: 5 }), point(1, { sum: 1, incomplete: true })]),
+      line('total', [point(0, { sum: 4 }), point(1, { sum: 6 })], '1d'),
+    ]);
+    const overlay = buildDatasets(s, { percentile: null, showMinMax: false }).find((x) => x.compare === '1d')!;
+
+    expect(overlay.data.map((x) => x.incomplete)).toEqual([false, false]);
+  });
+
+  it('collects the flagged timestamps of the current range only', () => {
+    const s = series(MetricKind.Counter, [
+      line('a', [point(0), point(1, { incomplete: true })]),
+      line('b', [point(1, { incomplete: true })]),
+      line('a', [point(1, { incomplete: true })], '1d'),
+    ]);
+
+    expect([...incompleteTimes(s)]).toEqual([T0 + MIN5]);
+  });
+
+  it('flags the matching ratio bucket of the current range, not of an overlay', () => {
+    const primary = series(MetricKind.Counter, [
+      line('ok', [point(0, { sum: 8 }), point(1, { sum: 1, incomplete: true })]),
+      line('ok', [point(0, { sum: 5 }), point(1, { sum: 5 })], '1d'),
+    ]);
+    const numerator = series(MetricKind.Counter, [
+      line('total', [point(0, { sum: 2 }), point(1, { sum: 1, incomplete: true })]),
+      line('total', [point(0, { sum: 1 }), point(1, { sum: 1 })], '1d'),
+    ]);
+    const datasets = buildRatioDatasets(primary, numerator, 'ok');
+
+    expect(datasets.find((x) => x.compare === null)!.data.map((x) => x.incomplete)).toEqual([false, true]);
+    expect(datasets.find((x) => x.compare === '1d')!.data.map((x) => x.incomplete ?? false)).toEqual([false, false]);
+  });
+});
+
+describe('headline', () => {
+  it('names the headline per kind', () => {
+    expect(headlineLabel(MetricKind.Counter)).toBe('Total');
+    expect(headlineLabel(MetricKind.UpDownCounter)).toBe('Net change');
+    expect(headlineLabel(MetricKind.Histogram)).toBe('Measurements');
+    expect(headlineLabel(MetricKind.Gauge)).toBe('Average');
+  });
+
+  it('computes the change against a baseline, and nothing against a missing or zero one', () => {
+    expect(changePercent(120, 100)).toBeCloseTo(20, 5);
+    expect(changePercent(-50, -100)).toBeCloseTo(50, 5);
+    expect(changePercent(5, 0)).toBeNull();
+    expect(changePercent(null, 10)).toBeNull();
+    expect(changePercent(10, null)).toBeNull();
+  });
+
+  it('formats a change with its sign', () => {
+    expect(formatChange(20)).toBe('+20%');
+    expect(formatChange(-3.14)).toBe('-3.1%');
+    expect(formatChange(0)).toBe('0%');
+    expect(formatChange(null)).toBe('—');
+  });
+
+  it('uses the server headlines (complete buckets only), never a sum of the drawn points', () => {
+    const s = {
+      ...series(MetricKind.Counter, [
+        line('total', [point(0, { sum: 30 }), point(1, { sum: 3, incomplete: true })]),
+        line('total', [point(0, { sum: 20 }), point(1, { sum: 20 })], '1d'),
+      ]),
+      headlines: [
+        { compare: null, value: 30, count: 6 },
+        { compare: '1d', value: 20, count: 4 },
+      ],
+    };
+    const summary = headlineSummary(s)!;
+
+    expect(summary.label).toBe('Total');
+    expect(summary.value).toBe(30);
+    expect(summary.excludesIncomplete).toBe(true);
+    expect(summary.comparisons).toEqual([{ compare: '1d', value: 20, changePercent: 50 }]);
+  });
+
+  it('is null when the response carries no headline', () => {
+    expect(headlineSummary(series(MetricKind.Counter, [line('total', [point(0)])]))).toBeNull();
+  });
+
+  it('does not claim to exclude anything when every bucket is complete', () => {
+    const s = { ...series(MetricKind.Counter, [line('total', [point(0, { sum: 4 })])]), headlines: [{ compare: null, value: 4, count: 1 }] };
+
+    expect(headlineSummary(s)!.excludesIncomplete).toBe(false);
   });
 });

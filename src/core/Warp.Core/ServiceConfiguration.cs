@@ -239,7 +239,8 @@ public static class ServiceConfiguration
         // AddMetrics() gates only the collector, the flusher and the addons flag.
         services.TryAddScoped<IMetricQueryService>(x => new MetricQueryService<TContext>(
             x.GetRequiredService<TContext>(),
-            x.GetRequiredService<IOptions<WarpConfiguration>>()));
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
+            x.GetRequiredService<TimeProvider>()));
 
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the

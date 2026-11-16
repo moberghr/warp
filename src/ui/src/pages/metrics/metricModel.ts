@@ -284,6 +284,8 @@ export type DatasetRole = 'value' | 'percentile' | 'min' | 'max' | 'ratio';
 export interface ChartPoint {
   x: number;
   y: number | null;
+  /** The current range's still-filling bucket: drawn faded and dashed, and left out of the headline. */
+  incomplete?: boolean;
 }
 
 export interface DatasetSpec {
@@ -435,7 +437,7 @@ export function buildDatasets(series: MetricSeries, options: DatasetOptions): Da
         points.map((p) => {
           const y = pick(p);
 
-          return { x: toMs(p.timestamp), y: y !== null && Number.isFinite(y) ? y : null };
+          return { x: toMs(p.timestamp), y: y !== null && Number.isFinite(y) ? y : null, incomplete: p.incomplete === true };
         }),
         primaryTimes,
         sameResolution
@@ -488,6 +490,18 @@ export function ratioPercent(numerator: number, total: number): number | null {
   return Number.isFinite(ratio) ? ratio : null;
 }
 
+/** The bucket timestamps the current range flags as still filling (any line). */
+export function incompleteTimes(series: MetricSeries): Set<number> {
+  return new Set(
+    series.series
+      .filter((x) => x.compare === null)
+      .flatMap((x) => x.points)
+      .filter((x) => x.incomplete === true)
+      .map((x) => toMs(x.timestamp))
+      .filter((x) => Number.isFinite(x))
+  );
+}
+
 /** Per-bucket sum of every line of one compare offset (null = the current range). */
 function sumByBucket(series: MetricSeries, compare: string | null): Map<number, number> {
   const sums = new Map<number, number>();
@@ -527,6 +541,7 @@ export function buildRatioDatasets(series: MetricSeries, numeratorSeries: Metric
       return [];
     }
 
+    const filling = compare === null ? incompleteTimes(series) : new Set<number>();
     const totals = sumByBucket(series, compare);
     const numerators = sumByBucket(numeratorSeries, compare);
     for (const t of numerators.keys()) {
@@ -542,7 +557,7 @@ export function buildRatioDatasets(series: MetricSeries, numeratorSeries: Metric
       .sort((a, b) => a - b);
     const points: ChartPoint[] = [...totals.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([x, total]) => ({ x, y: ratioPercent(numerators.get(x) ?? 0, total) }));
+      .map(([x, total]) => ({ x, y: ratioPercent(numerators.get(x) ?? 0, total), incomplete: filling.has(x) }));
     const spec: DatasetSpec = {
       id: `${compare ?? 'now'}|ratio`,
       label: `${numerator} ÷ total${compare ? ` (−${compare})` : ''} · ${resolutionLabel(resolution)}`,
@@ -582,4 +597,77 @@ export function axisTitles(kind: MetricKind, unit: string | null | undefined, ra
     default:
       return { y: suffix ? `Sum (${suffix})` : 'Sum', y1: '' };
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Headline: the range value over its complete buckets, and the 1d / 7d comparisons
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface HeadlineComparison {
+  compare: string;
+  value: number | null;
+  /** Change of the current value against this overlay, in percent; null when either side has no value or it is 0. */
+  changePercent: number | null;
+}
+
+export interface HeadlineSummary {
+  label: string;
+  value: number | null;
+  comparisons: HeadlineComparison[];
+  /** The current range has a still-filling bucket, which the value leaves out. */
+  excludesIncomplete: boolean;
+}
+
+/** What the headline of this kind is: the server sums counters, counts histograms and averages gauges. */
+export function headlineLabel(kind: MetricKind): string {
+  switch (kind) {
+    case MetricKind.UpDownCounter:
+      return 'Net change';
+    case MetricKind.Histogram:
+      return 'Measurements';
+    case MetricKind.Gauge:
+      return 'Average';
+    default:
+      return 'Total';
+  }
+}
+
+/** (current - previous) / |previous| in percent; null when it is not defined (a missing side, or a zero baseline). */
+export function changePercent(current: number | null, previous: number | null): number | null {
+  if (current === null || previous === null || !Number.isFinite(current) || !Number.isFinite(previous) || previous === 0) {
+    return null;
+  }
+
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+export function formatChange(percent: number | null): string {
+  if (percent === null) {
+    return '—';
+  }
+
+  const rounded = Math.abs(percent) >= 10 ? Math.round(percent) : Math.round(percent * 10) / 10;
+
+  return `${rounded > 0 ? '+' : ''}${rounded}%`;
+}
+
+/**
+ * The headline strip from the server's headlines (complete buckets only — the still-filling bucket is left out, never
+ * prorated, and each overlay leaves out the bucket aligned with it). Null when the response carries none.
+ */
+export function headlineSummary(series: MetricSeries): HeadlineSummary | null {
+  const headlines = series.headlines ?? [];
+  const current = headlines.find((x) => x.compare === null);
+  if (!current) {
+    return null;
+  }
+
+  return {
+    label: headlineLabel(series.kind),
+    value: current.value,
+    comparisons: headlines
+      .filter((x): x is typeof x & { compare: string } => x.compare !== null)
+      .map((x) => ({ compare: x.compare, value: x.value, changePercent: changePercent(current.value, x.value) })),
+    excludesIncomplete: incompleteTimes(series).size > 0,
+  };
 }

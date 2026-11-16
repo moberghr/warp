@@ -10,6 +10,8 @@ import {
   TimeScale,
   Tooltip,
   Legend,
+  type ScriptableContext,
+  type ScriptableLineSegmentContext,
 } from 'chart.js';
 import 'chartjs-adapter-luxon';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -35,6 +37,9 @@ import {
   buildSeriesQuery,
   chipToText,
   collapseTooltip,
+  formatChange,
+  formatNumber,
+  headlineSummary,
   isRatioActive,
   kindChartNote,
   kindLabel,
@@ -48,6 +53,7 @@ import {
   unitLabel,
   upsertChip,
   type DatasetSpec,
+  type HeadlineSummary,
   type MetricControls,
 } from './metricModel';
 
@@ -143,6 +149,7 @@ export default function MetricDetailPage() {
       : buildDatasets(series, { percentile: controls.percentile, showMinMax: controls.showMinMax });
   }, [series, numeratorSeries, ratioActive, controls.numerator, controls.percentile, controls.showMinMax]);
   const values = useMemo(() => breakdownValues(series), [series]);
+  const headline = useMemo(() => (series ? headlineSummary(series) : null), [series]);
   const axes = useMemo(
     () => (kind === null ? { y: '', y1: '' } : axisTitles(kind, instrument?.unit, ratioActive)),
     [kind, instrument?.unit, ratioActive],
@@ -382,6 +389,7 @@ export default function MetricDetailPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
+          {headline && !ratioActive && !seriesQuery.isError && <HeadlineStrip headline={headline} unit={unit} />}
           {seriesQuery.isError ? (
             <p className="py-8 text-center text-sm text-destructive">Unable to load the series.</p>
           ) : seriesQuery.isLoading || !series ? (
@@ -410,6 +418,28 @@ function Control({ label, children }: { label: string; children: React.ReactNode
     <div>
       <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
       {children}
+    </div>
+  );
+}
+
+function HeadlineStrip({ headline, unit }: { headline: HeadlineSummary; unit: string }) {
+  const show = (value: number | null) => (value === null ? '—' : `${formatNumber(value)}${unit ? ` ${unit}` : ''}`);
+
+  return (
+    <div className="mb-3 flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm">
+      <div>
+        <span className="text-xs uppercase tracking-wide text-muted-foreground">{headline.label}</span>{' '}
+        <span className="text-lg font-semibold tabular-nums">{show(headline.value)}</span>
+      </div>
+      {headline.comparisons.map((x) => (
+        <div key={x.compare} className="text-muted-foreground">
+          vs {x.compare} ago <span className="tabular-nums text-foreground">{show(x.value)}</span>{' '}
+          <span className="tabular-nums">({formatChange(x.changePercent)})</span>
+        </div>
+      ))}
+      {headline.excludesIncomplete && (
+        <span className="text-xs text-muted-foreground">Excludes the newest bucket, which is still filling (drawn faded).</span>
+      )}
     </div>
   );
 }
@@ -444,6 +474,8 @@ function MetricChart({
         datasets: datasets.map((d) => {
           const color = colorFor(d);
           const faint = d.role === 'min' || d.role === 'max';
+          // The still-filling bucket reads low: fade and dash the segment into it, and mark the point itself.
+          const filling = (index: number) => d.data[index]?.incomplete === true;
 
           return {
             label: d.label,
@@ -453,10 +485,15 @@ function MetricChart({
             backgroundColor: color,
             borderWidth: faint ? 1 : 2,
             borderDash: d.dashed ? [6, 4] : d.role === 'percentile' ? [2, 3] : faint ? [1, 3] : [],
-            pointRadius: 0,
+            pointRadius: (ctx: ScriptableContext<'line'>) => (filling(ctx.dataIndex) ? 3 : 0),
+            pointBackgroundColor: `${color}55`,
             pointHoverRadius: 3,
             tension: 0,
             spanGaps: false,
+            segment: {
+              borderColor: (ctx: ScriptableLineSegmentContext) => (filling(ctx.p1DataIndex) ? `${color}55` : undefined),
+              borderDash: (ctx: ScriptableLineSegmentContext) => (filling(ctx.p1DataIndex) ? [3, 3] : undefined),
+            },
           };
         }),
       },
@@ -493,6 +530,15 @@ function MetricChart({
         },
         plugins: {
           legend: { labels: { color: textColor, boxWidth: 12, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              label: (item) => {
+                const base = `${item.dataset.label ?? ''}: ${item.formattedValue}${ratio ? '%' : ''}`;
+
+                return datasets[item.datasetIndex]?.data[item.dataIndex]?.incomplete ? `${base} (still filling)` : base;
+              },
+            },
+          },
         },
       },
     });
