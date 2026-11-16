@@ -211,6 +211,10 @@ On a healthy→breaching edge the evaluator fires a `WarpEventType.SloBreached` 
 
 The **SLOs** page (`/slo`, gated on the `slo` addon flag) lists every objective with its state (Healthy / Warning / Breaching / Acknowledged / No data), error-budget bar, and fast/slow burn, and lets you create/edit/delete objectives and acknowledge a breach. **No data** is distinct from Healthy: an objective whose dimension never matched any metric (a typo'd job type or queue) reads as No data instead of a false green, and never alerts. Objectives are validated on save — a rate target must be a 0–1 ratio, a window must be positive — so a malformed objective can't silently disable its own evaluation. The detail page (`/slo/:id`) shows the budget gauge, burn stats, and the window/fast-burn breakdown. `GET/POST/DELETE {prefix}/api/slo*` serve the same data in any `AddWarp` process.
 
+## Annotations
+
+An objective can carry known-issue notes, for example "email provider rate-limits us during the nightly batch; retries recover", so a known dip is not investigated again. Notes are listed and edited on the detail page. Each one records its author (the signed-in dashboard user), a start, and an end or none for an ongoing note. A note is display only: it does not change the objective's evaluation, state or alerting, so use **Acknowledge** to silence a breach. Deleting the objective deletes its notes. The same notes can be attached to an instrument, and there they also show on the metric chart and the health board. See [Annotations](./custom-metrics.md#annotations) for the API, storage and audit.
+
 ## Migration
 
 Additive — two new tables (`slo_definition`, `slo_evaluation`), picked up by a standard `dotnet ef migrations add` / `database update`. The metric kinds (7.5.0) add seven nullable columns to `slo_definition` (`TagFilter`, `SecondaryMetric`, `SecondaryTagFilter`, `RatioTag`, `GoodValues`, `BadValues`, `BaselineDays`), and `MetricGaugeThreshold` two more (`Comparison`, `GaugeAggregate`, nullable ints), all additive. Disable with `SloEvaluationInterval = null`, or simply never call `AddSlo()`.

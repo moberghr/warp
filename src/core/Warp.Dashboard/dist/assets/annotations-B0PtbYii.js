@@ -1,0 +1,1 @@
+var e={Instrument:1,Slo:2};export{e as t};

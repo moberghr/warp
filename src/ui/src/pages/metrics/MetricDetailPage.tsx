@@ -24,7 +24,9 @@ import { parseFilterChip } from '@/lib/metricPattern';
 import { queryKeys } from '@/lib/queryClient';
 import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { useTickingValue } from '@/hooks/useTicking';
-import { DEPLOY_COLOR, deployMarkerPlugin } from '@/lib/deployMarkerPlugin';
+import { ANNOTATION_COLOR, DEPLOY_COLOR, annotationBandPlugin, deployMarkerPlugin } from '@/lib/deployMarkerPlugin';
+import { AnnotationPanel } from './AnnotationPanel';
+import { annotationBands, type AnnotationBand } from './annotationModel';
 import { MetricKind } from '@/types/metrics';
 import type { MetricInstrument } from '@/types/metrics';
 import {
@@ -185,6 +187,20 @@ export default function MetricDetailPage() {
     placeholderData: keepPreviousData,
   });
 
+  // Known-issue notes (#333) overlapping the window: every note on the instrument whatever its filter, shaded on the
+  // chart and listed under it. Same window and cadence as the deploys.
+  const annotationsQuery = useQuery({
+    queryKey: ['annotations', 'instrument', name, controls.range, controls.custom] as const,
+    queryFn: () => {
+      const w = resolveWindow(controls, Date.now());
+
+      return api.getAnnotations({ instrument: name as string, from: new Date(w.from).toISOString(), to: new Date(w.to + 1).toISOString() });
+    },
+    enabled: name !== null && instrument !== undefined,
+    refetchInterval: refetchMs,
+    placeholderData: keepPreviousData,
+  });
+
   // "Since last deploy" starts at the newest deploy of the selected application, or of any application when the
   // page has no application selected (the read is newest first, so latestDeploy is a guard, not a sort).
   const latestDeployQuery = useQuery({
@@ -224,6 +240,10 @@ export default function MetricDetailPage() {
   const markers = useMemo(
     () => (series ? deployMarkers(deploysQuery.data ?? [], { from: Date.parse(series.from), to: Date.parse(series.to) }, controls.application) : []),
     [deploysQuery.data, controls.application, series],
+  );
+  const bands = useMemo(
+    () => (series ? annotationBands(annotationsQuery.data?.items ?? [], { from: Date.parse(series.from), to: Date.parse(series.to) }) : []),
+    [annotationsQuery.data, series],
   );
   const headline = useMemo(() => (series ? headlineSummary(series, rate) : null), [series, rate]);
   const axes = useMemo(
@@ -513,7 +533,7 @@ export default function MetricDetailPage() {
         )}
       </Card>
 
-      <Card>
+      <Card className="mb-4">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-baseline justify-between gap-2 text-base">
             <span>{ratioActive ? 'Share of total' : 'Over time'}</span>
@@ -543,17 +563,36 @@ export default function MetricDetailPage() {
               axes={axes}
               ratio={ratioActive}
               markers={markers}
+              bands={bands}
               bounds={{ min: Date.parse(series.from), max: Date.parse(series.to) }}
             />
           )}
-          {markers.length > 0 && (
-            <p className="mt-2 text-xs text-muted-foreground">
-              <span className="mr-1 inline-block w-4 border-t-2 border-dashed align-middle" style={{ borderColor: DEPLOY_COLOR }} />
-              {markers.length === 1 ? '1 deploy' : `${markers.length} deploys`} in this range
+          {(markers.length > 0 || bands.length > 0) && (
+            <p className="mt-2 flex flex-wrap gap-4 text-xs text-muted-foreground">
+              {markers.length > 0 && (
+                <span>
+                  <span className="mr-1 inline-block w-4 border-t-2 border-dashed align-middle" style={{ borderColor: DEPLOY_COLOR }} />
+                  {markers.length === 1 ? '1 deploy' : `${markers.length} deploys`} in this range
+                </span>
+              )}
+              {bands.length > 0 && (
+                <span>
+                  <span className="mr-1 inline-block h-2.5 w-4 rounded-sm align-middle" style={{ backgroundColor: `${ANNOTATION_COLOR}55` }} />
+                  {bands.length === 1 ? '1 note' : `${bands.length} notes`} in this range
+                </span>
+              )}
             </p>
           )}
         </CardContent>
       </Card>
+
+      <AnnotationPanel
+        target={{ instrument: instrument.name, tagFilter: controls.filters.map((x) => `${x.key}=${x.value}`).join(',') || null }}
+        annotations={annotationsQuery.data?.items}
+        isTruncated={annotationsQuery.data?.isTruncated ?? false}
+        isError={annotationsQuery.isError}
+        invalidate={['annotations']}
+      />
     </div>
   );
 }
@@ -651,6 +690,7 @@ function MetricChart({
   axes,
   ratio,
   markers,
+  bands,
   bounds,
   height = 320,
 }: {
@@ -658,6 +698,8 @@ function MetricChart({
   axes: { y: string; y1: string };
   ratio: boolean;
   markers: DeployMarker[];
+  /** Annotation bands (#333), already clipped to the window. */
+  bands: AnnotationBand[];
   /** The window's ends, so the axis spans the selected range and a deploy at its start is on the chart. */
   bounds: { min: number; max: number };
   height?: number;
@@ -677,7 +719,7 @@ function MetricChart({
 
     const chart = new Chart(canvasRef.current, {
       type: 'line',
-      plugins: [deployMarkerPlugin(markers)],
+      plugins: [annotationBandPlugin(bands), deployMarkerPlugin(markers)],
       data: {
         datasets: datasets.map((d) => {
           const color = colorFor(d);
@@ -754,7 +796,7 @@ function MetricChart({
     });
 
     return () => chart.destroy();
-  }, [datasets, axes, ratio, hasData, markers, bounds.min, bounds.max]);
+  }, [datasets, axes, ratio, hasData, markers, bands, bounds.min, bounds.max]);
 
   if (!hasData) {
     return (

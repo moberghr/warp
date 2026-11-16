@@ -16,6 +16,7 @@ import {
 } from './data/applications';
 import { demoSlos, demoSloDetail } from './data/slo';
 import { demoBoardTiles, demoMetricBoard } from './data/metricBoard';
+import { demoAnnotationList } from './data/annotations';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
@@ -113,6 +114,15 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const sloResult = routeSlo(method, url, config);
     if (sloResult !== undefined) {
       return sloResult;
+    }
+
+    // Annotations (#333): GET lists the demo notes of one target; POST (upsert) and DELETE succeed without persisting.
+    if (url === '/annotations' || url.startsWith('/annotations?') || /^\/annotations\/[^/?]+$/.test(url)) {
+      if (method === 'get') {
+        return resolve(demoAnnotationList(config.params ?? {}), config);
+      }
+
+      return resolve(method === 'post' ? { id: 0 } : {}, config);
     }
 
     // Metrics: /addons reports metrics:true in demo mode (see routeGet), so the nav is visible and

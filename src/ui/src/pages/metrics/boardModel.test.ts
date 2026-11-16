@@ -4,6 +4,7 @@ import { MetricDeviationDirection, MetricTileKind, MetricTileStatusRule, type Me
 import { SloComparison, SloGaugeAggregate, SloState } from '@/types/slo';
 import {
   acceptsTileInstrument,
+  acknowledgedHint,
   buildTileRequest,
   changeStatusRule,
   changeTileKind,
@@ -32,7 +33,7 @@ const ratioTile: MetricBoardTile = {
 };
 
 function result(tile: MetricBoardTile, patch: Partial<MetricBoardTileResult> = {}): MetricBoardTileResult {
-  return { tile, instrumentKind: MetricKind.Counter, unit: null, current: null, dayAgo: null, weekAgo: null, status: null, sparkline: [], ...patch };
+  return { tile, instrumentKind: MetricKind.Counter, unit: null, current: null, dayAgo: null, weekAgo: null, status: null, unacknowledgedStatus: null, annotations: [], sparkline: [], ...patch };
 }
 
 describe('formatTileValue', () => {
@@ -96,10 +97,28 @@ describe('status', () => {
       result(valueTile, { status: SloState.Breaching }),
       result(valueTile, { status: SloState.Breaching }),
       result(valueTile, { status: SloState.NoData }),
+      result(valueTile, { status: SloState.Acknowledged }),
       result(valueTile, { status: null }),
     ]);
 
-    expect(counts).toEqual({ healthy: 0, warning: 0, breaching: 2, noData: 1 });
+    expect(counts).toEqual({ healthy: 0, warning: 0, breaching: 2, acknowledged: 1, noData: 1 });
+  });
+
+  it('gives an acknowledged tile its own neutral border', () => {
+    expect(tileStatusClass(SloState.Acknowledged)).toContain('slate');
+  });
+});
+
+describe('acknowledgedHint', () => {
+  it('names the rule verdict an acknowledged-noise note turned into Acknowledged', () => {
+    expect(acknowledgedHint({ status: SloState.Acknowledged, unacknowledgedStatus: SloState.Breaching })).toBe(
+      'Breaching by its rule, acknowledged by a known-noise note',
+    );
+  });
+
+  it('says nothing for any other status', () => {
+    expect(acknowledgedHint({ status: SloState.Breaching, unacknowledgedStatus: SloState.Breaching })).toBeNull();
+    expect(acknowledgedHint({ status: SloState.Acknowledged, unacknowledgedStatus: null })).toBeNull();
   });
 });
 

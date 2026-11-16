@@ -6,6 +6,7 @@ import { MetricKind, MetricTier } from '@/types/metrics';
 import { MetricDeviationDirection, MetricTileKind, MetricTileStatusRule } from '@/types/metricBoard';
 import type { MetricBoard, MetricBoardSparkPoint, MetricBoardTile, MetricBoardTileResult } from '@/types/metricBoard';
 import { SloComparison, SloGaugeAggregate, SloState } from '@/types/slo';
+import { demoTileAnnotations } from './annotations';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -178,6 +179,11 @@ export function demoMetricBoard(fromIso: string | undefined, toIso: string | und
     const current = windowValue(shape, t, from, to, true);
     const dayAgo = windowValue(shape, t, from - DAY, to - DAY, false);
     const weekAgo = windowValue(shape, t, from - 7 * DAY, to - 7 * DAY, false);
+    const ruled = status(t, current, dayAgo, weekAgo);
+    // Notes (#333) attached as the server does; an active acknowledged-noise note turns a problem into Acknowledged.
+    const annotations = demoTileAnnotations(t, from, to);
+    const acknowledged = (ruled === SloState.Warning || ruled === SloState.Breaching)
+      && annotations.some((a) => a.acknowledgedNoise && Date.parse(a.startsAt) < to && (a.endsAt === null || Date.parse(a.endsAt) >= to));
 
     return {
       tile: t,
@@ -186,7 +192,9 @@ export function demoMetricBoard(fromIso: string | undefined, toIso: string | und
       current,
       dayAgo,
       weekAgo,
-      status: status(t, current, dayAgo, weekAgo),
+      status: acknowledged ? SloState.Acknowledged : ruled,
+      unacknowledgedStatus: ruled,
+      annotations,
       sparkline: sparkline(shape, t, from, to),
     };
   });

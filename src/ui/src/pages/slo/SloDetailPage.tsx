@@ -1,6 +1,7 @@
 import { Link, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getSlo, ackSlo } from '@/api';
+import { getSlo, ackSlo, getAnnotations } from '@/api';
+import { AnnotationPanel } from '@/pages/metrics/AnnotationPanel';
 import { SloKind, SloKindLabel, SloState, isMetricKind, type SloObjective } from '@/types/slo';
 import { formatBudget, SloStatePill } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
@@ -16,6 +17,13 @@ export default function SloDetailPage() {
     queryKey: ['slo', objectiveId],
     queryFn: () => getSlo(objectiveId),
     refetchInterval: 30_000,
+  });
+
+  // Known-issue notes on this objective (#333): every note, newest first (capped by the server).
+  const annotationsQuery = useQuery({
+    queryKey: ['annotations', 'slo', objectiveId],
+    queryFn: () => getAnnotations({ slo: objectiveId }),
+    enabled: Number.isInteger(objectiveId) && objectiveId > 0,
   });
 
   const ackMutation = useMutation({
@@ -98,6 +106,16 @@ export default function SloDetailPage() {
         {o.acknowledgedUntil && <div>Acknowledged until: {new Date(o.acknowledgedUntil).toLocaleString(DASHBOARD_LOCALE)}</div>}
         {isThreshold(o.kind) && <div>Latency/depth objectives compare the windowed observed value to the target (lower is better).</div>}
         {isMetricKind(o.kind) && <div>{describeMetricKind(o.kind)}</div>}
+      </div>
+
+      <div className="mt-6">
+        <AnnotationPanel
+          target={{ sloDefinitionId: o.id }}
+          annotations={annotationsQuery.data?.items}
+          isTruncated={annotationsQuery.data?.isTruncated ?? false}
+          isError={annotationsQuery.isError}
+          invalidate={['annotations', 'slo', objectiveId]}
+        />
       </div>
     </div>
   );

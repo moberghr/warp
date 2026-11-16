@@ -299,6 +299,41 @@ A tile reads **No data** when its value (or the chosen baseline) is empty. That 
 
 **API.** `GET {prefix}/api/metrics/board?from=&to=` takes ISO instants at most 90 days apart; bad input is a 400. `GET {prefix}/api/metrics/board/tiles` lists the tiles. `POST {prefix}/api/metrics/board/tiles` inserts (`id: 0`) or updates a tile, validated against the instrument registry, and answers a 400 with the reason on failure. `DELETE {prefix}/api/metrics/board/tiles/{id}` removes one. These routes carry the dashboard's authorization like every other route.
 
+## Annotations
+
+After a deploy you usually know some noise is expected: "duplicate provider notification race, about once a day, predates this release". An **annotation** records that next to the numbers, so the same signal is not investigated again. [Issues](./error-grouping.md) only cover errors Warp sees itself, and annotations work on any instrument or objective.
+
+An annotation is a short note (at most **500** characters) attached to one of these:
+
+- an **instrument**, optionally narrowed by a tag filter in the same `k=v[,k=v]` grammar as the Metrics page, the SLOs and the board tiles;
+- an **SLO objective** (see [SLO / error budget](./slo-error-budget.md#annotations)).
+
+Each note has a **start** and either an **end** or none ("ongoing"), and an **author**. The author is the authenticated dashboard user: the identity name set by whichever gate protects the dashboard (the host's own scheme behind `RequireAuthorization`, or the built-in login). It is never read from the request. On an open dashboard it is `anonymous`.
+
+**Where they show:**
+
+- **Metric detail chart.** Every note on the instrument that overlaps the window is drawn as a shaded band, whatever its filter, and listed under the chart with its author, range and filter. Notes are added, edited and deleted from that list. A new note starts with the page's current filters.
+- **Health board tiles.** A tile shows a "N notes" indicator whose tooltip lists each note, and the bands are drawn on its sparkline. A note applies to a tile on the same instrument when the two filters do not contradict each other: no tag key that both constrain with values that can never match together. A note without a filter applies to every tile on the instrument. A note on `error.type=duplicate` applies to a tile filtered by `route=/pay`. A note on `status=4*` does not apply to a tile on `status=5*`. Notes are attached in the board's batched read, one more statement for the whole board, never one per tile.
+- **SLO detail page.** The objective's notes, with the same editor.
+
+**Acknowledged noise.** An instrument note can be marked *acknowledged noise*. While such a note is active at the window's end (for a live board, that means now), a board tile it applies to reads **Acknowledged** instead of Warning or Breaching. The pill's tooltip names the rule's own verdict, and the API returns it as `unacknowledgedStatus`. Healthy and No data tiles are never changed. The flag applies to the tile as a whole, because Warp cannot tell which events the note is about, so **nothing is subtracted from any count**. The tile's value, change and sparkline stay the same, and only the status changes. A note that ended before the window's end does not acknowledge, so a problem that comes back after the known issue was fixed still shows as Breaching. The flag has no effect on SLO evaluation. SLO alerts have their own acknowledgement (`POST …/slo/{id}/ack`), so the flag is cleared on an SLO note.
+
+**What is stored.** Only what the operator typed, plus the author: the note, the target (instrument name or objective id), the filter string, the range, the acknowledged-noise flag and the author. Nothing else is stored: no tag values, no payloads, no measurement data. The note text is never written to the log. Annotations live in the `metric_annotation` table and are **kept forever**, because they are tiny and nothing sweeps them. Deleting an SLO objective deletes its notes in the same transaction. Notes on an instrument that stops reporting stay, and so does the instrument's history.
+
+**Audit.** Every create, edit and delete writes a structured `LogInformation` record naming the note id, the acting user and the target, the same mechanism as the SLO, board-tile and issue commands. An edit keeps the original author and logs the editor.
+
+**Validation.** The instrument must be in the instrument registry, or the objective must exist. The note must be non-empty and at most 500 characters. The filter must parse. The end must be after the start. Any failure is a 400 with the reason.
+
+**API.**
+
+| Route | |
+|---|---|
+| `GET {prefix}/api/annotations?instrument=…` or `?slo={id}` | That target's notes, every filter included, newest start first. Optional `from` / `to` (ISO instants, either end open) keep only notes overlapping the window, with ongoing notes included. At most **200** are returned, with `isTruncated` set when more matched. Asking for both targets, a malformed instant or an inverted window is a 400. With no target, every note is returned. |
+| `POST {prefix}/api/annotations` | Inserts (`id: 0`) or updates a note. The body has `target` (1 instrument, 2 SLO), `instrument`, `tagFilter`, `sloDefinitionId`, `note`, `startsAt`, `endsAt` (null for ongoing) and `acknowledgedNoise`. Any `author` field is ignored. The answer is a 400 with the reason on bad input, or a 404 when the note being edited no longer exists. |
+| `DELETE {prefix}/api/annotations/{id}` | 204, or 404 when it does not exist. |
+
+`IMetricAnnotationQueryService` and `IMetricAnnotationCommandService` are registered by `AddWarp`, so a dashboard-only host serves annotations without `AddMetrics` or a server. The routes carry the dashboard's authorization like every other route.
+
 ## Cardinality
 
 Collected tags can be unbounded (a request id, a user id), and Warp writes them to your own operational database. Each process therefore bounds what a collected instrument can do, in memory:
@@ -370,4 +405,4 @@ See also [Configuration](/docs/operations/configuration#custom-application-metri
 
 ## Migration
 
-Additive: three new tables (`metric_point`, `metric_instrument`, and `metric_board_tile` for the [health board](#health-board)), nine nullable columns on `slo_definition` for the metric SLO kinds, and the nullable `metric_point.version` column for [comparing versions](#comparing-versions), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
+Additive: four new tables (`metric_point`, `metric_instrument`, `metric_board_tile` for the [health board](#health-board), and `metric_annotation` for [annotations](#annotations)), nine nullable columns on `slo_definition` for the metric SLO kinds, and the nullable `metric_point.version` column for [comparing versions](#comparing-versions), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.

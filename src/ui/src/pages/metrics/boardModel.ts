@@ -117,6 +117,8 @@ export function tileStatusClass(status: SloState | null): string {
       return 'border-red-500/80';
     case SloState.NoData:
       return 'border-dashed border-slate-400/60';
+    case SloState.Acknowledged:
+      return 'border-slate-500/70';
     default:
       return 'border-border';
   }
@@ -141,16 +143,31 @@ export function sparklinePoints(result: Pick<MetricBoardTileResult, 'tile' | 'sp
 }
 
 /** Counts per status for the board header: `{ breaching: 1, warning: 0, ... }`. */
-export function statusCounts(results: MetricBoardTileResult[]): Record<'healthy' | 'warning' | 'breaching' | 'noData', number> {
-  const counts = { healthy: 0, warning: 0, breaching: 0, noData: 0 };
+export function statusCounts(
+  results: MetricBoardTileResult[],
+): Record<'healthy' | 'warning' | 'breaching' | 'acknowledged' | 'noData', number> {
+  const counts = { healthy: 0, warning: 0, breaching: 0, acknowledged: 0, noData: 0 };
   for (const r of results) {
     if (r.status === SloState.Healthy) counts.healthy++;
     else if (r.status === SloState.Warning) counts.warning++;
     else if (r.status === SloState.Breaching) counts.breaching++;
+    else if (r.status === SloState.Acknowledged) counts.acknowledged++;
     else if (r.status === SloState.NoData) counts.noData++;
   }
 
   return counts;
+}
+
+/**
+ * The pill's hover text for a tile read Acknowledged (#333): what the rule said before the acknowledged-noise note, or
+ * null for every other status.
+ */
+export function acknowledgedHint(result: Pick<MetricBoardTileResult, 'status' | 'unacknowledgedStatus'>): string | null {
+  if (result.status !== SloState.Acknowledged || result.unacknowledgedStatus === null || result.unacknowledgedStatus === SloState.Acknowledged) {
+    return null;
+  }
+
+  return `${SloStateLabel[result.unacknowledgedStatus]} by its rule, acknowledged by a known-noise note`;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

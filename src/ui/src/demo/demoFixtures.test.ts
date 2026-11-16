@@ -8,6 +8,8 @@ import { MetricKind } from '@/types/metrics';
 import type { MetricInstrument, MetricSeries } from '@/types/metrics';
 import type { WarpAddonsInfo } from '@/types';
 import type { MetricBoard, MetricBoardTile } from '@/types/metricBoard';
+import { MetricAnnotationTarget, type MetricAnnotationList } from '@/types/annotations';
+import { demoSlos } from './data/slo';
 
 // Demo mode is what the docs screenshots and every "show me the dashboard" walkthrough run against,
 // so a dangling reference in the fixtures reads as a broken product: the page renders "Unable to
@@ -202,5 +204,45 @@ describe('demo metrics board fixtures', () => {
   it('accepts tile upserts and deletes', async () => {
     await expect(call('post', '/metrics/board/tiles')).resolves.toEqual({ id: 0 });
     await expect(call('delete', '/metrics/board/tiles/1')).resolves.toEqual({});
+  });
+});
+
+// Annotations (#333) show on the metric chart, the board tiles and the SLO page, so demo mode serves them too: every
+// note points at a demo instrument or objective, a read honours its target, and the board attaches them to tiles.
+describe('demo annotation fixtures', () => {
+  const adapter = createDemoAdapter(false);
+  const call = async <T>(method: string, url: string, params?: Record<string, string | number>): Promise<T> => {
+    const response = await adapter({ url, baseURL: '', method, params } as InternalAxiosRequestConfig);
+
+    return response.data as T;
+  };
+
+  it('every note points at a demo instrument or a demo objective', async () => {
+    const all = await call<MetricAnnotationList>('get', '/annotations');
+    const instruments = new Set(demoMetrics.map((x) => x.name));
+    const objectives = new Set(demoSlos().items.map((x) => x.id));
+
+    expect(all.items.length).toBeGreaterThan(0);
+    expect(all.items.filter((x) => x.target === MetricAnnotationTarget.Instrument && !instruments.has(x.instrument ?? ''))).toEqual([]);
+    expect(all.items.filter((x) => x.target === MetricAnnotationTarget.Slo && !objectives.has(x.sloDefinitionId ?? 0))).toEqual([]);
+  });
+
+  it('reads one target at a time, newest first', async () => {
+    const slo = await call<MetricAnnotationList>('get', '/annotations', { slo: 1 });
+    const http = await call<MetricAnnotationList>('get', '/annotations', { instrument: 'http.server.request.duration' });
+
+    expect(slo.items.length).toBeGreaterThan(0);
+    expect(slo.items.every((x) => x.target === MetricAnnotationTarget.Slo && x.sloDefinitionId === 1)).toBe(true);
+    expect(http.items.every((x) => x.instrument === 'http.server.request.duration')).toBe(true);
+  });
+
+  it('attaches notes to board tiles and accepts note upserts and deletes', async () => {
+    const to = Date.now();
+    const board = await call<MetricBoard>('get', '/metrics/board', { from: new Date(to - 24 * 3_600_000).toISOString(), to: new Date(to).toISOString() });
+
+    expect(board.tiles.every((x) => Array.isArray(x.annotations))).toBe(true);
+    expect(board.tiles.some((x) => x.annotations.length > 0)).toBe(true);
+    await expect(call('post', '/annotations')).resolves.toEqual({ id: 0 });
+    await expect(call('delete', '/annotations/1')).resolves.toEqual({});
   });
 });

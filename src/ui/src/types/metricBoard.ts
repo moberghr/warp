@@ -2,6 +2,7 @@
 // Enums are numeric on the wire (§8.11, start at 1).
 import type { MetricKind, MetricTier } from './metrics';
 import type { SloComparison, SloGaugeAggregate, SloState } from './slo';
+import type { MetricAnnotation } from './annotations';
 
 /** What a tile shows (MetricTileKind). */
 export const MetricTileKind = {
@@ -62,8 +63,15 @@ export interface MetricBoardTileResult {
   current: number | null;
   dayAgo: number | null;
   weekAgo: number | null;
-  /** Null when the tile has no status rule. */
+  /**
+   * Null when the tile has no status rule. Acknowledged when the rule says Warning / Breaching but an acknowledged-noise
+   * annotation that applies to the tile is active at the window's end (#333).
+   */
   status: SloState | null;
+  /** The rule's own verdict before acknowledged noise (equal to status unless that is Acknowledged). */
+  unacknowledgedStatus: SloState | null;
+  /** Instrument annotations that apply to the tile and overlap the window, newest first (#333). */
+  annotations: MetricAnnotation[];
   sparkline: MetricBoardSparkPoint[];
 }
 

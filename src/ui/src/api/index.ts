@@ -424,6 +424,17 @@ export const upsertMetricBoardTile = (body: import('@/types/metricBoard').Metric
 
 export const deleteMetricBoardTile = (id: number) => api.delete(`/metrics/board/tiles/${id}`);
 
+// Metric annotations (#333): known-issue notes on an instrument or an SLO objective. The read takes one target and an
+// optional window (notes overlapping it, ongoing ones included); the upsert's 400 body is a plain message string, a 404
+// means the note being edited was deleted meanwhile.
+export const getAnnotations = (params: { instrument?: string; slo?: number; from?: string; to?: string }) =>
+  api.get<import('@/types/annotations').MetricAnnotationList>('/annotations', { params }).then(r => r.data);
+
+export const upsertAnnotation = (body: import('@/types/annotations').MetricAnnotationUpsert) =>
+  api.post<{ id: number }>('/annotations', body).then(r => r.data);
+
+export const deleteAnnotation = (id: number) => api.delete(`/annotations/${id}`);
+
 // Extensions
 export const getExtensions = () =>
   api.get<ExtensionManifest[]>('/extensions').then(r => r.data);

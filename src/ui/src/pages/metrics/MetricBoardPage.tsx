@@ -8,7 +8,8 @@ import { Hint } from '@/components/ui/tooltip';
 import * as api from '@/api';
 import { queryKeys } from '@/lib/queryClient';
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
-import { DEPLOY_COLOR, deployMarkerPlugin } from '@/lib/deployMarkerPlugin';
+import { ANNOTATION_COLOR, DEPLOY_COLOR, annotationBandPlugin, deployMarkerPlugin } from '@/lib/deployMarkerPlugin';
+import { annotationBands, tileAnnotationSummary, type AnnotationBand } from './annotationModel';
 import { useTickingValue } from '@/hooks/useTicking';
 import { MetricKind, type MetricInstrument } from '@/types/metrics';
 import type { ApplicationDeployModel } from '@/types/applications';
@@ -49,6 +50,7 @@ import {
   formatTileChange,
   formatTileValue,
   sparklinePoints,
+  acknowledgedHint,
   statusCounts,
   tileStatusClass,
   validateTileDraft,
@@ -167,6 +169,7 @@ export default function MetricBoardPage() {
           {boardQuery.isPlaceholderData && <span aria-live="polite">updating…</span>}
           {counts.breaching > 0 && <span className="text-red-600">{counts.breaching} breaching</span>}
           {counts.warning > 0 && <span className="text-amber-600">{counts.warning} warning</span>}
+          {counts.acknowledged > 0 && <span>{counts.acknowledged} acknowledged</span>}
           {counts.noData > 0 && <span>{counts.noData} no data</span>}
         </span>
       </div>
@@ -229,6 +232,9 @@ function TileCard({
   const points = useMemo(() => sparklinePoints(result), [result]);
   // A tile scoped to one application shows that application's deploys; an unscoped tile shows every deploy.
   const markers = useMemo(() => deployMarkers(deploys ?? [], { from, to }, tile.application), [deploys, from, to, tile.application]);
+  // Known-issue notes (#333) the server attached to this tile in the board's one batched read.
+  const bands = useMemo(() => annotationBands(result.annotations, { from, to }), [result.annotations, from, to]);
+  const ackHint = acknowledgedHint(result);
 
   return (
     <div className={`rounded-lg border-2 bg-card p-3 ${tileStatusClass(result.status)}`}>
@@ -243,7 +249,11 @@ function TileCard({
           </Link>
           <div className="truncate font-mono text-[11px] text-muted-foreground">{describeTile(tile)}</div>
         </div>
-        {result.status !== null && <SloStatePill state={result.status} enabled />}
+        {result.status !== null && (ackHint ? (
+          <Hint text={ackHint}>
+            <span><SloStatePill state={result.status} enabled /></span>
+          </Hint>
+        ) : <SloStatePill state={result.status} enabled />)}
       </div>
 
       <div className="mt-2 flex items-baseline justify-between gap-2">
@@ -261,10 +271,18 @@ function TileCard({
         </span>
       </div>
 
-      <Sparkline points={points} from={from} to={to} markers={markers} />
+      <Sparkline points={points} from={from} to={to} markers={markers} bands={bands} />
 
       <div className="mt-1 flex items-center justify-between text-xs">
-        <span className="text-muted-foreground">
+        <span className="flex gap-3 text-muted-foreground">
+          {result.annotations.length > 0 && (
+            <Hint text={<span className="whitespace-pre-line">{tileAnnotationSummary(result.annotations)}</span>}>
+              <span>
+                <span className="mr-1 inline-block h-2.5 w-3 rounded-sm align-middle" style={{ backgroundColor: `${ANNOTATION_COLOR}55` }} />
+                {result.annotations.length === 1 ? '1 note' : `${result.annotations.length} notes`}
+              </span>
+            </Hint>
+          )}
           {markers.length > 0 && (
             <Hint text={markers.map((m) => m.label).join(', ')}>
               <span>
@@ -283,7 +301,21 @@ function TileCard({
   );
 }
 
-function Sparkline({ points, from, to, markers, height = 48 }: { points: SparkPoint[]; from: number; to: number; markers: DeployMarker[]; height?: number }) {
+function Sparkline({
+  points,
+  from,
+  to,
+  markers,
+  bands,
+  height = 48,
+}: {
+  points: SparkPoint[];
+  from: number;
+  to: number;
+  markers: DeployMarker[];
+  bands: AnnotationBand[];
+  height?: number;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -293,7 +325,7 @@ function Sparkline({ points, from, to, markers, height = 48 }: { points: SparkPo
 
     const chart = new Chart(canvasRef.current, {
       type: 'line',
-      plugins: [deployMarkerPlugin(markers, false)],
+      plugins: [annotationBandPlugin(bands, false), deployMarkerPlugin(markers, false)],
       data: {
         datasets: [
           {
@@ -320,7 +352,7 @@ function Sparkline({ points, from, to, markers, height = 48 }: { points: SparkPo
     });
 
     return () => chart.destroy();
-  }, [points, from, to, markers]);
+  }, [points, from, to, markers, bands]);
 
   if (points.length === 0) {
     return (
