@@ -37,6 +37,71 @@ public class MetricBoardMathTests
         budget.ShouldBe(expectedBudget, 1e-9);
     }
 
+    [TimedTheory]
+    [InlineData(0.995, 0.98, 0.75)]
+    [InlineData(1.0, 0.98, 1.0)]
+    [InlineData(0.98, 0.98, 0.0)]
+    [InlineData(0.97, 0.98, -0.5)]
+    [InlineData(0.5, 0.0, 0.5)]
+    public void EvaluateBound_AtLeastOnARatio_IsTheRateBudget(double observed, double target, double expectedBudget)
+    {
+        var (attainment, budget, burn) = SloMath.EvaluateBound(observed, target, SloComparison.AtLeast, ratio: true);
+
+        attainment.ShouldBe(observed);
+        budget.ShouldBe(expectedBudget, 1e-9);
+        burn.ShouldBe(1 - expectedBudget, 1e-9);
+    }
+
+    [TimedFact]
+    public void EvaluateBound_AtLeastOnARatio_MatchesEvaluateRate()
+    {
+        // 995 good of 1000 against 0.98: the same budget an SLO with that target would give.
+        var rate = SloMath.EvaluateRate(995, 1000, 0.98);
+
+        SloMath.EvaluateBound(0.995, 0.98, SloComparison.AtLeast, ratio: true).BudgetRemaining.ShouldBe(rate.BudgetRemaining, 1e-9);
+    }
+
+    [TimedTheory]
+    [InlineData(0.995, SloState.Healthy)]
+    [InlineData(0.984, SloState.Warning)]
+    [InlineData(0.98, SloState.Warning)]
+    [InlineData(0.975, SloState.Breaching)]
+    public void Status_AtLeastThresholdOnARatioTile_CanBeHealthy(double current, SloState expected)
+    {
+        // Before the fix the budget was (obs − t) / t, at most 0.02 for t = 0.98: never Healthy.
+        var tile = Tile(MetricTileStatusRule.Threshold, threshold: 0.98, comparison: SloComparison.AtLeast, kind: MetricTileKind.Ratio);
+
+        MetricBoardMath.Status(tile, current, null, null).ShouldBe(expected);
+    }
+
+    [TimedFact]
+    public void Status_AtLeastThresholdOnAValueTile_KeepsTheHeadroomOverTheTarget()
+    {
+        // 12 vs at least 10 on a value tile: 20 % headroom, so Warning (the ratio formula is not applied).
+        var tile = Tile(MetricTileStatusRule.Threshold, threshold: 10, comparison: SloComparison.AtLeast);
+
+        MetricBoardMath.Status(tile, 12, null, null).ShouldBe(SloState.Warning);
+    }
+
+    [TimedTheory]
+    [InlineData(10, SloComparison.AtMost)]
+    [InlineData(10, SloComparison.AtLeast)]
+    public void Status_ValueEqualToTheThreshold_IsWarningNeverBreaching(double current, SloComparison comparison)
+    {
+        MetricBoardMath.Status(Tile(MetricTileStatusRule.Threshold, threshold: 10, comparison: comparison), current, null, null)
+            .ShouldBe(SloState.Warning);
+    }
+
+    [TimedTheory]
+    [InlineData(7.5, SloState.Healthy)]
+    [InlineData(7.6, SloState.Warning)]
+    public void Status_ThresholdAtTheQuarterBudgetEdge_IsHealthyAtExactly25Percent(double current, SloState expected)
+    {
+        // At most 10: 7.5 leaves exactly 25 % budget, the Warning line (strictly below 0.25 warns).
+        MetricBoardMath.Status(Tile(MetricTileStatusRule.Threshold, threshold: 10, comparison: SloComparison.AtMost), current, null, null)
+            .ShouldBe(expected);
+    }
+
     [TimedFact]
     public void EvaluateBound_AtMostPositiveTarget_IsExactlyTheSloCountMaths()
     {
@@ -128,6 +193,7 @@ public class MetricBoardMathTests
     [TimedTheory]
     [InlineData(null)]
     [InlineData(0.0)]
+    [InlineData(-5.0)]
     public void Status_DeviationOnAValueTileWithoutAPositiveBaseline_IsNoData(double? baseline)
     {
         var tile = Tile(MetricTileStatusRule.Deviation, baselineDays: 1, maxDeviation: 0.3);

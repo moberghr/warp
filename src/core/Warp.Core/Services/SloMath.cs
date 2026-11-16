@@ -157,13 +157,23 @@ internal static class SloMath
     /// equal never a violation (as <see cref="TryGaugeVerdict"/>). At most a positive target is exactly
     /// <see cref="EvaluateCount"/> (the <c>MetricThreshold</c> maths, so "5xx ≤ 10" reads the same on a tile and an SLO);
     /// otherwise the budget is the headroom over <c>|target|</c>, and a zero target is all-or-nothing (1, or minus the
-    /// overshoot). Attainment is the observed value; burn is <c>1 − budget</c>.
+    /// overshoot). Attainment is the observed value; burn is <c>1 − budget</c>. On a 0–1 ratio (<paramref name="ratio"/>)
+    /// at least a target below 1 is the <see cref="EvaluateRate"/> budget instead, <c>(observed − t) / (1 − t)</c>: the
+    /// headroom is measured against the allowed bad share, so "success ≥ 0.98" at 0.995 is Healthy. Over <c>t</c> the
+    /// headroom can never reach 25 % of <c>t</c> on a ratio, so the plain formula would never read Healthy.
     /// </summary>
-    public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateBound(double observed, double target, SloComparison comparison)
+    public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateBound(double observed, double target, SloComparison comparison, bool ratio = false)
     {
         if (!AllFinite(observed, target))
         {
             return NoDataResult;
+        }
+
+        if (ratio && comparison == SloComparison.AtLeast && target < 1)
+        {
+            var rateBudget = (observed - target) / (1.0 - target);
+
+            return Finite((observed, rateBudget, 1.0 - rateBudget));
         }
 
         if (comparison != SloComparison.AtLeast && target > 0)

@@ -148,6 +148,45 @@ public class MetricBoardValidationTests
         MetricBoardValidation.TryValidate(tile, null, out _).ShouldBeFalse();
     }
 
+    [TimedTheory]
+    [InlineData("blank name", "Name is required and must be at most 200 characters.")]
+    [InlineData("long name", "Name is required and must be at most 200 characters.")]
+    [InlineData("blank instrument", "Instrument is required and must be a valid instrument name of at most 128 characters.")]
+    [InlineData("long instrument", "Instrument is required and must be a valid instrument name of at most 128 characters.")]
+    [InlineData("negative position", "Position must be zero or greater.")]
+    [InlineData("long application", "Application must be at most 200 characters.")]
+    [InlineData("long filter", "TagFilter must be at most 512 characters.")]
+    [InlineData("malformed filter", "TagFilter is invalid: Filter entry 'status' is missing '='.")]
+    [InlineData("version filter", "TagFilter is invalid: the '{version}' key is reserved for the Metrics page")]
+    [InlineData("undefined kind", "Kind '9' is not valid: use Value (1) or Ratio (2).")]
+    [InlineData("ratio on gauge", "A ratio tile cannot use gauge instrument 'payments': gauges have no event count.")]
+    [InlineData("undefined aggregate", "GaugeAggregate '9' is not valid: use Average (1), Min (2) or Max (3).")]
+    [InlineData("missing ratio tag", "A ratio tile requires RatioTag (the tag whose value marks an event good or bad), at most 64 characters.")]
+    [InlineData("long ratio tag", "A ratio tile requires RatioTag (the tag whose value marks an event good or bad), at most 64 characters.")]
+    [InlineData("version ratio tag", "RatioTag is invalid: the '{version}' key is reserved for the Metrics page")]
+    [InlineData("missing good", "A ratio tile requires non-empty GoodValues and BadValues of at most 512 characters each.")]
+    [InlineData("long bad", "A ratio tile requires non-empty GoodValues and BadValues of at most 512 characters each.")]
+    [InlineData("malformed good", "GoodValues is invalid: ")]
+    [InlineData("malformed bad", "BadValues is invalid: ")]
+    [InlineData("overlap", "GoodValues and BadValues must not overlap: no value may match a pattern in both lists.")]
+    [InlineData("missing threshold", "A threshold rule requires a finite Threshold.")]
+    [InlineData("infinite threshold", "A threshold rule requires a finite Threshold.")]
+    [InlineData("undefined comparison", "Comparison '9' is not valid: use AtMost (1) or AtLeast (2).")]
+    [InlineData("baseline 3", "A deviation rule requires BaselineDays of 1 or 7.")]
+    [InlineData("undefined direction", "DeviationDirection '9' is not valid: use Drop (1), Rise (2) or Either (3).")]
+    [InlineData("zero deviation", "A deviation rule requires a MaxDeviation greater than zero.")]
+    [InlineData("ratio deviation of 1", "A ratio tile's MaxDeviation is in ratio points and must be below 1 (0.02 = 2 points).")]
+    [InlineData("value drop of 1", "A value tile's MaxDeviation for a drop is a fraction of the baseline and must be below 1 (0.3 = 30 %).")]
+    [InlineData("undefined rule", "StatusRule '9' is not valid: use None (1), Threshold (2) or Deviation (3).")]
+    public void TryValidate_EachBranch_IsRejectedWithItsMessage(string branch, string expected)
+    {
+        var (tile, kind) = Invalid(branch);
+
+        MetricBoardValidation.TryValidate(tile, kind, out var error).ShouldBeFalse();
+
+        error.ShouldNotBeNull().ShouldStartWith(expected);
+    }
+
     [TimedFact]
     public void Options_DuplicateName_Throws()
     {
@@ -181,6 +220,65 @@ public class MetricBoardValidationTests
         tile.BaselineDays.ShouldBe(1);
         tile.MaxDeviation.ShouldBe(0.02);
         tile.DeviationDirection.ShouldBe(MetricDeviationDirection.Drop);
+    }
+
+    private static (MetricBoardTile Tile, MetricKind? Kind) Invalid(string branch)
+    {
+        var ratio = branch is "ratio on gauge" or "missing ratio tag" or "long ratio tag" or "version ratio tag" or "missing good"
+            or "long bad" or "malformed good" or "malformed bad" or "overlap" or "ratio deviation of 1";
+        var tile = ratio ? RatioTile() : ValueTile();
+        var kind = string.Equals(branch, "ratio on gauge", StringComparison.Ordinal) ? MetricKind.Gauge : MetricKind.Counter;
+        Action<MetricBoardTile> breakIt = branch switch
+        {
+            "blank name" => x => x.Name = " ",
+            "long name" => x => x.Name = new string('n', 201),
+            "blank instrument" => x => x.Instrument = string.Empty,
+            "long instrument" => x => x.Instrument = new string('i', 129),
+            "negative position" => x => x.Position = -1,
+            "long application" => x => x.Application = new string('a', 201),
+            "long filter" => x => x.TagFilter = "k=" + new string('v', 511),
+            "malformed filter" => x => x.TagFilter = "status",
+            "version filter" => x => x.TagFilter = "{version}=2.*",
+            "undefined kind" => x => x.Kind = (MetricTileKind)9,
+            "ratio on gauge" => x => x.Position = 0,
+            "undefined aggregate" => x => x.GaugeAggregate = (SloGaugeAggregate)9,
+            "missing ratio tag" => x => x.RatioTag = null,
+            "long ratio tag" => x => x.RatioTag = new string('r', 65),
+            "version ratio tag" => x => x.RatioTag = "{version}",
+            "missing good" => x => x.GoodValues = " ",
+            "long bad" => x => x.BadValues = new string('b', 513),
+            "malformed good" => x => x.GoodValues = "o*k",
+            "malformed bad" => x => x.BadValues = "e*r",
+            "overlap" => x => x.BadValues = "ok",
+            "missing threshold" => x => x.StatusRule = MetricTileStatusRule.Threshold,
+            "infinite threshold" => x => Threshold(x, double.PositiveInfinity, null),
+            "undefined comparison" => x => Threshold(x, 1, (SloComparison)9),
+            "baseline 3" => x => Deviation(x, 3, 0.3, MetricDeviationDirection.Drop),
+            "undefined direction" => x => Deviation(x, 1, 0.3, (MetricDeviationDirection)9),
+            "zero deviation" => x => Deviation(x, 1, 0, MetricDeviationDirection.Drop),
+            "ratio deviation of 1" => x => Deviation(x, 1, 1, MetricDeviationDirection.Rise),
+            "value drop of 1" => x => Deviation(x, 7, 1, MetricDeviationDirection.Drop),
+            "undefined rule" => x => x.StatusRule = (MetricTileStatusRule)9,
+            _ => throw new ArgumentOutOfRangeException(nameof(branch), branch, "Unknown branch."),
+        };
+        breakIt(tile);
+
+        return (tile, kind);
+    }
+
+    private static void Threshold(MetricBoardTile tile, double threshold, SloComparison? comparison)
+    {
+        tile.StatusRule = MetricTileStatusRule.Threshold;
+        tile.Threshold = threshold;
+        tile.Comparison = comparison;
+    }
+
+    private static void Deviation(MetricBoardTile tile, int baselineDays, double max, MetricDeviationDirection direction)
+    {
+        tile.StatusRule = MetricTileStatusRule.Deviation;
+        tile.BaselineDays = baselineDays;
+        tile.MaxDeviation = max;
+        tile.DeviationDirection = direction;
     }
 
     private static MetricBoardTile ValueTile() => new() { Name = "Volume", Instrument = "orders", Kind = MetricTileKind.Value };

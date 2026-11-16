@@ -1,5 +1,6 @@
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Models;
 using Warp.Core.Services;
 using Warp.Core.Slo;
 
@@ -81,9 +82,16 @@ public static class MetricBoardValidation
             return false;
         }
 
-        if (!MetricFilter.TryParse(tile.TagFilter, out _, out var filterError))
+        if (!MetricFilter.TryParse(tile.TagFilter, out var filter, out var filterError))
         {
             error = $"TagFilter is invalid: {filterError}";
+
+            return false;
+        }
+
+        if (filter.Constrains(MetricSeriesQuery.VersionKey))
+        {
+            error = $"TagFilter is invalid: {MetricFilter.ReservedVersionKeyError}";
 
             return false;
         }
@@ -145,6 +153,13 @@ public static class MetricBoardValidation
         if (string.IsNullOrWhiteSpace(tile.RatioTag) || tile.RatioTag.Length > 64)
         {
             error = "A ratio tile requires RatioTag (the tag whose value marks an event good or bad), at most 64 characters.";
+
+            return false;
+        }
+
+        if (string.Equals(tile.RatioTag.Trim(), MetricSeriesQuery.VersionKey, StringComparison.Ordinal))
+        {
+            error = $"RatioTag is invalid: {MetricFilter.ReservedVersionKeyError}";
 
             return false;
         }

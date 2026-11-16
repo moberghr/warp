@@ -582,15 +582,87 @@ public class SloValidationTests
     [Theory]
     [InlineData(SloKind.MetricThreshold)]
     [InlineData(SloKind.MetricLatency)]
+    [InlineData(SloKind.SuccessRate)]
+    [InlineData(SloKind.QueueWaitLatency)]
+    [InlineData(SloKind.ExecutionLatency)]
+    [InlineData(SloKind.BacklogDepth)]
+    [InlineData(SloKind.DeadlineAttainment)]
     public void TryValidate_OtherMetricKinds_ClearTheGaugeOptions(SloKind kind)
     {
-        var def = Metric(kind, 1);
+        var def = Metric(kind, SloValidation.IsRateKind(kind) ? 0.99 : 1);
         def.Comparison = SloComparison.AtLeast;
         def.GaugeAggregate = SloGaugeAggregate.Max;
 
         SloValidation.TryValidate(def, out _).ShouldBeTrue();
         def.Comparison.ShouldBeNull();
         def.GaugeAggregate.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(SloKind.SuccessRate, 0.99)]
+    [InlineData(SloKind.QueueWaitLatency, 500)]
+    [InlineData(SloKind.ExecutionLatency, 500)]
+    [InlineData(SloKind.BacklogDepth, 100)]
+    [InlineData(SloKind.DeadlineAttainment, 0.99)]
+    public void TryValidate_NonMetricKinds_ClearEveryMetricOnlyColumn(SloKind kind, double target)
+    {
+        // A stray metric field on a job-domain objective (an edited form, a hand-written POST) must not be stored: the
+        // evaluator of kinds 1-5 never reads it, and a reader would take it to mean something.
+        var def = Def(kind, target);
+        def.TagFilter = "status=5*";
+        def.SecondaryMetric = "orders.finished";
+        def.SecondaryTagFilter = "result=ok";
+        def.RatioTag = "outcome";
+        def.GoodValues = "ok";
+        def.BadValues = "error";
+        def.BaselineDays = 7;
+        def.Comparison = SloComparison.AtLeast;
+        def.GaugeAggregate = SloGaugeAggregate.Min;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeTrue(error);
+
+        def.TagFilter.ShouldBeNull();
+        def.SecondaryMetric.ShouldBeNull();
+        def.SecondaryTagFilter.ShouldBeNull();
+        def.RatioTag.ShouldBeNull();
+        def.GoodValues.ShouldBeNull();
+        def.BadValues.ShouldBeNull();
+        def.BaselineDays.ShouldBeNull();
+        def.Comparison.ShouldBeNull();
+        def.GaugeAggregate.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData("{version}=2.*")]
+    [InlineData("status=5*,{version}=2.4.1")]
+    public void TryValidate_TagFilterOnTheReservedVersionKey_IsRejected(string filter)
+    {
+        var def = Metric(SloKind.MetricThreshold, 0);
+        def.TagFilter = filter;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldStartWith("TagFilter is invalid: the '{version}' key is reserved");
+    }
+
+    [Fact]
+    public void TryValidate_SecondaryTagFilterOnTheReservedVersionKey_IsRejected()
+    {
+        var def = Metric(SloKind.MetricGap, 0);
+        def.SecondaryMetric = "orders.finished";
+        def.SecondaryTagFilter = "{version}=1.*";
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldStartWith("SecondaryTagFilter is invalid: the '{version}' key is reserved");
+    }
+
+    [Fact]
+    public void TryValidate_RatioTagOnTheReservedVersionKey_IsRejected()
+    {
+        var def = Ratio();
+        def.RatioTag = "{version}";
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldStartWith("RatioTag is invalid: the '{version}' key is reserved");
     }
 
     [Theory]

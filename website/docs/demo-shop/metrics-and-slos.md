@@ -215,6 +215,9 @@ opt.AddMetricBoard(b => b
 A value tile on a histogram counts measurements, so "PayFast callbacks" catches a broken callback route, not
 slow callbacks. PayFast latency is gated by the `MetricLatency` SLO, which the verdict also counts.
 
+"At least 0.98" on a ratio tile uses the success-rate budget, `(value − 0.98) / (1 − 0.98)`: 99.5 % delivered
+is **Healthy**, 98.0–98.4 % is **Warning** and anything below 98 % is **Breaching**.
+
 **Test scenario.**
 
 - *Given* the tiles above and a day of normal traffic.

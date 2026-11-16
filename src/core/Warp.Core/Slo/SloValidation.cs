@@ -1,5 +1,6 @@
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Models;
 
 namespace Warp.Core.Slo;
 
@@ -137,6 +138,17 @@ public static class SloValidation
             definition.Percentile = null;
         }
 
+        // Every metric-only column means nothing to kinds 1-5: clear them, as the metric path clears another kind's fields.
+        definition.Comparison = null;
+        definition.GaugeAggregate = null;
+        definition.TagFilter = null;
+        definition.SecondaryMetric = null;
+        definition.SecondaryTagFilter = null;
+        definition.RatioTag = null;
+        definition.GoodValues = null;
+        definition.BadValues = null;
+        definition.BaselineDays = null;
+
         error = null;
 
         return true;
@@ -189,16 +201,30 @@ public static class SloValidation
             return false;
         }
 
-        if (!MetricFilter.TryParse(definition.TagFilter, out _, out var filterError))
+        if (!MetricFilter.TryParse(definition.TagFilter, out var filter, out var filterError))
         {
             error = $"TagFilter is invalid: {filterError}";
 
             return false;
         }
 
-        if (!MetricFilter.TryParse(definition.SecondaryTagFilter, out _, out filterError))
+        if (!MetricFilter.TryParse(definition.SecondaryTagFilter, out var secondaryFilter, out filterError))
         {
             error = $"SecondaryTagFilter is invalid: {filterError}";
+
+            return false;
+        }
+
+        if (filter.Constrains(MetricSeriesQuery.VersionKey) || secondaryFilter.Constrains(MetricSeriesQuery.VersionKey))
+        {
+            error = $"{(filter.Constrains(MetricSeriesQuery.VersionKey) ? "TagFilter" : "SecondaryTagFilter")} is invalid: {MetricFilter.ReservedVersionKeyError}";
+
+            return false;
+        }
+
+        if (string.Equals(definition.RatioTag?.Trim(), MetricSeriesQuery.VersionKey, StringComparison.Ordinal))
+        {
+            error = $"RatioTag is invalid: {MetricFilter.ReservedVersionKeyError}";
 
             return false;
         }

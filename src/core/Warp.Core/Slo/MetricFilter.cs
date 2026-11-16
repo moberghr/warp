@@ -19,6 +19,10 @@ internal sealed class MetricFilter
 
     public bool IsEmpty => _clauses.Length == 0;
 
+    // The reserved version pseudo-tag (MetricSeriesQuery.VersionKey) is injected only by the Metrics page read; the SLO
+    // evaluator and the board never see it, so a filter on it can never match there.
+    public const string ReservedVersionKeyError = "the '{version}' key is reserved for the Metrics page: objectives and board tiles ignore the application version, so a filter on it would never match. Remove it.";
+
     public static bool TryParse(string? text, out MetricFilter filter, out string? error)
     {
         filter = Empty;
@@ -123,6 +127,8 @@ internal sealed class MetricFilter
 
         return true;
     }
+
+    public bool Constrains(string key) => Array.Exists(_clauses, x => string.Equals(x.Key, key, StringComparison.Ordinal));
 
     public bool Matches(IReadOnlyDictionary<string, string> tags)
     {

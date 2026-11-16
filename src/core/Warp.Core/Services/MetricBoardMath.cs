@@ -201,7 +201,7 @@ internal static class MetricBoardMath
                     return SloState.NoData;
                 }
 
-                return Classify(SloMath.EvaluateBound(observed, threshold, tile.Comparison ?? SloComparison.AtMost));
+                return Classify(SloMath.EvaluateBound(observed, threshold, tile.Comparison ?? SloComparison.AtMost, tile.Kind == MetricTileKind.Ratio));
 
             case MetricTileStatusRule.Deviation:
                 var baseline = tile.BaselineDays == 1 ? dayAgo : weekAgo;
