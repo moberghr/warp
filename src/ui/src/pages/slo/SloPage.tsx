@@ -17,13 +17,13 @@ import {
 } from '@/types/slo';
 import { SloStatePill, inputClass } from './shared';
 import { PageHeading } from '@/components/PageHeading';
+import { errorMessage } from '@/lib/apiError';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import {
   MIN_METRIC_WINDOW_SECONDS,
   buildUpsertRequest,
   changeKind,
   DEFAULT_LATENCY_PERCENTILE,
-  errorMessage,
   fieldsFor,
   fractionToPercent,
   objectiveToDraft,

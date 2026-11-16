@@ -3,7 +3,7 @@ import { useMutation, useQueryClient, type QueryKey } from '@tanstack/react-quer
 import * as api from '@/api';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { ACKNOWLEDGED_NOISE_COLOR, ANNOTATION_COLOR } from '@/lib/deployMarkerPlugin';
-import { errorMessage } from '@/pages/slo/sloForm';
+import { errorMessage } from '@/lib/apiError';
 import { MetricAnnotationTarget, type MetricAnnotation } from '@/types/annotations';
 import {
   MAX_NOTE_LENGTH,

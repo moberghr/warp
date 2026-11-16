@@ -5,7 +5,8 @@ import { AnnotationPanel } from '@/pages/metrics/AnnotationPanel';
 import { SloKind, SloKindLabel, SloState, isMetricKind, type SloObjective } from '@/types/slo';
 import { SloStatePill } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
-import { baselineLabel, describeMetricKind, errorMessage } from './sloForm';
+import { baselineLabel, describeMetricKind } from './sloForm';
+import { errorMessage } from '@/lib/apiError';
 import { formatBudget, formatObserved, formatTarget, sloValueDisplay } from './sloDisplay';
 
 export default function SloDetailPage() {

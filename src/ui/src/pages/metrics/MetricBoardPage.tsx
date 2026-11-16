@@ -23,7 +23,8 @@ import {
 } from '@/types/metricBoard';
 import { SloComparison, SloGaugeAggregate } from '@/types/slo';
 import { SloStatePill, inputClass } from '@/pages/slo/shared';
-import { errorMessage, fractionToPercent, percentToFraction } from '@/pages/slo/sloForm';
+import { errorMessage } from '@/lib/apiError';
+import { fractionToPercent, percentToFraction } from '@/pages/slo/sloForm';
 import { MetricsTabs } from './MetricsTabs';
 import {
   RANGES,
