@@ -3,10 +3,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getSlo, ackSlo, getAnnotations } from '@/api';
 import { AnnotationPanel } from '@/pages/metrics/AnnotationPanel';
 import { SloKind, SloKindLabel, SloState, isMetricKind, type SloObjective } from '@/types/slo';
-import { formatBudget, SloStatePill } from './shared';
+import { SloStatePill } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { baselineLabel, describeMetricKind } from './sloForm';
-import { formatObserved, formatTarget, sloValueDisplay } from './sloDisplay';
+import { formatBudget, formatObserved, formatTarget, sloValueDisplay } from './sloDisplay';
 
 export default function SloDetailPage() {
   const { id } = useParams<{ id: string }>();

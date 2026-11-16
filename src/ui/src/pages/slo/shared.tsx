@@ -1,23 +1,7 @@
-import { SloState, SloStateLabel, isRatioKind, type SloKind } from '@/types/slo';
-import { isCountKind } from './sloForm';
+import { SloState, SloStateLabel } from '@/types/slo';
 
 export const inputClass =
   'w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-1.5 text-sm';
-
-/** Formats a target/observed value per kind: ratio kinds as a %, latency as ms, depth as a count. */
-export function formatObjectiveValue(kind: SloKind, value: number): string {
-  if (isRatioKind(kind)) {
-    return `${(value * 100).toFixed(2)}%`;
-  }
-  if (isCountKind(kind)) {
-    return `${Math.round(value)}`;
-  }
-  return `${Math.round(value)} ms`;
-}
-
-export function formatBudget(budget: number): string {
-  return `${Math.round(budget * 100)}%`;
-}
 
 export function SloStatePill({ state, enabled }: { state: SloState; enabled: boolean }) {
   if (!enabled) {

@@ -15,7 +15,7 @@ import {
   isMetricKind,
   isRatioKind,
 } from '@/types/slo';
-import { formatBudget, SloStatePill, inputClass } from './shared';
+import { SloStatePill, inputClass } from './shared';
 import { PageHeading } from '@/components/PageHeading';
 import {
   MIN_METRIC_WINDOW_SECONDS,
@@ -30,7 +30,7 @@ import {
   selectableInstruments,
   validateMetricDraft,
 } from './sloForm';
-import { formatObserved, formatTarget, showsSloValues } from './sloDisplay';
+import { formatBudget, formatObserved, formatTarget, showsSloValues } from './sloDisplay';
 
 const emptyDraft: SloUpsertRequest = {
   id: 0,

@@ -1,5 +1,20 @@
-import { SloComparison, SloGaugeAggregate, SloGaugeAggregateLabel, SloKind, SloState, type SloObjective } from '@/types/slo';
-import { formatObjectiveValue } from './shared';
+import { SloComparison, SloGaugeAggregate, SloGaugeAggregateLabel, SloKind, SloState, isRatioKind, type SloObjective } from '@/types/slo';
+import { isCountKind } from './sloForm';
+
+/** Formats a target/observed value per kind: ratio kinds as a %, latency as ms, depth as a count. */
+export function formatObjectiveValue(kind: SloKind, value: number): string {
+  if (isRatioKind(kind)) {
+    return `${(value * 100).toFixed(2)}%`;
+  }
+  if (isCountKind(kind)) {
+    return `${Math.round(value)}`;
+  }
+  return `${Math.round(value)} ms`;
+}
+
+export function formatBudget(budget: number): string {
+  return `${Math.round(budget * 100)}%`;
+}
 
 /**
  * What an objective's attainment, budget and burn cells may show:

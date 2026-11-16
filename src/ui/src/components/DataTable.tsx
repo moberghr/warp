@@ -4,6 +4,7 @@ import {
   useReactTable,
   type ColumnDef,
   type Row,
+  type RowData,
 } from '@tanstack/react-table';
 import {
   Table,
@@ -22,7 +23,7 @@ import { cn } from '@/lib/utils';
 // outer cell element.
 declare module '@tanstack/react-table' {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  interface ColumnMeta<TData extends unknown, TValue> {
+  interface ColumnMeta<TData extends RowData, TValue> {
     headerClassName?: string;
     cellClassName?: string;
   }
@@ -62,6 +63,8 @@ export function DataTable<TData>({
   rowClassName,
   getRowId,
 }: DataTableProps<TData>) {
+  // TanStack Table returns unstable functions the React compiler cannot memoize; it skips this component, as intended.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
     data,
     columns,
