@@ -8,7 +8,7 @@ import Screenshot from '@site/src/components/Screenshot';
 
 Endpoint observability is the **inbound** mirror of [outbound adapters](./adapters.md): where adapters observe the calls your app *makes to* other services, endpoint observability observes the requests *made to* your app's Warp-exposed HTTP endpoints — **who called** (IP, user-agent, authenticated user), how long it took, the status/outcome, latency percentiles, the jobs the request spawned, and — opt-in — the request and response headers and bodies.
 
-It observes **only Warp HTTP endpoints** (handlers exposed via `MapWarpHttp`). It never observes your own MVC/minimal-API controllers, the dashboard, health checks, or static files — the middleware no-ops for anything that isn't a Warp-mapped endpoint.
+It always observes **Warp HTTP endpoints** (handlers exposed via `MapWarpHttp`). Your own MVC controllers and minimal APIs are observed **only when you opt them in** — see [Observing your own endpoints](#observing-your-own-endpoints). There is no global "observe everything" switch, and the dashboard, health checks and static files are never observed — the middleware no-ops for anything that isn't a Warp endpoint or an opted-in endpoint.
 
 <Screenshot light="/img/screenshots/23-endpoints-list.png" dark="/img/screenshots/23-endpoints-list-dark.png" alt="Endpoints list showing each observed endpoint with call volume, error rate and average latency" />
 
@@ -51,6 +51,60 @@ app.MapWarpHttp();
 ```
 
 `UseWarpHttpObservability()` must run **after** `UseRouting()` (so the matched endpoint is known) and requires `AddEndpointObservability()` to have registered the recorder.
+
+## Observing your own endpoints
+
+Your own ASP.NET endpoints — MVC controllers and minimal APIs — can be observed too. Opt them in explicitly; an opted-in endpoint then **behaves exactly like a Warp endpoint**: the same middleware, capture tiers, redaction, `SampleRate`/`ForceCapture`, `RecordCalls`, the same `EndpointCallLog` rows and sinks (`Database` / `Otel` / `Both`), the same `warp.endpoint.*` meters, the same **Endpoints** dashboard pages, and its 5xx (and 4xx) become [Issues](./error-grouping.md). There are no separate options or defaults for host endpoints — whatever you configured in `AddEndpointObservability` applies to them.
+
+Two ways to opt in:
+
+```csharp
+// 1. Endpoint convention — on anything that returns an endpoint convention builder.
+app.MapControllers().WithWarpObservability();               // every controller action
+app.MapGet("/orders/{id}", GetOrder).WithWarpObservability();
+app.MapGroup("/api").WithWarpObservability();                // every endpoint in the group
+app.MapPost("/checkout", Checkout).WithWarpObservability("Checkout");   // explicit operation name
+
+// 2. Attribute — per controller or per action, with a plain app.MapControllers().
+[WarpObserved]
+public class OrdersController : ControllerBase { ... }
+
+public class BillingController : ControllerBase
+{
+    [WarpObserved(Operation = "Charge")]
+    [HttpPost("charge")]
+    public IActionResult Charge(...) { ... }
+}
+```
+
+To keep one endpoint out of an opted-in group or controller (a health or polling action, say), put `[ExcludeFromWarpObservability]` (namespace `Warp.Core.Endpoints`) on it, or `.WithMetadata(new ExcludeFromWarpObservabilityAttribute())`. The exclusion always wins.
+
+**Identity.** Each endpoint is recorded under its own bounded identity, built from the matched route endpoint — never from the request path, so `/orders/42` and `/orders/43` are one endpoint:
+
+- **Method** — the endpoint's HTTP method. An endpoint that answers several methods (`[AcceptVerbs("GET", "HEAD")]`, `MapMethods`) or any method (`Map`) is recorded as `*`.
+- **Route template** — the route pattern, with constraints dropped (`/orders/{id:int}` → `/orders/{id}`), group prefixes included. A conventionally-routed action is recorded under its own route (`/Orders/List/{id?}`), not the shared `{controller}/{action}` template.
+- **Operation** — the name you pass to `WithWarpObservability("…")` / `[WarpObserved(Operation = "…")]` (the innermost one wins), else the endpoint name (`WithName`, or a route name like `[HttpGet(Name = "…")]`), else `Controller.Action` for an MVC action (`Orders.Get`), else the endpoint's display name.
+
+A Warp endpoint inside an opted-in group keeps its own Warp identity — the convention never overwrites one.
+
+**Order.** The matched endpoint must be resolved before the middleware runs:
+
+```csharp
+app.UseExceptionHandler(...);     // optional — host exception handling stays outside, so the row gets the real status
+app.UseRouting();
+app.UseWarpHttpObservability();   // after routing
+app.UseAuthentication();          // auth may come before or after; the user is read when the request completes
+app.UseAuthorization();
+app.MapControllers().WithWarpObservability();
+```
+
+On a `WebApplication` that never calls `UseRouting()`, the implicit routing step runs ahead of your middleware, so `app.UseWarpHttpObservability()` alone works. Registering it **before** an explicit `UseRouting()` silently observes nothing.
+
+:::warning Your endpoints may carry sensitive data
+Host request and response bodies (logins, payments, personal data) are captured under the same tiers as Warp endpoints — by default **response bodies and headers on failure** (`OnFailure`). Before opting in endpoints that handle secrets or PII, review the [capture tiers and redaction](#capture-tiers-redaction-truncation-pii): set `CaptureRequestBodies` / `CaptureResponseBodies` / `CaptureHeaders` to `None` where needed, extend `RedactedHeaders`, and never point `ForceCapture` at such endpoints — or simply leave them out (`[ExcludeFromWarpObservability]`).
+:::
+
+The dashboard itself is never observed, even if you call `WithWarpObservability()` on `MapWarpDashboard(...)`: every dashboard endpoint carries `ExcludeFromWarpObservabilityAttribute`.
 
 ## What it records
 

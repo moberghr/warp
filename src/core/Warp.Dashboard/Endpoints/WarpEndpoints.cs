@@ -32,6 +32,10 @@ public static class WarpEndpoints
     {
         var apiGroup = app.MapGroup($"{options.RoutePrefix}/api");
 
+        // The dashboard is never observed by inbound endpoint observability, even when the host opts in a
+        // convention that reaches these endpoints (WithWarpObservability on the dashboard builder).
+        apiGroup.WithMetadata(new ExcludeFromWarpObservabilityAttribute());
+
         // Pin the dashboard's own JSON shape (camelCase, numeric enums) instead of inheriting the
         // host's process-wide ConfigureHttpJsonOptions — see WarpDashboardJson. Registered first so it
         // wraps every route under the prefix, extension sub-groups included.

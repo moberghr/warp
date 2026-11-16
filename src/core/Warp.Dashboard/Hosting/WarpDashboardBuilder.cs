@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Warp.Core.Endpoints;
 using Warp.Dashboard.Endpoints;
 using Warp.Dashboard.Extensions;
 using Warp.Dashboard.Push;
@@ -90,6 +91,10 @@ public static class WarpDashboardBuilder
         }
 
         var mapped = new WarpDashboardEndpointConventionBuilder(app.Services, shell, new CompositeEndpointConventionBuilder(api));
+
+        // Every dashboard surface (shell, API, hub) stays out of inbound endpoint observability. Added before the
+        // host can attach conventions, so the opt-in's Finally step always sees it and steps aside.
+        mapped.WithMetadata(new ExcludeFromWarpObservabilityAttribute());
 
         if (app.Services.GetService<IWarpDashboardLoginMarker>() != null)
         {
