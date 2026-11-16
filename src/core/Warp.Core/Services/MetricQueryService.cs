@@ -308,7 +308,7 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
         }
 
         var grouped = query.Breakdown is null ? [.. byValue] : GroupRest(byValue, kind, keep);
-        var lines = grouped.ConvertAll(x => BuildLine(x.Key, x.Value, kind, query.Percentile, compare, tier, shift, cutoff));
+        var lines = grouped.ConvertAll(x => BuildLine(x.Key, x.Value, kind, query.Percentile, compare, tier, shift, cutoff, fineMinutes));
 
         return (tier, lines, Headline(byValue.Values, kind, compare, shift, cutoff));
     }
@@ -393,7 +393,8 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
         string? compare,
         MetricTier tier,
         TimeSpan shift,
-        DateTime cutoff)
+        DateTime cutoff,
+        int fineMinutes)
     {
         var tracksExtremes = kind is MetricKind.Histogram or MetricKind.Gauge;
         var points = new List<MetricPointModel>(buckets.Count);
@@ -409,6 +410,7 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
                 Max = tracksExtremes ? accumulator.Max : null,
                 Percentile = kind == MetricKind.Histogram && percentile is not null ? accumulator.Percentile(percentile.Value) : null,
                 Incomplete = compare is null && bucket >= cutoff,
+                BucketSeconds = MetricSeriesMath.BucketSeconds((MetricTier)Math.Max((int)tier, (int)accumulator.Coarsest), fineMinutes),
             });
         }
 
@@ -510,6 +512,14 @@ internal static class MetricSeriesMath
 
         return length <= TimeSpan.FromDays(HourlyRangeDays) ? MetricTier.Hourly : MetricTier.Daily;
     }
+
+    public static int BucketSeconds(MetricTier tier, int fineMinutes) => tier switch
+    {
+        MetricTier.Fine => fineMinutes * 60,
+        MetricTier.Hourly => 3600,
+        MetricTier.Daily => 86400,
+        _ => throw new ArgumentOutOfRangeException(nameof(tier), tier, "Unknown metric tier."),
+    };
 
     public static DateTime AsUtc(DateTime value) => value.Kind == DateTimeKind.Local
         ? value.ToUniversalTime()

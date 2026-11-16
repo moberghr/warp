@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
   Chart,
@@ -29,6 +29,7 @@ import {
   DEFAULT_CONTROLS,
   PERCENTILES,
   RANGES,
+  RATES,
   axisTitles,
   breakdownValues,
   buildDatasets,
@@ -43,11 +44,14 @@ import {
   isRatioActive,
   kindChartNote,
   kindLabel,
+  parseRate,
   percentileLabel,
+  rateParam,
   removeChip,
   resolutionSummary,
   seriesRefetchMs,
   supportsPercentile,
+  supportsRate,
   supportsRatio,
   toggleNumerator,
   unitLabel,
@@ -55,6 +59,7 @@ import {
   type DatasetSpec,
   type HeadlineSummary,
   type MetricControls,
+  type RateId,
 } from './metricModel';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, TimeScale, Tooltip, Legend);
@@ -90,6 +95,17 @@ export default function MetricDetailPage() {
   const [chipDraft, setChipDraft] = useState({ key: '', value: '' });
   const [patternDraft, setPatternDraft] = useState('');
   const set = (patch: Partial<MetricControls>) => setControls((c) => ({ ...c, ...patch }));
+  // The rate unit lives in the URL, so a shared link or a refresh keeps the chart's scale.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rate = parseRate(searchParams.get('rate'));
+  const setRate = (next: RateId) =>
+    setSearchParams((prev) => {
+      const params = new URLSearchParams(prev);
+      const value = rateParam(next);
+      if (value) params.set('rate', value);
+      else params.delete('rate');
+      return params;
+    }, { replace: true });
 
   const instrumentsQuery = useQuery({
     queryKey: queryKeys.metrics,
@@ -146,13 +162,13 @@ export default function MetricDetailPage() {
 
     return ratioActive
       ? buildRatioDatasets(series, numeratorSeries, controls.numerator)
-      : buildDatasets(series, { percentile: controls.percentile, showMinMax: controls.showMinMax });
-  }, [series, numeratorSeries, ratioActive, controls.numerator, controls.percentile, controls.showMinMax]);
+      : buildDatasets(series, { percentile: controls.percentile, showMinMax: controls.showMinMax, rate });
+  }, [series, numeratorSeries, ratioActive, controls.numerator, controls.percentile, controls.showMinMax, rate]);
   const values = useMemo(() => breakdownValues(series), [series]);
-  const headline = useMemo(() => (series ? headlineSummary(series) : null), [series]);
+  const headline = useMemo(() => (series ? headlineSummary(series, rate) : null), [series, rate]);
   const axes = useMemo(
-    () => (kind === null ? { y: '', y1: '' } : axisTitles(kind, instrument?.unit, ratioActive)),
-    [kind, instrument?.unit, ratioActive],
+    () => (kind === null ? { y: '', y1: '' } : axisTitles(kind, instrument?.unit, ratioActive, rate)),
+    [kind, instrument?.unit, ratioActive, rate],
   );
 
   if (name === null) {
@@ -262,6 +278,18 @@ export default function MetricDetailPage() {
                 <option value="">None</option>
                 {PERCENTILES.map((p) => <option key={p} value={p}>{percentileLabel(p)}</option>)}
               </select>
+            </Control>
+          )}
+
+          {supportsRate(instrument.kind) && !ratioActive && (
+            <Control label="Rate">
+              <div className="flex gap-1">
+                {RATES.map((r) => (
+                  <button key={r.id} type="button" className={toggleClass(rate === r.id)} onClick={() => setRate(r.id)}>
+                    {r.label}
+                  </button>
+                ))}
+              </div>
             </Control>
           )}
 
@@ -389,7 +417,7 @@ export default function MetricDetailPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {headline && !ratioActive && !seriesQuery.isError && <HeadlineStrip headline={headline} unit={unit} />}
+          {headline && !ratioActive && !seriesQuery.isError && <HeadlineStrip headline={headline} unit={instrument.kind === MetricKind.Histogram ? '' : unit} />}
           {seriesQuery.isError ? (
             <p className="py-8 text-center text-sm text-destructive">Unable to load the series.</p>
           ) : seriesQuery.isLoading || !series ? (

@@ -136,7 +136,7 @@ function bucketPoint(
   if (kind === MetricKind.Gauge) {
     const avg = weight * (0.7 + 0.3 * traffic(t)) * wobble;
 
-    return { timestamp, value: avg, count: 12, sum: avg * 12, min: avg * 0.8, max: avg * 1.25, percentile: null, incomplete: false };
+    return { timestamp, value: avg, count: 12, sum: avg * 12, min: avg * 0.8, max: avg * 1.25, percentile: null, incomplete: false, bucketSeconds: bucketMs / 1000 };
   }
 
   const count = Math.round(weight * 60 * traffic(t) * wobble * buckets);
@@ -146,10 +146,10 @@ function bucketPoint(
     const raw = percentile === null ? null : (BASE_PERCENTILE_MS[percentile] ?? 100) * (0.8 + noise(t, `${groupName}|p${percentile}`) * 0.5);
     const bound = raw === null ? null : (BOUNDS.find((b) => b >= raw) ?? BOUNDS[BOUNDS.length - 1]);
 
-    return { timestamp, value: count, count, sum: count * avgMs, min: 3, max: avgMs * 14, percentile: count > 0 ? bound : null, incomplete: false };
+    return { timestamp, value: count, count, sum: count * avgMs, min: 3, max: avgMs * 14, percentile: count > 0 ? bound : null, incomplete: false, bucketSeconds: bucketMs / 1000 };
   }
 
-  return { timestamp, value: count, count, sum: count, min: null, max: null, percentile: null, incomplete: false };
+  return { timestamp, value: count, count, sum: count, min: null, max: null, percentile: null, incomplete: false, bucketSeconds: bucketMs / 1000 };
 }
 
 function buildLines(

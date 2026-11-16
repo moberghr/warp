@@ -11,6 +11,7 @@ import {
   buildNumeratorQuery,
   buildRatioDatasets,
   buildSeriesQuery,
+  effectiveRate,
   chipFromQuery,
   chipToQuery,
   changePercent,
@@ -19,18 +20,23 @@ import {
   formatChange,
   formatPercentileValue,
   headlineLabel,
+  headlineSpanSeconds,
   headlineSummary,
   incompleteTimes,
   isRatioActive,
   kindChartNote,
   kindLabel,
   orderedLineNames,
+  parseRate,
   pointValue,
+  rateParam,
+  rateValue,
   ratioPercent,
   removeChip,
   resolutionLabel,
   resolutionSummary,
   seriesRefetchMs,
+  supportsRate,
   toggleNumerator,
   unitLabel,
   upsertChip,
@@ -50,6 +56,7 @@ function point(offset: number, overrides: Partial<MetricPoint> = {}): MetricPoin
     max: null,
     percentile: null,
     incomplete: false,
+    bucketSeconds: 300,
     ...overrides,
   };
 }
@@ -603,5 +610,104 @@ describe('headline', () => {
     const s = { ...series(MetricKind.Counter, [line('total', [point(0, { sum: 4 })])]), headlines: [{ compare: null, value: 4, count: 1 }] };
 
     expect(headlineSummary(s)!.excludesIncomplete).toBe(false);
+  });
+});
+
+describe('rate', () => {
+  it('reads the URL parameter, defaulting to per bucket', () => {
+    expect(parseRate('minute')).toBe('minute');
+    expect(parseRate('second')).toBe('second');
+    expect(parseRate(null)).toBe('bucket');
+    expect(parseRate('hour')).toBe('bucket');
+    expect(rateParam('bucket')).toBeNull();
+    expect(rateParam('second')).toBe('second');
+  });
+
+  it('applies to counters and histogram counts only, and never to the ratio view', () => {
+    expect(supportsRate(MetricKind.Counter)).toBe(true);
+    expect(supportsRate(MetricKind.Histogram)).toBe(true);
+    expect(supportsRate(MetricKind.UpDownCounter)).toBe(false);
+    expect(supportsRate(MetricKind.Gauge)).toBe(false);
+    expect(effectiveRate(MetricKind.Gauge, 'minute', false)).toBe('bucket');
+    expect(effectiveRate(MetricKind.Counter, 'minute', true)).toBe('bucket');
+    expect(effectiveRate(MetricKind.Counter, 'second', false)).toBe('second');
+  });
+
+  it('divides a bucket by its length', () => {
+    expect(rateValue(600, 300, 'minute')).toBe(120);
+    expect(rateValue(600, 300, 'second')).toBe(2);
+    expect(rateValue(600, 3600, 'minute')).toBe(10);
+    expect(rateValue(600, 300, 'bucket')).toBe(600);
+    expect(rateValue(null, 300, 'minute')).toBeNull();
+    expect(rateValue(600, 0, 'minute')).toBeNull();
+    expect(rateValue(600, undefined, 'minute')).toBeNull();
+  });
+
+  it('charts each point per its own bucket length, so an hourly point and a fine one read on one scale', () => {
+    const s = series(MetricKind.Counter, [
+      line('total', [point(0, { sum: 3600, bucketSeconds: 3600 }), point(12, { sum: 300, bucketSeconds: 300 })]),
+    ]);
+
+    expect(buildDatasets(s, { percentile: null, showMinMax: false, rate: 'minute' })[0].data.map((x) => x.y)).toEqual([60, 60]);
+    expect(buildDatasets(s, { percentile: null, showMinMax: false })[0].data.map((x) => x.y)).toEqual([3600, 300]);
+  });
+
+  it('rates a histogram count but leaves its percentile alone', () => {
+    const s = series(MetricKind.Histogram, [line('total', [point(0, { count: 600, percentile: 250 })])]);
+    const [value, percentile] = buildDatasets(s, { percentile: 95, showMinMax: false, rate: 'second' });
+
+    expect(value.data[0].y).toBe(2);
+    expect(percentile.data[0].y).toBe(250);
+  });
+
+  it('ignores the rate for a gauge and an up-down counter', () => {
+    const gauge = series(MetricKind.Gauge, [line('total', [point(0, { value: 7 })])]);
+    const upDown = series(MetricKind.UpDownCounter, [line('total', [point(0, { sum: -4 })])]);
+
+    expect(buildDatasets(gauge, { percentile: null, showMinMax: false, rate: 'second' })[0].data[0].y).toBe(7);
+    expect(buildDatasets(upDown, { percentile: null, showMinMax: false, rate: 'second' })[0].data[0].y).toBe(-4);
+  });
+
+  it('puts the unit on the axis', () => {
+    expect(axisTitles(MetricKind.Counter, null, false, 'minute').y).toBe('Sum per minute');
+    expect(axisTitles(MetricKind.Counter, 'By', false, 'second').y).toBe('Sum per second (bytes)');
+    expect(axisTitles(MetricKind.Histogram, 'ms', false, 'minute')).toEqual({ y: 'Measurements per minute', y1: 'Percentile (ms)' });
+    expect(axisTitles(MetricKind.Gauge, null, false, 'minute').y).toBe('Average');
+    expect(axisTitles(MetricKind.UpDownCounter, null, false, 'minute').y).toBe('Net change');
+    expect(axisTitles(MetricKind.Counter, null, true, 'minute').y).toBe('Share of total (%)');
+  });
+
+  it('turns the headline into an average rate over the span it covers, overlays over the same span', () => {
+    // 10 complete five-minute buckets: from iso(0) to completeUntil iso(10) is 50 minutes.
+    const s = {
+      ...series(MetricKind.Counter, [line('total', [point(0, { sum: 1 }), point(10, { sum: 1, incomplete: true })])]),
+      headlines: [
+        { compare: null, value: 500, count: 500 },
+        { compare: '1d', value: 250, count: 250 },
+      ],
+    };
+
+    expect(headlineSpanSeconds(s)).toBe(3000);
+
+    const summary = headlineSummary(s, 'minute')!;
+
+    expect(summary.label).toBe('Average per minute');
+    expect(summary.value).toBe(10);
+    expect(summary.comparisons).toEqual([{ compare: '1d', value: 5, changePercent: 100 }]);
+    expect(headlineSummary(s, 'bucket')!.value).toBe(500);
+  });
+
+  it('measures the headline span from the first bucket when it floors to before the range start', () => {
+    const s = { ...series(MetricKind.Counter, [line('total', [point(-1, { sum: 1 })])]), completeUntil: iso(1) };
+
+    expect(headlineSpanSeconds(s)).toBe(600);
+  });
+
+  it('keeps the gauge headline an average whatever the rate', () => {
+    const s = { ...series(MetricKind.Gauge, [line('total', [point(0)])]), headlines: [{ compare: null, value: 7, count: 2 }] };
+    const summary = headlineSummary(s, 'second')!;
+
+    expect(summary.label).toBe('Average');
+    expect(summary.value).toBe(7);
   });
 });

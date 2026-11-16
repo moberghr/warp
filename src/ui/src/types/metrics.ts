@@ -51,6 +51,8 @@ export interface MetricPoint {
    * now), so its value reads low. Always false on an overlay.
    */
   incomplete: boolean;
+  /** Length of this point's bucket in seconds (an hourly row in a fine read is 3600); the divisor for a rate. */
+  bucketSeconds: number;
 }
 
 /** The headline value of one range over its complete buckets (the still-filling bucket is left out, never prorated). */

@@ -989,6 +989,46 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
         }
     }
 
+    [TimedFact]
+    public async Task GetSeries_SixHourRangeMixingFineAndHourlyRows_GivesEachPointItsOwnBucketLength()
+    {
+        var hour = new DateTime(2026, 11, 13, 6, 0, 0, DateTimeKind.Utc);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", hour, sum: 120, tier: MetricTier.Hourly, compacted: true),
+                Point("c", Now.AddMinutes(-30), sum: 10),
+            ]);
+
+        var result = await CreateService().GetSeries("c", Query(Now.AddHours(-6), Now), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.Select(x => (x.Timestamp, x.BucketSeconds)).ShouldBe([(hour, 3600), (Now.AddMinutes(-30), 300)]);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_HourlyAndDailyRanges_GiveTheDisplayBucketLength()
+    {
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddHours(-2), sum: 10)]);
+        var service = CreateService();
+
+        var day = await service.GetSeries("c", Query(Now.AddHours(-24), Now), Ct);
+        var month = await service.GetSeries("c", Query(Now.AddDays(-30), Now), Ct);
+
+        day.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().BucketSeconds.ShouldBe(3600);
+        month.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().BucketSeconds.ShouldBe(86400);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_ConfiguredFineResolution_GivesThatBucketLength()
+    {
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-3), sum: 10)]);
+        var service = new MetricQueryService<TestContext>(_fixture.CreateContext(), Options.Create(new WarpConfiguration { FineResolutionMinutes = 1 }));
+
+        var result = await service.GetSeries("c", Query(Now.AddHours(-1), Now), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().BucketSeconds.ShouldBe(60);
+    }
+
     private static MetricSeriesQuery Query(
         DateTime from,
         DateTime to,

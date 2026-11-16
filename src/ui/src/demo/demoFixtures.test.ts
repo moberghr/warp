@@ -154,6 +154,15 @@ describe('demo metrics fixtures', () => {
     expect(Date.parse(result.completeUntil)).toBe(Date.parse(current.points.find((x) => x.incomplete)!.timestamp));
   });
 
+  it('carries the bucket length of every point, so the page can chart a rate', async () => {
+    const to = Date.now();
+    const range = (hours: number) =>
+      `from=${encodeURIComponent(new Date(to - hours * 3_600_000).toISOString())}&to=${encodeURIComponent(new Date(to).toISOString())}`;
+
+    expect((await series('payment.results', range(1))).series[0].points.every((x) => x.bucketSeconds === 300)).toBe(true);
+    expect((await series('payment.results', range(24))).series[0].points.every((x) => x.bucketSeconds === 3600)).toBe(true);
+  });
+
   it('answers 404 for an unknown instrument', async () => {
     await expect(series('no.such.metric')).rejects.toMatchObject({ response: { status: 404 } });
   });

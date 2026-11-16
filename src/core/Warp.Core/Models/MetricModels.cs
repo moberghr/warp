@@ -136,6 +136,12 @@ public sealed class MetricPointModel
     /// out. Always false on a compare overlay, whose buckets are in the past.
     /// </summary>
     public bool Incomplete { get; init; }
+
+    /// <summary>
+    /// The length of this point's bucket in seconds: the display bucket, or the stored bucket of a coarser row that kept
+    /// its own (an hourly row in a fine read is an hour). Divide by it for a rate (per minute / per second).
+    /// </summary>
+    public int BucketSeconds { get; init; }
 }
 
 /// <summary>One line of a series response: the total, one breakdown value, <c>(rest)</c>, or an overlay of one of those.</summary>

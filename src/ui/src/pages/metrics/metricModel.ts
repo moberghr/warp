@@ -115,6 +115,59 @@ export type RangeId = (typeof RANGES)[number]['id'];
 
 export const PERCENTILES = [50, 90, 95, 99] as const;
 
+/**
+ * Rate units for counters and histogram counts: each bucket divided by its length. Per bucket is the stored value, and
+ * changes scale with the bucket size (5 min up to 6h, 1 hour up to 7d, 1 day beyond); a rate does not.
+ */
+export const RATES = [
+  { id: 'bucket', label: 'Per bucket', seconds: null },
+  { id: 'minute', label: 'Per minute', seconds: 60 },
+  { id: 'second', label: 'Per second', seconds: 1 },
+] as const;
+export type RateId = (typeof RATES)[number]['id'];
+
+/** The `rate` URL parameter: anything but `minute` / `second` (or none) is per bucket, the default. */
+export function parseRate(value: string | null | undefined): RateId {
+  return value === 'minute' || value === 'second' ? value : 'bucket';
+}
+
+/** The `rate` URL parameter for a choice: none for the default, so a plain link stays plain. */
+export function rateParam(rate: RateId): string | null {
+  return rate === 'bucket' ? null : rate;
+}
+
+function rateSeconds(rate: RateId): number | null {
+  return RATES.find((x) => x.id === rate)?.seconds ?? null;
+}
+
+/** Counters count events and histograms count measurements; up-down counters and gauges have no rate. */
+export function supportsRate(kind: MetricKind): boolean {
+  return kind === MetricKind.Counter || kind === MetricKind.Histogram;
+}
+
+/** The rate that applies: per bucket for a kind without one, and for the ratio view (the bucket length cancels). */
+export function effectiveRate(kind: MetricKind, rate: RateId, ratio: boolean): RateId {
+  return ratio || !supportsRate(kind) ? 'bucket' : rate;
+}
+
+/** A bucket's value as a rate: value × unit ÷ bucket length. Null when the bucket length is unknown. */
+export function rateValue(value: number | null, bucketSeconds: number | null | undefined, rate: RateId): number | null {
+  const unit = rateSeconds(rate);
+  if (value === null || unit === null) {
+    return value;
+  }
+
+  if (bucketSeconds === null || bucketSeconds === undefined || !Number.isFinite(bucketSeconds) || bucketSeconds <= 0) {
+    return null;
+  }
+
+  return (value * unit) / bucketSeconds;
+}
+
+function rateSuffix(rate: RateId): string {
+  return rate === 'second' ? 'per second' : 'per minute';
+}
+
 export interface MetricControls {
   range: RangeId;
   application: string | null;
@@ -410,6 +463,8 @@ export interface DatasetOptions {
   percentile: number | null;
   /** Gauges: also draw min and max. */
   showMinMax: boolean;
+  /** Counters and histogram counts: divide each bucket by its length. Per bucket when absent. */
+  rate?: RateId;
 }
 
 /** One dataset per line (top 10 + `(rest)`), plus overlays dashed in the same colour, plus percentile / min / max. */
@@ -458,7 +513,8 @@ export function buildDatasets(series: MetricSeries, options: DatasetOptions): Da
       return spec;
     };
 
-    const result: DatasetSpec[] = [build('value', (p) => pointValue(series.kind, p), 'y')];
+    const rate = effectiveRate(series.kind, options.rate ?? 'bucket', false);
+    const result: DatasetSpec[] = [build('value', (p) => rateValue(pointValue(series.kind, p), p.bucketSeconds, rate), 'y')];
 
     if (series.kind === MetricKind.Histogram && options.percentile !== null) {
       result.push(build('percentile', (p) => p.percentile, 'y1', percentileLabel(options.percentile)));
@@ -580,10 +636,24 @@ export function buildRatioDatasets(series: MetricSeries, numeratorSeries: Metric
 }
 
 /** y-axis titles: what the left and right axes mean for this kind / view. */
-export function axisTitles(kind: MetricKind, unit: string | null | undefined, ratio: boolean): { y: string; y1: string } {
+export function axisTitles(
+  kind: MetricKind,
+  unit: string | null | undefined,
+  ratio: boolean,
+  rate: RateId = 'bucket'
+): { y: string; y1: string } {
   const suffix = unitLabel(unit);
   if (ratio) {
     return { y: 'Share of total (%)', y1: '' };
+  }
+
+  if (effectiveRate(kind, rate, ratio) !== 'bucket') {
+    const per = rateSuffix(rate);
+    if (kind === MetricKind.Histogram) {
+      return { y: `Measurements ${per}`, y1: suffix ? `Percentile (${suffix})` : 'Percentile' };
+    }
+
+    return { y: suffix ? `Sum ${per} (${suffix})` : `Sum ${per}`, y1: '' };
   }
 
   switch (kind) {
@@ -655,19 +725,48 @@ export function formatChange(percent: number | null): string {
  * The headline strip from the server's headlines (complete buckets only — the still-filling bucket is left out, never
  * prorated, and each overlay leaves out the bucket aligned with it). Null when the response carries none.
  */
-export function headlineSummary(series: MetricSeries): HeadlineSummary | null {
+export function headlineSummary(series: MetricSeries, rate: RateId = 'bucket'): HeadlineSummary | null {
   const headlines = series.headlines ?? [];
   const current = headlines.find((x) => x.compare === null);
   if (!current) {
     return null;
   }
 
+  const effective = effectiveRate(series.kind, rate, false);
+  const span = effective === 'bucket' ? null : headlineSpanSeconds(series);
+  const scale = (value: number | null) => (effective === 'bucket' ? value : rateValue(value, span, effective));
+  const value = scale(current.value);
+
   return {
-    label: headlineLabel(series.kind),
-    value: current.value,
+    label: effective === 'bucket' ? headlineLabel(series.kind) : `Average ${rateSuffix(effective)}`,
+    value,
     comparisons: headlines
       .filter((x): x is typeof x & { compare: string } => x.compare !== null)
-      .map((x) => ({ compare: x.compare, value: x.value, changePercent: changePercent(current.value, x.value) })),
+      .map((x) => {
+        const previous = scale(x.value);
+
+        return { compare: x.compare, value: previous, changePercent: changePercent(value, previous) };
+      }),
     excludesIncomplete: incompleteTimes(series).size > 0,
   };
+}
+
+/**
+ * The span a headline covers, for its rate: from the range start (or the first bucket's start, which floors to the
+ * bucket and can sit before it) to where the complete buckets end. Every overlay covers the same span shifted back.
+ * Null when it is not positive.
+ */
+export function headlineSpanSeconds(series: MetricSeries): number | null {
+  const firstPoint = Math.min(
+    ...series.series
+      .filter((x) => x.compare === null)
+      .flatMap((x) => x.points)
+      .map((x) => toMs(x.timestamp))
+      .filter((x) => Number.isFinite(x))
+  );
+  const start = Math.min(toMs(series.from), firstPoint);
+  const end = toMs(series.completeUntil);
+  const seconds = (end - start) / 1000;
+
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
