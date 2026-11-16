@@ -13,6 +13,7 @@ import { queryKeys } from '@/lib/queryClient';
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import type { MetricInstrument } from '@/types/metrics';
 import { collapseTooltip, kindLabel, unitLabel } from './metricModel';
+import { MetricsTabs } from './MetricsTabs';
 
 export default function MetricsPage() {
   const navigate = useNavigate();
@@ -99,6 +100,7 @@ export default function MetricsPage() {
         Application metrics collected from your OpenTelemetry meters — pick one to chart it, break it down by tag
         and compare it with yesterday or last week.
       </p>
+      <MetricsTabs />
 
       <DataTable
         columns={columns}

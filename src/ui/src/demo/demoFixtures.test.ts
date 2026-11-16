@@ -7,6 +7,7 @@ import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import { MetricKind } from '@/types/metrics';
 import type { MetricInstrument, MetricSeries } from '@/types/metrics';
 import type { WarpAddonsInfo } from '@/types';
+import type { MetricBoard, MetricBoardTile } from '@/types/metricBoard';
 
 // Demo mode is what the docs screenshots and every "show me the dashboard" walkthrough run against,
 // so a dangling reference in the fixtures reads as a broken product: the page renders "Unable to
@@ -165,5 +166,41 @@ describe('demo metrics fixtures', () => {
 
   it('answers 404 for an unknown instrument', async () => {
     await expect(series('no.such.metric')).rejects.toMatchObject({ response: { status: 404 } });
+  });
+});
+
+// The health board (#326) is a tab of the Metrics page, so demo mode serves it too: every tile reads a demo instrument
+// and the board honours the window it is asked for.
+describe('demo metrics board fixtures', () => {
+  const adapter = createDemoAdapter(false);
+  const call = async <T>(method: string, url: string, params?: Record<string, string>): Promise<T> => {
+    const response = await adapter({ url, baseURL: '', method, params } as InternalAxiosRequestConfig);
+
+    return response.data as T;
+  };
+
+  it('every tile reads an instrument of the demo registry', async () => {
+    const tiles = await call<MetricBoardTile[]>('get', '/metrics/board/tiles');
+    const names = new Set(demoMetrics.map((x) => x.name));
+
+    expect(tiles.length).toBeGreaterThan(0);
+    expect(tiles.filter((x) => !names.has(x.instrument))).toEqual([]);
+  });
+
+  it('evaluates every tile over the requested window, with a coloured tile and a sparkline inside it', async () => {
+    const to = Date.now();
+    const from = to - 6 * 3_600_000;
+    const board = await call<MetricBoard>('get', '/metrics/board', { from: new Date(from).toISOString(), to: new Date(to).toISOString() });
+
+    expect(Date.parse(board.from)).toBe(from);
+    expect(board.tiles.every((x) => x.current !== null && x.dayAgo !== null && x.weekAgo !== null)).toBe(true);
+    expect(board.tiles.some((x) => x.status !== null)).toBe(true);
+    expect(board.tiles.every((x) => x.sparkline.length > 0)).toBe(true);
+    expect(board.tiles.flatMap((x) => x.sparkline).every((p) => Date.parse(p.timestamp) < to)).toBe(true);
+  });
+
+  it('accepts tile upserts and deletes', async () => {
+    await expect(call('post', '/metrics/board/tiles')).resolves.toEqual({ id: 0 });
+    await expect(call('delete', '/metrics/board/tiles/1')).resolves.toEqual({});
   });
 });

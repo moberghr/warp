@@ -257,6 +257,48 @@ app.MapWarpDashboard(o => o.ShowMetrics());
 
 The routes inherit the dashboard's authorization like every other page, and expose instrument names and tag values, so gate them accordingly.
 
+## Health board
+
+The **Board** tab of the Metrics page (`/metrics/board`) answers the post-deploy question: do the handful of numbers that matter look normal right now? Each tile shows its value over the selected window, the same window **1 day** and **7 days** earlier with the change, a **sparkline** with the window's [deploys](./applications.md#deploy-history) drawn as dashed lines, and a **status colour**. The window selector is the metric page's: the presets, **Since last deploy** (the newest deploy of any application), and a range kept in the URL the same way (`?range=…` or `?from=…&to=…`).
+
+Tiles are stored in the `metric_board_tile` table and edited on the board (**Add tile**, **Edit**, **Delete**). You can also seed them from code:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.AddMetricBoard(b => b
+        .Ratio("Payment success", "payment.results", ratioTag: "result", goodValues: "ok", badValues: "declined,error",
+            check: MetricTileCheck.Deviation(0.02, baselineDays: 7, direction: MetricDeviationDirection.Drop))
+        .Value("Inbound requests", "http.server.request.duration",
+            check: MetricTileCheck.Deviation(0.3, baselineDays: 1, direction: MetricDeviationDirection.Drop))
+        .Value("Server errors (5xx)", "http.server.request.duration", tagFilter: "http.response.status_code=5*",
+            check: MetricTileCheck.AtMost(25))
+        .Value("DB connections", "db.pool.connections", aggregate: SloGaugeAggregate.Max,
+            check: MetricTileCheck.AtMost(80)));
+});
+```
+
+Seeding is **insert-if-absent**, as for [SLO objectives](./slo-error-budget.md). A seeded tile is matched by name, or by instrument + kind + application + filter + ratio tag + aggregate, so renaming it or editing its rule in the dashboard survives a restart. A tile deleted in the dashboard comes back on the next start while it stays in code. A seed that fails validation against the instrument registry (a ratio on a gauge, for example) is skipped and logged at Error. `AddMetricBoard` is separate from `AddMetrics` on purpose. It only registers the seeder, so a **dashboard-only host** (no server, no worker, no `AddMetrics`) can own the board. The board's read and edit services are registered by `AddWarp` itself.
+
+**Tile kinds.** The tag filter uses the same `k=v[,k=v]` grammar as the Metrics page and the SLOs: a trailing `*` is a prefix, and an absent tag reads as `{none}`. Tile filters do not address the `{version}` pseudo-tag.
+
+| Kind | Value over the window | Instruments |
+|---|---|---|
+| **Value** | Matching events: the sum for a counter or up-down counter, the measurement count for a histogram. On a gauge, the average (sample-weighted across processes and series, never a total), min or max of every sample. | Any |
+| **Ratio** | Good events ÷ (good + bad) on one tag, with other values ignored: the `MetricRatio` SLO rule. | Counters, up-down counters, histograms (a gauge has no event count) |
+
+**Status rules.** Status uses the SLO maths (`SloMath`) and the SLO states:
+
+- **None**: the tile shows its numbers only.
+- **Threshold**: the value must stay *at most* or *at least* the threshold (a 0–1 fraction on a ratio tile; a value equal to the threshold never violates it). At most a positive threshold is exactly the `MetricThreshold` budget, `(threshold − value) / threshold`; otherwise the budget is the headroom over `|threshold|`. Status is **Breaching** below zero, **Warning** below 25 % headroom, otherwise **Healthy**.
+- **Deviation**: the value must not move more than the allowance from the same window 1 or 7 days earlier, as a **drop**, a **rise** or **either**. On a value tile the allowance is a fraction of the baseline: a drop is the `MetricVolumeFloor` maths at `1 − allowance`, and a rise is its mirror at `1 + allowance`. On a ratio tile it is ratio points (the baseline `MetricRatio` maths). *Either* takes whichever side has less budget.
+
+A tile reads **No data** when its value (or the chosen baseline) is empty. That covers: no row of the instrument in the window, a gauge with no sample, a ratio with no good or bad event, a value baseline of zero or less, and an instrument that is not in the registry or whose kind the tile cannot read. A counter with traffic but no matching event reads 0, so "5xx ≤ 0" works.
+
+**How it is read.** The whole board is one batched, tier-bounded read of `metric_point`. One statement covers the current, 1d and 7d windows of every tile's instrument (two at most, grouped with and without tags), plus the registry rows. Each window reads every tier that overlaps it. A stored bucket that only partly overlaps a window counts in proportion to the overlap, exactly as the SLO evaluator reads a window, so a "since last deploy" window that starts mid-hour compares fairly with an hourly baseline. The sparkline follows the series resolution rules (up to 6 hours fine, up to 7 days hourly, longer daily). A board holds at most 48 tiles.
+
+**API.** `GET {prefix}/api/metrics/board?from=&to=` takes ISO instants at most 90 days apart; bad input is a 400. `GET {prefix}/api/metrics/board/tiles` lists the tiles. `POST {prefix}/api/metrics/board/tiles` inserts (`id: 0`) or updates a tile, validated against the instrument registry, and answers a 400 with the reason on failure. `DELETE {prefix}/api/metrics/board/tiles/{id}` removes one. These routes carry the dashboard's authorization like every other route.
+
 ## Cardinality
 
 Collected tags can be unbounded (a request id, a user id), and Warp writes them to your own operational database. Each process therefore bounds what a collected instrument can do, in memory:
@@ -328,4 +370,4 @@ See also [Configuration](/docs/operations/configuration#custom-application-metri
 
 ## Migration
 
-Additive: two new tables (`metric_point`, `metric_instrument`), nine nullable columns on `slo_definition` for the metric SLO kinds, and the nullable `metric_point.version` column for [comparing versions](#comparing-versions), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
+Additive: three new tables (`metric_point`, `metric_instrument`, and `metric_board_tile` for the [health board](#health-board)), nine nullable columns on `slo_definition` for the metric SLO kinds, and the nullable `metric_point.version` column for [comparing versions](#comparing-versions), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.

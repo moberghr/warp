@@ -10,7 +10,6 @@ import {
   TimeScale,
   Tooltip,
   Legend,
-  type Plugin,
   type ScriptableContext,
   type ScriptableLineSegmentContext,
 } from 'chart.js';
@@ -25,6 +24,7 @@ import { parseFilterChip } from '@/lib/metricPattern';
 import { queryKeys } from '@/lib/queryClient';
 import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { useTickingValue } from '@/hooks/useTicking';
+import { DEPLOY_COLOR, deployMarkerPlugin } from '@/lib/deployMarkerPlugin';
 import { MetricKind } from '@/types/metrics';
 import type { MetricInstrument } from '@/types/metrics';
 import {
@@ -80,7 +80,6 @@ import {
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, TimeScale, Tooltip, Legend);
 
-const DEPLOY_COLOR = '#f59e0b';
 const PALETTE = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7', '#ec4899', '#84cc16', '#14b8a6', '#f97316'];
 const REST_COLOR = '#9ca3af';
 
@@ -614,40 +613,6 @@ function CustomRangeForm({
       </form>
     </CardContent>
   );
-}
-
-// Draws each deploy as a dashed vertical line with its label, staggered so neighbouring labels do not overprint.
-function deployMarkerPlugin(markers: DeployMarker[]): Plugin<'line'> {
-  return {
-    id: 'warpDeployMarkers',
-    afterDatasetsDraw(chart) {
-      const { ctx, chartArea, scales } = chart;
-      const x = scales.x;
-      if (!x || markers.length === 0) {
-        return;
-      }
-
-      ctx.save();
-      ctx.strokeStyle = DEPLOY_COLOR;
-      ctx.fillStyle = DEPLOY_COLOR;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.font = '10px sans-serif';
-      markers.forEach((marker, index) => {
-        const px = x.getPixelForValue(marker.time);
-        if (px < chartArea.left || px > chartArea.right) {
-          return;
-        }
-
-        ctx.beginPath();
-        ctx.moveTo(px, chartArea.top);
-        ctx.lineTo(px, chartArea.bottom);
-        ctx.stroke();
-        ctx.fillText(marker.label, Math.min(px + 3, chartArea.right - ctx.measureText(marker.label).width), chartArea.top + 10 + (index % 3) * 11);
-      });
-      ctx.restore();
-    },
-  };
 }
 
 function Control({ label, children }: { label: string; children: React.ReactNode }) {

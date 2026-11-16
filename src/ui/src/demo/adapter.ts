@@ -15,6 +15,7 @@ import {
   filterDemoDeploys,
 } from './data/applications';
 import { demoSlos, demoSloDetail } from './data/slo';
+import { demoBoardTiles, demoMetricBoard } from './data/metricBoard';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
@@ -505,7 +506,31 @@ function routeMetrics(
   url: string,
   config: InternalAxiosRequestConfig,
 ): Promise<AxiosResponse> | undefined {
-  if (method !== 'get' || !url.startsWith('/metrics')) {
+  if (!url.startsWith('/metrics')) {
+    return undefined;
+  }
+
+  // Health board (#326) — literal segments, matched before /metrics/{id}/series as on the server.
+  if (url === '/metrics/board' || url.startsWith('/metrics/board?')) {
+    if (method !== 'get') {
+      return undefined;
+    }
+
+    const params: Record<string, string | undefined> = config.params ?? {};
+
+    return resolve(demoMetricBoard(params.from, params.to), config);
+  }
+
+  if (url === '/metrics/board/tiles' || /^\/metrics\/board\/tiles\/[^/?]+$/.test(url)) {
+    // GET lists the demo tiles; POST (upsert) and DELETE succeed without persisting in demo mode.
+    if (method === 'get') {
+      return resolve(demoBoardTiles, config);
+    }
+
+    return resolve(method === 'post' ? { id: 0 } : {}, config);
+  }
+
+  if (method !== 'get') {
     return undefined;
   }
 

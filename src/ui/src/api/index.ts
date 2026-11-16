@@ -411,6 +411,19 @@ export const getMetrics = () =>
 export const getMetricSeries = (instrument: string, query: string) =>
   api.get<import('@/types/metrics').MetricSeries>(`/metrics/${encodeUrlSafeId(instrument)}/series?${query}`).then(r => r.data);
 
+// Metrics health board (#326): every tile evaluated over [from, to) in one batched read, and tile CRUD. Registered by
+// AddWarp, so a dashboard-only host serves them; the upsert's 400 body is a plain message string.
+export const getMetricBoard = (from: string, to: string) =>
+  api.get<import('@/types/metricBoard').MetricBoard>('/metrics/board', { params: { from, to } }).then(r => r.data);
+
+export const getMetricBoardTiles = () =>
+  api.get<import('@/types/metricBoard').MetricBoardTile[]>('/metrics/board/tiles').then(r => r.data);
+
+export const upsertMetricBoardTile = (body: import('@/types/metricBoard').MetricBoardTile) =>
+  api.post<{ id: number }>('/metrics/board/tiles', body).then(r => r.data);
+
+export const deleteMetricBoardTile = (id: number) => api.delete(`/metrics/board/tiles/${id}`);
+
 // Extensions
 export const getExtensions = () =>
   api.get<ExtensionManifest[]>('/extensions').then(r => r.data);
