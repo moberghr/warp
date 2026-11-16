@@ -34,6 +34,8 @@ import {
   PERCENTILES,
   RANGES,
   RATES,
+  annotationsQueryKey,
+  annotationsRequest,
   axisTitles,
   breakdownValues,
   buildDatasets,
@@ -44,6 +46,8 @@ import {
   collapseTooltip,
   customRangeLabel,
   deployMarkers,
+  deploysQueryKey,
+  deploysRequest,
   dimensionKeys,
   dimensionLabel,
   formatChange,
@@ -54,6 +58,7 @@ import {
   kindChartNote,
   kindLabel,
   latestDeploy,
+  numeratorQueryKey,
   parseRangeParams,
   parseRate,
   percentileLabel,
@@ -61,6 +66,8 @@ import {
   removeChip,
   resolutionSummary,
   resolveWindow,
+  seriesQueryKey,
+  sinceDeployHint,
   seriesRefetchMs,
   sinceDeployRange,
   supportsPercentile,
@@ -162,8 +169,7 @@ export default function MetricDetailPage() {
   const clamped = useTickingValue(useCallback((now: number) => resolveWindow({ range, custom }, now).clamped, [range, custom]));
 
   const seriesQuery = useQuery({
-    queryKey: ['metrics', 'series', name, controls.range, controls.custom, controls.application, controls.breakdown, controls.filters,
-      controls.compareDay, controls.compareWeek, controls.view === 'values' ? controls.percentile : null, kind] as const,
+    queryKey: seriesQueryKey(name, controls, kind),
     queryFn: () => api.getMetricSeries(name as string, buildSeriesQuery(controls, kind, Date.now())),
     enabled: name !== null && instrument !== undefined,
     refetchInterval: refetchMs,
@@ -172,16 +178,8 @@ export default function MetricDetailPage() {
 
   // Deploys (#325) in the window, for the selected application or every application, drawn as chart markers.
   const deploysQuery = useQuery({
-    queryKey: ['metrics', 'deploys', controls.application, controls.range, controls.custom] as const,
-    queryFn: () => {
-      const w = resolveWindow(controls, Date.now());
-
-      return api.getDeploys({
-        application: controls.application ?? undefined,
-        from: new Date(w.from).toISOString(),
-        to: new Date(w.to + 1).toISOString(),
-      });
-    },
+    queryKey: deploysQueryKey(controls),
+    queryFn: () => api.getDeploys(deploysRequest(controls, Date.now())),
     enabled: name !== null && instrument !== undefined,
     refetchInterval: refetchMs,
     placeholderData: keepPreviousData,
@@ -190,12 +188,8 @@ export default function MetricDetailPage() {
   // Known-issue notes (#333) overlapping the window: every note on the instrument whatever its filter, shaded on the
   // chart and listed under it. Same window and cadence as the deploys.
   const annotationsQuery = useQuery({
-    queryKey: ['annotations', 'instrument', name, controls.range, controls.custom] as const,
-    queryFn: () => {
-      const w = resolveWindow(controls, Date.now());
-
-      return api.getAnnotations({ instrument: name as string, from: new Date(w.from).toISOString(), to: new Date(w.to + 1).toISOString() });
-    },
+    queryKey: annotationsQueryKey(name, controls),
+    queryFn: () => api.getAnnotations(annotationsRequest(name as string, controls, Date.now())),
     enabled: name !== null && instrument !== undefined,
     refetchInterval: refetchMs,
     placeholderData: keepPreviousData,
@@ -217,8 +211,7 @@ export default function MetricDetailPage() {
   // The ratio numerator is its own request (current filters + breakdown:<pattern>, no breakdown), so values the
   // breakdown read folded into (rest) still count. The denominator is the primary breakdown response's total.
   const numeratorQuery = useQuery({
-    queryKey: ['metrics', 'series', 'numerator', name, controls.range, controls.application, controls.breakdown, controls.filters,
-      controls.compareDay, controls.compareWeek, controls.numerator, kind] as const,
+    queryKey: numeratorQueryKey(name, controls, kind),
     queryFn: () => api.getMetricSeries(name as string, buildNumeratorQuery(controls, kind, Date.now()) as string),
     enabled: name !== null && instrument !== undefined && ratioActive && controls.numerator !== null,
     refetchInterval: refetchMs,
@@ -333,7 +326,7 @@ export default function MetricDetailPage() {
               >
                 Custom
               </button>
-              <Hint text={lastDeploy ? `From the ${lastDeploy.application} ${lastDeploy.version} deploy` : 'No deploy recorded for this selection'}>
+              <Hint text={sinceDeployHint(lastDeploy, latestDeployQuery.isError, controls.application !== null)}>
                 <button
                   type="button"
                   className={toggleClass(false)}
@@ -567,9 +560,11 @@ export default function MetricDetailPage() {
               bounds={{ min: Date.parse(series.from), max: Date.parse(series.to) }}
             />
           )}
-          {(markers.length > 0 || bands.length > 0) && (
+          {(markers.length > 0 || bands.length > 0 || deploysQuery.isError) && (
             <p className="mt-2 flex flex-wrap gap-4 text-xs text-muted-foreground">
-              {markers.length > 0 && (
+              {deploysQuery.isError ? (
+                <span className="text-destructive">Unable to load deploys; no deploy markers are drawn.</span>
+              ) : markers.length > 0 && (
                 <span>
                   <span className="mr-1 inline-block w-4 border-t-2 border-dashed align-middle" style={{ borderColor: DEPLOY_COLOR }} />
                   {markers.length === 1 ? '1 deploy' : `${markers.length} deploys`} in this range

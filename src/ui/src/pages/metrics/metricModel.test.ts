@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { inTimeZone, localOffsetMinutes } from '@/lib/timeZone.testUtils';
 import { MetricKind, MetricTier } from '@/types/metrics';
 import type { MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
 import {
@@ -16,8 +17,18 @@ import {
   toLocalInputValue,
   validateCustomRange,
   writeRangeParams,
+  type MetricControls,
   type RangeId,
   type RangeSelection,
+  annotationsQueryKey,
+  annotationsRequest,
+  customRangeLabel,
+  deploysQueryKey,
+  deploysRequest,
+  formatNumber,
+  numeratorQueryKey,
+  seriesQueryKey,
+  sinceDeployHint,
   REST_NAME,
   alignOverlay,
   axisTitles,
@@ -299,6 +310,32 @@ describe('resolveWindow', () => {
     const span = resolveWindow({ range: '24h', custom: { from: now + 5_000, to: null } }, now);
 
     expect(span.to - span.from).toBe(60_000);
+  });
+
+  it('cuts a closed window older than 90 days to 90 days before its own end, not before now', () => {
+    const custom = { from: now - 200 * 86_400_000, to: now - 100 * 86_400_000 };
+
+    expect(resolveWindow({ range: '24h', custom }, now)).toEqual({ from: custom.to - MAX_RANGE_MS, to: custom.to, live: false, clamped: true });
+  });
+
+  it('keeps a window of exactly 90 days whole and unclamped, and clamps one a millisecond longer', () => {
+    const custom = { from: now - MAX_RANGE_MS, to: now };
+
+    expect(resolveWindow({ range: '24h', custom }, now)).toEqual({ ...custom, live: false, clamped: false });
+    expect(resolveWindow({ range: '24h', custom: { from: now - MAX_RANGE_MS, to: null } }, now).clamped).toBe(false);
+    expect(resolveWindow({ range: '24h', custom: { from: now - MAX_RANGE_MS - 1, to: null } }, now).clamped).toBe(true);
+  });
+
+  it('treats a window whose end is still in the future as live, and keeps that end', () => {
+    const custom = { from: now - 3_600_000, to: now + 3_600_000 };
+
+    expect(resolveWindow({ range: '24h', custom }, now)).toEqual({ ...custom, live: true, clamped: false });
+  });
+
+  it('does not report a start the one-minute floor moved earlier as clamped', () => {
+    const custom = { from: now - 30_000, to: now };
+
+    expect(resolveWindow({ range: '24h', custom }, now)).toEqual({ from: now - 60_000, to: now, live: false, clamped: false });
   });
 });
 
@@ -910,5 +947,164 @@ describe('rate', () => {
 
     expect(summary.label).toBe('Average');
     expect(summary.value).toBe(7);
+  });
+});
+
+describe('local time in a DST zone (Europe/Zagreb)', () => {
+  inTimeZone('Europe/Zagreb');
+
+  it('is really running in Zagreb: +1 h in winter, +2 h in summer', () => {
+    expect(localOffsetMinutes(Date.UTC(2026, 0, 15, 12, 0, 0))).toBe(60);
+    expect(localOffsetMinutes(Date.UTC(2026, 6, 15, 12, 0, 0))).toBe(120);
+  });
+
+  it('round-trips a datetime-local value on both sides of the spring and autumn changes', () => {
+    const instants = [
+      Date.UTC(2026, 2, 29, 0, 30, 0), // 01:30 CET, before the spring change
+      Date.UTC(2026, 2, 29, 1, 30, 0), // 03:30 CEST, after it
+      Date.UTC(2026, 9, 24, 23, 30, 0), // 01:30 CEST, before the autumn change
+      Date.UTC(2026, 9, 25, 2, 30, 0), // 03:30 CET, after it
+    ];
+
+    for (const ms of instants) {
+      expect(fromLocalInputValue(toLocalInputValue(ms))).toBe(ms);
+    }
+  });
+
+  it('shows the wall-clock time of the zone in the input value', () => {
+    expect(toLocalInputValue(Date.UTC(2026, 0, 15, 9, 42, 0))).toBe('2026-01-15T10:42');
+    expect(toLocalInputValue(Date.UTC(2026, 6, 15, 9, 42, 0))).toBe('2026-07-15T11:42');
+  });
+
+  it('labels a custom range in local time', () => {
+    expect(customRangeLabel({ from: Date.UTC(2026, 6, 15, 9, 42, 0), to: null })).toBe('Jul 15, 11:42 AM → now');
+  });
+});
+
+describe('customRangeLabel (UTC, en-US)', () => {
+  it('runs in the pinned UTC zone', () => {
+    expect(localOffsetMinutes(Date.UTC(2026, 6, 15, 12, 0, 0))).toBe(0);
+  });
+
+  it('reads "now" for an open range and formats both ends of a closed one', () => {
+    const from = Date.UTC(2026, 10, 13, 10, 42, 0);
+
+    expect(customRangeLabel({ from, to: null })).toBe('Nov 13, 10:42 AM → now');
+    expect(customRangeLabel({ from, to: Date.UTC(2026, 10, 14, 18, 5, 0) })).toBe('Nov 13, 10:42 AM → Nov 14, 06:05 PM');
+  });
+});
+
+describe('formatNumber', () => {
+  it.each([
+    [0, '0'],
+    [7, '7'],
+    [-7, '-7'],
+    [999, '999'],
+    [1000, '1,000'],
+    [1234.56, '1,235'],
+    [-1234.56, '-1,235'],
+    [12.34, '12.3'],
+    [-12.34, '-12.3'],
+    [1.5, '1.5'],
+    [0.125, '0.125'],
+    [0.1, '0.1'],
+    [0.0004, '0'],
+    [2.0001, '2'],
+    [Number.NaN, '—'],
+    [Number.POSITIVE_INFINITY, '—'],
+  ])('%s → %s', (value, expected) => {
+    expect(formatNumber(value)).toBe(expected);
+  });
+});
+
+describe('sinceDeployHint', () => {
+  const deploy = { id: 'd', application: 'api', version: '1.2.0', environment: 'prod', firstSeenAt: '2026-11-12T18:00:00Z', instanceId: 'i', instanceName: null };
+
+  it('names the deploy, says there is none, or says the read failed, never "none" for a failure', () => {
+    expect(sinceDeployHint(deploy, false, true)).toBe('From the api 1.2.0 deploy');
+    expect(sinceDeployHint(null, false, true)).toBe('No deploy recorded for this selection');
+    expect(sinceDeployHint(null, false, false)).toBe('No deploy recorded');
+    expect(sinceDeployHint(null, true, true)).toBe('Unable to load deploys');
+    expect(sinceDeployHint(deploy, true, false)).toBe('Unable to load deploys');
+  });
+});
+
+describe('query keys', () => {
+  const now = Date.UTC(2026, 10, 13, 12, 0, 0);
+  const name = 'http.server.request.duration';
+  const bases: MetricControls[] = [
+    { ...DEFAULT_CONTROLS, breakdown: 'status', filters: [{ key: 'route', value: '/a' }], percentile: 95 },
+    { ...DEFAULT_CONTROLS, breakdown: 'status', filters: [{ key: 'route', value: '/a' }], view: 'ratio', numerator: '5*' },
+    { ...DEFAULT_CONTROLS, custom: { from: now - 2 * 3_600_000, to: now - 3_600_000 }, view: 'ratio', breakdown: 'status', numerator: '503' },
+  ];
+  // Every control: a field added to MetricControls without a case here fails to compile.
+  const changes: Record<keyof MetricControls, Partial<MetricControls>[]> = {
+    range: [{ range: '7d' }, { range: '1h' }],
+    custom: [
+      { custom: null },
+      { custom: { from: now - 3 * 3_600_000, to: null } },
+      { custom: { from: now - 3 * 3_600_000, to: now - 3_600_000 } },
+      { custom: { from: now - 2 * 3_600_000, to: now - 1_800_000 } },
+    ],
+    application: [{ application: 'shop' }, { application: null }],
+    breakdown: [{ breakdown: 'route' }, { breakdown: null }],
+    filters: [{ filters: [] }, { filters: [{ key: 'route', value: '/b' }] }, { filters: [{ key: 'status', value: '5*' }] }],
+    compareDay: [{ compareDay: true }],
+    compareWeek: [{ compareWeek: true }],
+    percentile: [{ percentile: 99 }, { percentile: null }],
+    view: [{ view: 'values' }, { view: 'ratio' }],
+    numerator: [{ numerator: '4*' }, { numerator: null }],
+    showMinMax: [{ showMinMax: true }],
+  };
+  const kinds = [MetricKind.Counter, MetricKind.Histogram, MetricKind.Gauge];
+  const cases = bases.flatMap((base) =>
+    kinds.flatMap((kind) =>
+      Object.entries(changes).flatMap(([field, patches]) => patches.map((patch) => ({ base, kind, field, changed: { ...base, ...patch } }))),
+    ),
+  );
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+  it.each(cases)('a $field change that changes the series request changes its key', ({ base, kind, changed }) => {
+    if (!same(buildSeriesQuery(base, kind, now), buildSeriesQuery(changed, kind, now))) {
+      expect(same(seriesQueryKey(name, base, kind), seriesQueryKey(name, changed, kind))).toBe(false);
+    }
+  });
+
+  it.each(cases)('a $field change that changes the numerator request changes its key', ({ base, kind, changed }) => {
+    if (!same(buildNumeratorQuery(base, kind, now), buildNumeratorQuery(changed, kind, now))) {
+      expect(same(numeratorQueryKey(name, base, kind), numeratorQueryKey(name, changed, kind))).toBe(false);
+    }
+  });
+
+  it.each(cases)('a $field change that changes the deploys or notes request changes its key', ({ base, changed }) => {
+    if (!same(deploysRequest(base, now), deploysRequest(changed, now))) {
+      expect(same(deploysQueryKey(base), deploysQueryKey(changed))).toBe(false);
+    }
+    if (!same(annotationsRequest(name, base, now), annotationsRequest(name, changed, now))) {
+      expect(same(annotationsQueryKey(name, base), annotationsQueryKey(name, changed))).toBe(false);
+    }
+  });
+
+  it('keys the numerator on the custom window, so "since last deploy" never reuses the previous window', () => {
+    const preset = bases[1];
+    const sinceDeploy = { ...preset, custom: { from: now - 3_600_000, to: null } };
+
+    expect(buildNumeratorQuery(preset, MetricKind.Counter, now)).not.toBe(buildNumeratorQuery(sinceDeploy, MetricKind.Counter, now));
+    expect(same(numeratorQueryKey(name, preset, MetricKind.Counter), numeratorQueryKey(name, sinceDeploy, MetricKind.Counter))).toBe(false);
+  });
+
+  it('keys by instrument and kind as well', () => {
+    expect(same(seriesQueryKey('a', bases[0], MetricKind.Counter), seriesQueryKey('b', bases[0], MetricKind.Counter))).toBe(false);
+    expect(same(seriesQueryKey('a', bases[0], MetricKind.Counter), seriesQueryKey('a', bases[0], MetricKind.Histogram))).toBe(false);
+    expect(same(numeratorQueryKey('a', bases[1], MetricKind.Counter), numeratorQueryKey('b', bases[1], MetricKind.Counter))).toBe(false);
+    expect(same(annotationsQueryKey('a', bases[0]), annotationsQueryKey('b', bases[0]))).toBe(false);
+  });
+
+  it('asks for the deploys and notes of the window, the end made inclusive', () => {
+    const controls = { ...DEFAULT_CONTROLS, range: '1h' as const, application: 'shop' };
+
+    expect(deploysRequest(controls, now)).toEqual({ application: 'shop', from: '2026-11-13T11:00:00.000Z', to: '2026-11-13T12:00:00.001Z' });
+    expect(deploysRequest({ ...controls, application: null }, now).application).toBeUndefined();
+    expect(annotationsRequest(name, controls, now)).toEqual({ instrument: name, from: '2026-11-13T11:00:00.000Z', to: '2026-11-13T12:00:00.001Z' });
   });
 });

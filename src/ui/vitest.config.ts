@@ -11,6 +11,9 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     globals: true,
+    // Pinned so local-time and number formatting read the same on a developer machine and in CI; tests that are about
+    // local time switch to a DST zone themselves (lib/timeZone.testUtils.ts).
+    env: { TZ: 'UTC' },
     // Playwright screenshot specs under e2e/ are a separate runner.
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     coverage: {

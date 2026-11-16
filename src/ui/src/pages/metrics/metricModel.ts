@@ -429,6 +429,22 @@ export function latestDeploy(deploys: ApplicationDeployModel[] | undefined): App
   return latest;
 }
 
+/**
+ * The "Since last deploy" tooltip. A failed deploy read says so rather than "no deploy", which would claim the
+ * application was never deployed. `scoped` = the read was limited to the selected application.
+ */
+export function sinceDeployHint(deploy: ApplicationDeployModel | null, failed: boolean, scoped: boolean): string {
+  if (failed) {
+    return 'Unable to load deploys';
+  }
+
+  if (deploy) {
+    return `From the ${deploy.application} ${deploy.version} deploy`;
+  }
+
+  return scoped ? 'No deploy recorded for this selection' : 'No deploy recorded';
+}
+
 /** The custom range "since last deploy" selects: from the deploy, open-ended to now. */
 export function sinceDeployRange(deploy: ApplicationDeployModel): CustomRange {
   return { from: Date.parse(deploy.firstSeenAt), to: null };
@@ -503,6 +519,45 @@ export function buildNumeratorQuery(controls: MetricControls, kind: MetricKind |
     kind,
     now
   );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Query keys: every input a request reads is in its key, so a change of window, filter or numerator refetches instead
+// of reusing the previous window's data. metricModel.test.ts pins that for every control.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** The series request's key: every control buildSeriesQuery reads (the percentile only where it is sent). */
+export function seriesQueryKey(name: string | null, controls: MetricControls, kind: MetricKind | null) {
+  return ['metrics', 'series', name, controls.range, controls.custom, controls.application, controls.breakdown, controls.filters,
+    controls.compareDay, controls.compareWeek, controls.view === 'values' ? controls.percentile : null, kind] as const;
+}
+
+/** The ratio numerator's key: every control buildNumeratorQuery reads, the custom window included. */
+export function numeratorQueryKey(name: string | null, controls: MetricControls, kind: MetricKind | null) {
+  return ['metrics', 'series', 'numerator', name, controls.range, controls.custom, controls.application, controls.breakdown,
+    controls.filters, controls.compareDay, controls.compareWeek, controls.numerator, kind] as const;
+}
+
+/** The deploys drawn as chart markers: the selected application (or all) inside the window. */
+export function deploysRequest(controls: Pick<MetricControls, 'range' | 'custom' | 'application'>, now: number) {
+  const w = resolveWindow(controls, now);
+
+  return { application: controls.application ?? undefined, from: new Date(w.from).toISOString(), to: new Date(w.to + 1).toISOString() };
+}
+
+export function deploysQueryKey(controls: Pick<MetricControls, 'range' | 'custom' | 'application'>) {
+  return ['metrics', 'deploys', controls.application, controls.range, controls.custom] as const;
+}
+
+/** The instrument's notes overlapping the window, whatever their filter. */
+export function annotationsRequest(name: string, controls: Pick<MetricControls, 'range' | 'custom'>, now: number) {
+  const w = resolveWindow(controls, now);
+
+  return { instrument: name, from: new Date(w.from).toISOString(), to: new Date(w.to + 1).toISOString() };
+}
+
+export function annotationsQueryKey(name: string | null, controls: Pick<MetricControls, 'range' | 'custom'>) {
+  return ['annotations', 'instrument', name, controls.range, controls.custom] as const;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
