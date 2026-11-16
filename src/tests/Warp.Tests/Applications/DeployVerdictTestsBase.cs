@@ -113,6 +113,63 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         verdict.Checks.ShouldHaveSingleItem().State.ShouldBe("breaching");
     }
 
+    [TimedTheory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task GetVerdict_DeployAtNowOrInTheFuture_IsPendingWithAnEmptyWindow(int minutesAhead)
+    {
+        // FirstSeenAt = now (the deploy is this instant) or now + 1 min (clock skew between the deploying host and this
+        // one): the window is empty, the board is not read, and nothing throws.
+        await SeedDeployAsync("api", "2.0.0", Now.AddMinutes(minutesAhead));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-5), 100));
+        await SeedTilesAsync(Tile("Errors", threshold: 10));
+
+        var verdict = await Service().GetVerdict(Query("api"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pending);
+        verdict.Window.From.ShouldBe(verdict.Window.To);
+        verdict.Window.Settled.ShouldBeFalse();
+        verdict.Checks.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_SupersededInsideTheSettleWindow_IsJudgedNotPending()
+    {
+        // v2 at 11:00, v3 at 11:02, 5-minute settle window: v2 can never reach 5 minutes, so it is judged over its lifetime.
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedDeployAsync("api", "3.0.0", Now.AddHours(-1).AddMinutes(2));
+        await SeedMetricsAsync(Point(Now.AddHours(-1), 50));
+        await SeedTilesAsync(Tile("Errors", threshold: 10));
+
+        var verdict = await Service().GetVerdict(Query("api", version: "2.0.0"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Fail);
+        verdict.Deploy.SupersededBy.ShouldBe("3.0.0");
+        verdict.Window.Settled.ShouldBeTrue();
+        verdict.Window.SettlesAt.ShouldBe(Now.AddHours(-1).AddMinutes(2));
+        verdict.Window.To.ShouldBe(Now.AddHours(-1).AddMinutes(2));
+        verdict.Checks.ShouldHaveSingleItem().State.ShouldBe("breaching");
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_MinCoverageAboveTheShareWithData_IsNoData()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 4));
+        await SeedTilesAsync(Tile("Errors", threshold: 10));
+        await SeedSloAsync("Evaluated before the deploy", "api", SloState.Healthy, evaluatedAt: Now.AddHours(-2));
+
+        var verdict = await Service().GetVerdict(Query("api", minCoverage: 0.6), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.NoData);
+        verdict.ChecksWithData.ShouldBe(1);
+        verdict.ChecksTotal.ShouldBe(2);
+        verdict.Summary.ShouldStartWith("noData (1 of 2 checks had data, below minCoverage 0.6)");
+    }
+
     [TimedFact]
     public async Task GetVerdict_TileWithoutDataAndNoSlos_IsNoData()
     {
@@ -218,6 +275,9 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         json.RootElement.GetProperty("verdict").GetString().ShouldBe("fail");
         json.RootElement.GetProperty("deploy").GetProperty("version").GetString().ShouldBe("2.0.0");
         json.RootElement.GetProperty("window").GetProperty("minWindowSeconds").GetInt32().ShouldBe(600);
+        json.RootElement.GetProperty("checksWithData").GetInt32().ShouldBe(1);
+        json.RootElement.GetProperty("checksTotal").GetInt32().ShouldBe(1);
+        json.RootElement.GetProperty("summary").GetString().ShouldBe("fail (1 of 1 checks had data): 1 breaching");
         var check = json.RootElement.GetProperty("checks").EnumerateArray().ShouldHaveSingleItem();
         check.GetProperty("source").GetString().ShouldBe("tile");
         check.GetProperty("state").GetString().ShouldBe("breaching");
@@ -243,6 +303,9 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     [InlineData("application=api&minWindowMinutes=-1")]
     [InlineData("application=api&minWindowMinutes=99999")]
     [InlineData("application=api&minWindowMinutes=soon")]
+    [InlineData("application=api&minCoverage=1.5")]
+    [InlineData("application=api&minCoverage=-0.5")]
+    [InlineData("application=api&minCoverage=most")]
     public async Task GetVerdict_Route_BadParameters_ReturnsBadRequest(string queryString)
     {
         await using var host = await CreateDashboardHostAsync();
@@ -301,11 +364,12 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         }
     }
 
-    private static DeployVerdictQuery Query(string application, string? version = null, string? environment = null) => new()
+    private static DeployVerdictQuery Query(string application, string? version = null, string? environment = null, double minCoverage = 0) => new()
     {
         Application = application,
         Version = version,
         Environment = environment,
+        MinCoverage = minCoverage,
     };
 
     private static MetricBoardTile Tile(string name, double? threshold, string? application = null, int position = 1) => new()
@@ -378,7 +442,7 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         await context.SaveChangesAsync(Ct);
     }
 
-    private async Task SeedSloAsync(string name, string? application, SloState state)
+    private async Task SeedSloAsync(string name, string? application, SloState state, DateTime? evaluatedAt = default)
     {
         var definition = new SloDefinition
         {
@@ -395,7 +459,7 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
             Attainment = 0.995,
             BudgetRemaining = 0.5,
             State = state,
-            LastEvaluatedAt = Now,
+            LastEvaluatedAt = evaluatedAt ?? Now,
         });
     }
 

@@ -29,6 +29,26 @@ public class DeployVerdictMathTests
         DeployVerdictMath.Aggregate(states, settled).ShouldBe(expected);
     }
 
+    [TimedTheory]
+    [InlineData(new[] { SloState.Healthy, SloState.NoData, SloState.NoData, SloState.NoData }, 0.5, DeployVerdicts.NoData)]
+    [InlineData(new[] { SloState.Healthy, SloState.Healthy, SloState.NoData, SloState.NoData }, 0.5, DeployVerdicts.Pass)]
+    [InlineData(new[] { SloState.Warning, SloState.NoData, SloState.NoData }, 0.5, DeployVerdicts.NoData)]
+    [InlineData(new[] { SloState.Breaching, SloState.NoData, SloState.NoData }, 0.9, DeployVerdicts.Fail)]
+    [InlineData(new[] { SloState.Acknowledged, SloState.Healthy }, 1.0, DeployVerdicts.Pass)]
+    [InlineData(new[] { SloState.Healthy, SloState.NoData }, 1.0, DeployVerdicts.NoData)]
+    [InlineData(new[] { SloState.Healthy, SloState.NoData, SloState.NoData, SloState.NoData }, 0.0, DeployVerdicts.Pass)]
+    [InlineData(new SloState[0], 0.5, DeployVerdicts.NoData)]
+    public void Aggregate_MinCoverage_TurnsAThinPassOrWarnIntoNoDataButKeepsAFail(SloState[] states, double minCoverage, string expected)
+    {
+        DeployVerdictMath.Aggregate(states, settled: true, minCoverage).ShouldBe(expected);
+    }
+
+    [TimedFact]
+    public void Aggregate_MinCoverageWhileUnsettled_StaysPending()
+    {
+        DeployVerdictMath.Aggregate([SloState.NoData], settled: false, minCoverage: 1).ShouldBe(DeployVerdicts.Pending);
+    }
+
     [TimedFact]
     public void Resolve_NoVersion_TakesTheLatestDeployAndItsPredecessor()
     {
@@ -36,7 +56,7 @@ public class DeployVerdictMathTests
 
         resolved.ShouldNotBeNull();
         resolved.Deploy.Version.ShouldBe("2.0.0");
-        resolved.Previous?.Version.ShouldBe("1.5.0");
+        resolved.Previous.ShouldNotBeNull().Version.ShouldBe("1.5.0");
         resolved.Next.ShouldBeNull();
     }
 
@@ -46,8 +66,8 @@ public class DeployVerdictMathTests
         var resolved = DeployVerdictMath.Resolve([Deploy("1.0.0", -3), Deploy("2.0.0", -1), Deploy("1.5.0", -2)], "1.5.0", null);
 
         resolved.ShouldNotBeNull();
-        resolved.Previous?.Version.ShouldBe("1.0.0");
-        resolved.Next?.Version.ShouldBe("2.0.0");
+        resolved.Previous.ShouldNotBeNull().Version.ShouldBe("1.0.0");
+        resolved.Next.ShouldNotBeNull().Version.ShouldBe("2.0.0");
     }
 
     [TimedFact]
@@ -65,7 +85,7 @@ public class DeployVerdictMathTests
 
         resolved.ShouldNotBeNull();
         resolved.Deploy.FirstSeenAt.ShouldBe(Now.AddHours(-2));
-        resolved.Previous?.Version.ShouldBe("1.0.0");
+        resolved.Previous.ShouldNotBeNull().Version.ShouldBe("1.0.0");
         resolved.Next.ShouldBeNull();
     }
 
@@ -74,7 +94,7 @@ public class DeployVerdictMathTests
     {
         var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -3, "staging"), Deploy("2.0.0", -2, "prod")], "2.0.0", null);
 
-        resolved?.Deploy.Environment.ShouldBe("prod");
+        resolved.ShouldNotBeNull().Deploy.Environment.ShouldBe("prod");
     }
 
     [TimedTheory]
@@ -117,6 +137,31 @@ public class DeployVerdictMathTests
 
         window.To.ShouldBe(Now.AddHours(-1));
         window.Settled.ShouldBeTrue();
+        window.SettlesAt.ShouldBe(Now.AddHours(-3).AddMinutes(5));
+    }
+
+    [TimedFact]
+    public void Window_SupersededInsideTheSettleWindow_IsSettledAtTheNextDeploy()
+    {
+        // v2 at 11:00, v3 at 11:02, 5-minute settle window: v2's window can never reach 5 minutes, so waiting is pointless.
+        var deployedAt = Now.AddHours(-1);
+
+        var window = DeployVerdictMath.Window(deployedAt, deployedAt.AddMinutes(2), Now, TimeSpan.FromMinutes(5));
+
+        window.From.ShouldBe(deployedAt);
+        window.To.ShouldBe(deployedAt.AddMinutes(2));
+        window.Settled.ShouldBeTrue();
+        window.SettlesAt.ShouldBe(deployedAt.AddMinutes(2));
+    }
+
+    [TimedFact]
+    public void Window_SupersededAtTheSameInstant_IsSettledAndEmpty()
+    {
+        var window = DeployVerdictMath.Window(Now.AddHours(-1), Now.AddHours(-1), Now, TimeSpan.FromMinutes(5));
+
+        window.To.ShouldBe(window.From);
+        window.Settled.ShouldBeTrue();
+        window.SettlesAt.ShouldBe(Now.AddHours(-1));
     }
 
     [TimedFact]
@@ -227,7 +272,7 @@ public class DeployVerdictMathTests
     {
         var check = DeployVerdictMath.TileCheck(TileResult("Odd", SloState.Healthy, current: double.NaN, threshold: 1));
 
-        check?.Value.ShouldBeNull();
+        check.ShouldNotBeNull().Value.ShouldBeNull();
     }
 
     [TimedFact]
@@ -294,8 +339,59 @@ public class DeployVerdictMathTests
 
         verdict.Verdict.ShouldBe(DeployVerdicts.Warn);
         verdict.Checks.Select(x => x.Name).ShouldBe(["Mine", "Global", "A global", "Z mine"]);
-        verdict.Summary.ShouldBe("warn: 1 warning, 3 healthy of 4 checks");
+        verdict.Summary.ShouldBe("warn (4 of 4 checks had data): 1 warning, 3 healthy");
+        verdict.ChecksWithData.ShouldBe(4);
+        verdict.ChecksTotal.ShouldBe(4);
         verdict.Deploy.PreviousVersion.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public void Build_SparseData_PassesAndCountsTheChecksWithData()
+    {
+        var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1)], null, null)!;
+        var window = DeployVerdictMath.Window(Now.AddHours(-1), null, Now, TimeSpan.FromMinutes(5));
+
+        var verdict = DeployVerdictMath.Build(
+            resolved,
+            window,
+            [TileResult("A", SloState.Healthy, current: 1, threshold: 5), TileResult("Bb", SloState.NoData, current: null, threshold: 5)],
+            [Slo("C", SloState.Healthy, evaluatedAt: null)]);
+
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+        verdict.ChecksWithData.ShouldBe(1);
+        verdict.ChecksTotal.ShouldBe(3);
+        verdict.Summary.ShouldBe("pass (1 of 3 checks had data): 1 healthy, 2 no data");
+    }
+
+    [TimedFact]
+    public void Build_BelowMinCoverage_IsNoDataAndSaysWhy()
+    {
+        var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1)], null, null)!;
+        var window = DeployVerdictMath.Window(Now.AddHours(-1), null, Now, TimeSpan.FromMinutes(5));
+
+        var verdict = DeployVerdictMath.Build(
+            resolved,
+            window,
+            [TileResult("A", SloState.Healthy, current: 1, threshold: 5), TileResult("Bb", SloState.NoData, current: null, threshold: 5)],
+            [],
+            minCoverage: 0.75);
+
+        verdict.Verdict.ShouldBe(DeployVerdicts.NoData);
+        verdict.ChecksWithData.ShouldBe(1);
+        verdict.ChecksTotal.ShouldBe(2);
+        verdict.Summary.ShouldBe("noData (1 of 2 checks had data, below minCoverage 0.75): 1 healthy, 1 no data");
+    }
+
+    [TimedFact]
+    public void Build_SupersededInsideTheSettleWindow_IsJudgedNotPending()
+    {
+        var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1), Deploy("3.0.0", -1)], "2.0.0", null)!;
+        var window = DeployVerdictMath.Window(Now.AddHours(-1), Now.AddHours(-1).AddMinutes(2), Now, TimeSpan.FromMinutes(5));
+
+        var verdict = DeployVerdictMath.Build(resolved, window, [TileResult("A", SloState.Breaching, current: 9, threshold: 5)], []);
+
+        verdict.Verdict.ShouldBe(DeployVerdicts.Fail);
+        verdict.Summary.ShouldBe("fail (1 of 1 checks had data): 1 breaching");
     }
 
     [TimedFact]
@@ -319,7 +415,9 @@ public class DeployVerdictMathTests
         var verdict = DeployVerdictMath.Build(resolved, window, [], []);
 
         verdict.Verdict.ShouldBe(DeployVerdicts.NoData);
-        verdict.Summary.ShouldContain("no board tile with a rule and no SLO");
+        verdict.Summary.ShouldBe("noData (0 of 0 checks had data): no board tile with a rule and no SLO covers this application");
+        verdict.ChecksWithData.ShouldBe(0);
+        verdict.ChecksTotal.ShouldBe(0);
     }
 
     private static ApplicationDeployModel Deploy(string version, int hoursAgo, string? environment = null) => new()

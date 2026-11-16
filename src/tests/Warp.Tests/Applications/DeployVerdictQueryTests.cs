@@ -10,12 +10,39 @@ public class DeployVerdictQueryTests
     [TimedFact]
     public void TryCreate_OnlyApplication_UsesTheDefaults()
     {
-        DeployVerdictQuery.TryCreate(" api ", " ", null, null, out var query, out _).ShouldBeTrue();
+        DeployVerdictQuery.TryCreate(" api ", " ", null, null, " ", out var query, out _).ShouldBeTrue();
 
         query.Application.ShouldBe("api");
         query.Version.ShouldBeNull();
         query.Environment.ShouldBeNull();
         query.MinWindow.ShouldBe(TimeSpan.FromMinutes(DeployVerdictQuery.DefaultMinWindowMinutes));
+        query.MinCoverage.ShouldBe(0);
+    }
+
+    [TimedTheory]
+    [InlineData("0", 0)]
+    [InlineData("0.5", 0.5)]
+    [InlineData(".25", 0.25)]
+    [InlineData("1", 1)]
+    public void TryCreate_MinCoverageInRange_IsAccepted(string minCoverage, double expected)
+    {
+        DeployVerdictQuery.TryCreate("api", null, null, null, minCoverage, out var query, out _).ShouldBeTrue();
+
+        query.MinCoverage.ShouldBe(expected);
+    }
+
+    [TimedTheory]
+    [InlineData("-0.1")]
+    [InlineData("1.01")]
+    [InlineData("2")]
+    [InlineData("NaN")]
+    [InlineData("1e-1")]
+    [InlineData("half")]
+    public void TryCreate_BadMinCoverage_IsRejectedNamingTheParameter(string minCoverage)
+    {
+        DeployVerdictQuery.TryCreate("api", null, null, null, minCoverage, out _, out var error).ShouldBeFalse();
+
+        error.ShouldBe("'minCoverage' must be a number from 0 to 1.");
     }
 
     [TimedTheory]
@@ -24,7 +51,7 @@ public class DeployVerdictQueryTests
     [InlineData("1440", 1440)]
     public void TryCreate_MinWindowInRange_IsAccepted(string minutes, int expected)
     {
-        DeployVerdictQuery.TryCreate("api", "2.0.0", "prod", minutes, out var query, out _).ShouldBeTrue();
+        DeployVerdictQuery.TryCreate("api", "2.0.0", "prod", minutes, null, out var query, out _).ShouldBeTrue();
 
         query.MinWindow.ShouldBe(TimeSpan.FromMinutes(expected));
         query.Version.ShouldBe("2.0.0");
@@ -40,7 +67,7 @@ public class DeployVerdictQueryTests
     [InlineData("api", "soon", "minWindowMinutes")]
     public void TryCreate_BadInput_IsRejectedNamingTheParameter(string? application, string? minutes, string parameter)
     {
-        DeployVerdictQuery.TryCreate(application, null, null, minutes, out _, out var error).ShouldBeFalse();
+        DeployVerdictQuery.TryCreate(application, null, null, minutes, null, out _, out var error).ShouldBeFalse();
 
         error.ShouldContain(parameter);
     }
@@ -48,7 +75,7 @@ public class DeployVerdictQueryTests
     [TimedFact]
     public void TryCreate_OverlongVersion_IsRejected()
     {
-        DeployVerdictQuery.TryCreate("api", new string('v', DeployVerdictQuery.MaxNameLength + 1), null, null, out _, out var error).ShouldBeFalse();
+        DeployVerdictQuery.TryCreate("api", new string('v', DeployVerdictQuery.MaxNameLength + 1), null, null, null, out _, out var error).ShouldBeFalse();
 
         error.ShouldContain("at most");
     }

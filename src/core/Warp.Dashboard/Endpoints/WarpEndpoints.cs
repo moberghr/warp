@@ -1057,9 +1057,10 @@ public static class WarpEndpoints
             [FromQuery] string? version,
             [FromQuery] string? environment,
             [FromQuery] string? minWindowMinutes,
+            [FromQuery] string? minCoverage,
             CancellationToken ct) =>
         {
-            if (!DeployVerdictQuery.TryCreate(application, version, environment, minWindowMinutes, out var query, out var error))
+            if (!DeployVerdictQuery.TryCreate(application, version, environment, minWindowMinutes, minCoverage, out var query, out var error))
             {
                 return Results.BadRequest(new { error });
             }

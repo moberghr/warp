@@ -60,6 +60,6 @@ public sealed class DeployVerdictService : IDeployVerdictService
             ? (await _slos.GetObjectives(ct)).Items
             : [];
 
-        return DeployVerdictMath.Build(resolved, window, tiles, slos);
+        return DeployVerdictMath.Build(resolved, window, tiles, slos, query.MinCoverage);
     }
 }

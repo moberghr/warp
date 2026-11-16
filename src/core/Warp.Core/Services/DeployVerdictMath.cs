@@ -46,6 +46,9 @@ internal static class DeployVerdictMath
     /// <summary>
     /// The evaluation window: from the deploy to now (or to the next deploy in its environment), at most
     /// <see cref="IMetricQueryService.MaxRangeDays"/> long; settled once the deploy is at least <paramref name="minWindow"/> old.
+    /// A superseded deploy is always settled: its window ends at the next deploy and can never grow, so waiting for
+    /// <paramref name="minWindow"/> would leave it pending forever. It is judged over its whole (short) lifetime and counts
+    /// as settled from the moment it was replaced.
     /// </summary>
     public static DeployVerdictWindow Window(DateTime deployedAt, DateTime? supersededAt, DateTime now, TimeSpan minWindow)
     {
@@ -57,14 +60,16 @@ internal static class DeployVerdictMath
 
         var maxLength = TimeSpan.FromDays(IMetricQueryService.MaxRangeDays);
         var from = to - deployedAt > maxLength ? to - maxLength : deployedAt;
+        var settlesAt = deployedAt + minWindow;
+        var superseded = supersededAt is not null;
 
         return new DeployVerdictWindow
         {
             From = from,
             To = to,
             MinWindowSeconds = (int)minWindow.TotalSeconds,
-            SettlesAt = deployedAt + minWindow,
-            Settled = to - deployedAt >= minWindow,
+            SettlesAt = superseded && to < settlesAt ? to : settlesAt,
+            Settled = superseded || to - deployedAt >= minWindow,
         };
     }
 
@@ -143,9 +148,11 @@ internal static class DeployVerdictMath
 
     /// <summary>
     /// The verdict: pending until settled; then any Breaching fails, any Warning warns, any Healthy or Acknowledged passes,
-    /// and nothing but NoData (or no checks at all) is noData. Acknowledged never fails or warns.
+    /// and nothing but NoData (or no checks at all) is noData. Acknowledged never fails or warns. When fewer than
+    /// <paramref name="minCoverage"/> of the checks have data, a would-be pass or warn is noData (too little evidence either
+    /// way); a fail stays a fail, since a breaching check is evidence whatever the others say.
     /// </summary>
-    public static string Aggregate(IReadOnlyCollection<SloState> states, bool settled)
+    public static string Aggregate(IReadOnlyCollection<SloState> states, bool settled, double minCoverage = 0)
     {
         ArgumentNullException.ThrowIfNull(states);
 
@@ -159,6 +166,11 @@ internal static class DeployVerdictMath
             return DeployVerdicts.Fail;
         }
 
+        if (!Covered(states, minCoverage))
+        {
+            return DeployVerdicts.NoData;
+        }
+
         if (states.Contains(SloState.Warning))
         {
             return DeployVerdicts.Warn;
@@ -167,12 +179,26 @@ internal static class DeployVerdictMath
         return states.Any(x => x is SloState.Healthy or SloState.Acknowledged) ? DeployVerdicts.Pass : DeployVerdicts.NoData;
     }
 
+    /// <summary>True when the share of checks with data reaches <paramref name="minCoverage"/> (always true at 0).</summary>
+    public static bool Covered(IReadOnlyCollection<SloState> states, double minCoverage)
+    {
+        ArgumentNullException.ThrowIfNull(states);
+
+        if (minCoverage <= 0)
+        {
+            return true;
+        }
+
+        return states.Count > 0 && WithData(states) >= minCoverage * states.Count;
+    }
+
     /// <summary>Assembles the verdict from the resolved deploy, the window and the inputs of the application.</summary>
     public static DeployVerdictModel Build(
         ResolvedDeploy resolved,
         DeployVerdictWindow window,
         IReadOnlyList<MetricBoardTileResult> tiles,
-        IReadOnlyList<SloObjectiveModel> slos)
+        IReadOnlyList<SloObjectiveModel> slos,
+        double minCoverage = 0)
     {
         ArgumentNullException.ThrowIfNull(resolved);
         ArgumentNullException.ThrowIfNull(window);
@@ -196,12 +222,14 @@ internal static class DeployVerdictMath
             .Select(x => SloCheck(x, deploy.FirstSeenAt)));
 
         var states = checks.ConvertAll(x => x.State);
-        var verdict = Aggregate(states, window.Settled);
+        var verdict = Aggregate(states, window.Settled, minCoverage);
 
         return new DeployVerdictModel
         {
             Verdict = verdict,
-            Summary = Summary(verdict, states, window),
+            Summary = Summary(verdict, states, window, minCoverage),
+            ChecksWithData = WithData(states),
+            ChecksTotal = states.Count,
             Deploy = new DeployVerdictDeploy
             {
                 Application = deploy.Application,
@@ -227,16 +255,22 @@ internal static class DeployVerdictMath
         _ => "noData",
     };
 
-    internal static string Summary(string verdict, IReadOnlyCollection<SloState> states, DeployVerdictWindow window)
+    internal static string Summary(string verdict, IReadOnlyCollection<SloState> states, DeployVerdictWindow window, double minCoverage = 0)
     {
         if (string.Equals(verdict, DeployVerdicts.Pending, StringComparison.Ordinal))
         {
             return $"pending: settles at {Instant(window.SettlesAt)}";
         }
 
+        var coverage = $"{WithData(states).ToString(CultureInfo.InvariantCulture)} of {states.Count.ToString(CultureInfo.InvariantCulture)} checks had data";
         if (states.Count == 0)
         {
-            return $"{verdict}: no board tile with a rule and no SLO covers this application";
+            return $"{verdict} ({coverage}): no board tile with a rule and no SLO covers this application";
+        }
+
+        if (!Covered(states, minCoverage) && !string.Equals(verdict, DeployVerdicts.Fail, StringComparison.Ordinal))
+        {
+            coverage += $", below minCoverage {minCoverage.ToString("0.###", CultureInfo.InvariantCulture)}";
         }
 
         var parts = new[] { SloState.Breaching, SloState.Warning, SloState.Acknowledged, SloState.Healthy, SloState.NoData }
@@ -244,7 +278,7 @@ internal static class DeployVerdictMath
             .Where(x => x.Count > 0)
             .Select(x => $"{x.Count.ToString(CultureInfo.InvariantCulture)} {Phrase(x.State)}");
 
-        return $"{verdict}: {string.Join(", ", parts)} of {states.Count.ToString(CultureInfo.InvariantCulture)} checks";
+        return $"{verdict} ({coverage}): {string.Join(", ", parts)}";
     }
 
     private static string TileReason(MetricBoardTileResult result, SloState state, SloState unacknowledged, double? baseline)
@@ -274,6 +308,8 @@ internal static class DeployVerdictMath
             ? $"Acknowledged until {Instant(until)}: {detail}."
             : $"{Capitalized(Phrase(slo.State))}: {detail}.";
     }
+
+    private static int WithData(IReadOnlyCollection<SloState> states) => states.Count(x => x != SloState.NoData);
 
     private static bool SameEnvironment(ApplicationDeployModel a, ApplicationDeployModel b)
         => string.Equals(a.Environment ?? string.Empty, b.Environment ?? string.Empty, StringComparison.Ordinal);

@@ -98,7 +98,7 @@ The application detail page lists the deploys as `previous → new` per environm
 After a rollout, a CI/CD step or a person can ask one question and get one machine-readable answer: is release X of application A healthy?
 
 ```http
-GET {prefix}/api/applications/verdict?application=orders-api&version=2.3.1&environment=production&minWindowMinutes=10
+GET {prefix}/api/applications/verdict?application=orders-api&version=2.3.1&environment=production&minWindowMinutes=10&minCoverage=0.5
 ```
 
 | Parameter | Required | Meaning |
@@ -107,12 +107,15 @@ GET {prefix}/api/applications/verdict?application=orders-api&version=2.3.1&envir
 | `version` | no | The version to judge. Left out, the latest deploy is judged. |
 | `environment` | no | Look only at deploys in this environment. Left out, the newest matching deploy in any environment is taken. |
 | `minWindowMinutes` | no | The settle time, a whole number from 0 to 1440 (default 5). |
+| `minCoverage` | no | The share of checks that must have data for a `pass` or `warn`, a number from 0 to 1 (default 0). Below it the verdict is `noData`. |
 
-A missing `application`, a value longer than 200 characters, or a bad `minWindowMinutes` is a **400**. An application with no recorded deploy, or no deploy matching the version and environment, is a **404**. The route is read-only and carries the dashboard's authorization like every other route.
+A missing `application`, a value longer than 200 characters, a bad `minWindowMinutes` or a bad `minCoverage` is a **400**. An application with no recorded deploy, or no deploy matching the version and environment, is a **404**. The route is read-only and carries the dashboard's authorization like every other route.
 
 **Which deploy, which window.** The deploy comes from the [deploy history](#deploy-history). The window runs from its `FirstSeenAt` to now. If a newer version has since been deployed in the same environment, the window ends at that deploy instead: a superseded release is judged over its own lifetime. The response names the version deployed before it (`previousVersion`) and, when superseded, the one after it (`supersededBy`). A window longer than 90 days starts 90 days before its end, the board's read limit.
 
 **Pending.** A deploy younger than `minWindowMinutes` gets `pending`, whatever its checks say. A CI step polling right after a rollout therefore never reads a premature pass, or a fail from two minutes of data. `window.settlesAt` says when to ask again. The checks are still returned, so a person can look early.
+
+A **superseded** deploy is never pending. Its window ends at the next deploy and can never grow, so it is judged over its whole lifetime however short that is, and `window.settlesAt` is the next deploy's `FirstSeenAt` (v2 at 10:00, v3 at 10:02, a 5-minute settle time: v2 is judged over its two minutes and settled at 10:02). Only the latest deploy in an environment can be pending.
 
 **What counts.**
 
@@ -123,11 +126,14 @@ A missing `application`, a value longer than 200 characters, or a bad `minWindow
 
 | Checks | Verdict |
 |---|---|
-| The deploy is younger than `minWindowMinutes` | `pending` |
+| The deploy is the latest in its environment and younger than `minWindowMinutes` | `pending` |
 | Any check is Breaching | `fail` |
+| Otherwise, the share of checks with data is below `minCoverage` | `noData` |
 | Otherwise, any check is Warning | `warn` |
 | Otherwise, any check is Healthy or Acknowledged | `pass` |
 | No checks, or every check is No data | `noData` |
+
+**Sparse data.** A check without data never fails or warns, so with the default `minCoverage=0` a single healthy check among nine without data is a `pass`. The response says how thin that is: `checksWithData` and `checksTotal` count the checks, and the `summary` line starts with them (`pass (1 of 9 checks had data): 1 healthy, 8 no data`). A CI step that wants more evidence passes `minCoverage`, for example `0.5`: below half, a would-be `pass` or `warn` is `noData` and the summary adds `below minCoverage 0.5`. A `fail` stays a `fail` whatever the coverage, since a breaching check is evidence on its own.
 
 **Acknowledged never fails.** A tile whose Warning or Breaching status is covered by an active acknowledged-noise [annotation](./custom-metrics.md#annotations), or an SLO with an active acknowledgement, reads `acknowledged` and counts as a pass. The check keeps `acknowledged: true` and, for a tile, the rule's own state in `unacknowledgedState`.
 
@@ -136,7 +142,9 @@ A missing `application`, a value longer than 200 characters, or a bad `minWindow
 ```json
 {
   "verdict": "warn",
-  "summary": "warn: 1 warning, 1 acknowledged, 2 healthy of 4 checks",
+  "summary": "warn (4 of 4 checks had data): 1 warning, 1 acknowledged, 2 healthy",
+  "checksWithData": 4,
+  "checksTotal": 4,
   "deploy": { "application": "orders-api", "version": "2.3.1", "environment": "production",
               "firstSeenAt": "2026-11-16T11:40:00Z", "instanceName": "orders-api-4b2d",
               "previousVersion": "2.3.0", "supersededBy": null },
@@ -176,7 +184,8 @@ curl -fsS -c jar.txt -X POST "$BASE/api/auth/login" \
 for attempt in $(seq 1 20); do
   body=$(curl -fsS -b jar.txt --get "$BASE/api/applications/verdict" \
     --data-urlencode "application=$APP" --data-urlencode "version=$VERSION" \
-    --data-urlencode "environment=$ENV" --data-urlencode "minWindowMinutes=10")
+    --data-urlencode "environment=$ENV" --data-urlencode "minWindowMinutes=10" \
+    --data-urlencode "minCoverage=0.5")
   verdict=$(jq -r .verdict <<< "$body")
   jq -r .summary <<< "$body"
   case "$verdict" in

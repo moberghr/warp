@@ -382,10 +382,14 @@ curl -fsS -H "Authorization: Bearer $WARP_CI_TOKEN" --get \
   --data-urlencode "application=shop-api" \
   --data-urlencode "version=$GIT_TAG" \
   --data-urlencode "environment=production" \
-  --data-urlencode "minWindowMinutes=10" | jq '{verdict, summary, settlesAt: .window.settlesAt}'
+  --data-urlencode "minWindowMinutes=10" \
+  --data-urlencode "minCoverage=0.5" | jq '{verdict, summary, checksWithData, checksTotal, settlesAt: .window.settlesAt}'
 ```
 
-Poll while `verdict` is `pending`, fail the job on `fail`. The full script is in
+Poll while `verdict` is `pending`, fail the job on `fail`. `minCoverage=0.5` turns a `pass` that rests on
+fewer than half of the checks into `noData`, so a quiet first ten minutes (no checkouts yet) does not read as
+healthy; the `summary` line starts with the count, e.g. `pass (3 of 5 checks had data): 3 healthy, 2 no data`.
+The full script is in
 [Calling it from CI](../features/applications.md#post-deploy-verdict).
 
 **Test scenario.**
@@ -398,6 +402,8 @@ Poll while `verdict` is `pending`, fail the job on `fail`. The full script is in
   `"verdict": "fail"`, `deploy.previousVersion` set to the old version, and a `checks` entry for the 5xx tile
   with `"state": "breaching"`. With an active acknowledged-noise annotation on that tile, the check reads
   `"state": "acknowledged"` and no longer fails the verdict. A version that never registered returns 404.
+  If you deploy again at minute 1, the earlier build is never left `pending`: asked by its version, it is
+  judged over its one minute and settled at the second deploy.
 - `Covered by:` `DeployVerdictTestsBase`, `DeployVerdictMathTests`, `DeployVerdictQueryTests`; UI:
   `verdictModel.test.ts`.
 

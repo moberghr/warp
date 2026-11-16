@@ -12,10 +12,16 @@ public static class DeployVerdicts
     /// <summary>At least one check is Breaching.</summary>
     public const string Fail = "fail";
 
-    /// <summary>The deploy is younger than the settle window: ask again at <see cref="DeployVerdictWindow.SettlesAt"/>.</summary>
+    /// <summary>
+    /// The deploy is younger than the settle window and still the latest in its environment: ask again at
+    /// <see cref="DeployVerdictWindow.SettlesAt"/>. A superseded deploy is never pending, since its window cannot grow.
+    /// </summary>
     public const string Pending = "pending";
 
-    /// <summary>No check counts, or every one that does has no data.</summary>
+    /// <summary>
+    /// No check counts, every one that does has no data, or fewer than the requested <c>minCoverage</c> share of the checks
+    /// have data and none is breaching.
+    /// </summary>
     public const string NoData = "noData";
 }
 
@@ -28,8 +34,17 @@ public sealed class DeployVerdictModel
     /// <summary>One of <see cref="DeployVerdicts"/>.</summary>
     public string Verdict { get; init; } = DeployVerdicts.NoData;
 
-    /// <summary>A one-line summary for a CI log, e.g. <c>fail: 1 breaching, 2 healthy of 3 checks</c>.</summary>
+    /// <summary>A one-line summary for a CI log, e.g. <c>pass (2 of 9 checks had data): 2 healthy, 7 no data</c>.</summary>
     public string Summary { get; init; } = string.Empty;
+
+    /// <summary>
+    /// How many of <see cref="Checks"/> had data (any state but noData). A pass resting on few checks is weak evidence; a CI
+    /// step can demand a share with the <c>minCoverage</c> query parameter.
+    /// </summary>
+    public int ChecksWithData { get; init; }
+
+    /// <summary>The number of <see cref="Checks"/>.</summary>
+    public int ChecksTotal { get; init; }
 
     public DeployVerdictDeploy Deploy { get; init; } = new();
 
@@ -75,7 +90,10 @@ public sealed class DeployVerdictWindow
     /// <summary>The settle time the caller asked for (<c>minWindowMinutes</c>), in seconds.</summary>
     public int MinWindowSeconds { get; init; }
 
-    /// <summary>When the deploy is old enough to get a verdict other than pending.</summary>
+    /// <summary>
+    /// When the deploy is old enough to get a verdict other than pending: <c>FirstSeenAt + minWindow</c>, or the next deploy's
+    /// <c>FirstSeenAt</c> when it was superseded before that.
+    /// </summary>
     public DateTime SettlesAt { get; init; }
 
     /// <summary>False while the verdict is pending.</summary>
