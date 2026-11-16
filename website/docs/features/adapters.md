@@ -49,7 +49,7 @@ builder.Services.AddWarp<AppDbContext>(opt =>
 
     opt.AddAdapter("acme-payments", a =>
     {
-        a.BaseUrl = "https://api.acme.example";   // optional — see below
+        a.BaseUrl = new Uri("https://api.acme.example");   // optional — see below
     });
 });
 
@@ -69,7 +69,7 @@ Every call through that client is now one recorded adapter call: timed, outcome-
 ### Refit adapter
 
 ```csharp
-opt.AddAdapter<IAcmePaymentsApi>("acme-payments", a => a.BaseUrl = "https://api.acme.example");
+opt.AddAdapter<IAcmePaymentsApi>("acme-payments", a => a.BaseUrl = new Uri("https://api.acme.example"));
 ```
 
 Your existing Refit interface, DTOs, and auth `DelegatingHandler`s are unchanged. Operation names come from the interface method names (`ChargeCard`, `RefundCharge`) — never the URL heuristic, never subject to the cardinality guard. `RefitSettings` (custom serializers for XML-over-REST, auth token getters, exception factories) pass through as an optional third argument.
@@ -220,11 +220,11 @@ Adapter call logs can persist request/response bodies and headers, which may con
 ```csharp
 opt.AddAdapter("acme-payments", a =>
 {
-    a.CaptureRequestBodies = CaptureMode.OnFailure;
-    a.CaptureResponseBodies = CaptureMode.OnFailure;
-    a.CaptureHeaders = CaptureMode.OnFailure;
-    a.RedactedHeaders.Add("X-Acme-Signature");   // add your own
-    a.RedactedHeaders.Remove("X-Api-Key");        // or opt one back in — your call
+    a.Recording.CaptureRequestBodies = CaptureMode.OnFailure;
+    a.Recording.CaptureResponseBodies = CaptureMode.OnFailure;
+    a.Recording.CaptureHeaders = CaptureMode.OnFailure;
+    a.Recording.RedactedHeaders.Add("X-Acme-Signature");   // add your own
+    a.Recording.RedactedHeaders.Remove("X-Api-Key");        // or opt one back in — your call
 });
 ```
 
@@ -267,7 +267,7 @@ Recording is **lossy by design.** If the channel is full, the record is dropped,
 The recommended way to adopt adapters is to **add no policy on day one**. Register the adapter with no retry handler and no `UseSharedRateLimit`:
 
 ```csharp
-opt.AddAdapter("acme-payments", a => a.BaseUrl = "https://api.acme.example");
+opt.AddAdapter("acme-payments", a => a.BaseUrl = new Uri("https://api.acme.example"));
 // no retry handler, no UseSharedRateLimit
 ```
 
@@ -281,7 +281,7 @@ Warp deliberately ships **no retry library**. `Warp.Adapters.Http` depends on `M
 // dotnet add package Microsoft.Extensions.Http.Resilience
 opt.AddAdapter("acme-payments", a =>
 {
-    a.BaseUrl = "https://api.acme.example";
+    a.BaseUrl = new Uri("https://api.acme.example");
     a.ConfigureHttpClientBuilder(b => b.AddStandardResilienceHandler());
 });
 ```

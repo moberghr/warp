@@ -11,11 +11,10 @@ When a worker crashes mid-job, Warp's `StaleJobRecovery` normally requeues the j
 NoRestart is an opt-in addon. Register it alongside `AddWarp` / `AddWarpServer`:
 
 ```csharp
-builder.Services.AddWarpServer<AppDbContext>();
-builder.Services.AddWarpNoRestart();
+builder.Services.AddWarpServer<AppDbContext>(opt => opt.AddNoRestart());
 ```
 
-Without `AddWarpNoRestart()`, the `[NoRestart]` / `[Restart]` attributes are silently ignored (the publish behavior isn't registered). `.WithRestart(bool)` still works — it writes metadata directly and doesn't need the addon.
+Without `opt.AddNoRestart()`, the `[NoRestart]` / `[Restart]` attributes are silently ignored (the publish behavior isn't registered). `.WithRestart(bool)` still works — it writes metadata directly and doesn't need the addon.
 
 ## Usage
 

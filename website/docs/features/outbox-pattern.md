@@ -80,9 +80,9 @@ Inject `IPublisherFactory<TContext>` and bind a publisher to the context you are
 ```csharp
 public class CompleteOrderHandler(
     IDbContextFactory<AppDbContext> dbFactory,
-    IPublisherFactory<AppDbContext> publishers) : IRequestHandler<CompleteOrder>
+    IPublisherFactory<AppDbContext> publishers) : IRequestHandler<CompleteOrder, Unit>
 {
-    public async Task Handle(CompleteOrder request, CancellationToken ct)
+    public async Task<Unit> HandleAsync(CompleteOrder request, CancellationToken ct)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var order = await db.Orders.FindAsync([request.OrderId], ct);
@@ -92,6 +92,8 @@ public class CompleteOrderHandler(
         await publisher.Enqueue(new SendReceipt { OrderId = order.Id });
 
         await publisher.SaveChangesAsync(ct); // one commit: the order and the job
+
+        return Unit.Value;
     }
 }
 ```

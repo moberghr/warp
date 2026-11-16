@@ -450,7 +450,7 @@ The dashboard's force-complete button calls `DELETE /api/sagas/{id}`. If the sag
 
 1. The structured-log entry (`LogLevel.Warning`) records the saga id + mutex name. Look in your application logs for `"Force-complete on saga {SagaId} ... aborted: mutex held by in-flight handler"`.
 2. Find the holder: the saga's activity log will show a job in `Processing` state. Click through to the job detail — its `Last Keep-Alive` timestamp tells you whether the handler is alive or stalled.
-3. If the handler is genuinely stuck and you've confirmed the worker is dead, `StaleJobRecovery` will release the lock automatically once `LastKeepAlive` exceeds `InvisibilityTimeout` (default 1 minute). Wait or restart the worker.
+3. If the handler is genuinely stuck and you've confirmed the worker is dead, `StaleJobRecovery` will release the lock automatically once `LastKeepAlive` exceeds `InvisibilityTimeout` (default 5 minutes). Wait or restart the worker.
 
 ### Worker crash mid-handler — idempotency contract
 
