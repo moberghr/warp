@@ -5,6 +5,8 @@ import { getSlos, upsertSlo, deleteSlo, ackSlo, getMetrics } from '@/api';
 import { queryKeys } from '@/lib/queryClient';
 import type { MetricInstrument } from '@/types/metrics';
 import {
+  SloComparison,
+  SloGaugeAggregate,
   SloKind,
   SloKindLabel,
   SloState,
@@ -152,7 +154,7 @@ function ObjectiveRow({
     <tr className="hover:bg-gray-50 dark:hover:bg-gray-900/50">
       <td className="px-4 py-3">
         <Link to={`/slo/${o.id}`} className="font-medium text-blue-600 hover:underline">{o.name}</Link>
-        <div className="text-xs text-gray-500">{SloKindLabel[o.kind]}{o.percentile && o.kind !== SloKind.MetricLatency ? ` p${o.percentile}` : ''}</div>
+        <div className="text-xs text-gray-500">{SloKindLabel[o.kind]}{o.percentile && !isMetricKind(o.kind) ? ` p${o.percentile}` : ''}</div>
       </td>
       <td className="px-4 py-3">
         <span className="font-mono text-xs">{o.dimension}</span>
@@ -266,8 +268,25 @@ function ObjectiveForm({
                   </Field>
                 </>
               )}
+              {draft.kind === SloKind.MetricGaugeThreshold && (
+                <>
+                  <Field label="Compare the per-bucket">
+                    <select className={inputClass} value={draft.gaugeAggregate ?? SloGaugeAggregate.Average} onChange={(e) => set({ gaugeAggregate: Number(e.target.value) as SloGaugeAggregate })}>
+                      <option value={SloGaugeAggregate.Average}>Average (samples from every process averaged)</option>
+                      <option value={SloGaugeAggregate.Min}>Minimum</option>
+                      <option value={SloGaugeAggregate.Max}>Maximum</option>
+                    </select>
+                  </Field>
+                  <Field label="Must stay">
+                    <select className={inputClass} value={draft.comparison ?? SloComparison.AtMost} onChange={(e) => set({ comparison: Number(e.target.value) as SloComparison })}>
+                      <option value={SloComparison.AtMost}>At most the threshold</option>
+                      <option value={SloComparison.AtLeast}>At least the threshold</option>
+                    </select>
+                  </Field>
+                </>
+              )}
               {fields.percentile && (
-                <Field label="Percentile (1–99)">
+                <Field label={draft.kind === SloKind.MetricGaugeThreshold ? 'Compliant share of the window (%, 1–99)' : 'Percentile (1–99)'}>
                   <input className={`${inputClass} tabular-nums`} type="number" min={1} max={99} value={draft.percentile ?? DEFAULT_LATENCY_PERCENTILE} onChange={(e) => set({ percentile: Number(e.target.value) })} />
                 </Field>
               )}
@@ -383,7 +402,9 @@ function MetricTarget({ draft, onChange }: { draft: SloUpsertRequest; onChange: 
           ? 'Max gap (primary − secondary events)'
           : draft.kind === SloKind.MetricLatency
             ? "Threshold (instrument's unit; compared with bucket upper bounds)"
-            : 'Max events in window';
+            : draft.kind === SloKind.MetricGaugeThreshold
+              ? 'Threshold (gauge value)'
+              : 'Max events in window';
 
   return (
     <Field label={label}>

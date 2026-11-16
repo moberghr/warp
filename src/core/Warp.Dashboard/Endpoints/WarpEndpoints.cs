@@ -1222,7 +1222,9 @@ public sealed record SloUpsertRequest(
     string? RatioTag = null,
     string? GoodValues = null,
     string? BadValues = null,
-    int? BaselineDays = null)
+    int? BaselineDays = null,
+    SloComparison? Comparison = null,
+    SloGaugeAggregate? GaugeAggregate = null)
 {
     public Warp.Core.Data.Entities.SloDefinition ToDefinition() => new()
     {
@@ -1242,6 +1244,8 @@ public sealed record SloUpsertRequest(
         GoodValues = GoodValues,
         BadValues = BadValues,
         BaselineDays = BaselineDays,
+        Comparison = Comparison,
+        GaugeAggregate = GaugeAggregate,
     };
 }
 

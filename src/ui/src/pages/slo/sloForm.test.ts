@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MetricKind, type MetricInstrument } from '@/types/metrics';
-import { SloKind, SloState, type SloObjective, type SloUpsertRequest } from '@/types/slo';
+import { SloComparison, SloGaugeAggregate, SloKind, SloState, type SloObjective, type SloUpsertRequest } from '@/types/slo';
 import {
   acceptsInstrument,
   buildUpsertRequest,
@@ -402,5 +402,82 @@ describe('metric latency', () => {
 
   it('is neither a count nor a ratio kind', () => {
     expect(isCountKind(SloKind.MetricLatency)).toBe(false);
+  });
+});
+
+describe('metric gauge threshold', () => {
+  const gaugeDraft = (patch: Partial<SloUpsertRequest> = {}): SloUpsertRequest => ({
+    ...changeKind(baseDraft, SloKind.MetricGaugeThreshold),
+    dimension: 'queue.depth',
+    targetValue: 500,
+    ...patch,
+  });
+
+  it('limits the instrument picker to gauges', () => {
+    const result = selectableInstruments(
+      [instrument('c', MetricKind.Counter), instrument('h', MetricKind.Histogram), instrument('g', MetricKind.Gauge)],
+      SloKind.MetricGaugeThreshold,
+    );
+
+    expect(result.map((x) => x.name)).toEqual(['g']);
+  });
+
+  it('defaults to at most, average and 95% compliant', () => {
+    const draft = changeKind(baseDraft, SloKind.MetricGaugeThreshold);
+
+    expect(draft.comparison).toBe(SloComparison.AtMost);
+    expect(draft.gaugeAggregate).toBe(SloGaugeAggregate.Average);
+    expect(draft.percentile).toBe(95);
+    expect(fieldsFor(SloKind.MetricGaugeThreshold)).toMatchObject({ tagFilter: true, percentile: true });
+  });
+
+  it('drops the gauge options when switching to another kind', () => {
+    const next = changeKind(gaugeDraft({ comparison: SloComparison.AtLeast }), SloKind.MetricThreshold);
+
+    expect(next.comparison).toBeUndefined();
+    expect(next.gaugeAggregate).toBeUndefined();
+  });
+
+  it('accepts a negative threshold and rejects a bad compliant share or option', () => {
+    expect(validateMetricDraft(gaugeDraft({ targetValue: -5 }))).toBeNull();
+    expect(validateMetricDraft(gaugeDraft({ percentile: 100 }))).toMatch(/Compliant share/);
+    expect(validateMetricDraft(gaugeDraft({ comparison: 7 as SloComparison }))).toMatch(/at most or at least/);
+    expect(validateMetricDraft(gaugeDraft({ gaugeAggregate: 9 as SloGaugeAggregate }))).toMatch(/aggregate/);
+  });
+
+  it('sends the comparison, aggregate and percentile, and only for this kind', () => {
+    const request = buildUpsertRequest(gaugeDraft({ comparison: SloComparison.AtLeast, gaugeAggregate: SloGaugeAggregate.Min, percentile: 90 }));
+
+    expect(request).toMatchObject({ comparison: SloComparison.AtLeast, gaugeAggregate: SloGaugeAggregate.Min, percentile: 90 });
+    const threshold = buildUpsertRequest({ ...gaugeDraft({ comparison: SloComparison.AtLeast }), kind: SloKind.MetricThreshold });
+    expect(threshold.comparison).toBeUndefined();
+    expect(threshold.percentile).toBeNull();
+  });
+
+  it('carries the gauge options into an edit draft', () => {
+    const draft = objectiveToDraft({
+      id: 9,
+      name: 'depth',
+      kind: SloKind.MetricGaugeThreshold,
+      dimension: 'queue.depth',
+      application: null,
+      targetValue: 500,
+      percentile: 95,
+      windowSeconds: 3600,
+      enabled: true,
+      evaluated: false,
+      attainment: 0,
+      budgetRemaining: 1,
+      burnRateShort: 0,
+      burnRateLong: 0,
+      state: SloState.Healthy,
+      acknowledgedUntil: null,
+      lastEvaluatedAt: null,
+      comparison: SloComparison.AtLeast,
+      gaugeAggregate: SloGaugeAggregate.Max,
+    });
+
+    expect(draft.comparison).toBe(SloComparison.AtLeast);
+    expect(draft.gaugeAggregate).toBe(SloGaugeAggregate.Max);
   });
 });

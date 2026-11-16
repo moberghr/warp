@@ -48,6 +48,12 @@ public sealed class SloObjectiveModel
     /// <summary>Baseline offset in days (1 or 7) for volume-floor and baseline-ratio objectives.</summary>
     public int? BaselineDays { get; init; }
 
+    /// <summary><see cref="SloKind.MetricGaugeThreshold"/>: at most or at least the target.</summary>
+    public SloComparison? Comparison { get; init; }
+
+    /// <summary><see cref="SloKind.MetricGaugeThreshold"/>: the per-bucket aggregate compared with the target.</summary>
+    public SloGaugeAggregate? GaugeAggregate { get; init; }
+
     /// <summary>False until the evaluator has produced a status for this objective.</summary>
     public bool Evaluated { get; init; }
 

@@ -1,4 +1,4 @@
-import { SloKind, SloState, type SloObjective } from '@/types/slo';
+import { SloComparison, SloGaugeAggregate, SloGaugeAggregateLabel, SloKind, SloState, type SloObjective } from '@/types/slo';
 import { formatObjectiveValue } from './shared';
 
 /**
@@ -35,7 +35,13 @@ function percent(fraction: number): string {
  * The target cell. A metric latency objective shows its percentile and threshold (in the instrument's unit, which the
  * objective does not know, so no unit is printed); every other kind formats its target value.
  */
-export function formatTarget(o: Pick<SloObjective, 'kind' | 'targetValue' | 'percentile'>): string {
+export function formatTarget(o: Pick<SloObjective, 'kind' | 'targetValue' | 'percentile' | 'comparison' | 'gaugeAggregate'>): string {
+  if (o.kind === SloKind.MetricGaugeThreshold) {
+    const aggregate = SloGaugeAggregateLabel[o.gaugeAggregate ?? SloGaugeAggregate.Average];
+    const sign = o.comparison === SloComparison.AtLeast ? '≥' : '≤';
+
+    return `${aggregate} ${sign} ${plain(o.targetValue)} in ${o.percentile ?? 95}%`;
+  }
   if (o.kind === SloKind.MetricLatency) {
     return `p${o.percentile ?? 95} ≤ ${plain(o.targetValue)}`;
   }
@@ -43,8 +49,14 @@ export function formatTarget(o: Pick<SloObjective, 'kind' | 'targetValue' | 'per
   return formatObjectiveValue(o.kind, o.targetValue);
 }
 
-/** The observed cell. A metric latency objective's attainment is the share of events within the threshold. */
+/**
+ * The observed cell. A metric latency objective's attainment is the share of events within the threshold; a gauge
+ * threshold's is the compliant share of the window's observed time.
+ */
 export function formatObserved(o: Pick<SloObjective, 'kind' | 'targetValue' | 'attainment'>): string {
+  if (o.kind === SloKind.MetricGaugeThreshold) {
+    return `${percent(o.attainment)} compliant`;
+  }
   if (o.kind === SloKind.MetricLatency) {
     return `${percent(o.attainment)} ≤ ${plain(o.targetValue)}`;
   }

@@ -1,9 +1,9 @@
 // Pure form logic for the SLO objective editor. Mirrors the client-checkable rules of Warp.Core.Slo.SloValidation
-// for the metric kinds (6-10) so most mistakes show up before a round trip. The server stays the authority: the
+// for the metric kinds (6-11) so most mistakes show up before a round trip. The server stays the authority: the
 // upsert's 400 message is always surfaced by the page.
 import { listsOverlap, parsePattern, type ValuePattern } from '@/lib/metricPattern';
 import { MetricKind, type MetricInstrument } from '@/types/metrics';
-import { SloKind, isMetricKind, type SloObjective, type SloUpsertRequest } from '@/types/slo';
+import { SloComparison, SloGaugeAggregate, SloKind, isMetricKind, type SloObjective, type SloUpsertRequest } from '@/types/slo';
 
 export const MIN_METRIC_WINDOW_SECONDS = 600;
 
@@ -12,13 +12,16 @@ export function acceptsInstrument(kind: SloKind, instrument: MetricKind): boolea
   if (kind === SloKind.MetricLatency) {
     return instrument === MetricKind.Histogram;
   }
+  if (kind === SloKind.MetricGaugeThreshold) {
+    return instrument === MetricKind.Gauge;
+  }
 
   return instrument !== MetricKind.Gauge;
 }
 
 /**
- * Instruments that can back a metric SLO of `kind`: a latency objective needs a histogram (bucket counts); the
- * event-counting kinds exclude gauges, which have no event count.
+ * Instruments that can back a metric SLO of `kind`: a latency objective needs a histogram (bucket counts), a gauge
+ * threshold a gauge; the event-counting kinds exclude gauges, which have no event count.
  */
 export function selectableInstruments(instruments: MetricInstrument[], kind: SloKind = SloKind.MetricThreshold): MetricInstrument[] {
   return instruments
@@ -45,6 +48,8 @@ const metricFieldKeys = [
   'goodValues',
   'badValues',
   'baselineDays',
+  'comparison',
+  'gaugeAggregate',
 ] as const;
 
 /** A draft with every metric-only field cleared. */
@@ -78,6 +83,15 @@ export function changeKind(draft: SloUpsertRequest, kind: SloKind): SloUpsertReq
       return { ...metricBase, targetValue: 0.5, tagFilter: '', baselineDays: 7 };
     case SloKind.MetricLatency:
       return { ...metricBase, targetValue: 0, percentile: DEFAULT_LATENCY_PERCENTILE, tagFilter: '' };
+    case SloKind.MetricGaugeThreshold:
+      return {
+        ...metricBase,
+        targetValue: 0,
+        percentile: DEFAULT_LATENCY_PERCENTILE,
+        tagFilter: '',
+        comparison: SloComparison.AtMost,
+        gaugeAggregate: SloGaugeAggregate.Average,
+      };
     default:
       return { ...metricBase, targetValue: 0, tagFilter: '', secondaryMetric: '', secondaryTagFilter: '' };
   }
@@ -103,6 +117,7 @@ export function fieldsFor(kind: SloKind): KindFields {
     case SloKind.MetricGap:
       return { tagFilter: true, ratio: false, baseline: 'none', secondary: true, percentile: false };
     case SloKind.MetricLatency:
+    case SloKind.MetricGaugeThreshold:
       return { tagFilter: true, ratio: false, baseline: 'none', secondary: false, percentile: true };
     case SloKind.QueueWaitLatency:
     case SloKind.ExecutionLatency:
@@ -225,18 +240,34 @@ export function validateMetricDraft(draft: SloUpsertRequest): string | null {
     }
     case SloKind.MetricLatency:
       return validateLatency(draft);
+    case SloKind.MetricGaugeThreshold:
+      return validateGauge(draft);
     default:
       return draft.targetValue < 0 ? 'Max events must be zero or greater.' : null;
   }
 }
 
 function validateLatency(draft: SloUpsertRequest): string | null {
+  return validatePercentile(draft, 'Percentile') ?? (draft.targetValue < 0 ? 'Threshold must be zero or greater.' : null);
+}
+
+function validatePercentile(draft: SloUpsertRequest, label: string): string | null {
   const percentile = draft.percentile ?? DEFAULT_LATENCY_PERCENTILE;
-  if (!Number.isInteger(percentile) || percentile < 1 || percentile > 99) {
-    return 'Percentile must be a whole number between 1 and 99.';
+
+  return !Number.isInteger(percentile) || percentile < 1 || percentile > 99 ? `${label} must be a whole number between 1 and 99.` : null;
+}
+
+function validateGauge(draft: SloUpsertRequest): string | null {
+  const comparisons: number[] = Object.values(SloComparison);
+  const aggregates: number[] = Object.values(SloGaugeAggregate);
+  if (draft.comparison != null && !comparisons.includes(draft.comparison)) {
+    return 'Pick whether the gauge must stay at most or at least the threshold.';
+  }
+  if (draft.gaugeAggregate != null && !aggregates.includes(draft.gaugeAggregate)) {
+    return 'Pick the aggregate (average, min or max) compared with the threshold.';
   }
 
-  return draft.targetValue < 0 ? 'Threshold must be zero or greater.' : null;
+  return validatePercentile(draft, 'Compliant share');
 }
 
 function validateRatio(draft: SloUpsertRequest): string | null {
@@ -279,7 +310,8 @@ export function buildUpsertRequest(draft: SloUpsertRequest): SloUpsertRequest {
   }
 
   // Every metric kind takes a (primary) tag filter: dropping it on any kind silently widens the objective on edit.
-  const percentile = draft.kind === SloKind.MetricLatency ? (draft.percentile ?? DEFAULT_LATENCY_PERCENTILE) : null;
+  const usesPercentile = draft.kind === SloKind.MetricLatency || draft.kind === SloKind.MetricGaugeThreshold;
+  const percentile = usesPercentile ? (draft.percentile ?? DEFAULT_LATENCY_PERCENTILE) : null;
   const request: SloUpsertRequest = { ...base, dimension: draft.dimension.trim(), percentile, tagFilter: clean(draft.tagFilter) };
   if (draft.kind === SloKind.MetricRatio) {
     request.ratioTag = clean(draft.ratioTag);
@@ -293,6 +325,10 @@ export function buildUpsertRequest(draft: SloUpsertRequest): SloUpsertRequest {
   if (draft.kind === SloKind.MetricGap) {
     request.secondaryMetric = clean(draft.secondaryMetric);
     request.secondaryTagFilter = clean(draft.secondaryTagFilter);
+  }
+  if (draft.kind === SloKind.MetricGaugeThreshold) {
+    request.comparison = draft.comparison ?? SloComparison.AtMost;
+    request.gaugeAggregate = draft.gaugeAggregate ?? SloGaugeAggregate.Average;
   }
 
   return request;
@@ -317,6 +353,8 @@ export function objectiveToDraft(o: SloObjective): SloUpsertRequest {
     goodValues: o.goodValues ?? null,
     badValues: o.badValues ?? null,
     baselineDays: o.baselineDays ?? null,
+    comparison: o.comparison ?? null,
+    gaugeAggregate: o.gaugeAggregate ?? null,
   };
 }
 
@@ -350,6 +388,8 @@ export function describeMetricKind(kind: SloKind): string | null {
       return 'Matching events must stay at or above the target fraction of the same window in the baseline period.';
     case SloKind.MetricGap:
       return 'Primary event count minus secondary event count must not exceed the limit (count ≤ N).';
+    case SloKind.MetricGaugeThreshold:
+      return 'The gauge\'s per-bucket aggregate must stay at most / at least the threshold in at least the compliant share of the window\'s observed time. Samples from several processes and matching series are averaged (or their min / max taken), never summed.';
     case SloKind.MetricLatency:
       return 'At least the percentile share of matching histogram events must land in buckets whose upper bound is at most the threshold (in the instrument\'s unit). Thresholds are compared with bucket upper bounds, so resolution is the bucket ladder.';
     default:

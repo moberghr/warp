@@ -20,7 +20,7 @@ namespace Warp.Worker.Services;
 /// analogue of <c>CounterAggregator</c> / <c>ErrorGroupAggregator</c>); reads only, plus the one status row per
 /// objective. Rate objectives (success-rate, deadline-attainment) are windowed over the tiered history buckets
 /// (fine / hourly / daily, §8.30); latency objectives read the tiered <c>pcth</c> percentile histogram over the
-/// window; backlog reads the current gauge. Metric kinds 6–10 (ratio, threshold, volume floor, gap, latency) read
+/// window; backlog reads the current gauge. Metric kinds 6–11 (ratio, threshold, volume floor, gap, latency, gauge threshold) read
 /// <see cref="MetricPoint"/> rows across every tier overlapping the window (and baseline), prorated by overlap. A
 /// healthy→breaching edge buffers a <see cref="SloBreachedEvent"/> (or <c>BacklogBreached</c> for a depth
 /// objective), dispatched post-commit from <see cref="OnCommittedAsync"/> (§8.25).
@@ -179,6 +179,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
             SloKind.MetricVolumeFloor => ComputeMetricVolumeFloorAsync(def, now, ct),
             SloKind.MetricGap => ComputeMetricGapAsync(def, now, ct),
             SloKind.MetricLatency => ComputeMetricLatencyAsync(def, now, ct),
+            SloKind.MetricGaugeThreshold => ComputeMetricGaugeThresholdAsync(def, now, ct),
             _ => UnsupportedKindAsync(def),
         };
 
@@ -586,6 +587,69 @@ public sealed class SloEvaluator<TContext> : IServerTask
         return FromMath(Rate(goodW, badW, target), Rate(goodS, badS, target));
     }
 
+    // MetricGaugeThreshold: the matching rows of each (tier, bucket) are combined - counts and sums add, extremes take
+    // the min / max - which is exactly what the stored rows of several processes mean: the bucket average is the
+    // sample-weighted mean across processes and series, never their total. Each bucket with samples then complies or
+    // violates (SloMath.TryGaugeVerdict), weighted by the time it covers in the window, so an hourly row counts for an
+    // hour and a fine row for five minutes; bad fraction = violating time / observed time, fed to the rate budget
+    // against Percentile/100. NoData when no bucket in the window has samples.
+    private async Task<EvalResult> ComputeMetricGaugeThresholdAsync(SloDefinition def, DateTime now, CancellationToken ct)
+    {
+        if (!TryParseFilter(def, def.TagFilter, out var filter) || def.Percentile is not { } percentile || percentile is < 1 or > 99)
+        {
+            return CorruptDefinition(def);
+        }
+
+        var from = now.AddSeconds(-def.WindowSeconds);
+        var shortFrom = ShortWindowStart(def, now);
+        var rows = await LoadRawAsync(def, def.Dimension, from, now, byTags: !filter.IsEmpty, withBuckets: false, ct);
+        if (rows is null)
+        {
+            return NoDataResult;
+        }
+
+        var aggregate = def.GaugeAggregate ?? SloGaugeAggregate.Average;
+        var comparison = def.Comparison ?? SloComparison.AtMost;
+        double goodW = 0, badW = 0, goodS = 0, badS = 0;
+        var buckets = rows
+            .Where(x => filter.IsEmpty || filter.Matches(ParsedTags(x.Tags)))
+            .GroupBy(x => (x.Tier, x.BucketStart));
+
+        foreach (var bucket in buckets)
+        {
+            var (tier, start) = bucket.Key;
+            var count = bucket.Sum(x => x.Count);
+            var min = bucket.Aggregate((double?)null, (acc, x) => MetricBuckets.MinOf(acc, x.Min));
+            var max = bucket.Aggregate((double?)null, (acc, x) => MetricBuckets.MaxOf(acc, x.Max));
+            if (!SloMath.TryGaugeVerdict(aggregate, comparison, def.TargetValue, count, bucket.Sum(x => x.Sum), min, max, out var violates))
+            {
+                continue;
+            }
+
+            var wide = CoveredSeconds(tier, start, from, now, now);
+            var recent = CoveredSeconds(tier, start, shortFrom, now, now);
+            if (violates)
+            {
+                badW += wide;
+                badS += recent;
+            }
+            else
+            {
+                goodW += wide;
+                goodS += recent;
+            }
+        }
+
+        if (goodW + badW <= 0)
+        {
+            return NoDataResult;
+        }
+
+        var target = percentile / 100.0;
+
+        return FromMath(Rate(goodW, badW, target), Rate(goodS, badS, target));
+    }
+
     // The metric maths return SloMath.NoDataResult (all NaN) for non-finite input or an overflowing result, and
     // Classify(NaN) would read Healthy — so NoData is decided HERE, before the shared classification. A non-finite
     // short window only zeroes the fast-burn signal.
@@ -742,12 +806,14 @@ public sealed class SloEvaluator<TContext> : IServerTask
                         x.Tags,
                         x.Count,
                         x.Sum,
+                        x.Min,
+                        x.Max,
                         x.Bounds,
                         x.Buckets,
                     })
                 .ToListAsync(ct);
 
-            return stored.ConvertAll(x => new MetricRawRow(x.Tier, DateTime.SpecifyKind(x.BucketStart, DateTimeKind.Utc), x.Tags, x.Count, x.Sum, x.Bounds, x.Buckets));
+            return stored.ConvertAll(x => new MetricRawRow(x.Tier, DateTime.SpecifyKind(x.BucketStart, DateTimeKind.Utc), x.Tags, x.Count, x.Sum, x.Min, x.Max, x.Bounds, x.Buckets));
         }
 
         if (!byTags)
@@ -758,7 +824,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
         // The same grouped projection as the dashboard read (MetricPointQueries.Summed), run on this context.
         var grouped = await MetricPointQueries.Summed(points, byTags).ToListAsync(ct);
 
-        return grouped.ConvertAll(x => new MetricRawRow(x.Tier, DateTime.SpecifyKind(x.BucketStart, DateTimeKind.Utc), byTags ? x.Tags : MetricSeries.NoTags, x.Count, x.Sum, null, null));
+        return grouped.ConvertAll(x => new MetricRawRow(x.Tier, DateTime.SpecifyKind(x.BucketStart, DateTimeKind.Utc), byTags ? x.Tags : MetricSeries.NoTags, x.Count, x.Sum, x.Min, x.Max, null, null));
     }
 
     // The registry kind of every instrument an enabled metric objective reads, loaded in one query at the start of the
@@ -858,15 +924,23 @@ public sealed class SloEvaluator<TContext> : IServerTask
         => Overlap(row.Tier, row.BucketStart, from, to, now);
 
     private double Overlap(MetricTier tier, DateTime bucketStart, DateTime from, DateTime to, DateTime now)
+        => SloMath.OverlapFraction(bucketStart, WrittenWidth(tier, bucketStart, now), from, to);
+
+    // Seconds of [from, to) a bucket covers, its width clipped at now like Overlap's.
+    private double CoveredSeconds(MetricTier tier, DateTime bucketStart, DateTime from, DateTime to, DateTime now)
+    {
+        var width = WrittenWidth(tier, bucketStart, now);
+
+        return SloMath.OverlapFraction(bucketStart, width, from, to) * width.TotalSeconds;
+    }
+
+    // The bucket still being written (it straddles now) has only covered the time up to now.
+    private TimeSpan WrittenWidth(MetricTier tier, DateTime bucketStart, DateTime now)
     {
         var width = TierWidth(tier);
         var written = now - bucketStart;
-        if (written < width)
-        {
-            width = written;
-        }
 
-        return SloMath.OverlapFraction(bucketStart, width, from, to);
+        return written < width ? written : width;
     }
 
     private TimeSpan TierWidth(MetricTier tier) => tier switch
@@ -942,9 +1016,17 @@ public sealed class SloEvaluator<TContext> : IServerTask
             SloKind.MetricVolumeFloor => $"{def.Dimension}{FilterLabel(def.TagFilter)}{baseline}",
             SloKind.MetricGap => $"{def.Dimension}{FilterLabel(def.TagFilter)} - {def.SecondaryMetric}{FilterLabel(def.SecondaryTagFilter)}",
             SloKind.MetricLatency => string.Create(CultureInfo.InvariantCulture, $"{def.Dimension}{FilterLabel(def.TagFilter)} p{def.Percentile} <= {def.TargetValue}"),
+            SloKind.MetricGaugeThreshold => string.Create(CultureInfo.InvariantCulture, $"{def.Dimension}{FilterLabel(def.TagFilter)} {GaugeAggregateLabel(def.GaugeAggregate)} {(def.Comparison == SloComparison.AtLeast ? ">=" : "<=")} {def.TargetValue} in {def.Percentile}% of the window"),
             _ => null,
         };
     }
+
+    private static string GaugeAggregateLabel(SloGaugeAggregate? aggregate) => aggregate switch
+    {
+        SloGaugeAggregate.Min => "min",
+        SloGaugeAggregate.Max => "max",
+        _ => "avg",
+    };
 
     private static string FilterLabel(string? filter)
         => string.IsNullOrWhiteSpace(filter) ? string.Empty : $" [{filter}]";
@@ -1071,7 +1153,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
     private readonly record struct MetricReadKey(string Instrument, string? Application, DateTime From, DateTime To, bool ByTags, bool WithBuckets);
 
     // Bounds and Buckets are only set on the with-buckets shape.
-    private sealed record MetricRawRow(MetricTier Tier, DateTime BucketStart, string Tags, long Count, double Sum, string? Bounds, string? Buckets);
+    private sealed record MetricRawRow(MetricTier Tier, DateTime BucketStart, string Tags, long Count, double Sum, double? Min, double? Max, string? Bounds, string? Buckets);
 
     // One objective window's rows and bounds: [From, To) with its fast-burn start, read at `Now` (To differs from Now
     // only for a baseline window).

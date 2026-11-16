@@ -46,6 +46,41 @@ public enum SloKind
     /// <c>1 − Percentile/100</c>. Histograms only.
     /// </summary>
     MetricLatency = 10,
+
+    /// <summary>
+    /// A custom gauge's per-bucket aggregate (<c>GaugeAggregate</c>: average, min or max) must stay at most / at least
+    /// (<c>Comparison</c>) <c>TargetValue</c> in at least <c>Percentile</c>% of the window's observed time. The bad
+    /// fraction is the time covered by buckets in violation over the time covered by buckets with samples, fed to the
+    /// rate budget with an allowed bad fraction of <c>1 − Percentile/100</c>. Gauges only.
+    /// </summary>
+    MetricGaugeThreshold = 11,
+}
+
+/// <summary>Which side of <c>TargetValue</c> a <see cref="SloKind.MetricGaugeThreshold"/> objective must stay on. Values start at 1 (§8.11).</summary>
+public enum SloComparison
+{
+    /// <summary>The aggregate must be at most the target (a bucket above it is a violation).</summary>
+    AtMost = 1,
+
+    /// <summary>The aggregate must be at least the target (a bucket below it is a violation).</summary>
+    AtLeast = 2,
+}
+
+/// <summary>
+/// The per-bucket gauge value a <see cref="SloKind.MetricGaugeThreshold"/> objective compares. A bucket holds every sample
+/// of the matching series from every process (count, sum, min, max), so <see cref="Average"/> is the sample-weighted
+/// mean across processes and series, never their total. Values start at 1 (§8.11).
+/// </summary>
+public enum SloGaugeAggregate
+{
+    /// <summary>Sum ÷ count of every sample in the bucket.</summary>
+    Average = 1,
+
+    /// <summary>The smallest sample in the bucket.</summary>
+    Min = 2,
+
+    /// <summary>The largest sample in the bucket.</summary>
+    Max = 3,
 }
 
 /// <summary>

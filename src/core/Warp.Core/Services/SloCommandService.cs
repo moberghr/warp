@@ -77,6 +77,8 @@ public sealed class SloCommandService<TContext> : ISloCommandService
         existing.GoodValues = definition.GoodValues;
         existing.BadValues = definition.BadValues;
         existing.BaselineDays = definition.BaselineDays;
+        existing.Comparison = definition.Comparison;
+        existing.GaugeAggregate = definition.GaugeAggregate;
         existing.UpdatedAt = now;
         await _context.SaveChangesAsync(ct);
         _logger.LogInformation("SLO objective {Id} updated", existing.Id);

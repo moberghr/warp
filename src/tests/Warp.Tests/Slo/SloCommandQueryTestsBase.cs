@@ -365,6 +365,92 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         row.TagFilter.ShouldBe("http.route=/api/x");
     }
 
+    [TimedFact]
+    public async Task Seeder_GaugeThresholdTiers_BothInsertWithTheirOptions_AndReseedIsIdempotent()
+    {
+        await SeedInstrumentAsync("queue.depth", MetricKind.Gauge);
+
+        static void Configure(SloOptions o) => o
+            .AddMetricGaugeThreshold("depth warn", "queue.depth", 100)
+            .AddMetricGaugeThreshold("depth page", "queue.depth", 500, aggregate: SloGaugeAggregate.Max, percentile: 99);
+
+        await SeedFromConfigAsync(o => o.AddMetricGaugeThreshold("depth warn", "queue.depth", 100));
+        await SeedFromConfigAsync(Configure);
+        await SeedFromConfigAsync(Configure);
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().OrderBy(x => x.TargetValue).ToListAsync(Ct);
+        rows.Count.ShouldBe(2);
+        rows[0].Name.ShouldBe("depth warn");
+        rows[0].Comparison.ShouldBe(SloComparison.AtMost);
+        rows[0].GaugeAggregate.ShouldBe(SloGaugeAggregate.Average);
+        rows[0].Percentile.ShouldBe(95);
+        rows[1].Name.ShouldBe("depth page");
+        rows[1].GaugeAggregate.ShouldBe(SloGaugeAggregate.Max);
+        rows[1].Percentile.ShouldBe(99);
+    }
+
+    [TimedFact]
+    public async Task Seeder_GaugeThresholdOnCounterInstrument_IsSkipped_AndTheValidSeedStillInserts()
+    {
+        await SeedInstrumentAsync("orders.started", MetricKind.Counter);
+        await SeedInstrumentAsync("queue.depth", MetricKind.Gauge);
+
+        await SeedFromConfigAsync(o => o
+            .AddMetricGaugeThreshold("counter level", "orders.started", 10)
+            .AddMetricGaugeThreshold("depth", "queue.depth", 10, SloComparison.AtLeast, SloGaugeAggregate.Min));
+
+        var row = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct);
+        row.Name.ShouldBe("depth");
+        row.Comparison.ShouldBe(SloComparison.AtLeast);
+        row.GaugeAggregate.ShouldBe(SloGaugeAggregate.Min);
+    }
+
+    [TimedTheory]
+    [InlineData(MetricKind.Counter)]
+    [InlineData(MetricKind.UpDownCounter)]
+    [InlineData(MetricKind.Histogram)]
+    public async Task PostSlo_GaugeThresholdOnNonGaugeInstrument_Returns400(MetricKind kind)
+    {
+        await SeedInstrumentAsync("some.instrument", kind);
+
+        var status = await PostObjectiveAsync(MetricRequest(SloKind.MetricGaugeThreshold, "some.instrument", 10));
+
+        status.ShouldBe(HttpStatusCode.BadRequest);
+        (await _fixture.CreateContext().Set<SloDefinition>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task PostSlo_ValidGaugeThreshold_PersistsComparisonAggregateAndPercentile_AndReadsThemBack()
+    {
+        await SeedInstrumentAsync("queue.depth", MetricKind.Gauge);
+
+        var status = await PostObjectiveAsync(MetricRequest(SloKind.MetricGaugeThreshold, "queue.depth", 5, percentile: 90, comparison: SloComparison.AtLeast, gaugeAggregate: SloGaugeAggregate.Min));
+
+        status.ShouldBe(HttpStatusCode.OK);
+        var row = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct);
+        row.Comparison.ShouldBe(SloComparison.AtLeast);
+        row.GaugeAggregate.ShouldBe(SloGaugeAggregate.Min);
+        row.Percentile.ShouldBe(90);
+        var model = (await Query().GetObjective(row.Id, Ct)).ShouldNotBeNull();
+        model.Comparison.ShouldBe(SloComparison.AtLeast);
+        model.GaugeAggregate.ShouldBe(SloGaugeAggregate.Min);
+    }
+
+    [TimedFact]
+    public async Task Upsert_GaugeThresholdChangedToThreshold_ClearsTheGaugeOptions()
+    {
+        var id = await Command().Upsert(new SloDefinition { Name = "Depth", Kind = SloKind.MetricGaugeThreshold, Dimension = "queue.depth", Comparison = SloComparison.AtLeast, GaugeAggregate = SloGaugeAggregate.Max, Percentile = 99, TargetValue = 5, WindowSeconds = 3600, Enabled = true }, Ct);
+
+        var update = new SloDefinition { Id = id, Name = "Depth", Kind = SloKind.MetricThreshold, Dimension = "orders.failed", Comparison = SloComparison.AtLeast, GaugeAggregate = SloGaugeAggregate.Max, Percentile = 99, TargetValue = 5, WindowSeconds = 3600, Enabled = true };
+        SloValidation.TryValidate(update, out var error).ShouldBeTrue(error);
+        await Command().Upsert(update, Ct);
+
+        var o = (await Query().GetObjective(id, Ct)).ShouldNotBeNull();
+        o.Comparison.ShouldBeNull();
+        o.GaugeAggregate.ShouldBeNull();
+        o.Percentile.ShouldBeNull();
+    }
+
     private static void ConfigureEditable(SloOptions o) => o
         .AddMetricThreshold("threshold", "http.server.request.duration", 0, tagFilter: "status=5*")
         .AddMetricGap("gap", "payments.received", "payments.processed", 0)
@@ -453,7 +539,7 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         return response.StatusCode;
     }
 
-    private static object MetricRequest(SloKind kind, string instrument, double target, string? ratioTag = null, string? goodValues = null, string? badValues = null, int? baselineDays = null, string? tagFilter = null, string? secondaryMetric = null, int? percentile = null)
+    private static object MetricRequest(SloKind kind, string instrument, double target, string? ratioTag = null, string? goodValues = null, string? badValues = null, int? baselineDays = null, string? tagFilter = null, string? secondaryMetric = null, int? percentile = null, SloComparison? comparison = null, SloGaugeAggregate? gaugeAggregate = null)
         => new
         {
             id = 0,
@@ -472,6 +558,8 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
             goodValues,
             badValues,
             baselineDays,
+            comparison = (int?)comparison,
+            gaugeAggregate = (int?)gaugeAggregate,
         };
 
     private async Task SeedInstrumentAsync(string name, MetricKind kind)

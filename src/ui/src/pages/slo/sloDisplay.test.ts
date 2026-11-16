@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SloKind, SloState } from '@/types/slo';
+import { SloComparison, SloGaugeAggregate, SloKind, SloState } from '@/types/slo';
 import { formatObserved, formatTarget, showsSloValues, sloValueDisplay } from './sloDisplay';
 
 describe('sloValueDisplay', () => {
@@ -34,5 +34,15 @@ describe('formatTarget / formatObserved', () => {
     expect(formatTarget({ kind: SloKind.SuccessRate, targetValue: 0.995, percentile: null })).toBe('99.50%');
     expect(formatObserved({ kind: SloKind.ExecutionLatency, targetValue: 500, attainment: 420.4 })).toBe('420 ms');
     expect(formatObserved({ kind: SloKind.MetricThreshold, targetValue: 0, attainment: 3 })).toBe('3');
+  });
+});
+
+describe('gauge threshold display', () => {
+  it('shows the aggregate, direction, threshold and compliant share', () => {
+    const o = { kind: SloKind.MetricGaugeThreshold, targetValue: 5, percentile: 99, attainment: 0.875, comparison: SloComparison.AtLeast, gaugeAggregate: SloGaugeAggregate.Min };
+
+    expect(formatTarget(o)).toBe('min ≥ 5 in 99%');
+    expect(formatObserved(o)).toBe('87.50% compliant');
+    expect(formatTarget({ ...o, comparison: null, gaugeAggregate: null, percentile: null })).toBe('avg ≤ 5 in 95%');
   });
 });

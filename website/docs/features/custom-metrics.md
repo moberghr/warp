@@ -109,7 +109,7 @@ Every measurement is converted to `double` and added to an in-memory aggregate f
 | `ObservableCounter<T>` | Counter | per-series **delta** from the last cumulative value this process saw (the first observation is a baseline only; a total that went down is a reset and the new total is the delta) | sum |
 | `UpDownCounter<T>`, `ObservableUpDownCounter<T>` | UpDownCounter | sum of deltas | **net change** in the bucket (sum of deltas), not the level |
 | `Histogram<T>` | Histogram | count, sum, min, max, bucket counts | count (rates); percentiles from the buckets; a [`MetricLatency` SLO](./slo-error-budget.md#metric-objectives) reads the bucket counts |
-| `Gauge<T>`, `ObservableGauge<T>` | Gauge | count, sum, min, max | average (sum / count), min, max |
+| `Gauge<T>`, `ObservableGauge<T>` | Gauge | count, sum, min, max | average (sum / count), min, max; a [`MetricGaugeThreshold` SLO](./slo-error-budget.md#metric-objectives) compares one of them per bucket |
 
 Observable instruments are read once per flush, just before the aggregates are written out. Non-finite values (`NaN`, infinities) are ignored.
 
@@ -328,4 +328,4 @@ See also [Configuration](/docs/operations/configuration#custom-application-metri
 
 ## Migration
 
-Additive: two new tables (`metric_point`, `metric_instrument`), seven nullable columns on `slo_definition` for the metric SLO kinds, and the nullable `metric_point.version` column for [comparing versions](#comparing-versions), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
+Additive: two new tables (`metric_point`, `metric_instrument`), nine nullable columns on `slo_definition` for the metric SLO kinds, and the nullable `metric_point.version` column for [comparing versions](#comparing-versions), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.

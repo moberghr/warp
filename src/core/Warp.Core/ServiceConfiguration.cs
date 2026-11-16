@@ -1203,6 +1203,8 @@ public static class ServiceConfiguration
         slo.Property(p => p.GoodValues).HasMaxLength(512);
         slo.Property(p => p.BadValues).HasMaxLength(512);
         slo.Property(p => p.BaselineDays);
+        slo.Property(p => p.Comparison).HasConversion<int>();
+        slo.Property(p => p.GaugeAggregate).HasConversion<int>();
         slo.Property(p => p.CreatedAt);
         slo.Property(p => p.UpdatedAt);
 

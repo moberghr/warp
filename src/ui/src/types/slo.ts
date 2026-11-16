@@ -12,6 +12,7 @@ export const SloKind = {
   MetricVolumeFloor: 8,
   MetricGap: 9,
   MetricLatency: 10,
+  MetricGaugeThreshold: 11,
 } as const;
 export type SloKind = (typeof SloKind)[keyof typeof SloKind];
 
@@ -26,6 +27,28 @@ export const SloKindLabel: Record<SloKind, string> = {
   [SloKind.MetricVolumeFloor]: 'Metric volume floor',
   [SloKind.MetricGap]: 'Metric gap',
   [SloKind.MetricLatency]: 'Metric latency',
+  [SloKind.MetricGaugeThreshold]: 'Metric gauge threshold',
+};
+
+/** MetricGaugeThreshold: which side of the target the gauge must stay on (SloComparison, from 1). */
+export const SloComparison = {
+  AtMost: 1,
+  AtLeast: 2,
+} as const;
+export type SloComparison = (typeof SloComparison)[keyof typeof SloComparison];
+
+/** MetricGaugeThreshold: the per-bucket gauge value compared with the target (SloGaugeAggregate, from 1). */
+export const SloGaugeAggregate = {
+  Average: 1,
+  Min: 2,
+  Max: 3,
+} as const;
+export type SloGaugeAggregate = (typeof SloGaugeAggregate)[keyof typeof SloGaugeAggregate];
+
+export const SloGaugeAggregateLabel: Record<SloGaugeAggregate, string> = {
+  [SloGaugeAggregate.Average]: 'avg',
+  [SloGaugeAggregate.Min]: 'min',
+  [SloGaugeAggregate.Max]: 'max',
 };
 
 export const SloState = {
@@ -63,7 +86,7 @@ export interface SloObjective {
   state: SloState;
   acknowledgedUntil: string | null;
   lastEvaluatedAt: string | null;
-  /** Metric kinds only (6-10); null/absent otherwise. Mirrors SloObjectiveModel. */
+  /** Metric kinds only (6-11); null/absent otherwise. Mirrors SloObjectiveModel. */
   tagFilter?: string | null;
   secondaryMetric?: string | null;
   secondaryTagFilter?: string | null;
@@ -71,6 +94,8 @@ export interface SloObjective {
   goodValues?: string | null;
   badValues?: string | null;
   baselineDays?: number | null;
+  comparison?: SloComparison | null;
+  gaugeAggregate?: SloGaugeAggregate | null;
 }
 
 export interface SloList {
@@ -94,15 +119,18 @@ export interface SloUpsertRequest {
   goodValues?: string | null;
   badValues?: string | null;
   baselineDays?: number | null;
+  comparison?: SloComparison | null;
+  gaugeAggregate?: SloGaugeAggregate | null;
 }
 
-/** True for the metric kinds (6-10), whose Dimension is an instrument name. */
+/** True for the metric kinds (6-11), whose Dimension is an instrument name. */
 export const isMetricKind = (kind: SloKind): boolean =>
   kind === SloKind.MetricRatio ||
   kind === SloKind.MetricThreshold ||
   kind === SloKind.MetricVolumeFloor ||
   kind === SloKind.MetricGap ||
-  kind === SloKind.MetricLatency;
+  kind === SloKind.MetricLatency ||
+  kind === SloKind.MetricGaugeThreshold;
 
 /** True for the kinds whose target + attainment are ratios (0..1); false for latency/depth/count (ms / count). */
 export const isRatioKind = (kind: SloKind): boolean =>

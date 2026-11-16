@@ -1,7 +1,7 @@
 // Static SLO fixtures (§8.31) for hosted demo mode + docs screenshots. Mirrors SloList / SloObjective
 // (src/ui/src/types/slo.ts). Values are hand-picked to show one healthy, one warning, and one breaching
-// objective (plus one metric SLO of each metric kind, ids 4-8: healthy, breaching, no data, healthy, healthy) so the state pills and budget bars all appear on the /slo page.
-import { SloKind, SloState, type SloObjective, type SloList } from '@/types/slo';
+// objective (plus one metric SLO of each metric kind, ids 4-9: healthy, breaching, no data, healthy, healthy, breaching) so the state pills and budget bars all appear on the /slo page.
+import { SloComparison, SloGaugeAggregate, SloKind, SloState, type SloObjective, type SloList } from '@/types/slo';
 
 const objectives: SloObjective[] = [
   {
@@ -164,6 +164,27 @@ const objectives: SloObjective[] = [
     acknowledgedUntil: null,
     lastEvaluatedAt: '2026-07-31T09:14:00Z',
     tagFilter: 'http.route=/checkout',
+  },
+  {
+    id: 9,
+    name: 'Webhook queue depth ≤ 500',
+    kind: SloKind.MetricGaugeThreshold,
+    dimension: 'webhooks.queue.depth',
+    application: null,
+    targetValue: 500,
+    percentile: 95,
+    windowSeconds: 3600,
+    enabled: true,
+    evaluated: true,
+    attainment: 0.917,
+    budgetRemaining: -0.67,
+    burnRateShort: 0,
+    burnRateLong: 1.67,
+    state: SloState.Breaching,
+    acknowledgedUntil: null,
+    lastEvaluatedAt: '2026-07-31T09:14:00Z',
+    comparison: SloComparison.AtMost,
+    gaugeAggregate: SloGaugeAggregate.Max,
   },
 ];
 

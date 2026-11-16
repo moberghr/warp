@@ -23,15 +23,20 @@ public static class SloValidation
     /// <summary>Minimum <c>WindowSeconds</c> for metric kinds: one closed bucket plus the flush lag.</summary>
     public const int MinMetricWindowSeconds = 600;
 
-    public static bool IsMetricKind(SloKind kind) => kind is SloKind.MetricRatio or SloKind.MetricThreshold or SloKind.MetricVolumeFloor or SloKind.MetricGap or SloKind.MetricLatency;
+    public static bool IsMetricKind(SloKind kind) => kind is SloKind.MetricRatio or SloKind.MetricThreshold or SloKind.MetricVolumeFloor or SloKind.MetricGap or SloKind.MetricLatency or SloKind.MetricGaugeThreshold;
+
+    /// <summary>The metric kinds whose <c>Percentile</c> is meaningful (and kept by validation).</summary>
+    public static bool UsesPercentile(SloKind kind) => kind is SloKind.MetricLatency or SloKind.MetricGaugeThreshold;
 
     /// <summary>
     /// Whether an objective of <paramref name="slo"/> can read an instrument of registry kind <paramref name="instrument"/>:
-    /// a latency objective needs a histogram (bucket counts), every event-counting kind refuses a gauge (no event count).
+    /// a latency objective needs a histogram (bucket counts), a gauge threshold needs a gauge, and every event-counting
+    /// kind refuses a gauge (no event count).
     /// </summary>
     public static bool AcceptsInstrument(SloKind slo, MetricKind instrument) => slo switch
     {
         SloKind.MetricLatency => instrument == MetricKind.Histogram,
+        SloKind.MetricGaugeThreshold => instrument == MetricKind.Gauge,
         _ => instrument != MetricKind.Gauge,
     };
 
@@ -157,9 +162,12 @@ public static class SloValidation
 
         if (instrumentKind is { } known && !AcceptsInstrument(kind, known))
         {
-            error = kind == SloKind.MetricLatency
-                ? $"{kind} needs a histogram instrument, but '{definition.Dimension}' is a {known}: only a histogram stores the bucket counts a latency objective reads."
-                : $"{kind} cannot use gauge instrument '{definition.Dimension}': gauges have no event count. Use a counter, up-down counter or histogram.";
+            error = kind switch
+            {
+                SloKind.MetricLatency => $"{kind} needs a histogram instrument, but '{definition.Dimension}' is a {known}: only a histogram stores the bucket counts a latency objective reads.",
+                SloKind.MetricGaugeThreshold => $"{kind} needs a gauge instrument, but '{definition.Dimension}' is a {known}: a counter or histogram has no level to hold to a threshold. Use MetricThreshold or MetricLatency instead.",
+                _ => $"{kind} cannot use gauge instrument '{definition.Dimension}': gauges have no event count. Use a counter, up-down counter or histogram.",
+            };
 
             return false;
         }
@@ -202,9 +210,15 @@ public static class SloValidation
 
         // Percentile only means something to a latency objective; fields that belong to other kinds are cleared so they
         // can't mislead a reader.
-        if (kind != SloKind.MetricLatency)
+        if (!UsesPercentile(kind))
         {
             definition.Percentile = null;
+        }
+
+        if (kind != SloKind.MetricGaugeThreshold)
+        {
+            definition.Comparison = null;
+            definition.GaugeAggregate = null;
         }
 
         if (kind != SloKind.MetricRatio)
@@ -295,6 +309,9 @@ public static class SloValidation
 
                 break;
 
+            case SloKind.MetricGaugeThreshold:
+                return TryValidateGauge(definition, out error);
+
             case SloKind.MetricGap:
                 if (string.IsNullOrWhiteSpace(definition.SecondaryMetric))
                 {
@@ -323,6 +340,39 @@ public static class SloValidation
                 break;
         }
 
+        error = null;
+
+        return true;
+    }
+
+    // The target may be any finite value (a gauge can be negative); Comparison and GaugeAggregate default to at most /
+    // average, and Percentile — the share of the window that must comply — to 95.
+    private static bool TryValidateGauge(SloDefinition definition, out string? error)
+    {
+        if (definition.Percentile is { } p && p is < 1 or > 99)
+        {
+            error = "Percentile (the share of the window that must comply) must be between 1 and 99.";
+
+            return false;
+        }
+
+        if (definition.Comparison is { } comparison && !Enum.IsDefined(comparison))
+        {
+            error = $"Comparison '{(int)comparison}' is not valid: use AtMost (1) or AtLeast (2).";
+
+            return false;
+        }
+
+        if (definition.GaugeAggregate is { } aggregate && !Enum.IsDefined(aggregate))
+        {
+            error = $"GaugeAggregate '{(int)aggregate}' is not valid: use Average (1), Min (2) or Max (3).";
+
+            return false;
+        }
+
+        definition.Percentile ??= DefaultLatencyPercentile;
+        definition.Comparison ??= SloComparison.AtMost;
+        definition.GaugeAggregate ??= SloGaugeAggregate.Average;
         error = null;
 
         return true;

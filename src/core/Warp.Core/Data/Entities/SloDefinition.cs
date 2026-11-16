@@ -31,7 +31,10 @@ public class SloDefinition
     /// </summary>
     public double TargetValue { get; set; }
 
-    /// <summary>Percentile (1–99, default 95) for the latency kinds, <see cref="SloKind.MetricLatency"/> included; null for rate/depth kinds.</summary>
+    /// <summary>
+    /// Percentile (1–99, default 95) for the latency kinds, <see cref="SloKind.MetricLatency"/> included, and the
+    /// required compliant share of the window for <see cref="SloKind.MetricGaugeThreshold"/>; null for rate/depth kinds.
+    /// </summary>
     public int? Percentile { get; set; }
 
     /// <summary>Rolling evaluation window in seconds (e.g. 3600). The short burn window is derived as this / 12.</summary>
@@ -59,6 +62,12 @@ public class SloDefinition
 
     /// <summary>Baseline offset in days (1 or 7): <see cref="SloKind.MetricVolumeFloor"/> (required) and <see cref="SloKind.MetricRatio"/> (optional, turns the target into a maximum drop).</summary>
     public int? BaselineDays { get; set; }
+
+    /// <summary><see cref="SloKind.MetricGaugeThreshold"/>: whether the aggregate must stay at most or at least the target (default at most).</summary>
+    public SloComparison? Comparison { get; set; }
+
+    /// <summary><see cref="SloKind.MetricGaugeThreshold"/>: the per-bucket aggregate compared with the target (default average).</summary>
+    public SloGaugeAggregate? GaugeAggregate { get; set; }
 
     public DateTime CreatedAt { get; set; }
 

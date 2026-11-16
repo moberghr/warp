@@ -227,6 +227,37 @@ internal static class SloMath
         return true;
     }
 
+    /// <summary>
+    /// One gauge bucket's verdict for <c>MetricGaugeThreshold</c>: the bucket's <paramref name="aggregate"/> (average =
+    /// <paramref name="sum"/> ÷ <paramref name="count"/>, or the min / max sample) compared with <paramref name="target"/>
+    /// in the <paramref name="comparison"/> direction; equal to the target is never a violation. False when the bucket has
+    /// no usable value (no samples, a missing extreme, or a non-finite aggregate), so it does not count as observed.
+    /// </summary>
+    public static bool TryGaugeVerdict(SloGaugeAggregate aggregate, SloComparison comparison, double target, long count, double sum, double? min, double? max, out bool violates)
+    {
+        violates = false;
+        if (count <= 0)
+        {
+            return false;
+        }
+
+        var value = aggregate switch
+        {
+            SloGaugeAggregate.Min => min,
+            SloGaugeAggregate.Max => max,
+            _ => (double?)(sum / count),
+        };
+
+        if (value is not { } v || !double.IsFinite(v))
+        {
+            return false;
+        }
+
+        violates = comparison == SloComparison.AtLeast ? v < target : v > target;
+
+        return true;
+    }
+
     private static bool AllFinite(params ReadOnlySpan<double> values)
     {
         foreach (var value in values)

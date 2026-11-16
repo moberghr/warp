@@ -188,6 +188,38 @@ public sealed class SloOptions
             Enabled = enabled,
         });
 
+    /// <summary>
+    /// A gauge <paramref name="instrument"/>'s per-bucket <paramref name="aggregate"/> (average by default: samples from
+    /// every process and matching series are averaged, never summed) must stay at most — or, with
+    /// <see cref="SloComparison.AtLeast"/>, at least — <paramref name="threshold"/> in at least
+    /// <paramref name="percentile"/>% (1–99) of the window's observed time.
+    /// </summary>
+    public SloOptions AddMetricGaugeThreshold(
+        string name,
+        string instrument,
+        double threshold,
+        SloComparison comparison = SloComparison.AtMost,
+        SloGaugeAggregate aggregate = SloGaugeAggregate.Average,
+        int percentile = SloValidation.DefaultLatencyPercentile,
+        int windowSeconds = 3600,
+        string? application = null,
+        string? tagFilter = null,
+        bool enabled = true)
+        => AddMetric(new SloDefinition
+        {
+            Name = name,
+            Kind = SloKind.MetricGaugeThreshold,
+            Dimension = instrument,
+            TargetValue = threshold,
+            Comparison = comparison,
+            GaugeAggregate = aggregate,
+            Percentile = percentile,
+            WindowSeconds = windowSeconds,
+            Application = application,
+            TagFilter = tagFilter,
+            Enabled = enabled,
+        });
+
     // The retention check (R29) needs WarpConfiguration, which the options do not have: the seeder re-validates with it.
     private SloOptions AddMetric(SloDefinition definition)
     {
@@ -252,7 +284,7 @@ public static class SloServiceConfiguration
 
 /// <summary>
 /// Startup seeder for config-defined SLO objectives (§8.31). Insert-if-absent by (kind, dimension, application,
-/// percentile; metric kinds also by name or filter fields, #332; a latency objective's fields include its threshold) so it never clobbers a dashboard edit. Runs once at boot; the schema is expected present because
+/// percentile; metric kinds also by name or filter fields, #332; latency and gauge objectives' fields include the threshold) so it never clobbers a dashboard edit. Runs once at boot; the schema is expected present because
 /// web/worker are gated on a dedicated migrator running to completion first (§ migrator gating), so a failure here
 /// is not a transient not-yet-migrated race but a real error — logged at <c>Error</c> (alertable) rather than
 /// swallowed to a Warning nobody watches. It stays non-fatal (objectives can still be authored in the dashboard),
@@ -305,11 +337,12 @@ internal sealed class SloSeeder<TContext> : IHostedService
                 // Metric kinds put the instrument in Dimension, so two objectives on one instrument are told apart
                 // by their filter, secondary instrument and ratio tag. Those are editable in the dashboard, so the
                 // name (unique per kind + application, enforced by SloOptions) matches too (#332): an edit of
-                // either the name or the fields still finds the row; only an edit of both reseeds. A latency objective
-                // also matches on its threshold: a warning tier (p95 <= 0.5) and a paging tier (p95 <= 1) on one
-                // histogram differ only there, and without it a tier added in a later deploy would match the existing
-                // one and never be seeded.
-                var matchesTarget = seed.Kind == SloKind.MetricLatency;
+                // either the name or the fields still finds the row; only an edit of both reseeds. A latency or gauge
+                // objective also matches on its threshold (and a gauge on its comparison and aggregate): a warning tier
+                // (p95 <= 0.5) and a paging tier (p95 <= 1) on one instrument differ only there, and without it a tier
+                // added in a later deploy would match the existing one and never be seeded. Both fields are null on
+                // every other kind, so they match there as before.
+                var matchesTarget = seed.Kind is SloKind.MetricLatency or SloKind.MetricGaugeThreshold;
                 var targetTolerance = Math.Abs(seed.TargetValue) * 1e-9;
                 var targetFrom = seed.TargetValue - targetTolerance;
                 var targetTo = seed.TargetValue + targetTolerance;
@@ -319,6 +352,7 @@ internal sealed class SloSeeder<TContext> : IHostedService
                             && (x.Name == seed.Name
                                 || (x.Dimension == seed.Dimension && x.Percentile == seed.Percentile
                                     && x.TagFilter == seed.TagFilter && x.SecondaryMetric == seed.SecondaryMetric && x.RatioTag == seed.RatioTag
+                                    && x.Comparison == seed.Comparison && x.GaugeAggregate == seed.GaugeAggregate
                                     && (!matchesTarget || (x.TargetValue >= targetFrom && x.TargetValue <= targetTo)))),
                         cancellationToken)
                     : await context.Set<SloDefinition>().AnyAsync(
