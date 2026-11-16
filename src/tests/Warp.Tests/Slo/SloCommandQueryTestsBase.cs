@@ -452,6 +452,39 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         row.TagFilter.ShouldBe("http.route=/api/x");
     }
 
+    [TimedTheory]
+    [InlineData("threshold")]
+    [InlineData("comparison")]
+    [InlineData("aggregate")]
+    public async Task Seeder_GaugeTierDifferingInExactlyOneField_IsSeededBesideTheFirst_AndReseedIsIdempotent(string field)
+    {
+        // Each of the three gauge match fields alone must tell two tiers on one instrument apart: a tier added in a later
+        // deploy that differs only there is seeded, not matched to the first.
+        await SeedInstrumentAsync("queue.depth", MetricKind.Gauge);
+        static void First(SloOptions o) => o.AddMetricGaugeThreshold("depth base", "queue.depth", 100);
+        void Both(SloOptions o) => _ = field switch
+        {
+            "threshold" => o.AddMetricGaugeThreshold("depth base", "queue.depth", 100).AddMetricGaugeThreshold("depth tier", "queue.depth", 200),
+            "comparison" => o.AddMetricGaugeThreshold("depth base", "queue.depth", 100).AddMetricGaugeThreshold("depth tier", "queue.depth", 100, comparison: SloComparison.AtLeast),
+            _ => o.AddMetricGaugeThreshold("depth base", "queue.depth", 100).AddMetricGaugeThreshold("depth tier", "queue.depth", 100, aggregate: SloGaugeAggregate.Max),
+        };
+
+        await SeedFromConfigAsync(First);
+        await SeedFromConfigAsync(Both);
+        await SeedFromConfigAsync(Both);
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().OrderBy(x => x.Name).ToListAsync(Ct);
+        rows.Select(x => x.Name).ShouldBe(["depth base", "depth tier"]);
+        var (baseTier, tier) = (rows[0], rows[1]);
+        (tier.TargetValue, tier.Comparison, tier.GaugeAggregate).ShouldBe(field switch
+        {
+            "threshold" => (200d, (SloComparison?)SloComparison.AtMost, (SloGaugeAggregate?)SloGaugeAggregate.Average),
+            "comparison" => (100d, SloComparison.AtLeast, SloGaugeAggregate.Average),
+            _ => (100d, SloComparison.AtMost, SloGaugeAggregate.Max),
+        });
+        (baseTier.TargetValue, baseTier.Comparison, baseTier.GaugeAggregate).ShouldBe((100d, (SloComparison?)SloComparison.AtMost, (SloGaugeAggregate?)SloGaugeAggregate.Average));
+    }
+
     [TimedFact]
     public async Task Seeder_GaugeThresholdTiers_BothInsertWithTheirOptions_AndReseedIsIdempotent()
     {

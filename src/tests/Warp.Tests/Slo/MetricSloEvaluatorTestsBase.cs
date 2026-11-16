@@ -593,6 +593,48 @@ public abstract class MetricSloEvaluatorTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Evaluate_MetricLatency_BadRecentBucketOverAGoodHistory_BurnsTheShortWindow()
+    {
+        // Short window = 3600 / 12 floored to 5 min: [12:27, 12:32). 1000 fast events at 12:00 are outside it; the
+        // still-filling 12:30 bucket (10 events, all slow) is inside it, clipped at now.
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(
+            Histogram(Duration, "-", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 1000, 0, 0, 0),
+            Histogram(Duration, "-", MetricTier.Fine, At(12, 30), "0.1,0.25,0.5", 0, 0, 0, 10));
+        var id = await SeedObjectiveAsync(Latency(0.25, 95));
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.BurnRateShort.ShouldBe(1.0 / 0.05, Tolerance);
+        eval.BurnRateLong.ShouldBe(10.0 / 1010 / 0.05, Tolerance);
+        eval.BurnRateShort.ShouldBeGreaterThan(eval.BurnRateLong);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_BadRecentBucketOverAGoodHistory_BurnsTheShortWindow()
+    {
+        // Long window [11:32, 12:32): 28 min of the 11:00 hour + six 5-min buckets 12:00-12:25, all compliant, and the
+        // 12:30 bucket (2 min so far) in violation: 2 of 60 observed minutes. Short window [12:27, 12:32): 3 compliant
+        // minutes of the 12:25 bucket and the 2 violating ones: 40 %.
+        await SeedInstrumentAsync(Depth, MetricKind.Gauge);
+        await SeedPointsAsync(
+        [
+            Gauge(Depth, "-", MetricTier.Hourly, At(11, 0), count: 120, sum: 6000, min: 1, max: 99),
+            .. Enumerable.Range(0, 6).Select(x => Gauge(Depth, "-", MetricTier.Fine, At(12, 5 * x), count: 10, sum: 500, min: 10, max: 90)),
+            Gauge(Depth, "-", MetricTier.Fine, At(12, 30), count: 4, sum: 800, min: 150, max: 250, compacted: false),
+        ]);
+        var id = await SeedObjectiveAsync(GaugeThreshold(100, SloComparison.AtMost, SloGaugeAggregate.Average, 95));
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(58.0 / 60, Tolerance);
+        eval.BurnRateLong.ShouldBe(2.0 / 60 / 0.05, Tolerance);
+        eval.BurnRateShort.ShouldBe(0.4 / 0.05, Tolerance);
+    }
+
+    [TimedFact]
     public async Task Evaluate_MetricLatency_ThresholdBetweenBounds_ComparesWithBucketUpperBounds()
     {
         await SeedInstrumentAsync(Duration, MetricKind.Histogram);

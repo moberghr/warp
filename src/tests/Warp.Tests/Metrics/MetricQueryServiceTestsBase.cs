@@ -922,6 +922,94 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetSeries_ExactlyOneFlushIntervalAfterTheBucketEnd_IsComplete()
+    {
+        // The boundary: at 12:00:30 the 11:55 bucket ended exactly one 30 s flush interval ago, so it is complete.
+        var clock = Now.AddSeconds(30);
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-5), sum: 20)]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-1), clock), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().Incomplete.ShouldBeFalse();
+        result.Headlines.ShouldHaveSingleItem().Value.ShouldBe(20);
+        result.CompleteUntil.ShouldBe(Now);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_ConfiguredFlushInterval_KeepsTheBucketIncompleteForThatLong()
+    {
+        // MetricFlushInterval = 2 min: at 12:01 the 11:55 bucket ended only 1 minute ago, so it is still filling.
+        var clock = Now.AddMinutes(1);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [Point("c", Now.AddMinutes(-10), sum: 10), Point("c", Now.AddMinutes(-5), sum: 20)]);
+        var service = new MetricQueryService<TestContext>(
+            _fixture.CreateContext(),
+            Options.Create(new WarpConfiguration { MetricFlushInterval = TimeSpan.FromMinutes(2) }),
+            new FakeTimeProvider(new DateTimeOffset(clock)));
+
+        var result = await service.GetSeries("c", Query(clock.AddHours(-1), clock), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.Select(x => x.Incomplete).ShouldBe([false, true]);
+        result.Headlines.ShouldHaveSingleItem().Value.ShouldBe(10);
+        result.CompleteUntil.ShouldBe(Now.AddMinutes(-5));
+    }
+
+    [TimedFact]
+    public async Task GetSeries_HourlyRangeWithADayOverlay_FlagsTheFillingHourAndBothHeadlinesLeaveItOut()
+    {
+        // A 24 h range reads at hourly resolution. At 12:30 the 12:00 hour is still filling (its fine rows are partial),
+        // so it is flagged and left out of the current headline; the 1d overlay leaves out the hour aligned with it.
+        var clock = Now.AddMinutes(30);
+        var yesterday = Now.AddDays(-1);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddHours(-1), sum: 10, tier: MetricTier.Hourly),
+                Point("c", Now, sum: 3),
+                Point("c", Now.AddMinutes(15), sum: 4),
+                Point("c", yesterday.AddHours(-1), sum: 5, tier: MetricTier.Hourly),
+                Point("c", yesterday, sum: 7, tier: MetricTier.Hourly),
+            ]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-24), clock, compare: [MetricCompareOffset.Day]), Ct);
+
+        result.ShouldNotBeNull();
+        result.Resolution.ShouldBe(MetricTier.Hourly);
+        result.CompleteUntil.ShouldBe(Now);
+        var current = result.Series.Single(x => x.Compare is null).Points;
+
+        // The range starts at 12:30 yesterday, so yesterday's 12:00 hour is its (complete) first bucket.
+        current.Select(x => (x.Timestamp, x.Sum, x.Incomplete)).ShouldBe([(yesterday, 7d, false), (Now.AddHours(-1), 10d, false), (Now, 7d, true)]);
+        result.Headlines.Select(x => (x.Compare, x.Value)).ShouldBe([(null, 17d), ("1d", 5d)]);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_DailyRangeWithADayOverlay_FlagsTodayAndBothHeadlinesLeaveItOut()
+    {
+        // A 10-day range reads at daily resolution: today is still filling, yesterday is complete.
+        var clock = Now.AddMinutes(2.5);
+        var today = Now.Date;
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", today.AddDays(-2), sum: 20, tier: MetricTier.Daily),
+                Point("c", today.AddDays(-1), sum: 50, tier: MetricTier.Daily),
+                Point("c", Now, sum: 3),
+            ]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddDays(-10), clock, compare: [MetricCompareOffset.Day]), Ct);
+
+        result.ShouldNotBeNull();
+        result.Resolution.ShouldBe(MetricTier.Daily);
+        result.CompleteUntil.ShouldBe(today);
+        var current = result.Series.Single(x => x.Compare is null).Points;
+        current.Single(x => x.Timestamp == today).Incomplete.ShouldBeTrue();
+        current.Where(x => x.Timestamp < today).ShouldAllBe(x => !x.Incomplete);
+        result.Headlines.Select(x => (x.Compare, x.Value)).ShouldBe([(null, 70d), ("1d", 20d)]);
+    }
+
+    [TimedFact]
     public async Task GetSeries_BucketClosedForLongerThanAFlushInterval_IsComplete()
     {
         var clock = Now.AddSeconds(31);

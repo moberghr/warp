@@ -247,21 +247,44 @@ public abstract class HostEndpointObservabilityTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task OtelSink_ObservedOnMetersOnly_NoRecorderNoRows()
+    public async Task OtelSink_ObservedOnMetersOnly_NoRecorderNoFlusherNoRows()
     {
+        // A route unique to this test (and provider): the meter listener is process-global, so a shared route could
+        // pick up another test's call and pass for the wrong reason.
+        var route = $"/api/otel-{Guid.NewGuid():N}/{{id}}";
         var calls = new ConcurrentQueue<string?>();
-        using var listener = ListenForEndpointCalls("GET /api/host-orders/{id}", calls);
+        using var listener = ListenForEndpointCalls($"GET {route}", calls);
 
-        await using var host = await StartAsync(app => app.MapControllers().WithWarpObservability(), o => o.Sink = RecordingSink.Otel);
+        await using var host = await StartAsync(app => app.MapGet(route, (int id) => id).WithWarpObservability(), o => o.Sink = RecordingSink.Otel);
 
-        (await host.Client.GetAsync("/api/host-orders/42", Ct)).EnsureSuccessStatusCode();
+        (await host.Client.GetAsync(route.Replace("{id}", "42", StringComparison.Ordinal), Ct)).EnsureSuccessStatusCode();
 
-        // Observed (the always-on meter fired with the bounded route), but the Otel sink registers no recorder
-        // and no flusher, so nothing can reach the database.
+        // Observed (the always-on meter fired with the bounded route), but the Otel sink registers no recorder and no
+        // flusher, so nothing can reach the database. FlusherRegistered is read before the fixture strips the flusher,
+        // so this assertion is not hidden by that stripping (the Both test below shows the same check failing over).
         calls.ShouldContain("Success");
+        host.FlusherRegistered.ShouldBeFalse();
         host.App.Services.GetServices<IEndpointCallRecorder>().ShouldBeEmpty();
-        host.App.Services.GetServices<IHostedService>().ShouldNotContain(x => x is EndpointCallFlusher<TestContext>);
         (await _fixture.CreateContext().Set<EndpointCallLog>().CountAsync(Ct)).ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task BothSink_ObservedOnMetersAndRecorded_FlusherRegistered()
+    {
+        var route = $"/api/both-{Guid.NewGuid():N}/{{id}}";
+        var calls = new ConcurrentQueue<string?>();
+        using var listener = ListenForEndpointCalls($"GET {route}", calls);
+
+        await using var host = await StartAsync(app => app.MapGet(route, (int id) => id).WithWarpObservability(), o => o.Sink = RecordingSink.Both);
+
+        (await host.Client.GetAsync(route.Replace("{id}", "42", StringComparison.Ordinal), Ct)).EnsureSuccessStatusCode();
+
+        calls.ShouldContain("Success");
+        host.FlusherRegistered.ShouldBeTrue();
+        var record = (await host.DrainAsync(1)).ShouldHaveSingleItem();
+        record.RouteTemplate.ShouldBe(route);
+        await host.PersistAsync([record]);
+        (await _fixture.CreateContext().Set<EndpointCallLog>().CountAsync(Ct)).ShouldBe(1);
     }
 
     private static MeterListener ListenForEndpointCalls(string route, ConcurrentQueue<string?> outcomes)
@@ -358,8 +381,10 @@ public abstract class HostEndpointObservabilityTestsBase : IAsyncLifetime
             configure?.Invoke(o);
         }));
 
-        // The test drains the channel itself; the background flusher would race it for the records.
+        // The test drains the channel itself; the background flusher would race it for the records. Whether the sink
+        // registered one is captured first, so a test can still assert on the real registration.
         var flusher = builder.Services.Where(x => x.ImplementationType == typeof(EndpointCallFlusher<TestContext>)).ToList();
+        var flusherRegistered = flusher.Count > 0;
         foreach (var descriptor in flusher)
         {
             builder.Services.Remove(descriptor);
@@ -390,7 +415,7 @@ public abstract class HostEndpointObservabilityTestsBase : IAsyncLifetime
 
         await app.StartAsync(Ct);
 
-        return new Host(app, _fixture);
+        return new Host(app, _fixture, flusherRegistered);
     }
 
     private sealed class OnlyHostControllers : ControllerFeatureProvider
@@ -398,9 +423,12 @@ public abstract class HostEndpointObservabilityTestsBase : IAsyncLifetime
         protected override bool IsController(TypeInfo typeInfo) => HostControllers.Contains(typeInfo.AsType());
     }
 
-    private sealed class Host(WebApplication app, IDatabaseFixture fixture) : IAsyncDisposable
+    private sealed class Host(WebApplication app, IDatabaseFixture fixture, bool flusherRegistered) : IAsyncDisposable
     {
         public WebApplication App { get; } = app;
+
+        // Whether the sink registered EndpointCallFlusher before StartAsync removed it from the service collection.
+        public bool FlusherRegistered { get; } = flusherRegistered;
 
         public HttpClient Client { get; } = app.GetTestClient();
 

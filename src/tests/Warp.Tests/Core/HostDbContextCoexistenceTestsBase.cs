@@ -148,16 +148,25 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
             tables.ShouldContain(table);
         }
 
-        // The seven nullable metric-SLO columns land on slo_definition.
+        // The nine nullable metric-SLO columns land on slo_definition (seven for #329's kinds, plus comparison and
+        // gauge_aggregate for #331): nullable, so the migration is additive on a table with rows.
         var sloColumns = creates
             .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "slo_definition", StringComparison.Ordinal))
             .Columns
             .ToDictionary(x => x.Name, StringComparer.Ordinal);
-        foreach (var column in new[] { "tag_filter", "secondary_metric", "secondary_tag_filter", "ratio_tag", "good_values", "bad_values", "baseline_days" })
+        foreach (var column in new[] { "tag_filter", "secondary_metric", "secondary_tag_filter", "ratio_tag", "good_values", "bad_values", "baseline_days", "comparison", "gauge_aggregate" })
         {
             sloColumns.ShouldContainKey(column);
             sloColumns[column].IsNullable.ShouldBeTrue(column);
         }
+
+        // #330: metric_point.version is nullable (null = collected without ByVersion), so existing rows stay valid.
+        var pointColumns = creates
+            .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "metric_point", StringComparison.Ordinal))
+            .Columns
+            .ToDictionary(x => x.Name, StringComparer.Ordinal);
+        pointColumns.ShouldContainKey("version");
+        pointColumns["version"].IsNullable.ShouldBeTrue("version");
     }
 
     private static async Task<SaveOutcome> SaveTwiceAsync(HostDbContext context, DbTransaction transaction, string reference)

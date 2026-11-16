@@ -4,7 +4,10 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -18,6 +21,7 @@ using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
+using Warp.Tests.Observability;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
 using Warp.Worker.Services;
@@ -142,6 +146,43 @@ public abstract class ApplicationDeployTestsBase : IAsyncLifetime
         deploy.Version.ShouldBe("2.0.0");
         deploy.InstanceId.ShouldBe(serverId);
         (await _fixture.CreateContext().Set<Server>().AnyAsync(x => x.Id == serverId, Ct)).ShouldBeTrue();
+    }
+
+    [TimedFact]
+    public async Task ServerRegistration_DeployRecordingThrows_RegistersTheServerAndLogsAWarning()
+    {
+        // Deploy history is a diagnostic: a failure to record it (here every ApplicationDeploy insert throws) must not
+        // fail the server's registration.
+        var serverId = Guid.NewGuid();
+        var logs = new CapturingLoggerProvider();
+        var registration = CreateServerRegistration(serverId, "api", "2.0.0", "prod", failDeployInsert: true, logs: logs);
+
+        await registration.StartAsync(Ct);
+
+        (await _fixture.CreateContext().Set<Server>().AnyAsync(x => x.Id == serverId, Ct)).ShouldBeTrue();
+        (await _fixture.CreateContext().Set<ApplicationDeploy>().AnyAsync(Ct)).ShouldBeFalse();
+        var warning = logs.Logs.Where(x => x.Level == LogLevel.Warning).ShouldHaveSingleItem();
+        warning.Message.ShouldStartWith("Failed to record the deploy of application version 2.0.0");
+    }
+
+    [TimedFact]
+    public async Task HeartbeatHost_DeployRecordingThrows_RegistersTheInstanceAndLogsAWarning()
+    {
+        var logs = new CapturingLoggerProvider();
+        var host = CreateHost("publisher", "1.4.0", "prod", failDeployInsert: true, logs: logs);
+
+        await host.StartAsync(Ct);
+        try
+        {
+            (await _fixture.CreateContext().Set<ApplicationInstance>().SingleAsync(Ct)).ApplicationName.ShouldBe("publisher");
+            (await _fixture.CreateContext().Set<ApplicationDeploy>().AnyAsync(Ct)).ShouldBeFalse();
+            var warning = logs.Logs.Where(x => x.Level == LogLevel.Warning).ShouldHaveSingleItem();
+            warning.Message.ShouldStartWith("Failed to record the deploy of application version 1.4.0");
+        }
+        finally
+        {
+            await host.StopAsync(Ct);
+        }
     }
 
     [TimedFact]
@@ -369,7 +410,9 @@ public abstract class ApplicationDeployTestsBase : IAsyncLifetime
         Guid serverId,
         string? application,
         string? version,
-        string? environment)
+        string? environment,
+        bool failDeployInsert = false,
+        CapturingLoggerProvider? logs = null)
     {
         var configuration = new WarpServerConfiguration
         {
@@ -381,7 +424,7 @@ public abstract class ApplicationDeployTestsBase : IAsyncLifetime
         };
 
         var services = new ServiceCollection();
-        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<TestContext>(_ => CreateContext(failDeployInsert));
         services.AddTestServerContext<TestContext>();
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
@@ -391,25 +434,60 @@ public abstract class ApplicationDeployTestsBase : IAsyncLifetime
             scopeFactory,
             TimeProvider.System,
             new PauseStateHolder(),
-            new ServerRegistrationState());
+            new ServerRegistrationState(),
+            logs is null ? null : new CapturingLoggerFactory(logs).CreateLogger<WarpServerRegistration<TestContext>>());
     }
 
-    private ApplicationHeartbeatHost<TestContext> CreateHost(string applicationName, string version, string environment)
+    private ApplicationHeartbeatHost<TestContext> CreateHost(
+        string applicationName,
+        string version,
+        string environment,
+        bool failDeployInsert = false,
+        CapturingLoggerProvider? logs = null)
     {
         var services = new ServiceCollection();
-        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddScoped<TestContext>(_ => CreateContext(failDeployInsert));
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         var configuration = Config(applicationName, version, environment);
         configuration.ApplicationHeartbeatInterval = TimeSpan.FromHours(1);
+        var logger = logs is null
+            ? NullLogger<ApplicationHeartbeatHost<TestContext>>.Instance
+            : new CapturingLoggerFactory(logs).CreateLogger<ApplicationHeartbeatHost<TestContext>>();
 
         return new ApplicationHeartbeatHost<TestContext>(
             scopeFactory,
             Options.Create(configuration),
             TimeProvider.System,
             new ProcessCpuTracker(TimeProvider.System),
-            NullLogger<ApplicationHeartbeatHost<TestContext>>.Instance,
+            logger,
             []);
+    }
+
+    // The fixture's context, optionally with an interceptor that fails every save adding an ApplicationDeploy: the
+    // Server / ApplicationInstance rows still save, only the deploy recording throws.
+    private TestContext CreateContext(bool failDeployInsert)
+    {
+        if (!failDeployInsert)
+        {
+            return _fixture.CreateContext();
+        }
+
+        var options = (DbContextOptions<TestContext>)_fixture.CreateContext().GetService<IDbContextOptions>();
+
+        return new TestContext(new DbContextOptionsBuilder<TestContext>(options).AddInterceptors(new FailDeployInsert()).Options);
+    }
+
+    private sealed class FailDeployInsert : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            var addsDeploy = eventData.Context!.ChangeTracker.Entries<ApplicationDeploy>().Any(x => x.State == EntityState.Added);
+
+            return addsDeploy
+                ? throw new InvalidOperationException("Simulated deploy-history failure.")
+                : ValueTask.FromResult(result);
+        }
     }
 
     private async Task<(WebApplication App, HttpClient Client)> CreateDashboardHost()
