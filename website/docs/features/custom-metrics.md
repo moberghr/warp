@@ -297,6 +297,8 @@ A tile reads **No data** when its value (or the chosen baseline) is empty. That 
 
 **How it is read.** The whole board is one batched, tier-bounded read of `metric_point`. One statement covers the current, 1d and 7d windows of every tile's instrument (two at most, grouped with and without tags), plus the registry rows. Each window reads every tier that overlaps it. A stored bucket that only partly overlaps a window counts in proportion to the overlap, exactly as the SLO evaluator reads a window, so a "since last deploy" window that starts mid-hour compares fairly with an hourly baseline. The sparkline follows the series resolution rules (up to 6 hours fine, up to 7 days hourly, longer daily). A board holds at most 48 tiles.
 
+**Post-deploy verdict.** The board also answers the question for a machine. `GET {prefix}/api/applications/verdict?application=<name>` evaluates the tiles scoped to that application (or to none) over the window since its latest deploy, adds its SLOs, and returns `pass`, `warn`, `fail`, `pending` or `noData` with one check per tile and SLO. A CI step can call it after a rollout; see [Post-deploy verdict](./applications.md#post-deploy-verdict). The application detail page shows the same verdict next to its deploys.
+
 **API.** `GET {prefix}/api/metrics/board?from=&to=` takes ISO instants at most 90 days apart; bad input is a 400. `GET {prefix}/api/metrics/board/tiles` lists the tiles. `POST {prefix}/api/metrics/board/tiles` inserts (`id: 0`) or updates a tile, validated against the instrument registry, and answers a 400 with the reason on failure. `DELETE {prefix}/api/metrics/board/tiles/{id}` removes one. These routes carry the dashboard's authorization like every other route.
 
 ## Annotations

@@ -1,0 +1,306 @@
+using System.Globalization;
+using Warp.Core.Enums;
+using Warp.Core.Metrics;
+using Warp.Core.Models;
+
+namespace Warp.Core.Services;
+
+/// <summary>
+/// The pure half of the post-deploy verdict: picking the deploy out of the history, the window, turning board tiles and SLOs
+/// into checks, and the aggregation. No I/O, so every rule is unit-tested without a database.
+/// </summary>
+internal static class DeployVerdictMath
+{
+    /// <summary>The deploy, its predecessor and its successor in the same environment.</summary>
+    internal sealed record ResolvedDeploy(ApplicationDeployModel Deploy, ApplicationDeployModel? Previous, ApplicationDeployModel? Next);
+
+    /// <summary>
+    /// Finds the deploy to judge in one application's history (any order): the newest one matching the version (when given)
+    /// and the environment (when given), plus its neighbours in that deploy's environment. Null when nothing matches.
+    /// </summary>
+    public static ResolvedDeploy? Resolve(IReadOnlyList<ApplicationDeployModel> deploys, string? version, string? environment)
+    {
+        var ordered = deploys
+            .OrderByDescending(x => x.FirstSeenAt)
+            .ThenBy(x => x.Version, StringComparer.Ordinal)
+            .ToList();
+        var deploy = ordered
+            .Where(x => version is null || string.Equals(x.Version, version, StringComparison.Ordinal))
+            .FirstOrDefault(x => environment is null || string.Equals(x.Environment ?? string.Empty, environment, StringComparison.Ordinal));
+        if (deploy is null)
+        {
+            return null;
+        }
+
+        var index = ordered.IndexOf(deploy);
+        var previous = ordered
+            .Skip(index + 1)
+            .FirstOrDefault(x => SameEnvironment(x, deploy));
+        var next = ordered
+            .Take(index)
+            .LastOrDefault(x => SameEnvironment(x, deploy));
+
+        return new ResolvedDeploy(deploy, previous, next);
+    }
+
+    /// <summary>
+    /// The evaluation window: from the deploy to now (or to the next deploy in its environment), at most
+    /// <see cref="IMetricQueryService.MaxRangeDays"/> long; settled once the deploy is at least <paramref name="minWindow"/> old.
+    /// </summary>
+    public static DeployVerdictWindow Window(DateTime deployedAt, DateTime? supersededAt, DateTime now, TimeSpan minWindow)
+    {
+        var to = supersededAt ?? now;
+        if (to < deployedAt)
+        {
+            to = deployedAt;
+        }
+
+        var maxLength = TimeSpan.FromDays(IMetricQueryService.MaxRangeDays);
+        var from = to - deployedAt > maxLength ? to - maxLength : deployedAt;
+
+        return new DeployVerdictWindow
+        {
+            From = from,
+            To = to,
+            MinWindowSeconds = (int)minWindow.TotalSeconds,
+            SettlesAt = deployedAt + minWindow,
+            Settled = to - deployedAt >= minWindow,
+        };
+    }
+
+    /// <summary>A tile or SLO with no application covers every application; a scoped one counts only for its own.</summary>
+    public static bool AppliesTo(string? scope, string application)
+    {
+        var normalized = MetricPointQueries.NormalizeApplication(scope);
+
+        return normalized is null || string.Equals(normalized, MetricPointQueries.NormalizeApplication(application), StringComparison.Ordinal);
+    }
+
+    /// <summary>A board tile as a check; null when the tile has no status rule (nothing to judge).</summary>
+    public static DeployVerdictCheck? TileCheck(MetricBoardTileResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (result.Status is not { } state)
+        {
+            return null;
+        }
+
+        var tile = result.Tile;
+        var unacknowledged = result.UnacknowledgedStatus ?? state;
+        var deviation = tile.StatusRule == MetricTileStatusRule.Deviation;
+        var baseline = deviation ? Baseline(result) : null;
+        var target = deviation ? tile.MaxDeviation : tile.Threshold;
+
+        return new DeployVerdictCheck
+        {
+            Source = DeployVerdictSources.Tile,
+            Id = tile.Id,
+            Name = tile.Name,
+            Application = tile.Application,
+            State = Token(state),
+            UnacknowledgedState = state == SloState.Acknowledged ? Token(unacknowledged) : null,
+            Acknowledged = state == SloState.Acknowledged,
+            Value = Finite(result.Current),
+            Baseline = Finite(baseline),
+            Target = Finite(target),
+            Reason = TileReason(result, state, unacknowledged, baseline),
+        };
+    }
+
+    /// <summary>
+    /// An SLO as a check, from its latest evaluation. An objective never evaluated, or last evaluated before the deploy, has
+    /// no data about this release yet.
+    /// </summary>
+    public static (DeployVerdictCheck Check, SloState State) SloCheck(SloObjectiveModel slo, DateTime deployedAt)
+    {
+        ArgumentNullException.ThrowIfNull(slo);
+
+        var (state, reason) = slo switch
+        {
+            { Evaluated: false } => (SloState.NoData, "Not evaluated yet."),
+            { LastEvaluatedAt: { } at } when at < deployedAt => (SloState.NoData, $"Last evaluated at {Instant(at)}, before the deploy."),
+            _ => (slo.State, SloReason(slo)),
+        };
+        var evaluated = slo.Evaluated && state != SloState.NoData;
+
+        var check = new DeployVerdictCheck
+        {
+            Source = DeployVerdictSources.Slo,
+            Id = slo.Id,
+            Name = slo.Name,
+            Application = slo.Application,
+            State = Token(state),
+            Acknowledged = state == SloState.Acknowledged,
+            Value = evaluated ? Finite(slo.Attainment) : null,
+            Target = Finite(slo.TargetValue),
+            BudgetRemaining = evaluated ? Finite(slo.BudgetRemaining) : null,
+            Reason = reason,
+        };
+
+        return (check, state);
+    }
+
+    /// <summary>
+    /// The verdict: pending until settled; then any Breaching fails, any Warning warns, any Healthy or Acknowledged passes,
+    /// and nothing but NoData (or no checks at all) is noData. Acknowledged never fails or warns.
+    /// </summary>
+    public static string Aggregate(IReadOnlyCollection<SloState> states, bool settled)
+    {
+        ArgumentNullException.ThrowIfNull(states);
+
+        if (!settled)
+        {
+            return DeployVerdicts.Pending;
+        }
+
+        if (states.Contains(SloState.Breaching))
+        {
+            return DeployVerdicts.Fail;
+        }
+
+        if (states.Contains(SloState.Warning))
+        {
+            return DeployVerdicts.Warn;
+        }
+
+        return states.Any(x => x is SloState.Healthy or SloState.Acknowledged) ? DeployVerdicts.Pass : DeployVerdicts.NoData;
+    }
+
+    /// <summary>Assembles the verdict from the resolved deploy, the window and the inputs of the application.</summary>
+    public static DeployVerdictModel Build(
+        ResolvedDeploy resolved,
+        DeployVerdictWindow window,
+        IReadOnlyList<MetricBoardTileResult> tiles,
+        IReadOnlyList<SloObjectiveModel> slos)
+    {
+        ArgumentNullException.ThrowIfNull(resolved);
+        ArgumentNullException.ThrowIfNull(window);
+        ArgumentNullException.ThrowIfNull(tiles);
+        ArgumentNullException.ThrowIfNull(slos);
+
+        var deploy = resolved.Deploy;
+        var checks = new List<(DeployVerdictCheck Check, SloState State)>();
+        foreach (var tile in tiles.Where(x => AppliesTo(x.Tile.Application, deploy.Application)))
+        {
+            if (TileCheck(tile) is { } check)
+            {
+                checks.Add((check, tile.Status!.Value));
+            }
+        }
+
+        checks.AddRange(slos
+            .Where(x => x.Enabled)
+            .Where(x => AppliesTo(x.Application, deploy.Application))
+            .OrderBy(x => x.Name, StringComparer.Ordinal)
+            .Select(x => SloCheck(x, deploy.FirstSeenAt)));
+
+        var states = checks.ConvertAll(x => x.State);
+        var verdict = Aggregate(states, window.Settled);
+
+        return new DeployVerdictModel
+        {
+            Verdict = verdict,
+            Summary = Summary(verdict, states, window),
+            Deploy = new DeployVerdictDeploy
+            {
+                Application = deploy.Application,
+                Version = deploy.Version,
+                Environment = deploy.Environment,
+                FirstSeenAt = deploy.FirstSeenAt,
+                InstanceName = deploy.InstanceName,
+                PreviousVersion = resolved.Previous?.Version,
+                SupersededBy = resolved.Next?.Version,
+            },
+            Window = window,
+            Checks = checks.ConvertAll(x => x.Check),
+        };
+    }
+
+    /// <summary>The wire token of a state: <c>healthy</c>, <c>warning</c>, <c>breaching</c>, <c>acknowledged</c> or <c>noData</c>.</summary>
+    public static string Token(SloState state) => state switch
+    {
+        SloState.Healthy => "healthy",
+        SloState.Warning => "warning",
+        SloState.Breaching => "breaching",
+        SloState.Acknowledged => "acknowledged",
+        _ => "noData",
+    };
+
+    internal static string Summary(string verdict, IReadOnlyCollection<SloState> states, DeployVerdictWindow window)
+    {
+        if (string.Equals(verdict, DeployVerdicts.Pending, StringComparison.Ordinal))
+        {
+            return $"pending: settles at {Instant(window.SettlesAt)}";
+        }
+
+        if (states.Count == 0)
+        {
+            return $"{verdict}: no board tile with a rule and no SLO covers this application";
+        }
+
+        var parts = new[] { SloState.Breaching, SloState.Warning, SloState.Acknowledged, SloState.Healthy, SloState.NoData }
+            .Select(x => (State: x, Count: states.Count(y => y == x)))
+            .Where(x => x.Count > 0)
+            .Select(x => $"{x.Count.ToString(CultureInfo.InvariantCulture)} {Phrase(x.State)}");
+
+        return $"{verdict}: {string.Join(", ", parts)} of {states.Count.ToString(CultureInfo.InvariantCulture)} checks";
+    }
+
+    private static string TileReason(MetricBoardTileResult result, SloState state, SloState unacknowledged, double? baseline)
+    {
+        var tile = result.Tile;
+        if (unacknowledged == SloState.NoData)
+        {
+            return result.InstrumentKind is null
+                ? $"Instrument '{tile.Instrument}' is not in the metric registry."
+                : "No data in the window or its baseline.";
+        }
+
+        var detail = tile.StatusRule == MetricTileStatusRule.Deviation
+            ? $"{Number(result.Current)} vs {(tile.BaselineDays ?? 7).ToString(CultureInfo.InvariantCulture)}-day baseline {Number(baseline)} (max {Direction(tile.DeviationDirection)} {Number(tile.MaxDeviation)})"
+            : $"{Number(result.Current)} vs {Bound(tile.Comparison)} {Number(tile.Threshold)}";
+
+        return state == SloState.Acknowledged
+            ? $"Acknowledged noise (would be {Phrase(unacknowledged)}): {detail}."
+            : $"{Capitalized(Phrase(state))}: {detail}.";
+    }
+
+    private static string SloReason(SloObjectiveModel slo)
+    {
+        var detail = $"observed {Number(slo.Attainment)} vs target {Number(slo.TargetValue)}, budget remaining {Number(slo.BudgetRemaining)}";
+
+        return slo.State == SloState.Acknowledged && slo.AcknowledgedUntil is { } until
+            ? $"Acknowledged until {Instant(until)}: {detail}."
+            : $"{Capitalized(Phrase(slo.State))}: {detail}.";
+    }
+
+    private static bool SameEnvironment(ApplicationDeployModel a, ApplicationDeployModel b)
+        => string.Equals(a.Environment ?? string.Empty, b.Environment ?? string.Empty, StringComparison.Ordinal);
+
+    private static string Phrase(SloState state) => state switch
+    {
+        SloState.NoData => "no data",
+        _ => Token(state),
+    };
+
+    private static double? Baseline(MetricBoardTileResult result) => result.Tile.BaselineDays == 1 ? result.DayAgo : result.WeekAgo;
+
+    private static string Bound(SloComparison? comparison) => comparison == SloComparison.AtLeast ? "at least" : "at most";
+
+    private static string Direction(MetricDeviationDirection? direction) => direction switch
+    {
+        MetricDeviationDirection.Drop => "drop",
+        MetricDeviationDirection.Rise => "rise",
+        _ => "change",
+    };
+
+    private static string Capitalized(string text) => string.Concat(text[..1].ToUpperInvariant(), text[1..]);
+
+    private static string Number(double? value) => Finite(value) is { } x ? x.ToString("G4", CultureInfo.InvariantCulture) : "n/a";
+
+    private static string Instant(DateTime value) => value.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+
+    // JSON cannot carry NaN or infinity; a non-finite value is "nothing to show".
+    private static double? Finite(double? value) => value is { } x && double.IsFinite(x) ? x : null;
+}

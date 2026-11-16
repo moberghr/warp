@@ -1044,6 +1044,29 @@ public static class WarpEndpoints
             return Results.Ok(await svc.GetDeploys(name, ToUtc(from), ToUtc(to), ct));
         });
 
+        // Post-deploy verdict: pass / warn / fail / pending / noData for one deploy of an application, by NAME (a CI step
+        // knows the name, not the route id). Read-only, under the group's conventions like every route (§1.5); a literal
+        // segment, so it wins over {id}. 400 for bad input, 404 when no recorded deploy matches.
+        apiGroup.MapGet("applications/verdict", async (
+            [FromServices] IDeployVerdictService svc,
+            [FromQuery] string? application,
+            [FromQuery] string? version,
+            [FromQuery] string? environment,
+            [FromQuery] string? minWindowMinutes,
+            CancellationToken ct) =>
+        {
+            if (!DeployVerdictQuery.TryCreate(application, version, environment, minWindowMinutes, out var query, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            var verdict = await svc.GetVerdict(query, ct);
+
+            return verdict is null
+                ? Results.NotFound(new { error = "No recorded deploy of that application matches the version and environment." })
+                : Results.Ok(verdict);
+        });
+
         apiGroup.MapGet("applications/{id}/deploys", async (
             [FromServices] IApplicationQueryService svc,
             string id,

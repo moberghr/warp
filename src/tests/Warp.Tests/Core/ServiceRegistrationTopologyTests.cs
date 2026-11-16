@@ -226,6 +226,20 @@ public class ServiceRegistrationTopologyTests
     }
 
     [TimedFact]
+    public void AddWarp_Only_ResolvesTheDeployVerdictService()
+    {
+        // A dashboard-only (or CI-facing) host serves the post-deploy verdict with no server, no AddMetrics and no AddSlo.
+        var services = NewServices();
+        services.AddWarp<TestContext>(_ => { });
+
+        using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = sp.CreateScope();
+
+        scope.ServiceProvider.GetService<IDeployVerdictService>().ShouldBeOfType<DeployVerdictService>();
+        services.Count(x => x.ServiceType == typeof(IDeployVerdictService)).ShouldBe(1);
+    }
+
+    [TimedFact]
     public void AddWarp_Only_ResolvesTheMetricAnnotationServices()
     {
         // A dashboard-only host edits and shows annotations (#333) with no AddMetrics and no server.

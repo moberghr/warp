@@ -251,6 +251,10 @@ public static class ServiceConfiguration
             x.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<IMetricBoardCommandService, MetricBoardCommandService<TContext>>();
 
+        // Post-deploy verdict: composes the deploy history, the board and the SLOs above (no query of its own). Registered in
+        // AddWarp beside them so a dashboard-only host (or a CI-facing one) serves /api/applications/verdict.
+        services.TryAddScoped<IDeployVerdictService, DeployVerdictService>();
+
         // Metric annotations (#333): known-issue notes on instruments and SLOs. Registered in AddWarp for the same reason
         // as the board: a dashboard-only host edits and shows them; the metric_annotation table is always in the schema.
         services.TryAddScoped<IMetricAnnotationQueryService, MetricAnnotationQueryService<TContext>>();

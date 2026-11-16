@@ -93,6 +93,105 @@ The application detail page lists the deploys as `previous → new` per environm
 
 `from` (inclusive) and `to` (exclusive) are ISO 8601 instants and either can be left out. At most 500 deploys are returned. `IApplicationQueryService.GetDeploys(application, since, until)` is the same read in code.
 
+### Post-deploy verdict
+
+After a rollout, a CI/CD step or a person can ask one question and get one machine-readable answer: is release X of application A healthy?
+
+```http
+GET {prefix}/api/applications/verdict?application=orders-api&version=2.3.1&environment=production&minWindowMinutes=10
+```
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `application` | yes | The application **name** (not the URL-safe id). |
+| `version` | no | The version to judge. Left out, the latest deploy is judged. |
+| `environment` | no | Look only at deploys in this environment. Left out, the newest matching deploy in any environment is taken. |
+| `minWindowMinutes` | no | The settle time, a whole number from 0 to 1440 (default 5). |
+
+A missing `application`, a value longer than 200 characters, or a bad `minWindowMinutes` is a **400**. An application with no recorded deploy, or no deploy matching the version and environment, is a **404**. The route is read-only and carries the dashboard's authorization like every other route.
+
+**Which deploy, which window.** The deploy comes from the [deploy history](#deploy-history). The window runs from its `FirstSeenAt` to now. If a newer version has since been deployed in the same environment, the window ends at that deploy instead: a superseded release is judged over its own lifetime. The response names the version deployed before it (`previousVersion`) and, when superseded, the one after it (`supersededBy`). A window longer than 90 days starts 90 days before its end, the board's read limit.
+
+**Pending.** A deploy younger than `minWindowMinutes` gets `pending`, whatever its checks say. A CI step polling right after a rollout therefore never reads a premature pass, or a fail from two minutes of data. `window.settlesAt` says when to ask again. The checks are still returned, so a person can look early.
+
+**What counts.**
+
+- **Health-board tiles** ([custom metrics](./custom-metrics.md#health-board)) scoped to this application, plus tiles with no application, evaluated over the window against their own rule: a threshold, or a deviation from the same window 1 or 7 days earlier. Tiles without a status rule are skipped. A tile scoped to another application never counts. An unscoped tile covers every application, so on a shared database, scope the tiles that should gate one application to it.
+- **SLOs** ([SLO / error budget](./slo-error-budget.md)) that are enabled and scoped to this application or to none, with their **current** evaluated state. An SLO never evaluated, or not evaluated since the deploy (`LastEvaluatedAt` before `FirstSeenAt`), counts as no data. An SLO's state covers its own window, which can reach back before the deploy. The evaluation history is not kept, so "healthy before, breaching after" is not computed. A superseded deploy gets no SLO checks, because their current state describes the newer release.
+
+**Aggregation.**
+
+| Checks | Verdict |
+|---|---|
+| The deploy is younger than `minWindowMinutes` | `pending` |
+| Any check is Breaching | `fail` |
+| Otherwise, any check is Warning | `warn` |
+| Otherwise, any check is Healthy or Acknowledged | `pass` |
+| No checks, or every check is No data | `noData` |
+
+**Acknowledged never fails.** A tile whose Warning or Breaching status is covered by an active acknowledged-noise [annotation](./custom-metrics.md#annotations), or an SLO with an active acknowledgement, reads `acknowledged` and counts as a pass. The check keeps `acknowledged: true` and, for a tile, the rule's own state in `unacknowledgedState`.
+
+**Response.**
+
+```json
+{
+  "verdict": "warn",
+  "summary": "warn: 1 warning, 1 acknowledged, 2 healthy of 4 checks",
+  "deploy": { "application": "orders-api", "version": "2.3.1", "environment": "production",
+              "firstSeenAt": "2026-11-16T11:40:00Z", "instanceName": "orders-api-4b2d",
+              "previousVersion": "2.3.0", "supersededBy": null },
+  "window": { "from": "2026-11-16T11:40:00Z", "to": "2026-11-16T12:00:00Z",
+              "minWindowSeconds": 300, "settlesAt": "2026-11-16T11:45:00Z", "settled": true },
+  "checks": [
+    { "source": "tile", "id": 2, "name": "Order latency p95", "application": "orders-api",
+      "state": "warning", "unacknowledgedState": null, "acknowledged": false,
+      "value": 412, "baseline": 340, "target": 0.25, "budgetRemaining": null,
+      "reason": "Warning: 412 vs 7-day baseline 340 (max rise 0.25)." }
+  ]
+}
+```
+
+`value` is the tile's value over the window, or the SLO's observed value. `baseline` is a deviation tile's baseline. `target` is a threshold tile's threshold, a deviation tile's allowed deviation, or the SLO's target. A value is `null` when there is nothing to show.
+
+**Cost.** One deploy read, one batched [board read](./custom-metrics.md#health-board) (two grouped statements at most, whatever the tile count) and one SLO read. Nothing is read per tile or per objective. `IDeployVerdictService` is registered by `AddWarp`, so a dashboard-only host serves the route. The application detail page shows the verdict of the latest deploy above the **Deploys** card.
+
+**Calling it from CI.** The route sits behind the dashboard's gate ([Dashboard authorization](../operations/dashboard-auth.md)). Warp adds no token scheme of its own, so use the gate you already have:
+
+- **Your own policy.** If the dashboard is gated with `RequireAuthorization("YourPolicy")`, let that policy accept a credential your pipeline already holds. For example, add your bearer scheme to it (`policy.AddAuthenticationSchemes(CookieAuthenticationDefaults.AuthenticationScheme, JwtBearerDefaults.AuthenticationScheme)`), or use the API-key policy pinned on `WarpDashboardDefaults.DenyScheme` shown under [Localhost only](../operations/dashboard-auth.md#localhost-only).
+- **Built-in login.** Sign in once and reuse the cookie. `POST {prefix}/api/auth/login` takes the form fields `username` and `password`.
+- **Localhost only.** Run the step on the host itself.
+
+A CI step that waits for the deploy to settle and fails the pipeline on `fail`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+BASE="https://ops.example.com/warp"
+APP="orders-api"; VERSION="$GIT_TAG"; ENV="production"
+
+# Built-in login: keep the cookie in a jar. With your own policy, send its header instead (-H "Authorization: Bearer $TOKEN").
+curl -fsS -c jar.txt -X POST "$BASE/api/auth/login" \
+  --data-urlencode "username=$WARP_USER" --data-urlencode "password=$WARP_PASSWORD" > /dev/null
+
+for attempt in $(seq 1 20); do
+  body=$(curl -fsS -b jar.txt --get "$BASE/api/applications/verdict" \
+    --data-urlencode "application=$APP" --data-urlencode "version=$VERSION" \
+    --data-urlencode "environment=$ENV" --data-urlencode "minWindowMinutes=10")
+  verdict=$(jq -r .verdict <<< "$body")
+  jq -r .summary <<< "$body"
+  case "$verdict" in
+    pending) sleep 60 ;;
+    fail) jq -r '.checks[] | select(.state == "breaching") | "  \(.name): \(.reason)"' <<< "$body"; exit 1 ;;
+    *) exit 0 ;;   # pass, warn and noData do not block here; tighten to taste
+  esac
+done
+echo "Verdict still pending"; exit 1
+```
+
+A 404 right after a rollout means no instance of the new version has registered yet: deploys are recorded at registration.
+
+**Limits.** Metric points and SLOs carry an application but not an environment, so the checks are application-wide even when `environment` picks the deploy. A rollback to a version already recorded is not a new deploy, so "the latest deploy" is the newest *new* version. Only the newest 500 deploys of the application are searched.
+
 ### Tracing
 
 Activities carry a `warp.application` OpenTelemetry attribute when `ApplicationName` is set (absent when `null`), so you can correlate a request across applications in your trace backend.
