@@ -3,6 +3,18 @@ import { MetricKind, MetricTier } from '@/types/metrics';
 import type { MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
 import {
   DEFAULT_CONTROLS,
+  MAX_RANGE_MS,
+  deployMarkers,
+  fromLocalInputValue,
+  latestDeploy,
+  parseRangeParams,
+  resolveWindow,
+  sinceDeployRange,
+  toLocalInputValue,
+  validateCustomRange,
+  writeRangeParams,
+  type RangeId,
+  type RangeSelection,
   REST_NAME,
   alignOverlay,
   axisTitles,
@@ -207,12 +219,172 @@ describe('toggleNumerator', () => {
 });
 
 describe('seriesRefetchMs', () => {
+  const now = Date.UTC(2026, 10, 13, 12, 0, 0);
+  const preset = (range: RangeId) => seriesRefetchMs(resolveWindow({ range, custom: null }, now));
+
   it('follows the display resolution the range reads at: fine 1 min, hourly 5 min, daily 30 min', () => {
-    expect(seriesRefetchMs('1h')).toBe(60_000);
-    expect(seriesRefetchMs('6h')).toBe(60_000);
-    expect(seriesRefetchMs('24h')).toBe(5 * 60_000);
-    expect(seriesRefetchMs('7d')).toBe(5 * 60_000);
-    expect(seriesRefetchMs('30d')).toBe(30 * 60_000);
+    expect(preset('1h')).toBe(60_000);
+    expect(preset('6h')).toBe(60_000);
+    expect(preset('24h')).toBe(5 * 60_000);
+    expect(preset('7d')).toBe(5 * 60_000);
+    expect(preset('30d')).toBe(30 * 60_000);
+  });
+
+  it('applies the same rules to a custom window, and never refetches one that ended in the past', () => {
+    expect(seriesRefetchMs(resolveWindow({ range: '24h', custom: { from: now - 3 * 3_600_000, to: null } }, now))).toBe(60_000);
+    expect(seriesRefetchMs(resolveWindow({ range: '24h', custom: { from: now - 20 * 86_400_000, to: null } }, now))).toBe(30 * 60_000);
+    expect(seriesRefetchMs(resolveWindow({ range: '24h', custom: { from: now - 7_200_000, to: now - 3_600_000 } }, now))).toBe(false);
+  });
+});
+
+describe('resolveWindow', () => {
+  const now = Date.UTC(2026, 10, 13, 12, 0, 0);
+
+  it('ends a preset now', () => {
+    expect(resolveWindow({ range: '6h', custom: null }, now)).toEqual({ from: now - 6 * 3_600_000, to: now, live: true, clamped: false });
+  });
+
+  it('uses a closed custom range as given', () => {
+    const custom = { from: now - 5 * 86_400_000, to: now - 86_400_000 };
+
+    expect(resolveWindow({ range: '24h', custom }, now)).toEqual({ ...custom, live: false, clamped: false });
+  });
+
+  it('runs an open custom range until now', () => {
+    expect(resolveWindow({ range: '24h', custom: { from: now - 3_600_000, to: null } }, now)).toEqual({
+      from: now - 3_600_000,
+      to: now,
+      live: true,
+      clamped: false,
+    });
+  });
+
+  it('cuts a start older than 90 days to the API limit and says so', () => {
+    const span = resolveWindow({ range: '24h', custom: { from: now - 120 * 86_400_000, to: null } }, now);
+
+    expect(span.to - span.from).toBe(MAX_RANGE_MS);
+    expect(span.clamped).toBe(true);
+  });
+
+  it('keeps a start at or past the end a minute before it', () => {
+    const span = resolveWindow({ range: '24h', custom: { from: now + 5_000, to: null } }, now);
+
+    expect(span.to - span.from).toBe(60_000);
+  });
+});
+
+describe('validateCustomRange', () => {
+  const now = Date.UTC(2026, 10, 13, 12, 0, 0);
+
+  it('accepts a range up to 90 days, open-ended or closed', () => {
+    expect(validateCustomRange(now - MAX_RANGE_MS, null, now)).toBeNull();
+    expect(validateCustomRange(now - 2 * 86_400_000, now - 86_400_000, now)).toBeNull();
+  });
+
+  it('rejects a missing start, an unparseable end, a reversed range and one longer than 90 days', () => {
+    expect(validateCustomRange(Number.NaN, null, now)).toBe('Pick a start time.');
+    expect(validateCustomRange(now - 1, Number.NaN, now)).toBe('Pick an end time, or leave it empty for now.');
+    expect(validateCustomRange(now, now - 1, now)).toBe('The start must be before the end.');
+    expect(validateCustomRange(now + 1, null, now)).toBe('The start must be in the past.');
+    expect(validateCustomRange(now - MAX_RANGE_MS - 1, null, now)).toBe('A range can span at most 90 days.');
+  });
+});
+
+describe('range URL parameters', () => {
+  const roundTrip = (selection: RangeSelection) => parseRangeParams(writeRangeParams(new URLSearchParams('rate=minute'), selection));
+
+  it('round-trips a preset, the default preset, a closed custom range and an open one', () => {
+    const from = Date.UTC(2026, 10, 12, 10, 42, 0);
+    const to = Date.UTC(2026, 10, 13, 9, 0, 0);
+
+    expect(roundTrip({ range: '7d', custom: null })).toEqual({ range: '7d', custom: null });
+    expect(roundTrip({ range: '24h', custom: null })).toEqual({ range: '24h', custom: null });
+    expect(roundTrip({ range: '24h', custom: { from, to } })).toEqual({ range: '24h', custom: { from, to } });
+    expect(roundTrip({ range: '24h', custom: { from, to: null } })).toEqual({ range: '24h', custom: { from, to: null } });
+  });
+
+  it('keeps the default preset out of the URL and other parameters in it', () => {
+    const params = writeRangeParams(new URLSearchParams('rate=minute&range=7d&from=x'), { range: '24h', custom: null });
+
+    expect(params.toString()).toBe('rate=minute');
+  });
+
+  it('falls back to the preset for an unparseable start and to "until now" for an unparseable end', () => {
+    expect(parseRangeParams(new URLSearchParams('range=6h&from=nonsense'))).toEqual({ range: '6h', custom: null });
+    expect(parseRangeParams(new URLSearchParams('from=2026-11-12T10:42:00.000Z&to=bad')).custom).toEqual({
+      from: Date.UTC(2026, 10, 12, 10, 42, 0),
+      to: null,
+    });
+    expect(parseRangeParams(new URLSearchParams('range=2y')).range).toBe('24h');
+  });
+
+  it('converts to and from a datetime-local input value to the minute', () => {
+    const ms = new Date(2026, 10, 12, 10, 42, 0).getTime();
+
+    expect(toLocalInputValue(ms)).toBe('2026-11-12T10:42');
+    expect(fromLocalInputValue(toLocalInputValue(ms))).toBe(ms);
+    expect(fromLocalInputValue('')).toBeNaN();
+  });
+});
+
+describe('custom range in the series query', () => {
+  const now = Date.UTC(2026, 10, 13, 12, 0, 0);
+
+  it('sends the custom window, and the overlays follow it because compare offsets the same from/to', () => {
+    const custom = { from: Date.UTC(2026, 10, 12, 10, 42, 0), to: null };
+    const params = new URLSearchParams(buildSeriesQuery({ ...DEFAULT_CONTROLS, custom, compareDay: true }, MetricKind.Counter, now));
+
+    expect(params.get('from')).toBe('2026-11-12T10:42:00.000Z');
+    expect(params.get('to')).toBe('2026-11-13T12:00:00.000Z');
+    expect(params.get('compare')).toBe('1d');
+  });
+});
+
+describe('deploy markers', () => {
+  const deploy = (application: string, version: string, firstSeenAt: string, environment: string | null = 'prod') => ({
+    id: `${application}-${version}-${environment}`,
+    application,
+    version,
+    environment,
+    firstSeenAt,
+    instanceId: 'i',
+    instanceName: null,
+  });
+  const span = { from: Date.UTC(2026, 10, 12, 0, 0, 0), to: Date.UTC(2026, 10, 13, 0, 0, 0) };
+
+  it('keeps the deploys inside the window, oldest first, labelled by version for one application', () => {
+    const markers = deployMarkers(
+      [
+        deploy('api', '1.2.0', '2026-11-12T18:00:00Z'),
+        deploy('api', '1.1.0', '2026-11-12T06:00:00Z'),
+        deploy('api', '1.0.0', '2026-11-11T06:00:00Z'),
+        deploy('worker', '9.0.0', '2026-11-12T07:00:00Z'),
+      ],
+      span,
+      'api',
+    );
+
+    expect(markers).toEqual([
+      { time: Date.UTC(2026, 10, 12, 6, 0, 0), label: '1.1.0' },
+      { time: Date.UTC(2026, 10, 12, 18, 0, 0), label: '1.2.0' },
+    ]);
+  });
+
+  it('names the application across applications and the environment only when several are in view', () => {
+    expect(deployMarkers([deploy('api', '1.1.0', '2026-11-12T06:00:00Z'), deploy('worker', '9.0.0', '2026-11-12T07:00:00Z')], span, null)
+      .map((x) => x.label)).toEqual(['api 1.1.0', 'worker 9.0.0']);
+    expect(deployMarkers([deploy('api', '1.1.0', '2026-11-12T06:00:00Z'), deploy('api', '1.1.0', '2026-11-12T08:00:00Z', 'staging')], span, 'api')
+      .map((x) => x.label)).toEqual(['1.1.0 (prod)', '1.1.0 (staging)']);
+  });
+
+  it('picks the newest deploy for "since last deploy" and opens the range from it', () => {
+    const newest = deploy('api', '1.2.0', '2026-11-12T18:00:00Z');
+    const latest = latestDeploy([deploy('api', '1.1.0', '2026-11-12T06:00:00Z'), newest]);
+
+    expect(latest).toBe(newest);
+    expect(sinceDeployRange(newest)).toEqual({ from: Date.UTC(2026, 10, 12, 18, 0, 0), to: null });
+    expect(latestDeploy([])).toBeNull();
+    expect(latestDeploy(undefined)).toBeNull();
   });
 });
 

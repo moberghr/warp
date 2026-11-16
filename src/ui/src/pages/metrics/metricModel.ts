@@ -6,6 +6,7 @@ import { MetricKind, MetricTier } from '@/types/metrics';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import type { FilterChip } from '@/lib/metricPattern';
 import type { MetricInstrument, MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
+import type { ApplicationDeployModel } from '@/types/applications';
 
 export const REST_NAME = '(rest)';
 export const TOTAL_NAME = 'total';
@@ -113,6 +114,21 @@ export const RANGES = [
 ] as const;
 export type RangeId = (typeof RANGES)[number]['id'];
 
+/** The series API's limit on `to - from` (IMetricQueryService.MaxRangeDays). */
+export const MAX_RANGE_MS = 90 * 24 * 3_600_000;
+
+/** The shortest window a custom range resolves to, so a start at (or a skewed clock just past) now still reads. */
+const MIN_RANGE_MS = 60_000;
+
+/**
+ * A custom window in epoch milliseconds. `to` null means "until now": the window keeps moving like a preset, which is
+ * what "since last deploy" wants.
+ */
+export interface CustomRange {
+  from: number;
+  to: number | null;
+}
+
 export const PERCENTILES = [50, 90, 95, 99] as const;
 
 /**
@@ -170,6 +186,8 @@ function rateSuffix(rate: RateId): string {
 
 export interface MetricControls {
   range: RangeId;
+  /** A custom window; when set it replaces `range`. */
+  custom: CustomRange | null;
   application: string | null;
   breakdown: string | null;
   filters: FilterChip[];
@@ -190,6 +208,7 @@ export interface MetricControls {
 
 export const DEFAULT_CONTROLS: MetricControls = {
   range: '24h',
+  custom: null,
   application: null,
   breakdown: null,
   filters: [],
@@ -205,18 +224,197 @@ export function rangeMs(range: RangeId): number {
   return RANGES.find((x) => x.id === range)?.ms ?? RANGES[2].ms;
 }
 
+/** The window a read covers, resolved against a clock. `live` = its end moves with now; `clamped` = cut to 90 days. */
+export interface MetricWindow {
+  from: number;
+  to: number;
+  live: boolean;
+  clamped: boolean;
+}
+
+/**
+ * The [from, to) a read asks for. A preset ends now; a custom range is used as given, except that its start is cut to
+ * the API's 90-day limit (an old "since deploy") and kept at least a minute before its end, so the read is never a 400.
+ */
+export function resolveWindow(controls: Pick<MetricControls, 'range' | 'custom'>, now: number): MetricWindow {
+  if (controls.custom === null) {
+    return { from: now - rangeMs(controls.range), to: now, live: true, clamped: false };
+  }
+
+  const to = controls.custom.to ?? now;
+  const from = Math.min(Math.max(controls.custom.from, to - MAX_RANGE_MS), to - MIN_RANGE_MS);
+
+  return { from, to, live: controls.custom.to === null || controls.custom.to > now, clamped: from > controls.custom.from };
+}
+
+/**
+ * Why a custom range cannot be applied, or null when it can. `to` null is "until now". The limits are the API's: the
+ * start before the end, at most 90 days apart.
+ */
+export function validateCustomRange(from: number, to: number | null, now: number): string | null {
+  if (!Number.isFinite(from)) {
+    return 'Pick a start time.';
+  }
+
+  if (to !== null && !Number.isFinite(to)) {
+    return 'Pick an end time, or leave it empty for now.';
+  }
+
+  const end = to ?? now;
+  if (from >= end) {
+    return to === null ? 'The start must be in the past.' : 'The start must be before the end.';
+  }
+
+  return end - from > MAX_RANGE_MS ? 'A range can span at most 90 days.' : null;
+}
+
 /**
  * How often a series read refetches: as often as its display resolution can change. The server picks the
- * resolution from the range length (up to 6 hours fine, up to 7 days hourly, longer daily), so a fine chart refetches
- * every minute, an hourly one every 5 minutes and a daily one every 30.
+ * resolution from the window length (up to 6 hours fine, up to 7 days hourly, longer daily), so a fine chart refetches
+ * every minute, an hourly one every 5 minutes and a daily one every 30. A window that ended in the past never changes,
+ * so it is not refetched at all.
  */
-export function seriesRefetchMs(range: RangeId): number {
-  const ms = rangeMs(range);
+export function seriesRefetchMs(span: MetricWindow): number | false {
+  if (!span.live) {
+    return false;
+  }
+
+  const ms = span.to - span.from;
   if (ms <= 6 * 3_600_000) {
     return 60_000;
   }
 
   return ms <= 7 * 24 * 3_600_000 ? 5 * 60_000 : 30 * 60_000;
+}
+
+// The range lives in the URL so a shared link reproduces the view: `range=<preset>` (left out for the default),
+// or `from=<ISO>[&to=<ISO>]` for a custom window, with no `to` meaning "until now".
+
+export interface RangeSelection {
+  range: RangeId;
+  custom: CustomRange | null;
+}
+
+function parseInstant(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const ms = Date.parse(value);
+
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** Reads the range from the URL. An unparseable `from` falls back to the preset, an unparseable `to` to "until now". */
+export function parseRangeParams(params: URLSearchParams): RangeSelection {
+  const preset = RANGES.find((x) => x.id === params.get('range'))?.id ?? DEFAULT_CONTROLS.range;
+  const from = parseInstant(params.get('from'));
+  if (from === null) {
+    return { range: preset, custom: null };
+  }
+
+  return { range: preset, custom: { from, to: parseInstant(params.get('to')) } };
+}
+
+/** A copy of `params` carrying `selection` and every other parameter unchanged. */
+export function writeRangeParams(params: URLSearchParams, selection: RangeSelection): URLSearchParams {
+  const next = new URLSearchParams(params);
+  next.delete('range');
+  next.delete('from');
+  next.delete('to');
+
+  if (selection.custom !== null) {
+    next.set('from', new Date(selection.custom.from).toISOString());
+    if (selection.custom.to !== null) {
+      next.set('to', new Date(selection.custom.to).toISOString());
+    }
+
+    return next;
+  }
+
+  if (selection.range !== DEFAULT_CONTROLS.range) {
+    next.set('range', selection.range);
+  }
+
+  return next;
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+/** An instant as a `<input type="datetime-local">` value, in the browser's time zone, to the minute. */
+export function toLocalInputValue(ms: number): string {
+  const d = new Date(ms);
+
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** A `<input type="datetime-local">` value as an instant (NaN when empty or invalid). */
+export function fromLocalInputValue(value: string): number {
+  return value ? new Date(value).getTime() : Number.NaN;
+}
+
+/** The custom window as text: `13 Nov, 10:42 → now`. */
+export function customRangeLabel(custom: CustomRange): string {
+  const format = (ms: number) =>
+    new Date(ms).toLocaleString(DASHBOARD_LOCALE, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+  return `${format(custom.from)} → ${custom.to === null ? 'now' : format(custom.to)}`;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Deploy markers (#325 deploy history on the chart)
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface DeployMarker {
+  time: number;
+  label: string;
+}
+
+/**
+ * Vertical chart markers for the deploys inside the window, oldest first. With one application in view the label is
+ * the version; across applications it names the application too. The environment is added only when the deploys in
+ * view span more than one, so the common single-environment chart stays terse.
+ */
+export function deployMarkers(
+  deploys: ApplicationDeployModel[],
+  span: Pick<MetricWindow, 'from' | 'to'>,
+  application: string | null,
+): DeployMarker[] {
+  const inView = deploys
+    .map((x) => ({ deploy: x, time: Date.parse(x.firstSeenAt) }))
+    .filter((x) => Number.isFinite(x.time) && x.time >= span.from && x.time <= span.to)
+    .filter((x) => application === null || x.deploy.application === application)
+    .sort((a, b) => a.time - b.time);
+  const environments = new Set(inView.map((x) => x.deploy.environment ?? ''));
+
+  return inView.map(({ deploy, time }) => {
+    const name = application === null ? `${deploy.application} ${deploy.version}` : deploy.version;
+    const label = environments.size > 1 && deploy.environment ? `${name} (${deploy.environment})` : name;
+
+    return { time, label };
+  });
+}
+
+/**
+ * The deploy "since last deploy" starts from: the newest of `deploys`, which the caller has already scoped to the
+ * selected application, or to every application when none is selected. Null when there is none.
+ */
+export function latestDeploy(deploys: ApplicationDeployModel[] | undefined): ApplicationDeployModel | null {
+  let latest: ApplicationDeployModel | null = null;
+  for (const deploy of deploys ?? []) {
+    if (latest === null || Date.parse(deploy.firstSeenAt) > Date.parse(latest.firstSeenAt)) {
+      latest = deploy;
+    }
+  }
+
+  return latest;
+}
+
+/** The custom range "since last deploy" selects: from the deploy, open-ended to now. */
+export function sinceDeployRange(deploy: ApplicationDeployModel): CustomRange {
+  return { from: Date.parse(deploy.firstSeenAt), to: null };
 }
 
 export function supportsRatio(kind: MetricKind): boolean {
@@ -237,9 +435,10 @@ export function isRatioActive(controls: MetricControls, kind: MetricKind): boole
  * because `filter` repeats and axios would serialise the array as `filter[]=`.
  */
 export function buildSeriesQuery(controls: MetricControls, kind: MetricKind | null, now: number): string {
+  const span = resolveWindow(controls, now);
   const parts: [string, string][] = [
-    ['from', new Date(now - rangeMs(controls.range)).toISOString()],
-    ['to', new Date(now).toISOString()],
+    ['from', new Date(span.from).toISOString()],
+    ['to', new Date(span.to).toISOString()],
   ];
 
   if (controls.application) {
