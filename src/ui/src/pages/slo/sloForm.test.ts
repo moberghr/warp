@@ -307,12 +307,25 @@ describe('edit round-trip (objective -> draft -> request)', () => {
         return { tagFilter: 'http.response.status_code=5*' };
       case SloKind.MetricVolumeFloor:
         return { tagFilter: 'route=/checkout', baselineDays: 1 };
+      case SloKind.MetricLatency:
+        // A non-default percentile: a round-trip that fell back to 95 would pass with the default.
+        return { tagFilter: 'http.route=/checkout', percentile: 99 };
+      case SloKind.MetricGaugeThreshold:
+        // Neither the default comparison (AtMost) nor the default aggregate (Average), for the same reason.
+        return { tagFilter: 'pool=main', percentile: 90, comparison: SloComparison.AtLeast, gaugeAggregate: SloGaugeAggregate.Max };
       default:
         return { tagFilter: 'side=in', secondaryMetric: 'orders.shipped', secondaryTagFilter: 'side=out' };
     }
   };
 
-  it.each([SloKind.MetricRatio, SloKind.MetricThreshold, SloKind.MetricVolumeFloor, SloKind.MetricGap])(
+  it.each([
+    SloKind.MetricRatio,
+    SloKind.MetricThreshold,
+    SloKind.MetricVolumeFloor,
+    SloKind.MetricGap,
+    SloKind.MetricLatency,
+    SloKind.MetricGaugeThreshold,
+  ])(
     'preserves every metric field of kind %s',
     (kind) => {
       const fields = metricFields(kind);

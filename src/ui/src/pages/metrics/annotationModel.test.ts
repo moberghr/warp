@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { inTimeZone } from '@/lib/timeZone.testUtils';
 import { MetricAnnotationTarget, type MetricAnnotation } from '@/types/annotations';
 import {
   MAX_NOTE_LENGTH,
@@ -93,8 +94,9 @@ describe('isActiveAt', () => {
 });
 
 describe('text', () => {
-  it('writes an ongoing range with "ongoing"', () => {
-    expect(formatAnnotationRange(note())).toMatch(/→ ongoing$/);
+  it('writes the range in the pinned UTC zone, an open one as "ongoing"', () => {
+    expect(formatAnnotationRange(note())).toBe('Nov 13, 10:00 AM → ongoing');
+    expect(formatAnnotationRange(note({ endsAt: new Date(T0 + 2 * HOUR).toISOString() }))).toBe('Nov 13, 10:00 AM → Nov 13, 12:00 PM');
   });
 
   it('describes the scope of a note', () => {
@@ -174,5 +176,39 @@ describe('validateAnnotationDraft', () => {
   it('checks the tag filter grammar on an instrument note only', () => {
     expect(validateAnnotationDraft({ ...valid, tagFilter: 'status' })).not.toBeNull();
     expect(validateAnnotationDraft({ ...newAnnotationDraft({ sloDefinitionId: 1 }, T0), note: 'n', tagFilter: 'status' })).toBeNull();
+  });
+});
+
+describe('local time in a DST zone (Europe/Zagreb)', () => {
+  inTimeZone('Europe/Zagreb');
+
+  // A note that starts in summer time and ends in winter time, across the 25 Oct 2026 change.
+  const summerStart = Date.parse('2026-10-24T22:15:00Z'); // 00:15 CEST
+  const winterEnd = Date.parse('2026-10-25T03:45:00Z'); // 04:45 CET
+
+  it('opens a stored note in the editor at the wall-clock times of the zone', () => {
+    const draft = draftFromAnnotation(note({ startsAt: new Date(summerStart).toISOString(), endsAt: new Date(winterEnd).toISOString() }));
+
+    expect([draft.from, draft.to]).toEqual(['2026-10-25T00:15', '2026-10-25T04:45']);
+  });
+
+  it('round-trips a note across the change through the editor into the same instants', () => {
+    const stored = note({ startsAt: new Date(summerStart).toISOString(), endsAt: new Date(winterEnd).toISOString() });
+
+    expect(draftToUpsert(draftFromAnnotation(stored))).toMatchObject({ startsAt: stored.startsAt, endsAt: stored.endsAt });
+  });
+
+  it('starts a new note at local now, which goes back to the same instant', () => {
+    const now = Date.parse('2026-07-15T09:42:00Z');
+    const draft = newAnnotationDraft({ instrument: 'http' }, now);
+
+    expect(draft.from).toBe('2026-07-15T11:42');
+    expect(fromLocalInputValue(draft.from)).toBe(now);
+    expect(draftToUpsert({ ...draft, note: 'n' }).startsAt).toBe('2026-07-15T09:42:00.000Z');
+  });
+
+  it('writes the range in local time', () => {
+    expect(formatAnnotationRange(note({ startsAt: new Date(summerStart).toISOString(), endsAt: new Date(winterEnd).toISOString() })))
+      .toBe('Oct 25, 12:15 AM → Oct 25, 04:45 AM');
   });
 });
