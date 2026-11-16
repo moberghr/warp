@@ -5,12 +5,15 @@ using Warp.Core.Enums;
 namespace Warp.Core.Metrics;
 
 /// <summary>
-/// One series of a collected instrument: (instrument name, application, canonical tag set). The canonical tag
+/// One series of a collected instrument: (instrument name, application, canonical tag set), plus the application
+/// version when the host opted in with <c>AddMetrics(m =&gt; m.ByVersion())</c>. The canonical tag
 /// set is <c>k1=v1,k2=v2</c> — projected through the instrument's <c>KeepTags</c> allowlist, keys sanitized and
 /// sorted in ordinal order, capped at <c>MaxTagsPerInstrument</c> keys and at <see cref="MaxTagsLength"/> characters
 /// (the <c>Tags</c> column) — or <see cref="NoTags"/> when no tag survives. A series key is therefore never longer than
 /// the column, so storage never has to cut it and two distinct series can never merge there.
-/// Application comes from <c>WarpConfiguration.ApplicationName</c>, never from a tag.
+/// Application and version come from <c>WarpConfiguration.ApplicationName</c> / <c>ApplicationVersion</c>, never from a
+/// tag. Both are per-process constants, so they never multiply the series one process interns; they matter where rows
+/// of several processes meet (the rollup's key, the read's breakdown).
 /// <para>
 /// Series instances are interned per instrument by <see cref="MetricInstrumentCardinality"/>, so an
 /// already-seen series resolves without allocating: the tag set is written into a pooled buffer and looked up
@@ -35,15 +38,17 @@ internal sealed class MetricSeries : IEquatable<MetricSeries>
 
     private readonly int _hashCode;
 
-    public MetricSeries(MetricInstrumentInfo instrument, string? application, string tags)
+    public MetricSeries(MetricInstrumentInfo instrument, string? application, string tags, string? version = null)
     {
         Instrument = instrument;
         Application = application;
         Tags = tags;
+        Version = version;
         _hashCode = HashCode.Combine(
             StringComparer.Ordinal.GetHashCode(instrument.Name),
             application is null ? 0 : StringComparer.Ordinal.GetHashCode(application),
-            StringComparer.Ordinal.GetHashCode(tags));
+            StringComparer.Ordinal.GetHashCode(tags),
+            version is null ? 0 : StringComparer.Ordinal.GetHashCode(version));
     }
 
     public MetricInstrumentInfo Instrument { get; }
@@ -51,6 +56,9 @@ internal sealed class MetricSeries : IEquatable<MetricSeries>
     public string? Application { get; }
 
     public string Tags { get; }
+
+    /// <summary>The application version, only when the host opted in with <c>ByVersion()</c>; null otherwise.</summary>
+    public string? Version { get; }
 
     /// <summary>
     /// Resolves the series for one measurement's tags. Keys are sanitized first, and sorting, de-duplication and
@@ -214,7 +222,8 @@ internal sealed class MetricSeries : IEquatable<MetricSeries>
             && _hashCode == other._hashCode
             && string.Equals(Instrument.Name, other.Instrument.Name, StringComparison.Ordinal)
             && string.Equals(Application, other.Application, StringComparison.Ordinal)
-            && string.Equals(Tags, other.Tags, StringComparison.Ordinal);
+            && string.Equals(Tags, other.Tags, StringComparison.Ordinal)
+            && string.Equals(Version, other.Version, StringComparison.Ordinal);
     }
 
     public override bool Equals(object? obj) => obj is MetricSeries other && Equals(other);

@@ -641,6 +641,60 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetSeries_BreakdownByVersion_SplitsLinesByApplicationVersionAndVersionlessRowsReadAsNone()
+    {
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-30), sum: 3, version: "1.0.0"),
+                Point("c", Now.AddMinutes(-30), sum: 5, version: "2.0.0"),
+                Point("c", Now.AddMinutes(-20), sum: 7, version: "2.0.0"),
+                Point("c", Now.AddMinutes(-20), sum: 1),
+            ]);
+
+        var result = await CreateService().GetSeries("c", Query(Now.AddHours(-1), Now, breakdown: MetricSeriesQuery.VersionKey), Ct);
+
+        var lines = result.ShouldNotBeNull().Series.ToDictionary(x => x.Name, x => x.Points.Sum(y => y.Sum));
+        lines.ShouldBe(new Dictionary<string, double> { ["2.0.0"] = 12, ["1.0.0"] = 3, ["{none}"] = 1 });
+    }
+
+    [TimedFact]
+    public async Task GetSeries_FilterByVersionPrefix_KeepsOnlyMatchingVersions()
+    {
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-30), sum: 3, version: "1.0.0", tags: "route=a"),
+                Point("c", Now.AddMinutes(-30), sum: 5, version: "2.0.0", tags: "route=a"),
+                Point("c", Now.AddMinutes(-30), sum: 4, version: "2.1.0", tags: "route=b"),
+                Point("c", Now.AddMinutes(-30), sum: 9, tags: "route=a"),
+            ]);
+
+        var result = await CreateService().GetSeries(
+            "c",
+            Query(Now.AddHours(-1), Now, filters: new Dictionary<string, string> { [MetricSeriesQuery.VersionKey] = "2.*" }),
+            Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.Sum(x => x.Sum).ShouldBe(9);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_NoVersionDimensionAsked_SumsEveryVersionIntoTheTotal()
+    {
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-30), sum: 3, version: "1.0.0"),
+                Point("c", Now.AddMinutes(-30), sum: 5, version: "2.0.0"),
+                Point("c", Now.AddMinutes(-30), sum: 1),
+            ]);
+
+        var result = await CreateService().GetSeries("c", Query(Now.AddHours(-1), Now), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().Sum.ShouldBe(9);
+    }
+
+    [TimedFact]
     public async Task GetMetrics_Route_ListsTheRegistry()
     {
         await SeedAsync([Instrument("c", MetricKind.Counter)], []);
@@ -1071,11 +1125,13 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
         MetricTier tier = MetricTier.Fine,
         bool compacted = false,
         string? buckets = null,
-        string? bounds = null)
+        string? bounds = null,
+        string? version = null)
         => new()
         {
             Instrument = instrument,
             Application = application,
+            Version = version,
             Tags = tags,
             Tier = tier,
             BucketStart = bucket,

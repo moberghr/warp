@@ -32,6 +32,8 @@ Set on `AddWarp` (or `AddWarpServer`, which inherits them) and only meaningful w
 | `MetricFlushInterval` | `TimeSpan` | `30 seconds` | How often each process writes the metrics it aggregated in memory as partial `metric_point` rows, and reads its observable instruments. A flush also runs on graceful shutdown; **an ungraceful exit loses at most one interval.** An idle interval does no database work. Must be greater than zero (`AddMetrics` throws otherwise). Raise it on emit-only processes to cut insert volume. |
 | `MetricRollupInterval` | `TimeSpan?` | `1 minute` | How often the `MetricRollup` server task compacts closed 5-minute buckets and rolls them up to hourly and daily rows. `null` disables the rollup loop (metric rows then accumulate). It runs on every `AddWarpServer` process, including `DisableWorker()` ones. Tier ages come from `FineResolutionRetention` (6h), `HourlyStatisticsRetention` (7d) and `DailyStatisticsRetention` (90d, `null` keeps forever). |
 
+To keep application versions apart in the stored series (old vs new during a rolling deploy), call `ByVersion()` inside `AddMetrics` on the hosts that should record it. It is off by default and needs `ApplicationName` and `ApplicationVersion`. See [Comparing versions](/docs/features/custom-metrics#comparing-versions).
+
 ### Naming Conventions
 
 Warp's entity configurations do **not** hardcode table or column names. If you use a naming convention plugin (e.g., `UseSnakeCaseNamingConvention()`), it will transform Warp's tables and columns just like your own entities:

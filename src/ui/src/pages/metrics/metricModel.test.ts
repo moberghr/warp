@@ -4,6 +4,9 @@ import type { MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metric
 import {
   DEFAULT_CONTROLS,
   MAX_RANGE_MS,
+  VERSION_KEY,
+  dimensionKeys,
+  dimensionLabel,
   deployMarkers,
   fromLocalInputValue,
   latestDeploy,
@@ -153,6 +156,32 @@ describe('filter chips', () => {
       { key: 'a', value: '9' },
     ]);
     expect(removeChip(chips, 'a')).toEqual([{ key: 'b', value: '2' }]);
+  });
+});
+
+describe('version dimension', () => {
+  it('offers the version after the tag keys, once', () => {
+    expect(dimensionKeys(['route', 'status'])).toEqual(['route', 'status', VERSION_KEY]);
+    expect(dimensionKeys([])).toEqual([VERSION_KEY]);
+    expect(dimensionKeys([VERSION_KEY])).toEqual([VERSION_KEY]);
+  });
+
+  it('labels the version key for people and leaves tag keys as they are', () => {
+    expect(dimensionLabel(VERSION_KEY)).toBe('application version');
+    expect(dimensionLabel('route')).toBe('route');
+  });
+
+  it('sends a version breakdown and a version filter like any tag', () => {
+    const params = new URLSearchParams(
+      buildSeriesQuery(
+        { ...DEFAULT_CONTROLS, breakdown: VERSION_KEY, filters: [{ key: VERSION_KEY, value: '2.4.*' }] },
+        MetricKind.Counter,
+        Date.UTC(2026, 10, 13, 12, 0, 0),
+      ),
+    );
+
+    expect(params.get('breakdown')).toBe('{version}');
+    expect(params.getAll('filter')).toEqual(['{version}:2.4.*']);
   });
 });
 

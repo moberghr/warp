@@ -11,6 +11,23 @@ import type { ApplicationDeployModel } from '@/types/applications';
 export const REST_NAME = '(rest)';
 export const TOTAL_NAME = 'total';
 
+/**
+ * The reserved key that addresses the application version as if it were a tag (#330, MetricSeriesQuery.VersionKey):
+ * `breakdown={version}` splits by version and a `{version}` filter chip filters by it. Only hosts that opted in with
+ * `AddMetrics(m => m.ByVersion())` write a version; every other row reads as `{none}`.
+ */
+export const VERSION_KEY = '{version}';
+
+/** The breakdown / filter keys offered for an instrument: its tag keys, then the version pseudo-key. */
+export function dimensionKeys(tagKeys: string[]): string[] {
+  return tagKeys.includes(VERSION_KEY) ? tagKeys : [...tagKeys, VERSION_KEY];
+}
+
+/** How a breakdown / filter key reads in a picker. */
+export function dimensionLabel(key: string): string {
+  return key === VERSION_KEY ? 'application version' : key;
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Labels
 // ---------------------------------------------------------------------------------------------------------------

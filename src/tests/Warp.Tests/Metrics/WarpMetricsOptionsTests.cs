@@ -60,6 +60,13 @@ public class WarpMetricsOptionsTests
     }
 
     [TimedFact]
+    public void ByVersion_OptsIn_AndIsOffByDefault()
+    {
+        new WarpMetricsOptions().CollectByVersion.ShouldBeFalse();
+        new WarpMetricsOptions().ByVersion().CollectByVersion.ShouldBeTrue();
+    }
+
+    [TimedFact]
     public void PresetConstants_NameTheStandardMetersAndInstruments()
     {
         WarpMetricsOptions.AspNetCoreHostingMeter.ShouldBe("Microsoft.AspNetCore.Hosting");

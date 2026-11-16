@@ -82,6 +82,14 @@ public static class MetricCompareOffsets
 /// <summary>One series read: the range, an optional application, one breakdown tag, tag filters, overlays and a percentile.</summary>
 public sealed class MetricSeriesQuery
 {
+    /// <summary>
+    /// The reserved key that addresses the application version (<c>AddMetrics(m =&gt; m.ByVersion())</c>) as if it were a
+    /// tag: <see cref="Breakdown"/> = <c>{version}</c> splits by version and a <see cref="Filters"/> entry
+    /// <c>{version}</c> → <c>2.4.*</c> filters by it. Rows written without a version read as <c>{none}</c>. Braced like
+    /// Warp's other reserved tokens (<c>{none}</c>, <c>{other}</c>), so it cannot clash with an ordinary tag key.
+    /// </summary>
+    public const string VersionKey = "{version}";
+
     /// <summary>Inclusive start of the range (UTC).</summary>
     public DateTime From { get; init; }
 

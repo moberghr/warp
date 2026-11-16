@@ -204,6 +204,7 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
                         BucketStart = x.BucketStart,
                         Tags = x.Tags,
                         Bounds = x.Bounds,
+                        Version = x.Version,
                         Count = x.Count,
                         Sum = x.Sum,
                         Min = x.Min,
@@ -212,7 +213,7 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
                     });
         }
 
-        return MetricPointQueries.Summed(points, byTags: read != MetricRead.Total);
+        return MetricPointQueries.Summed(points, byTags: read != MetricRead.Total, byVersion: read != MetricRead.Total);
     }
 
     // The cheapest read that answers the query: bucket CSVs only for a histogram percentile, per-series rows only when
@@ -257,17 +258,24 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
         var fineMinutes = FineMinutes;
         var rows = await PointRows(instrument, from, to, query.Application, ReadFor(kind, query)).ToListAsync(ct);
 
-        var tagCache = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+        var tagCache = new Dictionary<(string Tags, string? Version), Dictionary<string, string>>();
         var boundsCache = new Dictionary<string, double[]?>(StringComparer.Ordinal);
         var byValue = new Dictionary<string, BucketMap>(StringComparer.Ordinal);
         var corrupt = 0;
 
         foreach (var row in rows)
         {
-            if (!tagCache.TryGetValue(row.Tags, out var tags))
+            if (!tagCache.TryGetValue((row.Tags, row.Version), out var tags))
             {
+                // The version is a pseudo-tag, so the one filter matcher and the one breakdown path serve it too. A row
+                // without one leaves it absent, which both read as {none}, exactly like a missing tag.
                 tags = MetricFilter.ParseCanonicalTags(row.Tags);
-                tagCache[row.Tags] = tags;
+                if (row.Version is not null)
+                {
+                    tags[MetricSeriesQuery.VersionKey] = row.Version;
+                }
+
+                tagCache[(row.Tags, row.Version)] = tags;
             }
 
             if (!filter.Matches(tags))
@@ -479,6 +487,9 @@ internal sealed class MetricPointRow
     public string Tags { get; init; } = string.Empty;
 
     public string? Bounds { get; init; }
+
+    /// <summary>The application version of the rows summed here; null when the writer did not opt into it, or the read did not group by it.</summary>
+    public string? Version { get; init; }
 
     public long Count { get; init; }
 

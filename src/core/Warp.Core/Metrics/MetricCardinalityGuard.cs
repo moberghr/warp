@@ -138,8 +138,8 @@ internal sealed class MetricCardinalityGuard
     }
 
     /// <summary>The per-instrument key, value and series caps for one collected instrument.</summary>
-    public MetricInstrumentCardinality CreateInstrument(MetricInstrumentInfo instrument, string? application)
-        => new(this, instrument, application, _maxValuesPerTag, _maxSeriesPerInstrument, _maxTagKeys);
+    public MetricInstrumentCardinality CreateInstrument(MetricInstrumentInfo instrument, string? application, string? version = null)
+        => new(this, instrument, application, _maxValuesPerTag, _maxSeriesPerInstrument, _maxTagKeys, version);
 
     /// <summary>Reports a collapse. <paramref name="tagKey"/> is an admitted key name, never a value.</summary>
     public void Report(string instrument, string? tagKey, string reason)
@@ -332,6 +332,7 @@ internal sealed class MetricInstrumentCardinality
     private readonly MetricCardinalityGuard _guard;
     private readonly MetricInstrumentInfo _instrument;
     private readonly string? _application;
+    private readonly string? _version;
     private readonly int _maxValuesPerTag;
     private readonly int _maxSeries;
     private readonly int _maxTagKeys;
@@ -350,17 +351,19 @@ internal sealed class MetricInstrumentCardinality
         string? application,
         int maxValuesPerTag,
         int maxSeries,
-        int maxTagKeys)
+        int maxTagKeys,
+        string? version = null)
     {
         _guard = guard;
         _instrument = instrument;
         _application = application;
+        _version = version;
         _maxValuesPerTag = maxValuesPerTag;
         _maxSeries = maxSeries;
         _maxTagKeys = maxTagKeys;
         _keyLookup = _keys.GetAlternateLookup<ReadOnlySpan<char>>();
         _seriesLookup = _series.GetAlternateLookup<ReadOnlySpan<char>>();
-        _otherSeries = new MetricSeries(instrument, application, MetricSeries.Other);
+        _otherSeries = new MetricSeries(instrument, application, MetricSeries.Other, version);
     }
 
     /// <summary>Distinct series admitted so far (excluding the <c>{other}</c> series).</summary>
@@ -465,7 +468,7 @@ internal sealed class MetricInstrumentCardinality
             if (_series.Count < _maxSeries)
             {
                 var admitted = tags.ToString();
-                series = new MetricSeries(_instrument, _application, admitted);
+                series = new MetricSeries(_instrument, _application, admitted, _version);
                 _series.TryAdd(admitted, series);
 
                 return series;

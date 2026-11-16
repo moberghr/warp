@@ -101,7 +101,7 @@ Rows whose bounds differ are never merged, so changing an instrument's buckets s
 
 ## Instrument kinds and what is stored
 
-Every measurement is converted to `double` and added to an in-memory aggregate for its **series** and its **5-minute bucket**. A series is the instrument name, the application and the tag set.
+Every measurement is converted to `double` and added to an in-memory aggregate for its **series** and its **5-minute bucket**. A series is the instrument name, the application, the tag set and, only on a host that opted in with `ByVersion()`, the application version.
 
 | Instrument | Stored kind | Per bucket | "Value" on charts and SLOs |
 |---|---|---|---|
@@ -117,7 +117,7 @@ Observable instruments are read once per flush, just before the aggregates are w
 An `UpDownCounter` or `ObservableUpDownCounter` is stored as deltas, so each bucket on the chart (and the value an SLO reads) is the **net change during that bucket**, not the current level. For an observable up-down counter the first observed total is only a baseline, so the level cannot be rebuilt from what is stored. Instrumenting "in-flight requests" with an up-down counter therefore draws a line hovering around 0, and the Metrics page labels the axis **Net change** for this kind. **To chart a level** (in-flight requests, queue length, pool size), publish it with an `ObservableGauge<T>`, which is charted as the average of the observed values per bucket.
 :::
 
-**Series identity.** `application` is the sanitized `ApplicationName` (or none). It is added automatically as a dimension and is never read from a tag. The tag set is `k1=v1,k2=v2`, sorted by key (ordinal) after the allowlist. Values are formatted with the invariant culture, trimmed and **truncated to 64 characters**; a null or empty value becomes `{none}`; `,` and `=` become `-` and control characters are removed. A tag set that would exceed 512 characters loses its trailing keys. If two meters publish an instrument with the same name, the first one wins and a later one that differs in meter, kind or bounds is not collected (reason `name_conflict`). Instrument names longer than 128 characters are refused (`name_too_long`).
+**Series identity.** `application` is the sanitized `ApplicationName` (or none). It is added automatically as a dimension and is never read from a tag. `version` is the sanitized `ApplicationVersion`, added the same way **only** on a host that called `ByVersion()` (see [Comparing versions](#comparing-versions)); everywhere else it is none, and the series is exactly what it was before. The tag set is `k1=v1,k2=v2`, sorted by key (ordinal) after the allowlist. Values are formatted with the invariant culture, trimmed and **truncated to 64 characters**; a null or empty value becomes `{none}`; `,` and `=` become `-` and control characters are removed. A tag set that would exceed 512 characters loses its trailing keys. If two meters publish an instrument with the same name, the first one wins and a later one that differs in meter, kind or bounds is not collected (reason `name_conflict`). Instrument names longer than 128 characters are refused (`name_too_long`).
 
 ## Topology
 
@@ -174,12 +174,31 @@ The application processes need only `AddWarp`; the service-only server is the on
 
 Two tables in the Warp schema, picked up by your normal `dotnet ef migrations add` (additive: nothing existing changes).
 
-- **`metric_point`**: one row per (instrument, application, tag set, tier, bucket start), holding count, sum, min, max, and for histograms the bucket counts and bounds as CSV text. Indexed on `(Instrument, Tier, BucketStart)` for reads.
+- **`metric_point`**: one row per (instrument, application, version, tag set, tier, bucket start), holding count, sum, min, max, and for histograms the bucket counts and bounds as CSV text. Indexed on `(Instrument, Tier, BucketStart)` for reads.
 - **`metric_instrument`**: a registry (name, meter, kind, unit, description, bounds, observed tag keys, first and last seen, and the collapse badge). The list page reads only this table and never scans points. Rows whose `LastSeenAt` is older than `DailyStatisticsRetention` are removed by `ExpirationCleanup` (never when it is `null`).
 
 **Flush.** Every `MetricFlushInterval` each process drains its in-memory aggregates and inserts one **partial** fine row per active series. A flush also runs once on graceful shutdown. An idle process does no database work. The registry is upserted in a **separate** save: a registry failure never fails or re-adds the points. A failed point write merges the aggregates back so the next flush writes them (additive: nothing is lost or counted twice).
 
-**Compaction.** Once a fine bucket has been closed for longer than twice the flush interval (`bucket start + 5 min + 2 × MetricFlushInterval`), `MetricRollup` merges its partial rows into **one compacted row per series**: count, sum and bucket counts summed, min of mins, max of maxes. This is what turns the 10 partial rows per process per 5 minutes into one row per series per bucket.
+### Comparing versions
+
+During a rolling deploy two versions of an application emit at once and their measurements merge into one series. To tell them apart, opt a host into the version dimension:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.ApplicationName = "checkout-api";
+    opt.ApplicationVersion = typeof(Program).Assembly.GetName().Version?.ToString();
+    opt.AddMetrics(m => m.CollectAspNetCoreHttp().ByVersion());
+});
+```
+
+- **Opt-in per host, default off.** Without `ByVersion()` the `version` column stays null and every row is written exactly as before. It needs `ApplicationName` and `ApplicationVersion` too; without either it does nothing. Hosts can differ: a host that did not opt in writes version-less rows beside a host that did.
+- **The version is a series dimension, like the application.** It is sanitized like a tag value (trimmed, `,` and `=` to `-`, at most 64 characters), it is part of the series key that compaction and the rollup tiers match on, so two versions never merge into one stored row, and a read without a version filter or breakdown sums every version, so totals are unchanged.
+- **Reading it.** The version is addressed as the reserved pseudo-tag `{version}`: `breakdown={version}` draws one line per version, and `filter={version}:2.4.*` keeps matching versions (exact or `prefix*`, like any filter). Rows without a version read as `{none}`. On the Metrics page, **application version** is listed in the breakdown and filter pickers.
+- **Cost.** Each version running at once adds its own set of series, so a rolling deploy briefly doubles them. Old versions stop being written when their instances stop and age out with the retention tiers, so the steady state is one or two versions per application. The cardinality caps are per process, and a process only ever has one version, so they are unaffected.
+- **Migration.** One nullable column, `metric_point.version`, picked up by your next `dotnet ef migrations add`.
+
+**Compaction.** Once a fine bucket has been closed for longer than twice the flush interval (`bucket start + 5 min + 2 × MetricFlushInterval`), `MetricRollup` merges its partial rows into **one compacted row per series** (including its version, when there is one): count, sum and bucket counts summed, min of mins, max of maxes. This is what turns the 10 partial rows per process per 5 minutes into one row per series per bucket.
 
 **Tiers.** Then the existing [retention tiers](./metrics-retention.md) apply to metric rows too, on the same settings:
 
@@ -220,7 +239,7 @@ Compaction keeps the steady state far smaller: **about 330 rows per series** are
 - **Headlines cover complete buckets only.** The response carries one `headlines` entry per range (the current one, then each overlay): the summed sum for counters and up-down counters, the summed count for histograms, the average for gauges, over every line including `(rest)`. The still-filling bucket is left out, **never prorated**, and each overlay leaves out the bucket aligned with it, so "now" and "1d ago" cover the same span. `completeUntil` says where the complete buckets end. The value is `null` when no complete bucket holds a measurement. The breakdown ranking still uses the whole range.
 - **Percentiles** (1 to 99) are computed from the stored bucket counts, so they read as "at most": the answer is the upper bound of the bucket that holds the percentile. A percentile over the overflow bucket reports the last finite bound. When rows have different bounds the ladder with the most samples is used.
 
-The dashboard API is `GET {prefix}/api/metrics` and `GET {prefix}/api/metrics/{id}/series`, where `{id}` is the URL-safe base64 of the instrument name. The series query takes `from` and `to` (ISO 8601), `application`, `breakdown` (a tag key), repeated `filter=key:value`, `compare=1d,7d` and `percentile`. A bad range, percentile, compare value or filter is a 400.
+The dashboard API is `GET {prefix}/api/metrics` and `GET {prefix}/api/metrics/{id}/series`, where `{id}` is the URL-safe base64 of the instrument name. The series query takes `from` and `to` (ISO 8601), `application`, `breakdown` (a tag key, or `{version}`), repeated `filter=key:value` (the key may be `{version}`), `compare=1d,7d` and `percentile`. A bad range, percentile, compare value or filter is a 400.
 
 ## Dashboard
 
@@ -303,9 +322,10 @@ This feature is deliberately small. Know these before relying on it:
 | `MetricRollupInterval` | `WarpConfiguration` | `1m` | How often `MetricRollup` runs. `null` disables it. |
 | `FineResolutionMinutes`, `FineResolutionRetention`, `HourlyStatisticsRetention`, `DailyStatisticsRetention` | `WarpConfiguration` | 5 min, 6 h, 7 d, 90 d | The [retention tiers](./metrics-retention.md), shared with `Statistic` rows. |
 | `MaxTagsPerInstrument`, `MaxValuesPerTag`, `MaxSeriesPerInstrument`, `MaxInstruments` | `WarpMetricsOptions` | 6, 100, 500, 300 | The [cardinality caps](#cardinality). |
+| `ByVersion()` | `WarpMetricsOptions` | off | Adds `ApplicationVersion` to every series this host collects. See [Comparing versions](#comparing-versions). |
 
 See also [Configuration](/docs/operations/configuration#custom-application-metrics), [SLO / error budget](./slo-error-budget.md#metric-objectives) and [Metrics retention tiers](./metrics-retention.md).
 
 ## Migration
 
-Additive: two new tables (`metric_point`, `metric_instrument`) and seven nullable columns on `slo_definition` for the metric SLO kinds, all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
+Additive: two new tables (`metric_point`, `metric_instrument`), seven nullable columns on `slo_definition` for the metric SLO kinds, and the nullable `metric_point.version` column for [comparing versions](#comparing-versions), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.

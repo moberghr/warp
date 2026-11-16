@@ -262,6 +262,27 @@ public abstract class MetricRollupTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task ExecuteAsync_SameSeriesOfTwoApplicationVersions_StaysApartThroughEveryTier()
+    {
+        // ByVersion (#330): the version is part of the series key, matched like Application. Rows old enough to pass
+        // through compaction, hourly and daily in one tick; the version-less row keys exactly as it always did.
+        await SeedAsync(
+            Versioned(Counter("c", Rollable, 1), "1.0.0"),
+            Versioned(Counter("c", Rollable, 2), "1.0.0"),
+            Versioned(Counter("c", Rollable, 10), "2.0.0"),
+            Versioned(Counter("c", Rollable, 20), "2.0.0"),
+            Counter("c", Rollable, 100));
+
+        await RunAsync();
+
+        var rows = await RowsAsync("c");
+        rows.ShouldAllBe(x => x.Tier == MetricTier.Daily);
+        rows.OrderBy(x => x.Count)
+            .Select(x => (x.Version, x.Count))
+            .ShouldBe([("1.0.0", 3L), ("2.0.0", 30L), (null, 100L)]);
+    }
+
+    [TimedFact]
     public async Task ExecuteAsync_IdleTick_ReturnsNull()
     {
         await SeedAsync(Counter("c", Bucket(MetricTier.Daily, Rollable), 1, tier: MetricTier.Daily, compacted: true));
@@ -383,6 +404,13 @@ public abstract class MetricRollupTestsBase : IAsyncLifetime
             Sum = count,
             Compacted = compacted,
         };
+
+    internal static MetricPoint Versioned(MetricPoint point, string version)
+    {
+        point.Version = version;
+
+        return point;
+    }
 
     internal static MetricPoint Histogram(
         string instrument,

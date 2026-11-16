@@ -44,6 +44,12 @@ public sealed class WarpMetricsOptions
     /// </summary>
     public int MaxPendingBuckets { get; set; } = 60_000;
 
+    /// <summary>
+    /// True when every series this process collects also carries its <c>ApplicationVersion</c> as a dimension (set by
+    /// <see cref="ByVersion"/>). Default false: <c>metric_point.Version</c> stays null and storage is unchanged.
+    /// </summary>
+    public bool CollectByVersion { get; private set; }
+
     /// <summary>The collected meters, by meter name.</summary>
     public IReadOnlyDictionary<string, MeterSelector> Meters => _meters;
 
@@ -73,6 +79,19 @@ public sealed class WarpMetricsOptions
         {
             selector.CollectAll = true;
         }
+
+        return this;
+    }
+
+    /// <summary>
+    /// Stamps this process's <c>ApplicationVersion</c> on every series it collects, so the Metrics page can filter and
+    /// break a metric down by version (old vs new during a rolling deploy). Series count grows by one set per version
+    /// running at once; old versions age out with retention. Ignored when <c>ApplicationName</c> or
+    /// <c>ApplicationVersion</c> is not set.
+    /// </summary>
+    public WarpMetricsOptions ByVersion()
+    {
+        CollectByVersion = true;
 
         return this;
     }

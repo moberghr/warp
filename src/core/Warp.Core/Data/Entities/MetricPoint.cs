@@ -19,6 +19,12 @@ public class MetricPoint
     /// <summary>The application the series belongs to (<c>WarpConfiguration.ApplicationName</c>); null when none is set.</summary>
     public string? Application { get; set; }
 
+    /// <summary>
+    /// The application version (<c>WarpConfiguration.ApplicationVersion</c>), only when the writing host opted in with
+    /// <c>AddMetrics(m =&gt; m.ByVersion())</c>; null otherwise, so a host that did not opt in writes the same rows as before.
+    /// </summary>
+    public string? Version { get; set; }
+
     /// <summary>The canonical tag set <c>k1=v1,k2=v2</c> (keys sorted), or <c>-</c> when the series has no tags.</summary>
     public string Tags { get; set; } = string.Empty;
 

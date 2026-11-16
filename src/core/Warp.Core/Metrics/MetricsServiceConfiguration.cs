@@ -50,11 +50,18 @@ public static class MetricsServiceConfiguration
             x.GetRequiredService<IOptions<WarpConfiguration>>().Value.FineResolutionMinutes,
             ResolveOptions(x).MaxPendingBuckets));
 
-        builder.Services.TryAddSingleton(x => new WarpMeterCollector(
-            ResolveOptions(x),
-            x.GetRequiredService<MetricAggregator>(),
-            x.GetRequiredService<MetricCardinalityGuard>(),
-            x.GetRequiredService<IOptions<WarpConfiguration>>().Value.ApplicationName));
+        builder.Services.TryAddSingleton(x =>
+        {
+            var options = ResolveOptions(x);
+            var configuration = x.GetRequiredService<IOptions<WarpConfiguration>>().Value;
+
+            return new WarpMeterCollector(
+                options,
+                x.GetRequiredService<MetricAggregator>(),
+                x.GetRequiredService<MetricCardinalityGuard>(),
+                configuration.ApplicationName,
+                options.CollectByVersion ? configuration.ApplicationVersion : null);
+        });
 
         // Registered after the collector host: hosted services stop in reverse order, so the flusher's final flush
         // runs while the listener still feeds the aggregator.

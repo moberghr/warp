@@ -339,6 +339,60 @@ public class WarpMeterCollectorTests
     }
 
     [TimedFact]
+    public void Measurement_WithVersion_CarriesTheSanitizedVersionOnTheSeries()
+    {
+        var name = MeterName();
+        using var meter = new Meter(name);
+        using var harness = Harness.Start(x => x.CollectMeter(name), application: "orders", version: " 2.4.1,rc=1 ");
+
+        meter.CreateCounter<long>("c").Add(1);
+
+        var series = harness.Aggregator.Drain().ShouldHaveSingleItem().Series;
+        series.Application.ShouldBe("orders");
+        series.Version.ShouldBe("2.4.1-rc-1");
+    }
+
+    [TimedFact]
+    public void Collector_VersionWithoutApplication_IsIgnored()
+    {
+        using var harness = Harness.Start(_ => { }, application: null, version: "2.4.1");
+
+        harness.Collector.Version.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task AddMetrics_ByVersion_StampsTheApplicationVersion()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.ApplicationName = "orders";
+            x.ApplicationVersion = "2.4.1";
+            x.AddMetrics(y => y.CollectMeter(MeterName()).ByVersion());
+        });
+        await using var provider = services.BuildServiceProvider();
+
+        provider.GetRequiredService<WarpMeterCollector>().Version.ShouldBe("2.4.1");
+    }
+
+    [TimedFact]
+    public async Task AddMetrics_WithoutByVersion_LeavesTheVersionOff()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.ApplicationName = "orders";
+            x.ApplicationVersion = "2.4.1";
+            x.AddMetrics(y => y.CollectMeter(MeterName()));
+        });
+        await using var provider = services.BuildServiceProvider();
+
+        var collector = provider.GetRequiredService<WarpMeterCollector>();
+        collector.Version.ShouldBeNull();
+        collector.Application.ShouldBe("orders");
+    }
+
+    [TimedFact]
     public void WarpMeter_NamedForCollection_IsNeverEnabled()
     {
         var name = MeterName();
@@ -703,12 +757,12 @@ public class WarpMeterCollectorTests
 
     private sealed class Harness : IDisposable
     {
-        private Harness(WarpMetricsOptions options, string? application)
+        private Harness(WarpMetricsOptions options, string? application, string? version)
         {
             var time = new FakeTimeProvider(Now);
             Guard = new MetricCardinalityGuard(options, time, new CapturingLoggerFactory(Logs).CreateLogger<MetricCardinalityGuard>());
             Aggregator = new MetricAggregator(time, 5);
-            Collector = new WarpMeterCollector(options, Aggregator, Guard, application);
+            Collector = new WarpMeterCollector(options, Aggregator, Guard, application, version);
         }
 
         public CapturingLoggerProvider Logs { get; } = new();
@@ -721,11 +775,11 @@ public class WarpMeterCollectorTests
 
         public WarpMeterCollector Collector { get; }
 
-        public static Harness Start(Action<WarpMetricsOptions> configure, string? application = null)
+        public static Harness Start(Action<WarpMetricsOptions> configure, string? application = null, string? version = null)
         {
             var options = new WarpMetricsOptions();
             configure(options);
-            var harness = new Harness(options, application);
+            var harness = new Harness(options, application, version);
             harness.Collector.Start();
 
             return harness;

@@ -42,6 +42,8 @@ import {
   collapseTooltip,
   customRangeLabel,
   deployMarkers,
+  dimensionKeys,
+  dimensionLabel,
   formatChange,
   formatNumber,
   fromLocalInputValue,
@@ -357,7 +359,7 @@ export default function MetricDetailPage() {
               onChange={(e) => set({ breakdown: e.target.value || null, numerator: null, view: e.target.value ? controls.view : 'values' })}
             >
               <option value="">None (total)</option>
-              {instrument.tagKeys.map((x) => <option key={x} value={x}>{x}</option>)}
+              {dimensionKeys(instrument.tagKeys).map((x) => <option key={x} value={x}>{dimensionLabel(x)}</option>)}
             </select>
           </Control>
 
@@ -446,36 +448,32 @@ export default function MetricDetailPage() {
               </button>
             </span>
           ))}
-          {instrument.tagKeys.length > 0 ? (
-            <form
-              className="flex items-center gap-1"
-              onSubmit={(e) => {
-                e.preventDefault();
-                addChip();
-              }}
+          <form
+            className="flex items-center gap-1"
+            onSubmit={(e) => {
+              e.preventDefault();
+              addChip();
+            }}
+          >
+            <select
+              className={selectClass}
+              value={chipDraft.key}
+              aria-label="Filter tag"
+              onChange={(e) => setChipDraft({ ...chipDraft, key: e.target.value })}
             >
-              <select
-                className={selectClass}
-                value={chipDraft.key}
-                aria-label="Filter tag"
-                onChange={(e) => setChipDraft({ ...chipDraft, key: e.target.value })}
-              >
-                <option value="">tag…</option>
-                {instrument.tagKeys.map((x) => <option key={x} value={x}>{x}</option>)}
-              </select>
-              <span className="text-muted-foreground">=</span>
-              <input
-                className={`${inputClass} w-32`}
-                placeholder="value or prefix*"
-                aria-label="Filter value"
-                value={chipDraft.value}
-                onChange={(e) => setChipDraft({ ...chipDraft, value: e.target.value })}
-              />
-              <button type="submit" className={toggleClass(false)} disabled={!chipDraft.key || !chipDraft.value.trim()}>Add</button>
-            </form>
-          ) : (
-            <span className="text-xs text-muted-foreground">This instrument has no tags to filter on.</span>
-          )}
+              <option value="">tag…</option>
+              {dimensionKeys(instrument.tagKeys).map((x) => <option key={x} value={x}>{dimensionLabel(x)}</option>)}
+            </select>
+            <span className="text-muted-foreground">=</span>
+            <input
+              className={`${inputClass} w-32`}
+              placeholder="value or prefix*"
+              aria-label="Filter value"
+              value={chipDraft.value}
+              onChange={(e) => setChipDraft({ ...chipDraft, value: e.target.value })}
+            />
+            <button type="submit" className={toggleClass(false)} disabled={!chipDraft.key || !chipDraft.value.trim()}>Add</button>
+          </form>
         </CardContent>
 
         {ratioActive && (

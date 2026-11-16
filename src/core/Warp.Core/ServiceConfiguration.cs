@@ -1244,6 +1244,7 @@ public static class ServiceConfiguration
 
         point.Property(p => p.Instrument).HasMaxLength(128);
         point.Property(p => p.Application).HasMaxLength(128);
+        point.Property(p => p.Version).HasMaxLength(128);
         point.Property(p => p.Tags).HasMaxLength(512);
         point.Property(p => p.Tier).HasConversion<int>();
         point.Property(p => p.BucketStart);
