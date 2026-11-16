@@ -2,10 +2,10 @@ import { Link, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getSlo, ackSlo } from '@/api';
 import { SloKind, SloKindLabel, SloState, isMetricKind, type SloObjective } from '@/types/slo';
-import { formatObjectiveValue, formatBudget, SloStatePill } from './shared';
+import { formatBudget, SloStatePill } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { baselineLabel, describeMetricKind } from './sloForm';
-import { sloValueDisplay } from './sloDisplay';
+import { formatObserved, formatTarget, sloValueDisplay } from './sloDisplay';
 
 export default function SloDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -84,8 +84,8 @@ export default function SloDetailPage() {
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <Stat label="Target" value={formatObjectiveValue(o.kind, o.targetValue)} />
-            <Stat label="Observed" value={formatObjectiveValue(o.kind, o.attainment)} />
+            <Stat label="Target" value={formatTarget(o)} />
+            <Stat label="Observed" value={formatObserved(o)} />
             <Stat label="Burn (fast)" value={`${o.burnRateShort.toFixed(2)}×`} danger={o.burnRateShort > 1} />
             <Stat label="Burn (slow)" value={`${o.burnRateLong.toFixed(2)}×`} danger={o.burnRateLong > 1} />
           </div>

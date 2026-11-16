@@ -1,6 +1,6 @@
 // Static SLO fixtures (§8.31) for hosted demo mode + docs screenshots. Mirrors SloList / SloObjective
 // (src/ui/src/types/slo.ts). Values are hand-picked to show one healthy, one warning, and one breaching
-// objective (plus one metric SLO of each metric kind, ids 4-7: healthy, breaching, no data, healthy) so the state pills and budget bars all appear on the /slo page.
+// objective (plus one metric SLO of each metric kind, ids 4-8: healthy, breaching, no data, healthy, healthy) so the state pills and budget bars all appear on the /slo page.
 import { SloKind, SloState, type SloObjective, type SloList } from '@/types/slo';
 
 const objectives: SloObjective[] = [
@@ -144,6 +144,26 @@ const objectives: SloObjective[] = [
     acknowledgedUntil: null,
     lastEvaluatedAt: '2026-07-31T09:14:00Z',
     secondaryMetric: 'notifications.processed',
+  },
+  {
+    id: 8,
+    name: 'Checkout p95 ≤ 0.5 s',
+    kind: SloKind.MetricLatency,
+    dimension: 'http.server.request.duration',
+    application: null,
+    targetValue: 0.5,
+    percentile: 95,
+    windowSeconds: 3600,
+    enabled: true,
+    evaluated: true,
+    attainment: 0.972,
+    budgetRemaining: 0.44,
+    burnRateShort: 0.4,
+    burnRateLong: 0.56,
+    state: SloState.Healthy,
+    acknowledgedUntil: null,
+    lastEvaluatedAt: '2026-07-31T09:14:00Z',
+    tagFilter: 'http.route=/checkout',
   },
 ];
 

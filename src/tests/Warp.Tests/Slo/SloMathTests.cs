@@ -379,4 +379,48 @@ public class SloMathTests
         SloMath.IsNoData(SloMath.EvaluateRatioDrop(0.99, 0.97, 0.05)).ShouldBeFalse();
         SloMath.IsNoData(SloMath.NoDataResult).ShouldBeTrue();
     }
+
+    [Fact]
+    public void TrySplitAtThreshold_ThresholdOnABound_CountsThatBucketAsWithin()
+    {
+        // Bounds 0.1, 0.25, 0.5 plus overflow; threshold 0.25 keeps the first two buckets.
+        SloMath.TrySplitAtThreshold([0.1, 0.25, 0.5], [10, 20, 30, 40], 0.25, out var within, out var over).ShouldBeTrue();
+
+        within.ShouldBe(30);
+        over.ShouldBe(70);
+    }
+
+    [Fact]
+    public void TrySplitAtThreshold_ThresholdBetweenBounds_BehavesLikeTheLowerBound()
+    {
+        // 0.3 sits inside (0.25, 0.5]: that bucket's events may be faster than 0.3, but the ladder cannot tell, so they are over.
+        SloMath.TrySplitAtThreshold([0.1, 0.25, 0.5], [10, 20, 30, 40], 0.3, out var within, out var over).ShouldBeTrue();
+
+        within.ShouldBe(30);
+        over.ShouldBe(70);
+    }
+
+    [Fact]
+    public void TrySplitAtThreshold_ThresholdAboveTheLadder_LeavesOnlyTheOverflowBucketOver()
+    {
+        SloMath.TrySplitAtThreshold([0.1, 0.25, 0.5], [10, 20, 30, 40], 1000, out var within, out var over).ShouldBeTrue();
+
+        within.ShouldBe(60);
+        over.ShouldBe(40);
+    }
+
+    [Fact]
+    public void TrySplitAtThreshold_ThresholdBelowTheFirstBound_IsAllOver()
+    {
+        SloMath.TrySplitAtThreshold([0.1, 0.25], [5, 5, 5], 0.05, out var within, out var over).ShouldBeTrue();
+
+        within.ShouldBe(0);
+        over.ShouldBe(15);
+    }
+
+    [Fact]
+    public void TrySplitAtThreshold_CountsNotAlignedWithBounds_ReturnsFalse()
+    {
+        SloMath.TrySplitAtThreshold([0.1, 0.25], [5, 5], 0.1, out _, out _).ShouldBeFalse();
+    }
 }

@@ -108,7 +108,7 @@ Every measurement is converted to `double` and added to an in-memory aggregate f
 | `Counter<T>` | Counter | count of measurements, sum | sum |
 | `ObservableCounter<T>` | Counter | per-series **delta** from the last cumulative value this process saw (the first observation is a baseline only; a total that went down is a reset and the new total is the delta) | sum |
 | `UpDownCounter<T>`, `ObservableUpDownCounter<T>` | UpDownCounter | sum of deltas | **net change** in the bucket (sum of deltas), not the level |
-| `Histogram<T>` | Histogram | count, sum, min, max, bucket counts | count (rates); percentiles from the buckets |
+| `Histogram<T>` | Histogram | count, sum, min, max, bucket counts | count (rates); percentiles from the buckets; a [`MetricLatency` SLO](./slo-error-budget.md#metric-objectives) reads the bucket counts |
 | `Gauge<T>`, `ObservableGauge<T>` | Gauge | count, sum, min, max | average (sum / count), min, max |
 
 Observable instruments are read once per flush, just before the aggregates are written out. Non-finite values (`NaN`, infinities) are ignored.

@@ -38,6 +38,14 @@ public enum SloKind
 
     /// <summary>Primary minus secondary event count (<c>SecondaryMetric</c>) must not exceed <c>TargetValue</c> (e.g. started minus finished).</summary>
     MetricGap = 9,
+
+    /// <summary>
+    /// Latency over a custom histogram: at least <c>Percentile</c>% of matching events must land in buckets whose upper
+    /// bound is at most <c>TargetValue</c> (in the instrument's unit), i.e. the bucket-resolution p<c>Percentile</c> stays
+    /// at or under the threshold. Evaluated as a good-event ratio, so the allowed slow fraction is
+    /// <c>1 − Percentile/100</c>. Histograms only.
+    /// </summary>
+    MetricLatency = 10,
 }
 
 /// <summary>

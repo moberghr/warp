@@ -1,5 +1,5 @@
 // Pure form logic for the SLO objective editor. Mirrors the client-checkable rules of Warp.Core.Slo.SloValidation
-// for the metric kinds (6-9) so most mistakes show up before a round trip. The server stays the authority: the
+// for the metric kinds (6-10) so most mistakes show up before a round trip. The server stays the authority: the
 // upsert's 400 message is always surfaced by the page.
 import { listsOverlap, parsePattern, type ValuePattern } from '@/lib/metricPattern';
 import { MetricKind, type MetricInstrument } from '@/types/metrics';
@@ -7,12 +7,26 @@ import { SloKind, isMetricKind, type SloObjective, type SloUpsertRequest } from 
 
 export const MIN_METRIC_WINDOW_SECONDS = 600;
 
-/** Instruments that can back a metric SLO: gauges have no event count and are excluded. */
-export function selectableInstruments(instruments: MetricInstrument[]): MetricInstrument[] {
+/** Whether an objective of `kind` can read an instrument of `instrument` kind (mirrors SloValidation.AcceptsInstrument). */
+export function acceptsInstrument(kind: SloKind, instrument: MetricKind): boolean {
+  if (kind === SloKind.MetricLatency) {
+    return instrument === MetricKind.Histogram;
+  }
+
+  return instrument !== MetricKind.Gauge;
+}
+
+/**
+ * Instruments that can back a metric SLO of `kind`: a latency objective needs a histogram (bucket counts); the
+ * event-counting kinds exclude gauges, which have no event count.
+ */
+export function selectableInstruments(instruments: MetricInstrument[], kind: SloKind = SloKind.MetricThreshold): MetricInstrument[] {
   return instruments
-    .filter((x) => x.kind !== MetricKind.Gauge)
+    .filter((x) => acceptsInstrument(kind, x.kind))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+export const DEFAULT_LATENCY_PERCENTILE = 95;
 
 /** Rounds away float noise so 0.9 * 100 shows as 90, not 90.00000000000001. */
 export function fractionToPercent(fraction: number): number {
@@ -62,6 +76,8 @@ export function changeKind(draft: SloUpsertRequest, kind: SloKind): SloUpsertReq
       return { ...metricBase, targetValue: 0, tagFilter: '' };
     case SloKind.MetricVolumeFloor:
       return { ...metricBase, targetValue: 0.5, tagFilter: '', baselineDays: 7 };
+    case SloKind.MetricLatency:
+      return { ...metricBase, targetValue: 0, percentile: DEFAULT_LATENCY_PERCENTILE, tagFilter: '' };
     default:
       return { ...metricBase, targetValue: 0, tagFilter: '', secondaryMetric: '', secondaryTagFilter: '' };
   }
@@ -86,6 +102,8 @@ export function fieldsFor(kind: SloKind): KindFields {
       return { tagFilter: true, ratio: false, baseline: 'required', secondary: false, percentile: false };
     case SloKind.MetricGap:
       return { tagFilter: true, ratio: false, baseline: 'none', secondary: true, percentile: false };
+    case SloKind.MetricLatency:
+      return { tagFilter: true, ratio: false, baseline: 'none', secondary: false, percentile: true };
     case SloKind.QueueWaitLatency:
     case SloKind.ExecutionLatency:
       return { tagFilter: false, ratio: false, baseline: 'none', secondary: false, percentile: true };
@@ -205,9 +223,20 @@ export function validateMetricDraft(draft: SloUpsertRequest): string | null {
 
       return draft.targetValue < 0 ? 'Max gap must be zero or greater.' : null;
     }
+    case SloKind.MetricLatency:
+      return validateLatency(draft);
     default:
       return draft.targetValue < 0 ? 'Max events must be zero or greater.' : null;
   }
+}
+
+function validateLatency(draft: SloUpsertRequest): string | null {
+  const percentile = draft.percentile ?? DEFAULT_LATENCY_PERCENTILE;
+  if (!Number.isInteger(percentile) || percentile < 1 || percentile > 99) {
+    return 'Percentile must be a whole number between 1 and 99.';
+  }
+
+  return draft.targetValue < 0 ? 'Threshold must be zero or greater.' : null;
 }
 
 function validateRatio(draft: SloUpsertRequest): string | null {
@@ -250,7 +279,8 @@ export function buildUpsertRequest(draft: SloUpsertRequest): SloUpsertRequest {
   }
 
   // Every metric kind takes a (primary) tag filter: dropping it on any kind silently widens the objective on edit.
-  const request: SloUpsertRequest = { ...base, dimension: draft.dimension.trim(), percentile: null, tagFilter: clean(draft.tagFilter) };
+  const percentile = draft.kind === SloKind.MetricLatency ? (draft.percentile ?? DEFAULT_LATENCY_PERCENTILE) : null;
+  const request: SloUpsertRequest = { ...base, dimension: draft.dimension.trim(), percentile, tagFilter: clean(draft.tagFilter) };
   if (draft.kind === SloKind.MetricRatio) {
     request.ratioTag = clean(draft.ratioTag);
     request.goodValues = clean(draft.goodValues);
@@ -320,6 +350,8 @@ export function describeMetricKind(kind: SloKind): string | null {
       return 'Matching events must stay at or above the target fraction of the same window in the baseline period.';
     case SloKind.MetricGap:
       return 'Primary event count minus secondary event count must not exceed the limit (count ≤ N).';
+    case SloKind.MetricLatency:
+      return 'At least the percentile share of matching histogram events must land in buckets whose upper bound is at most the threshold (in the instrument\'s unit). Thresholds are compared with bucket upper bounds, so resolution is the bucket ladder.';
     default:
       return null;
   }

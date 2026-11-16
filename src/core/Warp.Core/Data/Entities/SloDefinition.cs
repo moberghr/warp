@@ -25,10 +25,13 @@ public class SloDefinition
     /// <summary>Executor application to scope to (§8.23), reading the <c>-app</c> aggregate slice. Null ⇒ not app-scoped.</summary>
     public string? Application { get; set; }
 
-    /// <summary>The target: a ratio (0.995) for rate/attainment kinds, milliseconds for latency kinds, a job count for depth.</summary>
+    /// <summary>
+    /// The target: a ratio (0.995) for rate/attainment kinds, milliseconds for latency kinds, a job count for depth,
+    /// and the latency threshold in the instrument's own unit for <see cref="SloKind.MetricLatency"/>.
+    /// </summary>
     public double TargetValue { get; set; }
 
-    /// <summary>Percentile (90/95/99) for the latency kinds; null for rate/depth kinds.</summary>
+    /// <summary>Percentile (1–99, default 95) for the latency kinds, <see cref="SloKind.MetricLatency"/> included; null for rate/depth kinds.</summary>
     public int? Percentile { get; set; }
 
     /// <summary>Rolling evaluation window in seconds (e.g. 3600). The short burn window is derived as this / 12.</summary>

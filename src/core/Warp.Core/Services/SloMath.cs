@@ -196,6 +196,37 @@ internal static class SloMath
         return QueueWaitKeys.Buckets[^2];
     }
 
+    /// <summary>
+    /// Splits one histogram row's bucket counts at a latency <paramref name="threshold"/> (<c>MetricLatency</c>): a bucket
+    /// is within the threshold when its UPPER bound is at most the threshold, so a bucket that straddles it — and the
+    /// overflow bucket — counts as over. Percentile resolution is therefore the bucket ladder: a threshold between two
+    /// bounds behaves like the lower one. <paramref name="counts"/> has one entry per bound plus the overflow bucket;
+    /// any other length is a misaligned row and returns false.
+    /// </summary>
+    public static bool TrySplitAtThreshold(IReadOnlyList<double> bounds, IReadOnlyList<long> counts, double threshold, out long within, out long over)
+    {
+        within = 0;
+        over = 0;
+        if (counts.Count != bounds.Count + 1)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < counts.Count; i++)
+        {
+            if (i < bounds.Count && bounds[i] <= threshold)
+            {
+                within += counts[i];
+            }
+            else
+            {
+                over += counts[i];
+            }
+        }
+
+        return true;
+    }
+
     private static bool AllFinite(params ReadOnlySpan<double> values)
     {
         foreach (var value in values)

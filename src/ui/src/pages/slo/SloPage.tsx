@@ -13,12 +13,13 @@ import {
   isMetricKind,
   isRatioKind,
 } from '@/types/slo';
-import { formatObjectiveValue, formatBudget, SloStatePill, inputClass } from './shared';
+import { formatBudget, SloStatePill, inputClass } from './shared';
 import { PageHeading } from '@/components/PageHeading';
 import {
   MIN_METRIC_WINDOW_SECONDS,
   buildUpsertRequest,
   changeKind,
+  DEFAULT_LATENCY_PERCENTILE,
   errorMessage,
   fieldsFor,
   fractionToPercent,
@@ -27,7 +28,7 @@ import {
   selectableInstruments,
   validateMetricDraft,
 } from './sloForm';
-import { showsSloValues } from './sloDisplay';
+import { formatObserved, formatTarget, showsSloValues } from './sloDisplay';
 
 const emptyDraft: SloUpsertRequest = {
   id: 0,
@@ -151,14 +152,14 @@ function ObjectiveRow({
     <tr className="hover:bg-gray-50 dark:hover:bg-gray-900/50">
       <td className="px-4 py-3">
         <Link to={`/slo/${o.id}`} className="font-medium text-blue-600 hover:underline">{o.name}</Link>
-        <div className="text-xs text-gray-500">{SloKindLabel[o.kind]}{o.percentile ? ` p${o.percentile}` : ''}</div>
+        <div className="text-xs text-gray-500">{SloKindLabel[o.kind]}{o.percentile && o.kind !== SloKind.MetricLatency ? ` p${o.percentile}` : ''}</div>
       </td>
       <td className="px-4 py-3">
         <span className="font-mono text-xs">{o.dimension}</span>
         {o.application && <span className="ml-1 text-xs text-gray-400">@{o.application}</span>}
       </td>
-      <td className="px-4 py-3 text-right tabular-nums">{formatObjectiveValue(o.kind, o.targetValue)}</td>
-      <td className="px-4 py-3 text-right tabular-nums">{hasValues ? formatObjectiveValue(o.kind, o.attainment) : '—'}</td>
+      <td className="px-4 py-3 text-right tabular-nums">{formatTarget(o)}</td>
+      <td className="px-4 py-3 text-right tabular-nums">{hasValues ? formatObserved(o) : '—'}</td>
       <td className="px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="h-2 w-24 rounded bg-gray-200 dark:bg-gray-700 overflow-hidden">
@@ -203,7 +204,7 @@ function ObjectiveForm({
   const ratio = isRatioKind(draft.kind);
 
   const { data: metrics } = useQuery({ queryKey: queryKeys.metrics, queryFn: getMetrics, enabled: metric });
-  const instruments = selectableInstruments(metrics ?? []);
+  const instruments = selectableInstruments(metrics ?? [], draft.kind);
   const primary = instruments.find((x) => x.name === draft.dimension);
   const clientError = validateMetricDraft(draft);
   const saveDisabled = saving || !draft.name || !draft.dimension || clientError !== null;
@@ -264,6 +265,11 @@ function ObjectiveForm({
                     <input className={`${inputClass} font-mono`} value={draft.secondaryTagFilter ?? ''} onChange={(e) => set({ secondaryTagFilter: e.target.value })} />
                   </Field>
                 </>
+              )}
+              {fields.percentile && (
+                <Field label="Percentile (1–99)">
+                  <input className={`${inputClass} tabular-nums`} type="number" min={1} max={99} value={draft.percentile ?? DEFAULT_LATENCY_PERCENTILE} onChange={(e) => set({ percentile: Number(e.target.value) })} />
+                </Field>
               )}
               <MetricTarget draft={draft} onChange={(targetValue) => set({ targetValue })} />
             </>
@@ -375,7 +381,9 @@ function MetricTarget({ draft, onChange }: { draft: SloUpsertRequest; onChange: 
         ? 'Minimum fraction of baseline (%)'
         : draft.kind === SloKind.MetricGap
           ? 'Max gap (primary − secondary events)'
-          : 'Max events in window';
+          : draft.kind === SloKind.MetricLatency
+            ? "Threshold (instrument's unit; compared with bucket upper bounds)"
+            : 'Max events in window';
 
   return (
     <Field label={label}>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { SloState } from '@/types/slo';
-import { showsSloValues, sloValueDisplay } from './sloDisplay';
+import { SloKind, SloState } from '@/types/slo';
+import { formatObserved, formatTarget, showsSloValues, sloValueDisplay } from './sloDisplay';
 
 describe('sloValueDisplay', () => {
   it('reports not-evaluated before the first evaluation, whatever the state', () => {
@@ -20,4 +20,19 @@ describe('sloValueDisplay', () => {
       expect(showsSloValues({ evaluated: true, state })).toBe(true);
     },
   );
+});
+
+describe('formatTarget / formatObserved', () => {
+  it('shows a metric latency objective as its percentile and threshold, observed as the share within it', () => {
+    const o = { kind: SloKind.MetricLatency, targetValue: 0.25, percentile: 99, attainment: 0.9812 };
+
+    expect(formatTarget(o)).toBe('p99 ≤ 0.25');
+    expect(formatObserved(o)).toBe('98.12% ≤ 0.25');
+  });
+
+  it('formats the other kinds as before', () => {
+    expect(formatTarget({ kind: SloKind.SuccessRate, targetValue: 0.995, percentile: null })).toBe('99.50%');
+    expect(formatObserved({ kind: SloKind.ExecutionLatency, targetValue: 500, attainment: 420.4 })).toBe('420 ms');
+    expect(formatObserved({ kind: SloKind.MetricThreshold, targetValue: 0, attainment: 3 })).toBe('3');
+  });
 });

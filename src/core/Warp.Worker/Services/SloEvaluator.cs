@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -19,7 +20,7 @@ namespace Warp.Worker.Services;
 /// analogue of <c>CounterAggregator</c> / <c>ErrorGroupAggregator</c>); reads only, plus the one status row per
 /// objective. Rate objectives (success-rate, deadline-attainment) are windowed over the tiered history buckets
 /// (fine / hourly / daily, §8.30); latency objectives read the tiered <c>pcth</c> percentile histogram over the
-/// window; backlog reads the current gauge. Metric kinds 6–9 (ratio, threshold, volume floor, gap) read
+/// window; backlog reads the current gauge. Metric kinds 6–10 (ratio, threshold, volume floor, gap, latency) read
 /// <see cref="MetricPoint"/> rows across every tier overlapping the window (and baseline), prorated by overlap. A
 /// healthy→breaching edge buffers a <see cref="SloBreachedEvent"/> (or <c>BacklogBreached</c> for a depth
 /// objective), dispatched post-commit from <see cref="OnCommittedAsync"/> (§8.25).
@@ -177,6 +178,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
             SloKind.MetricThreshold => ComputeMetricThresholdAsync(def, now, ct),
             SloKind.MetricVolumeFloor => ComputeMetricVolumeFloorAsync(def, now, ct),
             SloKind.MetricGap => ComputeMetricGapAsync(def, now, ct),
+            SloKind.MetricLatency => ComputeMetricLatencyAsync(def, now, ct),
             _ => UnsupportedKindAsync(def),
         };
 
@@ -523,6 +525,67 @@ public sealed class SloEvaluator<TContext> : IServerTask
         return FromMath(SloMath.EvaluateCount(gap, def.TargetValue), SloMath.EvaluateCount(gapShort, def.TargetValue));
     }
 
+    // MetricLatency: a histogram's events split at the threshold by bucket upper bound (SloMath.TrySplitAtThreshold),
+    // then the good-event ratio against Percentile/100 — "p95 <= X" is "at most 5% of events slower than X", which is
+    // the rate model's allowed error. Bucket CSVs cannot be summed in SQL, so the rows come back as stored and each is
+    // split on its own ladder (rows with different bounds never need merging). NoData when no event in the window has
+    // bucket detail.
+    private async Task<EvalResult> ComputeMetricLatencyAsync(SloDefinition def, DateTime now, CancellationToken ct)
+    {
+        if (!TryParseFilter(def, def.TagFilter, out var filter) || def.Percentile is not { } percentile || percentile is < 1 or > 99)
+        {
+            return CorruptDefinition(def);
+        }
+
+        var from = now.AddSeconds(-def.WindowSeconds);
+        var shortFrom = ShortWindowStart(def, now);
+        var rows = await LoadRawAsync(def, def.Dimension, from, now, byTags: true, withBuckets: true, ct);
+        if (rows is null)
+        {
+            return NoDataResult;
+        }
+
+        double goodW = 0, badW = 0, goodS = 0, badS = 0;
+        var unreadable = 0;
+        var bounds = new Dictionary<string, double[]?>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            var fraction = Overlap(row.Tier, row.BucketStart, from, now, now);
+            if (fraction <= 0 || !filter.Matches(ParsedTags(row.Tags)))
+            {
+                continue;
+            }
+
+            if (!TrySplit(row, def.TargetValue, bounds, out var within, out var over))
+            {
+                unreadable++;
+
+                continue;
+            }
+
+            goodW += within * fraction;
+            badW += over * fraction;
+
+            var recent = Overlap(row.Tier, row.BucketStart, shortFrom, now, now);
+            goodS += within * recent;
+            badS += over * recent;
+        }
+
+        if (unreadable > 0)
+        {
+            _logger.LogDebug("SLO objective {Id} '{Name}' skipped {Count} metric row(s) without readable bucket counts.", def.Id, def.Name, unreadable);
+        }
+
+        if (goodW + badW <= 0)
+        {
+            return NoDataResult;
+        }
+
+        var target = percentile / 100.0;
+
+        return FromMath(Rate(goodW, badW, target), Rate(goodS, badS, target));
+    }
+
     // The metric maths return SloMath.NoDataResult (all NaN) for non-finite input or an overflowing result, and
     // Classify(NaN) would read Healthy — so NoData is decided HERE, before the shared classification. A non-finite
     // short window only zeroes the fast-burn signal.
@@ -572,23 +635,39 @@ public sealed class SloEvaluator<TContext> : IServerTask
     // yet), which the caller reports as NoData.
     private async Task<List<MetricEventRow>?> LoadMetricAsync(SloDefinition def, string instrument, DateTime from, DateTime to, bool byTags, CancellationToken ct)
     {
-        var kind = await InstrumentKindAsync(instrument, ct);
-        if (kind == MetricKind.Gauge)
+        var raw = await LoadRawAsync(def, instrument, from, to, byTags, withBuckets: false, ct);
+        if (raw is null)
         {
-            // Validation rejects gauges at upsert and seed; reaching here means the instrument changed kind since.
-            _logger.LogError(
-                "SLO objective {Id} '{Name}' reads gauge instrument '{Instrument}', which has no event count — reported as NoData.",
-                def.Id,
-                def.Name,
-                instrument);
+            return null;
+        }
+
+        // A non-empty read only gets past LoadRawAsync with a registry kind, which is what makes the event quantity known.
+        if (raw.Count == 0 || await InstrumentKindAsync(instrument, ct) is not { } eventKind)
+        {
+            return [];
+        }
+
+        return raw.ConvertAll(x => new MetricEventRow(x.Tier, x.BucketStart, ParsedTags(x.Tags), MetricPointQueries.EventQuantity(eventKind, x.Count, x.Sum)));
+    }
+
+    // The raw (tier, bucket[, tags]) rows of one instrument over [from, to), or null when the objective cannot read it:
+    // an instrument of a kind the objective does not accept (SloValidation.AcceptsInstrument), or rows the registry has
+    // not named yet. With `withBuckets` the rows come back as stored, bucket CSVs included (they cannot be summed in SQL).
+    private async Task<List<MetricRawRow>?> LoadRawAsync(SloDefinition def, string instrument, DateTime from, DateTime to, bool byTags, bool withBuckets, CancellationToken ct)
+    {
+        var kind = await InstrumentKindAsync(instrument, ct);
+        if (kind is { } known && !SloValidation.AcceptsInstrument(def.Kind, known))
+        {
+            // Validation rejects the mismatch at upsert and seed; reaching here means the instrument changed kind since.
+            LogUnreadableInstrument(def, instrument, known);
 
             return null;
         }
 
-        var key = new MetricReadKey(instrument, def.Application, from, to, byTags);
+        var key = new MetricReadKey(instrument, def.Application, from, to, byTags, withBuckets);
         if (!_metricReads.TryGetValue(key, out var raw))
         {
-            raw = await ReadMetricRowsAsync(instrument, def.Application, from, to, byTags, ct);
+            raw = await ReadMetricRowsAsync(instrument, def.Application, from, to, byTags, withBuckets, ct);
             _metricReads[key] = raw;
         }
 
@@ -615,12 +694,32 @@ public sealed class SloEvaluator<TContext> : IServerTask
             return null;
         }
 
-        var eventKind = kind.Value;
-
-        return raw.ConvertAll(x => new MetricEventRow(x.Tier, x.BucketStart, ParsedTags(x.Tags), MetricPointQueries.EventQuantity(eventKind, x.Count, x.Sum)));
+        return raw;
     }
 
-    private async Task<List<MetricRawRow>> ReadMetricRowsAsync(string instrument, string? application, DateTime from, DateTime to, bool byTags, CancellationToken ct)
+    private void LogUnreadableInstrument(SloDefinition def, string instrument, MetricKind known)
+    {
+        if (known == MetricKind.Gauge)
+        {
+            _logger.LogError(
+                "SLO objective {Id} '{Name}' reads gauge instrument '{Instrument}', which has no event count — reported as NoData.",
+                def.Id,
+                def.Name,
+                instrument);
+
+            return;
+        }
+
+        _logger.LogError(
+            "SLO objective {Id} '{Name}' ({Kind}) reads {InstrumentKind} instrument '{Instrument}', which this kind cannot evaluate — reported as NoData.",
+            def.Id,
+            def.Name,
+            def.Kind,
+            known,
+            instrument);
+    }
+
+    private async Task<List<MetricRawRow>> ReadMetricRowsAsync(string instrument, string? application, DateTime from, DateTime to, bool byTags, bool withBuckets, CancellationToken ct)
     {
         // The same tier-bounded range filter as the dashboard read, on this task's own (server) context.
         var points = MetricPointQueries.InRange(
@@ -631,6 +730,26 @@ public sealed class SloEvaluator<TContext> : IServerTask
             application,
             FineMinutes);
 
+        if (withBuckets)
+        {
+            // As the dashboard's percentile read: the partial rows as stored, each split on its own ladder in memory.
+            var stored = await points
+                .Select(x =>
+                    new
+                    {
+                        x.Tier,
+                        x.BucketStart,
+                        x.Tags,
+                        x.Count,
+                        x.Sum,
+                        x.Bounds,
+                        x.Buckets,
+                    })
+                .ToListAsync(ct);
+
+            return stored.ConvertAll(x => new MetricRawRow(x.Tier, DateTime.SpecifyKind(x.BucketStart, DateTimeKind.Utc), x.Tags, x.Count, x.Sum, x.Bounds, x.Buckets));
+        }
+
         if (!byTags)
         {
             TotalOnlyReads++;
@@ -639,7 +758,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
         // The same grouped projection as the dashboard read (MetricPointQueries.Summed), run on this context.
         var grouped = await MetricPointQueries.Summed(points, byTags).ToListAsync(ct);
 
-        return grouped.ConvertAll(x => new MetricRawRow(x.Tier, DateTime.SpecifyKind(x.BucketStart, DateTimeKind.Utc), byTags ? x.Tags : MetricSeries.NoTags, x.Count, x.Sum));
+        return grouped.ConvertAll(x => new MetricRawRow(x.Tier, DateTime.SpecifyKind(x.BucketStart, DateTimeKind.Utc), byTags ? x.Tags : MetricSeries.NoTags, x.Count, x.Sum, null, null));
     }
 
     // The registry kind of every instrument an enabled metric objective reads, loaded in one query at the start of the
@@ -649,7 +768,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
     private async Task LoadInstrumentKindsAsync(List<SloDefinition> definitions, CancellationToken ct)
     {
         var names = definitions
-            .Where(x => x.Kind is SloKind.MetricRatio or SloKind.MetricThreshold or SloKind.MetricVolumeFloor or SloKind.MetricGap)
+            .Where(x => SloValidation.IsMetricKind(x.Kind))
             .SelectMany(x => new[] { x.Dimension, x.Kind == SloKind.MetricGap ? x.SecondaryMetric : null })
             .OfType<string>()
             .Distinct(StringComparer.Ordinal)
@@ -736,21 +855,47 @@ public sealed class SloEvaluator<TContext> : IServerTask
         => window.Rows.Exists(x => Overlap(x, window.From, window.To, window.Now) > 0);
 
     private double Overlap(MetricEventRow row, DateTime from, DateTime to, DateTime now)
-    {
-        var width = row.Tier switch
-        {
-            MetricTier.Fine => TimeSpan.FromMinutes(FineMinutes),
-            MetricTier.Hourly => TimeSpan.FromHours(1),
-            _ => TimeSpan.FromDays(1),
-        };
+        => Overlap(row.Tier, row.BucketStart, from, to, now);
 
-        var written = now - row.BucketStart;
+    private double Overlap(MetricTier tier, DateTime bucketStart, DateTime from, DateTime to, DateTime now)
+    {
+        var width = TierWidth(tier);
+        var written = now - bucketStart;
         if (written < width)
         {
             width = written;
         }
 
-        return SloMath.OverlapFraction(row.BucketStart, width, from, to);
+        return SloMath.OverlapFraction(bucketStart, width, from, to);
+    }
+
+    private TimeSpan TierWidth(MetricTier tier) => tier switch
+    {
+        MetricTier.Fine => TimeSpan.FromMinutes(FineMinutes),
+        MetricTier.Hourly => TimeSpan.FromHours(1),
+        _ => TimeSpan.FromDays(1),
+    };
+
+    // A row's bucket counts split at the threshold; false for a row without bucket detail (the rollup drops it when a
+    // sum would not fit the column) or with a corrupt bounds/counts CSV. Bounds are parsed once per distinct ladder.
+    private static bool TrySplit(MetricRawRow row, double threshold, Dictionary<string, double[]?> boundsCache, out long within, out long over)
+    {
+        within = 0;
+        over = 0;
+        if (row.Bounds is null || row.Buckets is null)
+        {
+            return false;
+        }
+
+        if (!boundsCache.TryGetValue(row.Bounds, out var bounds))
+        {
+            bounds = MetricBuckets.TryParseBounds(row.Bounds, out var parsed) ? parsed : null;
+            boundsCache[row.Bounds] = bounds;
+        }
+
+        return bounds is not null
+            && MetricBuckets.TryParseCounts(row.Buckets, bounds.Length + 1, out var counts)
+            && SloMath.TrySplitAtThreshold(bounds, counts, threshold, out within, out over);
     }
 
     private int FineMinutes => Math.Max(1, _configuration.FineResolutionMinutes);
@@ -796,6 +941,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
             SloKind.MetricThreshold => $"{def.Dimension}{FilterLabel(def.TagFilter)}",
             SloKind.MetricVolumeFloor => $"{def.Dimension}{FilterLabel(def.TagFilter)}{baseline}",
             SloKind.MetricGap => $"{def.Dimension}{FilterLabel(def.TagFilter)} - {def.SecondaryMetric}{FilterLabel(def.SecondaryTagFilter)}",
+            SloKind.MetricLatency => string.Create(CultureInfo.InvariantCulture, $"{def.Dimension}{FilterLabel(def.TagFilter)} p{def.Percentile} <= {def.TargetValue}"),
             _ => null,
         };
     }
@@ -922,9 +1068,10 @@ public sealed class SloEvaluator<TContext> : IServerTask
 
     private readonly record struct KeyVal(string Key, long Value);
 
-    private readonly record struct MetricReadKey(string Instrument, string? Application, DateTime From, DateTime To, bool ByTags);
+    private readonly record struct MetricReadKey(string Instrument, string? Application, DateTime From, DateTime To, bool ByTags, bool WithBuckets);
 
-    private sealed record MetricRawRow(MetricTier Tier, DateTime BucketStart, string Tags, long Count, double Sum);
+    // Bounds and Buckets are only set on the with-buckets shape.
+    private sealed record MetricRawRow(MetricTier Tier, DateTime BucketStart, string Tags, long Count, double Sum, string? Bounds, string? Buckets);
 
     // One objective window's rows and bounds: [From, To) with its fast-burn start, read at `Now` (To differs from Now
     // only for a baseline window).

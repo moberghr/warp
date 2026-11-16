@@ -1,4 +1,5 @@
-import { SloState, type SloObjective } from '@/types/slo';
+import { SloKind, SloState, type SloObjective } from '@/types/slo';
+import { formatObjectiveValue } from './shared';
 
 /**
  * What an objective's attainment, budget and burn cells may show:
@@ -20,4 +21,33 @@ export function sloValueDisplay(objective: Pick<SloObjective, 'evaluated' | 'sta
 /** True only when the attainment, budget, burn and budget bar carry real numbers. */
 export function showsSloValues(objective: Pick<SloObjective, 'evaluated' | 'state'>): boolean {
   return sloValueDisplay(objective) === 'values';
+}
+
+function plain(value: number): string {
+  return `${Number(value.toPrecision(7))}`;
+}
+
+function percent(fraction: number): string {
+  return `${(fraction * 100).toFixed(2)}%`;
+}
+
+/**
+ * The target cell. A metric latency objective shows its percentile and threshold (in the instrument's unit, which the
+ * objective does not know, so no unit is printed); every other kind formats its target value.
+ */
+export function formatTarget(o: Pick<SloObjective, 'kind' | 'targetValue' | 'percentile'>): string {
+  if (o.kind === SloKind.MetricLatency) {
+    return `p${o.percentile ?? 95} ≤ ${plain(o.targetValue)}`;
+  }
+
+  return formatObjectiveValue(o.kind, o.targetValue);
+}
+
+/** The observed cell. A metric latency objective's attainment is the share of events within the threshold. */
+export function formatObserved(o: Pick<SloObjective, 'kind' | 'targetValue' | 'attainment'>): string {
+  if (o.kind === SloKind.MetricLatency) {
+    return `${percent(o.attainment)} ≤ ${plain(o.targetValue)}`;
+  }
+
+  return formatObjectiveValue(o.kind, o.attainment);
 }

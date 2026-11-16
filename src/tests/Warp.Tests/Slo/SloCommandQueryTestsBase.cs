@@ -277,6 +277,94 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         row.BaselineDays.ShouldBe(1);
     }
 
+    [TimedFact]
+    public async Task Seeder_LatencyTierAddedInALaterDeploy_IsSeeded_AndReseedIsIdempotent()
+    {
+        // Two tiers on one histogram differ only by threshold; the field match must not take the new one for the old.
+        await SeedFromConfigAsync(o => o.AddMetricLatency("p95 warn", "http.server.request.duration", 0.5, tagFilter: "http.route=/api/x"));
+
+        static void BothTiers(SloOptions o) => o
+            .AddMetricLatency("p95 warn", "http.server.request.duration", 0.5, tagFilter: "http.route=/api/x")
+            .AddMetricLatency("p95 page", "http.server.request.duration", 1, tagFilter: "http.route=/api/x");
+        await SeedFromConfigAsync(BothTiers);
+        await SeedFromConfigAsync(BothTiers);
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().OrderBy(x => x.TargetValue).ToListAsync(Ct);
+        rows.Count.ShouldBe(2);
+        rows.ShouldAllBe(x => x.Kind == SloKind.MetricLatency && x.Percentile == 95 && x.TagFilter == "http.route=/api/x");
+        rows[0].Name.ShouldBe("p95 warn");
+        rows[1].Name.ShouldBe("p95 page");
+    }
+
+    [TimedFact]
+    public async Task Seeder_LatencyObjectiveRenamedInDashboard_ReseedMatchesByFieldsAndKeepsOneRow()
+    {
+        await SeedFromConfigAsync(o => o.AddMetricLatency("p99", "http.server.request.duration", 2.5, percentile: 99));
+        var ctx = _fixture.CreateContext();
+        var row = await ctx.Set<SloDefinition>().SingleAsync(Ct);
+        row.Name.ShouldBe("p99");
+        row.Percentile.ShouldBe(99);
+        row.Name = "slow requests";
+        await ctx.SaveChangesAsync(Ct);
+
+        await SeedFromConfigAsync(o => o.AddMetricLatency("p99", "http.server.request.duration", 2.5, percentile: 99));
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().ToListAsync(Ct);
+        rows.ShouldHaveSingleItem().Name.ShouldBe("slow requests");
+    }
+
+    [TimedFact]
+    public async Task Seeder_LatencyOnCounterInstrument_IsSkipped_AndTheValidSeedStillInserts()
+    {
+        await SeedInstrumentAsync("orders.started", MetricKind.Counter);
+        await SeedInstrumentAsync("http.server.request.duration", MetricKind.Histogram);
+
+        await SeedFromConfigAsync(o => o
+            .AddMetricLatency("counter latency", "orders.started", 1)
+            .AddMetricLatency("request latency", "http.server.request.duration", 1));
+
+        var row = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct);
+        row.Name.ShouldBe("request latency");
+    }
+
+    [TimedFact]
+    public void AddMetricLatency_InvalidPercentileOrDuplicateName_Throws()
+    {
+        Should.Throw<ArgumentException>(() => new SloOptions().AddMetricLatency("p", "h", 1, percentile: 100));
+
+        var options = new SloOptions().AddMetricLatency("p95", "h", 1);
+        Should.Throw<ArgumentException>(() => options.AddMetricLatency("p95", "h", 2));
+    }
+
+    [TimedTheory]
+    [InlineData(MetricKind.Counter)]
+    [InlineData(MetricKind.UpDownCounter)]
+    [InlineData(MetricKind.Gauge)]
+    public async Task PostSlo_LatencyOnNonHistogramInstrument_Returns400(MetricKind kind)
+    {
+        await SeedInstrumentAsync("some.instrument", kind);
+
+        var status = await PostObjectiveAsync(MetricRequest(SloKind.MetricLatency, "some.instrument", 1, percentile: 95));
+
+        status.ShouldBe(HttpStatusCode.BadRequest);
+        (await _fixture.CreateContext().Set<SloDefinition>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task PostSlo_ValidMetricLatency_PersistsThresholdPercentileAndFilter()
+    {
+        await SeedInstrumentAsync("http.server.request.duration", MetricKind.Histogram);
+
+        var status = await PostObjectiveAsync(MetricRequest(SloKind.MetricLatency, "http.server.request.duration", 0.25, tagFilter: "http.route=/api/x", percentile: 99));
+
+        status.ShouldBe(HttpStatusCode.OK);
+        var row = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct);
+        row.Kind.ShouldBe(SloKind.MetricLatency);
+        row.TargetValue.ShouldBe(0.25);
+        row.Percentile.ShouldBe(99);
+        row.TagFilter.ShouldBe("http.route=/api/x");
+    }
+
     private static void ConfigureEditable(SloOptions o) => o
         .AddMetricThreshold("threshold", "http.server.request.duration", 0, tagFilter: "status=5*")
         .AddMetricGap("gap", "payments.received", "payments.processed", 0)
@@ -365,7 +453,7 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         return response.StatusCode;
     }
 
-    private static object MetricRequest(SloKind kind, string instrument, double target, string? ratioTag = null, string? goodValues = null, string? badValues = null, int? baselineDays = null, string? tagFilter = null, string? secondaryMetric = null)
+    private static object MetricRequest(SloKind kind, string instrument, double target, string? ratioTag = null, string? goodValues = null, string? badValues = null, int? baselineDays = null, string? tagFilter = null, string? secondaryMetric = null, int? percentile = null)
         => new
         {
             id = 0,
@@ -374,7 +462,7 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
             dimension = instrument,
             application = (string?)null,
             targetValue = target,
-            percentile = (int?)null,
+            percentile,
             windowSeconds = 3600,
             enabled = true,
             tagFilter,

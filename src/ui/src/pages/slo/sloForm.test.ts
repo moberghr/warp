@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MetricKind, type MetricInstrument } from '@/types/metrics';
 import { SloKind, SloState, type SloObjective, type SloUpsertRequest } from '@/types/slo';
 import {
+  acceptsInstrument,
   buildUpsertRequest,
   changeKind,
   errorMessage,
@@ -343,5 +344,63 @@ describe('isCountKind', () => {
     expect(isCountKind(SloKind.BacklogDepth)).toBe(true);
     expect(isCountKind(SloKind.MetricRatio)).toBe(false);
     expect(isCountKind(SloKind.ExecutionLatency)).toBe(false);
+  });
+});
+
+describe('metric latency', () => {
+  const latencyDraft = (patch: Partial<SloUpsertRequest> = {}): SloUpsertRequest => ({
+    ...changeKind(baseDraft, SloKind.MetricLatency),
+    dimension: 'http.server.request.duration',
+    targetValue: 0.25,
+    ...patch,
+  });
+
+  it('limits the instrument picker to histograms', () => {
+    const result = selectableInstruments(
+      [
+        instrument('c', MetricKind.Counter),
+        instrument('h', MetricKind.Histogram),
+        instrument('g', MetricKind.Gauge),
+        instrument('u', MetricKind.UpDownCounter),
+      ],
+      SloKind.MetricLatency,
+    );
+
+    expect(result.map((x) => x.name)).toEqual(['h']);
+    expect(acceptsInstrument(SloKind.MetricThreshold, MetricKind.Histogram)).toBe(true);
+    expect(acceptsInstrument(SloKind.MetricLatency, MetricKind.Counter)).toBe(false);
+  });
+
+  it('defaults the percentile to 95 and shows the percentile and tag filter fields', () => {
+    const draft = changeKind(baseDraft, SloKind.MetricLatency);
+
+    expect(draft.percentile).toBe(95);
+    expect(draft.windowSeconds).toBeGreaterThanOrEqual(600);
+    expect(fieldsFor(SloKind.MetricLatency)).toMatchObject({ tagFilter: true, percentile: true, ratio: false, secondary: false });
+  });
+
+  it('clears the percentile when switching to another metric kind', () => {
+    expect(changeKind(latencyDraft({ percentile: 99 }), SloKind.MetricThreshold).percentile).toBeNull();
+  });
+
+  it.each([0, 100, 95.5])('rejects percentile %s', (percentile) => {
+    expect(validateMetricDraft(latencyDraft({ percentile }))).toMatch(/Percentile/);
+  });
+
+  it('rejects a negative threshold and accepts a valid draft', () => {
+    expect(validateMetricDraft(latencyDraft({ targetValue: -1 }))).toMatch(/Threshold/);
+    expect(validateMetricDraft(latencyDraft())).toBeNull();
+  });
+
+  it('keeps the percentile and tag filter in the request, unlike the other metric kinds', () => {
+    const request = buildUpsertRequest(latencyDraft({ percentile: 99, tagFilter: ' http.route=/x ' }));
+
+    expect(request.percentile).toBe(99);
+    expect(request.tagFilter).toBe('http.route=/x');
+    expect(buildUpsertRequest({ ...latencyDraft({ percentile: 99 }), kind: SloKind.MetricThreshold }).percentile).toBeNull();
+  });
+
+  it('is neither a count nor a ratio kind', () => {
+    expect(isCountKind(SloKind.MetricLatency)).toBe(false);
   });
 });

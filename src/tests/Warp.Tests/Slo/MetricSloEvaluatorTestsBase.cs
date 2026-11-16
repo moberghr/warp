@@ -549,6 +549,130 @@ public abstract class MetricSloEvaluatorTestsBase : IAsyncLifetime
         evaluator.TotalOnlyReads.ShouldBe(0);
     }
 
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_EnoughEventsUnderThreshold_IsHealthy()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(Histogram(Duration, "-", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 90, 8, 2, 0));
+        var id = await SeedObjectiveAsync(Latency(0.25, 95));
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        // 98 of 100 events in buckets bounded at <= 0.25: 2% slow against the 5% a p95 allows, burn 0.4.
+        var eval = await EvalAsync(id);
+        eval.State.ShouldBe(SloState.Healthy);
+        eval.Attainment.ShouldBe(0.98, Tolerance);
+        eval.BurnRateLong.ShouldBe(0.4, Tolerance);
+        eval.BudgetRemaining.ShouldBe(0.6, Tolerance);
+        spy.Received.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_TooManySlowEvents_BreachesWithLabelFromDefinition()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(
+            Histogram(Duration, "http.route=/api/x", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 80, 10, 5, 5),
+            Histogram(Duration, "http.route=/api/y", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 0, 0, 0, 1000));
+        var def = Latency(0.25, 95);
+        def.TagFilter = "http.route=/api/x";
+        var id = await SeedObjectiveAsync(def);
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        // Only /api/x matches: 90 of 100 within 0.25, 10% slow against 5% allowed.
+        var eval = await EvalAsync(id);
+        eval.State.ShouldBe(SloState.Breaching);
+        eval.Attainment.ShouldBe(0.9, Tolerance);
+        eval.BurnRateLong.ShouldBe(2, Tolerance);
+        var evt = spy.Received.ShouldHaveSingleItem().ShouldBeOfType<SloBreachedEvent>();
+        evt.Kind.ShouldBe(SloKind.MetricLatency);
+        evt.Metric.ShouldBe($"{Duration} [http.route=/api/x] p95 <= 0.25");
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_ThresholdBetweenBounds_ComparesWithBucketUpperBounds()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+
+        // 0.3 lies inside (0.25, 0.5]: those events cannot be told apart from 0.45 ones, so they count as slow.
+        await SeedPointsAsync(Histogram(Duration, "-", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 50, 40, 10, 0));
+        var id = await SeedObjectiveAsync(Latency(0.3, 95));
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(0.9, Tolerance);
+        eval.State.ShouldBe(SloState.Breaching);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_WindowAcrossFineAndHourlyTiersAndLadders_ProratesAndSplitsEachRow()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(
+            Histogram(Duration, "-", MetricTier.Hourly, At(10, 0), "0.1,0.25,0.5", 0, 0, 0, 900), // before the window: not read
+            Histogram(Duration, "-", MetricTier.Hourly, At(11, 0), "0.1,0.25,0.5", 60, 0, 0, 60), // 28 of 60 min: 28 within, 28 over
+            Histogram(Duration, "-", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 100, 0, 0, 0), // 100 within
+            Histogram(Duration, "-", MetricTier.Fine, At(12, 5), "0.2,1", 10, 2, 0)); // its own ladder: 10 within, 2 over
+        var id = await SeedObjectiveAsync(Latency(0.25, 70));
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(138.0 / 168, Tolerance);
+        eval.State.ShouldBe(SloState.Healthy);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_NoEventsInTheWindow_IsNoData_NoAlert()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(Histogram(Duration, "-", MetricTier.Hourly, At(9, 0), "0.1,0.25,0.5", 0, 0, 0, 50));
+        var id = await SeedObjectiveAsync(Latency(0.25, 95));
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        (await EvalAsync(id)).State.ShouldBe(SloState.NoData);
+        spy.Received.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_RowsWithoutBucketDetail_AreNoData()
+    {
+        // The rollup keeps the counts but drops the bucket CSV when a sum would not fit the column: no split is possible.
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(Fine(Duration, "-", At(12, 0), sum: 50, count: 100));
+        var id = await SeedObjectiveAsync(Latency(0.25, 95));
+
+        await RunAsync(new SpyNotifier());
+
+        (await EvalAsync(id)).State.ShouldBe(SloState.NoData);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_CounterInstrument_IsNoDataAndLoggedAtError()
+    {
+        await SeedInstrumentAsync("orders.failed", MetricKind.Counter);
+        await SeedPointsAsync(Fine("orders.failed", "-", At(12, 0), sum: 5));
+        var def = Latency(1, 95);
+        def.Dimension = "orders.failed";
+        var id = await SeedObjectiveAsync(def);
+        var spy = new SpyNotifier();
+        var logs = new CapturingLoggerProvider();
+
+        await RunAsync(spy, new FakeTimeProvider(new DateTimeOffset(Now)), LoggerFor(logs));
+
+        (await EvalAsync(id)).State.ShouldBe(SloState.NoData);
+        spy.Received.ShouldBeEmpty();
+        var error = logs.Logs.Where(x => x.Level == LogLevel.Error).ShouldHaveSingleItem();
+        error.Message.ShouldContain("orders.failed");
+        error.Message.ShouldContain("Counter");
+    }
+
     private static DateTime At(int hour, int minute) => new(Now.Year, Now.Month, Now.Day, hour, minute, 0, DateTimeKind.Utc);
 
     private static DateTime Hour(DateTime day, int hour) => new(day.Year, day.Month, day.Day, hour, 0, 0, DateTimeKind.Utc);
@@ -558,6 +682,21 @@ public abstract class MetricSloEvaluatorTestsBase : IAsyncLifetime
 
     private static SloDefinition Threshold(string instrument, double max, string? filter)
         => new() { Name = $"{instrument} under {max}", Kind = SloKind.MetricThreshold, Dimension = instrument, TagFilter = filter, TargetValue = max, WindowSeconds = 3600, Enabled = true };
+
+    private const string Duration = "http.server.request.duration";
+
+    private static SloDefinition Latency(double threshold, int percentile)
+        => new() { Name = $"latency p{percentile} under {threshold}", Kind = SloKind.MetricLatency, Dimension = Duration, TargetValue = threshold, Percentile = percentile, WindowSeconds = 3600, Enabled = true };
+
+    // One histogram row: the bounds CSV and its counts (one per bound plus the overflow bucket).
+    private static MetricPoint Histogram(string instrument, string tags, MetricTier tier, DateTime bucket, string bounds, params long[] counts)
+    {
+        var point = Point(instrument, tags, tier, bucket, counts.Sum(), 0, tier != MetricTier.Fine);
+        point.Bounds = bounds;
+        point.Buckets = string.Join(',', counts);
+
+        return point;
+    }
 
     private static MetricPoint Fine(string instrument, string tags, DateTime bucket, double sum, long count = 1, bool compacted = false)
         => Point(instrument, tags, MetricTier.Fine, bucket, count, sum, compacted);

@@ -23,7 +23,17 @@ public static class SloValidation
     /// <summary>Minimum <c>WindowSeconds</c> for metric kinds: one closed bucket plus the flush lag.</summary>
     public const int MinMetricWindowSeconds = 600;
 
-    public static bool IsMetricKind(SloKind kind) => kind is SloKind.MetricRatio or SloKind.MetricThreshold or SloKind.MetricVolumeFloor or SloKind.MetricGap;
+    public static bool IsMetricKind(SloKind kind) => kind is SloKind.MetricRatio or SloKind.MetricThreshold or SloKind.MetricVolumeFloor or SloKind.MetricGap or SloKind.MetricLatency;
+
+    /// <summary>
+    /// Whether an objective of <paramref name="slo"/> can read an instrument of registry kind <paramref name="instrument"/>:
+    /// a latency objective needs a histogram (bucket counts), every event-counting kind refuses a gauge (no event count).
+    /// </summary>
+    public static bool AcceptsInstrument(SloKind slo, MetricKind instrument) => slo switch
+    {
+        SloKind.MetricLatency => instrument == MetricKind.Histogram,
+        _ => instrument != MetricKind.Gauge,
+    };
 
     /// <summary>
     /// Validates and normalizes <paramref name="definition"/> in place. Returns <c>true</c> when valid; otherwise
@@ -39,8 +49,9 @@ public static class SloValidation
     /// <paramref name="hourlyStatisticsRetention"/> (<c>WarpConfiguration.HourlyStatisticsRetention</c>) enables R29:
     /// a 7-day baseline needs retention of at least 7 days + window + 1 hour; <c>null</c> skips it.
     /// <paramref name="instrumentKind"/> is the registry kind of the objective's instrument when the caller knows it
-    /// (the evaluator and the endpoint can look it up); a <see cref="MetricKind.Gauge"/> is rejected for metric
-    /// kinds, <c>null</c> (unknown) is allowed. Non-metric kinds ignore both.
+    /// (the evaluator and the endpoint can look it up); a kind the objective cannot read is rejected
+    /// (<see cref="AcceptsInstrument"/>: a gauge for the event-counting kinds, anything but a histogram for
+    /// <see cref="SloKind.MetricLatency"/>), <c>null</c> (unknown) is allowed. Non-metric kinds ignore both.
     /// </summary>
     public static bool TryValidate(SloDefinition definition, TimeSpan? hourlyStatisticsRetention, MetricKind? instrumentKind, out string? error)
         => TryValidate(definition, hourlyStatisticsRetention, instrumentKind, null, out error);
@@ -144,9 +155,11 @@ public static class SloValidation
             return false;
         }
 
-        if (instrumentKind == MetricKind.Gauge)
+        if (instrumentKind is { } known && !AcceptsInstrument(kind, known))
         {
-            error = $"{kind} cannot use gauge instrument '{definition.Dimension}': gauges have no event count. Use a counter, up-down counter or histogram.";
+            error = kind == SloKind.MetricLatency
+                ? $"{kind} needs a histogram instrument, but '{definition.Dimension}' is a {known}: only a histogram stores the bucket counts a latency objective reads."
+                : $"{kind} cannot use gauge instrument '{definition.Dimension}': gauges have no event count. Use a counter, up-down counter or histogram.";
 
             return false;
         }
@@ -187,8 +200,13 @@ public static class SloValidation
             return false;
         }
 
-        // Percentile is meaningless for metric kinds; fields that belong to other kinds are cleared so they can't mislead a reader.
-        definition.Percentile = null;
+        // Percentile only means something to a latency objective; fields that belong to other kinds are cleared so they
+        // can't mislead a reader.
+        if (kind != SloKind.MetricLatency)
+        {
+            definition.Percentile = null;
+        }
+
         if (kind != SloKind.MetricRatio)
         {
             definition.RatioTag = null;
@@ -255,6 +273,25 @@ public static class SloValidation
 
                     return false;
                 }
+
+                break;
+
+            case SloKind.MetricLatency:
+                if (definition.Percentile is { } p && p is < 1 or > 99)
+                {
+                    error = "Percentile must be between 1 and 99.";
+
+                    return false;
+                }
+
+                if (target < 0)
+                {
+                    error = "MetricLatency threshold must be zero or greater (in the instrument's unit).";
+
+                    return false;
+                }
+
+                definition.Percentile ??= DefaultLatencyPercentile;
 
                 break;
 

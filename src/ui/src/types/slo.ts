@@ -11,6 +11,7 @@ export const SloKind = {
   MetricThreshold: 7,
   MetricVolumeFloor: 8,
   MetricGap: 9,
+  MetricLatency: 10,
 } as const;
 export type SloKind = (typeof SloKind)[keyof typeof SloKind];
 
@@ -24,6 +25,7 @@ export const SloKindLabel: Record<SloKind, string> = {
   [SloKind.MetricThreshold]: 'Metric threshold',
   [SloKind.MetricVolumeFloor]: 'Metric volume floor',
   [SloKind.MetricGap]: 'Metric gap',
+  [SloKind.MetricLatency]: 'Metric latency',
 };
 
 export const SloState = {
@@ -61,7 +63,7 @@ export interface SloObjective {
   state: SloState;
   acknowledgedUntil: string | null;
   lastEvaluatedAt: string | null;
-  /** Metric kinds only (6-9); null/absent otherwise. Mirrors SloObjectiveModel. */
+  /** Metric kinds only (6-10); null/absent otherwise. Mirrors SloObjectiveModel. */
   tagFilter?: string | null;
   secondaryMetric?: string | null;
   secondaryTagFilter?: string | null;
@@ -94,12 +96,13 @@ export interface SloUpsertRequest {
   baselineDays?: number | null;
 }
 
-/** True for the metric kinds (6-9), whose Dimension is an instrument name. */
+/** True for the metric kinds (6-10), whose Dimension is an instrument name. */
 export const isMetricKind = (kind: SloKind): boolean =>
   kind === SloKind.MetricRatio ||
   kind === SloKind.MetricThreshold ||
   kind === SloKind.MetricVolumeFloor ||
-  kind === SloKind.MetricGap;
+  kind === SloKind.MetricGap ||
+  kind === SloKind.MetricLatency;
 
 /** True for the kinds whose target + attainment are ratios (0..1); false for latency/depth/count (ms / count). */
 export const isRatioKind = (kind: SloKind): boolean =>

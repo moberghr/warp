@@ -488,6 +488,7 @@ public class SloValidationTests
     [InlineData(SloKind.MetricThreshold, true)]
     [InlineData(SloKind.MetricVolumeFloor, true)]
     [InlineData(SloKind.MetricGap, true)]
+    [InlineData(SloKind.MetricLatency, true)]
     [InlineData(SloKind.SuccessRate, false)]
     [InlineData(SloKind.QueueWaitLatency, false)]
     [InlineData(SloKind.ExecutionLatency, false)]
@@ -506,6 +507,86 @@ public class SloValidationTests
         ((int)SloKind.MetricThreshold).ShouldBe(7);
         ((int)SloKind.MetricVolumeFloor).ShouldBe(8);
         ((int)SloKind.MetricGap).ShouldBe(9);
+        ((int)SloKind.MetricLatency).ShouldBe(10);
+    }
+
+    [Theory]
+    [InlineData(MetricKind.Histogram, true)]
+    [InlineData(null, true)]
+    [InlineData(MetricKind.Counter, false)]
+    [InlineData(MetricKind.UpDownCounter, false)]
+    [InlineData(MetricKind.Gauge, false)]
+    public void TryValidate_MetricLatency_AcceptsOnlyAHistogramOrAnUnknownInstrument(MetricKind? instrument, bool expected)
+    {
+        var def = Metric(SloKind.MetricLatency, 0.5);
+
+        SloValidation.TryValidate(def, null, instrument, out var error).ShouldBe(expected, error);
+        if (!expected)
+        {
+            error.ShouldNotBeNull().ShouldContain("histogram");
+        }
+    }
+
+    [Fact]
+    public void TryValidate_MetricLatencyWithoutPercentile_DefaultsTo95AndKeepsIt()
+    {
+        var def = Metric(SloKind.MetricLatency, 0.25);
+
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        def.Percentile.ShouldBe(95);
+
+        var p99 = Metric(SloKind.MetricLatency, 0.25);
+        p99.Percentile = 99;
+        SloValidation.TryValidate(p99, out _).ShouldBeTrue();
+        p99.Percentile.ShouldBe(99);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(100)]
+    [InlineData(-5)]
+    public void TryValidate_MetricLatencyPercentileOutOfRange_Rejected(int percentile)
+    {
+        var def = Metric(SloKind.MetricLatency, 0.25);
+        def.Percentile = percentile;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("Percentile");
+    }
+
+    [Fact]
+    public void TryValidate_MetricLatencyThreshold_AllowsZeroRejectsNegativeAndNonFinite()
+    {
+        SloValidation.TryValidate(Metric(SloKind.MetricLatency, 0), out _).ShouldBeTrue();
+        SloValidation.TryValidate(Metric(SloKind.MetricLatency, -0.1), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Metric(SloKind.MetricLatency, double.NaN), out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void TryValidate_MetricLatency_ClearsFieldsOfOtherKindsButKeepsTheTagFilter()
+    {
+        var def = Metric(SloKind.MetricLatency, 0.5);
+        def.TagFilter = "http.route=/api/x";
+        def.RatioTag = "x";
+        def.SecondaryMetric = "s";
+        def.BaselineDays = 1;
+
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        def.TagFilter.ShouldBe("http.route=/api/x");
+        def.RatioTag.ShouldBeNull();
+        def.SecondaryMetric.ShouldBeNull();
+        def.BaselineDays.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(SloKind.MetricThreshold)]
+    [InlineData(SloKind.MetricGap)]
+    public void TryValidate_EventKindOnHistogram_StillPasses(SloKind kind)
+    {
+        var def = Metric(kind, 5);
+        def.SecondaryMetric = kind == SloKind.MetricGap ? "j" : null;
+
+        SloValidation.TryValidate(def, null, MetricKind.Histogram, out _).ShouldBeTrue();
     }
 
     [Fact]
