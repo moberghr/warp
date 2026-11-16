@@ -17,6 +17,7 @@ import {
 } from '@/types/slo';
 import { SloStatePill, inputClass } from './shared';
 import { PageHeading } from '@/components/PageHeading';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import {
   MIN_METRIC_WINDOW_SECONDS,
   buildUpsertRequest,
@@ -57,8 +58,11 @@ export default function SloPage() {
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['slos'] });
   const saveMutation = useMutation({ mutationFn: (d: SloUpsertRequest) => upsertSlo(buildUpsertRequest(d)), onSuccess: () => { setDraft(null); invalidate(); } });
   const openDraft = (d: SloUpsertRequest | null) => { saveMutation.reset(); setDraft(d); };
-  const deleteMutation = useMutation({ mutationFn: deleteSlo, onSuccess: invalidate });
-  const ackMutation = useMutation({ mutationFn: (id: number) => ackSlo(id, 60), onSuccess: invalidate });
+  // Settled, not success: a failed delete or ack may still have changed the row (or the row is already gone), so the
+  // list is re-read either way and the error is shown above it.
+  const deleteMutation = useMutation({ mutationFn: deleteSlo, onSettled: invalidate });
+  const ackMutation = useMutation({ mutationFn: (id: number) => ackSlo(id, 60), onSettled: invalidate });
+  const [pendingDelete, setPendingDelete] = useState<SloObjective | null>(null);
 
   const objectives = data?.items ?? [];
 
@@ -80,6 +84,12 @@ export default function SloPage() {
         </button>
       </div>
 
+      {deleteMutation.isError && (
+        <p role="alert" className="mb-3 text-sm text-red-600">{errorMessage(deleteMutation.error, 'Failed to delete the objective.')}</p>
+      )}
+      {ackMutation.isError && (
+        <p role="alert" className="mb-3 text-sm text-red-600">{errorMessage(ackMutation.error, 'Failed to acknowledge the objective.')}</p>
+      )}
       {isLoading && <p className="text-gray-500">Loading…</p>}
       {isError && <p className="text-red-600">Failed to load SLO objectives.</p>}
 
@@ -110,7 +120,7 @@ export default function SloPage() {
                   key={o.id}
                   objective={o}
                   onEdit={() => openDraft(objectiveToDraft(o))}
-                  onDelete={() => deleteMutation.mutate(o.id)}
+                  onDelete={() => setPendingDelete(o)}
                   onAck={() => ackMutation.mutate(o.id)}
                 />
               ))}
@@ -118,6 +128,21 @@ export default function SloPage() {
           </table>
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => !open && setPendingDelete(null)}
+        title={`Delete objective "${pendingDelete?.name ?? ''}"?`}
+        description="Its evaluation and its notes are deleted with it. An objective seeded in code is re-created on the next start."
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={() => {
+          if (pendingDelete) {
+            deleteMutation.mutate(pendingDelete.id);
+          }
+          setPendingDelete(null);
+        }}
+      />
 
       {draft && (
         <ObjectiveForm

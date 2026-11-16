@@ -358,14 +358,20 @@ export function objectiveToDraft(o: SloObjective): SloUpsertRequest {
   };
 }
 
-/** Extracts the message from an axios-style error: the 400 body is a plain string (or ProblemDetails). */
-export function errorMessage(error: unknown): string {
+/**
+ * Extracts the message from an axios-style error. The dashboard API answers a 400/404 with `{ error }`; a validation
+ * 400 may be a plain string or ProblemDetails. `fallback` is used when the error carries no message at all.
+ */
+export function errorMessage(error: unknown, fallback = 'Failed to save the objective.'): string {
   const data = (error as { response?: { data?: unknown } } | null)?.response?.data;
   if (typeof data === 'string' && data.trim() !== '') {
     return data;
   }
   if (data && typeof data === 'object') {
-    const body = data as { detail?: unknown; title?: unknown };
+    const body = data as { error?: unknown; detail?: unknown; title?: unknown };
+    if (typeof body.error === 'string' && body.error) {
+      return body.error;
+    }
     if (typeof body.detail === 'string' && body.detail) {
       return body.detail;
     }
@@ -374,7 +380,7 @@ export function errorMessage(error: unknown): string {
     }
   }
 
-  return error instanceof Error && error.message ? error.message : 'Failed to save the objective.';
+  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 /** One-line explanation of what a metric kind measures, for the detail page. */

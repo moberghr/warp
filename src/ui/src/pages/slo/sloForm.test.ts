@@ -335,6 +335,16 @@ describe('errorMessage', () => {
     expect(errorMessage(new Error('Network Error'))).toBe('Network Error');
     expect(errorMessage(null)).toBe('Failed to save the objective.');
   });
+
+  it('reads the dashboard API { error } body first', () => {
+    expect(errorMessage({ response: { status: 404, data: { error: 'No recorded deploy matches.' } } })).toBe('No recorded deploy matches.');
+    expect(errorMessage({ response: { data: { error: 'from must be before to', title: 'Bad Request' } } })).toBe('from must be before to');
+  });
+
+  it('skips an empty { error } and uses the caller fallback when nothing else is there', () => {
+    expect(errorMessage({ response: { data: { error: '' } } }, 'Failed to delete the tile.')).toBe('Failed to delete the tile.');
+    expect(errorMessage({ response: { data: { error: 42 } } }, 'x')).toBe('x');
+  });
 });
 
 describe('isCountKind', () => {

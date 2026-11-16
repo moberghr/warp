@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient, type QueryKey } from '@tanstack/react-query';
 import * as api from '@/api';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { ACKNOWLEDGED_NOISE_COLOR, ANNOTATION_COLOR } from '@/lib/deployMarkerPlugin';
 import { errorMessage } from '@/pages/slo/sloForm';
 import { MetricAnnotationTarget, type MetricAnnotation } from '@/types/annotations';
@@ -45,7 +46,9 @@ export function AnnotationPanel({
       void refresh();
     },
   });
-  const deleteMutation = useMutation({ mutationFn: (id: number) => api.deleteAnnotation(id), onSuccess: () => void refresh() });
+  // Re-read on failure too: a 404 means the note is already gone, and the list should stop showing it.
+  const deleteMutation = useMutation({ mutationFn: (id: number) => api.deleteAnnotation(id), onSettled: () => void refresh() });
+  const [pendingDelete, setPendingDelete] = useState<MetricAnnotation | null>(null);
   const open = (d: AnnotationDraft | null) => {
     saveMutation.reset();
     setDraft(d);
@@ -84,14 +87,31 @@ export function AnnotationPanel({
               </div>
               <span className="flex shrink-0 gap-3 text-xs">
                 <button type="button" className="text-muted-foreground hover:underline" onClick={() => open(draftFromAnnotation(a))}>Edit</button>
-                <button type="button" className="text-red-600 hover:underline" onClick={() => deleteMutation.mutate(a.id)}>Delete</button>
+                <button type="button" className="text-red-600 hover:underline" onClick={() => setPendingDelete(a)}>Delete</button>
               </span>
             </li>
           ))}
         </ul>
       )}
       {isTruncated && <p className="mt-2 text-xs text-muted-foreground">Showing the newest notes only.</p>}
-      {deleteMutation.isError && <p role="alert" className="mt-2 text-xs text-red-600">{errorMessage(deleteMutation.error)}</p>}
+      {deleteMutation.isError && (
+        <p role="alert" className="mt-2 text-xs text-red-600">{errorMessage(deleteMutation.error, 'Failed to delete the note.')}</p>
+      )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(isOpen) => !isOpen && setPendingDelete(null)}
+        title="Delete this note?"
+        description={pendingDelete ? <span className="break-words">{pendingDelete.note}</span> : undefined}
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={() => {
+          if (pendingDelete) {
+            deleteMutation.mutate(pendingDelete.id);
+          }
+          setPendingDelete(null);
+        }}
+      />
 
       {draft && (
         <AnnotationForm

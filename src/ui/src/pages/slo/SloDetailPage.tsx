@@ -5,7 +5,7 @@ import { AnnotationPanel } from '@/pages/metrics/AnnotationPanel';
 import { SloKind, SloKindLabel, SloState, isMetricKind, type SloObjective } from '@/types/slo';
 import { SloStatePill } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
-import { baselineLabel, describeMetricKind } from './sloForm';
+import { baselineLabel, describeMetricKind, errorMessage } from './sloForm';
 import { formatBudget, formatObserved, formatTarget, sloValueDisplay } from './sloDisplay';
 
 export default function SloDetailPage() {
@@ -28,7 +28,7 @@ export default function SloDetailPage() {
 
   const ackMutation = useMutation({
     mutationFn: () => ackSlo(objectiveId, 60),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['slo', objectiveId] }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['slo', objectiveId] }),
   });
 
   if (isLoading) {
@@ -70,6 +70,9 @@ export default function SloDetailPage() {
           )}
         </div>
       </div>
+      {ackMutation.isError && (
+        <p role="alert" className="-mt-4 mb-4 text-sm text-red-600">{errorMessage(ackMutation.error, 'Failed to acknowledge the objective.')}</p>
+      )}
 
       {display === 'not-evaluated' ? (
         <div className="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-8 text-center text-gray-500">

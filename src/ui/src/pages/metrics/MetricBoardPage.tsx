@@ -4,6 +4,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { Chart, LineController, LineElement, LinearScale, PointElement, Tooltip } from 'chart.js';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { PageHeading } from '@/components/PageHeading';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { Hint } from '@/components/ui/tooltip';
 import * as api from '@/api';
 import { queryKeys } from '@/lib/queryClient';
@@ -32,6 +33,7 @@ import {
   parseRangeParams,
   resolveWindow,
   seriesRefetchMs,
+  sinceDeployHint,
   sinceDeployRange,
   writeRangeParams,
   type DeployMarker,
@@ -107,7 +109,9 @@ export default function MetricBoardPage() {
       void invalidate();
     },
   });
-  const deleteMutation = useMutation({ mutationFn: (id: number) => api.deleteMetricBoardTile(id), onSuccess: () => void invalidate() });
+  // Re-read on failure too: a 404 means the tile is already gone, and the board should stop showing it.
+  const deleteMutation = useMutation({ mutationFn: (id: number) => api.deleteMetricBoardTile(id), onSettled: () => void invalidate() });
+  const [pendingDelete, setPendingDelete] = useState<MetricBoardTile | null>(null);
   const openDraft = (d: MetricBoardTile | null) => {
     saveMutation.reset();
     setDraft(d);
@@ -149,7 +153,7 @@ export default function MetricBoardPage() {
             {r.label}
           </button>
         ))}
-        <Hint text={lastDeploy ? `From the ${lastDeploy.application} ${lastDeploy.version} deploy` : 'No deploy recorded'}>
+        <Hint text={sinceDeployHint(lastDeploy, latestDeployQuery.isError, false)}>
           <button
             type="button"
             className={toggleClass(false)}
@@ -167,12 +171,17 @@ export default function MetricBoardPage() {
         )}
         <span className="ml-auto flex gap-3 text-xs text-muted-foreground">
           {boardQuery.isPlaceholderData && <span aria-live="polite">updating…</span>}
+          {deploysQuery.isError && <span className="text-destructive">Unable to load deploys; no deploy markers are drawn.</span>}
           {counts.breaching > 0 && <span className="text-red-600">{counts.breaching} breaching</span>}
           {counts.warning > 0 && <span className="text-amber-600">{counts.warning} warning</span>}
           {counts.acknowledged > 0 && <span>{counts.acknowledged} acknowledged</span>}
           {counts.noData > 0 && <span>{counts.noData} no data</span>}
         </span>
       </div>
+
+      {deleteMutation.isError && (
+        <p role="alert" className="mb-3 text-sm text-destructive">{errorMessage(deleteMutation.error, 'Failed to delete the tile.')}</p>
+      )}
 
       {boardQuery.isError ? (
         <ErrorState message="Unable to load the board" />
@@ -192,11 +201,26 @@ export default function MetricBoardPage() {
               to={span!.to}
               deploys={deploysQuery.data}
               onEdit={() => openDraft({ ...result.tile })}
-              onDelete={() => deleteMutation.mutate(result.tile.id)}
+              onDelete={() => setPendingDelete(result.tile)}
             />
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => !open && setPendingDelete(null)}
+        title={`Delete tile "${pendingDelete?.name ?? ''}"?`}
+        description="Notes on its instrument are kept. A tile seeded in code is re-created on the next start."
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={() => {
+          if (pendingDelete) {
+            deleteMutation.mutate(pendingDelete.id);
+          }
+          setPendingDelete(null);
+        }}
+      />
 
       {draft && (
         <TileForm
