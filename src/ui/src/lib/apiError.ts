@@ -2,11 +2,14 @@
 // shows a mutation or read error, so a server's own explanation is never replaced by a generic one.
 
 /**
- * Extracts the message from an axios-style error. The dashboard API answers a 400/404 with `{ error }`; a validation
- * 400 may be a plain string or ProblemDetails. `fallback` is used when the error carries no message at all.
+ * Extracts the message from an axios-style error. The dashboard API answers a 400/404/503 with `{ error }` (an upsert
+ * whose row was deleted meanwhile answers 404 with one too); a validation 400 may be a plain string or ProblemDetails.
+ * When the server answered without a message, `fallback` (each caller names its own action) beats axios's generic
+ * "Request failed with status code …"; with no answer at all, the transport's message ("Network Error") is shown.
  */
-export function errorMessage(error: unknown, fallback = 'Failed to save the objective.'): string {
-  const data = (error as { response?: { data?: unknown } } | null)?.response?.data;
+export function errorMessage(error: unknown, fallback = 'The request failed.'): string {
+  const response = (error as { response?: { data?: unknown } } | null)?.response;
+  const data = response?.data;
   if (typeof data === 'string' && data.trim() !== '') {
     return data;
   }
@@ -23,7 +26,7 @@ export function errorMessage(error: unknown, fallback = 'Failed to save the obje
     }
   }
 
-  return error instanceof Error && error.message ? error.message : fallback;
+  return response === undefined && error instanceof Error && error.message ? error.message : fallback;
 }
 
 /** The HTTP status of an axios-style error, or null when the request never got an answer. */

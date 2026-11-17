@@ -151,7 +151,7 @@ export default function SloPage() {
           onCancel={() => openDraft(null)}
           onSave={() => saveMutation.mutate(draft)}
           saving={saveMutation.isPending}
-          serverError={saveMutation.isError ? errorMessage(saveMutation.error) : null}
+          serverError={saveMutation.isError ? errorMessage(saveMutation.error, 'Failed to save the objective.') : null}
         />
       )}
     </div>

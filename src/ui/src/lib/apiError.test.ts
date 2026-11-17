@@ -10,7 +10,30 @@ describe('errorMessage', () => {
     expect(errorMessage({ response: { data: { detail: 'bad' } } })).toBe('bad');
     expect(errorMessage({ response: { data: { title: 'Bad Request' } } })).toBe('Bad Request');
     expect(errorMessage(new Error('Network Error'))).toBe('Network Error');
-    expect(errorMessage(null)).toBe('Failed to save the objective.');
+    expect(errorMessage(null)).toBe('The request failed.');
+  });
+
+  it('defaults to a neutral message that names no particular form', () => {
+    expect(errorMessage(undefined)).toBe('The request failed.');
+    expect(errorMessage({ response: { status: 500, data: '' } })).toBe('The request failed.');
+  });
+
+  it('prefers the caller fallback over the generic transport message once the server answered', () => {
+    const answered = Object.assign(new Error('Request failed with status code 500'), { response: { status: 500, data: {} } });
+
+    expect(errorMessage(answered, 'Failed to save the tile.')).toBe('Failed to save the tile.');
+    expect(errorMessage(new Error('Network Error'), 'Failed to save the tile.')).toBe('Network Error');
+  });
+
+  it('shows the { error } of a 404 from an upsert whose row was deleted meanwhile, over every form fallback', () => {
+    const gone = (error: string) => Object.assign(new Error('Request failed with status code 404'), { response: { status: 404, data: { error } } });
+
+    expect(errorMessage(gone('The metric board tile no longer exists: it was deleted while you edited it.'), 'Failed to save the tile.'))
+      .toBe('The metric board tile no longer exists: it was deleted while you edited it.');
+    expect(errorMessage(gone('The annotation no longer exists: it was deleted while you edited it.'), 'Failed to save the note.'))
+      .toBe('The annotation no longer exists: it was deleted while you edited it.');
+    expect(errorMessage(gone('The SLO objective no longer exists: it was deleted while you edited it.'), 'Failed to save the objective.'))
+      .toBe('The SLO objective no longer exists: it was deleted while you edited it.');
   });
 
   it('reads the dashboard API { error } body first', () => {

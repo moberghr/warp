@@ -23,7 +23,7 @@ import {
 } from '@/types/metricBoard';
 import { SloComparison, SloGaugeAggregate } from '@/types/slo';
 import { SloStatePill, inputClass } from '@/pages/slo/shared';
-import { errorMessage } from '@/lib/apiError';
+import { errorMessage, errorStatus } from '@/lib/apiError';
 import { fractionToPercent, percentToFraction } from '@/pages/slo/sloForm';
 import { MetricsTabs } from './MetricsTabs';
 import {
@@ -110,6 +110,12 @@ export default function MetricBoardPage() {
     onSuccess: () => {
       setDraft(null);
       void invalidate();
+    },
+    // A 404 on an edit: the tile was deleted meanwhile. Its { error } stays in the form; the board stops showing it.
+    onError: (error) => {
+      if (errorStatus(error) === 404) {
+        void invalidate();
+      }
     },
   });
   // Re-read on failure too: a 404 means the tile is already gone, and the board should stop showing it.
@@ -244,7 +250,7 @@ export default function MetricBoardPage() {
           onCancel={() => openDraft(null)}
           onSave={() => saveMutation.mutate(draft)}
           saving={saveMutation.isPending}
-          serverError={saveMutation.isError ? errorMessage(saveMutation.error) : null}
+          serverError={saveMutation.isError ? errorMessage(saveMutation.error, 'Failed to save the tile.') : null}
         />
       )}
     </div>

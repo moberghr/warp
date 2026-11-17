@@ -3,7 +3,7 @@ import { useMutation, useQueryClient, type QueryKey } from '@tanstack/react-quer
 import * as api from '@/api';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { ACKNOWLEDGED_NOISE_COLOR, ANNOTATION_COLOR } from '@/lib/deployMarkerPlugin';
-import { errorMessage } from '@/lib/apiError';
+import { errorMessage, errorStatus } from '@/lib/apiError';
 import { MetricAnnotationTarget, type MetricAnnotation } from '@/types/annotations';
 import {
   MAX_NOTE_LENGTH,
@@ -44,6 +44,12 @@ export function AnnotationPanel({
     onSuccess: () => {
       setDraft(null);
       void refresh();
+    },
+    // A 404 on an edit: the note was deleted meanwhile. Its { error } stays in the form; the list stops showing it.
+    onError: (error) => {
+      if (errorStatus(error) === 404) {
+        void refresh();
+      }
     },
   });
   // Re-read on failure too: a 404 means the note is already gone, and the list should stop showing it.
@@ -120,7 +126,7 @@ export function AnnotationPanel({
           onCancel={() => open(null)}
           onSave={() => saveMutation.mutate(draft)}
           saving={saveMutation.isPending}
-          serverError={saveMutation.isError ? errorMessage(saveMutation.error) : null}
+          serverError={saveMutation.isError ? errorMessage(saveMutation.error, 'Failed to save the note.') : null}
         />
       )}
     </div>
