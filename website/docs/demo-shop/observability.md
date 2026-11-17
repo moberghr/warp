@@ -67,10 +67,12 @@ traces while they are fresh.
 both places, but the ShipIt tracking poll calls ShipIt thousands of times an hour and should not fill the
 database with call-log rows.
 
-**Wiring.** Endpoints pick their `RecordingSink` (`Database` by default, `Otel` or `Both`). The adapter sink
-is different: `AddAdapters(o => o.Sink = …)` sets it for the whole process, every adapter included. An `Otel`
+**Wiring.** Both sinks are set once per process, for everything of their kind in it.
+`AddEndpointObservability(o => o.Sink = …)` (`Database` by default, `Otel` or `Both`) covers every observed
+endpoint of that process, and `AddAdapters(o => o.Sink = …)` covers every adapter of that process. An `Otel`
 adapter sink on `shop-worker` would also drop the PayFast and Mailer rows that the trace view and Issues
-need. So `shop-worker` keeps the default sink and turns down the volume on the ShipIt adapter alone:
+need. So `shop-api` sends its endpoints to both places, `shop-worker` keeps the default adapter sink, and the
+ShipIt adapter alone turns down its volume:
 
 ```csharp
 // shop-api
@@ -80,22 +82,17 @@ builder.Services.AddWarp<ShopDbContext>(opt =>
     opt.AddEndpointObservability(o => o.Sink = RecordingSink.Both);   // dashboard rows + span attributes
 });
 
-// shop-worker (the ShipIt tracking poller runs here)
-builder.Services.AddWarpServer<ShopDbContext>(opt =>
+// shop-worker (the ShipIt tracking poller runs here): add one line to the existing "shipit"
+// registration from Integrations. Do not call AddAdapter("shipit") a second time; a duplicate name throws.
+opt.AddAdapter<IShipItApi>("shipit", a =>
 {
-    opt.UsePostgreSql();
-    opt.AddAdapters();   // default Database sink, for PayFast, Mailer and ShipIt alike
-
-    opt.AddAdapter<IShipItApi>("shipit", a =>
-    {
-        a.BaseUrl = new Uri("https://api.shipit.example");
-        a.Recording.RecordCalls = CallRecording.FailuresOnly;   // rows for failed ShipIt calls only
-    });
+    // ... BaseUrl, GroupLabel, capture and rate limit as in Integrations ...
+    a.Recording.RecordCalls = CallRecording.FailuresOnly;   // rows for failed ShipIt calls only
 });
 ```
 
-If ShipIt calls should leave the database entirely, run the tracking poller in its own process with
-`AddAdapters(o => o.Sink = RecordingSink.Otel)`.
+The `shipit` registration is in [Integrations](./integrations.md#outbound-adapters). `AddAdapters()` there keeps
+the default `Database` sink for every adapter in `shop-worker`: PayFast, Mailer and ShipIt alike.
 
 **Test scenario.**
 
@@ -110,7 +107,8 @@ If ShipIt calls should leave the database entirely, run the tracking poller in i
   `OTelJobMetricsSinkTestsBase`, `AdapterRecorderTestsBase`.
 
 Pitfall: an `Otel`-only endpoint sink writes no rows, so it produces no Issues. Keep `shop-api` on `Both` if you
-want checkout 500s to become Issues. The same holds for adapters, process-wide.
+want checkout 500s to become Issues. The same holds for adapters: an `Otel` adapter sink would stop Issues for
+every adapter in that process.
 
 ## Endpoint observability
 
@@ -167,8 +165,8 @@ To observe every controller instead, use `app.MapControllers().WithWarpObservabi
   `InvalidOperationException` when the cart contains SKU `TEST-500`.
 - *When* you check out a cart with `TEST-500` three times, and poll `GET /api/orders/{id}/status` a few times.
 - *Then* the **Endpoints** page lists `POST /api/checkout` with 3 failed calls and a non-zero error rate. The
-  call detail page of a failed call shows the status 500, the exception type and the related jobs (none for
-  the failed calls).
+  call detail page of a failed call shows the status 500 and the exception type. It has no **Related jobs**
+  section, because the failed calls spawned no jobs and the section is left out when it is empty.
   `GET /api/orders/{id}/status` does not appear. Within about a minute **Issues** shows one Endpoint issue,
   `InvalidOperationException` on `POST /api/checkout`, with count 3.
 - `Covered by:` `HostEndpointObservabilityTestsBase`, `WarpEndpointIdentityFactoryTests`,
@@ -249,7 +247,8 @@ builder.Services.AddWarpServer<ShopDbContext>(opt =>
     });
 
     opt.AddSlo(o => o.AddObjective(
-        SloKind.QueueWaitLatency, "payments", target: 30_000, percentile: 95, name: "Payments queue wait p95 < 30 s"));
+        SloKind.QueueWaitLatency, "payments", target: 30_000, percentile: 95,
+        application: "shop-worker", name: "Payments queue wait p95 < 30 s"));
 });
 ```
 
@@ -257,16 +256,22 @@ builder.Services.AddWarpServer<ShopDbContext>(opt =>
 Repeated `AddSlo` calls merge, so both sets are seeded. One combined call is easier to read; the guide splits
 it only to keep each objective next to its feature.
 
+The objective is scoped to `shop-worker` so that it counts in `shop-worker`'s
+[post-deploy verdict](#post-deploy-verdict) and not in `shop-api`'s. A queue-wait objective reads the queue's
+global wait whatever its application, so the scope changes only which verdicts it counts in.
+
 **Test scenario.**
 
 - *Given* `shop-worker` running with the `payments` group.
 - *When* you pause the `shop-worker` server from the **Applications** page, ship 10 orders, wait two minutes,
   and resume it.
 - *Then* while paused, the **Queues** family on the **Counters** page shows the `payments` row with backlog
-  depth 10 and an oldest age that grows with each sample (60 s cadence). After resume, depth returns to 0. The
-  queue-wait average for `payments` reads around two minutes, and p95 and p99 read 300 s: percentiles are
-  bucket upper bounds, and a two-minute wait falls in the 60 s to 300 s bucket. The SLO above reads
-  **Breaching** on the **SLOs** page. `GET /warp/api/queues/metrics` returns the same numbers.
+  depth 10 and an oldest age that grows with each sample (60 s cadence). After resume, depth returns to 0. On a
+  fresh test database the queue-wait average for `payments` reads around two minutes, and p95 and p99 read
+  `5.0m`: percentiles are bucket upper bounds, and a two-minute wait falls in the 60 s to 300 s bucket. The
+  average and both percentiles are lifetime aggregates, so on a database with earlier traffic they move less.
+  The SLO above reads **Breaching** on the **SLOs** page. `GET /warp/api/queues/metrics` returns the same
+  numbers in milliseconds (`300000` for p95 and p99).
 - `Covered by:` `QueueWaitClaimTestsBase`, `BacklogSamplerTestsBase`, `QueueMetricsQueryTestsBase`,
   `QueueWaitKeysTests`, `SloEvaluatorTestsBase`.
 
@@ -407,8 +412,10 @@ curl -fsS -H "Authorization: Bearer $WARP_CI_TOKEN" --get \
   --data-urlencode "minCoverage=0.5" | jq '{verdict, summary, checksWithData, checksTotal, settlesAt: .window.settlesAt}'
 ```
 
-Poll while `verdict` is `pending`, fail the job on `fail`. The verdict judges only complete 5-minute buckets
-that start after the deploy; the bucket the deploy fell into is never counted. A deploy stays `pending` until
+Poll while `verdict` is `pending`, fail the job on `fail`. Board tiles are judged over complete 5-minute
+buckets that start after the deploy only; the bucket the deploy fell into is never counted. SLO checks report
+each objective's current state over its own rolling window, which reaches back before the deploy; an SLO last
+evaluated before the window starts reads no data. A deploy stays `pending` until
 `minWindowMinutes` of that clean data exists and is complete, which adds the bucket close plus about 30 s
 (`MetricFlushInterval`). With `minWindowMinutes=10` the verdict settles 10.5 minutes after a deploy that
 lands exactly on a bucket boundary and up to just under 15.5 minutes after one that lands later in a bucket
@@ -424,8 +431,9 @@ The full script is in
 
 - *Given* the board tiles scoped to `shop-api` ("Checkout success", "Checkout 5xx", "PayFast callbacks") and
   the SLOs scoped to `shop-api` ("Checkout success", "Checkout: no 5xx", "Checkouts vs last week") from
-  [Metrics and SLOs](./metrics-and-slos.md). The PayFast authorise latency SLO is scoped to `shop-worker`, so
-  it counts in `shop-worker`'s verdict, not in this one.
+  [Metrics and SLOs](./metrics-and-slos.md): six checks. The "Partner webhooks delivered" tile and the
+  "PayFast authorise p95 < 2 s", "Stockroom sync lag" and "Payments queue wait p95 < 30 s" SLOs are scoped to
+  `shop-worker`, so they count in `shop-worker`'s verdict, not in this one.
 - *When* you deploy a build of `shop-api` that throws on every checkout with SKU `TEST-500`, send 10 such
   checkouts between minute 6 and minute 10 (after the deploy's own bucket has closed, so they count), and
   call the route at minute 2 and again at about minute 16.
@@ -437,8 +445,9 @@ The full script is in
   because the "Checkout: no 5xx" SLO still breaches: annotations never acknowledge an SLO. A version that
   never registered returns 404.
   If you deploy again at minute 1, the earlier build is never left `pending`: asked by its version, it is
-  settled at the second deploy. Its window holds no complete bucket after the deploy, so expect its checks to
-  read no data.
+  settled at the second deploy. Its window holds no complete bucket after the deploy, so it returns
+  `"verdict": "noData"` with `"checks": []` and `checksTotal: 0`, and the summary says it was superseded before
+  a complete metric bucket.
 - `Covered by:` `DeployVerdictTestsBase`, `DeployVerdictMathTests`, `DeployVerdictQueryTests`; UI:
   `verdictModel.test.ts`.
 
