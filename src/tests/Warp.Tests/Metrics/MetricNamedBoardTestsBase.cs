@@ -384,6 +384,57 @@ public abstract class MetricNamedBoardTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Seeder_SeededBoardRenamedInTheDashboard_IsFoundByItsSeedKeyAndNotRecreated()
+    {
+        static void Configure(MetricBoardSeeds x) => x.For("Checkout").Tiles.Value("Volume", "c").Value("Errors", "e");
+        await SeedFromConfigAsync(Configure);
+        var board = (await Query().GetBoards(Ct)).Single(x => !x.IsDefault);
+        (await Command().UpsertBoard(new MetricBoard { Id = board.Id, Name = "Checkout (EU)" }, "alice", Ct)).Status.ShouldBe(MetricBoardWriteStatus.Saved);
+
+        await SeedFromConfigAsync(Configure);
+
+        var stored = await _fixture.CreateContext().Set<MetricBoard>().Where(x => !x.IsDefault).ToListAsync(Ct);
+        var renamed = stored.ShouldHaveSingleItem();
+        renamed.Id.ShouldBe(board.Id);
+        renamed.Name.ShouldBe("Checkout (EU)");
+        renamed.SeedKey.ShouldBe("Checkout");
+        (await Query().GetTiles(Ct)).Select(x => (x.Name, x.BoardId)).ShouldBe([("Volume", board.Id), ("Errors", board.Id)]);
+    }
+
+    [TimedFact]
+    public async Task Seeder_BoardCreatedInTheDashboardUnderTheSeedName_IsAdoptedSoALaterRenameKeepsIt()
+    {
+        var stored = await CreateBoardAsync("Checkout");
+        (await _fixture.CreateContext().Set<MetricBoard>().SingleAsync(x => x.Id == stored, Ct)).SeedKey.ShouldBeNull();
+        static void Configure(MetricBoardSeeds x) => x.For("Checkout").Tiles.Value("Volume", "c");
+        await SeedFromConfigAsync(Configure);
+        (await Command().UpsertBoard(new MetricBoard { Id = stored, Name = "Shop checkout" }, "alice", Ct)).Status.ShouldBe(MetricBoardWriteStatus.Saved);
+
+        await SeedFromConfigAsync(Configure);
+
+        (await Query().GetBoards(Ct)).Select(x => x.Name).ShouldBe(["Default", "Shop checkout"]);
+        (await _fixture.CreateContext().Set<MetricBoard>().SingleAsync(x => x.Id == stored, Ct)).SeedKey.ShouldBe("Checkout");
+        (await Query().GetTiles(Ct)).ShouldHaveSingleItem().BoardId.ShouldBe(stored);
+    }
+
+    [TimedFact]
+    public async Task Seeder_AnotherSeededBoardRenamedToTheSeedName_SkipsTheSeedAndKeepsNamesUnique()
+    {
+        await SeedFromConfigAsync(x => x.For("Payments"));
+        var payments = (await Query().GetBoards(Ct)).Single(x => !x.IsDefault).Id;
+        (await Command().UpsertBoard(new MetricBoard { Id = payments, Name = "Checkout" }, "alice", Ct)).Status.ShouldBe(MetricBoardWriteStatus.Saved);
+
+        await SeedFromConfigAsync(x =>
+        {
+            x.For("Payments");
+            x.For("Checkout").Tiles.Value("Volume", "c");
+        });
+
+        (await Query().GetBoards(Ct)).Select(x => x.Name).ShouldBe(["Default", "Checkout"]);
+        (await Query().GetTiles(Ct)).ShouldBeEmpty();
+    }
+
+    [TimedFact]
     public async Task Seeder_TwoReplicasStartAtOnce_SeedOneNamedBoardAndOneCopyOfItsTiles()
     {
         // The first replica is pinned inside the board lock after it created the board and read the tiles (BarrierSignal,

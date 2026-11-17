@@ -1366,6 +1366,7 @@ public static class ServiceConfiguration
         board.Property(p => p.Position);
         board.Property(p => p.Application).HasMaxLength(200);
         board.Property(p => p.IsDefault);
+        board.Property(p => p.SeedKey).HasMaxLength(200);
         board.Property(p => p.CreatedAt);
         board.Property(p => p.UpdatedAt);
         board.Property(p => p.CreatedBy).HasMaxLength(200);

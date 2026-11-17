@@ -31,6 +31,13 @@ public class MetricBoard
     /// </summary>
     public bool IsDefault { get; set; }
 
+    /// <summary>
+    /// The name a code seed (<c>opt.AddMetricBoard("Checkout", ...)</c>) declared this board under, or null for a board
+    /// created in the dashboard. The seeder matches a seed by it before the name, so a dashboard rename keeps the seeded
+    /// board (and its tiles) instead of creating a second board under the old name on the next start.
+    /// </summary>
+    public string? SeedKey { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime UpdatedAt { get; set; }

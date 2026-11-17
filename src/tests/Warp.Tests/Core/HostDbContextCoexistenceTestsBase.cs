@@ -176,6 +176,11 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
         var boardColumn = tileTable.Columns.Single(x => string.Equals(x.Name, "board_id", StringComparison.Ordinal));
         boardColumn.IsNullable.ShouldBeTrue("board_id");
         tileTable.ForeignKeys.ShouldBeEmpty();
+
+        // A seeded board's seed key: nullable (boards created in the dashboard have none), so the column is additive.
+        var boardTable = creates
+            .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "metric_board", StringComparison.Ordinal));
+        boardTable.Columns.Single(x => string.Equals(x.Name, "seed_key", StringComparison.Ordinal)).IsNullable.ShouldBeTrue("seed_key");
     }
 
     private static async Task<SaveOutcome> SaveTwiceAsync(HostDbContext context, DbTransaction transaction, string reference)

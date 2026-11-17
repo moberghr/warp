@@ -285,7 +285,8 @@ public static class MetricBoardServiceConfiguration
 
 /// <summary>
 /// Startup seeder for config-defined health boards and their tiles (#326), the <c>SloSeeder</c> shape: insert-if-absent.
-/// A board matches a stored board by name ignoring case (the unnamed seed is the Default board, created when missing); a
+/// A board matches a stored board by its seed key, then by name, ignoring case (the unnamed seed is the Default board,
+/// created when missing), so a dashboard rename keeps the seeded board; a
 /// tile matches a stored tile ON THE SAME BOARD by name or by fields (<see cref="MetricBoardOptions.SameFields"/>), so a
 /// dashboard edit of either survives a restart. Each seed is validated against the registry kind of its instrument (a
 /// ratio on a gauge is skipped, logged at Error). The reads, the caps and the inserts run under the transaction-scoped
@@ -391,17 +392,35 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
 
         // Default first: it owns the null-board tiles, and a new board is placed after it.
         var defaultBoard = await MetricBoardStore.EnsureDefaultAsync(context, now, ct);
+
+        // Tracked: a board matched by name alone is stamped with its seed key below.
         var boards = await context.Set<MetricBoard>()
-            .AsNoTracking()
             .ToListAsync(ct);
         var targets = new List<(int? BoardId, string Name, List<PreparedTile> Tiles)>();
         var created = new List<(MetricBoard Board, List<PreparedTile> Tiles)>();
+        var stamped = false;
         foreach (var seed in seeds)
         {
-            // Matched in memory ignoring case: a collation must not decide whether two boards are one.
-            var match = seed.Name is null ? defaultBoard : boards.Find(x => MetricBoardStore.SameName(x.Name, seed.Name));
+            var match = seed.Name is null ? defaultBoard : MatchSeed(boards, seed.Name);
+            if (match is not null && seed.Name is not null && match.SeedKey is not null && !MetricBoardStore.SameName(match.SeedKey, seed.Name))
+            {
+                // Another seeded board was renamed to this seed's name in the dashboard: names stay unique, so this seed
+                // waits until one of the two is renamed.
+                _logger.LogError("Metric board '{Board}' was NOT seeded: a board seeded as '{SeedKey}' was renamed to that name in the dashboard. Rename one of them.", seed.Name, match.SeedKey);
+
+                continue;
+            }
+
             if (match is not null)
             {
+                // A board created before seed keys existed (or in the dashboard under the seeded name) adopts the seed, so
+                // a later dashboard rename still finds it.
+                if (seed.Name is not null && match.SeedKey is null && !match.IsDefault)
+                {
+                    match.SeedKey = seed.Name;
+                    stamped = true;
+                }
+
                 targets.Add((match.IsDefault ? null : match.Id, match.Name, seed.Tiles));
 
                 continue;
@@ -417,6 +436,7 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
             var board = new MetricBoard
             {
                 Name = seed.Name!,
+                SeedKey = seed.Name,
                 Position = boards.Max(x => x.Position) + 1,
                 CreatedAt = now,
                 UpdatedAt = now,
@@ -450,13 +470,20 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
             await BeforeSave(ct);
         }
 
-        if (added > 0)
+        if (added > 0 || stamped)
         {
             await context.SaveChangesAsync(ct);
         }
 
         return (created.Count, added);
     }
+
+    // The seed key first, then the name; both ignore case in memory, so a collation never decides whether two boards are
+    // one. The seed key is what survives a dashboard rename: a board found by name with no seed key is one the seed has
+    // not adopted yet.
+    private static MetricBoard? MatchSeed(List<MetricBoard> boards, string name)
+        => boards.Find(x => x.SeedKey is not null && MetricBoardStore.SameName(x.SeedKey, name))
+            ?? boards.Find(x => MetricBoardStore.SameName(x.Name, name));
 
     private int SeedTiles(DbContext context, int? boardId, string board, List<MetricBoardTile> stored, List<PreparedTile> seeds, DateTime now)
     {
