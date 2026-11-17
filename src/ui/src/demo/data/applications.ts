@@ -375,6 +375,14 @@ function sloCheck(slo: SloObjective, deployedAt: number): DeployVerdictCheck {
   };
 }
 
+/**
+ * The server's coverage gate: the share of checks with data reaches `minCoverage`. Compared as a share with a 1e-9
+ * epsilon, as the server does, so 14 of 25 meets 0.56 although `0.56 * 25` is 14.000000000000002 in floating point.
+ */
+export function coverageMet(withData: number, count: number, minCoverage: number): boolean {
+  return count > 0 && withData / count >= minCoverage - 1e-9;
+}
+
 /** The server's aggregation: pending until settled, any breaching fails, thin coverage is noData, then warn, then pass. */
 function aggregate(states: DeployVerdictCheckState[], settled: boolean, minCoverage: number): DeployVerdictValue {
   const withData = states.filter((x) => x !== 'noData').length;
@@ -384,7 +392,7 @@ function aggregate(states: DeployVerdictCheckState[], settled: boolean, minCover
   if (states.includes('breaching')) {
     return 'fail';
   }
-  if (minCoverage > 0 && !(states.length > 0 && withData >= minCoverage * states.length)) {
+  if (minCoverage > 0 && !coverageMet(withData, states.length, minCoverage)) {
     return 'noData';
   }
   if (states.includes('warning')) {

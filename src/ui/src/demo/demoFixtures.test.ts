@@ -9,7 +9,7 @@ import type { MetricInstrument, MetricSeries } from '@/types/metrics';
 import type { WarpAddonsInfo } from '@/types';
 import { MetricTileStatusRule, type MetricBoard, type MetricBoardTile } from '@/types/metricBoard';
 import type { ApplicationDeployModel, DeployVerdictModel } from '@/types/applications';
-import { demoDeploys } from './data/applications';
+import { coverageMet, demoDeploys } from './data/applications';
 import { MetricAnnotationTarget, type MetricAnnotationList } from '@/types/annotations';
 import { demoSlos } from './data/slo';
 import { demoAnnotations, demoNoteAppliesTo, demoNoteCoversTile } from './data/annotations';
@@ -391,6 +391,14 @@ describe('demo deploy and verdict fixtures', () => {
     expect((await verdictOf('orders-api', { minCoverage: '0.5' })).verdict).toBe(pass.verdict);
     expect(fail.verdict).toBe('fail');
     expect((await verdictOf('billing-service', { minCoverage: '1' })).verdict).toBe('fail');
+  });
+
+  it('compares the coverage as a share with an epsilon, so an exact share is never lost to floating point', () => {
+    expect(coverageMet(14, 25, 0.56)).toBe(true);
+    expect(coverageMet(7, 25, 0.28)).toBe(true);
+    expect(coverageMet(13, 25, 0.56)).toBe(false);
+    expect(coverageMet(6, 25, 0.28)).toBe(false);
+    expect(coverageMet(0, 0, 0.5)).toBe(false);
   });
 
   it('answers 404 with the server { error } body when no deploy matches', async () => {
