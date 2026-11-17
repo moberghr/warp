@@ -96,9 +96,9 @@ describe('saved views model', () => {
     expect(shared.map((x) => x.id)).toEqual([3]);
   });
 
-  it('defaults a new view to shared on an open dashboard and to personal for a signed-in user', () => {
+  it('defaults a new view to shared on an open dashboard and to personal for a signed-in or unknown user', () => {
     expect(defaultShared(ANONYMOUS_USER)).toBe(true);
-    expect(defaultShared(undefined)).toBe(true);
+    expect(defaultShared(undefined)).toBe(false);
     expect(defaultShared('alice')).toBe(false);
   });
 

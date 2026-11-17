@@ -99,7 +99,9 @@ export function ViewsMenu({ page, target }: { page: SavedViewPage; target: strin
           <div role="menu" className="absolute right-0 z-50 mt-1 w-80 rounded-lg border border-border bg-card p-3 text-sm shadow-lg">
             <button
               type="button"
-              className="w-full rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+              className="w-full rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!listQuery.isSuccess}
+              title={listQuery.isSuccess ? undefined : 'Available once the saved views have loaded'}
               onClick={() => openForm({ id: 0, name: '', shared: defaultShared(user), query, sharingLocked: false })}
             >
               Save view

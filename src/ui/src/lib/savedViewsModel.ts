@@ -98,9 +98,13 @@ export function splitViews(list: SavedViewList, views: SavedView[] = list.views)
   };
 }
 
-/** A new view defaults to shared on an open dashboard (no user to keep a personal view for), else to personal. */
+/**
+ * A new view defaults to shared only on an open dashboard (no user to keep a personal view for). An unknown user (the
+ * list read is loading or failed) defaults to personal, so a view on an authenticated dashboard is never published by
+ * accident.
+ */
 export function defaultShared(user: string | undefined): boolean {
-  return user === undefined || user === ANONYMOUS_USER;
+  return user === ANONYMOUS_USER;
 }
 
 /** Only the author decides whether a view is shared (the server answers 403 otherwise). */
