@@ -63,18 +63,25 @@ builder.Services.AddWarpServer<ShopDbContext>(opt =>
 });
 
 // PayFast: a named HttpClient. Operation and group ride on the request.
-public sealed class AuthorizePaymentHandler(IHttpClientFactory httpFactory, ShopDbContext db)
-    : IJobHandler<AuthorizePayment>
+// AuthorisePayment is the OrderPlaced handler from Orders and checkout.
+public sealed class AuthorisePayment(IHttpClientFactory httpFactory, ShopDbContext db)
+    : IMessageHandler<OrderPlaced>
 {
-    public async Task HandleAsync(AuthorizePayment job, CancellationToken ct)
+    public async Task HandleAsync(OrderPlaced message, CancellationToken ct)
     {
+        var order = await db.Orders
+            .AsNoTracking()
+            .Where(x => x.Id == message.OrderId)
+            .Select(x => new { x.PaymentToken, x.Total, x.Currency, x.Region, x.Reference })
+            .SingleAsync(ct);
+
         var request = new HttpRequestMessage(HttpMethod.Post, "/v1/authorisations")
             {
-                Content = JsonContent.Create(new { job.PaymentToken, job.Amount, job.Currency }),
+                Content = JsonContent.Create(new { order.PaymentToken, Amount = order.Total, order.Currency }),
             }
             .WithWarpOperation("Authorize")
-            .WithWarpGroup(job.Region)
-            .WithWarpCorrelation(job.OrderReference);
+            .WithWarpGroup(order.Region)
+            .WithWarpCorrelation(order.Reference);
 
         using var response = await httpFactory.CreateClient("payfast").SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
@@ -97,9 +104,11 @@ using (WarpAdapterCall.Group(order.Region))
   latency. `/warp/adapters/shipit` shows operations `CreateShipment` and `GetTracking`, and a **Region**
   table with one row per region.
 - **When** you make the sandbox return `503` for the EU region only and ship more EU and UK orders.
-- **Then** the EU row in the **Region** table turns red for both operations while UK stays green. The
-  recent-calls list shows the failed calls; the call drawer shows status `503` and the captured response
-  body. On `/warp/adapters/payfast` the drawer never shows a body.
+- **Then** the EU row in the **Region** table shows its **Error %** in red while UK stays green. The
+  Region table has no per-operation split; to see which operations failed, filter the recent-calls list
+  or look at the **Operation** table. Click a failed call to open its call detail page
+  (`/warp/adapters/shipit/calls/{id}`): it shows status `503` and the captured response body. On a PayFast
+  call's detail page there is never a body.
 - **When**, on a fresh test database, you register ShipIt with `limit: 5, perSeconds: 60`, run two
   `shop-worker` replicas and ship 10 orders.
 - **Then** ShipIt sees at most 5 calls per minute in total, not 5 per replica. The extra calls wait, and
@@ -123,7 +132,7 @@ Covered by: `HttpAdapterRegistrationTests`, `RefitAdapterTests`, `AdapterGroupTe
 
 Marketplace partners that list Northwind Goods products want to know when an order is paid and when
 it ships. Each partner registers a callback URL and a signing secret; the shop stores these in its own
-`MarketplaceSubscription` table. When `OrderPaid` or `OrderShipped` is published, a handler sends one
+`MarketplaceSubscription` table. When `PaymentConfirmed` or `OrderShipped` is published, a handler sends one
 webhook per subscription. Warp stores each delivery, signs it with Standard Webhooks, retries on a
 schedule, and calls the shop's exhausted handler when a partner stays down, so the shop can flag that
 subscription.
@@ -132,10 +141,16 @@ subscription.
 
 ```csharp
 public sealed class NotifyMarketplacesOnOrderPaid(ShopDbContext db, IWebhookDispatcher webhooks)
-    : IMessageHandler<OrderPaid>
+    : IMessageHandler<PaymentConfirmed>
 {
-    public async Task HandleAsync(OrderPaid message, CancellationToken ct)
+    public async Task HandleAsync(PaymentConfirmed message, CancellationToken ct)
     {
+        var order = await db.Orders
+            .AsNoTracking()
+            .Where(x => x.Id == message.OrderId)
+            .Select(x => new { x.Reference, PaidAt = x.UpdatedAt })
+            .SingleAsync(ct);
+
         var subscriptions = await db.MarketplaceSubscriptions
             .Where(x => x.Events.Contains("order.paid"))
             .Where(x => x.Enabled)
@@ -148,8 +163,8 @@ public sealed class NotifyMarketplacesOnOrderPaid(ShopDbContext db, IWebhookDisp
                 {
                     Url = sub.CallbackUrl,
                     EventType = "order.paid",
-                    EventId = $"{message.OrderReference}:order.paid",   // webhook-id, same on every retry
-                    Payload = JsonSerializer.Serialize(new { message.OrderReference, message.PaidAt }),
+                    EventId = $"{order.Reference}:order.paid",          // webhook-id, same on every retry
+                    Payload = JsonSerializer.Serialize(new { OrderReference = order.Reference, order.PaidAt }),
                     Group = sub.PartnerName,                            // per-partner stats
                     Reference = sub.Id.ToString(),                      // back to the subscription
                     Signing = WebhookSigning.StandardWebhooks,
@@ -213,8 +228,8 @@ Pitfalls:
   automatically; if no process runs `AddWarpServer` with a worker, deliveries stay `Pending`.
 - Retry timing is a backoff, not a precise timer: each retry fires up to about 10 seconds after its
   delay.
-- Do not put an HTTP retry handler on the `warp-webhooks` client. Each inner retry shows up as an
-  extra attempt.
+- Do not put an HTTP retry handler on the `warp-webhooks` client. Its inner retries hide inside one
+  recorded attempt: the timeline shows one attempt while the partner received several requests.
 
 Covered by: `WebhookExecutionTestsBase`, `WebhookSigningTests`, `WebhookCommandServiceTestsBase`,
 `WebhookDispatcherValidationTestsBase`, `WebhookStuckRecoveryTestsBase`, `WebhookQueueWiringTests`,
@@ -226,8 +241,9 @@ Covered by: `WebhookExecutionTestsBase`, `WebhookSigningTests`, `WebhookCommandS
 
 After `shop-worker` asks PayFast to authorise a payment, PayFast posts the result to the shop. The
 callback is a Warp HTTP endpoint on `shop-api`: a request handler tagged with `[WarpHttpPost]`. It
-checks PayFast's signature, marks the order `Paid` and publishes `OrderPaid` in the same transaction,
-then answers quickly. Everything slow happens in the `OrderPaid` handlers on `shop-worker`.
+checks PayFast's signature, marks the order `Paid` and publishes `PaymentConfirmed` (the message the
+[order saga](./orders-and-checkout.md#sagas) waits for) in the same transaction, then answers quickly.
+Everything slow happens in the `PaymentConfirmed` handlers on `shop-worker`.
 
 ### Wiring
 
@@ -274,10 +290,10 @@ public sealed class PayFastCallbackHandler(PayFastSignatureVerifier verifier, Sh
             : OrderStatus.PaymentFailed;
         if (order.Status == OrderStatus.Paid)
         {
-            await publisher.Publish(new OrderPaid { OrderReference = order.Reference, PaidAt = order.UpdatedAt });
+            await publisher.Publish(new PaymentConfirmed { OrderId = order.Id });
         }
 
-        await db.SaveChangesAsync(ct);   // order state and OrderPaid commit together
+        await publisher.SaveChangesAsync(ct);   // order state and PaymentConfirmed commit together
 
         return Results.NoContent();
     }
@@ -289,21 +305,24 @@ builder.Services.AddWarpHttp();
 app.MapWarpHttp();
 ```
 
-`IRequest<IResult>` lets the handler choose the status code. A plain `IRequest<T>` always answers `200`
-with JSON.
+`IRequest<IResult>` lets the handler choose the status code. A plain `IRequest<T>` answers `200` with
+JSON, an `IRequest<Unit>` answers `204`, and a response type that implements `IHttpResponseShape` can set
+its own status and headers.
 
 ### Test scenario
 
 - **Given** `shop-api` and `shop-worker` are running and an order is in `PaymentPending`.
 - **When** you post a callback with a valid signature and `"Status": "approved"`.
-- **Then** the response is `204`. The order is `Paid`. `/warp/messages` shows an `OrderPaid` message
-  whose child jobs (including `NotifyMarketplacesOnOrderPaid`) complete on `shop-worker`.
+- **Then** the response is `204`. The order is `Paid`. `/warp/messages/completed` shows a
+  `PaymentConfirmed` message whose child jobs (including `NotifyMarketplacesOnOrderPaid`) completed on
+  `shop-worker`.
 - **When** you post the same callback again.
-- **Then** the response is `204` and no second `OrderPaid` message appears.
+- **Then** the response is `204` and no second `PaymentConfirmed` message appears.
 - **When** you post a callback with a wrong signature.
 - **Then** the response is `401`, the order does not change and no message is published.
-- If `shop-api` also calls `AddEndpointObservability()` (see [Observability](./observability.md)), the
-  route `POST /payments/payfast/callback` appears on `/warp/endpoints` with its calls and status codes.
+- If `shop-api` also calls `AddEndpointObservability()` and `app.UseWarpHttpObservability()` after
+  `UseRouting()` (see [Observability](./observability.md#endpoint-observability)), the route
+  `POST /payments/payfast/callback` appears on `/warp/endpoints` with its calls and status codes.
 
 Pitfalls:
 
