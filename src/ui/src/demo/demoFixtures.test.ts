@@ -7,15 +7,15 @@ import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import { MetricKind } from '@/types/metrics';
 import type { MetricInstrument, MetricSeries } from '@/types/metrics';
 import type { WarpAddonsInfo } from '@/types';
-import { MetricTileStatusRule, type MetricBoard, type MetricBoardTile } from '@/types/metricBoard';
+import { MetricTileKind, MetricTileStatusRule, type MetricBoard, type MetricBoardTile } from '@/types/metricBoard';
 import type { ApplicationDeployModel, DeployVerdictModel } from '@/types/applications';
 import { coverageMet, demoDeploys } from './data/applications';
 import { MetricAnnotationTarget, type MetricAnnotationList } from '@/types/annotations';
 import { demoSlos } from './data/slo';
 import { demoAnnotations, demoNoteAppliesTo, demoNoteCoversTile } from './data/annotations';
-import { demoBoardTiles, demoMetricBoard } from './data/metricBoard';
+import { demoBoardTiles, demoMetricBoard, demoTileStatus } from './data/metricBoard';
 import type { MetricAnnotation } from '@/types/annotations';
-import { SloState } from '@/types/slo';
+import { SloComparison, SloState } from '@/types/slo';
 
 // Demo mode is what the docs screenshots and every "show me the dashboard" walkthrough run against,
 // so a dangling reference in the fixtures reads as a broken product: the page renders "Unable to
@@ -222,6 +222,26 @@ describe('demo metrics board fixtures', () => {
     expect(fresh.completeUntil).toBe(fresh.from);
     expect(fresh.tiles.every((x) => x.current === null && x.dayAgo === null && x.weekAgo === null)).toBe(true);
     expect(fresh.tiles.every((x) => x.status === (x.tile.statusRule === MetricTileStatusRule.None ? null : SloState.NoData))).toBe(true);
+  });
+
+  // SloMath.EvaluateBound on a ratio tile held at least to t: the rate budget (obs − t)/(1 − t), Warning under 0.25.
+  it('judges an at-least ratio threshold by the rate budget, and a 100% target all or nothing', () => {
+    const ratio = (threshold: number): MetricBoardTile => ({
+      ...demoBoardTiles[0],
+      statusRule: MetricTileStatusRule.Threshold,
+      comparison: SloComparison.AtLeast,
+      threshold,
+    });
+
+    // (0.995 − 0.98) / 0.02 = 0.75: Healthy; the old headroom over t (0.015) read Warning.
+    expect(demoTileStatus(ratio(0.98), 0.995, 0, 0)).toBe(SloState.Healthy);
+    // (0.984 − 0.98) / 0.02 = 0.2: Warning.
+    expect(demoTileStatus(ratio(0.98), 0.984, 0, 0)).toBe(SloState.Warning);
+    expect(demoTileStatus(ratio(0.98), 0.97, 0, 0)).toBe(SloState.Breaching);
+    expect(demoTileStatus(ratio(1), 1, 0, 0)).toBe(SloState.Healthy);
+    expect(demoTileStatus(ratio(1), 0.999, 0, 0)).toBe(SloState.Breaching);
+    // A value tile keeps the headroom over |t|: 110 ≥ 100 leaves 0.1, Warning.
+    expect(demoTileStatus({ ...ratio(100), kind: MetricTileKind.Value }, 110, 0, 0)).toBe(SloState.Warning);
   });
 
   it('accepts tile upserts and deletes', async () => {

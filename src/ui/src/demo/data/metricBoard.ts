@@ -161,10 +161,24 @@ function sparkline(shape: Shape, t: MetricBoardTile, from: number, to: number): 
   return points;
 }
 
-function status(t: MetricBoardTile, current: number, dayAgo: number, weekAgo: number): SloState | null {
+/** The share of the threshold budget left (SloMath.EvaluateBound, simplified for the demo). */
+function thresholdBudget(t: MetricBoardTile, threshold: number, current: number): number {
+  const atLeast = t.comparison === SloComparison.AtLeast;
+  if (atLeast && t.kind === MetricTileKind.Ratio) {
+    // On a 0–1 ratio the headroom is measured against the allowed bad share, the rate budget (obs − t)/(1 − t), so
+    // "success ≥ 98%" at 99.5% is Healthy. A target of 100% leaves no bad share: met or not, all or nothing.
+    return threshold >= 1 ? (current >= threshold ? 1 : current - threshold) : (current - threshold) / (1 - threshold);
+  }
+
+  const headroom = atLeast ? current - threshold : threshold - current;
+
+  return threshold === 0 ? (headroom >= 0 ? 1 : -1) : headroom / Math.abs(threshold);
+}
+
+/** A demo tile's rule verdict from its current value and baselines; null without a rule. */
+export function demoTileStatus(t: MetricBoardTile, current: number, dayAgo: number, weekAgo: number): SloState | null {
   if (t.statusRule === MetricTileStatusRule.Threshold && t.threshold !== null) {
-    const headroom = t.comparison === SloComparison.AtLeast ? current - t.threshold : t.threshold - current;
-    const budget = t.threshold === 0 ? (headroom >= 0 ? 1 : -1) : headroom / Math.abs(t.threshold);
+    const budget = thresholdBudget(t, t.threshold, current);
 
     return budget < 0 ? SloState.Breaching : budget < 0.25 ? SloState.Warning : SloState.Healthy;
   }
@@ -199,7 +213,7 @@ export function demoMetricBoard(fromIso: string | undefined, toIso: string | und
     const weekAgo = empty ? null : windowValue(shape, t, from - 7 * DAY, complete - 7 * DAY, false);
     const ruled = current === null || dayAgo === null || weekAgo === null
       ? (t.statusRule === MetricTileStatusRule.None ? null : SloState.NoData)
-      : status(t, current, dayAgo, weekAgo);
+      : demoTileStatus(t, current, dayAgo, weekAgo);
     // Notes (#333) attached as the server does: every overlapping note is shown, but only an active acknowledged-noise
     // note that COVERS the tile (about everything it reads) turns a problem into Acknowledged.
     const annotations = demoTileAnnotations(t, from, to);
