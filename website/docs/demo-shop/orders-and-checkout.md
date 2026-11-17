@@ -51,7 +51,7 @@ public class SendConfirmationEmail : IMessageHandler<OrderPlaced>
 
 // shop-api, CheckoutController
 await publisher.Publish(new OrderPlaced { OrderId = order.Id });
-await db.SaveChangesAsync(ct);
+await publisher.SaveChangesAsync(ct);   // commits, then sends the push and the local wake
 ```
 
 **Test scenario.**
@@ -59,14 +59,14 @@ await db.SaveChangesAsync(ct);
 - *Given* `shop-worker` is running with the three handlers above.
 - *When* you place an order on `shop-web`, then make `SendConfirmationEmail` throw (for example, point
   Mailer at a closed port) and place a second order.
-- *Then* the dashboard **Messages** page lists two `OrderPlaced` rows. Each message detail shows **Total
-  jobs** = 3, one per handler (4 once the [saga](#sagas) below is registered, because the saga is another
-  handler). For the first order all three spawned jobs are `Completed`. For the second, `ReserveStock` and
-  `AuthorisePayment` are `Completed` and `SendConfirmationEmail` is `Failed`; the message itself still
-  reaches a terminal state.
-- `Covered by:` `MessageIntegrationTests` (including
-  `GivenMessageWithFailingHandler_WhenProcessed_ThenMessageStillCompletesWithFailedJobs`),
-  `MessageRoutingTaskTests`.
+- *Then* the dashboard **Messages** pages, one per state (Enqueued, Processing, Completed, Failed), list
+  the two `OrderPlaced` messages. Each message's detail page shows a progress line such as `3/3 (100%)` and
+  a **Jobs** table with one row per handler, filterable by state (4 rows once the [saga](#sagas) below is
+  registered, because the saga is another handler). For the first order all three jobs are `Completed`.
+  For the second, `ReserveStock` and `AuthorisePayment` are `Completed` and `SendConfirmationEmail` is
+  `Failed`; the message itself still reaches a terminal state.
+- `Covered by:` `MessageIntegrationTests`, `MessagePolicyTests`
+  (`HandlerDeclaredRetry_MessageChildRetriesPerChild_SiblingUnaffected`), `MessageRoutingTaskTests`.
 
 Pitfall: the child jobs are created by the `MessageRouter` server task, so a message published from
 `shop-api` does nothing until a `shop-worker` is running.
@@ -76,6 +76,10 @@ Pitfall: the child jobs are created by the `MessageRouter` server task, so a mes
 **In the shop.** Some work has exactly one handler. Once an order is paid, `shop-worker` books the ShipIt
 shipment and, only after that succeeds, prints the label. Separately, a cart left at checkout gets an
 abandoned-cart email 24 hours later. Booking and printing are a continuation; the email is a scheduled job.
+
+The guide shows two designs for the abandoned-cart email. This page schedules one job per cart.
+[Scheduling](./scheduling.md#recurring-jobs) shows the alternative: a recurring sweep that finds old carts.
+They are alternatives. Pick one; running both sends two emails.
 
 **Wiring.**
 
@@ -103,8 +107,8 @@ await publisher.SaveChangesAsync(ct);
 - *Given* `BookShipmentHandler` waits on a breakpoint (or a ShipIt sandbox call that you hold open).
 - *When* you pay for an order so both jobs are enqueued.
 - *Then* on the dashboard **Jobs** page `PrintShippingLabel` is in **Awaiting** and `BookShipment` is in
-  **Processing**. The `BookShipment` detail page lists `PrintShippingLabel` under **Child Jobs**. Release the
-  breakpoint: `BookShipment` moves to `Completed` and `PrintShippingLabel` moves to `Enqueued`, then
+  **Processing**. The `BookShipment` detail page lists `PrintShippingLabel` under **Continuations** in its
+  **Flow** card. Release the breakpoint: `BookShipment` moves to `Completed` and `PrintShippingLabel` moves to `Enqueued`, then
   `Completed`. Abandon a cart and the `SendAbandonedCartEmail` job sits in **Scheduled** with its
   `ScheduleTime` 24 hours out.
 - `Covered by:` `PublisherTests` (`Enqueue_WithParentId_SetsParentAndAwaitingState`,
@@ -177,13 +181,20 @@ minutes after checkout, a timeout cancels the order.
 **Wiring.**
 
 ```csharp
-// shop-worker
+// shop-worker: runs the saga handlers
 builder.Services.AddWarpServer<ShopDbContext>(opt =>
 {
     opt.UsePostgreSql();   // the saga lock provider; must come before AddSagas()
     opt.AddSagas();
 });
 builder.Services.AddSagaHandler<OrderWorkflow>();
+
+// shop-api: hosts the dashboard, so it registers the addon too
+builder.Services.AddWarp<ShopDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddSagas();        // registers the query service behind the Sagas page
+});
 
 public class OrderSaga : Saga<Guid>
 {
@@ -245,15 +256,21 @@ public class OrderWorkflow(IPublisher publisher) :
 `ReserveStock` publishes `StockReserved` when Stockroom confirms. The PayFast callback job (see
 [Mutex](./reliability.md#mutex)) publishes `PaymentConfirmed`.
 
+The dashboard runs in `shop-api`. Its **Sagas** page reads through a service that only `AddSagas()`
+registers, so without `AddSagas()` in `shop-api` the page is hidden there, even though `shop-worker` runs
+the sagas.
+
 **Test scenario.**
 
-- *Given* `shop-worker` with `AddSagas()` and `OrderWorkflow`, and `Delay` temporarily set to 1 minute.
+- *Given* `shop-worker` with `AddSagas()` and `OrderWorkflow`, `shop-api` with `AddSagas()`, and `Delay`
+  temporarily set to 1 minute.
 - *When* you place order A and let PayFast confirm it. Then place order B and never complete the payment.
 - *Then* the dashboard **Sagas** page (`/warp/sagas`) shows a live `OrderSaga` for each order while it
   waits; the detail page shows the state JSON (`StockReserved: true`) and an activity log of the jobs that
   touched it. Order A's saga disappears once payment arrives and a `BookShipment` job is enqueued. About a
-  minute later (plus up to `ScheduledActivationInterval`, 10 s by default) order A's `UnpaidOrderTimeout`
-  job ends `Deleted`, not `Failed`, because its saga is gone. Order B's timeout fires against a live saga:
+  minute later order A's `UnpaidOrderTimeout` job ends `Deleted`, not `Failed`, because its saga is gone.
+  "About a minute" adds two waits: up to one `ScheduledActivationInterval` (10 s) to activate the timeout
+  message, then up to one `MessageRoutingInterval` (10 s, or 30 s with DB push) to route it to the saga. Order B's timeout fires against a live saga:
   a `CancelOrder` job is enqueued and the saga row is removed from `saga_state`.
 - `Covered by:` `SagaIntegrationTests` (`ThreeMessageFlow_OutOfOrder_SagaCompletes`,
   `TimeoutMessage_FiresAfterDelay_WhenSagaStillLive`,
@@ -280,7 +297,7 @@ db.Orders.Add(order);
 
 await publisher.Publish(new OrderPlaced { OrderId = order.Id });
 
-await db.SaveChangesAsync(ct);   // one transaction: the order row and the message row
+await publisher.SaveChangesAsync(ct);   // one transaction: the order row and the message row
 ```
 
 `ShopDbContext` must be registered as scoped (the EF Core default) so the publisher and the controller share
@@ -297,15 +314,18 @@ it.
 - `Covered by:` `PublisherFactoryTests` (`Create_BusinessRowAndJob_OneSaveCommitsBoth`,
   `Create_UnsavedContext_JobNotCommitted`), `UnsavedOutboxWarningTests`.
 
-Pitfall: commit through `publisher.SaveChangesAsync` (or the same context's `SaveChangesAsync`) and not
-through a different context instance. A publish that is never saved is lost, and Warp logs a warning when
-the scope ends with unsaved staged jobs.
+Pitfall: commit through `publisher.SaveChangesAsync`, not through a different context instance. The
+context's own `db.SaveChangesAsync` also commits both rows, but it sends nothing: no DB push notification
+and no local wake, so a worker only finds the message on its next poll. A publish that is never saved is
+lost, and Warp logs a warning when the scope ends with unsaved staged jobs.
 
 ## Metadata
 
 **In the shop.** Orders come from the web storefront and from marketplace partners. Support wants to see the
 sales channel on every job an order creates, including the jobs created by handlers further down. A publish
-pipeline behaviour stamps the channel on every publish in `shop-api`, and child jobs inherit it.
+pipeline behaviour stamps the channel on every publish in `shop-api`. The jobs the message router creates for
+`OrderPlaced` copy the message's metadata. A job that a handler or saga enqueues inherits nothing, so the code
+that enqueues it passes the channel on itself.
 
 **Wiring.**
 
@@ -331,6 +351,11 @@ public class AuthorisePayment(IJobContext job) : IMessageHandler<OrderPlaced>
         return Task.CompletedTask;
     }
 }
+
+// shop-worker, wherever a handler or saga enqueues follow-up work: pass the channel on explicitly
+await publisher.Enqueue(
+    new BookShipment { OrderId = orderId },
+    new JobParameters { Metadata = new() { ["channel"] = channel } });
 ```
 
 **Test scenario.**
@@ -338,10 +363,13 @@ public class AuthorisePayment(IJobContext job) : IMessageHandler<OrderPlaced>
 - *Given* `SalesChannelBehavior` is registered in `shop-api`.
 - *When* you place one order on `shop-web` and import one marketplace order.
 - *Then* on the dashboard the `OrderPlaced` job detail shows a metadata section with `"channel": "web"`
-  (or `"marketplace"`). The routed `ReserveStock`, `AuthorisePayment` and `SendConfirmationEmail` jobs, and
-  any `BookShipment` job those handlers enqueue, carry the same value.
+  (or `"marketplace"`). The routed `ReserveStock`, `AuthorisePayment` and `SendConfirmationEmail` jobs carry
+  the same value. A `BookShipment` job carries it only because the code that enqueued it passed it in
+  `JobParameters.Metadata`; drop that and the job's metadata has no `channel`.
 - `Covered by:` `MetadataIntegrationTests` (`PublishMessage_MetadataInheritedByRoutedChildJobs`),
-  `MetadataPublishPipelineTests`, `MetadataPropagationIntegrationTests`, `MetadataInheritanceTests`.
+  `MetadataPublishPipelineTests`, `MetadataPropagationIntegrationTests`
+  (`GivenChildJobSpawnedByHandler_WhenCompleted_ThenChildDoesNotInheritParentMetadata`),
+  `MetadataInheritanceTests`.
 
 Pitfall: metadata is shown on the dashboard and stored on the job row. Do not put customer emails or other
 personal data in it.
@@ -384,7 +412,7 @@ for new tables so the id exists before the publish.
 ## Cancellation
 
 **In the shop.** A merchandiser starts a `GenerateSalesReport` job for the whole year by mistake. It will
-run for twenty minutes. Deleting it from the dashboard must stop the handler cleanly, not leave a
+run for twenty minutes. Cancelling it from the dashboard must stop the handler cleanly, not leave a
 half-written report. Job cancellation is cooperative: the handler's `CancellationToken` is cancelled and the
 handler must honour it. This is separate from cancelling a customer's order, which is ordinary business
 logic such as the saga's `CancelOrder` job.
@@ -404,14 +432,14 @@ public class GenerateSalesReportHandler : IJobHandler<GenerateSalesReport>
     }
 }
 
-// From code (the dashboard Delete button calls the same service)
+// From code (the dashboard Cancel button calls the same service)
 await jobCommandService.DeleteJob(jobId);
 ```
 
 **Test scenario.**
 
 - *Given* a `GenerateSalesReport` job is `Processing`.
-- *When* you click **Delete** on its job detail page.
+- *When* you click **Cancel** on its job detail page. A `Processing` job shows **Cancel**, not **Delete**.
 - *Then* the job keeps the `Processing` state with an orange **Cancelling...** badge. Within
   `CancellationCheckInterval` (5 s by default) the handler stops, and the job moves to `Deleted` with a
   `Cancelled` entry in its history. Repeat with a handler that ignores `ct`: the job runs to the end and
