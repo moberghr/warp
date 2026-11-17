@@ -20,7 +20,8 @@ public sealed class SloMarker : ISloMarker;
 /// <summary>
 /// Objectives seeded from config via <c>opt.AddSlo(o =&gt; o.AddObjective(...))</c> (§8.31). Seeding is
 /// insert-if-absent (matched on kind + dimension + application + percentile), so a later dashboard edit to the
-/// same objective is never clobbered on restart — the DB row wins.
+/// same objective is never clobbered on restart — the DB row wins. Repeated <c>AddSlo</c> calls add to one instance
+/// (one seeder), so the duplicate-name check spans all of them.
 /// </summary>
 public sealed class SloOptions
 {
@@ -230,8 +231,8 @@ public sealed class SloOptions
         }
 
         // The seeder matches a metric objective by name, so a repeated name would silently seed only the first.
-        // Case-insensitive: the seeder matches the name in SQL, and SQL Server's default collation would make "Payments"
-        // and "payments" one objective there (seeding only the first) while PostgreSQL seeds both.
+        // Case-insensitive, the comparer the seeder matches names with (in memory, so the database collation never
+        // decides): "Payments" and "payments" are one objective. Checked across every AddSlo call, which merge here.
         if (Seeded.Exists(x => x.Kind == definition.Kind
             && string.Equals(x.Name, definition.Name, StringComparison.OrdinalIgnoreCase)
             && string.Equals(x.Application, definition.Application, StringComparison.OrdinalIgnoreCase)))
@@ -260,16 +261,28 @@ public static class SloServiceConfiguration
 
         builder.Services.TryAddSingleton<ISloMarker, SloMarker>();
 
-        var options = new SloOptions();
+        // Repeated calls merge into the one registered SloOptions, as AddMetricBoard does: one seeder, and a duplicate
+        // metric objective name across two calls throws like one within a call.
+        var existing = builder.Services
+            .Where(x => x.ServiceType == typeof(SloOptions))
+            .Select(x => x.ImplementationInstance)
+            .OfType<SloOptions>()
+            .FirstOrDefault();
+        var options = existing ?? new SloOptions();
         configure?.Invoke(options);
 
-        if (options.Seeded.Count > 0)
+        if (options.Seeded.Count == 0)
         {
-            var contextType = ResolveContextType(builder);
-            builder.Services.AddSingleton(options);
-            var seederType = typeof(SloSeeder<>).MakeGenericType(contextType);
-            builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IHostedService), seederType));
+            return builder;
         }
+
+        if (existing is null)
+        {
+            builder.Services.AddSingleton(options);
+        }
+
+        var seederType = typeof(SloSeeder<>).MakeGenericType(ResolveContextType(builder));
+        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IHostedService), seederType));
 
         return builder;
     }
@@ -384,6 +397,18 @@ internal sealed class SloSeeder<TContext> : IHostedService
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var added = 0;
 
+        // One read of the candidates, matched in memory with one comparer: in SQL the database collation would decide
+        // (SQL Server's default is case-insensitive, PostgreSQL's is not), so the same seeds could match on one provider
+        // and insert on the other. The objectives table is a handful of rows per kind.
+        var kinds = seeds
+            .Select(x => x.Kind)
+            .Distinct()
+            .ToList();
+        var stored = await context.Set<SloDefinition>()
+            .AsNoTracking()
+            .Where(x => kinds.Contains(x.Kind))
+            .ToListAsync(ct);
+
         foreach (var seed in seeds)
         {
             // Metric kinds put the instrument in Dimension, so two objectives on one instrument are told apart by their
@@ -397,15 +422,15 @@ internal sealed class SloSeeder<TContext> : IHostedService
             // every other kind, so they match there as before.
             if (!SloValidation.IsMetricKind(seed.Kind))
             {
-                var exists = await context.Set<SloDefinition>().AnyAsync(
-                    x => x.Kind == seed.Kind && x.Dimension == seed.Dimension && x.Application == seed.Application && x.Percentile == seed.Percentile,
-                    ct);
-                if (exists)
+                if (stored.Exists(x => x.Kind == seed.Kind
+                    && string.Equals(x.Dimension, seed.Dimension, StringComparison.Ordinal)
+                    && string.Equals(x.Application, seed.Application, StringComparison.Ordinal)
+                    && x.Percentile == seed.Percentile))
                 {
                     continue;
                 }
             }
-            else if (await MetricSeedPresentAsync(context, seed, ct))
+            else if (MetricSeedPresent(stored, seed))
             {
                 continue;
             }
@@ -413,6 +438,7 @@ internal sealed class SloSeeder<TContext> : IHostedService
             seed.CreatedAt = now;
             seed.UpdatedAt = now;
             context.Set<SloDefinition>().Add(seed);
+            stored.Add(seed);
             added++;
         }
 
@@ -429,30 +455,30 @@ internal sealed class SloSeeder<TContext> : IHostedService
         return added;
     }
 
-    private async Task<bool> MetricSeedPresentAsync(DbContext context, SloDefinition seed, CancellationToken ct)
+    // Fields match ordinally (an instrument, filter or tag is data, case and all); the name case-insensitively, the
+    // comparer SloOptions rejects a repeated name with.
+    private bool MetricSeedPresent(List<SloDefinition> stored, SloDefinition seed)
     {
         var matchesTarget = seed.Kind is SloKind.MetricLatency or SloKind.MetricGaugeThreshold;
         var targetTolerance = Math.Abs(seed.TargetValue) * 1e-9;
-        var targetFrom = seed.TargetValue - targetTolerance;
-        var targetTo = seed.TargetValue + targetTolerance;
-        var sameFields = await context.Set<SloDefinition>().AnyAsync(
-            x => x.Kind == seed.Kind && x.Application == seed.Application
-                && x.Dimension == seed.Dimension && x.Percentile == seed.Percentile
-                && x.TagFilter == seed.TagFilter && x.SecondaryMetric == seed.SecondaryMetric && x.RatioTag == seed.RatioTag
-                && x.Comparison == seed.Comparison && x.GaugeAggregate == seed.GaugeAggregate
-                && (!matchesTarget || (x.TargetValue >= targetFrom && x.TargetValue <= targetTo)),
-            ct);
+        var candidates = stored
+            .Where(x => x.Kind == seed.Kind)
+            .Where(x => string.Equals(x.Application, seed.Application, StringComparison.Ordinal))
+            .ToList();
+        var sameFields = candidates.Exists(x => string.Equals(x.Dimension, seed.Dimension, StringComparison.Ordinal)
+            && x.Percentile == seed.Percentile
+            && string.Equals(x.TagFilter, seed.TagFilter, StringComparison.Ordinal)
+            && string.Equals(x.SecondaryMetric, seed.SecondaryMetric, StringComparison.Ordinal)
+            && string.Equals(x.RatioTag, seed.RatioTag, StringComparison.Ordinal)
+            && x.Comparison == seed.Comparison
+            && x.GaugeAggregate == seed.GaugeAggregate
+            && (!matchesTarget || Math.Abs(x.TargetValue - seed.TargetValue) <= targetTolerance));
         if (sameFields)
         {
             return true;
         }
 
-        var named = await context.Set<SloDefinition>()
-            .AsNoTracking()
-            .Where(x => x.Kind == seed.Kind)
-            .Where(x => x.Application == seed.Application)
-            .Where(x => x.Name == seed.Name)
-            .FirstOrDefaultAsync(ct);
+        var named = candidates.Find(x => string.Equals(x.Name, seed.Name, StringComparison.OrdinalIgnoreCase));
         if (named is null)
         {
             return false;

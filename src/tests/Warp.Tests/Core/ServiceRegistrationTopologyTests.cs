@@ -5,8 +5,10 @@ using Moq;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Data.Queries;
+using Warp.Core.Enums;
 using Warp.Core.Metrics;
 using Warp.Core.Services;
+using Warp.Core.Slo;
 using Warp.Worker;
 using Warp.Worker.Services;
 
@@ -272,6 +274,51 @@ public class ServiceRegistrationTopologyTests
             .OfType<MetricBoardOptions>()
             .ShouldHaveSingleItem();
         options.Seeded.Select(x => x.Name).ShouldBe(["A", "B"]);
+    }
+
+    [TimedFact]
+    public void AddSlo_CalledTwice_RegistersOneSeederAndOneMergedSetOfObjectives()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddSlo(y => y.AddObjective(SloKind.SuccessRate, "SendEmail", 0.99));
+            x.AddSlo();
+            x.AddSlo(y => y.AddMetricThreshold("5xx", "http.server.request.duration", 0));
+        });
+
+        services.Count(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(SloSeeder<TestContext>)).ShouldBe(1);
+        services.Count(x => x.ServiceType == typeof(ISloMarker)).ShouldBe(1);
+        var options = services
+            .Where(x => x.ServiceType == typeof(SloOptions))
+            .Select(x => x.ImplementationInstance)
+            .OfType<SloOptions>()
+            .ShouldHaveSingleItem();
+        options.Seeded.Select(x => x.Name).ShouldBe(["SuccessRate SendEmail", "5xx"]);
+    }
+
+    [TimedFact]
+    public void AddSlo_DuplicateMetricNameAcrossTwoCalls_Throws()
+    {
+        // The duplicate-name check spans the merged set: a repeat in a second AddSlo would otherwise seed only one.
+        var services = NewServices();
+
+        Should.Throw<ArgumentException>(() => services.AddWarp<TestContext>(x =>
+        {
+            x.AddSlo(y => y.AddMetricThreshold("5xx", "http.server.request.duration", 0));
+            x.AddSlo(y => y.AddMetricThreshold("5XX", "http.server.duration", 0));
+        }));
+    }
+
+    [TimedFact]
+    public void AddSlo_NoObjectives_RegistersTheMarkerButNoSeeder()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x => x.AddSlo());
+
+        services.Count(x => x.ServiceType == typeof(ISloMarker)).ShouldBe(1);
+        services.ShouldNotContain(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(SloSeeder<TestContext>));
+        services.ShouldNotContain(x => x.ServiceType == typeof(SloOptions));
     }
 
     [TimedFact]

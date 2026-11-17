@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
@@ -221,7 +222,7 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
     [InlineData("5xx", "API")]
     public void AddMetric_NameOrApplicationDifferingOnlyByCase_Throws(string name, string? application)
     {
-        // The seeder matches names in SQL: on SQL Server's case-insensitive collation these would be one objective.
+        // The seeder matches names case-insensitively (in memory, on every provider): these would be one objective.
         var options = new SloOptions().AddMetricThreshold("5xx", "a", 0, application: application is null ? null : "api");
 
         Should.Throw<ArgumentException>(() => options.AddMetricThreshold(name, "b", 0, application: application));
@@ -294,10 +295,66 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         var id = await Command().Upsert(Objective("X", SloKind.SuccessRate, "SendEmail", 0.99), Ct);
         (await Command().Delete(id, Ct)).ShouldBeTrue();
 
-        var status = await PostObjectiveAsync(new { id, name = "Y", kind = (int)SloKind.SuccessRate, dimension = "SendEmail", targetValue = 0.99, windowSeconds = 3600, enabled = true });
+        var (status, body) = await PostObjectiveWithBodyAsync(new { id, name = "Y", kind = (int)SloKind.SuccessRate, dimension = "SendEmail", targetValue = 0.99, windowSeconds = 3600, enabled = true });
 
         status.ShouldBe(HttpStatusCode.NotFound);
+        using var json = JsonDocument.Parse(body);
+        json.RootElement.GetProperty("error").GetString().ShouldBe("The SLO objective no longer exists: it was deleted while you edited it.");
         (await _fixture.CreateContext().Set<SloDefinition>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Upsert_NegativeId_InsertsUnderAStoreGeneratedKey()
+    {
+        var id = await Command().Upsert(new SloDefinition { Id = -5, Name = "X", Kind = SloKind.SuccessRate, Dimension = "SendEmail", TargetValue = 0.99, WindowSeconds = 3600, Enabled = true }, Ct);
+
+        id.ShouldBeGreaterThan(0);
+        var row = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct);
+        row.Id.ShouldBe(id);
+    }
+
+    [TimedFact]
+    public async Task PostSlo_NegativeId_InsertsUnderAStoreGeneratedKey()
+    {
+        // A negative id is an insert, never the caller's key (SQL Server would refuse an explicit identity value: a 500).
+        var (status, body) = await PostObjectiveWithBodyAsync(new { id = -3, name = "X", kind = (int)SloKind.SuccessRate, dimension = "SendEmail", targetValue = 0.99, windowSeconds = 3600, enabled = true });
+
+        status.ShouldBe(HttpStatusCode.OK);
+        using var json = JsonDocument.Parse(body);
+        var id = json.RootElement.GetProperty("id").GetInt32();
+        id.ShouldBeGreaterThan(0);
+        (await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct)).Id.ShouldBe(id);
+    }
+
+    [TimedFact]
+    public async Task Seeder_StoredMetricObjectiveNamedWithOtherCase_IsMatchedByNameOnEveryProvider()
+    {
+        // The name matches case-insensitively in memory, so the result no longer depends on the collation: on PostgreSQL
+        // the SQL match missed "server errors" and seeded a second objective, on SQL Server it matched.
+        await SeedRowsAsync(new SloDefinition { Name = "server errors", Kind = SloKind.MetricThreshold, Dimension = "http", TagFilter = "status=4*", TargetValue = 0, WindowSeconds = 3600, Enabled = true });
+
+        await SeedFromConfigAsync(o => o.AddMetricThreshold("Server Errors", "http", 0, tagFilter: "status=5*"));
+
+        var row = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct);
+        row.Name.ShouldBe("server errors");
+        row.TagFilter.ShouldBe("status=4*");
+    }
+
+    [TimedFact]
+    public async Task Seeder_FieldsDifferingOnlyByCase_AreAnotherObjectiveOnEveryProvider()
+    {
+        // Fields match ordinally: a filter or a job type is data, case and all. SQL Server's case-insensitive collation
+        // used to read these as the stored objectives and skip both seeds.
+        await SeedRowsAsync(
+            new SloDefinition { Name = "Upper", Kind = SloKind.MetricThreshold, Dimension = "http", TagFilter = "STATUS=5*", TargetValue = 0, WindowSeconds = 3600, Enabled = true },
+            new SloDefinition { Name = "SuccessRate sendemail", Kind = SloKind.SuccessRate, Dimension = "sendemail", TargetValue = 0.99, WindowSeconds = 3600, Enabled = true });
+
+        await SeedFromConfigAsync(o => o
+            .AddMetricThreshold("Lower", "http", 0, tagFilter: "status=5*")
+            .AddObjective(SloKind.SuccessRate, "SendEmail", 0.99));
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().ToListAsync(Ct);
+        rows.Select(x => x.Name).OrderBy(x => x, StringComparer.Ordinal).ShouldBe(["Lower", "SuccessRate SendEmail", "SuccessRate sendemail", "Upper"]);
     }
 
     [TimedFact]
@@ -646,7 +703,22 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         await seeder.StartAsync(Ct);
     }
 
-    private async Task<HttpStatusCode> PostObjectiveAsync(object body)
+    private async Task<HttpStatusCode> PostObjectiveAsync(object body) => (await PostObjectiveWithBodyAsync(body)).Status;
+
+    private async Task SeedRowsAsync(params SloDefinition[] rows)
+    {
+        var ctx = _fixture.CreateContext();
+        foreach (var row in rows)
+        {
+            row.CreatedAt = DateTime.UtcNow;
+            row.UpdatedAt = DateTime.UtcNow;
+        }
+
+        ctx.Set<SloDefinition>().AddRange(rows);
+        await ctx.SaveChangesAsync(Ct);
+    }
+
+    private async Task<(HttpStatusCode Status, string Body)> PostObjectiveWithBodyAsync(object body)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -661,9 +733,10 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         using var client = app.GetTestClient();
 
         var response = await client.PostAsJsonAsync("/warp/api/slo", body, Ct);
+        var content = await response.Content.ReadAsStringAsync(Ct);
         await app.StopAsync(CancellationToken.None);
 
-        return response.StatusCode;
+        return (response.StatusCode, content);
     }
 
     private static object MetricRequest(SloKind kind, string instrument, double target, string? ratioTag = null, string? goodValues = null, string? badValues = null, int? baselineDays = null, string? tagFilter = null, string? secondaryMetric = null, int? percentile = null, SloComparison? comparison = null, SloGaugeAggregate? gaugeAggregate = null)
