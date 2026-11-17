@@ -410,9 +410,11 @@ curl -fsS -H "Authorization: Bearer $WARP_CI_TOKEN" --get \
 Poll while `verdict` is `pending`, fail the job on `fail`. The verdict judges only complete 5-minute buckets
 that start after the deploy; the bucket the deploy fell into is never counted. A deploy stays `pending` until
 `minWindowMinutes` of that clean data exists and is complete, which adds the bucket close plus about 30 s
-(`MetricFlushInterval`). With `minWindowMinutes=10` the verdict settles about 10.5 to 15.5 minutes after the
-deploy, depending on where in its bucket the deploy fell (about 5 to 10.5 minutes at the default of 5);
-`window.settlesAt` says when. `minCoverage=0.5` turns a `pass` that rests on fewer than half of the checks
+(`MetricFlushInterval`). With `minWindowMinutes=10` the verdict settles 10.5 minutes after a deploy that
+lands exactly on a bucket boundary and up to just under 15.5 minutes after one that lands later in a bucket
+(5.5 to just under 10.5 minutes at the default of 5). A value that is not a multiple of 5 rounds up to whole
+buckets, so 7 waits for 10 minutes of clean data. `window.settlesAt` says when, and `window.to` is the
+board's complete-data cut, not "now". `minCoverage=0.5` turns a `pass` that rests on fewer than half of the checks
 into `noData`, so a quiet first window (no checkouts yet) does not read as healthy; the `summary` line starts
 with the count, e.g. `pass (3 of 6 checks had data): 3 healthy, 3 no data`.
 The full script is in
