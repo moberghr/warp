@@ -287,7 +287,8 @@ internal static class DeployVerdictMath
         DeployVerdictWindow window,
         IReadOnlyList<MetricBoardTileResult> tiles,
         IReadOnlyList<SloObjectiveModel> slos,
-        double minCoverage = 0)
+        double minCoverage = 0,
+        string? board = null)
     {
         ArgumentNullException.ThrowIfNull(resolved);
         ArgumentNullException.ThrowIfNull(window);
@@ -319,6 +320,7 @@ internal static class DeployVerdictMath
             Summary = Summary(verdict, states, window, minCoverage),
             ChecksWithData = WithData(states),
             ChecksTotal = states.Count,
+            Board = board,
             Deploy = new DeployVerdictDeploy
             {
                 Application = deploy.Application,

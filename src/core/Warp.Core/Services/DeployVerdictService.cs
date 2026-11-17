@@ -86,7 +86,7 @@ public sealed class DeployVerdictService : IDeployVerdictService
             ? (await _slos.GetObjectives(ct)).Items
             : [];
 
-        return DeployVerdictMath.Build(resolved, window, tiles, slos, query.MinCoverage);
+        return DeployVerdictMath.Build(resolved, window, tiles, slos, query.MinCoverage, board?.Name);
     }
 
     private async Task<MetricBoardSummaryModel> FindBoardAsync(string name, CancellationToken ct)

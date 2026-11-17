@@ -154,6 +154,7 @@ A **superseded** deploy keeps the settled-over-its-lifetime rule: its window can
   "summary": "warn (4 of 4 checks had data): 1 warning, 1 acknowledged, 2 healthy",
   "checksWithData": 4,
   "checksTotal": 4,
+  "board": null,
   "deploy": { "application": "orders-api", "version": "2.3.1", "environment": "production",
               "firstSeenAt": "2026-11-16T11:40:00Z", "instanceName": "orders-api-4b2d",
               "previousVersion": "2.3.0", "supersededBy": null },
@@ -188,7 +189,7 @@ A **superseded** deploy keeps the settled-over-its-lifetime rule: its window can
 
 The reason uses the SLO page's wording and gives the budget left as a whole percentage. Before this release a metric latency or gauge threshold check reported the threshold in `target` against a share in `value` (`observed 0.9917 vs target 600`); `target` is now the required share and the threshold moved to the new `threshold` field, which is `null` for every other check. The reason text is for people, not for parsing.
 
-**Which board.** Without `board`, the verdict reads the tiles of every board, exactly as it did when there was only one board: moving a tile from the Default board to a named one never drops it from an existing CI check. Pass `board=Checkout` to gate a release on the Checkout board alone (a team's own checks); the SLOs are not on any board and still count. The board is named, not numbered, because a CI script knows the name.
+**Which board.** Without `board`, the verdict reads the tiles of every board, exactly as it did when there was only one board: moving a tile from the Default board to a named one never drops it from an existing CI check. Pass `board=Checkout` to gate a release on the Checkout board alone (a team's own checks); the SLOs are not on any board and still count. The board is named, not numbered, because a CI script knows the name. The response's `board` field says which board was used: the board's stored name (`board=checkout` answers `"board": "Checkout"`), or `null` when the tiles of every board counted.
 
 **Cost.** One deploy read, one batched [board read](./custom-metrics.md#health-board) (two grouped statements at most, whatever the tile or board count), one SLO read, and with `board` one read of the board list. Nothing is read per tile or per objective. `IDeployVerdictService` is registered by `AddWarp`, so a dashboard-only host serves the route. The application detail page shows the verdict of the latest deploy above the **Deploys** card.
 

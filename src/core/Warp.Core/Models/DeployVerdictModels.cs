@@ -46,6 +46,12 @@ public sealed class DeployVerdictModel
     /// <summary>The number of <see cref="Checks"/>.</summary>
     public int ChecksTotal { get; init; }
 
+    /// <summary>
+    /// The board whose tiles were judged, as stored (the <c>board</c> parameter matches it ignoring case), or null when the
+    /// tiles of every board counted.
+    /// </summary>
+    public string? Board { get; init; }
+
     public DeployVerdictDeploy Deploy { get; init; } = new();
 
     public DeployVerdictWindow Window { get; init; } = new();

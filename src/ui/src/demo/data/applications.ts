@@ -550,6 +550,7 @@ export function demoDeployVerdict(
     summary: summary(verdict, states, settlesAtIso, window.emptySuperseded),
     checksWithData: states.filter((x) => x !== 'noData').length,
     checksTotal: states.length,
+    board: named?.name ?? null,
     deploy: {
       application: deploy.application,
       version: deploy.version,

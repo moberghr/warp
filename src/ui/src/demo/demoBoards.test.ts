@@ -55,6 +55,8 @@ describe('demo named boards', () => {
 
     expect(every).not.toBeNull();
     expect(payments).not.toBeNull();
+    expect(every!.board).toBeNull();
+    expect(payments!.board).toBe('Payments');
     const paymentTiles = payments!.checks.filter((x) => x.source === 'tile');
     expect(paymentTiles.length).toBeGreaterThan(0);
     expect(paymentTiles.every((x) => tileNames.has(x.name))).toBe(true);

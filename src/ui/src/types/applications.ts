@@ -120,6 +120,8 @@ export interface DeployVerdictModel {
   checksWithData: number;
   /** The number of `checks`. */
   checksTotal: number;
+  /** The board whose tiles were judged (its stored name), or null when every board's tiles counted. */
+  board: string | null;
   deploy: {
     application: string;
     version: string;

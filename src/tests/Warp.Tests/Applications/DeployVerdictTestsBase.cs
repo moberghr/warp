@@ -326,14 +326,15 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
 
         verdict.ShouldNotBeNull();
         verdict.Verdict.ShouldBe(DeployVerdicts.Fail);
+        verdict.Board.ShouldBeNull();
         verdict.Checks.Select(x => (x.Name, x.State)).ShouldBe([("Default errors", "healthy"), ("Checkout errors", "breaching")], ignoreOrder: true);
     }
 
     [TimedTheory]
-    [InlineData("Checkout", DeployVerdicts.Fail, "Checkout errors")]
-    [InlineData("checkout", DeployVerdicts.Fail, "Checkout errors")]
-    [InlineData("Default", DeployVerdicts.Pass, "Default errors")]
-    public async Task GetVerdict_WithBoard_CountsOnlyThatBoardsTilesAndKeepsTheSlos(string board, string expected, string tile)
+    [InlineData("Checkout", DeployVerdicts.Fail, "Checkout errors", "Checkout")]
+    [InlineData("checkout", DeployVerdicts.Fail, "Checkout errors", "Checkout")]
+    [InlineData("Default", DeployVerdicts.Pass, "Default errors", "Default")]
+    public async Task GetVerdict_WithBoard_CountsOnlyThatBoardsTilesAndKeepsTheSlos(string board, string expected, string tile, string resolved)
     {
         await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
         await SeedMetricsAsync(Point(Now.AddMinutes(-30), 20));
@@ -347,6 +348,7 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
 
         verdict.ShouldNotBeNull();
         verdict.Verdict.ShouldBe(expected);
+        verdict.Board.ShouldBe(resolved);
         verdict.Checks.Select(x => (x.Source, x.Name)).ShouldBe([(DeployVerdictSources.Tile, tile), (DeployVerdictSources.Slo, "Api success")]);
     }
 
@@ -387,6 +389,7 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         response.StatusCode.ShouldBe(HttpStatusCode.OK);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
         json.RootElement.GetProperty("verdict").GetString().ShouldBe("pass");
+        json.RootElement.GetProperty("board").GetString().ShouldBe("Checkout");
         json.RootElement.GetProperty("checks").EnumerateArray().ShouldHaveSingleItem().GetProperty("name").GetString().ShouldBe("Checkout errors");
     }
 
@@ -473,6 +476,7 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         json.RootElement.GetProperty("deploy").GetProperty("version").GetString().ShouldBe("2.0.0");
         json.RootElement.GetProperty("window").GetProperty("minWindowSeconds").GetInt32().ShouldBe(600);
         json.RootElement.GetProperty("checksWithData").GetInt32().ShouldBe(1);
+        json.RootElement.GetProperty("board").ValueKind.ShouldBe(JsonValueKind.Null);
         json.RootElement.GetProperty("checksTotal").GetInt32().ShouldBe(1);
         json.RootElement.GetProperty("summary").GetString().ShouldBe("fail (1 of 1 checks had data): 1 breaching");
         var check = json.RootElement.GetProperty("checks").EnumerateArray().ShouldHaveSingleItem();
