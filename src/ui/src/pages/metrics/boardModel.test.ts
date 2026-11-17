@@ -217,6 +217,13 @@ describe('tile editor', () => {
     deviationDirection: MetricDeviationDirection.Either,
     ...patch,
   });
+  const ratioBound = {
+    kind: ratioTile.kind,
+    ratioTag: ratioTile.ratioTag,
+    goodValues: ratioTile.goodValues,
+    badValues: ratioTile.badValues,
+    comparison: SloComparison.AtLeast,
+  };
   const threshold = (value: number | null): MetricBoardTile => ({
     ...valueTile,
     statusRule: MetricTileStatusRule.Threshold,
@@ -244,6 +251,12 @@ describe('tile editor', () => {
     ['a threshold that is not finite', threshold(Number.NaN), null, 'The threshold must be a number.'],
     ['a threshold of zero', threshold(0), null, null],
     ['a negative threshold', threshold(-5), null, null],
+    // MetricBoardValidation: a ratio tile's threshold is a 0–1 share, the bounds themselves allowed.
+    ['a ratio threshold above 100%', { ...threshold(1.5), ...ratioBound }, null, 'A ratio threshold is a percentage between 0% and 100%.'],
+    ['a negative ratio threshold', { ...threshold(-0.01), ...ratioBound }, null, 'A ratio threshold is a percentage between 0% and 100%.'],
+    ['a ratio threshold of 0%', { ...threshold(0), ...ratioBound }, null, null],
+    ['a ratio threshold of 100%', { ...threshold(1), ...ratioBound }, null, null],
+    ['a ratio threshold of 99.5%', { ...threshold(0.995), ...ratioBound }, null, null],
     ['a baseline of 3 days', deviation({ baselineDays: 3 }), null, 'Compare with the same window 1 or 7 days earlier.'],
     ['no baseline', deviation({ baselineDays: null }), null, 'Compare with the same window 1 or 7 days earlier.'],
     ['a 1-day baseline', deviation({ baselineDays: 1 }), null, null],

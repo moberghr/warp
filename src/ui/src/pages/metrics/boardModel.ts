@@ -290,6 +290,10 @@ export function validateTileDraft(draft: MetricBoardTile, instrumentKind: Metric
   if (draft.statusRule === MetricTileStatusRule.Threshold && (draft.threshold === null || !Number.isFinite(draft.threshold))) {
     return 'The threshold must be a number.';
   }
+  // A ratio reads a 0–1 share (entered as a percentage): a bound outside it could never be met, or never be missed.
+  if (draft.statusRule === MetricTileStatusRule.Threshold && isRatio(draft) && (draft.threshold! < 0 || draft.threshold! > 1)) {
+    return 'A ratio threshold is a percentage between 0% and 100%.';
+  }
 
   if (draft.statusRule === MetricTileStatusRule.Deviation) {
     const max = draft.maxDeviation;
