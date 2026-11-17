@@ -435,10 +435,15 @@ internal sealed class SloSeeder<TContext> : IHostedService
                 continue;
             }
 
+            // Not added to `stored`: a seed matches only rows that were in the database when the pass began (other
+            // replicas' commits, earlier boots, dashboard edits), never a seed inserted earlier in this pass. Two config
+            // objectives sharing a match key on purpose (QueueWaitLatency tiers on one queue that differ by target, a
+            // 1 h and a 24 h SuccessRate on one job type) are both inserted on a fresh database, as before the match moved
+            // into memory. The target and window stay out of the non-metric key: those kinds have no name fallback, so
+            // a dashboard edit of either would make every restart insert a duplicate.
             seed.CreatedAt = now;
             seed.UpdatedAt = now;
             context.Set<SloDefinition>().Add(seed);
-            stored.Add(seed);
             added++;
         }
 

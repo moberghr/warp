@@ -173,6 +173,26 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
         rows[1].TagFilter.ShouldBe("http.response.status_code=5*");
     }
 
+    [TimedFact]
+    public async Task Seeder_TwoConfigObjectivesSharingAMatchKey_BothInsertOnAFreshDatabase_AndReseedIsIdempotent()
+    {
+        // The match key leaves out target and window, so these pairs share one; within one pass each seed is matched
+        // only against the rows already stored, so both of each pair insert.
+        static void Configure(SloOptions o) => o
+            .AddObjective(SloKind.QueueWaitLatency, "default", 5, percentile: 95, name: "queue wait warn")
+            .AddObjective(SloKind.QueueWaitLatency, "default", 30, percentile: 95, name: "queue wait page")
+            .AddObjective(SloKind.SuccessRate, "SendEmail", 0.99, windowSeconds: 3600, name: "send 1h")
+            .AddObjective(SloKind.SuccessRate, "SendEmail", 0.995, windowSeconds: 86400, name: "send 24h");
+
+        await SeedFromConfigAsync(Configure);
+        await SeedFromConfigAsync(Configure);
+
+        var rows = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().OrderBy(x => x.Name).ToListAsync(Ct);
+        rows.Select(x => x.Name).ShouldBe(["queue wait page", "queue wait warn", "send 1h", "send 24h"]);
+        rows.Select(x => x.TargetValue).ShouldBe([30, 5, 0.99, 0.995]);
+        rows.Select(x => x.WindowSeconds).ShouldBe([3600, 3600, 3600, 86400]);
+    }
+
     [TimedTheory]
     [InlineData(nameof(SloDefinition.TagFilter))]
     [InlineData(nameof(SloDefinition.SecondaryMetric))]
