@@ -102,6 +102,23 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
         return existing.Id;
     }
 
+    public async Task<bool> Delete(int id, CancellationToken ct)
+    {
+        var tile = await _context.Set<MetricBoardTile>()
+            .Where(x => x.Id == id)
+            .FirstOrDefaultAsync(ct);
+        if (tile is null)
+        {
+            return false;
+        }
+
+        _context.Set<MetricBoardTile>().Remove(tile);
+        await _context.SaveChangesAsync(ct);
+        _logger.LogInformation("Metric board tile {Id} deleted", id);
+
+        return true;
+    }
+
     private static async Task<int?> InsertAsync(DbContext context, MetricBoardTile tile, DateTime now, CancellationToken ct)
     {
         if (await context.Set<MetricBoardTile>().CountAsync(ct) >= MetricBoardValidation.MaxTiles)
@@ -122,22 +139,5 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
         await context.SaveChangesAsync(ct);
 
         return tile.Id;
-    }
-
-    public async Task<bool> Delete(int id, CancellationToken ct)
-    {
-        var tile = await _context.Set<MetricBoardTile>()
-            .Where(x => x.Id == id)
-            .FirstOrDefaultAsync(ct);
-        if (tile is null)
-        {
-            return false;
-        }
-
-        _context.Set<MetricBoardTile>().Remove(tile);
-        await _context.SaveChangesAsync(ct);
-        _logger.LogInformation("Metric board tile {Id} deleted", id);
-
-        return true;
     }
 }
