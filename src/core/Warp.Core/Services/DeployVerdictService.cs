@@ -18,8 +18,9 @@ public interface IDeployVerdictService
     /// scoped the same way contribute their current state. Bounded: one deploy read, one batched board read and one SLO read
     /// (none for a superseded deploy), whatever the number of tiles and objectives. Returns null when the application has no
     /// recorded deploy matching the version and environment. With <see cref="DeployVerdictQuery.Board"/> only that board's
-    /// tiles count (one more read, the board list); without it the tiles of every board do. Throws
-    /// <see cref="MetricBoardNotFoundException"/> when the named board does not exist.
+    /// tiles count (one more read, the board list); without it the tiles of every board do. The board is matched by its
+    /// current name ignoring case; when no board has that name, <c>Default</c> (ignoring case) is the Default board, renamed
+    /// or not. Throws <see cref="MetricBoardNotFoundException"/> when the named board does not exist.
     /// </summary>
     Task<DeployVerdictModel?> GetVerdict(DeployVerdictQuery query, CancellationToken ct);
 }
@@ -89,11 +90,14 @@ public sealed class DeployVerdictService : IDeployVerdictService
         return DeployVerdictMath.Build(resolved, window, tiles, slos, query.MinCoverage, board?.Name);
     }
 
+    // A board's current name first; then `Default` (ignoring case) is the Default board whatever it is called now, the
+    // seeder's rule for AddMetricBoard("Default", …), so a CI step pinned to board=Default survives a dashboard rename.
     private async Task<MetricBoardSummaryModel> FindBoardAsync(string name, CancellationToken ct)
     {
         var boards = await _board.GetBoards(ct);
 
         return boards.FirstOrDefault(x => MetricBoardStore.SameName(x.Name, name))
+            ?? (MetricBoardStore.SameName(name, MetricBoardValidation.DefaultBoardName) ? boards.FirstOrDefault(x => x.IsDefault) : null)
             ?? throw new MetricBoardNotFoundException($"No metric board is named '{name}'.");
     }
 

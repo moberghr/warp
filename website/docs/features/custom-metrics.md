@@ -331,7 +331,7 @@ Seeding stays insert-if-absent. A board created by a seed remembers the name the
 
 **API.** `GET {prefix}/api/metrics/boards` lists the boards in picker order with their tile counts (`id`, `name`, `description`, `position`, `application`, `isDefault`, `tileCount`, `createdBy`). `POST {prefix}/api/metrics/boards` creates (`id: 0`) or renames a board (`name`, `description`, `position`, `application`, which is only the scope the picker suggests and never filters tiles); a blank or duplicate name is a 400, editing a deleted board a 404. `DELETE {prefix}/api/metrics/boards/{id}` deletes a board and its tiles in one `SaveChanges` (204; 400 for the Default board; 404 when it does not exist). Every `{ "error": ... }` body is for people. The creator is the signed-in dashboard user, and every create, rename and delete is logged at Information with that name.
 
-The [post-deploy verdict](./applications.md#post-deploy-verdict) counts the tiles of every board unless you pass `board=<name>`.
+The [post-deploy verdict](./applications.md#post-deploy-verdict) counts the tiles of every board unless you pass `board=<name>`. As in the seeder, the name `Default` means the Default board even after a rename, unless another board is now called `Default`.
 
 ## Annotations
 

@@ -352,6 +352,49 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         verdict.Checks.Select(x => (x.Source, x.Name)).ShouldBe([(DeployVerdictSources.Tile, tile), (DeployVerdictSources.Slo, "Api success")]);
     }
 
+    [TimedTheory]
+    [InlineData("Default")]
+    [InlineData("default")]
+    public async Task GetVerdict_BoardDefaultAfterTheDefaultBoardWasRenamed_IsStillTheDefaultBoard(string board)
+    {
+        // The seeder maps the name Default to the IsDefault board whatever it is called now; the verdict does the same
+        // when no board currently has that name.
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 20));
+        await SeedAsync(new MetricBoard { Name = "Platform", IsDefault = true, CreatedAt = Now, UpdatedAt = Now });
+        var checkout = await SeedBoardAsync("Checkout");
+        await SeedTilesAsync(
+            Tile("Default errors", threshold: 100),
+            Tile("Checkout errors", threshold: 10, boardId: checkout));
+
+        var verdict = await Service().GetVerdict(Query("api", board: board), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+        verdict.Board.ShouldBe("Platform");
+        verdict.Checks.ShouldHaveSingleItem().Name.ShouldBe("Default errors");
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_BoardDefaultWhileAnotherBoardIsNamedDefault_IsThatBoard()
+    {
+        // A current name wins: the fallback to the Default board only applies when no board is called Default.
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 20));
+        await SeedAsync(new MetricBoard { Name = "Platform", IsDefault = true, CreatedAt = Now, UpdatedAt = Now });
+        var named = await SeedBoardAsync("Default");
+        await SeedTilesAsync(
+            Tile("Platform errors", threshold: 100),
+            Tile("Named errors", threshold: 10, boardId: named));
+
+        var verdict = await Service().GetVerdict(Query("api", board: "default"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Fail);
+        verdict.Board.ShouldBe("Default");
+        verdict.Checks.ShouldHaveSingleItem().Name.ShouldBe("Named errors");
+    }
+
     [TimedFact]
     public async Task GetVerdict_UnknownBoard_Throws()
     {
