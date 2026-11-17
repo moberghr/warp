@@ -57,6 +57,10 @@ public sealed class SavedViewCommandService<TContext> : ISavedViewCommandService
     /// <summary>How long a write waits for the saved-view lock before it gives up with a <see cref="TimeoutException"/>.</summary>
     internal TimeSpan LockTimeout { get; init; } = TransactionLock.CommandTimeout;
 
+    // Test seam: runs inside the lock after an insert or edit passed its checks (the caps, the author) and before it saves,
+    // so a race test can pin one write there (N=2 BarrierSignal) and prove a second cannot count until the first commits.
+    internal Func<CancellationToken, Task>? BeforeSave { get; init; }
+
     public async Task<SavedViewWriteResult> Upsert(SavedView view, string actor, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(view);
@@ -126,7 +130,7 @@ public sealed class SavedViewCommandService<TContext> : ISavedViewCommandService
         return (SavedViewDeleteStatus.Deleted, view.Page);
     }
 
-    private static async Task<SavedViewWriteResult> InsertAsync(DbContext context, SavedView view, string user, DateTime now, CancellationToken ct)
+    private async Task<SavedViewWriteResult> InsertAsync(DbContext context, SavedView view, string user, DateTime now, CancellationToken ct)
     {
         if (await CountByAuthorAsync(context, user, ct) >= SavedViewValidation.MaxViewsPerAuthor)
         {
@@ -150,13 +154,14 @@ public sealed class SavedViewCommandService<TContext> : ISavedViewCommandService
             CreatedAt = now,
             UpdatedAt = now,
         };
+        await PauseBeforeSaveAsync(ct);
         context.Set<SavedView>().Add(created);
         await context.SaveChangesAsync(ct);
 
         return new SavedViewWriteResult { Status = SavedViewWriteStatus.Saved, Id = created.Id };
     }
 
-    private static async Task<SavedViewWriteResult> UpdateAsync(DbContext context, SavedView view, string user, DateTime now, CancellationToken ct)
+    private async Task<SavedViewWriteResult> UpdateAsync(DbContext context, SavedView view, string user, DateTime now, CancellationToken ct)
     {
         var existing = await context.Set<SavedView>()
             .Where(x => x.Id == view.Id)
@@ -185,10 +190,13 @@ public sealed class SavedViewCommandService<TContext> : ISavedViewCommandService
         existing.Query = view.Query;
         existing.Shared = view.Shared;
         existing.UpdatedAt = now;
+        await PauseBeforeSaveAsync(ct);
         await context.SaveChangesAsync(ct);
 
         return new SavedViewWriteResult { Status = SavedViewWriteStatus.Saved, Id = existing.Id };
     }
+
+    private Task PauseBeforeSaveAsync(CancellationToken ct) => BeforeSave?.Invoke(ct) ?? Task.CompletedTask;
 
     // Ordinal, in memory: a case-insensitive collation must not make "alice" the author of "Alice"'s views.
     private static bool IsAuthor(SavedView view, string user) => string.Equals(view.Author, user, StringComparison.Ordinal);

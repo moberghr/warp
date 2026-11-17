@@ -192,6 +192,33 @@ public abstract class SavedViewTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Upsert_TwoInsertsAtOnceOneBelowTheAuthorCap_OnlyOnePassesTheCap()
+    {
+        // N=2: the first insert is pinned inside the saved-view lock after its cap check, before it saves (BarrierSignal).
+        // The second must not get to count until the first commits; without the lock both count 199 and both insert.
+        await SeedManyAsync("alice", shared: false, SavedViewValidation.MaxViewsPerAuthor - 1);
+        var barrier = new BarrierSignal();
+
+        async Task Pin(CancellationToken ct)
+        {
+            barrier.Running.Release();
+            await barrier.CanFinish.WaitAsync(ct);
+        }
+
+        var first = Command(beforeSave: Pin).Upsert(View("First"), "alice", Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        var second = Command(beforeSave: Pin).Upsert(View("Second"), "alice", Ct);
+
+        // The second insert is held at the lock, so it cannot reach the pin while the first is inside.
+        (await barrier.Running.WaitAsync(TimeSpan.FromMilliseconds(500), Ct)).ShouldBeFalse();
+        barrier.CanFinish.Release(2);
+        var results = await Task.WhenAll(first, second);
+
+        results.Select(x => x.Status).ShouldBe([SavedViewWriteStatus.Saved, SavedViewWriteStatus.AuthorFull]);
+        (await _fixture.CreateContext().Set<SavedView>().CountAsync(Ct)).ShouldBe(SavedViewValidation.MaxViewsPerAuthor);
+    }
+
+    [TimedFact]
     public async Task Delete_PersonalView_OnlyByItsAuthor()
     {
         var id = await SeedViewAsync("Mine", "alice", shared: false);
@@ -272,6 +299,29 @@ public abstract class SavedViewTestsBase : IAsyncLifetime
         }
 
         (await _fixture.CreateContext().Set<SavedView>().CountAsync(Ct)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task PostRoute_LockHeldPastTheTimeout_ReturnsServiceUnavailableWithAnError()
+    {
+        await using var host = await CreateDashboardHostAsync(TimeSpan.FromMilliseconds(300));
+        var barrier = new BarrierSignal();
+        var holder = HoldTheLockAsync(barrier);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        HttpResponseMessage response;
+        try
+        {
+            response = await PostAsync(host, "alice", new { id = 0, name = "Mine", page = "issues", query = string.Empty, shared = false });
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+            await holder;
+        }
+
+        response.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+        (await ErrorAsync(response)).ShouldNotBeNullOrEmpty();
+        (await _fixture.CreateContext().Set<SavedView>().AnyAsync(Ct)).ShouldBeFalse();
     }
 
     [TimedFact]
@@ -530,7 +580,7 @@ public abstract class SavedViewTestsBase : IAsyncLifetime
 
     private SavedViewQueryService<TestContext> Query() => new(_fixture.CreateContext());
 
-    private SavedViewCommandService<TestContext> Command(CapturingLoggerProvider? logs = null, TimeSpan? lockTimeout = null)
+    private SavedViewCommandService<TestContext> Command(CapturingLoggerProvider? logs = null, TimeSpan? lockTimeout = null, Func<CancellationToken, Task>? beforeSave = null)
     {
         var context = _fixture.CreateContext();
         var logger = logs is null
@@ -540,6 +590,7 @@ public abstract class SavedViewTestsBase : IAsyncLifetime
         return new SavedViewCommandService<TestContext>(context, new FakeTimeProvider(new DateTimeOffset(Now)), logger, TestTasks.QueriesFor(context))
         {
             LockTimeout = lockTimeout ?? TransactionLock.CommandTimeout,
+            BeforeSave = beforeSave,
         };
     }
 
