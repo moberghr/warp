@@ -21,8 +21,8 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 `AddOrUpdateRecurringJob` acquires a distributed lock on the job name and calls `SaveChanges` internally. You do **not** need to call `SaveChanges` after this method. The lock prevents race conditions when multiple app instances register the same recurring job concurrently.
 :::
 
-:::note[`Attempted to release a lock that was not held`]
-`AddOrUpdateRecurringJob` takes a session-scoped advisory lock on the job name. Releasing a lock never throws: if the release fails, Warp logs a Warning with that message and registration still succeeds. A repeated Warning usually means the connection is behind a pooler in transaction mode, where the lock gives no mutual exclusion at all — see [Connection Pooling](/docs/operations/connection-pooling).
+:::note[`Failed to release Warp distributed lock`]
+`AddOrUpdateRecurringJob` takes a session-scoped advisory lock on the job name (`warp:recurring:{name}`). Releasing a lock never throws: if the release fails, Warp logs a Warning, `Failed to release Warp distributed lock 'warp:recurring:{name}'. The guarded work already completed, so this is not propagated. …`, with the inner exception attached (`Attempted to release a lock that was not held` when the lock session was lost), and registration still succeeds. A repeated Warning usually means the connection is behind a pooler in transaction mode, where the lock gives no mutual exclusion at all — see [Connection Pooling](/docs/operations/connection-pooling).
 :::
 
 ## How It Works
