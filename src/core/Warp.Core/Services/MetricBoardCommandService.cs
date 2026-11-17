@@ -15,7 +15,8 @@ public interface IMetricBoardCommandService
     /// Insert (Id &lt;= 0, the store assigns the key) or update a tile; returns its id, null when the tile's board already
     /// holds <see cref="MetricBoardValidation.MaxTiles"/> tiles (an insert, or an edit that moves the tile there), or 0 when
     /// Id &gt; 0 names no tile or <see cref="MetricBoardTile.BoardId"/> names no board (deleted meanwhile: an edit never
-    /// re-creates either). A null board id, or the Default board's id, puts the tile on the Default board (stored as null).
+    /// re-creates either). On an insert a null board id, or the Default board's id, puts the tile on the Default board
+    /// (stored as null). On an edit a null board id keeps the tile on its board; the Default board's id moves it there.
     /// An insert with Position 0 is appended after the last tile of its board. Throws <see cref="TimeoutException"/> when
     /// the write cannot take the board lock in time (the dashboard route answers 503).
     /// </summary>
@@ -177,8 +178,11 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
             return 0;
         }
 
-        // The target board must exist; the Default board's tiles are stored with no board id, its one representation.
-        var boardId = tile.BoardId > 0 ? tile.BoardId : null;
+        // An edit that names no board keeps the tile where it is (an omitted boardId is not a move to Default: the dashboard
+        // sends the Default board's real id for that); on an insert no board means the Default board. The target board
+        // must exist; the Default board's tiles are stored with no board id, its one representation.
+        var requested = existing is not null && tile.BoardId is null ? existing.BoardId : tile.BoardId;
+        var boardId = requested > 0 ? requested : null;
         if (boardId is not null)
         {
             var target = await context.Set<MetricBoard>()

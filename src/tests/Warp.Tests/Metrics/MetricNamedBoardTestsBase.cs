@@ -311,6 +311,37 @@ public abstract class MetricNamedBoardTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Upsert_EditWithoutABoardOfATileOnANamedBoard_KeepsItOnItsBoard()
+    {
+        // An omitted boardId on an edit is not a move: the tile stays on Checkout (it once fell back to Default).
+        var checkout = await CreateBoardAsync("Checkout");
+        var id = await Command().Upsert(Tile("Volume", "c", boardId: checkout), Ct);
+        var edit = Tile("Checkout volume", "c");
+        edit.Id = id!.Value;
+
+        (await Command().Upsert(edit, Ct)).ShouldBe(id.Value);
+
+        var stored = await _fixture.CreateContext().Set<MetricBoardTile>().SingleAsync(Ct);
+        stored.Name.ShouldBe("Checkout volume");
+        stored.BoardId.ShouldBe(checkout);
+    }
+
+    [TimedFact]
+    public async Task Upsert_EditWithTheDefaultBoardsId_MovesTheTileToDefault()
+    {
+        var defaultId = await Command().EnsureDefaultBoard(Ct);
+        var checkout = await CreateBoardAsync("Checkout");
+        var id = await Command().Upsert(Tile("Volume", "c", boardId: checkout), Ct);
+        var move = Tile("Volume", "c", boardId: defaultId);
+        move.Id = id!.Value;
+
+        (await Command().Upsert(move, Ct)).ShouldBe(id.Value);
+
+        (await _fixture.CreateContext().Set<MetricBoardTile>().SingleAsync(Ct)).BoardId.ShouldBeNull();
+        (await Query().GetBoards(Ct)).Select(x => (x.Name, x.TileCount)).ShouldBe([("Default", 1), ("Checkout", 0)]);
+    }
+
+    [TimedFact]
     public async Task Upsert_TileOnTheDefaultBoardsId_IsStoredWithoutABoard()
     {
         var defaultId = await Command().EnsureDefaultBoard(Ct);
