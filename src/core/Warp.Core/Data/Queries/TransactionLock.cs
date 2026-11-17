@@ -14,6 +14,9 @@ internal static class TransactionLock
     /// <summary>The lock the board seeder and the dashboard's tile insert share (the tile cap).</summary>
     public const string MetricBoardKey = "warp:metric-board";
 
+    /// <summary>The lock saved-view writes share (the per-author and shared caps).</summary>
+    public const string SavedViewKey = "warp:saved-view";
+
     /// <summary>The lock the SLO seeders of every replica share.</summary>
     public const string SloSeedKey = "warp:slo-seed";
 

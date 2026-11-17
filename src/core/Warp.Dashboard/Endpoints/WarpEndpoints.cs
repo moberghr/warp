@@ -15,6 +15,7 @@ using Warp.Core.Enums;
 using Warp.Core.Models;
 using Warp.Core.RateLimit;
 using Warp.Core.Sagas;
+using Warp.Core.SavedViews;
 using Warp.Core.Services;
 using Warp.Core.Webhooks;
 using Warp.Dashboard.Extensions;
@@ -1012,6 +1013,62 @@ public static class WarpEndpoints
             return deleted ? Results.NoContent() : Results.NotFound();
         });
 
+        // Saved views (§8.34): a page + its URL query under a name, personal or shared. The services are registered by
+        // AddWarp (dashboard-only hosts resolve them). The acting user is always the principal (DashboardUser), never a
+        // body field: it decides what a read lists, who may edit or delete a personal view, and the author of a new one.
+        apiGroup.MapGet("views", async ([FromServices] ISavedViewQueryService svc, HttpRequest request, HttpContext http, CancellationToken ct) =>
+        {
+            var page = NonBlank(request.Query["page"]);
+            if (page is not null && !SavedViewValidation.IsPage(page))
+            {
+                return Results.BadRequest(new { error = $"page must be one of: {string.Join(", ", SavedViewValidation.Pages)}." });
+            }
+
+            var user = DashboardUser.Name(http);
+
+            return Results.Ok(new SavedViewListModel { User = user, Views = await svc.GetViews(user, page, NonBlank(request.Query["target"]), ct) });
+        });
+
+        apiGroup.MapPost("views", async ([FromServices] ISavedViewCommandService svc, [FromBody] SavedViewUpsertRequest body, HttpContext http, CancellationToken ct) =>
+        {
+            var view = body.ToView();
+            if (!SavedViewValidation.TryValidate(view, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            SavedViewWriteResult result;
+            try
+            {
+                result = await svc.Upsert(view, DashboardUser.Name(http), ct);
+            }
+            catch (TimeoutException)
+            {
+                return Results.Json(new { error = "Another saved view was being written; try again." }, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            return result.Status switch
+            {
+                SavedViewWriteStatus.Saved => Results.Ok(new { id = result.Id }),
+                SavedViewWriteStatus.NotFound => Results.NotFound(new { error = "The saved view no longer exists: it was deleted while you edited it." }),
+                SavedViewWriteStatus.Forbidden => Results.Json(new { error = "Only the author of a saved view can edit it while it is personal, or change whether it is shared." }, statusCode: StatusCodes.Status403Forbidden),
+                SavedViewWriteStatus.AuthorFull => Results.BadRequest(new { error = $"You already have {SavedViewValidation.MaxViewsPerAuthor} saved views; delete one first." }),
+                _ => Results.BadRequest(new { error = $"At most {SavedViewValidation.MaxSharedViews} shared views can exist; delete one or save this one as personal." }),
+            };
+        });
+
+        apiGroup.MapDelete("views/{id:int}", async ([FromServices] ISavedViewCommandService svc, int id, HttpContext http, CancellationToken ct) =>
+        {
+            var status = await svc.Delete(id, DashboardUser.Name(http), ct);
+
+            return status switch
+            {
+                SavedViewDeleteStatus.Deleted => Results.NoContent(),
+                SavedViewDeleteStatus.Forbidden => Results.Json(new { error = "Only the author of a personal saved view can delete it." }, statusCode: StatusCodes.Status403Forbidden),
+                _ => Results.NotFound(new { error = "The saved view no longer exists." }),
+            };
+        });
+
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
         // registered by AddWarp (dashboard-only processes resolve them), so these data routes are
         // non-nullable; the sidebar nav is gated on the addons flag (IWebhookRedeliveryEnqueuer presence),
@@ -1291,6 +1348,9 @@ public static class WarpEndpoints
         => Results.Json(
             new { error = "The metric board is busy with another change; try again." },
             statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    // A query parameter, trimmed; absent or blank = null.
+    private static string? NonBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     // ?board= on the board read: absent or blank = the Default board, else a positive board id.
     private static bool TryParseBoardId(IQueryCollection query, out int? boardId)
@@ -1685,6 +1745,20 @@ public sealed record MetricAnnotationUpsertRequest(
         StartsAt = StartsAt,
         EndsAt = EndsAt,
         AcknowledgedNoise = AcknowledgedNoise,
+    };
+}
+
+public sealed record SavedViewUpsertRequest(int Id, string Name, string Page, string? Target = null, string? Query = null, bool Shared = false)
+{
+    // No author: it is the authenticated dashboard user, taken from the request by the route (DashboardUser).
+    public Warp.Core.Data.Entities.SavedView ToView() => new()
+    {
+        Id = Id,
+        Name = Name ?? string.Empty,
+        Page = Page ?? string.Empty,
+        Target = Target,
+        Query = Query ?? string.Empty,
+        Shared = Shared,
     };
 }
 
