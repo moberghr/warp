@@ -78,8 +78,10 @@ replica: it takes a lock on the name and updates the existing row.
 - **Then** no second job is created yet. The firing waits and runs once the running import has finished.
 
 Pitfall: `AddOrUpdateRecurringJob` takes a session-scoped lock. Behind a pooler in transaction mode the
-lock gives no mutual exclusion, and its release logs a Warning (`Attempted to release a lock that was not
-held`) instead of throwing; see [Connection Pooling](/docs/operations/connection-pooling).
+lock gives no mutual exclusion, and its release logs a Warning instead of throwing:
+`Failed to release Warp distributed lock 'warp:recurring:{name}'…`, with the inner exception
+`Attempted to release a lock that was not held` attached. See
+[Connection Pooling](/docs/operations/connection-pooling).
 
 Covered by: `RecurringJobTestsBase`, `RecurringJobEdgeCaseTestsBase`, `RecurringFinalStateTestsBase`,
 `RecurringJobBugTestsBase`.
@@ -260,10 +262,11 @@ builder.Services.AddWarpServer<ShopDbContext>(opt =>
 - **Given** both services run with the wiring above, and no orders have come in for two minutes.
 - **When** you place an order on `shop-web`.
 - **Then** on the `OrderPlaced` message's detail page (`/warp/messages/detail/{id}`), the `Routed` entry
-  follows the `Created` entry by well under a second. On the payment job's detail page
-  (`/warp/jobs/detail/{id}`), `Processing` follows `Created` just as quickly.
+  follows the message's creation time (**Created** in the **Details** card; hover it for the exact time) by
+  well under a second. A message's history has no `Created` entry of its own. On the payment job's detail
+  page (`/warp/jobs/detail/{id}`), `Processing` follows `Created` just as quickly.
 - **When** you remove `UseDatabasePush()` from both services, wait two minutes, and place another order.
-- **Then** the gap between the message's `Created` and `Routed` entries grows to up to the
+- **Then** the gap between the message's creation time and its `Routed` entry grows to up to the
   `MessageRoutingInterval` (10 s). The payment job itself is still picked up quickly once it exists,
   because the router wakes the local workers. So the `queues` family on `/warp/counters` shows no jump:
   queue wait starts when the job is created, after routing.
@@ -276,8 +279,9 @@ Pitfalls:
 - A pooler in transaction mode drops `LISTEN` silently and falls back to polling. SQL Server without
   `ENABLE_BROKER` also falls back to polling, but logs an Error (`Service Broker setup failed`).
 - Push does not speed up scheduled jobs. They wait for `ScheduledJobActivation` (default every 10s).
-- `Created` is the log entry for a job published directly or created by the router. Only a job activated
-  from `Scheduled` logs `Enqueued`.
+- `Created` is the log entry for a job published directly or created by the router; a message has none.
+  `Enqueued` means the job went back to the queue: a scheduled job was activated, or a worker requeued it
+  for immediate pickup (a retry or wait with no delay; a delayed one logs `Scheduled`).
 
 Covered by: `PostgresDatabasePushIntegrationTests`, `SqlServerDatabasePushIntegrationTests`,
 `UseDatabasePushValidationTests`, `NonServerListenerPushTestsBase`, `ListenerReconnectDrainTestsBase`,
@@ -290,7 +294,8 @@ Covered by: `PostgresDatabasePushIntegrationTests`, `SqlServerDatabasePushIntegr
 The ops team keeps the Warp dashboard open on a wall screen during sales. With polling, every open tab
 refetches the statistics on its own. With dashboard push, `shop-api` sends SignalR events to every open
 tab when jobs finish or messages arrive, and the counts and charts update within about a second. The events
-are coalesced: at most one every second, however many jobs finished in between.
+are coalesced: at most one of each kind (`JobFinalized`, `MessageEnqueued`) every second, however many jobs
+finished in between.
 
 ### Wiring
 
@@ -316,9 +321,11 @@ app.MapWarpDashboard();       // the hub is mapped at /warp/api/hub with the sam
   a refresh.
 - **When** you remove `UseDatabasePush()` from `shop-api` and repeat.
 - **Then** the pill still shows **Live**. New `OrderPlaced` messages still update at once, because
-  `shop-api` published them and `publisher.SaveChangesAsync` signals its own process. Finished jobs show
-  only on the 30-second safety-net poll, because those events happen in `shop-worker` and never reach
-  `shop-api`.
+  `shop-api` published them and `publisher.SaveChangesAsync` signals its own process. Finished jobs reach
+  the navbar counts and the charts only with the next pushed event (the next order's `MessageEnqueued`
+  carries fresh counts) or on a reload, because those events happen in `shop-worker` and never reach
+  `shop-api`. While the hub is connected the statistics poll is off; it runs every second only while the
+  hub is disconnected.
 
 Pitfall: without DB push, dashboard push only sees events from its own process. In this shop that
 means the messages `shop-api` publishes itself, and no job finishes, since `shop-api` runs no worker.
