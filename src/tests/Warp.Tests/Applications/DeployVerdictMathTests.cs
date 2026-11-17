@@ -377,6 +377,85 @@ public class DeployVerdictMathTests
         check.Reason.ShouldBe("Not evaluated yet.");
     }
 
+    // Value and target are on one scale per kind (a share against a share for latency and gauge objectives, whose threshold
+    // moves to Threshold and the reason), and the reason reads like the SLO page.
+    [TimedTheory]
+    [InlineData(SloKind.SuccessRate, 0.9912, 0.995, null, null, null, null, -0.76, 0.995, null, "Breaching: observed 99.12% vs target 99.50%, budget remaining -76%.")]
+    [InlineData(SloKind.DeadlineAttainment, 0.999, 0.99, null, null, null, null, 0.9, 0.99, null, "Healthy: observed 99.90% vs target 99.00%, budget remaining 90%.")]
+    [InlineData(SloKind.MetricRatio, 0.98, 0.95, null, null, null, null, 0.6, 0.95, null, "Healthy: observed 98.00% vs target 95.00%, budget remaining 60%.")]
+    [InlineData(SloKind.MetricRatio, 0.012, 0.05, null, null, null, 7, 0.76, 0.05, null, "Healthy: observed a drop of 1.20 pts vs target a drop of at most 5.00 pts from the 7-day baseline, budget remaining 76%.")]
+    [InlineData(SloKind.MetricVolumeFloor, 0.83, 0.5, null, null, null, 7, 0.66, 0.5, null, "Healthy: observed 83.00% of baseline vs target ≥ 50.00% of baseline, budget remaining 66%.")]
+    [InlineData(SloKind.QueueWaitLatency, 120.0, 200.0, 95, null, null, null, 0.4, 200.0, null, "Healthy: observed 120 ms vs target 200 ms, budget remaining 40%.")]
+    [InlineData(SloKind.ExecutionLatency, 2500.4, 2000.0, 95, null, null, null, -0.25, 2000.0, null, "Breaching: observed 2500 ms vs target 2000 ms, budget remaining -25%.")]
+    [InlineData(SloKind.BacklogDepth, 12.0, 100.0, null, null, null, null, 0.88, 100.0, null, "Healthy: observed 12 vs target 100, budget remaining 88%.")]
+    [InlineData(SloKind.MetricThreshold, 3.0, 0.0, null, null, null, null, -3.0, 0.0, null, "Breaching: observed 3 vs target 0, budget remaining -300%.")]
+    [InlineData(SloKind.MetricGap, -2.0, 5.0, null, null, null, null, 1.4, 5.0, null, "Healthy: observed -2 vs target 5, budget remaining 140%.")]
+    [InlineData(SloKind.MetricLatency, 0.9874, 2.0, 95, null, null, null, 0.748, 0.95, 2.0, "Healthy: observed 98.74% ≤ 2 vs target p95 ≤ 2, budget remaining 75%.")]
+    [InlineData(SloKind.MetricLatency, 0.9, 0.25, 99, null, null, null, -9.0, 0.99, 0.25, "Breaching: observed 90.00% ≤ 0.25 vs target p99 ≤ 0.25, budget remaining -900%.")]
+    [InlineData(SloKind.MetricGaugeThreshold, 0.9917, 600.0, 95, SloComparison.AtMost, SloGaugeAggregate.Max, null, 0.834, 0.95, 600.0, "Healthy: observed 99.17% compliant vs target max ≤ 600 in 95%, budget remaining 83%.")]
+    [InlineData(SloKind.MetricGaugeThreshold, 0.8, 10.0, 90, SloComparison.AtLeast, SloGaugeAggregate.Average, null, -1.0, 0.9, 10.0, "Breaching: observed 80.00% compliant vs target avg ≥ 10 in 90%, budget remaining -100%.")]
+    [InlineData(SloKind.MetricGaugeThreshold, 1.0, 0.5, null, null, SloGaugeAggregate.Min, null, 1.0, 0.95, 0.5, "Healthy: observed 100.00% compliant vs target min ≤ 0.5 in 95%, budget remaining 100%.")]
+    public void SloCheck_EveryKind_ReportsValueTargetAndReasonOnOneScale(
+        SloKind kind,
+        double attainment,
+        double targetValue,
+        int? percentile,
+        SloComparison? comparison,
+        SloGaugeAggregate? aggregate,
+        int? baselineDays,
+        double budget,
+        double expectedTarget,
+        double? expectedThreshold,
+        string expectedReason)
+    {
+        var state = budget < 0 ? SloState.Breaching : SloState.Healthy;
+        var slo = new SloObjectiveModel
+        {
+            Id = 1,
+            Name = "Objective",
+            Kind = kind,
+            TargetValue = targetValue,
+            Percentile = percentile,
+            Comparison = comparison,
+            GaugeAggregate = aggregate,
+            BaselineDays = baselineDays,
+            WindowSeconds = 3600,
+            Enabled = true,
+            Evaluated = true,
+            Attainment = attainment,
+            BudgetRemaining = budget,
+            State = state,
+            LastEvaluatedAt = Now,
+        };
+
+        var (check, _) = DeployVerdictMath.SloCheck(slo, Now.AddHours(-1));
+
+        check.Value.ShouldBe(attainment);
+        check.Target.ShouldBe(expectedTarget);
+        check.Threshold.ShouldBe(expectedThreshold);
+        check.Reason.ShouldBe(expectedReason);
+    }
+
+    [TimedFact]
+    public void SloCheck_NeverEvaluatedGauge_StillReportsTheRequiredShareAndThreshold()
+    {
+        var slo = new SloObjectiveModel
+        {
+            Name = "Heap",
+            Kind = SloKind.MetricGaugeThreshold,
+            TargetValue = 600,
+            Percentile = 95,
+            Enabled = true,
+        };
+
+        var (check, state) = DeployVerdictMath.SloCheck(slo, Now.AddHours(-1));
+
+        state.ShouldBe(SloState.NoData);
+        check.Value.ShouldBeNull();
+        check.Target.ShouldBe(0.95);
+        check.Threshold.ShouldBe(600);
+    }
+
     [TimedFact]
     public void SloCheck_Acknowledged_IsMarked()
     {

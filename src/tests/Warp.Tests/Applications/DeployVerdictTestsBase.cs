@@ -311,6 +311,61 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         ]);
     }
 
+    [TimedFact]
+    public async Task GetVerdict_GaugeAndLatencySlos_ReportTheShareAgainstTheRequiredShareWithTheThresholdInTheReason()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedAsync(new SloDefinition
+        {
+            Name = "Heap",
+            Kind = SloKind.MetricGaugeThreshold,
+            Dimension = "process.heap",
+            TargetValue = 600,
+            Percentile = 95,
+            Comparison = SloComparison.AtMost,
+            GaugeAggregate = SloGaugeAggregate.Max,
+            WindowSeconds = 3600,
+        });
+        await SeedAsync(new SloDefinition
+        {
+            Name = "Latency",
+            Kind = SloKind.MetricLatency,
+            Dimension = "http.duration",
+            TargetValue = 2,
+            Percentile = 95,
+            WindowSeconds = 3600,
+        });
+        var definitions = await _fixture.CreateContext().Set<SloDefinition>()
+            .AsNoTracking()
+            .ToListAsync(Ct);
+        foreach (var definition in definitions)
+        {
+            await SeedAsync(new SloEvaluation
+            {
+                SloDefinitionId = definition.Id,
+                Attainment = string.Equals(definition.Name, "Heap", StringComparison.Ordinal) ? 0.9917 : 0.9874,
+                BudgetRemaining = string.Equals(definition.Name, "Heap", StringComparison.Ordinal) ? 0.834 : 0.748,
+                State = SloState.Healthy,
+                LastEvaluatedAt = Now,
+            });
+        }
+
+        var verdict = await Service().GetVerdict(Query("api"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+        var heap = verdict.Checks.Single(x => string.Equals(x.Name, "Heap", StringComparison.Ordinal));
+        heap.Value.ShouldBe(0.9917);
+        heap.Target.ShouldBe(0.95);
+        heap.Threshold.ShouldBe(600);
+        heap.Reason.ShouldBe("Healthy: observed 99.17% compliant vs target max ≤ 600 in 95%, budget remaining 83%.");
+        var latency = verdict.Checks.Single(x => string.Equals(x.Name, "Latency", StringComparison.Ordinal));
+        latency.Value.ShouldBe(0.9874);
+        latency.Target.ShouldBe(0.95);
+        latency.Threshold.ShouldBe(2);
+        latency.Reason.ShouldBe("Healthy: observed 98.74% ≤ 2 vs target p95 ≤ 2, budget remaining 75%.");
+    }
+
     [TimedTheory]
     [InlineData("nope", null)]
     [InlineData("api", "9.9.9")]

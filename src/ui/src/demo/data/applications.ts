@@ -14,6 +14,7 @@ import { IDS } from '@/demo/data';
 import { ApplicationInstanceEventType } from '@/types/applications';
 import { MetricDeviationDirection, MetricTileStatusRule, type MetricBoardTileResult } from '@/types/metricBoard';
 import { SloComparison, SloState, type SloObjective } from '@/types/slo';
+import { checkTarget, checkThreshold, formatBudget, formatObserved, formatTarget } from '@/pages/slo/sloDisplay';
 import { demoMetricBoard } from './metricBoard';
 import { demoSlos } from './slo';
 import type {
@@ -411,6 +412,7 @@ function tileCheck(result: MetricBoardTileResult): DeployVerdictCheck | null {
     value: result.current,
     baseline,
     target: deviation ? tile.maxDeviation : tile.threshold,
+    threshold: null,
     budgetRemaining: null,
     reason: state === 'acknowledged'
       ? `Acknowledged noise (would be ${phrase(unacknowledged)}): ${detail}.`
@@ -426,7 +428,7 @@ function sloCheck(slo: SloObjective, windowStart: number): DeployVerdictCheck {
     ? 'Not evaluated yet.'
     : stale
       ? `Last evaluated at ${slo.lastEvaluatedAt}, before the deploy's first complete bucket (${new Date(windowStart).toISOString()}).`
-      : `${capitalized(phrase(state))}: observed ${num(slo.attainment)} vs target ${num(slo.targetValue)}, budget remaining ${num(slo.budgetRemaining)}.`;
+      : `${capitalized(phrase(state))}: observed ${formatObserved(slo)} vs target ${formatTarget(slo)}, budget remaining ${formatBudget(slo.budgetRemaining)}.`;
 
   return {
     source: 'slo',
@@ -438,7 +440,8 @@ function sloCheck(slo: SloObjective, windowStart: number): DeployVerdictCheck {
     acknowledged: state === 'acknowledged',
     value: hasValue ? slo.attainment : null,
     baseline: null,
-    target: slo.targetValue,
+    target: checkTarget(slo),
+    threshold: checkThreshold(slo),
     budgetRemaining: hasValue ? slo.budgetRemaining : null,
     reason,
   };

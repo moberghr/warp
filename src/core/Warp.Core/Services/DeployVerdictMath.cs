@@ -13,6 +13,8 @@ internal static class DeployVerdictMath
 {
     private const double CoverageTolerance = 1e-9;
 
+    private const int DefaultPercentile = 95;
+
     /// <summary>The deploy, its predecessor and its successor in the same environment.</summary>
     internal sealed record ResolvedDeploy(ApplicationDeployModel Deploy, ApplicationDeployModel? Previous, ApplicationDeployModel? Next);
 
@@ -141,6 +143,57 @@ internal static class DeployVerdictMath
     }
 
     /// <summary>
+    /// The numeric target an SLO check reports, on the same scale as its value (the attainment). For most kinds that is the
+    /// objective's target value; a metric latency or gauge threshold objective's attainment is a SHARE (of events within the
+    /// threshold, of observed time compliant), so its target is the required share, <c>percentile / 100</c>, and the
+    /// threshold travels in <see cref="DeployVerdictCheck.Threshold"/> and the reason.
+    /// </summary>
+    public static double SloTarget(SloObjectiveModel slo)
+    {
+        ArgumentNullException.ThrowIfNull(slo);
+
+        return SharesWithinThreshold(slo.Kind) ? (slo.Percentile ?? DefaultPercentile) / 100.0 : slo.TargetValue;
+    }
+
+    /// <summary>
+    /// The observed side of an SLO reason, worded like the SLO page (<c>sloDisplay.formatObserved</c>): a percentage for the
+    /// rate kinds, a share of the baseline volume, a count, milliseconds, a ratio drop in points, or a share within the
+    /// threshold.
+    /// </summary>
+    public static string SloObserved(SloObjectiveModel slo)
+    {
+        ArgumentNullException.ThrowIfNull(slo);
+
+        return slo.Kind switch
+        {
+            SloKind.MetricGaugeThreshold => $"{Percent(slo.Attainment)} compliant",
+            SloKind.MetricLatency => $"{Percent(slo.Attainment)} ≤ {Plain(slo.TargetValue)}",
+            SloKind.MetricRatio when slo.BaselineDays is not null => $"a drop of {Points(slo.Attainment)}",
+            SloKind.MetricVolumeFloor => $"{Percent(slo.Attainment)} of baseline",
+            _ => ObjectiveValue(slo.Kind, slo.Attainment),
+        };
+    }
+
+    /// <summary>The target side of an SLO reason, worded like the SLO page (<c>sloDisplay.formatTarget</c>).</summary>
+    public static string SloTargetText(SloObjectiveModel slo)
+    {
+        ArgumentNullException.ThrowIfNull(slo);
+
+        var percentile = (slo.Percentile ?? DefaultPercentile).ToString(CultureInfo.InvariantCulture);
+
+        return slo.Kind switch
+        {
+            SloKind.MetricGaugeThreshold
+                => $"{GaugeAggregate(slo.GaugeAggregate)} {(slo.Comparison == SloComparison.AtLeast ? "≥" : "≤")} {Plain(slo.TargetValue)} in {percentile}%",
+            SloKind.MetricLatency => $"p{percentile} ≤ {Plain(slo.TargetValue)}",
+            SloKind.MetricRatio when slo.BaselineDays is { } days
+                => $"a drop of at most {Points(slo.TargetValue)} from the {days.ToString(CultureInfo.InvariantCulture)}-day baseline",
+            SloKind.MetricVolumeFloor => $"≥ {Percent(slo.TargetValue)} of baseline",
+            _ => ObjectiveValue(slo.Kind, slo.TargetValue),
+        };
+    }
+
+    /// <summary>
     /// An SLO as a check, from its latest evaluation. An objective never evaluated, or last evaluated before the verdict
     /// window starts (<paramref name="windowStart"/>: the deploy's first complete bucket), has no data about this release yet.
     /// </summary>
@@ -171,7 +224,8 @@ internal static class DeployVerdictMath
             State = Token(state),
             Acknowledged = state == SloState.Acknowledged,
             Value = evaluated ? Finite(slo.Attainment) : null,
-            Target = Finite(slo.TargetValue),
+            Target = Finite(SloTarget(slo)),
+            Threshold = SharesWithinThreshold(slo.Kind) ? Finite(slo.TargetValue) : null,
             BudgetRemaining = evaluated ? Finite(slo.BudgetRemaining) : null,
             Reason = reason,
         };
@@ -343,7 +397,7 @@ internal static class DeployVerdictMath
 
     private static string SloReason(SloObjectiveModel slo)
     {
-        var detail = $"observed {Number(slo.Attainment)} vs target {Number(slo.TargetValue)}, budget remaining {Number(slo.BudgetRemaining)}";
+        var detail = $"observed {SloObserved(slo)} vs target {SloTargetText(slo)}, budget remaining {Budget(slo.BudgetRemaining)}";
 
         return slo.State == SloState.Acknowledged && slo.AcknowledgedUntil is { } until
             ? $"Acknowledged until {Instant(until)}: {detail}."
@@ -378,6 +432,40 @@ internal static class DeployVerdictMath
         MetricDeviationDirection.Rise => "rise",
         _ => "change",
     };
+
+    // The kinds whose attainment is the share of events (latency) or observed time (gauge) on the right side of a threshold.
+    private static bool SharesWithinThreshold(SloKind kind) => kind is SloKind.MetricLatency or SloKind.MetricGaugeThreshold;
+
+    // sloDisplay.formatObjectiveValue: rate kinds as a percentage, count kinds rounded, the job latency kinds in ms.
+    private static string ObjectiveValue(SloKind kind, double value) => kind switch
+    {
+        SloKind.SuccessRate or SloKind.DeadlineAttainment or SloKind.MetricRatio or SloKind.MetricVolumeFloor => Percent(value),
+        SloKind.MetricThreshold or SloKind.MetricGap or SloKind.BacklogDepth => Rounded(value),
+        _ => $"{Rounded(value)} ms",
+    };
+
+    private static string GaugeAggregate(SloGaugeAggregate? aggregate) => aggregate switch
+    {
+        SloGaugeAggregate.Min => "min",
+        SloGaugeAggregate.Max => "max",
+        _ => "avg",
+    };
+
+    private static string Percent(double fraction)
+        => double.IsFinite(fraction) ? $"{(fraction * 100).ToString("F2", CultureInfo.InvariantCulture)}%" : "n/a";
+
+    private static string Points(double fraction)
+        => double.IsFinite(fraction) ? $"{(fraction * 100).ToString("F2", CultureInfo.InvariantCulture)} pts" : "n/a";
+
+    private static string Plain(double value) => double.IsFinite(value) ? value.ToString("G7", CultureInfo.InvariantCulture) : "n/a";
+
+    // Math.round in the UI: halves round up (towards +∞), not to even.
+    private static string Rounded(double value)
+        => double.IsFinite(value) ? Math.Floor(value + 0.5).ToString("0", CultureInfo.InvariantCulture) : "n/a";
+
+    // sloDisplay.formatBudget: the share of the error budget left, as a whole percentage (negative once overspent).
+    private static string Budget(double value)
+        => double.IsFinite(value) ? $"{Math.Floor((value * 100) + 0.5).ToString("0", CultureInfo.InvariantCulture)}%" : "n/a";
 
     private static string Capitalized(string text) => string.Concat(text[..1].ToUpperInvariant(), text[1..]);
 

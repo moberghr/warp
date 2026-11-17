@@ -24,6 +24,7 @@ function check(name: string, state: DeployVerdictCheckState, source: 'tile' | 's
     value: null,
     baseline: null,
     target: null,
+    threshold: null,
     budgetRemaining: null,
     reason: '',
   };

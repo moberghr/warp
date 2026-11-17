@@ -142,14 +142,28 @@ public sealed class DeployVerdictCheck
 
     public bool Acknowledged { get; init; }
 
-    /// <summary>The tile's value over the window, or the SLO's observed value (its attainment).</summary>
+    /// <summary>
+    /// The tile's value over the window, or the SLO's observed value (its attainment): a share for the rate kinds and for a
+    /// metric latency (events within the threshold) or gauge threshold (observed time compliant) objective, else the
+    /// observed latency, count, ratio or drop.
+    /// </summary>
     public double? Value { get; init; }
 
     /// <summary>A deviation tile's baseline (the same window 1 or 7 days earlier).</summary>
     public double? Baseline { get; init; }
 
-    /// <summary>A threshold tile's threshold, a deviation tile's allowed deviation, or the SLO's target.</summary>
+    /// <summary>
+    /// A threshold tile's threshold, a deviation tile's allowed deviation, or the SLO's target on the same scale as
+    /// <see cref="Value"/>: for a metric latency or gauge threshold objective that is the required share
+    /// (<c>percentile / 100</c>), and the threshold itself is in <see cref="Threshold"/>.
+    /// </summary>
     public double? Target { get; init; }
+
+    /// <summary>
+    /// A metric latency or gauge threshold SLO only: the threshold (in the instrument's unit) the share in <see cref="Value"/>
+    /// is measured against. Null for every other check.
+    /// </summary>
+    public double? Threshold { get; init; }
 
     /// <summary>SLOs only: the fraction of error budget left (negative when the objective is missed).</summary>
     public double? BudgetRemaining { get; init; }

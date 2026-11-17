@@ -38,6 +38,8 @@ export function showsSloValues(objective: Pick<SloObjective, 'evaluated' | 'stat
   return sloValueDisplay(objective) === 'values';
 }
 
+const DEFAULT_PERCENTILE = 95;
+
 function plain(value: number): string {
   return `${Number(value.toPrecision(7))}`;
 }
@@ -46,19 +48,31 @@ function percent(fraction: number): string {
   return `${(fraction * 100).toFixed(2)}%`;
 }
 
+function points(fraction: number): string {
+  return `${(fraction * 100).toFixed(2)} pts`;
+}
+
 /**
  * The target cell. A metric latency objective shows its percentile and threshold (in the instrument's unit, which the
  * objective does not know, so no unit is printed); every other kind formats its target value.
  */
-export function formatTarget(o: Pick<SloObjective, 'kind' | 'targetValue' | 'percentile' | 'comparison' | 'gaugeAggregate'>): string {
+export function formatTarget(
+  o: Pick<SloObjective, 'kind' | 'targetValue' | 'percentile' | 'comparison' | 'gaugeAggregate' | 'baselineDays'>,
+): string {
   if (o.kind === SloKind.MetricGaugeThreshold) {
     const aggregate = SloGaugeAggregateLabel[o.gaugeAggregate ?? SloGaugeAggregate.Average];
     const sign = o.comparison === SloComparison.AtLeast ? '≥' : '≤';
 
-    return `${aggregate} ${sign} ${plain(o.targetValue)} in ${o.percentile ?? 95}%`;
+    return `${aggregate} ${sign} ${plain(o.targetValue)} in ${o.percentile ?? DEFAULT_PERCENTILE}%`;
   }
   if (o.kind === SloKind.MetricLatency) {
-    return `p${o.percentile ?? 95} ≤ ${plain(o.targetValue)}`;
+    return `p${o.percentile ?? DEFAULT_PERCENTILE} ≤ ${plain(o.targetValue)}`;
+  }
+  if (o.kind === SloKind.MetricRatio && o.baselineDays != null) {
+    return `a drop of at most ${points(o.targetValue)} from the ${o.baselineDays}-day baseline`;
+  }
+  if (o.kind === SloKind.MetricVolumeFloor) {
+    return `≥ ${percent(o.targetValue)} of baseline`;
   }
 
   return formatObjectiveValue(o.kind, o.targetValue);
@@ -68,13 +82,37 @@ export function formatTarget(o: Pick<SloObjective, 'kind' | 'targetValue' | 'per
  * The observed cell. A metric latency objective's attainment is the share of events within the threshold; a gauge
  * threshold's is the compliant share of the window's observed time.
  */
-export function formatObserved(o: Pick<SloObjective, 'kind' | 'targetValue' | 'attainment'>): string {
+export function formatObserved(o: Pick<SloObjective, 'kind' | 'targetValue' | 'attainment' | 'baselineDays'>): string {
   if (o.kind === SloKind.MetricGaugeThreshold) {
     return `${percent(o.attainment)} compliant`;
   }
   if (o.kind === SloKind.MetricLatency) {
     return `${percent(o.attainment)} ≤ ${plain(o.targetValue)}`;
   }
+  if (o.kind === SloKind.MetricRatio && o.baselineDays != null) {
+    return `a drop of ${points(o.attainment)}`;
+  }
+  if (o.kind === SloKind.MetricVolumeFloor) {
+    return `${percent(o.attainment)} of baseline`;
+  }
 
   return formatObjectiveValue(o.kind, o.attainment);
+}
+
+/** True for the kinds whose attainment is a share on the right side of a threshold (events, or observed time). */
+export function sharesWithinThreshold(kind: SloKind): boolean {
+  return kind === SloKind.MetricLatency || kind === SloKind.MetricGaugeThreshold;
+}
+
+/**
+ * The numeric target a verdict check reports, on the attainment's scale (the server's `DeployVerdictMath.SloTarget`):
+ * the required share `percentile / 100` for a metric latency or gauge objective, else the target value.
+ */
+export function checkTarget(o: Pick<SloObjective, 'kind' | 'targetValue' | 'percentile'>): number {
+  return sharesWithinThreshold(o.kind) ? (o.percentile ?? DEFAULT_PERCENTILE) / 100 : o.targetValue;
+}
+
+/** The threshold a verdict check carries beside its share: metric latency and gauge objectives only. */
+export function checkThreshold(o: Pick<SloObjective, 'kind' | 'targetValue'>): number | null {
+  return sharesWithinThreshold(o.kind) ? o.targetValue : null;
 }

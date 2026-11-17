@@ -491,6 +491,16 @@ describe('demo deploy and verdict fixtures', () => {
     expect(slos.some((x) => x.reason.includes("before the deploy's first complete bucket (2026-07-31T09:15:00.000Z)"))).toBe(true);
   });
 
+  it('reports a gauge or latency SLO as a share against the required share, with the threshold in the reason', async () => {
+    const gauge = (await verdictOf('billing-service')).checks.find((x) => x.source === 'slo' && x.name === 'Webhook queue depth ≤ 500')!;
+    const latency = (await verdictOf('orders-api')).checks.find((x) => x.source === 'slo' && x.name === 'Checkout p95 ≤ 0.5 s')!;
+
+    expect(gauge).toMatchObject({ value: 0.917, target: 0.95, threshold: 500 });
+    expect(gauge.reason).toBe('Breaching: observed 91.70% compliant vs target max ≤ 500 in 95%, budget remaining -67%.');
+    expect(latency).toMatchObject({ value: 0.972, target: 0.95, threshold: 0.5 });
+    expect(latency.reason).toBe('Healthy: observed 97.20% ≤ 0.5 vs target p95 ≤ 0.5, budget remaining 44%.');
+  });
+
   it('answers 404 with the server { error } body when no deploy matches', async () => {
     await expect(verdictOf('orders-api', { version: '9.9.9' })).rejects.toMatchObject({
       response: { status: 404, data: { error: expect.stringContaining('No recorded deploy') } },

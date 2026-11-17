@@ -102,9 +102,13 @@ export interface DeployVerdictCheck {
   /** For an acknowledged tile, the state its rule gives. */
   unacknowledgedState: DeployVerdictCheckState | null;
   acknowledged: boolean;
+  /** The tile's value, or the SLO's attainment (a share for rate kinds and metric latency / gauge objectives). */
   value: number | null;
   baseline: number | null;
+  /** On `value`'s scale: for a metric latency or gauge SLO, the required share (`percentile / 100`). */
   target: number | null;
+  /** A metric latency or gauge SLO's threshold (instrument unit); null for every other check. */
+  threshold: number | null;
   budgetRemaining: number | null;
   reason: string;
 }

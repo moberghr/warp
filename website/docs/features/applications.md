@@ -161,13 +161,31 @@ A **superseded** deploy keeps the settled-over-its-lifetime rule: its window can
   "checks": [
     { "source": "tile", "id": 2, "name": "Checkout errors", "application": "orders-api",
       "state": "warning", "unacknowledgedState": null, "acknowledged": false,
-      "value": 412, "baseline": 340, "target": 0.25, "budgetRemaining": null,
-      "reason": "Warning: 412 vs 7-day baseline 340 (max rise 0.25)." }
+      "value": 412, "baseline": 340, "target": 0.25, "threshold": null, "budgetRemaining": null,
+      "reason": "Warning: 412 vs 7-day baseline 340 (max rise 0.25)." },
+    { "source": "slo", "id": 7, "name": "Heap ceiling", "application": "orders-api",
+      "state": "healthy", "unacknowledgedState": null, "acknowledged": false,
+      "value": 0.9917, "baseline": null, "target": 0.95, "threshold": 600, "budgetRemaining": 0.834,
+      "reason": "Healthy: observed 99.17% compliant vs target max ≤ 600 in 95%, budget remaining 83%." }
   ]
 }
 ```
 
-`value` is the tile's value over the window, or the SLO's observed value. `baseline` is a deviation tile's baseline. `target` is a threshold tile's threshold, a deviation tile's allowed deviation, or the SLO's target. A value is `null` when there is nothing to show.
+`value` is the tile's value over the window, or the SLO's observed value (its attainment). `baseline` is a deviation tile's baseline. `target` is a threshold tile's threshold, a deviation tile's allowed deviation, or the SLO's target. A value is `null` when there is nothing to show.
+
+**An SLO's `value` and `target` are always on the same scale**, so a script can compare them:
+
+| SLO kind | `value` | `target` | `threshold` | Reason reads like |
+|---|---|---|---|---|
+| Success rate, deadline attainment, metric ratio | the good share | the required share | `null` | `observed 99.12% vs target 99.50%` |
+| Metric ratio with a baseline | the drop in ratio (0–1) | the largest drop allowed | `null` | `observed a drop of 1.20 pts vs target a drop of at most 5.00 pts from the 7-day baseline` |
+| Metric volume floor | the volume as a share of the baseline | the smallest share allowed | `null` | `observed 83.00% of baseline vs target ≥ 50.00% of baseline` |
+| Queue-wait and execution latency | the observed percentile, ms | the limit, ms | `null` | `observed 120 ms vs target 200 ms` |
+| Backlog depth, metric threshold, metric gap | the observed count | the limit | `null` | `observed 12 vs target 100` |
+| Metric latency | the share of events within the threshold | the required share, `percentile / 100` | the threshold, in the instrument's unit | `observed 98.74% ≤ 2 vs target p95 ≤ 2` |
+| Metric gauge threshold | the share of observed time that complied | the required share, `percentile / 100` | the threshold, in the instrument's unit | `observed 99.17% compliant vs target max ≤ 600 in 95%` |
+
+The reason uses the SLO page's wording and gives the budget left as a whole percentage. Before this release a metric latency or gauge threshold check reported the threshold in `target` against a share in `value` (`observed 0.9917 vs target 600`); `target` is now the required share and the threshold moved to the new `threshold` field, which is `null` for every other check. The reason text is for people, not for parsing.
 
 **Cost.** One deploy read, one batched [board read](./custom-metrics.md#health-board) (two grouped statements at most, whatever the tile count) and one SLO read. Nothing is read per tile or per objective. `IDeployVerdictService` is registered by `AddWarp`, so a dashboard-only host serves the route. The application detail page shows the verdict of the latest deploy above the **Deploys** card.
 
