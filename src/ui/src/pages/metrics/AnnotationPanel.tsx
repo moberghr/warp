@@ -184,7 +184,7 @@ function AnnotationForm({
               <span>
                 Acknowledged noise
                 <span className="block text-xs text-muted-foreground">
-                  Board tiles this note applies to read Acknowledged instead of Warning or Breaching while it is active. The events still count.
+                  Board tiles this note covers (no tag filter, or one the tile's own filter implies) read Acknowledged instead of Warning or Breaching while it is active. A note on only part of a tile is shown there but does not change its verdict. The events still count.
                 </span>
               </span>
             </label>

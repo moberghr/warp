@@ -65,7 +65,8 @@ export interface MetricBoardTileResult {
   weekAgo: number | null;
   /**
    * Null when the tile has no status rule. Acknowledged when the rule says Warning / Breaching but an acknowledged-noise
-   * annotation that applies to the tile is active at the window's end (#333).
+   * annotation that covers the tile (its filter is empty or implied by the tile's, so it is about everything the tile
+   * reads) is active at the window's end (#333). A note that merely overlaps the tile is listed but does not acknowledge.
    */
   status: SloState | null;
   /** The rule's own verdict before acknowledged noise (equal to status unless that is Acknowledged). */

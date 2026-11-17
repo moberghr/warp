@@ -5,6 +5,7 @@
 import { MetricAnnotationTarget } from '@/types/annotations';
 import type { MetricAnnotation, MetricAnnotationList } from '@/types/annotations';
 import type { MetricBoardTile } from '@/types/metricBoard';
+import { filterCovers, filtersOverlap, parseTagFilter } from '@/lib/metricPattern';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -80,10 +81,38 @@ export function demoAnnotationList(params: { instrument?: string; slo?: string |
 }
 
 /**
- * The notes the board attaches to a demo tile over `[from, to)`: same instrument, and filters that do not contradict
- * (a simplified MetricAnnotationMatch: no filter on either side, or the same filter).
+ * An instrument note applies to a tile on the same instrument when some event could match both filters
+ * (MetricAnnotationMatch.AppliesTo): it is then shown on the tile. An unparseable note filter applies to nothing.
  */
+export function demoNoteAppliesTo(note: MetricAnnotation, tile: MetricBoardTile): boolean {
+  if (note.target !== MetricAnnotationTarget.Instrument || note.instrument !== tile.instrument) {
+    return false;
+  }
+
+  const noteFilter = parseTagFilter(note.tagFilter);
+  const tileFilter = parseTagFilter(tile.tagFilter);
+
+  return noteFilter !== null && (tileFilter === null || filtersOverlap(noteFilter, tileFilter));
+}
+
+/**
+ * A note covers a tile when it is about everything the tile reads (MetricAnnotationMatch.Covers): it applies, and its
+ * filter is empty or implied by the tile's. Only a covering acknowledged-noise note may turn the tile Acknowledged; a
+ * note on part of it ("status=503" on a "status=5*" tile) is shown but cannot excuse the rest.
+ */
+export function demoNoteCoversTile(note: MetricAnnotation, tile: MetricBoardTile): boolean {
+  const noteFilter = parseTagFilter(note.tagFilter);
+  if (!demoNoteAppliesTo(note, tile) || noteFilter === null) {
+    return false;
+  }
+
+  const tileFilter = parseTagFilter(tile.tagFilter);
+
+  return noteFilter.size === 0 || (tileFilter !== null && filterCovers(noteFilter, tileFilter));
+}
+
+/** The notes the board attaches to a demo tile over `[from, to)`: same instrument, overlapping filters, newest first. */
 export function demoTileAnnotations(tile: MetricBoardTile, from: number, to: number): MetricAnnotation[] {
   return demoAnnotationList({ instrument: tile.instrument, from: new Date(from).toISOString(), to: new Date(to).toISOString() }).items
-    .filter((a) => a.tagFilter === null || tile.tagFilter === null || a.tagFilter === tile.tagFilter);
+    .filter((a) => demoNoteAppliesTo(a, tile));
 }

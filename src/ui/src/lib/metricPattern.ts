@@ -79,3 +79,90 @@ export function patternsOverlap(a: ValuePattern, b: ValuePattern): boolean {
 export function listsOverlap(first: ValuePattern[], second: ValuePattern[]): boolean {
   return first.some((x) => second.some((y) => patternsOverlap(x, y)));
 }
+
+/**
+ * True when every value `narrower` matches is matched by `pattern` too (MetricValuePattern.Includes): an equal literal,
+ * or a literal or longer prefix under a prefix. A prefix (even a bare `*`) never includes the absent tag `{none}`.
+ */
+export function patternIncludes(pattern: ValuePattern, narrower: ValuePattern): boolean {
+  if (!pattern.prefix) {
+    return !narrower.prefix && pattern.text === narrower.text;
+  }
+  if (!narrower.prefix && narrower.text === NONE_NAME) {
+    return false;
+  }
+
+  return narrower.text.startsWith(pattern.text);
+}
+
+/** A parsed `k=v[,k=v...]` filter: one pattern per key. Empty means "everything". */
+export type TagFilter = Map<string, ValuePattern>;
+
+/**
+ * Parses a tag filter with the server's grammar (MetricFilter.TryParse): blank is the empty filter; null when an entry
+ * is empty, lacks `=`, has an empty or starred key, a misplaced `*`, or a duplicate key.
+ */
+export function parseTagFilter(text: string | null | undefined): TagFilter | null {
+  const filter: TagFilter = new Map();
+  if (!text || text.trim() === '') {
+    return filter;
+  }
+
+  for (const raw of text.split(',')) {
+    const pair = raw.trim();
+    const separator = pair.indexOf('=');
+    if (separator < 0) {
+      return null;
+    }
+
+    const key = pair.slice(0, separator).trim();
+    const pattern = parsePattern(pair.slice(separator + 1).trim());
+    if (key === '' || key.includes('*') || !pattern || filter.has(key)) {
+      return null;
+    }
+
+    filter.set(key, pattern);
+  }
+
+  return filter;
+}
+
+function isAbsent(pattern: ValuePattern): boolean {
+  return !pattern.prefix && pattern.text === NONE_NAME;
+}
+
+/**
+ * True when some tag set could match both filters (MetricFilter.Overlaps): every key both constrain has overlapping
+ * patterns; `{none}` overlaps only itself. The rule that puts a note on a board tile.
+ */
+export function filtersOverlap(a: TagFilter, b: TagFilter): boolean {
+  for (const [key, pattern] of a) {
+    const theirs = b.get(key);
+    if (!theirs) {
+      continue;
+    }
+
+    const absent = isAbsent(pattern) || isAbsent(theirs);
+    if (absent ? pattern.prefix !== theirs.prefix || pattern.text !== theirs.text : !patternsOverlap(pattern, theirs)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * True when every tag set `narrower` matches is matched by `filter` too (MetricFilter.Covers): each clause of `filter`
+ * is implied by `narrower`'s clause on the same key. A key only `filter` constrains is not covered. The rule that lets
+ * an acknowledged-noise note change a tile's verdict: covering it, not merely overlapping it.
+ */
+export function filterCovers(filter: TagFilter, narrower: TagFilter): boolean {
+  for (const [key, pattern] of filter) {
+    const theirs = narrower.get(key);
+    if (!theirs || !patternIncludes(pattern, theirs)) {
+      return false;
+    }
+  }
+
+  return true;
+}

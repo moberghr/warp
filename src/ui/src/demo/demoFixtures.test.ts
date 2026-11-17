@@ -12,6 +12,10 @@ import type { ApplicationDeployModel, DeployVerdictModel } from '@/types/applica
 import { demoDeploys } from './data/applications';
 import { MetricAnnotationTarget, type MetricAnnotationList } from '@/types/annotations';
 import { demoSlos } from './data/slo';
+import { demoAnnotations, demoNoteAppliesTo, demoNoteCoversTile } from './data/annotations';
+import { demoBoardTiles } from './data/metricBoard';
+import type { MetricAnnotation } from '@/types/annotations';
+import { SloState } from '@/types/slo';
 
 // Demo mode is what the docs screenshots and every "show me the dashboard" walkthrough run against,
 // so a dangling reference in the fixtures reads as a broken product: the page renders "Unable to
@@ -246,6 +250,43 @@ describe('demo annotation fixtures', () => {
     expect(board.tiles.some((x) => x.annotations.length > 0)).toBe(true);
     await expect(call('post', '/annotations')).resolves.toEqual({ id: 0 });
     await expect(call('delete', '/annotations/1')).resolves.toEqual({});
+  });
+
+  // MetricAnnotationMatch.Covers: overlap is enough to show a note on a tile, only covering acknowledges it.
+  it('shows every overlapping note on a tile but acknowledges only with a covering one', () => {
+    const tile = (tagFilter: string | null): MetricBoardTile => ({ ...demoBoardTiles[1], instrument: 'payment.results', tagFilter });
+    const note = (tagFilter: string | null, instrument = 'payment.results'): MetricAnnotation => ({
+      ...demoAnnotations(0)[0],
+      instrument,
+      tagFilter,
+    });
+
+    expect(demoNoteAppliesTo(note('result=error'), tile(null))).toBe(true);
+    expect(demoNoteCoversTile(note('result=error'), tile(null))).toBe(false);
+    expect(demoNoteAppliesTo(note('code=503'), tile('code=5*'))).toBe(true);
+    expect(demoNoteCoversTile(note('code=503'), tile('code=5*'))).toBe(false);
+    expect(demoNoteCoversTile(note('code=5*'), tile('code=503,region=eu'))).toBe(true);
+    expect(demoNoteCoversTile(note(null), tile('code=503'))).toBe(true);
+    expect(demoNoteAppliesTo(note('code=4*'), tile('code=5*'))).toBe(false);
+    expect(demoNoteAppliesTo(note(null, 'other'), tile(null))).toBe(false);
+    // An unparseable tile filter: the note still shows, but nothing proves it covers the tile.
+    expect(demoNoteAppliesTo(note('code=5*'), tile('code'))).toBe(true);
+    expect(demoNoteCoversTile(note('code=5*'), tile('code'))).toBe(false);
+    expect(demoNoteAppliesTo(note('code'), tile(null))).toBe(false);
+  });
+
+  it('never acknowledges a board tile with a note that only overlaps it', async () => {
+    const to = Date.now();
+    const board = await call<MetricBoard>('get', '/metrics/board', { from: new Date(to - 24 * 3_600_000).toISOString(), to: new Date(to).toISOString() });
+    const unfiltered = board.tiles.find((x) => x.tile.instrument === 'http.server.request.duration' && x.tile.tagFilter === null)!;
+
+    // The 5xx acknowledged-noise note is shown on the unfiltered requests tile but is about part of it only.
+    expect(unfiltered.annotations.some((a) => a.acknowledgedNoise && a.tagFilter !== null)).toBe(true);
+    expect(unfiltered.annotations.some((a) => demoNoteCoversTile(a, unfiltered.tile))).toBe(false);
+    expect(unfiltered.status).toBe(unfiltered.unacknowledgedStatus);
+    for (const result of board.tiles.filter((x) => x.status === SloState.Acknowledged)) {
+      expect(result.annotations.some((a) => a.acknowledgedNoise && demoNoteCoversTile(a, result.tile))).toBe(true);
+    }
   });
 });
 
