@@ -368,6 +368,36 @@ Each note has a **start** and either an **end** or none ("ongoing"), and an **au
 
 `IMetricAnnotationQueryService` and `IMetricAnnotationCommandService` are registered by `AddWarp`, so a dashboard-only host serves annotations without `AddMetrics` or a server. The routes carry the dashboard's authorization like every other route.
 
+## Saved views and shareable links
+
+**Shareable links.** Every control of the metric detail page, the Issues list and the Jobs lists is kept in the page URL, so a refresh, a bookmark or a link pasted in a chat opens the same view. Defaults are left out of the URL, and a value that does not parse reads as the control's default, so a hand-edited or stale link never breaks the page.
+
+| Page | Path | Query parameters |
+|---|---|---|
+| Metric detail | `/metrics/{id}` (`{id}` = URL-safe base64 of the instrument name) | `range` (a preset, default `24h`) or `from` / `to` (ISO instants, no `to` = until now); `application`; `breakdown` (a tag key or `{version}`); `filter=key:value`, repeated (the series API's syntax); `compare=1d,7d`; `percentile` (50, 90, 95, 99); `view=ratio` with `numerator` (a value or `prefix*`); `minmax=1`; `rate=minute` or `rate=second` |
+| Issues | `/issues` | `source` (`job`, `endpoint`, `adapter`, `client`); `status` (`resolved`, `ignored`; unresolved is the default); `application`; `show4xx=1` |
+| Jobs | `/jobs/{state}` (`enqueued`, `processing`, `scheduled`, `retrying`, `awaiting`, `completed`, `failed`, `deleted`) | `page` (zero-based); `type` (the failed list's job-type filter) |
+| Jobs of one type | `/jobs/by-type/{type}` (the type, URI-encoded) | `page`; `metrics=handler` (the header's handler metrics instead of the type's) |
+
+**Saved views.** A **saved view** stores one of those pages, the target its path names (the instrument, the job state or the job type; none for Issues) and its query string, under a name. The **Views** menu in the page header of those four pages saves the current state (**Save view**: a name and a **Shared** toggle), lists the views of the page in **Mine** (yours, personal or shared) and **Shared** (shared by others), and offers **Update** (store the current URL in the view), **Rename** and **Delete** for the view you opened. Choosing a view navigates to the page path plus its query, so a view is exactly a link with a name. The Metrics list shows a small count of saved views per instrument.
+
+- **Personal or shared.** A personal view is listed only to its author. A shared view is listed to everyone who can open the dashboard, who may edit and delete it; deleting it asks first, since it is deleted for everyone. Only the author may edit or delete a personal view (403 for anyone else), and only the author may change whether a view is shared, so nobody can hide a teammate's view from everyone or publish someone's personal one. An edit keeps the original author.
+- **Who you are.** The author is the authenticated dashboard user, as for [annotations](#annotations): the identity name set by whichever gate protects the dashboard, never a request field. On an open dashboard every author is `anonymous`, so personal views would be everyone's anyway: the menu defaults a new view to **shared** there, and to **personal** for a signed-in user (the list read tells the menu who the server takes you to be).
+- **What a view may hold.** The page is one of `metric`, `issues`, `jobs`, `jobs-by-type`. `metric`, `jobs` and `jobs-by-type` need a target (their route has it in the path; a jobs view's target is a state from the list above), `issues` has none. The query may hold only the parameters that page reads, listed above; any other key is refused, so a view can never carry an arbitrary parameter into a link. Name ≤ 200 characters, query ≤ 2,000.
+- **Caps.** At most **200** views per author and **500** shared views per host. Saves run under a short transaction lock, so two saves at once cannot both pass a cap.
+- **Kept forever.** Nothing sweeps saved views; deleting one is a dashboard action. Saved views are not seeded from code: they are created in the dashboard only.
+- **Audit.** Every create, update and delete is logged at Information as `Saved view {Id} created|updated|deleted by {Actor} on {Page}`. The query is never logged: it can hold the tag values someone filtered on.
+
+**API.**
+
+| Route | |
+|---|---|
+| `GET {prefix}/api/views?page=&target=` | `{ user, views }`: who the server takes the caller to be (`anonymous` on an open dashboard) and the caller's own views plus every shared view, newest first, optionally of one page and target. An unknown `page` is a 400. |
+| `POST {prefix}/api/views` | Inserts (`id: 0`) or updates a view. The body has `name`, `page`, `target`, `query` (without `?`) and `shared`; any `author` field is ignored. The answer is `{ id }`, a 400 `{ error }` on bad input or a full cap, a 403 `{ error }` for someone else's personal view or a non-author changing `shared`, or a 404 `{ error }` when the view being edited no longer exists. |
+| `DELETE {prefix}/api/views/{id}` | 204, 403 `{ error }` for someone else's personal view, or 404 `{ error }`. |
+
+`ISavedViewQueryService` and `ISavedViewCommandService` are registered by `AddWarp`, so a dashboard-only host serves saved views without `AddMetrics` or a server. Storage is one table, `saved_view`.
+
 ## Cardinality
 
 Collected tags can be unbounded (a request id, a user id), and Warp writes them to your own operational database. Each process therefore bounds what a collected instrument can do, in memory:
@@ -439,4 +469,4 @@ See also [Configuration](/docs/operations/configuration#custom-application-metri
 
 ## Migration
 
-Additive: five new tables (`metric_point`, `metric_instrument`, `metric_board_tile` and `metric_board` for the [health board](#health-board) and its [named boards](#named-boards), and `metric_annotation` for [annotations](#annotations)), nine nullable columns on `slo_definition` for the metric SLO kinds, the nullable `metric_point.version` column for [comparing versions](#comparing-versions), and the nullable `metric_board_tile.board_id` column (null is the Default board, so existing tiles need no data migration), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
+Additive: six new tables (`metric_point`, `metric_instrument`, `metric_board_tile` and `metric_board` for the [health board](#health-board) and its [named boards](#named-boards), `metric_annotation` for [annotations](#annotations), and `saved_view` for [saved views](#saved-views-and-shareable-links)), nine nullable columns on `slo_definition` for the metric SLO kinds, the nullable `metric_point.version` column for [comparing versions](#comparing-versions), the nullable `metric_board_tile.board_id` column (null is the Default board, so existing tiles need no data migration) and the nullable `metric_board.seed_key` column (the name a code seed declared, so a renamed seeded board is kept), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
