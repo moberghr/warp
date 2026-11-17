@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useMemo } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { StateBadge } from '@/components/StateBadge';
@@ -14,6 +14,7 @@ import { useJobsByType } from '@/api/hooks/useJobs';
 import * as api from '@/api';
 import type { JobModel } from '@/types';
 import type { JobExecutionStatModel } from '@/types/applications';
+import { parseMetricsDimension, writeMetricsDimension, type JobMetricsDimension } from './jobsModel';
 
 // #1: the destination for a clickable job type — every job of a given type across all states.
 export default function JobsByTypePage() {
@@ -25,7 +26,11 @@ export default function JobsByTypePage() {
   }, [rawType]);
   const { page, setPage } = useListParams();
   const [pageSize, setPageSize] = usePersistedPageSize();
-  const [dimension, setDimension] = useState<'type' | 'handler'>('type');
+  // The metrics dimension rides the URL like the page, so a shared link keeps it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const dimension = parseMetricsDimension(searchParams);
+  const setDimension = (next: JobMetricsDimension) =>
+    setSearchParams((prev) => writeMetricsDimension(prev, next), { replace: true });
 
   const { data, isLoading, isError } = useJobsByType(type, page, pageSize);
 
