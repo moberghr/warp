@@ -47,7 +47,8 @@ export const demoMetrics: MetricInstrument[] = [
     name: 'payment.results',
     meter: 'Shop.Payments',
     kind: MetricKind.Counter,
-    unit: '1',
+    // An OpenTelemetry annotation unit: a count of payments, shown as "payments".
+    unit: '{payment}',
     description: 'Payment attempts by pipeline step, gateway and outcome.',
     bounds: [],
     tagKeys: ['step', 'gateway', 'result'],

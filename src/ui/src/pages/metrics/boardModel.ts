@@ -13,7 +13,8 @@ import {
 } from '@/types/metricBoard';
 import { SloComparison, SloGaugeAggregate, SloGaugeAggregateLabel, SloState, SloStateLabel } from '@/types/slo';
 import { parseValueList, validateTagFilter, valueListsOverlap } from '@/pages/slo/sloForm';
-import { changePercent, formatChange, formatNumber, unitLabel } from './metricModel';
+import { withUnit } from '@/lib/metricUnit';
+import { changePercent, formatChange, formatNumber } from './metricModel';
 
 /** The most tiles a board holds (MetricBoardValidation.MaxTiles). */
 export const MAX_TILES = 48;
@@ -43,9 +44,7 @@ export function formatTileValue(result: Pick<MetricBoardTileResult, 'tile' | 'in
     return percent(value);
   }
 
-  const unit = result.instrumentKind === MetricKind.Histogram ? '' : unitLabel(result.unit);
-
-  return `${formatNumber(value)}${unit ? ` ${unit}` : ''}`;
+  return withUnit(formatNumber(value), result.instrumentKind === MetricKind.Histogram ? null : result.unit, value);
 }
 
 /** The move from a baseline: ratio points for a ratio tile (`+1.20 pts`), a percentage change otherwise. */

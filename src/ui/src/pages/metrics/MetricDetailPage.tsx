@@ -76,6 +76,7 @@ import {
   toLocalInputValue,
   toggleNumerator,
   unitLabel,
+  withUnit,
   upsertChip,
   validateCustomRange,
   writeRangeParams,
@@ -539,7 +540,7 @@ export default function MetricDetailPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {headline && !ratioActive && !seriesQuery.isError && <HeadlineStrip headline={headline} unit={instrument.kind === MetricKind.Histogram ? '' : unit} />}
+          {headline && !ratioActive && !seriesQuery.isError && <HeadlineStrip headline={headline} unit={instrument.kind === MetricKind.Histogram ? null : instrument.unit} />}
           {seriesQuery.isError ? (
             <p className="py-8 text-center text-sm text-destructive">Unable to load the series.</p>
           ) : seriesQuery.isLoading || !series ? (
@@ -658,8 +659,8 @@ function Control({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
-function HeadlineStrip({ headline, unit }: { headline: HeadlineSummary; unit: string }) {
-  const show = (value: number | null) => (value === null ? '—' : `${formatNumber(value)}${unit ? ` ${unit}` : ''}`);
+function HeadlineStrip({ headline, unit }: { headline: HeadlineSummary; unit: string | null }) {
+  const show = (value: number | null) => (value === null ? '—' : withUnit(formatNumber(value), unit, value));
 
   return (
     <div className="mb-3 flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm">

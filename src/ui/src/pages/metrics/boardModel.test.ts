@@ -51,6 +51,13 @@ describe('formatTileValue', () => {
     expect(formatTileValue(result(valueTile, { instrumentKind: MetricKind.Histogram, unit: 'ms' }), 12)).toBe('12');
   });
 
+  it('reads an annotation unit as a word, singular only for exactly one', () => {
+    expect(formatTileValue(result(valueTile, { unit: '{callback}' }), 30159)).toBe('30,159 callbacks');
+    expect(formatTileValue(result(valueTile, { unit: '{callback}' }), 1)).toBe('1 callback');
+    expect(formatTileValue(result(valueTile, { unit: '1' }), 12)).toBe('12');
+    expect(formatTileValue(result(valueTile, { instrumentKind: MetricKind.Histogram, unit: '{request}' }), 12)).toBe('12');
+  });
+
   it('shows a dash for nothing to show', () => {
     expect(formatTileValue(result(valueTile), null)).toBe('—');
   });

@@ -123,6 +123,12 @@ describe('labels', () => {
     expect(unitLabel('ms')).toBe('ms');
   });
 
+  it('reads an OpenTelemetry annotation unit as a word', () => {
+    expect(unitLabel('{checkout}')).toBe('checkouts');
+    expect(unitLabel('{checkout}', 1)).toBe('checkout');
+    expect(unitLabel('{request}/s')).toBe('requests/s');
+  });
+
   it('words the collapse tooltip', () => {
     expect(collapseTooltip({ collapsedTags: [] })).toBe('Some tag values were collapsed into {other}');
     expect(collapseTooltip({ collapsedTags: ['gateway'] })).toContain('{other} (gateway)');
@@ -131,6 +137,8 @@ describe('labels', () => {
   it('shows a histogram percentile as an upper bound, and a missing one as a dash', () => {
     expect(formatPercentileValue(250, 'ms')).toBe('≤ 250 ms');
     expect(formatPercentileValue(null, 'ms')).toBe('—');
+    expect(formatPercentileValue(5, '{item}')).toBe('≤ 5 items');
+    expect(formatPercentileValue(1, '{item}')).toBe('≤ 1 item');
   });
 
   it('summarises the resolution of the range and of each overlay', () => {
@@ -913,6 +921,14 @@ describe('rate', () => {
     expect(axisTitles(MetricKind.Gauge, null, false, 'minute').y).toBe('Average');
     expect(axisTitles(MetricKind.UpDownCounter, null, false, 'minute').y).toBe('Net change');
     expect(axisTitles(MetricKind.Counter, null, true, 'minute').y).toBe('Share of total (%)');
+  });
+
+  it('puts an annotation unit on the axis as a plural word', () => {
+    expect(axisTitles(MetricKind.Counter, '{checkout}', false).y).toBe('Sum (checkouts)');
+    expect(axisTitles(MetricKind.Counter, '{checkout}', false, 'minute').y).toBe('Sum per minute (checkouts)');
+    expect(axisTitles(MetricKind.Gauge, '{connection}', false).y).toBe('Average (connections)');
+    expect(axisTitles(MetricKind.Histogram, '{item}', false).y1).toBe('Percentile (items)');
+    expect(axisTitles(MetricKind.Counter, '1', false).y).toBe('Sum');
   });
 
   it('turns the headline into an average rate over the span it covers, overlays over the same span', () => {

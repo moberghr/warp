@@ -4,6 +4,7 @@
 
 import { MetricKind, MetricTier } from '@/types/metrics';
 import { DASHBOARD_LOCALE } from '@/utils/format';
+import { unitLabel, withUnit } from '@/lib/metricUnit';
 import type { FilterChip } from '@/lib/metricPattern';
 import type { MetricInstrument, MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
 import type { ApplicationDeployModel } from '@/types/applications';
@@ -53,14 +54,8 @@ export function kindChartNote(kind: MetricKind): string | null {
     : null;
 }
 
-/** OTel units are UCUM codes (`ms`, `s`, `By`, `1`); show the ones people read, pass the rest through. */
-export function unitLabel(unit: string | null | undefined): string {
-  if (!unit || unit === '1') {
-    return '';
-  }
-
-  return unit === 'By' ? 'bytes' : unit;
-}
+// The one unit formatter (UCUM codes and `{annotation}` counts), re-exported for the metric pages' existing imports.
+export { unitLabel, withUnit };
 
 const RESOLUTION_LABELS: Record<MetricTier, string> = {
   [MetricTier.Fine]: 'Fine',
@@ -88,9 +83,7 @@ export function formatPercentileValue(value: number | null | undefined, unit: st
     return '—';
   }
 
-  const suffix = unitLabel(unit);
-
-  return `≤ ${formatNumber(value)}${suffix ? ` ${suffix}` : ''}`;
+  return `≤ ${withUnit(formatNumber(value), unit, value)}`;
 }
 
 export function formatNumber(value: number): string {
