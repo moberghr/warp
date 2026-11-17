@@ -62,7 +62,7 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         verdict.Deploy.PreviousVersion.ShouldBe("1.0.0");
         verdict.Deploy.SupersededBy.ShouldBeNull();
         verdict.Window.From.ShouldBe(Now.AddHours(-1));
-        verdict.Window.To.ShouldBe(Now);
+        verdict.Window.To.ShouldBe(Now.AddMinutes(-5));
         var check = verdict.Checks.ShouldHaveSingleItem();
         check.State.ShouldBe(state);
         check.Value.ShouldBe(sinceDeploy);
@@ -98,23 +98,44 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task GetVerdict_DeployYoungerThanTheSettleWindow_IsPendingEvenWhenBreaching()
+    public async Task GetVerdict_DeployLateInABucket_IsPendingAndLeavesThePreDeployBucketOut()
     {
-        // Deployed 8 minutes ago with a 10-minute settle window. The complete part of its window is 11:52-11:55 (the
-        // 11:55 bucket is still filling), 3/5 of the 11:50 bucket: 60 events, over the threshold.
-        await SeedDeployAsync("api", "2.0.0", Now.AddMinutes(-8));
-        await SeedMetricsAsync(Point(Now.AddMinutes(-10), 100));
+        // Deployed 11:49:50, 10 s before the 11:50 boundary, with a 10-minute settle window. The 11:45 bucket holds almost
+        // only pre-deploy traffic (100 events) and is never counted; the clean window is 11:50-11:55 (the 11:55 bucket is
+        // still filling), 20 events, over the threshold. 10 minutes of clean data are complete at 12:00:30.
+        await SeedDeployAsync("api", "2.0.0", Now.AddMinutes(-10).AddSeconds(-10));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-15), 100), Point(Now.AddMinutes(-10), 20));
         await SeedTilesAsync(Tile("Errors", threshold: 10));
 
         var verdict = await Service().GetVerdict(new DeployVerdictQuery { Application = "api", MinWindow = TimeSpan.FromMinutes(10) }, Ct);
 
         verdict.ShouldNotBeNull();
         verdict.Verdict.ShouldBe(DeployVerdicts.Pending);
+        verdict.Window.From.ShouldBe(Now.AddMinutes(-10));
+        verdict.Window.To.ShouldBe(Now.AddMinutes(-5));
         verdict.Window.Settled.ShouldBeFalse();
-        verdict.Window.SettlesAt.ShouldBe(Now.AddMinutes(2));
+        verdict.Window.SettlesAt.ShouldBe(Now.AddSeconds(30));
         var check = verdict.Checks.ShouldHaveSingleItem();
         check.State.ShouldBe("breaching");
-        check.Value.ShouldNotBeNull().ShouldBe(60, 1e-9);
+        check.Value.ShouldNotBeNull().ShouldBe(20, 1e-9);
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_DeployInTheFirstSecondsOfABucket_SkipsThatBucketAndSettlesOnTheNext()
+    {
+        // Deployed 11:45:10, 10 s into the 11:45 bucket: that bucket still holds 10 s of the old release (its 100 events
+        // would fail the tile), so the window starts at 11:50. 5 minutes of clean data were complete at 11:55:30.
+        await SeedDeployAsync("api", "2.0.0", Now.AddMinutes(-15).AddSeconds(10));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-15), 100), Point(Now.AddMinutes(-10), 4));
+        await SeedTilesAsync(Tile("Errors", threshold: 10));
+
+        var verdict = await Service().GetVerdict(Query("api"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+        verdict.Window.From.ShouldBe(Now.AddMinutes(-10));
+        verdict.Window.SettlesAt.ShouldBe(Now.AddMinutes(-4).AddSeconds(-30));
+        verdict.Checks.ShouldHaveSingleItem().Value.ShouldBe(4);
     }
 
     [TimedFact]
@@ -156,10 +177,11 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task GetVerdict_SupersededInsideTheSettleWindow_IsJudgedNotPending()
     {
-        // v2 at 11:00, v3 at 11:02, 5-minute settle window: v2 can never reach 5 minutes, so it is judged over its lifetime.
+        // v2 at 11:00, v3 at 11:07, 5-minute settle window: v2's clean window is the one bucket 11:00-11:05 (v3 rounded
+        // down), which can never grow, so it is judged over that.
         await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
-        await SeedDeployAsync("api", "3.0.0", Now.AddHours(-1).AddMinutes(2));
-        await SeedMetricsAsync(Point(Now.AddHours(-1), 50));
+        await SeedDeployAsync("api", "3.0.0", Now.AddHours(-1).AddMinutes(7));
+        await SeedMetricsAsync(Point(Now.AddHours(-1), 50), Point(Now.AddHours(-1).AddMinutes(5), 1000));
         await SeedTilesAsync(Tile("Errors", threshold: 10));
 
         var verdict = await Service().GetVerdict(Query("api", version: "2.0.0"), Ct);
@@ -168,9 +190,30 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         verdict.Verdict.ShouldBe(DeployVerdicts.Fail);
         verdict.Deploy.SupersededBy.ShouldBe("3.0.0");
         verdict.Window.Settled.ShouldBeTrue();
-        verdict.Window.SettlesAt.ShouldBe(Now.AddHours(-1).AddMinutes(2));
-        verdict.Window.To.ShouldBe(Now.AddHours(-1).AddMinutes(2));
-        verdict.Checks.ShouldHaveSingleItem().State.ShouldBe("breaching");
+        verdict.Window.SettlesAt.ShouldBe(Now.AddHours(-1).AddMinutes(5).AddSeconds(30));
+        verdict.Window.To.ShouldBe(Now.AddHours(-1).AddMinutes(5));
+        var check = verdict.Checks.ShouldHaveSingleItem();
+        check.State.ShouldBe("breaching");
+        check.Value.ShouldBe(50);
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_SupersededBeforeACompleteBucket_IsNoDataNotPending()
+    {
+        // v2 at 11:00:10, v3 at 11:04:50: no whole bucket between them, so there is nothing of v2's alone to judge.
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1).AddSeconds(10));
+        await SeedDeployAsync("api", "3.0.0", Now.AddHours(-1).AddMinutes(4).AddSeconds(50));
+        await SeedMetricsAsync(Point(Now.AddHours(-1), 50));
+        await SeedTilesAsync(Tile("Errors", threshold: 10));
+
+        var verdict = await Service().GetVerdict(Query("api", version: "2.0.0"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.NoData);
+        verdict.Window.Settled.ShouldBeTrue();
+        verdict.Window.To.ShouldBe(verdict.Window.From);
+        verdict.Summary.ShouldContain("superseded at 2026-11-16T11:04:50Z, before a complete metric bucket after the deploy");
+        verdict.Checks.ShouldBeEmpty();
     }
 
     [TimedFact]
@@ -426,7 +469,8 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
             new ApplicationQueryService<TestContext>(_fixture.CreateContext(), time, options),
             new MetricBoardQueryService<TestContext>(_fixture.CreateContext(), options, time),
             new SloQueryService<TestContext>(_fixture.CreateContext()),
-            time);
+            time,
+            options);
     }
 
     private async Task SeedDeployAsync(string application, string version, DateTime firstSeenAt, string environment = "")

@@ -111,22 +111,30 @@ GET {prefix}/api/applications/verdict?application=orders-api&version=2.3.1&envir
 
 A missing `application`, a value longer than 200 characters, a bad `minWindowMinutes` or a bad `minCoverage` is a **400**. An application with no recorded deploy, or no deploy matching the version and environment, is a **404**. The route is read-only and carries the dashboard's authorization like every other route.
 
-**Which deploy, which window.** The deploy comes from the [deploy history](#deploy-history). The window runs from its `FirstSeenAt` to now. If a newer version has since been deployed in the same environment, the window ends at that deploy instead: a superseded release is judged over its own lifetime. The response names the version deployed before it (`previousVersion`) and, when superseded, the one after it (`supersededBy`). A window longer than 90 days starts 90 days before its end, the board's read limit.
+**Which deploy, which window.** The deploy comes from the [deploy history](#deploy-history). The verdict judges only **complete metric buckets that start after the deploy** (buckets are `FineResolutionMinutes` wide, 5 minutes by default), so no traffic from the previous release is counted:
 
-**Pending.** A deploy younger than `minWindowMinutes` gets `pending`, whatever its checks say. A CI step polling right after a rollout therefore never reads a premature pass, or a fail from two minutes of data. `window.settlesAt` says when to ask again. The checks are still returned, so a person can look early.
+- The window starts at the deploy's `FirstSeenAt` rounded **up** to the next bucket boundary. The bucket the deploy happened in mixes old and new traffic, so it is never counted, even when the deploy was in its first seconds.
+- The window ends where the board's complete data ends: the start of the bucket holding `now − MetricFlushInterval` (30 s by default). The bucket still being written is left out.
+- If a newer version has since been deployed in the same environment, the window ends at that deploy rounded **down** to a bucket boundary instead (when that is earlier): a superseded release is judged over its own lifetime.
 
-A **superseded** deploy is never pending. Its window ends at the next deploy and can never grow, so it is judged over its whole lifetime however short that is, and `window.settlesAt` is the next deploy's `FirstSeenAt` (v2 at 10:00, v3 at 10:02, a 5-minute settle time: v2 is judged over its two minutes and settled at 10:02). Only the latest deploy in an environment can be pending.
+The response names the version deployed before it (`previousVersion`) and, when superseded, the one after it (`supersededBy`). A window longer than 90 days starts 90 days before its end, the board's read limit.
+
+**Pending.** The latest deploy is `pending` until its clean window holds `minWindowMinutes` of complete data (and at least one bucket, so `minWindowMinutes=0` still waits for one), whatever its checks say. A CI step polling right after a rollout therefore never reads a premature pass, or a fail from two minutes of data. `window.settlesAt` says when to ask again: the end of the bucket that completes the minimum, plus `MetricFlushInterval`. The checks are still returned, so a person can look early.
+
+With the defaults (5-minute buckets, a 30 s flush interval, `minWindowMinutes=5`), a deploy at 10:00:00 settles at 10:05:30, and a deploy at 10:00:10 or at 10:04:50 settles at 10:10:30 (its window starts at 10:05). So a verdict settles between 5½ and 10½ minutes after the deploy. A `minWindowMinutes` that is not a whole number of buckets rounds up: 7 minutes waits for two 5-minute buckets.
+
+A **superseded** deploy keeps the settled-over-its-lifetime rule: its window can never grow, so it is judged over whatever complete buckets it has, however few, and never waits for `minWindowMinutes`. `window.settlesAt` is when its last bucket is complete: the next deploy rounded down, plus the flush interval (v2 at 10:00, v3 at 10:07, a 5-minute settle time: v2 is judged over 10:00–10:05, settled at 10:05:30; a deploy replaced seconds ago can read `pending` for at most that flush interval). If no whole bucket lies between the two deploys (v2 at 10:00:10, v3 at 10:04:50), there is nothing of v2's alone to judge: the verdict is `noData`, with a summary saying it was superseded before a complete bucket, never `pending`.
 
 **What counts.**
 
 - **Health-board tiles** ([custom metrics](./custom-metrics.md#health-board)) scoped to this application, plus tiles with no application, evaluated over the window against their own rule: a threshold, or a deviation from the same window 1 or 7 days earlier. Tiles without a status rule are skipped. A tile scoped to another application never counts. An unscoped tile covers every application, so on a shared database, scope the tiles that should gate one application to it.
-- **SLOs** ([SLO / error budget](./slo-error-budget.md)) that are enabled and scoped to this application or to none, with their **current** evaluated state. An SLO never evaluated, or not evaluated since the deploy (`LastEvaluatedAt` before `FirstSeenAt`), counts as no data. An SLO's state covers its own window, which can reach back before the deploy. The evaluation history is not kept, so "healthy before, breaching after" is not computed. A superseded deploy gets no SLO checks, because their current state describes the newer release.
+- **SLOs** ([SLO / error budget](./slo-error-budget.md)) that are enabled and scoped to this application or to none, with their **current** evaluated state. An SLO never evaluated, or not evaluated since the window started (`LastEvaluatedAt` before `window.from`, the deploy's first complete bucket), counts as no data. That evaluation time is the only part of the clean window an SLO can follow: its state covers its own rolling window, which reaches back before the deploy, and the verdict cannot re-cut it. The evaluation history is not kept, so "healthy before, breaching after" is not computed. A superseded deploy gets no SLO checks, because their current state describes the newer release.
 
 **Aggregation.**
 
 | Checks | Verdict |
 |---|---|
-| The deploy is the latest in its environment and younger than `minWindowMinutes` | `pending` |
+| The deploy is the latest in its environment and its clean window is not yet `minWindowMinutes` of complete data | `pending` |
 | Any check is Breaching | `fail` |
 | Otherwise, the share of checks with data is below `minCoverage` | `noData` |
 | Otherwise, any check is Warning | `warn` |
@@ -135,7 +143,7 @@ A **superseded** deploy is never pending. Its window ends at the next deploy and
 
 **Sparse data.** A check without data never fails or warns, so with the default `minCoverage=0` a single healthy check among nine without data is a `pass`. The response says how thin that is: `checksWithData` and `checksTotal` count the checks, and the `summary` line starts with them (`pass (1 of 9 checks had data): 1 healthy, 8 no data`). A CI step that wants more evidence passes `minCoverage`, for example `0.5`: below half, a would-be `pass` or `warn` is `noData` and the summary adds `below minCoverage 0.5`. A `fail` stays a `fail` whatever the coverage, since a breaching check is evidence on its own.
 
-**Acknowledged never fails.** A tile whose Warning or Breaching status is covered by an active acknowledged-noise [annotation](./custom-metrics.md#annotations), or an SLO with an active acknowledgement, reads `acknowledged` and counts as a pass. The check keeps `acknowledged: true` and, for a tile, the rule's own state in `unacknowledgedState`.
+**Acknowledged never fails.** A tile whose Warning or Breaching status is covered by an active acknowledged-noise [annotation](./custom-metrics.md#annotations) reads `acknowledged` and counts as a pass. An SLO reads `acknowledged` only when it is **Breaching** under an active acknowledgement: an acknowledgement silences a breach, so an acknowledged SLO in Warning stays `warning`. The check keeps `acknowledged: true` and, for a tile, the rule's own state in `unacknowledgedState`.
 
 **Response.**
 
@@ -148,10 +156,10 @@ A **superseded** deploy is never pending. Its window ends at the next deploy and
   "deploy": { "application": "orders-api", "version": "2.3.1", "environment": "production",
               "firstSeenAt": "2026-11-16T11:40:00Z", "instanceName": "orders-api-4b2d",
               "previousVersion": "2.3.0", "supersededBy": null },
-  "window": { "from": "2026-11-16T11:40:00Z", "to": "2026-11-16T12:00:00Z",
-              "minWindowSeconds": 300, "settlesAt": "2026-11-16T11:45:00Z", "settled": true },
+  "window": { "from": "2026-11-16T11:40:00Z", "to": "2026-11-16T11:55:00Z",
+              "minWindowSeconds": 300, "settlesAt": "2026-11-16T11:45:30Z", "settled": true },
   "checks": [
-    { "source": "tile", "id": 2, "name": "Order latency p95", "application": "orders-api",
+    { "source": "tile", "id": 2, "name": "Checkout errors", "application": "orders-api",
       "state": "warning", "unacknowledgedState": null, "acknowledged": false,
       "value": 412, "baseline": 340, "target": 0.25, "budgetRemaining": null,
       "reason": "Warning: 412 vs 7-day baseline 340 (max rise 0.25)." }

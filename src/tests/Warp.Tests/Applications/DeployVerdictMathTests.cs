@@ -113,71 +113,130 @@ public class DeployVerdictMathTests
     }
 
     [TimedTheory]
-    [InlineData(10, 5, true)]
-    [InlineData(5, 5, true)]
-    [InlineData(4, 5, false)]
-    [InlineData(0, 0, true)]
-    public void Window_DeployAge_SettlesAtTheMinimum(int ageMinutes, int minMinutes, bool settled)
+    [InlineData("11:50:00", 5, "11:50:00", "11:55:00", "11:55:30", true)]
+    [InlineData("11:50:10", 5, "11:55:00", "11:55:00", "12:00:30", false)]
+    [InlineData("11:49:50", 5, "11:50:00", "11:55:00", "11:55:30", true)]
+    [InlineData("11:40:10", 5, "11:45:00", "11:55:00", "11:50:30", true)]
+    [InlineData("11:44:50", 5, "11:45:00", "11:55:00", "11:50:30", true)]
+    [InlineData("11:42:00", 7, "11:45:00", "11:55:00", "11:55:30", true)]
+    [InlineData("11:47:00", 7, "11:50:00", "11:55:00", "12:00:30", false)]
+    [InlineData("11:50:00", 0, "11:50:00", "11:55:00", "11:55:30", true)]
+    [InlineData("11:55:00", 0, "11:55:00", "11:55:00", "12:00:30", false)]
+    public void Window_LiveDeploy_JudgesOnlyCompleteBucketsAfterTheDeploy(
+        string deployedAt,
+        int minMinutes,
+        string from,
+        string to,
+        string settlesAt,
+        bool settled)
     {
-        var deployedAt = Now.AddMinutes(-ageMinutes);
+        // 5-minute buckets, 30 s flush, now 12:00:00: the board's complete data ends at 11:55. The window starts at the
+        // deploy rounded UP to a bucket (a deploy in a bucket's first 30 s, 11:50:10, or late in it, 11:49:50, never has
+        // its mixed bucket counted), and settles when the clean window holds minWindow (at least one bucket) of complete
+        // data: that bucket's end plus the flush interval.
+        var window = Window(At(deployedAt), null, minMinutes);
 
-        var window = DeployVerdictMath.Window(deployedAt, null, Now, TimeSpan.FromMinutes(minMinutes));
-
-        window.From.ShouldBe(deployedAt);
-        window.To.ShouldBe(Now);
+        window.From.ShouldBe(At(from));
+        window.To.ShouldBe(At(to));
+        window.SettlesAt.ShouldBe(At(settlesAt));
         window.Settled.ShouldBe(settled);
-        window.SettlesAt.ShouldBe(deployedAt.AddMinutes(minMinutes));
         window.MinWindowSeconds.ShouldBe(minMinutes * 60);
     }
 
-    [TimedFact]
-    public void Window_Superseded_EndsAtTheNextDeploy()
+    [TimedTheory]
+    [InlineData("11:55:29", false)]
+    [InlineData("11:55:30", true)]
+    public void Window_SettleInstant_IsTheBucketEndPlusTheFlushInterval(string now, bool settled)
     {
-        var window = DeployVerdictMath.Window(Now.AddHours(-3), Now.AddHours(-1), Now, TimeSpan.FromMinutes(5));
+        // Deployed 11:50:00 with a 5-minute minimum: the 11:50 bucket closes at 11:55 and is complete 30 s later, the moment
+        // the board's cut moves past it.
+        var window = DeployVerdictMath.Window(At("11:50:00"), null, At(now), TimeSpan.FromMinutes(5), 5, TimeSpan.FromSeconds(30));
 
-        window.To.ShouldBe(Now.AddHours(-1));
-        window.Settled.ShouldBeTrue();
-        window.SettlesAt.ShouldBe(Now.AddHours(-3).AddMinutes(5));
+        window.Settled.ShouldBe(settled);
+        window.SettlesAt.ShouldBe(At("11:55:30"));
+        window.To.ShouldBe(settled ? At("11:55:00") : At("11:50:00"));
     }
 
     [TimedFact]
-    public void Window_SupersededInsideTheSettleWindow_IsSettledAtTheNextDeploy()
+    public void Window_Superseded_EndsAtTheNextDeployRoundedDown()
     {
-        // v2 at 11:00, v3 at 11:02, 5-minute settle window: v2's window can never reach 5 minutes, so waiting is pointless.
-        var deployedAt = Now.AddHours(-1);
+        var window = Window(At("09:00:10"), At("11:02:40"), 5);
 
-        var window = DeployVerdictMath.Window(deployedAt, deployedAt.AddMinutes(2), Now, TimeSpan.FromMinutes(5));
-
-        window.From.ShouldBe(deployedAt);
-        window.To.ShouldBe(deployedAt.AddMinutes(2));
+        window.From.ShouldBe(At("09:05:00"));
+        window.To.ShouldBe(At("11:00:00"));
         window.Settled.ShouldBeTrue();
-        window.SettlesAt.ShouldBe(deployedAt.AddMinutes(2));
+        window.SettlesAt.ShouldBe(At("11:00:30"));
     }
 
     [TimedFact]
-    public void Window_SupersededAtTheSameInstant_IsSettledAndEmpty()
+    public void Window_SupersededInsideTheSettleWindow_IsSettledOverItsLifetime()
     {
-        var window = DeployVerdictMath.Window(Now.AddHours(-1), Now.AddHours(-1), Now, TimeSpan.FromMinutes(5));
+        // v2 at 11:00, v3 at 11:07, 15-minute settle window: v2's window can never reach 15 minutes, so waiting is
+        // pointless. It is judged over its one complete bucket, 11:00-11:05.
+        var window = Window(At("11:00:00"), At("11:07:00"), 15);
+
+        window.From.ShouldBe(At("11:00:00"));
+        window.To.ShouldBe(At("11:05:00"));
+        window.Settled.ShouldBeTrue();
+        window.SettlesAt.ShouldBe(At("11:05:30"));
+    }
+
+    [TimedTheory]
+    [InlineData("11:00:10", "11:04:50")]
+    [InlineData("11:00:00", "11:00:00")]
+    [InlineData("11:03:00", "11:06:00")]
+    public void Window_SupersededBeforeACompleteBucket_IsSettledAndEmpty(string deployedAt, string supersededAt)
+    {
+        // No whole bucket lies between the deploy (rounded up) and the next deploy (rounded down): nothing to judge, and
+        // never pending, since the window can never grow.
+        var window = Window(At(deployedAt), At(supersededAt), 5);
 
         window.To.ShouldBe(window.From);
         window.Settled.ShouldBeTrue();
-        window.SettlesAt.ShouldBe(Now.AddHours(-1));
+        window.SettlesAt.ShouldBe(At(supersededAt));
+    }
+
+    [TimedFact]
+    public void Window_SupersededJustNow_IsPendingUntilItsLastBucketIsComplete()
+    {
+        // v3 at 12:00:05: v2's last bucket (11:55-12:00) is complete at 12:00:30. At 12:00:10 the board's data still ends
+        // at 11:55, so v2 waits instead of being judged without its last bucket.
+        var window = DeployVerdictMath.Window(At("11:30:00"), At("12:00:05"), At("12:00:10"), TimeSpan.FromMinutes(5), 5, TimeSpan.FromSeconds(30));
+
+        window.Settled.ShouldBeFalse();
+        window.SettlesAt.ShouldBe(At("12:00:30"));
+        window.To.ShouldBe(At("11:55:00"));
     }
 
     [TimedFact]
     public void Window_OlderThanTheReadLimit_StartsAtTheLimit()
     {
-        var window = DeployVerdictMath.Window(Now.AddDays(-200), null, Now, TimeSpan.FromMinutes(5));
+        var window = Window(Now.AddDays(-200), null, 5);
 
-        window.From.ShouldBe(Now.AddDays(-IMetricQueryService.MaxRangeDays));
+        window.To.ShouldBe(At("11:55:00"));
+        window.From.ShouldBe(At("11:55:00").AddDays(-IMetricQueryService.MaxRangeDays));
     }
 
     [TimedFact]
     public void Window_DeployInTheFuture_IsEmptyAndPending()
     {
-        var window = DeployVerdictMath.Window(Now.AddMinutes(1), null, Now, TimeSpan.FromMinutes(5));
+        var window = Window(Now.AddMinutes(1), null, 5);
 
+        window.From.ShouldBe(At("12:05:00"));
         window.To.ShouldBe(window.From);
+        window.Settled.ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public void Window_OtherBucketWidthAndFlush_FollowTheConfiguration()
+    {
+        // 1-minute buckets and a 10 s flush: deployed 11:58:20, the clean window starts 11:59 and holds 1 minute at 12:00,
+        // complete at 12:00:10.
+        var window = DeployVerdictMath.Window(At("11:58:20"), null, Now, TimeSpan.FromMinutes(1), 1, TimeSpan.FromSeconds(10));
+
+        window.From.ShouldBe(At("11:59:00"));
+        window.To.ShouldBe(At("11:59:00"));
+        window.SettlesAt.ShouldBe(At("12:00:10"));
         window.Settled.ShouldBeFalse();
     }
 
@@ -289,6 +348,17 @@ public class DeployVerdictMathTests
     }
 
     [TimedFact]
+    public void SloCheck_EvaluatedAfterTheDeployButBeforeItsFirstCompleteBucket_IsNoData()
+    {
+        // Deployed 11:00:10: the window starts at 11:05. An evaluation at 11:03 is after the deploy but before any complete
+        // bucket of the release.
+        var (check, state) = DeployVerdictMath.SloCheck(Slo("Payments", SloState.Breaching, evaluatedAt: At("11:03:00")), At("11:05:00"));
+
+        state.ShouldBe(SloState.NoData);
+        check.Reason.ShouldBe("Last evaluated at 2026-11-16T11:03:00Z, before the deploy's first complete bucket (2026-11-16T11:05:00Z).");
+    }
+
+    [TimedFact]
     public void SloCheck_LastEvaluatedBeforeTheDeploy_IsNoData()
     {
         var (check, state) = DeployVerdictMath.SloCheck(Slo("Payments", SloState.Breaching, evaluatedAt: Now.AddHours(-2)), Now.AddHours(-1));
@@ -320,7 +390,7 @@ public class DeployVerdictMathTests
     public void Build_ScopesTilesAndSlosToTheApplication_AndSkipsDisabledSlos()
     {
         var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1)], null, null)!;
-        var window = DeployVerdictMath.Window(Now.AddHours(-1), null, Now, TimeSpan.FromMinutes(5));
+        var window = Window(Now.AddHours(-1), null, 5);
 
         var verdict = DeployVerdictMath.Build(
             resolved,
@@ -349,7 +419,7 @@ public class DeployVerdictMathTests
     public void Build_SparseData_PassesAndCountsTheChecksWithData()
     {
         var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1)], null, null)!;
-        var window = DeployVerdictMath.Window(Now.AddHours(-1), null, Now, TimeSpan.FromMinutes(5));
+        var window = Window(Now.AddHours(-1), null, 5);
 
         var verdict = DeployVerdictMath.Build(
             resolved,
@@ -367,7 +437,7 @@ public class DeployVerdictMathTests
     public void Build_BelowMinCoverage_IsNoDataAndSaysWhy()
     {
         var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1)], null, null)!;
-        var window = DeployVerdictMath.Window(Now.AddHours(-1), null, Now, TimeSpan.FromMinutes(5));
+        var window = Window(Now.AddHours(-1), null, 5);
 
         var verdict = DeployVerdictMath.Build(
             resolved,
@@ -386,7 +456,7 @@ public class DeployVerdictMathTests
     public void Build_SupersededInsideTheSettleWindow_IsJudgedNotPending()
     {
         var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1), Deploy("3.0.0", -1)], "2.0.0", null)!;
-        var window = DeployVerdictMath.Window(Now.AddHours(-1), Now.AddHours(-1).AddMinutes(2), Now, TimeSpan.FromMinutes(5));
+        var window = Window(Now.AddHours(-1), Now.AddHours(-1).AddMinutes(7), 15);
 
         var verdict = DeployVerdictMath.Build(resolved, window, [TileResult("A", SloState.Breaching, current: 9, threshold: 5)], []);
 
@@ -397,20 +467,54 @@ public class DeployVerdictMathTests
     [TimedFact]
     public void Build_Pending_SummarisesTheSettleTime()
     {
+        // Deployed 11:58: the clean window starts at 12:00 and holds 5 minutes at 12:05, complete at 12:05:30.
         var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", 0)], null, null)!;
-        var window = DeployVerdictMath.Window(Now.AddMinutes(-2), null, Now, TimeSpan.FromMinutes(5));
+        var window = Window(Now.AddMinutes(-2), null, 5);
 
         var verdict = DeployVerdictMath.Build(resolved, window, [], []);
 
         verdict.Verdict.ShouldBe(DeployVerdicts.Pending);
-        verdict.Summary.ShouldBe("pending: settles at 2026-11-16T12:03:00Z");
+        verdict.Summary.ShouldBe("pending: settles at 2026-11-16T12:05:30Z");
+    }
+
+    [TimedFact]
+    public void Build_SupersededBeforeACompleteBucket_IsNoDataAndSaysWhy()
+    {
+        var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1), Deploy("3.0.0", -1)], "2.0.0", null)!;
+        var window = Window(At("11:00:10"), At("11:04:50"), 5);
+
+        var verdict = DeployVerdictMath.Build(resolved, window, [], []);
+
+        verdict.Verdict.ShouldBe(DeployVerdicts.NoData);
+        verdict.Summary.ShouldBe("noData: superseded at 2026-11-16T11:04:50Z, before a complete metric bucket after the deploy; nothing to judge");
+        verdict.Checks.ShouldBeEmpty();
+    }
+
+    [TimedTheory]
+    [InlineData(14, 25, 0.56, true)]
+    [InlineData(7, 25, 0.28, true)]
+    [InlineData(13, 25, 0.56, false)]
+    [InlineData(6, 25, 0.28, false)]
+    [InlineData(1, 3, 0.333, true)]
+    [InlineData(2, 3, 2.0 / 3, true)]
+    [InlineData(0, 3, 0, true)]
+    [InlineData(3, 3, 1.0, true)]
+    [InlineData(0, 0, 0.5, false)]
+    public void Covered_ShareWithData_MeetsTheBarExactly(int withData, int total, double minCoverage, bool expected)
+    {
+        // 0.56 * 25 is 14.000000000000002 in floating point: 14 of 25 must still meet a 0.56 bar.
+        var states = Enumerable.Range(0, total)
+            .Select(x => x < withData ? SloState.Healthy : SloState.NoData)
+            .ToList();
+
+        DeployVerdictMath.Covered(states, minCoverage).ShouldBe(expected);
     }
 
     [TimedFact]
     public void Build_NoChecks_IsNoDataWithAnExplanation()
     {
         var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1)], null, null)!;
-        var window = DeployVerdictMath.Window(Now.AddHours(-1), null, Now, TimeSpan.FromMinutes(5));
+        var window = Window(Now.AddHours(-1), null, 5);
 
         var verdict = DeployVerdictMath.Build(resolved, window, [], []);
 
@@ -419,6 +523,12 @@ public class DeployVerdictMathTests
         verdict.ChecksWithData.ShouldBe(0);
         verdict.ChecksTotal.ShouldBe(0);
     }
+
+    private static DateTime At(string time) => Now.Date.Add(TimeSpan.Parse(time, System.Globalization.CultureInfo.InvariantCulture));
+
+    // The default configuration: 5-minute fine buckets and a 30 s flush interval.
+    private static DeployVerdictWindow Window(DateTime deployedAt, DateTime? supersededAt, int minMinutes)
+        => DeployVerdictMath.Window(deployedAt, supersededAt, Now, TimeSpan.FromMinutes(minMinutes), 5, TimeSpan.FromSeconds(30));
 
     private static ApplicationDeployModel Deploy(string version, int hoursAgo, string? environment = null) => new()
     {

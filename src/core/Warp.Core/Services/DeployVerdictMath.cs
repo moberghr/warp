@@ -11,6 +11,8 @@ namespace Warp.Core.Services;
 /// </summary>
 internal static class DeployVerdictMath
 {
+    private const double CoverageTolerance = 1e-9;
+
     /// <summary>The deploy, its predecessor and its successor in the same environment.</summary>
     internal sealed record ResolvedDeploy(ApplicationDeployModel Deploy, ApplicationDeployModel? Previous, ApplicationDeployModel? Next);
 
@@ -44,32 +46,57 @@ internal static class DeployVerdictMath
     }
 
     /// <summary>
-    /// The evaluation window: from the deploy to now (or to the next deploy in its environment), at most
-    /// <see cref="IMetricQueryService.MaxRangeDays"/> long; settled once the deploy is at least <paramref name="minWindow"/> old.
-    /// A superseded deploy is always settled: its window ends at the next deploy and can never grow, so waiting for
-    /// <paramref name="minWindow"/> would leave it pending forever. It is judged over its whole (short) lifetime and counts
-    /// as settled from the moment it was replaced.
+    /// The evaluation window (§8.23). A verdict judges only complete fine buckets that start at or after the deploy: the
+    /// mixed bucket holding the deploy carries pre-deploy traffic, so the window starts at <paramref name="deployedAt"/>
+    /// rounded UP to the next fine bucket boundary. It ends where the board cuts its data (the start of the fine bucket
+    /// holding <c>now − flushInterval</c>), or, for a superseded deploy, at the next deploy rounded DOWN to a boundary
+    /// (whichever is earlier). It is at most <see cref="IMetricQueryService.MaxRangeDays"/> long.
+    /// <para>
+    /// A live deploy is pending until that clean window is at least <paramref name="minWindow"/> long (and holds at least
+    /// one bucket, so a zero minWindow still waits for one): <c>SettlesAt</c> is the end of the bucket that completes the
+    /// minimum, plus <paramref name="flushInterval"/> for its last measurements to be written. A superseded deploy keeps
+    /// the settled-over-its-lifetime rule (its window can never grow, so waiting for minWindow would leave it pending
+    /// forever): it is judged once its last bucket is complete, or straight away when its clean window is empty (the
+    /// verdict is then noData, never pending).
+    /// </para>
     /// </summary>
-    public static DeployVerdictWindow Window(DateTime deployedAt, DateTime? supersededAt, DateTime now, TimeSpan minWindow)
+    public static DeployVerdictWindow Window(DateTime deployedAt, DateTime? supersededAt, DateTime now, TimeSpan minWindow, int fineMinutes, TimeSpan flushInterval)
     {
-        var to = supersededAt ?? now;
-        if (to < deployedAt)
+        fineMinutes = Math.Max(1, fineMinutes);
+        var flush = flushInterval > TimeSpan.Zero ? flushInterval : TimeSpan.Zero;
+        var cleanStart = CeilToBucket(deployedAt, fineMinutes);
+        var completeUntil = MetricTiers.BucketStart(MetricTier.Fine, now - flush, fineMinutes);
+
+        DateTime end;
+        DateTime settlesAt;
+        if (supersededAt is { } next)
         {
-            to = deployedAt;
+            end = MetricTiers.BucketStart(MetricTier.Fine, next, fineMinutes);
+            settlesAt = end > cleanStart ? end + flush : next;
+        }
+        else
+        {
+            var required = CeilToBucket(cleanStart + minWindow, fineMinutes);
+            end = DateTime.MaxValue;
+            settlesAt = (required > cleanStart ? required : cleanStart.AddMinutes(fineMinutes)) + flush;
+        }
+
+        var to = end < completeUntil ? end : completeUntil;
+        if (to < cleanStart)
+        {
+            to = cleanStart;
         }
 
         var maxLength = TimeSpan.FromDays(IMetricQueryService.MaxRangeDays);
-        var from = to - deployedAt > maxLength ? to - maxLength : deployedAt;
-        var settlesAt = deployedAt + minWindow;
-        var superseded = supersededAt is not null;
+        var emptySuperseded = supersededAt is not null && end <= cleanStart;
 
         return new DeployVerdictWindow
         {
-            From = from,
+            From = to - cleanStart > maxLength ? to - maxLength : cleanStart,
             To = to,
             MinWindowSeconds = (int)minWindow.TotalSeconds,
-            SettlesAt = superseded && to < settlesAt ? to : settlesAt,
-            Settled = superseded || to - deployedAt >= minWindow,
+            SettlesAt = settlesAt,
+            Settled = emptySuperseded || now >= settlesAt,
         };
     }
 
@@ -114,17 +141,23 @@ internal static class DeployVerdictMath
     }
 
     /// <summary>
-    /// An SLO as a check, from its latest evaluation. An objective never evaluated, or last evaluated before the deploy, has
-    /// no data about this release yet.
+    /// An SLO as a check, from its latest evaluation. An objective never evaluated, or last evaluated before the verdict
+    /// window starts (<paramref name="windowStart"/>: the deploy's first complete bucket), has no data about this release yet.
     /// </summary>
-    public static (DeployVerdictCheck Check, SloState State) SloCheck(SloObjectiveModel slo, DateTime deployedAt)
+    /// <remarks>
+    /// Only the evaluation time can be held to the clean window. The SLO's state is computed over its own rolling window
+    /// (hours to days), which always holds pre-deploy traffic as well; the verdict cannot re-cut it without re-evaluating the
+    /// objective, so an SLO weighs the release's traffic among older traffic, as it does on the SLO page.
+    /// </remarks>
+    public static (DeployVerdictCheck Check, SloState State) SloCheck(SloObjectiveModel slo, DateTime windowStart)
     {
         ArgumentNullException.ThrowIfNull(slo);
 
         var (state, reason) = slo switch
         {
             { Evaluated: false } => (SloState.NoData, "Not evaluated yet."),
-            { LastEvaluatedAt: { } at } when at < deployedAt => (SloState.NoData, $"Last evaluated at {Instant(at)}, before the deploy."),
+            { LastEvaluatedAt: { } at } when at < windowStart
+                => (SloState.NoData, $"Last evaluated at {Instant(at)}, before the deploy's first complete bucket ({Instant(windowStart)})."),
             _ => (slo.State, SloReason(slo)),
         };
         var evaluated = slo.Evaluated && state != SloState.NoData;
@@ -189,7 +222,9 @@ internal static class DeployVerdictMath
             return true;
         }
 
-        return states.Count > 0 && WithData(states) >= minCoverage * states.Count;
+        // Compare the share, with a tolerance: minCoverage * Count rounds up past an exact count (0.56 * 25 =
+        // 14.000000000000002), so 14 of 25 would miss a 0.56 bar it meets.
+        return states.Count > 0 && (double)WithData(states) / states.Count >= minCoverage - CoverageTolerance;
     }
 
     /// <summary>Assembles the verdict from the resolved deploy, the window and the inputs of the application.</summary>
@@ -219,7 +254,7 @@ internal static class DeployVerdictMath
             .Where(x => x.Enabled)
             .Where(x => AppliesTo(x.Application, deploy.Application))
             .OrderBy(x => x.Name, StringComparer.Ordinal)
-            .Select(x => SloCheck(x, deploy.FirstSeenAt)));
+            .Select(x => SloCheck(x, window.From)));
 
         var states = checks.ConvertAll(x => x.State);
         var verdict = Aggregate(states, window.Settled, minCoverage);
@@ -260,6 +295,12 @@ internal static class DeployVerdictMath
         if (string.Equals(verdict, DeployVerdicts.Pending, StringComparison.Ordinal))
         {
             return $"pending: settles at {Instant(window.SettlesAt)}";
+        }
+
+        // Only a superseded deploy settles with an empty window: it was replaced before a complete bucket after it.
+        if (window.Settled && window.To <= window.From)
+        {
+            return $"{verdict}: superseded at {Instant(window.SettlesAt)}, before a complete metric bucket after the deploy; nothing to judge";
         }
 
         var coverage = $"{WithData(states).ToString(CultureInfo.InvariantCulture)} of {states.Count.ToString(CultureInfo.InvariantCulture)} checks had data";
@@ -307,6 +348,13 @@ internal static class DeployVerdictMath
         return slo.State == SloState.Acknowledged && slo.AcknowledgedUntil is { } until
             ? $"Acknowledged until {Instant(until)}: {detail}."
             : $"{Capitalized(Phrase(slo.State))}: {detail}.";
+    }
+
+    private static DateTime CeilToBucket(DateTime utc, int fineMinutes)
+    {
+        var floor = MetricTiers.BucketStart(MetricTier.Fine, utc, fineMinutes);
+
+        return floor == utc ? floor : floor.AddMinutes(fineMinutes);
     }
 
     private static int WithData(IReadOnlyCollection<SloState> states) => states.Count(x => x != SloState.NoData);

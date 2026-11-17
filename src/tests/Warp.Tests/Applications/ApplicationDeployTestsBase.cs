@@ -359,6 +359,96 @@ public abstract class ApplicationDeployTestsBase : IAsyncLifetime
         }
     }
 
+    [TimedFact]
+    public async Task GetApplicationDeploys_Route_MalformedId_ReturnsNotFound()
+    {
+        var (app, client) = await CreateDashboardHost();
+        try
+        {
+            // One base64 character is never a whole byte: UrlSafeId.TryDecode rejects it.
+            var response = await client.GetAsync("/warp/api/applications/a/deploys", Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        }
+        finally
+        {
+            await DisposeHostAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task GetApplicationDeploys_Route_FromEqualToTo_ReturnsBadRequest()
+    {
+        var (app, client) = await CreateDashboardHost();
+        try
+        {
+            var instant = Uri.EscapeDataString(Now.ToString("O"));
+
+            var response = await client.GetAsync($"/warp/api/applications/{UrlSafeId.Encode("api")}/deploys?from={instant}&to={instant}", Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+            json.RootElement.GetProperty("error").GetString().ShouldBe("'from' must be before 'to'.");
+        }
+        finally
+        {
+            await DisposeHostAsync(app, client);
+        }
+    }
+
+    [TimedTheory]
+    [InlineData("2026-11-16T10:30:00", "2026-11-16T11:30:00")]
+    [InlineData("2026-11-16T11:30:00+01:00", "2026-11-16T12:30:00+01:00")]
+    [InlineData("2026-11-16T05:30:00-05:00", "2026-11-16T06:30:00-05:00")]
+    public async Task GetApplicationDeploys_Route_UnspecifiedOrOffsetInstant_IsReadAsThatUtcInstant(string from, string to)
+    {
+        // Every pair is 10:30-11:30 UTC: a bare instant is read as UTC, an offset one is converted. Only the 11:00 deploy
+        // is inside; reading the offset as UTC (or a bare instant as local time) would move the range off it.
+        await SeedDeployAsync("api", "1.0.0", string.Empty, Now.AddHours(-3));
+        await SeedDeployAsync("api", "2.0.0", string.Empty, Now.AddHours(-1));
+        await SeedDeployAsync("api", "3.0.0", string.Empty, Now);
+        var (app, client) = await CreateDashboardHost();
+        try
+        {
+            var response = await client.GetAsync(
+                $"/warp/api/applications/{UrlSafeId.Encode("api")}/deploys?from={Uri.EscapeDataString(from)}&to={Uri.EscapeDataString(to)}",
+                Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+            json.RootElement.GetArrayLength().ShouldBe(1);
+            json.RootElement[0].GetProperty("version").GetString().ShouldBe("2.0.0");
+        }
+        finally
+        {
+            await DisposeHostAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task GetApplicationDeploys_Route_OffsetFromAndBareTo_ComparesTheUtcInstants()
+    {
+        // 10:30+00:00 to a bare 11:30 (read as UTC): a one-hour range. The binder turns an offset instant into machine-local
+        // time, so comparing before converting would read 11:30 local (on a host east of UTC) against 11:30 and answer 400.
+        await SeedDeployAsync("api", "2.0.0", string.Empty, Now.AddHours(-1));
+        var (app, client) = await CreateDashboardHost();
+        try
+        {
+            var from = Uri.EscapeDataString("2026-11-16T10:30:00+00:00");
+            var to = Uri.EscapeDataString("2026-11-16T11:30:00");
+
+            var response = await client.GetAsync($"/warp/api/applications/{UrlSafeId.Encode("api")}/deploys?from={from}&to={to}", Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+            json.RootElement.GetArrayLength().ShouldBe(1);
+        }
+        finally
+        {
+            await DisposeHostAsync(app, client);
+        }
+    }
+
     private static WarpConfiguration Config(string? application, string? version, string? environment) => new()
     {
         ApplicationName = application,

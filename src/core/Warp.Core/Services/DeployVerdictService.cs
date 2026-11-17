@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using Warp.Core.Models;
 
 namespace Warp.Core.Services;
@@ -11,7 +12,8 @@ public interface IDeployVerdictService
 {
     /// <summary>
     /// Judges the deploy <paramref name="query"/> names (the latest one when it gives no version). Board tiles scoped to the
-    /// application or to none are evaluated over <c>[deploy, now)</c> against their rules and baselines, and the enabled SLOs
+    /// application or to none are evaluated over the complete fine buckets after the deploy (see
+    /// <c>DeployVerdictMath.Window</c>) against their rules and baselines, and the enabled SLOs
     /// scoped the same way contribute their current state. Bounded: one deploy read, one batched board read and one SLO read
     /// (none for a superseded deploy), whatever the number of tiles and objectives. Returns null when the application has no
     /// recorded deploy matching the version and environment.
@@ -26,13 +28,20 @@ public sealed class DeployVerdictService : IDeployVerdictService
     private readonly IMetricBoardQueryService _board;
     private readonly ISloQueryService _slos;
     private readonly TimeProvider _timeProvider;
+    private readonly IOptions<WarpConfiguration> _options;
 
-    public DeployVerdictService(IApplicationDeployQueryService applications, IMetricBoardQueryService board, ISloQueryService slos, TimeProvider timeProvider)
+    public DeployVerdictService(
+        IApplicationDeployQueryService applications,
+        IMetricBoardQueryService board,
+        ISloQueryService slos,
+        TimeProvider timeProvider,
+        IOptions<WarpConfiguration> options)
     {
         _applications = applications;
         _board = board;
         _slos = slos;
         _timeProvider = timeProvider;
+        _options = options;
     }
 
     public async Task<DeployVerdictModel?> GetVerdict(DeployVerdictQuery query, CancellationToken ct)
@@ -48,9 +57,19 @@ public sealed class DeployVerdictService : IDeployVerdictService
         }
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var window = DeployVerdictMath.Window(resolved.Deploy.FirstSeenAt, resolved.Next?.FirstSeenAt, now, query.MinWindow);
 
-        // An empty window (the deploy is this instant) has nothing to read; the board rejects it.
+        // The board's cut: the window holds only the complete fine buckets after the deploy (§8.23).
+        var configuration = _options.Value;
+        var window = DeployVerdictMath.Window(
+            resolved.Deploy.FirstSeenAt,
+            resolved.Next?.FirstSeenAt,
+            now,
+            query.MinWindow,
+            configuration.FineResolutionMinutes,
+            configuration.MetricFlushInterval);
+
+        // An empty window (no complete bucket after the deploy yet, or ever for a deploy superseded inside its first
+        // bucket) has nothing to read; the board rejects it.
         var tiles = window.To > window.From
             ? (await _board.GetBoard(window.From, window.To, ct)).Tiles
             : [];

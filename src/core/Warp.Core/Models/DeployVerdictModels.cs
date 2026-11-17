@@ -78,21 +78,33 @@ public sealed class DeployVerdictDeploy
     public string? SupersededBy { get; init; }
 }
 
-/// <summary>The window the board tiles were evaluated over.</summary>
+/// <summary>
+/// The window the board tiles were evaluated over: only complete fine buckets (<c>FineResolutionMinutes</c> wide) that
+/// start after the deploy, so no pre-deploy traffic is judged (§8.23).
+/// </summary>
 public sealed class DeployVerdictWindow
 {
-    /// <summary>The deploy's <c>FirstSeenAt</c> (moved forward only when the window would exceed the 90-day read limit).</summary>
+    /// <summary>
+    /// The deploy's <c>FirstSeenAt</c> rounded UP to the next fine bucket boundary: the mixed bucket holding the deploy is
+    /// never counted. Moved forward only when the window would exceed the 90-day read limit.
+    /// </summary>
     public DateTime From { get; init; }
 
-    /// <summary>Now, or the next deploy's <c>FirstSeenAt</c> when this one is superseded.</summary>
+    /// <summary>
+    /// Where the board's complete data ends (the start of the fine bucket holding <c>now − MetricFlushInterval</c>), or, for
+    /// a superseded deploy, the next deploy's <c>FirstSeenAt</c> rounded DOWN to a bucket boundary when that is earlier.
+    /// Equal to <see cref="From"/> while no complete bucket follows the deploy.
+    /// </summary>
     public DateTime To { get; init; }
 
     /// <summary>The settle time the caller asked for (<c>minWindowMinutes</c>), in seconds.</summary>
     public int MinWindowSeconds { get; init; }
 
     /// <summary>
-    /// When the deploy is old enough to get a verdict other than pending: <c>FirstSeenAt + minWindow</c>, or the next deploy's
-    /// <c>FirstSeenAt</c> when it was superseded before that.
+    /// When the verdict stops being pending. Live deploy: when the clean window holds <c>minWindow</c> of complete data,
+    /// i.e. <see cref="From"/> + minWindow rounded up to a bucket end (at least one bucket), plus <c>MetricFlushInterval</c>.
+    /// Superseded deploy: when its last bucket is complete (the next deploy rounded down, plus the flush interval), or the
+    /// next deploy's <c>FirstSeenAt</c> when it was replaced before a complete bucket (then the verdict is noData).
     /// </summary>
     public DateTime SettlesAt { get; init; }
 
