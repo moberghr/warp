@@ -345,6 +345,88 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetBoard_ExactlyTheCap_IsNotTruncated()
+    {
+        await SeedAsync([Instrument("http", MetricKind.Counter)], []);
+        await SeedTilesAsync(Tile("All", "http"));
+        await SeedNotesAsync(
+        [
+            .. Enumerable.Range(0, MetricAnnotationValidation.MaxPerRead)
+                .Select(x => Note("http", $"n{x}", startsAt: Now.AddMinutes(-50).AddSeconds(x))),
+        ]);
+
+        var board = await Board().GetBoard(Now.AddHours(-1), Now, Ct);
+
+        board.AnnotationsTruncated.ShouldBeFalse();
+        board.Tiles.ShouldHaveSingleItem().Annotations.Count.ShouldBe(MetricAnnotationValidation.MaxPerRead);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_MoreNotesThanTheCap_KeepsAnOldPlainNoteActiveAtTheWindowEnd()
+    {
+        // No acknowledged noise at all, so only the second sort key (active at the window end) can keep the OLD note,
+        // which ends exactly at the window end (EndsAt == to counts as active), over 200 newer notes that ended earlier.
+        await SeedAsync([Instrument("http", MetricKind.Counter)], []);
+        await SeedTilesAsync(Tile("All", "http"));
+        await SeedNotesAsync(
+        [
+            Note("http", "still open", startsAt: Now.AddDays(-30), endsAt: Now),
+            .. Enumerable.Range(0, MetricAnnotationValidation.MaxPerRead)
+                .Select(x => Note("http", $"n{x}", startsAt: Now.AddMinutes(-50).AddSeconds(x), endsAt: Now.AddMinutes(-20))),
+        ]);
+
+        var board = await Board().GetBoard(Now.AddHours(-1), Now, Ct);
+
+        board.AnnotationsTruncated.ShouldBeTrue();
+        var tile = board.Tiles.ShouldHaveSingleItem();
+        tile.Annotations.Count.ShouldBe(MetricAnnotationValidation.MaxPerRead);
+        tile.Annotations.ShouldContain(x => string.Equals(x.Note, "still open", StringComparison.Ordinal));
+        tile.Annotations.ShouldNotContain(x => string.Equals(x.Note, "n0", StringComparison.Ordinal));
+        tile.Annotations[^1].Note.ShouldBe("still open");
+    }
+
+    [TimedFact]
+    public async Task GetBoard_AcknowledgedNoteEndingAtTheWindowEnd_IsKeptOverTheCapAndAcknowledges()
+    {
+        await SeedAsync([Instrument("http", MetricKind.Counter)], [Point("http", Now.AddMinutes(-10), sum: 7)]);
+        await SeedTilesAsync(Tile("All", "http", rule: MetricTileStatusRule.Threshold, threshold: 5, comparison: SloComparison.AtMost));
+        await SeedNotesAsync(
+        [
+            Note("http", "known noise", startsAt: Now.AddDays(-30), endsAt: Now, acknowledged: true),
+            .. Enumerable.Range(0, MetricAnnotationValidation.MaxPerRead)
+                .Select(x => Note("http", $"n{x}", startsAt: Now.AddMinutes(-50).AddSeconds(x))),
+        ]);
+
+        var board = await Board().GetBoard(Now.AddHours(-1), Now, Ct);
+
+        board.AnnotationsTruncated.ShouldBeTrue();
+        var tile = board.Tiles.ShouldHaveSingleItem();
+        tile.Annotations.ShouldContain(x => string.Equals(x.Note, "known noise", StringComparison.Ordinal));
+        tile.Status.ShouldBe(SloState.Acknowledged);
+    }
+
+    [TimedFact]
+    public async Task GetBoard_MoreNotesThanTheCapStartingAtTheSameInstant_KeepsTheHighestIdsNewestFirst()
+    {
+        // Every note starts at the same instant and none is active at the end: the Id breaks the tie, so the cap drops
+        // the lowest id, the same rule the result order uses.
+        await SeedAsync([Instrument("http", MetricKind.Counter)], []);
+        await SeedTilesAsync(Tile("All", "http"));
+        await SeedNotesAsync(
+        [
+            .. Enumerable.Range(0, MetricAnnotationValidation.MaxPerRead + 1)
+                .Select(x => Note("http", $"n{x}", startsAt: Now.AddMinutes(-50), endsAt: Now.AddMinutes(-20))),
+        ]);
+        var ids = await _fixture.CreateContext().Set<MetricAnnotation>().AsNoTracking().Select(x => x.Id).ToListAsync(Ct);
+
+        var board = await Board().GetBoard(Now.AddHours(-1), Now, Ct);
+
+        board.AnnotationsTruncated.ShouldBeTrue();
+        board.Tiles.ShouldHaveSingleItem().Annotations.Select(x => x.Id)
+            .ShouldBe(ids.OrderByDescending(x => x).Take(MetricAnnotationValidation.MaxPerRead));
+    }
+
+    [TimedFact]
     public async Task GetBoard_HealthyTileUnderAcknowledgedNoise_StaysHealthy()
     {
         await SeedAsync([Instrument("http", MetricKind.Counter)], [Point("http", Now.AddMinutes(-10), sum: 1)]);
