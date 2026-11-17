@@ -301,7 +301,37 @@ A tile reads **No data** when its value (or the chosen baseline) is empty. That 
 
 **Post-deploy verdict.** The board also answers the question for a machine. `GET {prefix}/api/applications/verdict?application=<name>` evaluates the tiles scoped to that application (or to none) over the window since its latest deploy, adds its SLOs, and returns `pass`, `warn`, `fail`, `pending` or `noData` with one check per tile and SLO. A CI step can call it after a rollout; see [Post-deploy verdict](./applications.md#post-deploy-verdict). The application detail page shows the same verdict next to its deploys.
 
-**API.** `GET {prefix}/api/metrics/board?from=&to=` takes ISO instants at most 90 days apart; bad input is a 400. `GET {prefix}/api/metrics/board/tiles` lists the tiles. `POST {prefix}/api/metrics/board/tiles` inserts (`id: 0`) or updates a tile, validated against the instrument registry, and answers a 400 with the reason on failure. `DELETE {prefix}/api/metrics/board/tiles/{id}` removes one. These routes carry the dashboard's authorization like every other route.
+**API.** `GET {prefix}/api/metrics/board?from=&to=[&board={id}]` takes ISO instants at most 90 days apart and an optional board id (without it, the [Default board](#named-boards)); bad input is a 400 and an unknown board a 404. `GET {prefix}/api/metrics/board/tiles` lists the tiles of every board. `POST {prefix}/api/metrics/board/tiles` inserts (`id: 0`) or updates a tile, validated against the instrument registry, and answers a 400 with the reason on failure; its optional `boardId` puts the tile on a board (null or the Default board's id is the Default board), and changing it moves the tile. `DELETE {prefix}/api/metrics/board/tiles/{id}` removes one. These routes carry the dashboard's authorization like every other route.
+
+### Named boards
+
+One board for every team gets crowded. Tiles can be grouped on **named boards**: a Checkout board for the shop team, a Payments board for the payments team. Boards are always shared, and each holds at most 48 tiles; a host holds at most 100 boards.
+
+The **Default** board always exists. It is created once, the first time anything uses the boards (the board list, a new board, or the seeder), under the same `warp:metric-board` lock, so ten replicas create one. Every tile with no board belongs to it, which is how the tiles stored before named boards existed show up there with no data migration. The Default board can be renamed but never deleted (a 400).
+
+**In the dashboard.** The board picker on Metrics → Board selects, creates (**New board**), renames and deletes boards. The selected board is in the URL as a slug of its name (`/metrics/board?board=checkout`; the Default board leaves the parameter out), so a link opens the same board, and the browser remembers the last board you opened. Deleting a board asks first and deletes **its tiles with it**; tiles on other boards are untouched. The tile editor has a **Board** select, so a tile can be moved; moving it onto a full board is refused.
+
+**From code.** `AddMetricBoard("Name", b => …)` seeds a named board and its tiles; the overload without a name seeds the Default board, as before:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.AddMetricBoard("Checkout", b => b
+        .Ratio("Checkout success", "shop.checkout.completed", "outcome", "ok", "error,declined",
+            application: "shop-api", check: MetricTileCheck.AtLeast(0.98))
+        .Value("Checkout 5xx", "http.server.request.duration",
+            tagFilter: "http.route=api/checkout*,http.response.status_code=5*",
+            application: "shop-api", check: MetricTileCheck.AtMost(5)));
+
+    opt.AddMetricBoard(b => b.Value("Inbound requests", "http.server.request.duration"));   // the Default board
+});
+```
+
+Seeding stays insert-if-absent. A board is matched by **name, ignoring case** (`Checkout` finds a stored `checkout`); a missing one is created. A tile is matched only against the tiles **of its own board**, by name or by its fields, as above, so two boards can each have a tile called "Volume". Repeated calls for the same board name merge, and the name `Default` is the Default board. A board renamed in the dashboard no longer matches its seed, so the seed creates a board under the old name on the next start: rename the seed too. Board and tile edits made in the dashboard (a description, a tile's rule or name) survive a restart. A board deleted in the dashboard is seeded again, with its seeded tiles, while it stays in code.
+
+**API.** `GET {prefix}/api/metrics/boards` lists the boards in picker order with their tile counts (`id`, `name`, `description`, `position`, `application`, `isDefault`, `tileCount`, `createdBy`). `POST {prefix}/api/metrics/boards` creates (`id: 0`) or renames a board (`name`, `description`, `position`, `application`, which is only the scope the picker suggests and never filters tiles); a blank or duplicate name is a 400, editing a deleted board a 404. `DELETE {prefix}/api/metrics/boards/{id}` deletes a board and its tiles in one `SaveChanges` (204; 400 for the Default board; 404 when it does not exist). Every `{ "error": ... }` body is for people. The creator is the signed-in dashboard user, and every create, rename and delete is logged at Information with that name.
+
+The [post-deploy verdict](./applications.md#post-deploy-verdict) counts the tiles of every board unless you pass `board=<name>`.
 
 ## Annotations
 
@@ -409,4 +439,4 @@ See also [Configuration](/docs/operations/configuration#custom-application-metri
 
 ## Migration
 
-Additive: four new tables (`metric_point`, `metric_instrument`, `metric_board_tile` for the [health board](#health-board), and `metric_annotation` for [annotations](#annotations)), nine nullable columns on `slo_definition` for the metric SLO kinds, and the nullable `metric_point.version` column for [comparing versions](#comparing-versions), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
+Additive: five new tables (`metric_point`, `metric_instrument`, `metric_board_tile` and `metric_board` for the [health board](#health-board) and its [named boards](#named-boards), and `metric_annotation` for [annotations](#annotations)), nine nullable columns on `slo_definition` for the metric SLO kinds, the nullable `metric_point.version` column for [comparing versions](#comparing-versions), and the nullable `metric_board_tile.board_id` column (null is the Default board, so existing tiles need no data migration), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.

@@ -108,8 +108,9 @@ GET {prefix}/api/applications/verdict?application=orders-api&version=2.3.1&envir
 | `environment` | no | Look only at deploys in this environment. Left out, the newest matching deploy in any environment is taken. |
 | `minWindowMinutes` | no | The settle time, a whole number from 0 to 1440 (default 5). |
 | `minCoverage` | no | The share of checks that must have data for a `pass` or `warn`, a number from 0 to 1 (default 0). Below it the verdict is `noData`. |
+| `board` | no | The [named board](./custom-metrics.md#named-boards) whose tiles count, by **name** (case ignored). Left out, the tiles of **every** board count. SLOs count either way. |
 
-A missing `application`, a value longer than 200 characters, a bad `minWindowMinutes` or a bad `minCoverage` is a **400**. An application with no recorded deploy, or no deploy matching the version and environment, is a **404**. The route is read-only and carries the dashboard's authorization like every other route.
+A missing `application`, a value longer than 200 characters, a bad `minWindowMinutes` or a bad `minCoverage` is a **400**. An application with no recorded deploy, or no deploy matching the version and environment, is a **404**, and so is a `board` that names no board (`{ "error": "No metric board is named '…'." }`): judging no tiles at all would read as a pass. The route is read-only and carries the dashboard's authorization like every other route.
 
 **Which deploy, which window.** The deploy comes from the [deploy history](#deploy-history). The verdict judges only **complete metric buckets that start after the deploy** (buckets are `FineResolutionMinutes` wide, 5 minutes by default), so no traffic from the previous release is counted:
 
@@ -127,7 +128,7 @@ A **superseded** deploy keeps the settled-over-its-lifetime rule: its window can
 
 **What counts.**
 
-- **Health-board tiles** ([custom metrics](./custom-metrics.md#health-board)) scoped to this application, plus tiles with no application, evaluated over the window against their own rule: a threshold, or a deviation from the same window 1 or 7 days earlier. Tiles without a status rule are skipped. A tile scoped to another application never counts. An unscoped tile covers every application, so on a shared database, scope the tiles that should gate one application to it.
+- **Health-board tiles** ([custom metrics](./custom-metrics.md#health-board)) of every board, or of the `board` you name, scoped to this application, plus tiles with no application, evaluated over the window against their own rule: a threshold, or a deviation from the same window 1 or 7 days earlier. Tiles without a status rule are skipped. A tile scoped to another application never counts. An unscoped tile covers every application, so on a shared database, scope the tiles that should gate one application to it.
 - **SLOs** ([SLO / error budget](./slo-error-budget.md)) that are enabled and scoped to this application or to none, with their **current** evaluated state. An SLO never evaluated, or not evaluated since the window started (`LastEvaluatedAt` before `window.from`, the deploy's first complete bucket), counts as no data. That evaluation time is the only part of the clean window an SLO can follow: its state covers its own rolling window, which reaches back before the deploy, and the verdict cannot re-cut it. The evaluation history is not kept, so "healthy before, breaching after" is not computed. A superseded deploy gets no SLO checks, because their current state describes the newer release.
 
 **Aggregation.**
@@ -187,7 +188,9 @@ A **superseded** deploy keeps the settled-over-its-lifetime rule: its window can
 
 The reason uses the SLO page's wording and gives the budget left as a whole percentage. Before this release a metric latency or gauge threshold check reported the threshold in `target` against a share in `value` (`observed 0.9917 vs target 600`); `target` is now the required share and the threshold moved to the new `threshold` field, which is `null` for every other check. The reason text is for people, not for parsing.
 
-**Cost.** One deploy read, one batched [board read](./custom-metrics.md#health-board) (two grouped statements at most, whatever the tile count) and one SLO read. Nothing is read per tile or per objective. `IDeployVerdictService` is registered by `AddWarp`, so a dashboard-only host serves the route. The application detail page shows the verdict of the latest deploy above the **Deploys** card.
+**Which board.** Without `board`, the verdict reads the tiles of every board, exactly as it did when there was only one board: moving a tile from the Default board to a named one never drops it from an existing CI check. Pass `board=Checkout` to gate a release on the Checkout board alone (a team's own checks); the SLOs are not on any board and still count. The board is named, not numbered, because a CI script knows the name.
+
+**Cost.** One deploy read, one batched [board read](./custom-metrics.md#health-board) (two grouped statements at most, whatever the tile or board count), one SLO read, and with `board` one read of the board list. Nothing is read per tile or per objective. `IDeployVerdictService` is registered by `AddWarp`, so a dashboard-only host serves the route. The application detail page shows the verdict of the latest deploy above the **Deploys** card.
 
 **Calling it from CI.** The route sits behind the dashboard's gate ([Dashboard authorization](../operations/dashboard-auth.md)). Warp adds no token scheme of its own, so use the gate you already have:
 
