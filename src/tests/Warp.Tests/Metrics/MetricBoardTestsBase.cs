@@ -16,6 +16,7 @@ using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Enums;
 using Warp.Core.Metrics;
 using Warp.Core.Models;
@@ -167,6 +168,94 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
 
         result.ShouldBe(0);
         (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedTheory]
+    [InlineData(-1)]
+    [InlineData(-42)]
+    public async Task Upsert_NegativeId_InsertsUnderAStoreGeneratedKey(int id)
+    {
+        var tile = Tile("Volume", "c");
+        tile.Id = id;
+
+        var result = await Command().Upsert(tile, Ct);
+
+        result.ShouldNotBeNull().ShouldBeGreaterThan(0);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().SingleAsync(Ct)).Id.ShouldBe(result.Value);
+    }
+
+    [TimedFact]
+    public async Task Upsert_InsertWhileAnotherHoldsTheBoardLock_WaitsForItThenInserts()
+    {
+        // N=2: a second connection holds warp:metric-board (as a replica's seed or another insert would), pinned inside
+        // its transaction by a BarrierSignal. The insert must wait at the lock (its count would otherwise race the
+        // holder's) and go through once the holder commits.
+        var barrier = new BarrierSignal();
+        var holderContext = _fixture.CreateContext();
+        var holder = TestTasks.QueriesFor(holderContext).RunUnderTransactionLockAsync(
+            holderContext,
+            "warp:metric-board",
+            async (_, ct) =>
+            {
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return 0;
+            },
+            Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+
+        var insert = Command().Upsert(Tile("Volume", "c"), Ct);
+
+        // Held at the lock: it does not finish while the holder is inside.
+        await Should.ThrowAsync<TimeoutException>(() => insert.WaitAsync(TimeSpan.FromMilliseconds(500), Ct));
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+        barrier.CanFinish.Release();
+        (await holder).LockHeld.ShouldBeTrue();
+        (await insert).ShouldNotBeNull();
+        (await _fixture.CreateContext().Set<MetricBoardTile>().CountAsync(Ct)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task Upsert_InsertWhileTheBoardLockIsHeldPastTheTimeout_ThrowsTimeoutAndAddsNothing()
+    {
+        var barrier = new BarrierSignal();
+        var holderContext = _fixture.CreateContext();
+        var holder = TestTasks.QueriesFor(holderContext).RunUnderTransactionLockAsync(
+            holderContext,
+            "warp:metric-board",
+            async (_, ct) =>
+            {
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return 0;
+            },
+            Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        try
+        {
+            await Should.ThrowAsync<TimeoutException>(() => Command(TimeSpan.FromMilliseconds(300)).Upsert(Tile("Volume", "c"), Ct));
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+            await holder;
+        }
+
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Upsert_InsertWithoutAProvider_RunsUnguardedAndInserts()
+    {
+        // An AddWarp-only host that never called UsePostgreSql/UseSqlServer has no IWarpSqlQueries: no lock to take.
+        var command = new MetricBoardCommandService<TestContext>(_fixture.CreateContext(), TimeProvider.System, NullLogger<MetricBoardCommandService<TestContext>>.Instance);
+
+        var id = await command.Upsert(Tile("Volume", "c"), Ct);
+
+        id.ShouldNotBeNull();
+        (await _fixture.CreateContext().Set<MetricBoardTile>().SingleAsync(Ct)).Id.ShouldBe(id.Value);
     }
 
     [TimedFact]
@@ -723,6 +812,7 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
     [InlineData("bad-filter")]
     [InlineData("no-name")]
     [InlineData("bad-baseline")]
+    [InlineData("ratio-threshold-above-1")]
     public async Task PostTile_Invalid_ReturnsBadRequestAndPersistsNothing(string scenario)
     {
         await SeedAsync([Instrument("pool", MetricKind.Gauge), Instrument("c", MetricKind.Counter)], []);
@@ -732,6 +822,7 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
             "ratio-on-gauge" => new { id = 0, name = "R", instrument = "pool", kind = (int)MetricTileKind.Ratio, ratioTag = "s", goodValues = "a", badValues = "b" },
             "bad-filter" => new { id = 0, name = "F", instrument = "c", tagFilter = "status" },
             "no-name" => new { id = 0, name = string.Empty, instrument = "c" },
+            "ratio-threshold-above-1" => new { id = 0, name = "R", instrument = "c", kind = (int)MetricTileKind.Ratio, ratioTag = "s", goodValues = "a", badValues = "b", statusRule = (int)MetricTileStatusRule.Threshold, comparison = (int)SloComparison.AtLeast, threshold = 1.5 },
             _ => new { id = 0, name = "D", instrument = "c", statusRule = (int)MetricTileStatusRule.Deviation, baselineDays = 3, maxDeviation = 0.2 },
         };
 
@@ -762,6 +853,58 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         var response = await host.Client.PostAsJsonAsync("/warp/api/metrics/board/tiles", new { id, name = "Volume", instrument = "c" }, Ct);
 
         response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+        json.RootElement.GetProperty("error").GetString().ShouldBe("The metric board tile no longer exists: it was deleted while you edited it.");
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task PostTile_NegativeId_InsertsUnderAStoreGeneratedKey()
+    {
+        // Before the fix the negative id reached the insert: SQL Server refuses an explicit identity value (a 500).
+        await using var host = await CreateDashboardHostAsync();
+
+        var response = await host.Client.PostAsJsonAsync("/warp/api/metrics/board/tiles", new { id = -7, name = "Volume", instrument = "c" }, Ct);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+        var id = json.RootElement.GetProperty("id").GetInt32();
+        id.ShouldBeGreaterThan(0);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().SingleAsync(Ct)).Id.ShouldBe(id);
+    }
+
+    [TimedFact]
+    public async Task PostTile_BoardLockHeldPastTheTimeout_ReturnsServiceUnavailableAndAddsNothing()
+    {
+        var barrier = new BarrierSignal();
+        var holderContext = _fixture.CreateContext();
+        var holder = TestTasks.QueriesFor(holderContext).RunUnderTransactionLockAsync(
+            holderContext,
+            "warp:metric-board",
+            async (_, ct) =>
+            {
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return 0;
+            },
+            Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        HttpResponseMessage response;
+        try
+        {
+            await using var host = await CreateDashboardHostAsync(TimeSpan.FromMilliseconds(300));
+            response = await host.Client.PostAsJsonAsync("/warp/api/metrics/board/tiles", new { id = 0, name = "Volume", instrument = "c" }, Ct);
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+            await holder;
+        }
+
+        response.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+        json.RootElement.GetProperty("error").GetString().ShouldBe("The metric board is busy with another change; try again.");
         (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
     }
 
@@ -903,11 +1046,14 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
     private MetricBoardQueryService<TestContext> Query()
         => new(_fixture.CreateContext(), Options.Create(new WarpConfiguration()), new FakeTimeProvider(new DateTimeOffset(Now)));
 
-    private MetricBoardCommandService<TestContext> Command()
+    private MetricBoardCommandService<TestContext> Command(TimeSpan? lockTimeout = null)
     {
         var context = _fixture.CreateContext();
 
-        return new(context, TimeProvider.System, NullLogger<MetricBoardCommandService<TestContext>>.Instance, TestTasks.QueriesFor(context));
+        return new(context, TimeProvider.System, NullLogger<MetricBoardCommandService<TestContext>>.Instance, TestTasks.QueriesFor(context))
+        {
+            LockTimeout = lockTimeout ?? TransactionLock.CommandTimeout,
+        };
     }
 
     private async Task SeedAsync(MetricInstrument[] instruments, MetricPoint[] points)
@@ -1009,14 +1155,14 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         await seeder.StartAsync(Ct);
     }
 
-    private async Task<DashboardHost> CreateDashboardHostAsync()
+    private async Task<DashboardHost> CreateDashboardHostAsync(TimeSpan? lockTimeout = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.WebHost.UseDefaultServiceProvider(o => o.ValidateScopes = true);
         builder.Services.AddScoped<IMetricQueryService>(_ => new MetricQueryService<TestContext>(_fixture.CreateContext(), Options.Create(new WarpConfiguration())));
         builder.Services.AddScoped<IMetricBoardQueryService>(_ => Query());
-        builder.Services.AddScoped<IMetricBoardCommandService>(_ => Command());
+        builder.Services.AddScoped<IMetricBoardCommandService>(_ => Command(lockTimeout));
 
         var app = builder.Build();
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);

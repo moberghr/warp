@@ -305,6 +305,33 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetBoard_MoreOngoingNotesThanTheCap_KeepsTheActiveAcknowledgedNoteFirst()
+    {
+        // 200 newer open-ended notes and one OLD acknowledged-noise note that ends after the window (so not open-ended):
+        // ongoing-first alone would fill the cap with the open-ended notes and drop the one note that acknowledges the
+        // breach. Active acknowledged noise comes first, then the other active notes, then newest.
+        await SeedAsync([Instrument("http", MetricKind.Counter)], [Point("http", Now.AddMinutes(-10), sum: 7)]);
+        await SeedTilesAsync(Tile("All", "http", rule: MetricTileStatusRule.Threshold, threshold: 5, comparison: SloComparison.AtMost));
+        await SeedNotesAsync(
+        [
+            Note("http", "known noise", startsAt: Now.AddDays(-30), endsAt: Now.AddHours(2), acknowledged: true),
+            Note("http", "ended noise", startsAt: Now.AddDays(-29), endsAt: Now.AddMinutes(-40), acknowledged: true),
+            .. Enumerable.Range(0, MetricAnnotationValidation.MaxPerRead)
+                .Select(x => Note("http", $"n{x}", startsAt: Now.AddMinutes(-50).AddSeconds(x))),
+        ]);
+
+        var board = await Board().GetBoard(Now.AddHours(-1), Now, Ct);
+
+        board.AnnotationsTruncated.ShouldBeTrue();
+        var tile = board.Tiles.ShouldHaveSingleItem();
+        tile.Annotations.Count.ShouldBe(MetricAnnotationValidation.MaxPerRead);
+        tile.Annotations.ShouldContain(x => string.Equals(x.Note, "known noise", StringComparison.Ordinal));
+        tile.Annotations.ShouldNotContain(x => string.Equals(x.Note, "ended noise", StringComparison.Ordinal));
+        tile.Annotations.ShouldNotContain(x => string.Equals(x.Note, "n0", StringComparison.Ordinal));
+        tile.Status.ShouldBe(SloState.Acknowledged);
+    }
+
+    [TimedFact]
     public async Task GetBoard_NotesWithinTheCap_AreNotTruncated()
     {
         await SeedAsync([Instrument("http", MetricKind.Counter)], []);
@@ -400,6 +427,8 @@ public abstract class MetricAnnotationTestsBase : IAsyncLifetime
         var response = await host.Client.PostAsJsonAsync("/warp/api/annotations", new { id = 777, note = "n", instrument = "c", startsAt = Now }, Ct);
 
         response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+        json.RootElement.GetProperty("error").GetString().ShouldBe("The annotation no longer exists: it was deleted while you edited it.");
     }
 
     [TimedFact]

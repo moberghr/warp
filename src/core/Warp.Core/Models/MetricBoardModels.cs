@@ -73,7 +73,7 @@ public sealed class MetricBoardTileResult
 
     /// <summary>
     /// Healthy / Warning / Breaching / NoData from the tile's rule, or Acknowledged when it would be Warning or Breaching
-    /// and an acknowledged-noise annotation that applies to the tile is active at the window's end (#333); null when the
+    /// and an acknowledged-noise annotation covering the tile is active at the window's end (#333); null when the
     /// tile has no rule.
     /// </summary>
     public SloState? Status { get; init; }

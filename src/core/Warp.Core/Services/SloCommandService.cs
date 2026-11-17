@@ -9,7 +9,7 @@ namespace Warp.Core.Services;
 public interface ISloCommandService
 {
     /// <summary>
-    /// Insert (Id == 0) or update an objective. Returns its id, or 0 when Id &gt; 0 names no objective (deleted meanwhile:
+    /// Insert (Id &lt;= 0, the store assigns the key) or update an objective. Returns its id, or 0 when Id &gt; 0 names no objective (deleted meanwhile:
     /// an edit never re-creates it; the dashboard route answers 404).
     /// </summary>
     /// <remarks>
@@ -58,6 +58,8 @@ public sealed class SloCommandService<TContext> : ISloCommandService
 
         if (existing is null)
         {
+            // A negative id is an insert too: store-generated, never the caller's key.
+            definition.Id = 0;
             definition.CreatedAt = now;
             definition.UpdatedAt = now;
             _context.Set<SloDefinition>().Add(definition);

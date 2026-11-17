@@ -209,8 +209,9 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
 
     private int FineMinutes => Math.Max(1, _options.Value.FineResolutionMinutes);
 
-    // The start of the fine bucket holding (now - MetricFlushInterval), the #328 rule MetricQueryService applies to its
-    // headlines, clamped to [from, to].
+    // The start of the FINE bucket holding (now - MetricFlushInterval), clamped to [from, to]: the #328 completeness rule,
+    // always at fine granularity whatever the range. MetricQueryService.CompleteCutoff cuts at the start of the display
+    // tier's bucket instead (hourly or daily for a long range), so the two cuts differ for ranges past the fine tier.
     private DateTime CompleteUntil(DateTime from, DateTime to, DateTime now, int fineMinutes)
     {
         var flush = _options.Value.MetricFlushInterval > TimeSpan.Zero ? _options.Value.MetricFlushInterval : TimeSpan.Zero;
@@ -243,8 +244,9 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
     }
 
     // Capped at MaxPerRead (+1 to detect truncation). When the cap bites, the notes that change a verdict must survive it:
-    // those still active at the window's end (ongoing first) and acknowledged noise come before the rest, then newest.
-    // Handed back newest first, the order every annotation read uses.
+    // acknowledged noise still active at the window's end first (it is what acknowledges a status), then the other notes
+    // still active at the end (open-ended or ending at or after it), then newest. Handed back newest first, the order every
+    // annotation read uses.
     private async Task<(List<MetricAnnotationModel> Notes, bool Truncated)> ReadAnnotationsAsync(List<string> instruments, DateTime from, DateTime to, CancellationToken ct)
     {
         if (instruments.Count == 0)
@@ -258,9 +260,8 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             .Where(x => instruments.Contains(x.Instrument!));
 
         var notes = await MetricAnnotationQueries.InWindow(annotations, from, to)
-            .OrderBy(x => x.EndsAt == null ? 0 : 1)
-            .ThenBy(x => x.EndsAt >= to ? 0 : 1)
-            .ThenBy(x => x.AcknowledgedNoise ? 0 : 1)
+            .OrderBy(x => x.AcknowledgedNoise && (x.EndsAt == null || x.EndsAt >= to) ? 0 : 1)
+            .ThenBy(x => x.EndsAt == null || x.EndsAt >= to ? 0 : 1)
             .ThenByDescending(x => x.StartsAt)
             .ThenByDescending(x => x.Id)
             .Take(MetricAnnotationValidation.MaxPerRead + 1)

@@ -10,9 +10,10 @@ namespace Warp.Core.Services;
 public interface IMetricBoardCommandService
 {
     /// <summary>
-    /// Insert (Id == 0) or update a tile; returns its id, null when an insert would take the board past
-    /// <see cref="MetricBoardValidation.MaxTiles"/>, or 0 when Id &gt; 0 names no tile (deleted meanwhile: an edit never
-    /// re-creates it). An insert with Position 0 is appended after the last tile.
+    /// Insert (Id &lt;= 0, the store assigns the key) or update a tile; returns its id, null when an insert would take the
+    /// board past <see cref="MetricBoardValidation.MaxTiles"/>, or 0 when Id &gt; 0 names no tile (deleted meanwhile: an
+    /// edit never re-creates it). An insert with Position 0 is appended after the last tile. Throws
+    /// <see cref="TimeoutException"/> when an insert cannot take the board lock in time (the dashboard route answers 503).
     /// </summary>
     /// <remarks>
     /// Persists <paramref name="tile"/> as given: callers validate (and normalize) it first with
@@ -46,6 +47,9 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
         _sqlQueries = sqlQueries;
     }
 
+    /// <summary>How long an insert waits for the board lock before it gives up with a <see cref="TimeoutException"/>.</summary>
+    internal TimeSpan LockTimeout { get; init; } = TransactionLock.CommandTimeout;
+
     public async Task<int?> Upsert(MetricBoardTile tile, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(tile);
@@ -64,7 +68,7 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
 
         if (existing is null)
         {
-            var id = await TransactionLock.RunAsync(_sqlQueries, _context, TransactionLock.MetricBoardKey, TransactionLock.CommandTimeout, (x, token) => InsertAsync(x, tile, now, token), ct);
+            var id = await TransactionLock.RunAsync(_sqlQueries, _context, TransactionLock.MetricBoardKey, LockTimeout, (x, token) => InsertAsync(x, tile, now, token), ct);
             if (id is not null)
             {
                 _logger.LogInformation("Metric board tile '{Name}' created", tile.Name);
@@ -110,6 +114,8 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
             tile.Position = (await context.Set<MetricBoardTile>().MaxAsync(x => (int?)x.Position, ct) ?? 0) + 1;
         }
 
+        // A negative id is an insert too: store-generated, never the caller's key.
+        tile.Id = 0;
         tile.CreatedAt = now;
         tile.UpdatedAt = now;
         context.Set<MetricBoardTile>().Add(tile);

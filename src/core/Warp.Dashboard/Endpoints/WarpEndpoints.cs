@@ -753,7 +753,9 @@ public static class WarpEndpoints
             var id = await svc.Upsert(definition, ct);
 
             // 0: the edited objective was deleted meanwhile; an edit never re-creates it.
-            return id == 0 ? Results.NotFound() : Results.Ok(new { id });
+            return id == 0
+                ? Results.NotFound(new { error = "The SLO objective no longer exists: it was deleted while you edited it." })
+                : Results.Ok(new { id });
         });
 
         apiGroup.MapDelete("slo/{id:int}", async ([FromServices] ISloCommandService svc, int id, CancellationToken ct) =>
@@ -843,11 +845,24 @@ public static class WarpEndpoints
                 return Results.BadRequest(error);
             }
 
-            var id = await svc.Upsert(tile, ct);
+            int? id;
+            try
+            {
+                id = await svc.Upsert(tile, ct);
+            }
+            catch (TimeoutException)
+            {
+                // Another insert or a replica's seed held the board lock past the wait: busy, not broken, so a retry
+                // can succeed. 503 rather than the unhandled 500.
+                return Results.Json(
+                    new { error = "The metric board is busy with another change; try again." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
             if (id == 0)
             {
                 // The edited tile was deleted meanwhile; an edit never re-creates it.
-                return Results.NotFound();
+                return Results.NotFound(new { error = "The metric board tile no longer exists: it was deleted while you edited it." });
             }
 
             return id is null
@@ -900,7 +915,10 @@ public static class WarpEndpoints
 
             var id = await svc.Upsert(annotation, DashboardUser.Name(http), ct);
 
-            return id is null ? Results.NotFound() : Results.Ok(new { id });
+            // null: the edited note was deleted meanwhile; an edit never re-creates it.
+            return id is null
+                ? Results.NotFound(new { error = "The annotation no longer exists: it was deleted while you edited it." })
+                : Results.Ok(new { id });
         });
 
         apiGroup.MapDelete("annotations/{id:int}", async ([FromServices] IMetricAnnotationCommandService svc, int id, HttpContext http, CancellationToken ct) =>
@@ -1044,14 +1062,16 @@ public static class WarpEndpoints
             [FromQuery] DateTime? to,
             CancellationToken ct) =>
         {
-            if (from >= to)
+            var fromUtc = ToUtc(from);
+            var toUtc = ToUtc(to);
+            if (fromUtc >= toUtc)
             {
                 return Results.BadRequest(new { error = "'from' must be before 'to'." });
             }
 
             var name = string.IsNullOrEmpty(application) ? null : application;
 
-            return Results.Ok(await svc.GetDeploys(name, ToUtc(from), ToUtc(to), ct));
+            return Results.Ok(await svc.GetDeploys(name, fromUtc, toUtc, ct));
         });
 
         // Post-deploy verdict: pass / warn / fail / pending / noData for one deploy of an application, by NAME (a CI step
@@ -1091,9 +1111,12 @@ public static class WarpEndpoints
                 return Results.NotFound();
             }
 
-            return from >= to
+            var fromUtc = ToUtc(from);
+            var toUtc = ToUtc(to);
+
+            return fromUtc >= toUtc
                 ? Results.BadRequest(new { error = "'from' must be before 'to'." })
-                : Results.Ok(await svc.GetDeploys(application, ToUtc(from), ToUtc(to), ct));
+                : Results.Ok(await svc.GetDeploys(application, fromUtc, toUtc, ct));
         });
 
         apiGroup.MapGet("applications/{id}", async ([FromServices] IApplicationQueryService svc, string id, CancellationToken ct) =>
@@ -1158,10 +1181,6 @@ public static class WarpEndpoints
         return apiGroup;
     }
 
-    // Decodes the URL-safe base64 {id} segment back to the recurring job's name and runs the action
-    // against it. A malformed id, an empty name, and a name no definition matches are all the same
-    // answer over HTTP — 404 — so the ArgumentException IRecurringJobService throws for an unknown
-    // name (and its normalizer throws for an unusable one) does not surface as a 500.
     // Query-bound instants are compared with UTC columns: an offset-bearing value is converted, a bare one is read as UTC.
     private static DateTime? ToUtc(DateTime? value)
     {
@@ -1174,6 +1193,10 @@ public static class WarpEndpoints
         };
     }
 
+    // Decodes the URL-safe base64 {id} segment back to the recurring job's name and runs the action
+    // against it. A malformed id, an empty name, and a name no definition matches are all the same
+    // answer over HTTP — 404 — so the ArgumentException IRecurringJobService throws for an unknown
+    // name (and its normalizer throws for an unusable one) does not surface as a 500.
     private static async Task<IResult> RecurringAction(string id, Func<string, Task<IResult>> action)
     {
         var name = UrlSafeId.TryDecode(id);
