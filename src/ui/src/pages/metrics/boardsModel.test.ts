@@ -50,6 +50,29 @@ describe('boardUrlIds', () => {
     expect([...ids.values()]).toEqual(['default', 'check-out', 'check-out-5']);
   });
 
+  it('never hands out an id an earlier board already holds', () => {
+    // "x 9" takes x-9 before board 9 ("x.", slug x, taken) asks for x-9.
+    const list = [board(5, 'x 9'), board(4, 'x'), board(9, 'x.'), board(7, 'x 9 2')];
+    const ids = boardUrlIds(list);
+
+    expect([...ids.values()]).toEqual(['x-9', 'x', 'x-9-2', 'x-9-2-7']);
+    expect(new Set(ids.values()).size).toBe(list.length);
+    for (const b of list) {
+      expect(findBoard(list, ids.get(b.id))).toBe(b);
+    }
+  });
+
+  it('keeps names without a Latin letter apart: they all fall back to the board slug', () => {
+    const list = [board(1, 'Default', { isDefault: true }), board(2, '決済'), board(3, 'Платежи'), board(4, '—'), board(5, 'board 3')];
+    const ids = boardUrlIds(list);
+
+    expect([...ids.values()]).toEqual(['default', 'board', 'board-3', 'board-4', 'board-3-5']);
+    expect(new Set(ids.values()).size).toBe(list.length);
+    for (const b of list) {
+      expect(findBoard(list, ids.get(b.id))).toBe(b);
+    }
+  });
+
   it('round-trips every board through findBoard', () => {
     for (const b of boards) {
       expect(findBoard(boards, boardUrlId(boards, b))).toBe(b);

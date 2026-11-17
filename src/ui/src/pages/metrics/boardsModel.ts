@@ -28,19 +28,34 @@ export function boardSlug(name: string): string {
 
 /**
  * The URL id of every board, unique: a board's slug, or `slug-{id}` when an earlier board (in picker order) already has
- * that slug — two names the server keeps apart ("Check-out" and "Check out") can share a slug.
+ * that slug — two names the server keeps apart ("Check-out" and "Check out") can share a slug. That fallback can itself
+ * be taken (a board named "x 9" holds `x-9` before board 9 "x." asks for it), so a counter is appended until the id is
+ * unused: `slug-{id}-2`, `slug-{id}-3`, ….
  */
 export function boardUrlIds(boards: readonly MetricBoardSummary[]): Map<number, string> {
   const ids = new Map<number, string>();
   const taken = new Set<string>();
   for (const board of boards) {
-    const slug = boardSlug(board.name);
-    const id = taken.has(slug) ? `${slug}-${board.id}` : slug;
+    const id = uniqueUrlId(boardSlug(board.name), board.id, taken);
     taken.add(id);
     ids.set(board.id, id);
   }
 
   return ids;
+}
+
+function uniqueUrlId(slug: string, boardId: number, taken: ReadonlySet<string>): string {
+  if (!taken.has(slug)) {
+    return slug;
+  }
+
+  const base = `${slug}-${boardId}`;
+  let id = base;
+  for (let n = 2; taken.has(id); n++) {
+    id = `${base}-${n}`;
+  }
+
+  return id;
 }
 
 /** The URL id of one board among `boards`. */
