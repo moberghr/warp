@@ -205,7 +205,7 @@ public static class ServiceConfiguration
         // BeginCall emits its Activity + meters, and manual scopes (e.g. the webhook executor) can record
         // regardless of AddAdapters(). AddAdapters() runs earlier in the AddWarp lambda and TryAdds the real
         // DbAdapterCallRecorder + flusher, so it wins; absent it, the null recorder discards rows while
-        // telemetry still flows. The dashboard "adapters" flag keys on DbAdapterCallRecorder, not this.
+        // telemetry still flows. The dashboard "adapters" flag keys on IAdapterRecordingMarker, not this.
         services.TryAddSingleton<AdapterRegistry>();
         services.TryAddSingleton<IAdapterCallRecorder, NullAdapterCallRecorder>();
         services.TryAddSingleton<IWarpAdapters, WarpAdapters>();
