@@ -300,6 +300,75 @@ export function filterDemoDeploys(application?: string, from?: string, to?: stri
 
 const VERDICT_MIN_WINDOW_MS = 5 * 60_000;
 const VERDICT_MAX_RANGE_MS = 90 * 24 * 3_600_000;
+// The server defaults the window is cut with: FineResolutionMinutes and MetricFlushInterval.
+const VERDICT_FINE_MINUTES = 5;
+const VERDICT_FLUSH_MS = 30_000;
+
+/** The verdict window: the clean span of complete fine buckets after the deploy, and when it settles. */
+export interface DemoVerdictWindow {
+  from: number;
+  to: number;
+  settlesAt: number;
+  settled: boolean;
+  /** A superseded deploy replaced before a complete bucket after it: settled, nothing to judge. */
+  emptySuperseded: boolean;
+}
+
+// MetricTiers.BucketStart(Fine): the minute floored to a multiple of the bucket width, seconds dropped.
+function floorToBucket(ms: number, fineMinutes: number): number {
+  const hour = Math.floor(ms / 3_600_000) * 3_600_000;
+  const minute = Math.floor((ms - hour) / 60_000);
+
+  return hour + Math.floor(minute / fineMinutes) * fineMinutes * 60_000;
+}
+
+function ceilToBucket(ms: number, fineMinutes: number): number {
+  const floor = floorToBucket(ms, fineMinutes);
+
+  return floor === ms ? floor : floor + fineMinutes * 60_000;
+}
+
+/**
+ * The server's DeployVerdictMath.Window: from = the deploy rounded UP to a fine bucket (the mixed bucket holding the deploy
+ * is never judged), to = the board's cut (the bucket holding now − flush) or, when superseded, the next deploy rounded
+ * DOWN if earlier. A live deploy settles once the clean window holds minWindow (and at least one bucket) plus a flush; a
+ * superseded one once its last bucket is complete, or at once when no whole bucket lies between the two deploys.
+ */
+export function demoVerdictWindow(
+  deployedAt: number,
+  supersededAt: number | null,
+  now: number,
+  minWindowMs: number = VERDICT_MIN_WINDOW_MS,
+  fineMinutes: number = VERDICT_FINE_MINUTES,
+  flushMs: number = VERDICT_FLUSH_MS,
+): DemoVerdictWindow {
+  const fine = Math.max(1, fineMinutes);
+  const flush = Math.max(0, flushMs);
+  const cleanStart = ceilToBucket(deployedAt, fine);
+  const completeUntil = floorToBucket(now - flush, fine);
+
+  let end: number;
+  let settlesAt: number;
+  if (supersededAt !== null) {
+    end = floorToBucket(supersededAt, fine);
+    settlesAt = end > cleanStart ? end + flush : supersededAt;
+  } else {
+    const required = ceilToBucket(cleanStart + minWindowMs, fine);
+    end = Infinity;
+    settlesAt = (required > cleanStart ? required : cleanStart + fine * 60_000) + flush;
+  }
+
+  const to = Math.max(Math.min(end, completeUntil), cleanStart);
+  const emptySuperseded = supersededAt !== null && end <= cleanStart;
+
+  return {
+    from: to - cleanStart > VERDICT_MAX_RANGE_MS ? to - VERDICT_MAX_RANGE_MS : cleanStart,
+    to,
+    settlesAt,
+    settled: emptySuperseded || now >= settlesAt,
+    emptySuperseded,
+  };
+}
 
 const STATE_TOKEN: Record<SloState, DeployVerdictCheckState> = {
   [SloState.Healthy]: 'healthy',
@@ -349,14 +418,14 @@ function tileCheck(result: MetricBoardTileResult): DeployVerdictCheck | null {
   };
 }
 
-function sloCheck(slo: SloObjective, deployedAt: number): DeployVerdictCheck {
-  const stale = slo.lastEvaluatedAt !== null && Date.parse(slo.lastEvaluatedAt) < deployedAt;
+function sloCheck(slo: SloObjective, windowStart: number): DeployVerdictCheck {
+  const stale = slo.lastEvaluatedAt !== null && Date.parse(slo.lastEvaluatedAt) < windowStart;
   const state: DeployVerdictCheckState = !slo.evaluated || stale ? 'noData' : STATE_TOKEN[slo.state];
   const hasValue = slo.evaluated && state !== 'noData';
   const reason = !slo.evaluated
     ? 'Not evaluated yet.'
     : stale
-      ? `Last evaluated at ${slo.lastEvaluatedAt}, before the deploy.`
+      ? `Last evaluated at ${slo.lastEvaluatedAt}, before the deploy's first complete bucket (${new Date(windowStart).toISOString()}).`
       : `${capitalized(phrase(state))}: observed ${num(slo.attainment)} vs target ${num(slo.targetValue)}, budget remaining ${num(slo.budgetRemaining)}.`;
 
   return {
@@ -402,9 +471,12 @@ function aggregate(states: DeployVerdictCheckState[], settled: boolean, minCover
   return states.some((x) => x === 'healthy' || x === 'acknowledged') ? 'pass' : 'noData';
 }
 
-function summary(verdict: DeployVerdictValue, states: DeployVerdictCheckState[], settlesAt: string): string {
+function summary(verdict: DeployVerdictValue, states: DeployVerdictCheckState[], settlesAt: string, emptySuperseded: boolean): string {
   if (verdict === 'pending') {
     return `pending: settles at ${settlesAt}`;
+  }
+  if (emptySuperseded) {
+    return `${verdict}: superseded at ${settlesAt}, before a complete metric bucket after the deploy; nothing to judge`;
   }
 
   const coverage = `${states.filter((x) => x !== 'noData').length} of ${states.length} checks had data`;
@@ -422,8 +494,14 @@ function summary(verdict: DeployVerdictValue, states: DeployVerdictCheckState[],
 }
 
 /** The demo router's verdict: the deploy picked like the server does (newest match), checks from the board and SLO fixtures. */
-export function demoDeployVerdict(application?: string, version?: string, environment?: string, minCoverage = 0): DeployVerdictModel | null {
-  const history = demoDeploys
+export function demoDeployVerdict(
+  application?: string,
+  version?: string,
+  environment?: string,
+  minCoverage = 0,
+  deploys: ApplicationDeployModel[] = demoDeploys,
+): DeployVerdictModel | null {
+  const history = deploys
     .filter((x) => x.application === application)
     .sort((a, b) => Date.parse(b.firstSeenAt) - Date.parse(a.firstSeenAt));
   const deploy = history
@@ -436,11 +514,8 @@ export function demoDeployVerdict(application?: string, version?: string, enviro
   const sameEnvironment = history.filter((x) => (x.environment ?? '') === (deploy.environment ?? ''));
   const index = sameEnvironment.indexOf(deploy);
   const next = index > 0 ? sameEnvironment[index - 1] : null;
-  const deployedAt = Date.parse(deploy.firstSeenAt);
-  const to = Math.max(next ? Date.parse(next.firstSeenAt) : FROZEN_NOW, deployedAt);
-  const from = Math.max(deployedAt, to - VERDICT_MAX_RANGE_MS);
-  const settlesAt = next && to < deployedAt + VERDICT_MIN_WINDOW_MS ? to : deployedAt + VERDICT_MIN_WINDOW_MS;
-  const settled = next !== null || to - deployedAt >= VERDICT_MIN_WINDOW_MS;
+  const window = demoVerdictWindow(Date.parse(deploy.firstSeenAt), next ? Date.parse(next.firstSeenAt) : null, FROZEN_NOW);
+  const { from, to, settled } = window;
 
   const name = deploy.application;
   const tiles = to > from
@@ -454,15 +529,15 @@ export function demoDeployVerdict(application?: string, version?: string, enviro
     : demoSlos().items
       .filter((x) => x.enabled && appliesTo(x.application, name))
       .sort((a, b) => a.name.localeCompare(b.name, 'en'))
-      .map((x) => sloCheck(x, deployedAt));
+      .map((x) => sloCheck(x, from));
   const checks = [...tiles, ...slos];
   const states = checks.map((x) => x.state);
   const verdict = aggregate(states, settled, minCoverage);
-  const settlesAtIso = new Date(settlesAt).toISOString();
+  const settlesAtIso = new Date(window.settlesAt).toISOString();
 
   return {
     verdict,
-    summary: summary(verdict, states, settlesAtIso),
+    summary: summary(verdict, states, settlesAtIso, window.emptySuperseded),
     checksWithData: states.filter((x) => x !== 'noData').length,
     checksTotal: states.length,
     deploy: {

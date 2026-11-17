@@ -9,7 +9,7 @@ import type { MetricInstrument, MetricSeries } from '@/types/metrics';
 import type { WarpAddonsInfo } from '@/types';
 import { MetricTileKind, MetricTileStatusRule, type MetricBoard, type MetricBoardTile } from '@/types/metricBoard';
 import type { ApplicationDeployModel, DeployVerdictModel } from '@/types/applications';
-import { coverageMet, demoDeploys } from './data/applications';
+import { coverageMet, demoDeploys, demoDeployVerdict, demoVerdictWindow } from './data/applications';
 import { MetricAnnotationTarget, type MetricAnnotationList } from '@/types/annotations';
 import { demoSlos } from './data/slo';
 import { demoAnnotations, demoNoteAppliesTo, demoNoteCoversTile } from './data/annotations';
@@ -419,6 +419,76 @@ describe('demo deploy and verdict fixtures', () => {
     expect(coverageMet(13, 25, 0.56)).toBe(false);
     expect(coverageMet(6, 25, 0.28)).toBe(false);
     expect(coverageMet(0, 0, 0.5)).toBe(false);
+  });
+
+  // The server's DeployVerdictMathTests cases, on the 5-minute buckets and 30 s flush both default to.
+  const at = (time: string) => Date.parse(`2026-11-16T${time}Z`);
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  it.each([
+    ['10:00:00', '10:05:30'],
+    ['10:00:10', '10:10:30'],
+    ['10:04:50', '10:10:30'],
+  ])('a live deploy at %s starts at the next bucket and settles at %s', (deployedAt, settlesAt) => {
+    const window = demoVerdictWindow(at(deployedAt), null, at('12:00:00'));
+
+    expect(iso(window.from)).toBe(iso(at(deployedAt === '10:00:00' ? '10:00:00' : '10:05:00')));
+    expect(iso(window.to)).toBe(iso(at('11:55:00')));
+    expect(iso(window.settlesAt)).toBe(iso(at(settlesAt)));
+    expect(window.settled).toBe(true);
+  });
+
+  it('keeps a live deploy pending until the bucket that completes the minimum window is flushed', () => {
+    expect(demoVerdictWindow(at('10:00:10'), null, at('10:10:29')).settled).toBe(false);
+    expect(demoVerdictWindow(at('10:00:10'), null, at('10:10:30')).settled).toBe(true);
+  });
+
+  it('ends a superseded deploy at the next deploy rounded down, settled once that bucket is flushed', () => {
+    const window = demoVerdictWindow(at('10:00:00'), at('10:22:40'), at('12:00:00'));
+
+    expect(iso(window.to)).toBe(iso(at('10:20:00')));
+    expect(iso(window.settlesAt)).toBe(iso(at('10:20:30')));
+    expect(window.settled).toBe(true);
+    expect(demoVerdictWindow(at('10:00:00'), at('10:20:00'), at('10:20:10')).settled).toBe(false);
+  });
+
+  it('settles a deploy superseded before a complete bucket at once, with an empty window', () => {
+    const window = demoVerdictWindow(at('10:00:10'), at('10:04:00'), at('12:00:00'));
+
+    expect(window.emptySuperseded).toBe(true);
+    expect(window.settled).toBe(true);
+    expect(window.to).toBe(window.from);
+    expect(iso(window.settlesAt)).toBe(iso(at('10:04:00')));
+  });
+
+  it('judges a deploy superseded before a complete bucket as noData with no checks', () => {
+    const base = demoDeploys.find((x) => x.id === 'dep-oa-231')!;
+    const deployedAt = Date.parse(base.firstSeenAt) + 10_000;
+    const deploys = [
+      { ...base, id: 'early', version: '9.0.0', firstSeenAt: iso(deployedAt) },
+      { ...base, id: 'late', version: '9.0.1', firstSeenAt: iso(deployedAt + 3 * 60_000) },
+    ];
+
+    const verdict = demoDeployVerdict('orders-api', '9.0.0', undefined, 0, deploys)!;
+
+    expect(verdict.verdict).toBe('noData');
+    expect(verdict.checks).toEqual([]);
+    expect(verdict.window.settled).toBe(true);
+    expect(verdict.summary).toBe(`noData: superseded at ${iso(deployedAt + 3 * 60_000)}, before a complete metric bucket after the deploy; nothing to judge`);
+  });
+
+  it('reads an SLO evaluated between the deploy and its first complete bucket as noData', () => {
+    // The demo objectives were last evaluated at 09:14:00; a deploy at 09:13:30 starts its clean window at 09:15.
+    const base = demoDeploys.find((x) => x.id === 'dep-oa-231')!;
+    const deploys = [{ ...base, firstSeenAt: '2026-07-31T09:13:30.000Z' }];
+
+    const verdict = demoDeployVerdict('orders-api', undefined, undefined, 0, deploys)!;
+    const slos = verdict.checks.filter((x) => x.source === 'slo');
+
+    expect(verdict.window.from).toBe('2026-07-31T09:15:00.000Z');
+    expect(slos.length).toBeGreaterThan(0);
+    expect(slos.every((x) => x.state === 'noData')).toBe(true);
+    expect(slos.some((x) => x.reason.includes("before the deploy's first complete bucket (2026-07-31T09:15:00.000Z)"))).toBe(true);
   });
 
   it('answers 404 with the server { error } body when no deploy matches', async () => {
