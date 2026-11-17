@@ -48,6 +48,15 @@ describe('issues dashboard navigation', () => {
     expect(links.some((a) => a.getAttribute('href')?.includes('/issues/'))).toBe(true);
   });
 
+  it('restores the filters from the URL', async () => {
+    renderAt('/issues?show4xx=1&application=shop-api');
+
+    // The 4xx toggle is on from the link alone, so the StatusCode group is listed without a click.
+    expect(await screen.findByText('HTTP 422')).toBeTruthy();
+    expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('combobox', { name: 'Application' }) as HTMLSelectElement).value).toBe('shop-api');
+  });
+
   it('issue detail loads with the sample stack and a Resolve button', async () => {
     renderAt('/issues/job-nullref-processorder');
 
