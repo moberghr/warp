@@ -23,6 +23,7 @@ using Warp.Dashboard;
 using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
+using Warp.Tests.Observability;
 using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Metrics;
@@ -435,6 +436,44 @@ public abstract class MetricNamedBoardTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Seeder_DefaultBoardRenamedToTheSeedName_SkipsTheSeedAndNeverPutsItsTilesOnDefault()
+    {
+        // Default renamed to "Checkout": the named seed must not match it by name (its tiles would land on Default with no
+        // seed key, and once Default is renamed back the seed creates "Checkout" and seeds them a second time).
+        var defaultId = await Command().EnsureDefaultBoard(Ct);
+        (await Command().UpsertBoard(new MetricBoard { Id = defaultId, Name = "Checkout" }, "alice", Ct)).Status.ShouldBe(MetricBoardWriteStatus.Saved);
+        static void Configure(MetricBoardSeeds x) => x.For("Checkout").Tiles.Value("Volume", "c");
+        var logs = new CapturingLoggerProvider();
+
+        await SeedFromConfigAsync(Configure, logs: logs);
+
+        var board = (await Query().GetBoards(Ct)).ShouldHaveSingleItem();
+        board.ShouldSatisfyAllConditions(x => x.Id.ShouldBe(defaultId), x => x.Name.ShouldBe("Checkout"), x => x.IsDefault.ShouldBeTrue());
+        (await Query().GetTiles(Ct)).ShouldBeEmpty();
+        (await _fixture.CreateContext().Set<MetricBoard>().SingleAsync(Ct)).SeedKey.ShouldBeNull();
+        var log = logs.Logs.ShouldHaveSingleItem();
+        log.Level.ShouldBe(LogLevel.Error);
+        log.Message.ShouldBe("Metric board 'Checkout' was NOT seeded: the Default board was renamed to that name in the dashboard. Rename one of them.");
+    }
+
+    [TimedFact]
+    public async Task Seeder_DefaultBoardRenamedBackAfterASkippedSeed_SeedsTheNamedBoardOnce()
+    {
+        var defaultId = await Command().EnsureDefaultBoard(Ct);
+        (await Command().UpsertBoard(new MetricBoard { Id = defaultId, Name = "Checkout" }, "alice", Ct)).Status.ShouldBe(MetricBoardWriteStatus.Saved);
+        static void Configure(MetricBoardSeeds x) => x.For("Checkout").Tiles.Value("Volume", "c");
+        await SeedFromConfigAsync(Configure);
+        (await Command().UpsertBoard(new MetricBoard { Id = defaultId, Name = "Default" }, "alice", Ct)).Status.ShouldBe(MetricBoardWriteStatus.Saved);
+
+        await SeedFromConfigAsync(Configure);
+        await SeedFromConfigAsync(Configure);
+
+        var boards = await Query().GetBoards(Ct);
+        boards.Select(x => (x.Name, x.TileCount)).ShouldBe([("Default", 0), ("Checkout", 1)]);
+        (await Query().GetTiles(Ct)).ShouldHaveSingleItem().BoardId.ShouldBe(boards[1].Id);
+    }
+
+    [TimedFact]
     public async Task Seeder_TwoReplicasStartAtOnce_SeedOneNamedBoardAndOneCopyOfItsTiles()
     {
         // The first replica is pinned inside the board lock after it created the board and read the tiles (BarrierSignal,
@@ -714,7 +753,7 @@ public abstract class MetricNamedBoardTestsBase : IAsyncLifetime
         return counter.Count;
     }
 
-    private async Task SeedFromConfigAsync(Action<MetricBoardSeeds> configure, Func<CancellationToken, Task>? beforeSave = null)
+    private async Task SeedFromConfigAsync(Action<MetricBoardSeeds> configure, Func<CancellationToken, Task>? beforeSave = null, CapturingLoggerProvider? logs = null)
     {
         var seeds = new MetricBoardSeeds();
         configure(seeds);
@@ -727,7 +766,7 @@ public abstract class MetricNamedBoardTestsBase : IAsyncLifetime
             provider.GetRequiredService<IServiceScopeFactory>(),
             seeds,
             TimeProvider.System,
-            NullLogger<MetricBoardSeeder<TestContext>>.Instance)
+            logs is null ? NullLogger<MetricBoardSeeder<TestContext>>.Instance : new CapturingLoggerFactory(logs).CreateLogger<MetricBoardSeeder<TestContext>>())
         {
             BeforeSave = beforeSave,
         };

@@ -402,6 +402,16 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
         foreach (var seed in seeds)
         {
             var match = seed.Name is null ? defaultBoard : MatchSeed(boards, seed.Name);
+            if (match is null && seed.Name is not null && MetricBoardStore.SameName(defaultBoard.Name, seed.Name))
+            {
+                // The Default board was renamed to this seed's name in the dashboard. A named seed never lands on Default
+                // (its tiles would be stored with no seed key and seeded again on a board of their own once Default is
+                // renamed back), and creating the board would break name uniqueness: skip it, like a renamed seeded board.
+                _logger.LogError("Metric board '{Board}' was NOT seeded: the Default board was renamed to that name in the dashboard. Rename one of them.", seed.Name);
+
+                continue;
+            }
+
             if (match is not null && seed.Name is not null && match.SeedKey is not null && !MetricBoardStore.SameName(match.SeedKey, seed.Name))
             {
                 // Another seeded board was renamed to this seed's name in the dashboard: names stay unique, so this seed
@@ -480,10 +490,11 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
 
     // The seed key first, then the name; both ignore case in memory, so a collation never decides whether two boards are
     // one. The seed key is what survives a dashboard rename: a board found by name with no seed key is one the seed has
-    // not adopted yet.
+    // not adopted yet. The Default board is never a named seed's match (only the unnamed seed and `Default` reach it), even
+    // after it was renamed to the seed's name.
     private static MetricBoard? MatchSeed(List<MetricBoard> boards, string name)
         => boards.Find(x => x.SeedKey is not null && MetricBoardStore.SameName(x.SeedKey, name))
-            ?? boards.Find(x => MetricBoardStore.SameName(x.Name, name));
+            ?? boards.Find(x => !x.IsDefault && MetricBoardStore.SameName(x.Name, name));
 
     private int SeedTiles(DbContext context, int? boardId, string board, List<MetricBoardTile> stored, List<PreparedTile> seeds, DateTime now)
     {
