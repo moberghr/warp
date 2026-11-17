@@ -26,13 +26,17 @@ All jobs on this page run on `shop-worker`. `shop-api` only publishes and hosts 
 Stockroom exports the warehouse stock levels once a night, and the shop imports them at 02:00. Every 15
 minutes a sweep finds carts that were left for more than an hour and asks Mailer to send a reminder.
 Both are ordinary jobs that a cron schedule creates; nobody calls them from code. The import must never
-overlap itself, so it carries a mutex.
+overlap itself. The scheduler already holds back a firing while the previous run is still enqueued or
+running, but an operator can still press **Trigger**, so the import also carries a mutex.
+
+The sweep is one of two designs for abandoned-cart emails in this guide. The other schedules one job per
+cart (see [Jobs](./orders-and-checkout.md#jobs)). Pick one; running both sends two emails.
 
 ### Wiring
 
 ```csharp
 // Contracts and handlers (shared by shop-api and shop-worker).
-[Mutex("stockroom-stock-import")]   // a firing that overlaps a running import is skipped; needs opt.AddConcurrency()
+[Mutex("stockroom-stock-import")]   // guards manual triggers; needs opt.AddConcurrency()
 public sealed class ImportStockroomStock : IJob;
 
 public sealed class SendAbandonedCartReminders : IJob;
@@ -70,10 +74,12 @@ replica: it takes a lock on the name and updates the existing row.
   Execution** shows `—`. **Enable** it again and the next quarter hour creates a real job.
 - **When** you trigger the import twice while the first run is still running.
 - **Then** the second job ends `Deleted` (skipped by the mutex), not `Failed`.
+- **When** a scheduled 02:00 firing comes due while a triggered import is still running.
+- **Then** no second job is created yet. The firing waits and runs once the running import has finished.
 
-Pitfall: `AddOrUpdateRecurringJob` takes a session-scoped lock. Behind a pooler in transaction mode it
-throws `Attempted to release a lock that was not held`; see
-[Connection Pooling](/docs/operations/connection-pooling).
+Pitfall: `AddOrUpdateRecurringJob` takes a session-scoped lock. Behind a pooler in transaction mode the
+lock gives no mutual exclusion, and its release logs a Warning (`Attempted to release a lock that was not
+held`) instead of throwing; see [Connection Pooling](/docs/operations/connection-pooling).
 
 Covered by: `RecurringJobTestsBase`, `RecurringJobEdgeCaseTestsBase`, `RecurringFinalStateTestsBase`,
 `RecurringJobBugTestsBase`.
@@ -133,7 +139,7 @@ builder.Services.AddWarpServer<ShopDbContext>(opt =>
 
 - **Given** two `shop-worker` replicas are running.
 - **When** you open `/warp/services`.
-- **Then** `ShipItTrackingPoller` shows `Running on <server>, 1 waiting`. Its detail page has one tab per
+- **Then** `ShipItTrackingPoller` shows `Running on 1, Waiting 1`. Its detail page has one tab per
   server, a **Lease** panel with the holder and a countdown, and the poller's `Checked N shipments`
   lines in the log tail.
 - **When** you stop the holder replica gracefully.
@@ -188,7 +194,7 @@ public sealed class StartMonthlySalesReportHandler(IBatchPublisher batches, Time
 
         var batchId = await batches.StartNew(regions, name: $"sales-report-{month:yyyy-MM}");
         await batches.ContinueBatchWith(new List<MergeSalesReport> { new() { Month = month } }, batchId);
-        await batches.SaveChangesAsync(ct);   // nothing runs until this commits
+        // No SaveChangesAsync here: the worker commits the handler's batch when the handler succeeds.
     }
 }
 
@@ -210,8 +216,9 @@ The default `ContinuationOptions.OnlyOnSucceeded` is what finance wants: no repo
 - **Then** the `us` job ends `Failed`, the batch is `Failed`, and `MergeSalesReport` stays `Awaiting`.
   Fix the cause and requeue the `us` job from its detail page: the batch completes and the merge runs.
 
-Pitfall: forgetting `SaveChangesAsync` discards the batch. Warp logs a warning when a scope ends with
-unsaved staged jobs.
+Pitfall: this applies to code outside a handler, such as a controller or a console command. There,
+forgetting `batches.SaveChangesAsync(ct)` discards the batch, and Warp logs a warning when the scope ends
+with unsaved staged jobs. Inside a handler the worker saves for you.
 
 Covered by: `BatchIntegrationTestsBase`, `BatchPublisherUnitTestsBase`.
 
@@ -220,10 +227,15 @@ Covered by: `BatchIntegrationTestsBase`, `BatchPublisherUnitTestsBase`.
 ### In the shop
 
 After checkout, `shop-api` publishes `OrderPlaced` and `shop-worker` authorises the payment. The
-customer waits on the order page for that result. An idle worker polls with a growing backoff, so
-without push the payment job can wait many seconds before a worker even looks. With DB push the
-commit in `shop-api` sends a notification (PostgreSQL `LISTEN`/`NOTIFY`, or Service Broker on SQL
-Server) and `shop-worker` fetches at once.
+customer waits on the order page for that result. `OrderPlaced` is a message, so the payment job only
+exists once the message router in `shop-worker` has routed it, and without push the router looks only
+every `MessageRoutingInterval` (10 s). With DB push the commit in `shop-api` sends a notification
+(PostgreSQL `LISTEN`/`NOTIFY`, or Service Broker on SQL Server), the router runs at once, and the
+routed job wakes a local worker.
+
+The notification is sent by `publisher.SaveChangesAsync(ct)`, which the checkout code uses (see
+[Messages](./orders-and-checkout.md#messages)). Committing through the DbContext's own
+`db.SaveChangesAsync(ct)` stores the same rows but sends nothing.
 
 ### Wiring
 
@@ -235,33 +247,37 @@ builder.Services.AddWarp<ShopDbContext>(opt =>
     opt.UseDatabasePush();
 });
 
-// shop-worker: receives the notification and wakes the dispatcher.
+// shop-worker: receives the notification and wakes the router and the workers.
 builder.Services.AddWarpServer<ShopDbContext>(opt =>
 {
     opt.UsePostgreSql();
-    opt.UseDispatcher = true;   // cross-process fetch push only wakes the dispatcher
-    opt.UseDatabasePush();
+    opt.UseDatabasePush();      // the listener wakes the dispatcher and bare workers alike
 });
 ```
 
 ### Test scenario
 
-- **Given** both services run with the wiring above, and no orders have come in for two minutes (the
-  worker's poll backoff is at its maximum).
+- **Given** both services run with the wiring above, and no orders have come in for two minutes.
 - **When** you place an order on `shop-web`.
-- **Then** on the payment job's detail page (`/warp/jobs/detail/{id}`), the `Processing` log entry
-  follows the `Enqueued` entry by well under a second.
+- **Then** on the `OrderPlaced` message's detail page (`/warp/messages/detail/{id}`), the `Routed` entry
+  follows the `Created` entry by well under a second. On the payment job's detail page
+  (`/warp/jobs/detail/{id}`), `Processing` follows `Created` just as quickly.
 - **When** you remove `UseDatabasePush()` from both services, wait two minutes, and place another order.
-- **Then** the gap between `Enqueued` and `Processing` grows to up to the polling backoff (default 30
-  seconds). The `queues` family on `/warp/counters` shows the same jump in queue wait.
+- **Then** the gap between the message's `Created` and `Routed` entries grows to up to the
+  `MessageRoutingInterval` (10 s). The payment job itself is still picked up quickly once it exists,
+  because the router wakes the local workers. So the `queues` family on `/warp/counters` shows no jump:
+  queue wait starts when the job is created, after routing.
 
 Pitfalls:
 
 - Call the provider (`UsePostgreSql()` / `UseSqlServer()`) before `UseDatabasePush()`.
-- `shop-api` needs `UseDatabasePush()` too. Without it the publisher sends nothing.
-- A pooler in transaction mode drops `LISTEN` silently, and SQL Server needs `ENABLE_BROKER`; both fall
-  back to polling without an error.
+- `shop-api` needs `UseDatabasePush()` too, and must commit with `publisher.SaveChangesAsync(ct)`.
+  Without the addon, or with `db.SaveChangesAsync(ct)`, nothing is sent.
+- A pooler in transaction mode drops `LISTEN` silently and falls back to polling. SQL Server without
+  `ENABLE_BROKER` also falls back to polling, but logs an Error (`Service Broker setup failed`).
 - Push does not speed up scheduled jobs. They wait for `ScheduledJobActivation` (default every 10s).
+- `Created` is the log entry for a job published directly or created by the router. Only a job activated
+  from `Scheduled` logs `Enqueued`.
 
 Covered by: `PostgresDatabasePushIntegrationTests`, `SqlServerDatabasePushIntegrationTests`,
 `UseDatabasePushValidationTests`, `NonServerListenerPushTestsBase`, `ListenerReconnectDrainTestsBase`,
@@ -272,8 +288,9 @@ Covered by: `PostgresDatabasePushIntegrationTests`, `SqlServerDatabasePushIntegr
 ### In the shop
 
 The ops team keeps the Warp dashboard open on a wall screen during sales. With polling, every open tab
-refetches the statistics on its own. With dashboard push, `shop-api` sends one SignalR message per job
-finish or new message to every open tab, and the counts and charts update within about a second.
+refetches the statistics on its own. With dashboard push, `shop-api` sends SignalR events to every open
+tab when jobs finish or messages arrive, and the counts and charts update within about a second. The events
+are coalesced: at most one every second, however many jobs finished in between.
 
 ### Wiring
 
@@ -298,11 +315,13 @@ app.MapWarpDashboard();       // the hub is mapped at /warp/api/hub with the sam
 - **Then** the navbar counts and the dashboard charts move in both tabs within about a second, without
   a refresh.
 - **When** you remove `UseDatabasePush()` from `shop-api` and repeat.
-- **Then** the pill still shows **Live**, but the counts change only on the 30-second safety-net poll,
-  because the job events happen in `shop-worker` and never reach `shop-api`.
+- **Then** the pill still shows **Live**. New `OrderPlaced` messages still update at once, because
+  `shop-api` published them and `publisher.SaveChangesAsync` signals its own process. Finished jobs show
+  only on the 30-second safety-net poll, because those events happen in `shop-worker` and never reach
+  `shop-api`.
 
 Pitfall: without DB push, dashboard push only sees events from its own process. In this shop that
-means it sees nothing, since `shop-api` runs no worker.
+means the messages `shop-api` publishes itself, and no job finishes, since `shop-api` runs no worker.
 
 Covered by: `DashboardBroadcasterTests`, `DashboardPushIntegrationTestsBase`,
 `DashboardPushRegistrationTests`, `DashboardPushAuthTests`, `NonServerListenerPushTestsBase`.
