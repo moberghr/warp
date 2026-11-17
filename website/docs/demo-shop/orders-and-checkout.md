@@ -61,10 +61,11 @@ await publisher.SaveChangesAsync(ct);   // commits, then sends the push and the 
   Mailer at a closed port) and place a second order.
 - *Then* the dashboard **Messages** pages, one per state (Enqueued, Processing, Completed, Failed), list
   the two `OrderPlaced` messages. Each message's detail page shows a progress line such as `3/3 (100%)` and
-  a **Jobs** table with one row per handler, filterable by state (4 rows once the [saga](#sagas) below is
-  registered, because the saga is another handler). For the first order all three jobs are `Completed`.
-  For the second, `ReserveStock` and `AuthorisePayment` are `Completed` and `SendConfirmationEmail` is
-  `Failed`; the message itself still reaches a terminal state.
+  a **Jobs** section headed `Jobs (3)`, one job per handler (`Jobs (4)` once the [saga](#sagas) below is
+  registered, because the saga is another handler). The section lists one state at a time: pick a state in
+  its sidebar, which shows the count for each. For the first order all three jobs are under `Completed`.
+  For the second, `ReserveStock` and `AuthorisePayment` are under `Completed` and `SendConfirmationEmail`
+  under `Failed`; the message itself still reaches a terminal state.
 - `Covered by:` `MessageIntegrationTests`, `MessagePolicyTests`
   (`HandlerDeclaredRetry_MessageChildRetriesPerChild_SiblingUnaffected`), `MessageRoutingTaskTests`.
 
@@ -253,8 +254,9 @@ public class OrderWorkflow(IPublisher publisher) :
 }
 ```
 
-`ReserveStock` publishes `StockReserved` when Stockroom confirms. The PayFast callback job (see
-[Mutex](./reliability.md#mutex)) publishes `PaymentConfirmed`.
+`ReserveStock` publishes `StockReserved` when Stockroom confirms. The PayFast callback, an inline HTTP
+endpoint on `shop-api` (see [Inbound HTTP endpoints](./integrations.md#inbound-http-endpoints)), publishes
+`PaymentConfirmed`.
 
 The dashboard runs in `shop-api`. Its **Sagas** page reads through a service that only `AddSagas()`
 registers, so without `AddSagas()` in `shop-api` the page is hidden there, even though `shop-worker` runs
@@ -316,7 +318,8 @@ it.
 
 Pitfall: commit through `publisher.SaveChangesAsync`, not through a different context instance. The
 context's own `db.SaveChangesAsync` also commits both rows, but it sends nothing: no DB push notification
-and no local wake, so a worker only finds the message on its next poll. A publish that is never saved is
+and no local wake, so the message router only finds the message on its next poll (`MessageRoutingInterval`,
+10 s by default, or 30 s with `UseDatabasePush()`). A publish that is never saved is
 lost, and Warp logs a warning when the scope ends with unsaved staged jobs.
 
 ## Metadata
