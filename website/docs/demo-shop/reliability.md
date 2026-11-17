@@ -231,42 +231,45 @@ Pitfall: admin rows survive redeploys. A limit raised during an incident stays u
 
 ## Mutex
 
-**In the shop.** PayFast can send two callbacks for one order almost at once (authorised, then captured).
-If both are processed in parallel, both read the order as unpaid and the second overwrites the first. `shop-api`
-enqueues each callback as a `ProcessPaymentCallback` job with a mutex keyed on the order id, in `Wait` mode,
-so callbacks for one order run one at a time while different orders run in parallel.
+**In the shop.** The payment-result callback is cheap and handled inline (see
+[Inbound HTTP endpoints](./integrations.md#inbound-http-endpoints)). Refund and chargeback notifications are
+slower: each one restocks items in Stockroom and adjusts the order. PayFast can send two of them for one
+order almost at once (a partial refund, then a chargeback). If both run in parallel, both read the same order
+totals and the second overwrites the first. `shop-api` enqueues each notification as a
+`ProcessPaymentAdjustment` job with a mutex keyed on the order id, in `Wait` mode, so adjustments for one
+order run one at a time while different orders run in parallel.
 
 **Wiring.**
 
 ```csharp
-public class ProcessPaymentCallback : IJob
+public class ProcessPaymentAdjustment : IJob
 {
     public Guid OrderId { get; set; }
     public string PayFastEventId { get; set; } = "";
 }
 
-// shop-api, PayFast webhook endpoint
+// shop-api, PayFast refund/chargeback endpoint
 await publisher.Enqueue(
-    new ProcessPaymentCallback { OrderId = orderId, PayFastEventId = eventId },
+    new ProcessPaymentAdjustment { OrderId = orderId, PayFastEventId = eventId },
     new JobParameters().WithMutex($"order:{orderId}", ConcurrencyMode.Wait));
 await publisher.SaveChangesAsync(ct);
 
-// shop-worker: the handler updates the order and publishes PaymentConfirmed for the saga
+// shop-worker: the handler restocks in Stockroom and updates the order totals
 ```
 
 **Test scenario.**
 
-- *Given* `ProcessPaymentCallbackHandler` waits on a breakpoint.
-- *When* you replay two PayFast sandbox callbacks for the same order, then one for a different order.
-- *Then* the first callback is `Processing`. The second shows `Requeued — 'order:<id>' full (1 slots)` in its
-  **History** and runs only after the first completes. The callback for the other order runs at the same
+- *Given* `ProcessPaymentAdjustmentHandler` waits on a breakpoint.
+- *When* you replay two PayFast sandbox refund notifications for the same order, then one for a different order.
+- *Then* the first adjustment is `Processing`. The second shows `Requeued — 'order:<id>' full (1 slots)` in its
+  **History** and runs only after the first completes. The adjustment for the other order runs at the same
   time as the first. The concurrency key is visible in each job's metadata.
 - `Covered by:` `MutexIntegrationTests` (`GivenTwoJobsWithSameMutex_WhenWaitMode_ThenSecondRequeuesUntilFirstFinishes`,
   `GivenTwoJobsWithDifferentKeys_WhenWaitMode_BothEnterHandlerSimultaneously`), `MutexTests`,
   `ConcurrencyIntegrationTests`.
 
 Pitfalls: `[Mutex("...")]` takes a literal key; it does not substitute `{id}`. A per-order key must come from
-`WithMutex` at enqueue. The default mode is `Skip`, which would drop the second callback.
+`WithMutex` at enqueue. The default mode is `Skip`, which would drop the second adjustment.
 
 ## No-restart
 
