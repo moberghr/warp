@@ -27,9 +27,34 @@ export const MetricDeviationDirection = {
 } as const;
 export type MetricDeviationDirection = (typeof MetricDeviationDirection)[keyof typeof MetricDeviationDirection];
 
+/** One named board (GET /api/metrics/boards row). Boards are always shared; the Default board cannot be deleted. */
+export interface MetricBoardSummary {
+  id: number;
+  name: string;
+  description: string | null;
+  position: number;
+  /** The application the board is scoped to by default; it does not filter the tiles. */
+  application: string | null;
+  /** True for the Default board, which owns every tile without a board (boardId null). */
+  isDefault: boolean;
+  tileCount: number;
+  createdBy: string | null;
+}
+
+/** The create / rename body of POST /api/metrics/boards (id 0 creates). */
+export interface MetricBoardUpsert {
+  id: number;
+  name: string;
+  description: string | null;
+  position?: number;
+  application?: string | null;
+}
+
 /** One stored tile (GET /api/metrics/board/tiles row; also the upsert body, with id 0 for a new tile). */
 export interface MetricBoardTile {
   id: number;
+  /** The board holding the tile; null is the Default board. Changing it moves the tile. */
+  boardId: number | null;
   name: string;
   position: number;
   instrument: string;
@@ -77,6 +102,8 @@ export interface MetricBoardTileResult {
 }
 
 export interface MetricBoard {
+  /** The board read; null only for a read across every board (the server's verdict, never this page). */
+  board: MetricBoardSummary | null;
   from: string;
   to: string;
   resolution: MetricTier;

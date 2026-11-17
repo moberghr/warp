@@ -15,7 +15,7 @@ import { ApplicationInstanceEventType } from '@/types/applications';
 import { MetricDeviationDirection, MetricTileStatusRule, type MetricBoardTileResult } from '@/types/metricBoard';
 import { SloComparison, SloState, type SloObjective } from '@/types/slo';
 import { checkTarget, checkThreshold, formatBudget, formatObserved, formatTarget } from '@/pages/slo/sloDisplay';
-import { demoMetricBoard } from './metricBoard';
+import { demoBoards, demoMetricBoard } from './metricBoard';
 import { demoSlos } from './slo';
 import type {
   ApplicationDeployModel,
@@ -503,7 +503,14 @@ export function demoDeployVerdict(
   environment?: string,
   minCoverage = 0,
   deploys: ApplicationDeployModel[] = demoDeploys,
+  board?: string,
 ): DeployVerdictModel | null {
+  // Like the server: a named board narrows the tile checks to it (unknown: no verdict, the router's 404); no board = every board.
+  const named = board ? demoBoards.find((x) => x.name.toLowerCase() === board.trim().toLowerCase()) : undefined;
+  if (board && named === undefined) {
+    return null;
+  }
+
   const history = deploys
     .filter((x) => x.application === application)
     .sort((a, b) => Date.parse(b.firstSeenAt) - Date.parse(a.firstSeenAt));
@@ -522,7 +529,7 @@ export function demoDeployVerdict(
 
   const name = deploy.application;
   const tiles = to > from
-    ? demoMetricBoard(new Date(from).toISOString(), new Date(to).toISOString()).tiles
+    ? (demoMetricBoard(new Date(from).toISOString(), new Date(to).toISOString(), undefined, named?.id ?? 'all')?.tiles ?? [])
       .filter((x) => appliesTo(x.tile.application, name))
       .map(tileCheck)
       .filter((x): x is DeployVerdictCheck => x !== null)

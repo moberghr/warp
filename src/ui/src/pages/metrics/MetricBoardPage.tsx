@@ -18,6 +18,7 @@ import {
   MetricDeviationDirection,
   MetricTileKind,
   MetricTileStatusRule,
+  type MetricBoardSummary,
   type MetricBoardTile,
   type MetricBoardTileResult,
 } from '@/types/metricBoard';
@@ -61,6 +62,19 @@ import {
   validateTileDraft,
   type SparkPoint,
 } from './boardModel';
+import {
+  BOARD_PARAM,
+  MAX_BOARDS,
+  boardReadId,
+  boardUrlId,
+  deleteBoardDescription,
+  readLastBoard,
+  selectBoard,
+  tileBoardValue,
+  validateBoardName,
+  writeBoardParam,
+  writeLastBoard,
+} from './boardsModel';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, Tooltip);
 
@@ -78,13 +92,33 @@ export default function MetricBoardPage() {
   const clamped = useTickingValue(useCallback((now: number) => resolveWindow({ range, custom }, now).clamped, [range, custom]));
   const [draft, setDraft] = useState<MetricBoardTile | null>(null);
 
+  // Named boards (§8.34): the selected board is in the URL (?board=<url id of its name>); without one, the last board
+  // opened here (localStorage, a convenience) or the Default board.
+  const boardsQuery = useQuery({ queryKey: ['metrics', 'boards'] as const, queryFn: api.getMetricBoards });
+  const boards = useMemo(() => boardsQuery.data ?? [], [boardsQuery.data]);
+  const [lastOpened] = useState(() => readLastBoard());
+  const { board: selected, missing } = useMemo(
+    () => selectBoard(boards, searchParams.get(BOARD_PARAM), lastOpened),
+    [boards, searchParams, lastOpened],
+  );
+  const readId = boardReadId(selected);
+  const showBoard = (next: MetricBoardSummary, list: readonly MetricBoardSummary[] = boards) =>
+    setSearchParams((prev) => writeBoardParam(prev, list, next));
+  useEffect(() => {
+    if (selected && !missing) {
+      writeLastBoard(selected.isDefault ? null : boardUrlId(boards, selected));
+    }
+  }, [boards, selected, missing]);
+
   const boardQuery = useQuery({
-    queryKey: ['metrics', 'board', range, custom] as const,
+    queryKey: ['metrics', 'board', readId ?? null, range, custom] as const,
     queryFn: () => {
       const w = resolveWindow({ range, custom }, Date.now());
 
-      return api.getMetricBoard(new Date(w.from).toISOString(), new Date(w.to).toISOString());
+      return api.getMetricBoard(new Date(w.from).toISOString(), new Date(w.to).toISOString(), readId);
     },
+    // Wait for the board list (the URL holds a name, the read takes an id); if it fails, the Default board still reads.
+    enabled: boardsQuery.isSuccess || boardsQuery.isError,
     refetchInterval: refetchMs,
     placeholderData: keepPreviousData,
   });
@@ -104,7 +138,10 @@ export default function MetricBoardPage() {
   });
   const lastDeploy = latestDeploy(latestDeployQuery.data);
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['metrics', 'board'] });
+  const invalidate = () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['metrics', 'board'] }),
+    queryClient.invalidateQueries({ queryKey: ['metrics', 'boards'] }),
+  ]);
   const saveMutation = useMutation({
     mutationFn: (d: MetricBoardTile) => api.upsertMetricBoardTile(buildTileRequest(d)),
     onSuccess: () => {
@@ -126,6 +163,46 @@ export default function MetricBoardPage() {
     setDraft(d);
   };
 
+  const [boardDraft, setBoardDraft] = useState<BoardDraft | null>(null);
+  const saveBoardMutation = useMutation({
+    mutationFn: (d: BoardDraft) => api.upsertMetricBoard({ id: d.id, name: d.name.trim(), description: d.description.trim() || null }),
+    onSuccess: async ({ id }) => {
+      setBoardDraft(null);
+      // The URL id follows the (new) name, so select the saved board from the refreshed list.
+      const refreshed = await boardsQuery.refetch();
+      const saved = refreshed.data?.find((x) => x.id === id);
+      if (saved && refreshed.data) {
+        showBoard(saved, refreshed.data);
+      }
+
+      void invalidate();
+    },
+    onError: (error) => {
+      if (errorStatus(error) === 404) {
+        void invalidate();
+      }
+    },
+  });
+  const openBoardDraft = (d: BoardDraft | null) => {
+    saveBoardMutation.reset();
+    setBoardDraft(d);
+  };
+  const [pendingBoardDelete, setPendingBoardDelete] = useState<MetricBoardSummary | null>(null);
+  const deleteBoardMutation = useMutation({
+    mutationFn: (b: MetricBoardSummary) => api.deleteMetricBoard(b.id),
+    onSuccess: () => {
+      // Back to the Default board, and forget the deleted one.
+      writeLastBoard(null);
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete(BOARD_PARAM);
+
+        return next;
+      });
+    },
+    onSettled: () => void invalidate(),
+  });
+
   const tiles = board?.tiles ?? [];
   const counts = statusCounts(tiles);
   const span = board ? { from: Date.parse(board.from), to: Date.parse(board.to) } : null;
@@ -146,12 +223,30 @@ export default function MetricBoardPage() {
           type="button"
           className={toggleClass(false)}
           disabled={tiles.length >= MAX_TILES}
-          onClick={() => openDraft({ ...emptyTileDraft })}
+          onClick={() => openDraft({ ...emptyTileDraft, boardId: selected && !selected.isDefault ? selected.id : null })}
         >
           Add tile
         </button>
       </div>
       <MetricsTabs />
+
+      <BoardPicker
+        boards={boards}
+        selected={selected}
+        loadError={boardsQuery.isError}
+        onSelect={(b) => showBoard(b)}
+        onNew={() => openBoardDraft({ id: 0, name: '', description: '' })}
+        onRename={() => selected && openBoardDraft({ id: selected.id, name: selected.name, description: selected.description ?? '' })}
+        onDelete={() => selected && setPendingBoardDelete(selected)}
+      />
+      {missing !== null && selected && (
+        <p role="status" className="mb-3 text-sm text-amber-600">
+          No board matches “{missing}” (deleted or renamed); showing {selected.name}.
+        </p>
+      )}
+      {deleteBoardMutation.isError && (
+        <p role="alert" className="mb-3 text-sm text-destructive">{errorMessage(deleteBoardMutation.error, 'Failed to delete the board.')}</p>
+      )}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {RANGES.map((r) => (
@@ -210,7 +305,8 @@ export default function MetricBoardPage() {
         <LoadingState />
       ) : tiles.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
-          No tiles yet. Add one, or seed them in code with <code>opt.AddMetricBoard(b =&gt; b.Value(...).Ratio(...))</code>.
+          No tiles on this board yet. Add one, or seed them in code with{' '}
+          <code>{selected && !selected.isDefault ? `opt.AddMetricBoard("${selected.name}", b => b.Value(...))` : 'opt.AddMetricBoard(b => b.Value(...).Ratio(...))'}</code>.
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -243,9 +339,37 @@ export default function MetricBoardPage() {
         }}
       />
 
+      <ConfirmDialog
+        open={pendingBoardDelete !== null}
+        onOpenChange={(open) => !open && setPendingBoardDelete(null)}
+        title={`Delete board "${pendingBoardDelete?.name ?? ''}"?`}
+        description={pendingBoardDelete ? deleteBoardDescription(pendingBoardDelete) : ''}
+        confirmLabel="Delete board"
+        variant="destructive"
+        onConfirm={() => {
+          if (pendingBoardDelete) {
+            deleteBoardMutation.mutate(pendingBoardDelete);
+          }
+          setPendingBoardDelete(null);
+        }}
+      />
+
+      {boardDraft && (
+        <BoardForm
+          draft={boardDraft}
+          boards={boards}
+          onChange={setBoardDraft}
+          onCancel={() => openBoardDraft(null)}
+          onSave={() => saveBoardMutation.mutate(boardDraft)}
+          saving={saveBoardMutation.isPending}
+          serverError={saveBoardMutation.isError ? errorMessage(saveBoardMutation.error, 'Failed to save the board.') : null}
+        />
+      )}
+
       {draft && (
         <TileForm
           draft={draft}
+          boards={boards}
           onChange={setDraft}
           onCancel={() => openDraft(null)}
           onSave={() => saveMutation.mutate(draft)}
@@ -253,6 +377,116 @@ export default function MetricBoardPage() {
           serverError={saveMutation.isError ? errorMessage(saveMutation.error, 'Failed to save the tile.') : null}
         />
       )}
+    </div>
+  );
+}
+
+interface BoardDraft {
+  id: number;
+  name: string;
+  description: string;
+}
+
+function BoardPicker({
+  boards,
+  selected,
+  loadError,
+  onSelect,
+  onNew,
+  onRename,
+  onDelete,
+}: {
+  boards: MetricBoardSummary[];
+  selected: MetricBoardSummary | undefined;
+  loadError: boolean;
+  onSelect: (b: MetricBoardSummary) => void;
+  onNew: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  if (loadError) {
+    return <p role="alert" className="mb-3 text-sm text-destructive">Unable to load the boards; showing the Default board.</p>;
+  }
+
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-2">
+      <label className="flex items-center gap-2 text-sm">
+        <span className="text-muted-foreground">Board</span>
+        <select
+          className={`${inputClass} h-8 w-auto min-w-[12rem]`}
+          value={selected?.id ?? ''}
+          disabled={boards.length === 0}
+          onChange={(e) => {
+            const next = boards.find((x) => x.id === Number(e.target.value));
+            if (next) {
+              onSelect(next);
+            }
+          }}
+        >
+          {boards.map((b) => (
+            <option key={b.id} value={b.id}>
+              {b.name} ({b.tileCount})
+            </option>
+          ))}
+        </select>
+      </label>
+      <button type="button" className={toggleClass(false)} disabled={boards.length >= MAX_BOARDS} onClick={onNew}>New board</button>
+      <button type="button" className={toggleClass(false)} disabled={!selected || selected.id <= 0} onClick={onRename}>Rename</button>
+      <Hint text={selected?.isDefault ? 'The Default board holds every tile without a board and cannot be deleted.' : 'Deletes the board and its tiles.'}>
+        <span>
+          <button type="button" className={`${toggleClass(false)} text-red-600`} disabled={!selected || selected.isDefault} onClick={onDelete}>Delete</button>
+        </span>
+      </Hint>
+      {selected?.description && <span className="text-xs text-muted-foreground">{selected.description}</span>}
+    </div>
+  );
+}
+
+function BoardForm({
+  draft,
+  boards,
+  onChange,
+  onCancel,
+  onSave,
+  saving,
+  serverError,
+}: {
+  draft: BoardDraft;
+  boards: MetricBoardSummary[];
+  onChange: (d: BoardDraft) => void;
+  onCancel: () => void;
+  onSave: () => void;
+  saving: boolean;
+  serverError: string | null;
+}) {
+  const clientError = validateBoardName(draft.name, boards, draft.id || null);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
+      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
+        <h2 className="mb-4 text-lg font-semibold">{draft.id ? 'Rename board' : 'New board'}</h2>
+        <div className="space-y-3 text-sm">
+          <Field label="Name">
+            <input className={inputClass} value={draft.name} autoFocus onChange={(e) => onChange({ ...draft, name: e.target.value })} />
+          </Field>
+          <Field label="Description (optional)">
+            <input className={inputClass} value={draft.description} onChange={(e) => onChange({ ...draft, description: e.target.value })} />
+          </Field>
+        </div>
+        {clientError && draft.name !== '' && <p className="mt-4 text-xs text-amber-600">{clientError}</p>}
+        {serverError && <p role="alert" className="mt-2 text-sm text-red-600">{serverError}</p>}
+        <div className="mt-6 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800">Cancel</button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saving || clientError !== null}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -416,6 +650,7 @@ function Sparkline({
 
 function TileForm({
   draft,
+  boards,
   onChange,
   onCancel,
   onSave,
@@ -423,6 +658,7 @@ function TileForm({
   serverError,
 }: {
   draft: MetricBoardTile;
+  boards: MetricBoardSummary[];
   onChange: (d: MetricBoardTile) => void;
   onCancel: () => void;
   onSave: () => void;
@@ -447,6 +683,17 @@ function TileForm({
           <Field label="Name">
             <input className={inputClass} value={draft.name} onChange={(e) => set({ name: e.target.value })} />
           </Field>
+          {boards.length > 0 && (
+            <Field label="Board">
+              <select
+                className={inputClass}
+                value={tileBoardValue(draft.boardId, boards) ?? ''}
+                onChange={(e) => set({ boardId: Number(e.target.value) })}
+              >
+                {boards.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            </Field>
+          )}
           <Field label="Shows">
             <select className={inputClass} value={draft.kind} onChange={(e) => onChange(changeTileKind(draft, Number(e.target.value) as MetricTileKind))}>
               <option value={MetricTileKind.Value}>Value (events, or a gauge's level)</option>

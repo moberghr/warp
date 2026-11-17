@@ -419,8 +419,19 @@ export const getMetricSeries = (instrument: string, query: string) =>
 
 // Metrics health board (#326): every tile evaluated over [from, to) in one batched read, and tile CRUD. Registered by
 // AddWarp, so a dashboard-only host serves them; the upsert's 400 body is a plain message string.
-export const getMetricBoard = (from: string, to: string) =>
-  api.get<import('@/types/metricBoard').MetricBoard>('/metrics/board', { params: { from, to } }).then(r => r.data);
+// `board` is a board id; without it the server reads the Default board.
+export const getMetricBoard = (from: string, to: string, board?: number) =>
+  api.get<import('@/types/metricBoard').MetricBoard>('/metrics/board', { params: board === undefined ? { from, to } : { from, to, board } }).then(r => r.data);
+
+// Named boards: the GET creates the Default board on first use; POST creates (id 0) or renames; DELETE removes the board
+// and its tiles (the Default board answers 400). Errors are { error }.
+export const getMetricBoards = () =>
+  api.get<import('@/types/metricBoard').MetricBoardSummary[]>('/metrics/boards').then(r => r.data);
+
+export const upsertMetricBoard = (body: import('@/types/metricBoard').MetricBoardUpsert) =>
+  api.post<{ id: number }>('/metrics/boards', body).then(r => r.data);
+
+export const deleteMetricBoard = (id: number) => api.delete(`/metrics/boards/${id}`);
 
 export const getMetricBoardTiles = () =>
   api.get<import('@/types/metricBoard').MetricBoardTile[]>('/metrics/board/tiles').then(r => r.data);

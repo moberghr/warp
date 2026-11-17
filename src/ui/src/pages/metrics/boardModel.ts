@@ -199,6 +199,7 @@ export function annotationsTruncatedHint(board: Pick<MetricBoard, 'annotationsTr
 
 export const emptyTileDraft: MetricBoardTile = {
   id: 0,
+  boardId: null,
   name: '',
   position: 0,
   instrument: '',

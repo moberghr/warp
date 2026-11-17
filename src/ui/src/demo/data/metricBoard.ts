@@ -2,10 +2,11 @@
 // numbers and sparkline are generated for whatever window is asked for from a deterministic curve, so the board honours
 // the range selector and "since last deploy" the way the real API does. Same window, same picture: nothing is random.
 // Two tiles are scoped to billing-service, so the post-deploy verdicts of the demo applications differ (applications.ts).
+// Three named boards (§8.34): Default (the tiles with no board), Checkout and Payments.
 
 import { MetricKind, MetricTier } from '@/types/metrics';
 import { MetricDeviationDirection, MetricTileKind, MetricTileStatusRule } from '@/types/metricBoard';
-import type { MetricBoard, MetricBoardSparkPoint, MetricBoardTile, MetricBoardTileResult } from '@/types/metricBoard';
+import type { MetricBoard, MetricBoardSparkPoint, MetricBoardSummary, MetricBoardTile, MetricBoardTileResult } from '@/types/metricBoard';
 import { SloComparison, SloGaugeAggregate, SloState } from '@/types/slo';
 import { demoNoteCoversTile, demoTileAnnotations } from './annotations';
 
@@ -23,8 +24,14 @@ export function demoCompleteUntil(from: number, to: number, now: number): number
   return Math.min(to, Math.max(from, cutoff));
 }
 
+/** The demo boards' ids; the Default board owns the tiles with no board. */
+export const DEMO_DEFAULT_BOARD = 1;
+export const DEMO_CHECKOUT_BOARD = 2;
+export const DEMO_PAYMENTS_BOARD = 3;
+
 function tile(partial: Partial<MetricBoardTile> & Pick<MetricBoardTile, 'id' | 'name' | 'instrument'>): MetricBoardTile {
   return {
+    boardId: null,
     position: partial.id,
     application: null,
     tagFilter: null,
@@ -97,7 +104,57 @@ export const demoBoardTiles: MetricBoardTile[] = [
     threshold: 80,
   }),
   tile({ id: 6, name: 'Refunds', instrument: 'payment.results', tagFilter: 'step=refund' }),
+  tile({
+    id: 7,
+    boardId: DEMO_CHECKOUT_BOARD,
+    position: 1,
+    name: 'Checkout requests',
+    instrument: 'http.server.request.duration',
+    tagFilter: 'http.route=api/checkout*',
+  }),
+  tile({
+    id: 8,
+    boardId: DEMO_CHECKOUT_BOARD,
+    position: 2,
+    name: 'Checkout 5xx',
+    instrument: 'http.server.request.duration',
+    application: 'orders-api',
+    tagFilter: 'http.route=api/checkout*,http.response.status_code=5*',
+    statusRule: MetricTileStatusRule.Threshold,
+    comparison: SloComparison.AtMost,
+    threshold: 200,
+  }),
+  tile({
+    id: 9,
+    boardId: DEMO_PAYMENTS_BOARD,
+    position: 1,
+    name: 'Authorisation rate',
+    instrument: 'payment.results',
+    application: 'billing-service',
+    kind: MetricTileKind.Ratio,
+    ratioTag: 'result',
+    goodValues: 'ok',
+    badValues: 'declined,error',
+    statusRule: MetricTileStatusRule.Threshold,
+    comparison: SloComparison.AtLeast,
+    threshold: 0.9,
+  }),
+  tile({ id: 10, boardId: DEMO_PAYMENTS_BOARD, position: 2, name: 'Declines', instrument: 'payment.results', tagFilter: 'result=declined' }),
 ];
+
+const boardOf = (t: MetricBoardTile) => t.boardId ?? DEMO_DEFAULT_BOARD;
+
+/** GET /metrics/boards — the three demo boards in picker order, with their tile counts. */
+export const demoBoards: MetricBoardSummary[] = [
+  { id: DEMO_DEFAULT_BOARD, name: 'Default', description: null, application: null, isDefault: true },
+  { id: DEMO_CHECKOUT_BOARD, name: 'Checkout', description: 'The checkout funnel of the shop.', application: 'orders-api', isDefault: false },
+  { id: DEMO_PAYMENTS_BOARD, name: 'Payments', description: 'Card authorisations and declines.', application: 'billing-service', isDefault: false },
+].map((x, i) => ({
+  ...x,
+  position: i,
+  createdBy: x.isDefault ? null : 'demo',
+  tileCount: demoBoardTiles.filter((t) => boardOf(t) === x.id).length,
+}));
 
 interface Shape {
   kind: MetricKind;
@@ -117,6 +174,10 @@ const shapes: Record<number, Shape> = {
   4: { kind: MetricKind.Counter, unit: '1', base: 30, swing: 0.3, drift: 0.2 },
   5: { kind: MetricKind.Gauge, unit: '1', base: 46, swing: 0.25, drift: 0.05 },
   6: { kind: MetricKind.Counter, unit: '1', base: 20, swing: 0.3, drift: 0 },
+  7: { kind: MetricKind.Histogram, unit: 'ms', base: 640, swing: 0.4, drift: 0.06 },
+  8: { kind: MetricKind.Histogram, unit: 'ms', base: 3, swing: 0.5, drift: 0.3 },
+  9: { kind: MetricKind.Counter, unit: '1', base: 0.94, swing: 0.01, drift: -0.005 },
+  10: { kind: MetricKind.Counter, unit: '1', base: 42, swing: 0.3, drift: 0.1 },
 };
 
 function level(shape: Shape, ms: number, current: boolean): number {
@@ -197,15 +258,23 @@ export function demoTileStatus(t: MetricBoardTile, current: number, dayAgo: numb
 }
 
 /**
- * GET /metrics/board?from=&to= — every demo tile evaluated over the window. As on the server, the values and their
- * baselines stop at `completeUntil` (the newest bucket is still filling) while the sparklines run to `to`.
+ * GET /metrics/board?from=&to=&board= — the tiles of one demo board (the Default board when none is given), or of every
+ * board for 'all' (what the server's verdict reads without a board), evaluated over the window. As on the server, the
+ * values and their baselines stop at `completeUntil` (the newest bucket is still filling) while the sparklines run to
+ * `to`. Null for a board id that does not exist.
  */
-export function demoMetricBoard(fromIso: string | undefined, toIso: string | undefined, now = Date.now()): MetricBoard {
+export function demoMetricBoard(fromIso: string | undefined, toIso: string | undefined, now?: number): MetricBoard;
+export function demoMetricBoard(fromIso: string | undefined, toIso: string | undefined, now: number | undefined, board: number | 'all'): MetricBoard | null;
+export function demoMetricBoard(fromIso: string | undefined, toIso: string | undefined, now = Date.now(), board: number | 'all' = DEMO_DEFAULT_BOARD): MetricBoard | null {
+  const summary = board === 'all' ? null : demoBoards.find((x) => x.id === board);
+  if (summary === undefined) {
+    return null;
+  }
   const to = toIso ? Date.parse(toIso) : now;
   const from = fromIso ? Date.parse(fromIso) : to - DAY;
   const span = to - from;
   const complete = demoCompleteUntil(from, to, now);
-  const tiles: MetricBoardTileResult[] = demoBoardTiles.map((t) => {
+  const tiles: MetricBoardTileResult[] = demoBoardTiles.filter((t) => summary === null || boardOf(t) === summary.id).map((t) => {
     const shape = shapes[t.id] ?? shapes[6];
     const empty = complete <= from;
     const current = empty ? null : windowValue(shape, t, from, complete, true);
@@ -235,6 +304,7 @@ export function demoMetricBoard(fromIso: string | undefined, toIso: string | und
   });
 
   return {
+    board: summary,
     from: new Date(from).toISOString(),
     to: new Date(to).toISOString(),
     resolution: span <= 6 * HOUR ? MetricTier.Fine : span <= 7 * DAY ? MetricTier.Hourly : MetricTier.Daily,
