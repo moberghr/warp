@@ -219,6 +219,45 @@ public abstract class SavedViewTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task Upsert_UpdateByAUserDifferingOnlyByCaseOnAPersonalView_IsForbidden()
+    {
+        // "Alice" is not "alice": a case-insensitive comparison (or collation) would hand her alice's personal view.
+        var id = await SeedViewAsync("Mine", "alice", shared: false);
+        var edit = View("Hijacked");
+        edit.Id = id;
+
+        var result = await Command().Upsert(edit, "Alice", Ct);
+
+        result.Status.ShouldBe(SavedViewWriteStatus.Forbidden);
+        (await _fixture.CreateContext().Set<SavedView>().SingleAsync(Ct)).Name.ShouldBe("Mine");
+    }
+
+    [TimedFact]
+    public async Task Delete_ByAUserDifferingOnlyByCaseOnAPersonalView_IsForbidden()
+    {
+        var id = await SeedViewAsync("Mine", "alice", shared: false);
+
+        var status = await Command().Delete(id, "Alice", Ct);
+
+        status.ShouldBe(SavedViewDeleteStatus.Forbidden);
+        (await _fixture.CreateContext().Set<SavedView>().CountAsync(Ct)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task Upsert_AuthorsDifferingOnlyByCase_HaveSeparateCaps()
+    {
+        // The count's SQL filter is widened by SQL Server's collation ("Alice" matches alice's rows); the in-memory ordinal
+        // recount keeps alice's full cap from blocking Alice.
+        await SeedManyAsync("alice", shared: false, SavedViewValidation.MaxViewsPerAuthor);
+
+        var upper = await Command().Upsert(View("Alice's"), "Alice", Ct);
+        var lower = await Command().Upsert(View("One more"), "alice", Ct);
+
+        upper.Status.ShouldBe(SavedViewWriteStatus.Saved);
+        lower.Status.ShouldBe(SavedViewWriteStatus.AuthorFull);
+    }
+
+    [TimedFact]
     public async Task Delete_PersonalView_OnlyByItsAuthor()
     {
         var id = await SeedViewAsync("Mine", "alice", shared: false);
