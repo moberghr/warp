@@ -83,12 +83,11 @@ public class SqlServerDatabasePushIntegrationTests : IAsyncLifetime, IClassFixtu
     }
 
     [TimedFact(20_000)]
-    public async Task PushEnabled_WithoutDispatcher_WorksButPollsForJobs()
+    public async Task PushEnabled_WithoutDispatcher_ProcessesWork()
     {
-        // UseDispatcher=false + push: the listener logs a warning, JobEnqueued notifications
-        // have no dispatcher to signal (individual workers still poll). But MessageRoutingTask
-        // and OrchestrationTask still benefit. The test verifies the warning path doesn't crash
-        // and the system still processes work correctly.
+        // UseDispatcher=false + push: there is no dispatcher to wake, but the listener still signals
+        // ServerTaskSignals.JobEnqueued, which every bare worker subscribes to (§2.9), and MessageRoutingTask
+        // and OrchestrationTask wake as usual. The system processes work in single-worker mode.
         await using var server = await WarpTestServer.StartAsync(
             fixture: _fixture,
             configure: cfg =>
