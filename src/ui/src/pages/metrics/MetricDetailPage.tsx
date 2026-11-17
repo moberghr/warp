@@ -30,7 +30,6 @@ import { annotationBands, type AnnotationBand } from './annotationModel';
 import { MetricKind } from '@/types/metrics';
 import type { MetricInstrument } from '@/types/metrics';
 import {
-  DEFAULT_CONTROLS,
   PERCENTILES,
   RANGES,
   RATES,
@@ -59,7 +58,7 @@ import {
   kindLabel,
   latestDeploy,
   numeratorQueryKey,
-  parseRangeParams,
+  parseControlParams,
   parseRate,
   percentileLabel,
   rateParam,
@@ -79,7 +78,7 @@ import {
   withUnit,
   upsertChip,
   validateCustomRange,
-  writeRangeParams,
+  writeControlParams,
   type DatasetSpec,
   type DeployMarker,
   type HeadlineSummary,
@@ -117,19 +116,16 @@ function tryDecode(id: string | undefined): string | null {
 export default function MetricDetailPage() {
   const { id } = useParams<{ id: string }>();
   const name = tryDecode(id);
-  const [state, setControls] = useState<MetricControls>(DEFAULT_CONTROLS);
   const [chipDraft, setChipDraft] = useState({ key: '', value: '' });
   const [patternDraft, setPatternDraft] = useState('');
   const [customDraft, setCustomDraft] = useState<{ from: string; to: string } | null>(null);
-  const set = (patch: Partial<MetricControls>) => setControls((c) => ({ ...c, ...patch }));
-  // The rate unit and the range live in the URL, so a shared link or a refresh keeps the chart's scale and window.
+  // Every control lives in the URL, so a shared link, a refresh or a saved view reproduces the chart. A change
+  // replaces the history entry rather than pushing one, so Back leaves the page instead of undoing each click.
   const [searchParams, setSearchParams] = useSearchParams();
-  const selection = useMemo(() => parseRangeParams(searchParams), [searchParams]);
-  const controls = useMemo<MetricControls>(
-    () => ({ ...state, range: selection.range, custom: selection.custom }),
-    [state, selection],
-  );
-  const setSelection = (next: RangeSelection) => setSearchParams((prev) => writeRangeParams(prev, next), { replace: true });
+  const controls = useMemo(() => parseControlParams(searchParams), [searchParams]);
+  const set = (patch: Partial<MetricControls>) =>
+    setSearchParams((prev) => writeControlParams(prev, { ...parseControlParams(prev), ...patch }), { replace: true });
+  const setSelection = (next: RangeSelection) => set(next);
   const rate = parseRate(searchParams.get('rate'));
   const setRate = (next: RateId) =>
     setSearchParams((prev) => {

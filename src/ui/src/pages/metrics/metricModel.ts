@@ -5,7 +5,7 @@
 import { MetricKind, MetricTier } from '@/types/metrics';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { unitLabel, withUnit } from '@/lib/metricUnit';
-import type { FilterChip } from '@/lib/metricPattern';
+import { parsePattern, type FilterChip } from '@/lib/metricPattern';
 import type { MetricInstrument, MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
 import type { ApplicationDeployModel } from '@/types/applications';
 
@@ -344,6 +344,114 @@ export function writeRangeParams(params: URLSearchParams, selection: RangeSelect
 
   if (selection.range !== DEFAULT_CONTROLS.range) {
     next.set('range', selection.range);
+  }
+
+  return next;
+}
+
+// Every other control lives in the URL too (saved views and shareable links, spec 2026-11-17 Part 2 step A):
+// `application`, `breakdown`, repeated `filter=key:value` (the series API's syntax, `{version}` included),
+// `compare=1d,7d`, `percentile`, `view=ratio`, `numerator`, `minmax=1`. Defaults are left out, and a value that does
+// not parse is ignored (the control reads its default), so a hand-edited or stale link never breaks the page.
+
+/** Every query key the metric detail page reads. Saved views (batch 3) validate a stored query against it. */
+export const metricQueryKeys = [
+  'range',
+  'from',
+  'to',
+  'application',
+  'breakdown',
+  'filter',
+  'compare',
+  'percentile',
+  'view',
+  'numerator',
+  'minmax',
+  'rate',
+] as const;
+
+/** The keys writeControlParams owns beside the range's; `rate` is written on its own (rateParam) and kept as is. */
+const CONTROL_KEYS = ['application', 'breakdown', 'filter', 'compare', 'percentile', 'view', 'numerator', 'minmax'] as const;
+
+function nonBlank(value: string | null): string | null {
+  return value !== null && value.trim() !== '' ? value : null;
+}
+
+/** A `key:value` filter as a chip, with the chip editor's rules: key without `:`, value a valid pattern. */
+function filterFromParam(text: string): FilterChip | null {
+  const chip = chipFromQuery(text);
+  if (chip === null || chip.key.trim() === '' || chip.value.trim() === '' || parsePattern(chip.value) === null) {
+    return null;
+  }
+
+  return chip;
+}
+
+/** Reads every metric control from the URL. Unknown or invalid values fall back to the defaults. */
+export function parseControlParams(params: URLSearchParams): MetricControls {
+  const { range, custom } = parseRangeParams(params);
+  const filters = params
+    .getAll('filter')
+    .map(filterFromParam)
+    .filter((x): x is FilterChip => x !== null)
+    .reduce<FilterChip[]>((chips, chip) => upsertChip(chips, chip), []);
+  const compare = new Set((params.get('compare') ?? '').split(',').map((x) => x.trim()));
+  const percentile = Number(params.get('percentile'));
+  const numerator = nonBlank(params.get('numerator'));
+
+  return {
+    range,
+    custom,
+    application: nonBlank(params.get('application')),
+    breakdown: nonBlank(params.get('breakdown')),
+    filters,
+    compareDay: compare.has('1d'),
+    compareWeek: compare.has('7d'),
+    percentile: (PERCENTILES as readonly number[]).includes(percentile) ? percentile : null,
+    view: params.get('view') === 'ratio' ? 'ratio' : 'values',
+    numerator: numerator !== null && parsePattern(numerator) !== null ? numerator : null,
+    showMinMax: params.get('minmax') === '1' || params.get('minmax') === 'true',
+  };
+}
+
+/** A copy of `params` carrying `controls` (defaults left out) and every other parameter, `rate` included, unchanged. */
+export function writeControlParams(params: URLSearchParams, controls: MetricControls): URLSearchParams {
+  const next = writeRangeParams(params, controls);
+  for (const key of CONTROL_KEYS) {
+    next.delete(key);
+  }
+
+  if (controls.application) {
+    next.set('application', controls.application);
+  }
+
+  if (controls.breakdown) {
+    next.set('breakdown', controls.breakdown);
+  }
+
+  for (const chip of controls.filters) {
+    next.append('filter', chipToQuery(chip));
+  }
+
+  const compare = [controls.compareDay ? '1d' : null, controls.compareWeek ? '7d' : null].filter((x) => x !== null);
+  if (compare.length > 0) {
+    next.set('compare', compare.join(','));
+  }
+
+  if (controls.percentile !== null) {
+    next.set('percentile', String(controls.percentile));
+  }
+
+  if (controls.view !== DEFAULT_CONTROLS.view) {
+    next.set('view', controls.view);
+  }
+
+  if (controls.numerator) {
+    next.set('numerator', controls.numerator);
+  }
+
+  if (controls.showMinMax) {
+    next.set('minmax', '1');
   }
 
   return next;

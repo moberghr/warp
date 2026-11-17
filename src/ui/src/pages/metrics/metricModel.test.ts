@@ -67,6 +67,7 @@ import {
   unitLabel,
   upsertChip,
 } from './metricModel';
+import { metricQueryKeys, parseControlParams, writeControlParams } from './metricModel';
 
 const T0 = Date.UTC(2026, 10, 13, 10, 0, 0);
 const MIN5 = 5 * 60_000;
@@ -1122,5 +1123,126 @@ describe('query keys', () => {
     expect(deploysRequest(controls, now)).toEqual({ application: 'shop', from: '2026-11-13T11:00:00.000Z', to: '2026-11-13T12:00:00.001Z' });
     expect(deploysRequest({ ...controls, application: null }, now).application).toBeUndefined();
     expect(annotationsRequest(name, controls, now)).toEqual({ instrument: name, from: '2026-11-13T11:00:00.000Z', to: '2026-11-13T12:00:00.001Z' });
+  });
+});
+
+describe('control URL parameters', () => {
+  const from = Date.UTC(2026, 10, 12, 10, 42, 0);
+  const to = Date.UTC(2026, 10, 13, 9, 0, 0);
+  const write = (controls: MetricControls) => writeControlParams(new URLSearchParams(), controls);
+  const roundTrip = (controls: MetricControls) => parseControlParams(write(controls));
+
+  // One row per MetricControls field: the value it takes off its default, and the query string that writes.
+  const cases: [keyof MetricControls, Partial<MetricControls>, string][] = [
+    ['range', { range: '7d' }, 'range=7d'],
+    ['custom', { custom: { from, to } }, 'from=2026-11-12T10%3A42%3A00.000Z&to=2026-11-13T09%3A00%3A00.000Z'],
+    ['custom', { custom: { from, to: null } }, 'from=2026-11-12T10%3A42%3A00.000Z'],
+    ['application', { application: 'shop-api' }, 'application=shop-api'],
+    ['breakdown', { breakdown: 'http.route' }, 'breakdown=http.route'],
+    ['breakdown', { breakdown: VERSION_KEY }, 'breakdown=%7Bversion%7D'],
+    ['filters', { filters: [{ key: 'status', value: '5*' }] }, 'filter=status%3A5*'],
+    [
+      'filters',
+      { filters: [{ key: 'http.route', value: 'api/checkout' }, { key: VERSION_KEY, value: '2.*' }, { key: 'outcome', value: '{none}' }] },
+      'filter=http.route%3Aapi%2Fcheckout&filter=%7Bversion%7D%3A2.*&filter=outcome%3A%7Bnone%7D',
+    ],
+    ['compareDay', { compareDay: true }, 'compare=1d'],
+    ['compareWeek', { compareWeek: true }, 'compare=7d'],
+    ['compareDay', { compareDay: true, compareWeek: true }, 'compare=1d%2C7d'],
+    ['percentile', { percentile: 95 }, 'percentile=95'],
+    ['view', { view: 'ratio' }, 'view=ratio'],
+    ['numerator', { numerator: '5*' }, 'numerator=5*'],
+    ['showMinMax', { showMinMax: true }, 'minmax=1'],
+  ];
+
+  it.each(cases)('round-trips %s (%j)', (_field, patch, query) => {
+    const controls = { ...DEFAULT_CONTROLS, ...patch };
+
+    expect(write(controls).toString()).toBe(query);
+    expect(roundTrip(controls)).toEqual(controls);
+  });
+
+  it('covers every MetricControls field', () => {
+    expect(new Set(cases.map(([field]) => field))).toEqual(new Set(Object.keys(DEFAULT_CONTROLS)));
+  });
+
+  // A custom window replaces the preset, so the preset under it is not written: it reads back as the default.
+  it('round-trips every control at once', () => {
+    const controls: MetricControls = {
+      range: '24h',
+      custom: { from, to: null },
+      application: 'shop-api',
+      breakdown: 'status',
+      filters: [{ key: 'route', value: 'api/*' }],
+      compareDay: true,
+      compareWeek: true,
+      percentile: 99,
+      view: 'ratio',
+      numerator: '503',
+      showMinMax: true,
+    };
+
+    expect(roundTrip(controls)).toEqual(controls);
+  });
+
+  it('leaves the defaults out of the URL', () => {
+    expect(write(DEFAULT_CONTROLS).toString()).toBe('');
+    expect(parseControlParams(new URLSearchParams())).toEqual(DEFAULT_CONTROLS);
+  });
+
+  it('keeps the rate and parameters it does not own, and drops stale controls', () => {
+    const params = writeControlParams(
+      new URLSearchParams('rate=minute&other=x&filter=a%3Ab&compare=1d&view=ratio&minmax=1'),
+      { ...DEFAULT_CONTROLS, percentile: 50 },
+    );
+
+    expect(params.toString()).toBe('rate=minute&other=x&percentile=50');
+  });
+
+  it.each([
+    ['range=2y', {}],
+    ['from=nonsense', {}],
+    ['application=&breakdown=%20', {}],
+    ['filter=nokey&filter=%3Avalue&filter=key%3A&filter=key%3Aa*b', {}],
+    ['compare=2d,week', {}],
+    ['percentile=75', {}],
+    ['percentile=abc', {}],
+    ['view=table', {}],
+    ['numerator=a*b', {}],
+    ['minmax=yes', {}],
+  ])('ignores the invalid %s and reads the default', (query) => {
+    expect(parseControlParams(new URLSearchParams(query))).toEqual(DEFAULT_CONTROLS);
+  });
+
+  it('keeps the valid filters beside an invalid one, one per key (the last wins)', () => {
+    const params = new URLSearchParams('filter=bad&filter=status%3A500&filter=route%3Aa&filter=status%3A503');
+
+    expect(parseControlParams(params).filters).toEqual([
+      { key: 'route', value: 'a' },
+      { key: 'status', value: '503' },
+    ]);
+  });
+
+  it('reads a value containing a colon after the first one', () => {
+    expect(parseControlParams(new URLSearchParams('filter=url%3Ahttp%3A%2F%2Fx')).filters).toEqual([{ key: 'url', value: 'http://x' }]);
+  });
+
+  it('lists every key it reads and writes, rate included', () => {
+    const everything = writeControlParams(new URLSearchParams('rate=second'), {
+      ...DEFAULT_CONTROLS,
+      range: '7d',
+      application: 'a',
+      breakdown: 'b',
+      filters: [{ key: 'c', value: 'd' }],
+      compareDay: true,
+      percentile: 50,
+      view: 'ratio',
+      numerator: 'n',
+      showMinMax: true,
+    });
+    const custom = writeControlParams(new URLSearchParams(), { ...DEFAULT_CONTROLS, custom: { from, to } });
+    const written = new Set([...everything.keys(), ...custom.keys()]);
+
+    expect(written).toEqual(new Set(metricQueryKeys));
   });
 });
