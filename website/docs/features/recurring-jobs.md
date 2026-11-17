@@ -22,7 +22,7 @@ await recurringPublisher.AddOrUpdateRecurringJob(
 :::
 
 :::note[`Attempted to release a lock that was not held`]
-`AddOrUpdateRecurringJob` takes a session-scoped advisory lock on the job name. If registration throws that exception, the connection is behind a pooler in transaction mode — see [Connection Pooling](/docs/operations/connection-pooling).
+`AddOrUpdateRecurringJob` takes a session-scoped advisory lock on the job name. Releasing a lock never throws: if the release fails, Warp logs a Warning with that message and registration still succeeds. A repeated Warning usually means the connection is behind a pooler in transaction mode, where the lock gives no mutual exclusion at all — see [Connection Pooling](/docs/operations/connection-pooling).
 :::
 
 ## How It Works
