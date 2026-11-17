@@ -303,6 +303,66 @@ public class MetricBoardValidationTests
         return (tile, kind);
     }
 
+    [TimedFact]
+    public void TryValidateBoard_Valid_TrimsAndClearsBlanks()
+    {
+        var board = new MetricBoard { Name = "  Checkout ", Description = " ", Application = " shop-api " };
+
+        MetricBoardValidation.TryValidateBoard(board, out var error).ShouldBeTrue(error);
+
+        board.Name.ShouldBe("Checkout");
+        board.Description.ShouldBeNull();
+        board.Application.ShouldBe("shop-api");
+    }
+
+    [TimedTheory]
+    [InlineData("blank-name")]
+    [InlineData("long-name")]
+    [InlineData("long-description")]
+    [InlineData("long-application")]
+    [InlineData("negative-position")]
+    public void TryValidateBoard_Invalid_IsRejected(string scenario)
+    {
+        var board = new MetricBoard { Name = "Checkout" };
+        switch (scenario)
+        {
+            case "blank-name":
+                board.Name = "   ";
+                break;
+            case "long-name":
+                board.Name = new string('n', MetricBoardValidation.MaxBoardNameLength + 1);
+                break;
+            case "long-description":
+                board.Description = new string('d', MetricBoardValidation.MaxBoardDescriptionLength + 1);
+                break;
+            case "long-application":
+                board.Application = new string('a', 201);
+                break;
+            default:
+                board.Position = -1;
+                break;
+        }
+
+        MetricBoardValidation.TryValidateBoard(board, out var error).ShouldBeFalse();
+
+        error.ShouldNotBeNullOrEmpty();
+    }
+
+    [TimedTheory]
+    [InlineData(null, null)]
+    [InlineData(0, null)]
+    [InlineData(-3, null)]
+    [InlineData(7, 7)]
+    public void TryValidate_BoardId_NonPositiveMeansTheDefaultBoard(int? boardId, int? expected)
+    {
+        var tile = ValueTile();
+        tile.BoardId = boardId;
+
+        MetricBoardValidation.TryValidate(tile, MetricKind.Counter, out _).ShouldBeTrue();
+
+        tile.BoardId.ShouldBe(expected);
+    }
+
     private static void Threshold(MetricBoardTile tile, double threshold, SloComparison? comparison)
     {
         tile.StatusRule = MetricTileStatusRule.Threshold;

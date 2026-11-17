@@ -133,6 +133,7 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
         tables.ShouldContain("warp.metric_point");
         tables.ShouldContain("warp.metric_instrument");
         tables.ShouldContain("warp.metric_board_tile");
+        tables.ShouldContain("warp.metric_board");
         tables.ShouldContain("warp.metric_annotation");
         tables.ShouldContain(".host_order");
         operations.OfType<EnsureSchemaOperation>().ShouldContain(x => string.Equals(x.Name, "warp", StringComparison.Ordinal));
@@ -167,6 +168,14 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
             .ToDictionary(x => x.Name, StringComparer.Ordinal);
         pointColumns.ShouldContainKey("version");
         pointColumns["version"].IsNullable.ShouldBeTrue("version");
+
+        // Named boards: metric_board_tile.board_id is nullable (null = the Default board), so existing tiles stay valid
+        // with no data migration, and it is a soft reference: no foreign key to metric_board.
+        var tileTable = creates
+            .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "metric_board_tile", StringComparison.Ordinal));
+        var boardColumn = tileTable.Columns.Single(x => string.Equals(x.Name, "board_id", StringComparison.Ordinal));
+        boardColumn.IsNullable.ShouldBeTrue("board_id");
+        tileTable.ForeignKeys.ShouldBeEmpty();
     }
 
     private static async Task<SaveOutcome> SaveTwiceAsync(HostDbContext context, DbTransaction transaction, string reference)

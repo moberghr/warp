@@ -79,4 +79,23 @@ public class DeployVerdictQueryTests
 
         error.ShouldContain("at most");
     }
+
+    [TimedTheory]
+    [InlineData(null, null)]
+    [InlineData("  ", null)]
+    [InlineData(" Checkout ", "Checkout")]
+    public void TryCreate_Board_IsTrimmedAndBlankMeansEveryBoard(string? board, string? expected)
+    {
+        DeployVerdictQuery.TryCreate("api", null, null, null, null, board, out var query, out _).ShouldBeTrue();
+
+        query.Board.ShouldBe(expected);
+    }
+
+    [TimedFact]
+    public void TryCreate_OverlongBoard_IsRejected()
+    {
+        DeployVerdictQuery.TryCreate("api", null, null, null, null, new string('b', 201), out _, out var error).ShouldBeFalse();
+
+        error.ShouldContain("'board'");
+    }
 }

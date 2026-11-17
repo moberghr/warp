@@ -13,6 +13,14 @@ public class MetricBoardTile
 {
     public int Id { get; set; }
 
+    /// <summary>
+    /// The <see cref="MetricBoard"/> holding the tile: a soft reference (no foreign key, like
+    /// <c>MetricAnnotation.SloDefinitionId</c>; deleting a board deletes its tiles in the same <c>SaveChanges</c>). Null is
+    /// the Default board, which is how every tile stored before named boards reads; the command service and the seeder
+    /// store Default's tiles as null too, so there is one representation.
+    /// </summary>
+    public int? BoardId { get; set; }
+
     /// <summary>Label shown on the tile.</summary>
     public string Name { get; set; } = string.Empty;
 

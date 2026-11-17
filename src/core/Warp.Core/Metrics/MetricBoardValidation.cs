@@ -17,6 +17,63 @@ public static class MetricBoardValidation
     /// <summary>The most tiles one board holds; the board read and the upsert endpoint both enforce it.</summary>
     public const int MaxTiles = 48;
 
+    /// <summary>The most boards a host holds, the Default board included.</summary>
+    public const int MaxBoards = 100;
+
+    /// <summary>The name the Default board is created with (it may be renamed later; its identity is <c>IsDefault</c>).</summary>
+    public const string DefaultBoardName = "Default";
+
+    /// <summary>The longest board name.</summary>
+    public const int MaxBoardNameLength = 200;
+
+    /// <summary>The longest board description.</summary>
+    public const int MaxBoardDescriptionLength = 500;
+
+    /// <summary>
+    /// Validates and normalizes a board's editable fields in place: the name is trimmed, required and at most
+    /// <see cref="MaxBoardNameLength"/> characters; a blank description or application is cleared, the rest bounded; the
+    /// position is zero or greater (zero appends an insert after the last board).
+    /// </summary>
+    public static bool TryValidateBoard(MetricBoard board, out string? error)
+    {
+        ArgumentNullException.ThrowIfNull(board);
+
+        board.Name = board.Name?.Trim() ?? string.Empty;
+        if (board.Name.Length == 0 || board.Name.Length > MaxBoardNameLength)
+        {
+            error = $"Name is required and must be at most {MaxBoardNameLength} characters.";
+
+            return false;
+        }
+
+        board.Description = string.IsNullOrWhiteSpace(board.Description) ? null : board.Description.Trim();
+        if (board.Description?.Length > MaxBoardDescriptionLength)
+        {
+            error = $"Description must be at most {MaxBoardDescriptionLength} characters.";
+
+            return false;
+        }
+
+        board.Application = string.IsNullOrWhiteSpace(board.Application) ? null : board.Application.Trim();
+        if (board.Application?.Length > 200)
+        {
+            error = "Application must be at most 200 characters.";
+
+            return false;
+        }
+
+        if (board.Position < 0)
+        {
+            error = "Position must be zero or greater.";
+
+            return false;
+        }
+
+        error = null;
+
+        return true;
+    }
+
     /// <summary>
     /// Whether a tile of <paramref name="tile"/> kind can read an instrument of registry kind
     /// <paramref name="instrument"/>: a ratio counts events, so it refuses a gauge (the <c>MetricRatio</c> rule); a value
@@ -66,6 +123,8 @@ public static class MetricBoardValidation
             return false;
         }
 
+        // No board, or a non-positive id, is the Default board.
+        tile.BoardId = tile.BoardId > 0 ? tile.BoardId : null;
         tile.Application = string.IsNullOrWhiteSpace(tile.Application) ? null : tile.Application.Trim();
         tile.TagFilter = string.IsNullOrWhiteSpace(tile.TagFilter) ? null : tile.TagFilter.Trim();
         if (tile.Application?.Length > 200)

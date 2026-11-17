@@ -312,6 +312,85 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetVerdict_WithoutBoard_CountsTheTilesOfEveryBoard()
+    {
+        // Resolved question 2: no board = every board, so moving a tile to a named board never drops it from a CI check.
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 20));
+        var checkout = await SeedBoardAsync("Checkout");
+        await SeedTilesAsync(
+            Tile("Default errors", threshold: 100),
+            Tile("Checkout errors", threshold: 10, boardId: checkout));
+
+        var verdict = await Service().GetVerdict(Query("api"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Fail);
+        verdict.Checks.Select(x => (x.Name, x.State)).ShouldBe([("Default errors", "healthy"), ("Checkout errors", "breaching")], ignoreOrder: true);
+    }
+
+    [TimedTheory]
+    [InlineData("Checkout", DeployVerdicts.Fail, "Checkout errors")]
+    [InlineData("checkout", DeployVerdicts.Fail, "Checkout errors")]
+    [InlineData("Default", DeployVerdicts.Pass, "Default errors")]
+    public async Task GetVerdict_WithBoard_CountsOnlyThatBoardsTilesAndKeepsTheSlos(string board, string expected, string tile)
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 20));
+        var checkout = await SeedBoardAsync("Checkout");
+        await SeedTilesAsync(
+            Tile("Default errors", threshold: 100),
+            Tile("Checkout errors", threshold: 10, boardId: checkout));
+        await SeedSloAsync("Api success", "api", SloState.Healthy);
+
+        var verdict = await Service().GetVerdict(Query("api", board: board), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(expected);
+        verdict.Checks.Select(x => (x.Source, x.Name)).ShouldBe([(DeployVerdictSources.Tile, tile), (DeployVerdictSources.Slo, "Api success")]);
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_UnknownBoard_Throws()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+
+        await Should.ThrowAsync<MetricBoardNotFoundException>(() => Service().GetVerdict(Query("api", board: "Nope"), Ct));
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_Route_UnknownBoard_ReturnsNotFoundWithAnError()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await using var host = await CreateDashboardHostAsync();
+
+        var response = await host.Client.GetAsync("/warp/api/applications/verdict?application=api&board=Nope", Ct);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+        json.RootElement.GetProperty("error").GetString().ShouldBe("No metric board is named 'Nope'.");
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_Route_Board_NarrowsTheTileChecks()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 20));
+        var checkout = await SeedBoardAsync("Checkout");
+        await SeedTilesAsync(
+            Tile("Default errors", threshold: 10),
+            Tile("Checkout errors", threshold: 100, boardId: checkout));
+        await using var host = await CreateDashboardHostAsync();
+
+        var response = await host.Client.GetAsync("/warp/api/applications/verdict?application=api&board=Checkout", Ct);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+        json.RootElement.GetProperty("verdict").GetString().ShouldBe("pass");
+        json.RootElement.GetProperty("checks").EnumerateArray().ShouldHaveSingleItem().GetProperty("name").GetString().ShouldBe("Checkout errors");
+    }
+
+    [TimedFact]
     public async Task GetVerdict_GaugeAndLatencySlos_ReportTheShareAgainstTheRequiredShareWithTheThresholdInTheReason()
     {
         await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
@@ -424,6 +503,7 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     [InlineData("application=api&minCoverage=1.5")]
     [InlineData("application=api&minCoverage=-0.5")]
     [InlineData("application=api&minCoverage=most")]
+    [InlineData("application=api&board=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
     public async Task GetVerdict_Route_BadParameters_ReturnsBadRequest(string queryString)
     {
         await using var host = await CreateDashboardHostAsync();
@@ -482,16 +562,18 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         }
     }
 
-    private static DeployVerdictQuery Query(string application, string? version = null, string? environment = null, double minCoverage = 0) => new()
+    private static DeployVerdictQuery Query(string application, string? version = null, string? environment = null, double minCoverage = 0, string? board = null) => new()
     {
         Application = application,
+        Board = board,
         Version = version,
         Environment = environment,
         MinCoverage = minCoverage,
     };
 
-    private static MetricBoardTile Tile(string name, double? threshold, string? application = null, int position = 1) => new()
+    private static MetricBoardTile Tile(string name, double? threshold, string? application = null, int position = 1, int? boardId = null) => new()
     {
+        BoardId = boardId,
         Name = name,
         Instrument = "c",
         Position = position,
@@ -552,6 +634,14 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         });
         context.Set<MetricPoint>().AddRange(points);
         await context.SaveChangesAsync(Ct);
+    }
+
+    private async Task<int> SeedBoardAsync(string name)
+    {
+        var board = new MetricBoard { Name = name, Position = 1, CreatedAt = Now, UpdatedAt = Now };
+        await SeedAsync(board);
+
+        return board.Id;
     }
 
     private async Task SeedTilesAsync(params MetricBoardTile[] tiles)

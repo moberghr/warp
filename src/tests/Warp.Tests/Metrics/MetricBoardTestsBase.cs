@@ -566,7 +566,7 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task GetBoard_StatementCount_DoesNotGrowWithTheTiles()
     {
-        // Tiles + registry + annotations + at most two grouped metric reads, whether the board has 3 tiles or 6.
+        // Board + tiles + registry + annotations + at most two grouped metric reads, whether the board has 3 tiles or 6.
         await SeedAsync(
             [.. Enumerable.Range(0, 6).Select(x => Instrument($"i{x}", MetricKind.Counter))],
             [.. Enumerable.Range(0, 6).Select(x => Point($"i{x}", Now.AddMinutes(-20), sum: x, tags: "status=500"))]);
@@ -576,7 +576,7 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
 
         var large = await CountBoardStatementsAsync();
 
-        small.ShouldBeLessThanOrEqualTo(5);
+        small.ShouldBeLessThanOrEqualTo(6);
         large.ShouldBe(small);
     }
 
@@ -854,7 +854,7 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
 
         response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
-        json.RootElement.GetProperty("error").GetString().ShouldBe("The metric board tile no longer exists: it was deleted while you edited it.");
+        json.RootElement.GetProperty("error").GetString().ShouldBe("The metric board tile or its board no longer exists: it was deleted while you edited it.");
         (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
     }
 
@@ -1133,8 +1133,8 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         Func<CancellationToken, Task>? beforeSave = null,
         CapturingLoggerProvider? logs = null)
     {
-        var options = new MetricBoardOptions();
-        configure(options);
+        var seeds = new MetricBoardSeeds();
+        configure(seeds.For(null).Tiles);
         var services = new ServiceCollection();
         services.AddScoped(_ => _fixture.CreateContext());
         services.AddScoped<IMetricQueryService>(_ => new MetricQueryService<TestContext>(_fixture.CreateContext(), Options.Create(new WarpConfiguration())));
@@ -1145,7 +1145,7 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
             : new CapturingLoggerFactory(logs).CreateLogger<MetricBoardSeeder<TestContext>>();
         var seeder = new MetricBoardSeeder<TestContext>(
             provider.GetRequiredService<IServiceScopeFactory>(),
-            options,
+            seeds,
             TimeProvider.System,
             logger)
         {

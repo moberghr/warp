@@ -1,4 +1,5 @@
 using System.Globalization;
+using Warp.Core.Metrics;
 
 namespace Warp.Core.Services;
 
@@ -23,6 +24,12 @@ public sealed class DeployVerdictQuery
     /// <summary>The environment to look in; null looks in every environment and takes the newest match.</summary>
     public string? Environment { get; init; }
 
+    /// <summary>
+    /// The metric board whose tiles count, by name (ignoring case); null counts the tiles of every board, still filtered
+    /// by the application scope. SLOs are unaffected either way.
+    /// </summary>
+    public string? Board { get; init; }
+
     /// <summary>A deploy younger than this gets <c>pending</c> instead of a premature verdict.</summary>
     public TimeSpan MinWindow { get; init; } = TimeSpan.FromMinutes(DefaultMinWindowMinutes);
 
@@ -45,6 +52,21 @@ public sealed class DeployVerdictQuery
         string? minCoverage,
         out DeployVerdictQuery query,
         out string error)
+        => TryCreate(application, version, environment, minWindowMinutes, minCoverage, null, out query, out error);
+
+    /// <summary>
+    /// <see cref="TryCreate(string?, string?, string?, string?, string?, out DeployVerdictQuery, out string)"/> with a
+    /// <paramref name="board"/> name (blank = every board; at most <c>MetricBoardValidation.MaxBoardNameLength</c> characters).
+    /// </summary>
+    public static bool TryCreate(
+        string? application,
+        string? version,
+        string? environment,
+        string? minWindowMinutes,
+        string? minCoverage,
+        string? board,
+        out DeployVerdictQuery query,
+        out string error)
     {
         query = null!;
         error = string.Empty;
@@ -62,6 +84,14 @@ public sealed class DeployVerdictQuery
         if (name.Length > MaxNameLength || cleanVersion?.Length > MaxNameLength || cleanEnvironment?.Length > MaxNameLength)
         {
             error = $"'application', 'version' and 'environment' must be at most {MaxNameLength} characters.";
+
+            return false;
+        }
+
+        var cleanBoard = Clean(board);
+        if (cleanBoard?.Length > MetricBoardValidation.MaxBoardNameLength)
+        {
+            error = $"'board' must be at most {MetricBoardValidation.MaxBoardNameLength} characters.";
 
             return false;
         }
@@ -89,6 +119,7 @@ public sealed class DeployVerdictQuery
             Application = name,
             Version = cleanVersion,
             Environment = cleanEnvironment,
+            Board = cleanBoard,
             MinWindow = TimeSpan.FromMinutes(minutes),
             MinCoverage = coverage,
         };

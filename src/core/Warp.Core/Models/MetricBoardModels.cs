@@ -8,6 +8,9 @@ public sealed class MetricBoardTileModel
 {
     public int Id { get; init; }
 
+    /// <summary>The board holding the tile; null is the Default board.</summary>
+    public int? BoardId { get; init; }
+
     public string Name { get; init; } = string.Empty;
 
     public int Position { get; init; }
@@ -87,9 +90,37 @@ public sealed class MetricBoardTileResult
     public IReadOnlyList<MetricBoardSparkPoint> Sparkline { get; init; } = [];
 }
 
+/// <summary>One named board as the picker lists it.</summary>
+public sealed class MetricBoardSummaryModel
+{
+    public int Id { get; init; }
+
+    public string Name { get; init; } = string.Empty;
+
+    public string? Description { get; init; }
+
+    public int Position { get; init; }
+
+    /// <summary>The application the picker scopes the board to by default; it does not filter the tiles.</summary>
+    public string? Application { get; init; }
+
+    /// <summary>True for the Default board, which owns the tiles with no board id and cannot be deleted.</summary>
+    public bool IsDefault { get; init; }
+
+    public int TileCount { get; init; }
+
+    public string? CreatedBy { get; init; }
+}
+
 /// <summary>The health board over one window: every tile, in board order.</summary>
 public sealed class MetricBoardModel
 {
+    /// <summary>
+    /// The board read; null for a read across every board (the deploy verdict without a <c>board</c>). Its
+    /// <see cref="MetricBoardSummaryModel.TileCount"/> is the number of tiles evaluated.
+    /// </summary>
+    public MetricBoardSummaryModel? Board { get; init; }
+
     public DateTime From { get; init; }
 
     public DateTime To { get; init; }

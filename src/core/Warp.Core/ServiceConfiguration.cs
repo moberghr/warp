@@ -481,6 +481,7 @@ public static class ServiceConfiguration
         AddSloEvaluationEntity(modelBuilder, schema);
         AddMetricPointEntity(modelBuilder, schema);
         AddMetricInstrumentEntity(modelBuilder, schema);
+        AddMetricBoardEntity(modelBuilder, schema);
         AddMetricBoardTileEntity(modelBuilder, schema);
         AddMetricAnnotationEntity(modelBuilder, schema);
     }
@@ -1323,6 +1324,7 @@ public static class ServiceConfiguration
         tile.Property(p => p.Id);
         tile.HasKey(p => p.Id);
 
+        tile.Property(p => p.BoardId);
         tile.Property(p => p.Name).HasMaxLength(200);
         tile.Property(p => p.Position);
         tile.Property(p => p.Instrument).HasMaxLength(128);
@@ -1345,10 +1347,33 @@ public static class ServiceConfiguration
         // A board is a handful of rows read whole, in board order. Names are NOT unique: only the config seeds are kept
         // apart (MetricBoardOptions rejects a repeat), the dashboard may create a tile under any name, and the seeder skips
         // a seed whose name a stored tile already has. No unique index, as for SloDefinition (NULL-uniqueness differs
-        // across providers).
-        tile.HasIndex(p => new { p.Position, p.Id });
+        // across providers). A board read filters by board first, then orders; the Default board's tiles have a null
+        // BoardId, which both providers index.
+        tile.HasIndex(p => new { p.BoardId, p.Position, p.Id });
 
         tile.Metadata.SetSchema(schema);
+    }
+
+    public static void AddMetricBoardEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var board = modelBuilder.Entity<MetricBoard>();
+
+        board.Property(p => p.Id);
+        board.HasKey(p => p.Id);
+
+        board.Property(p => p.Name).HasMaxLength(200);
+        board.Property(p => p.Description).HasMaxLength(500);
+        board.Property(p => p.Position);
+        board.Property(p => p.Application).HasMaxLength(200);
+        board.Property(p => p.IsDefault);
+        board.Property(p => p.CreatedAt);
+        board.Property(p => p.UpdatedAt);
+        board.Property(p => p.CreatedBy).HasMaxLength(200);
+
+        // At most MetricBoardValidation.MaxBoards rows, always read whole. No unique index on Name: uniqueness ignores
+        // case, which a collation decides differently per provider, so the command service and the seeder enforce it in
+        // memory under the warp:metric-board lock (the SLO seeder's rule).
+        board.Metadata.SetSchema(schema);
     }
 
     public static void AddMetricAnnotationEntity(ModelBuilder modelBuilder, string? schema)

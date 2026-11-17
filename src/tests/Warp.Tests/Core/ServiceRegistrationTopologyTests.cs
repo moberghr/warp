@@ -268,12 +268,63 @@ public class ServiceRegistrationTopologyTests
 
         services.Count(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>)).ShouldBe(1);
         services.Count(x => x.ServiceType == typeof(IMetricsMarker)).ShouldBe(0);
-        var options = services
-            .Where(x => x.ServiceType == typeof(MetricBoardOptions))
+        var seeds = services
+            .Where(x => x.ServiceType == typeof(MetricBoardSeeds))
             .Select(x => x.ImplementationInstance)
-            .OfType<MetricBoardOptions>()
+            .OfType<MetricBoardSeeds>()
             .ShouldHaveSingleItem();
-        options.Seeded.Select(x => x.Name).ShouldBe(["A", "B"]);
+        var board = seeds.Boards.ShouldHaveSingleItem();
+        board.Name.ShouldBeNull();
+        board.Tiles.Seeded.Select(x => x.Name).ShouldBe(["A", "B"]);
+    }
+
+    [TimedFact]
+    public void AddMetricBoard_NamedBoards_MergeByNameIgnoringCaseAndDefaultIsTheUnnamedBoard()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddMetricBoard("Checkout", y => y.Value("A", "a"));
+            x.AddMetricBoard("checkout", y => y.Value("B", "b"));
+            x.AddMetricBoard("Payments", _ => { });
+            x.AddMetricBoard("default", y => y.Value("C", "c"));
+            x.AddMetricBoard(y => y.Value("D", "d"));
+        });
+
+        services.Count(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>)).ShouldBe(1);
+        var seeds = services
+            .Where(x => x.ServiceType == typeof(MetricBoardSeeds))
+            .Select(x => x.ImplementationInstance)
+            .OfType<MetricBoardSeeds>()
+            .ShouldHaveSingleItem();
+        seeds.Boards.Select(x => x.Name).ShouldBe(["Checkout", "Payments", null]);
+        seeds.Boards[0].Tiles.Seeded.Select(x => x.Name).ShouldBe(["A", "B"]);
+        seeds.Boards[1].Tiles.Seeded.ShouldBeEmpty();
+        seeds.Boards[2].Tiles.Seeded.Select(x => x.Name).ShouldBe(["C", "D"]);
+    }
+
+    [TimedFact]
+    public void AddMetricBoard_TheSameTileNameOnTwoBoards_IsAllowed()
+    {
+        var services = NewServices();
+
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddMetricBoard("Checkout", y => y.Value("Volume", "a"));
+            x.AddMetricBoard("Payments", y => y.Value("Volume", "a"));
+        });
+
+        services.ShouldContain(x => x.ServiceType == typeof(MetricBoardSeeds));
+    }
+
+    [TimedTheory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AddMetricBoard_BlankName_Throws(string name)
+    {
+        var services = NewServices();
+
+        Should.Throw<ArgumentException>(() => services.AddWarp<TestContext>(x => x.AddMetricBoard(name, y => y.Value("A", "a"))));
     }
 
     [TimedFact]

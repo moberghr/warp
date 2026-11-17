@@ -810,6 +810,7 @@ public static class WarpEndpoints
         // AddWarp (dashboard-only hosts resolve them without AddMetrics); the board is a view of the Metrics page, so it
         // rides the same `metrics` nav flag. Same group conventions (§1.5) as every other route, writes included, like
         // the SLO upsert. Literal segments, so they win over metrics/{id}.
+        // ?board={id} picks a named board; without it the Default board (which owns the tiles stored before named boards).
         apiGroup.MapGet("metrics/board", async ([FromServices] IMetricBoardQueryService svc, HttpRequest request, CancellationToken ct) =>
         {
             if (!MetricSeriesRequestParser.TryParseRange(request.Query, out var from, out var to, out var error))
@@ -817,14 +818,99 @@ public static class WarpEndpoints
                 return Results.BadRequest(new { error });
             }
 
+            if (!TryParseBoardId(request.Query, out var boardId))
+            {
+                return Results.BadRequest(new { error = "'board' must be a board id." });
+            }
+
             try
             {
-                return Results.Ok(await svc.GetBoard(from, to, ct));
+                if (boardId is null)
+                {
+                    return Results.Ok(await svc.GetBoard(from, to, ct));
+                }
+
+                var board = await svc.GetBoard(boardId.Value, from, to, ct);
+
+                return board is null
+                    ? Results.NotFound(new { error = "The metric board no longer exists." })
+                    : Results.Ok(board);
             }
             catch (MetricQueryValidationException e)
             {
                 return Results.BadRequest(new { error = e.Message });
             }
+        });
+
+        // Named boards: the picker's list (the Default board is created here on first use, so it always has an id to
+        // rename and to move tiles to), create/rename, and delete with its tiles. Writes take the board lock, so a busy
+        // lock is a 503 like the tile insert.
+        apiGroup.MapGet("metrics/boards", async (
+            [FromServices] IMetricBoardQueryService svc,
+            [FromServices] IMetricBoardCommandService command,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                await command.EnsureDefaultBoard(ct);
+            }
+            catch (TimeoutException)
+            {
+                return BoardBusy();
+            }
+
+            return Results.Ok(await svc.GetBoards(ct));
+        });
+
+        apiGroup.MapPost("metrics/boards", async (
+            [FromServices] IMetricBoardCommandService svc,
+            [FromBody] MetricBoardUpsertRequest body,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var board = body.ToBoard();
+            if (!Warp.Core.Metrics.MetricBoardValidation.TryValidateBoard(board, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            MetricBoardWriteResult result;
+            try
+            {
+                result = await svc.UpsertBoard(board, DashboardUser.Name(http), ct);
+            }
+            catch (TimeoutException)
+            {
+                return BoardBusy();
+            }
+
+            return result.Status switch
+            {
+                MetricBoardWriteStatus.Saved => Results.Ok(new { id = result.Id }),
+                MetricBoardWriteStatus.NotFound => Results.NotFound(new { error = "The metric board no longer exists: it was deleted while you edited it." }),
+                MetricBoardWriteStatus.NameTaken => Results.BadRequest(new { error = $"A metric board named '{board.Name}' already exists." }),
+                _ => Results.BadRequest(new { error = $"At most {Warp.Core.Metrics.MetricBoardValidation.MaxBoards} metric boards can exist." }),
+            };
+        });
+
+        apiGroup.MapDelete("metrics/boards/{id:int}", async ([FromServices] IMetricBoardCommandService svc, int id, HttpContext http, CancellationToken ct) =>
+        {
+            MetricBoardDeleteStatus status;
+            try
+            {
+                status = await svc.DeleteBoard(id, DashboardUser.Name(http), ct);
+            }
+            catch (TimeoutException)
+            {
+                return BoardBusy();
+            }
+
+            return status switch
+            {
+                MetricBoardDeleteStatus.Deleted => Results.NoContent(),
+                MetricBoardDeleteStatus.DefaultBoard => Results.BadRequest(new { error = "The Default board cannot be deleted." }),
+                _ => Results.NotFound(new { error = "The metric board no longer exists." }),
+            };
         });
 
         apiGroup.MapGet("metrics/board/tiles", async ([FromServices] IMetricBoardQueryService svc, CancellationToken ct) =>
@@ -852,17 +938,15 @@ public static class WarpEndpoints
             }
             catch (TimeoutException)
             {
-                // Another insert or a replica's seed held the board lock past the wait: busy, not broken, so a retry
+                // Another write or a replica's seed held the board lock past the wait: busy, not broken, so a retry
                 // can succeed. 503 rather than the unhandled 500.
-                return Results.Json(
-                    new { error = "The metric board is busy with another change; try again." },
-                    statusCode: StatusCodes.Status503ServiceUnavailable);
+                return BoardBusy();
             }
 
             if (id == 0)
             {
-                // The edited tile was deleted meanwhile; an edit never re-creates it.
-                return Results.NotFound(new { error = "The metric board tile no longer exists: it was deleted while you edited it." });
+                // The edited tile, or the board it is put on, was deleted meanwhile; an edit never re-creates either.
+                return Results.NotFound(new { error = "The metric board tile or its board no longer exists: it was deleted while you edited it." });
             }
 
             return id is null
@@ -1084,14 +1168,23 @@ public static class WarpEndpoints
             [FromQuery] string? environment,
             [FromQuery] string? minWindowMinutes,
             [FromQuery] string? minCoverage,
+            [FromQuery] string? board,
             CancellationToken ct) =>
         {
-            if (!DeployVerdictQuery.TryCreate(application, version, environment, minWindowMinutes, minCoverage, out var query, out var error))
+            if (!DeployVerdictQuery.TryCreate(application, version, environment, minWindowMinutes, minCoverage, board, out var query, out var error))
             {
                 return Results.BadRequest(new { error });
             }
 
-            var verdict = await svc.GetVerdict(query, ct);
+            DeployVerdictModel? verdict;
+            try
+            {
+                verdict = await svc.GetVerdict(query, ct);
+            }
+            catch (MetricBoardNotFoundException e)
+            {
+                return Results.NotFound(new { error = e.Message });
+            }
 
             return verdict is null
                 ? Results.NotFound(new { error = "No recorded deploy of that application matches the version and environment." })
@@ -1191,6 +1284,32 @@ public static class WarpEndpoints
             { Kind: DateTimeKind.Unspecified } unspecified => DateTime.SpecifyKind(unspecified, DateTimeKind.Utc),
             { } utc => utc,
         };
+    }
+
+    // Another board write or a replica's seed held the board lock past the wait: busy, not broken, so a retry can succeed.
+    private static IResult BoardBusy()
+        => Results.Json(
+            new { error = "The metric board is busy with another change; try again." },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    // ?board= on the board read: absent or blank = the Default board, else a positive board id.
+    private static bool TryParseBoardId(IQueryCollection query, out int? boardId)
+    {
+        boardId = null;
+        var text = query["board"].ToString();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return true;
+        }
+
+        if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed <= 0)
+        {
+            return false;
+        }
+
+        boardId = parsed;
+
+        return true;
     }
 
     // Decodes the URL-safe base64 {id} segment back to the recurring job's name and runs the action
@@ -1499,11 +1618,13 @@ public sealed record MetricBoardTileUpsertRequest(
     double? Threshold = null,
     int? BaselineDays = null,
     double? MaxDeviation = null,
-    MetricDeviationDirection? DeviationDirection = null)
+    MetricDeviationDirection? DeviationDirection = null,
+    int? BoardId = null)
 {
     public Warp.Core.Data.Entities.MetricBoardTile ToTile() => new()
     {
         Id = Id,
+        BoardId = BoardId,
         Name = Name ?? string.Empty,
         Instrument = Instrument ?? string.Empty,
         Kind = Kind,
@@ -1520,6 +1641,24 @@ public sealed record MetricBoardTileUpsertRequest(
         BaselineDays = BaselineDays,
         MaxDeviation = MaxDeviation,
         DeviationDirection = DeviationDirection,
+    };
+}
+
+// No creator: a new board's creator is the authenticated dashboard user, taken from the request by the route.
+public sealed record MetricBoardUpsertRequest(
+    int Id,
+    string Name,
+    string? Description = null,
+    int Position = 0,
+    string? Application = null)
+{
+    public Warp.Core.Data.Entities.MetricBoard ToBoard() => new()
+    {
+        Id = Id,
+        Name = Name ?? string.Empty,
+        Description = Description,
+        Position = Position,
+        Application = Application,
     };
 }
 

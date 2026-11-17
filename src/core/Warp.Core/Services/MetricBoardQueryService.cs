@@ -13,19 +13,38 @@ namespace Warp.Core.Services;
 /// </summary>
 public interface IMetricBoardQueryService
 {
-    /// <summary>The stored tiles in board order (position, then id).</summary>
+    /// <summary>
+    /// Every named board in picker order (position, then id), with its tile count. The Default board counts the tiles
+    /// with no board id; when it was never created (nothing has used the boards yet) it is listed with id 0.
+    /// </summary>
+    Task<IReadOnlyList<MetricBoardSummaryModel>> GetBoards(CancellationToken ct);
+
+    /// <summary>The stored tiles of every board, Default's first, each board in board order (position, then id).</summary>
     Task<IReadOnlyList<MetricBoardTileModel>> GetTiles(CancellationToken ct);
 
     /// <summary>
-    /// Every tile (up to <see cref="MetricBoardValidation.MaxTiles"/>) evaluated over <c>[rangeStart, rangeEnd)</c>: its value now, the
+    /// The Default board's tiles (up to <see cref="MetricBoardValidation.MaxTiles"/>) evaluated over <c>[rangeStart, rangeEnd)</c>: its value now, the
     /// same window one and seven days earlier, a status and a sparkline. The whole board is one batched, tier-bounded
-    /// <c>metric_point</c> read (two grouped statements at most, whatever the tile count) plus the registry rows of its
-    /// instruments and one read of the instrument annotations overlapping the window (#333, attached per tile in memory)
-    /// — never a scan of the days between the windows. Throws
+    /// <c>metric_point</c> read (two grouped statements at most, whatever the tile count) plus the board row, its tiles,
+    /// the registry rows of its instruments and one read of the instrument annotations overlapping the window (#333,
+    /// attached per tile in memory) — never a scan of the days between the windows. Throws
     /// <see cref="MetricQueryValidationException"/> for an empty, inverted or over-long (&gt; 90 days) range, or one too
     /// close to the ends of the calendar.
     /// </summary>
     Task<MetricBoardModel> GetBoard(DateTime rangeStart, DateTime rangeEnd, CancellationToken ct);
+
+    /// <summary>
+    /// Board <paramref name="boardId"/> evaluated like <see cref="GetBoard(DateTime, DateTime, CancellationToken)"/>; the
+    /// Default board's id reads the Default board. Null when no board has that id.
+    /// </summary>
+    Task<MetricBoardModel?> GetBoard(int boardId, DateTime rangeStart, DateTime rangeEnd, CancellationToken ct);
+
+    /// <summary>
+    /// The tiles of EVERY board evaluated together, in the same bounded read shape (the statement count does not grow
+    /// with the boards either). The deploy verdict reads this when it is given no <c>board</c>, so a tile moved to a
+    /// named board keeps counting. <see cref="MetricBoardModel.Board"/> is null.
+    /// </summary>
+    Task<MetricBoardModel> GetAllBoards(DateTime rangeStart, DateTime rangeEnd, CancellationToken ct);
 }
 
 /// <summary><see cref="IMetricBoardQueryService"/> over the user's <typeparamref name="TContext"/> (§2.14 stays-on-TContext).</summary>
@@ -43,14 +62,93 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         _timeProvider = timeProvider;
     }
 
+    public async Task<IReadOnlyList<MetricBoardSummaryModel>> GetBoards(CancellationToken ct)
+    {
+        var boards = await _context.Set<MetricBoard>()
+            .AsNoTracking()
+            .OrderBy(x => x.Position)
+            .ThenBy(x => x.Id)
+            .ToListAsync(ct);
+        var counts = await _context.Set<MetricBoardTile>()
+            .AsNoTracking()
+            .GroupBy(x => x.BoardId)
+            .Select(x =>
+                new
+                {
+                    x.Key,
+                    Count = x.Count(),
+                })
+            .ToListAsync(ct);
+        var defaultCount = counts
+            .Where(x => x.Key == null)
+            .Sum(x => x.Count);
+        var byBoard = counts
+            .Where(x => x.Key != null)
+            .ToDictionary(x => x.Key!.Value, x => x.Count);
+
+        var models = boards.ConvertAll(x => Summarize(x, byBoard.GetValueOrDefault(x.Id) + (x.IsDefault ? defaultCount : 0)));
+        if (!boards.Exists(x => x.IsDefault))
+        {
+            models.Insert(0, Summarize(VirtualDefault(), defaultCount));
+        }
+
+        return models;
+    }
+
     public async Task<IReadOnlyList<MetricBoardTileModel>> GetTiles(CancellationToken ct)
     {
-        var tiles = await LoadTilesAsync(ct);
+        var tiles = await AllTiles().ToListAsync(ct);
 
         return tiles.ConvertAll(Project);
     }
 
     public async Task<MetricBoardModel> GetBoard(DateTime rangeStart, DateTime rangeEnd, CancellationToken ct)
+    {
+        var (from, to) = ValidateRange(rangeStart, rangeEnd);
+        var board = await _context.Set<MetricBoard>()
+            .AsNoTracking()
+            .Where(x => x.IsDefault)
+            .OrderBy(x => x.Id)
+            .FirstOrDefaultAsync(ct);
+
+        return await ReadBoardAsync(board ?? VirtualDefault(), from, to, ct);
+    }
+
+    public async Task<MetricBoardModel?> GetBoard(int boardId, DateTime rangeStart, DateTime rangeEnd, CancellationToken ct)
+    {
+        var (from, to) = ValidateRange(rangeStart, rangeEnd);
+        var board = await _context.Set<MetricBoard>()
+            .AsNoTracking()
+            .Where(x => x.Id == boardId)
+            .FirstOrDefaultAsync(ct);
+
+        return board is null ? null : await ReadBoardAsync(board, from, to, ct);
+    }
+
+    public async Task<MetricBoardModel> GetAllBoards(DateTime rangeStart, DateTime rangeEnd, CancellationToken ct)
+    {
+        var (from, to) = ValidateRange(rangeStart, rangeEnd);
+        var tiles = await AllTiles().ToListAsync(ct);
+
+        return await EvaluateAsync(null, tiles, from, to, ct);
+    }
+
+    // The board the read reports when no Default row exists yet: the legacy null-board tiles read as Default all the same.
+    private static MetricBoard VirtualDefault() => new() { Name = MetricBoardValidation.DefaultBoardName, IsDefault = true };
+
+    private static MetricBoardSummaryModel Summarize(MetricBoard x, int tileCount) => new()
+    {
+        Id = x.Id,
+        Name = x.Name,
+        Description = x.Description,
+        Position = x.Position,
+        Application = x.Application,
+        IsDefault = x.IsDefault,
+        TileCount = tileCount,
+        CreatedBy = x.CreatedBy,
+    };
+
+    private static (DateTime From, DateTime To) ValidateRange(DateTime rangeStart, DateTime rangeEnd)
     {
         var from = MetricSeriesMath.AsUtc(rangeStart);
         var to = MetricSeriesMath.AsUtc(rangeEnd);
@@ -69,8 +167,39 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             throw new MetricQueryValidationException("The range is too close to the ends of the calendar to read.", nameof(rangeStart));
         }
 
+        return (from, to);
+    }
+
+    // Every board's tiles: Default's (no board id) first, then by board, each in board order; bounded by the caps.
+    private IQueryable<MetricBoardTile> AllTiles()
+        => _context.Set<MetricBoardTile>()
+            .AsNoTracking()
+            .OrderBy(x => x.BoardId == null ? 0 : 1)
+            .ThenBy(x => x.BoardId)
+            .ThenBy(x => x.Position)
+            .ThenBy(x => x.Id)
+            .Take(MetricBoardValidation.MaxTiles * MetricBoardValidation.MaxBoards);
+
+    private async Task<MetricBoardModel> ReadBoardAsync(MetricBoard board, DateTime from, DateTime to, CancellationToken ct)
+    {
+        // The Default board also owns the tiles with no board id (every tile stored before named boards existed).
+        var boardId = board.Id;
+        var query = _context.Set<MetricBoardTile>().AsNoTracking();
+        query = board.IsDefault
+            ? query.Where(x => x.BoardId == null || x.BoardId == boardId)
+            : query.Where(x => x.BoardId == boardId);
+        var tiles = await query
+            .OrderBy(x => x.Position)
+            .ThenBy(x => x.Id)
+            .Take(MetricBoardValidation.MaxTiles)
+            .ToListAsync(ct);
+
+        return await EvaluateAsync(Summarize(board, tiles.Count), tiles, from, to, ct);
+    }
+
+    private async Task<MetricBoardModel> EvaluateAsync(MetricBoardSummaryModel? board, List<MetricBoardTile> tiles, DateTime from, DateTime to, CancellationToken ct)
+    {
         var tier = MetricSeriesMath.TierForLength(to - from);
-        var tiles = await LoadTilesAsync(ct);
         var specs = tiles.ToDictionary(x => x.Id, x => MetricTileSpec.TryCreate(x, out var spec) ? spec : null);
         var names = tiles
             .Select(x => x.Instrument)
@@ -171,6 +300,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
 
         return new MetricBoardModel
         {
+            Board = board,
             From = from,
             To = to,
             Resolution = tier,
@@ -189,6 +319,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
     private static MetricBoardTileModel Project(MetricBoardTile x) => new()
     {
         Id = x.Id,
+        BoardId = x.BoardId,
         Name = x.Name,
         Position = x.Position,
         Instrument = x.Instrument,
@@ -277,12 +408,4 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
 
         return (kept, truncated);
     }
-
-    private Task<List<MetricBoardTile>> LoadTilesAsync(CancellationToken ct)
-        => _context.Set<MetricBoardTile>()
-            .AsNoTracking()
-            .OrderBy(x => x.Position)
-            .ThenBy(x => x.Id)
-            .Take(MetricBoardValidation.MaxTiles)
-            .ToListAsync(ct);
 }
