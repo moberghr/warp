@@ -17,7 +17,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();         // or opt.UseSqlServer()
 
-    // Push benefits the dispatcher's batch-fetch path; individual workers still poll.
+    // Optional: one fetch hands out the work instead of every bare worker waking at once.
     opt.UseDispatcher = true;
     opt.PollingInterval = TimeSpan.FromSeconds(5); // loose polling is fine when push is on
 
@@ -31,13 +31,13 @@ The provider-specific transport is wired by whichever `UsePostgreSql()` / `UseSq
 
 ## What Push Accelerates
 
-| Task             | Wake trigger                      | Push latency |
-|------------------|-----------------------------------|--------------|
-| Dispatcher fetch | `JobEnqueued`                     | &lt;50ms        |
-| `MessageRouter`  | `MessageEnqueued`                 | &lt;50ms        |
-| `Orchestrator`   | `JobFinalized`                    | &lt;50ms        |
+| Task                         | Wake trigger                      | Push latency |
+|------------------------------|-----------------------------------|--------------|
+| Worker fetch (both modes)    | `JobEnqueued`                     | &lt;50ms        |
+| `MessageRouter`              | `MessageEnqueued`                 | &lt;50ms        |
+| `Orchestrator`               | `JobFinalized`                    | &lt;50ms        |
 
-Worker-fetch push only wires when `UseDispatcher = true` — individual-worker mode keeps polling to avoid a thundering herd on the same fetch query.
+A cross-process `JobEnqueued` wakes workers in both modes: the listener wakes the dispatcher **and** signals every bare worker of the process. With `UseDispatcher = true` one fetch hands out the work; with `UseDispatcher = false` every bare worker of the process wakes at once and each fetches for itself. Push is not "without effect" in either mode.
 
 ## Scheduled Jobs
 
