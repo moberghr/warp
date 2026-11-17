@@ -196,7 +196,7 @@ public class MetricAnnotationValidationTests
     }
 
     [TimedFact]
-    public void Covers_UnparseableTileFilter_IsNeverCovered()
+    public void Covers_UnparseableTileFilter_IsCoveredOnlyByAnUnfilteredNote()
     {
         MetricAnnotationMatch.Covers(Model("status=5*"), new MetricBoardTile { Instrument = "http", TagFilter = "status" }).ShouldBeFalse();
         MetricAnnotationMatch.Covers(Model(null), new MetricBoardTile { Instrument = "http", TagFilter = "status" }).ShouldBeTrue();
