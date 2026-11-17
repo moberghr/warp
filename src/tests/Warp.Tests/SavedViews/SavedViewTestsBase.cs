@@ -13,6 +13,7 @@ using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Enums;
 using Warp.Core.Metrics;
 using Warp.Core.SavedViews;
@@ -22,6 +23,7 @@ using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.Observability;
+using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.SavedViews;
 
@@ -214,6 +216,86 @@ public abstract class SavedViewTestsBase : IAsyncLifetime
 
         status.ShouldBe(SavedViewDeleteStatus.Deleted);
         (await _fixture.CreateContext().Set<SavedView>().CountAsync(Ct)).ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task Delete_WhileTheAuthorUnsharesTheView_WaitsForTheLockAndThenRefuses()
+    {
+        // N=2: alice's unshare holds warp:saved-view on a second connection and has already made the view personal, pinned
+        // inside its transaction by a BarrierSignal. Bob's delete must wait at the lock and re-read the row there; read
+        // outside it, the view was still shared and bob deleted alice's now-personal view.
+        var id = await SeedViewAsync("Checkout", "alice", shared: true);
+        var barrier = new BarrierSignal();
+        var holderContext = _fixture.CreateContext();
+        var holder = TestTasks.QueriesFor(holderContext).RunUnderTransactionLockAsync(
+            holderContext,
+            TransactionLock.SavedViewKey,
+            async (x, ct) =>
+            {
+                var view = await x.Set<SavedView>().Where(y => y.Id == id).SingleAsync(ct);
+                view.Shared = false;
+                await x.SaveChangesAsync(ct);
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return 0;
+            },
+            Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+
+        var delete = Command().Delete(id, "bob", Ct);
+
+        // Held at the lock: it does not finish while the unshare is inside.
+        await Should.ThrowAsync<TimeoutException>(() => delete.WaitAsync(TimeSpan.FromMilliseconds(500), Ct));
+        barrier.CanFinish.Release();
+        (await holder).LockHeld.ShouldBeTrue();
+        (await delete).ShouldBe(SavedViewDeleteStatus.Forbidden);
+        var row = await _fixture.CreateContext().Set<SavedView>().SingleAsync(Ct);
+        row.Shared.ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Delete_WhileTheLockIsHeldPastTheTimeout_ThrowsTimeoutAndDeletesNothing()
+    {
+        var id = await SeedViewAsync("Checkout", "alice", shared: true);
+        var barrier = new BarrierSignal();
+        var holder = HoldTheLockAsync(barrier);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        try
+        {
+            await Should.ThrowAsync<TimeoutException>(() => Command(lockTimeout: TimeSpan.FromMilliseconds(300)).Delete(id, "bob", Ct));
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+            await holder;
+        }
+
+        (await _fixture.CreateContext().Set<SavedView>().CountAsync(Ct)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task DeleteRoute_LockHeldPastTheTimeout_ReturnsServiceUnavailableWithAnError()
+    {
+        var id = await SeedViewAsync("Checkout", "alice", shared: true);
+        await using var host = await CreateDashboardHostAsync(TimeSpan.FromMilliseconds(300));
+        var barrier = new BarrierSignal();
+        var holder = HoldTheLockAsync(barrier);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        HttpResponseMessage response;
+        try
+        {
+            response = await host.DeleteAsync("bob", id);
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+            await holder;
+        }
+
+        response.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+        (await ErrorAsync(response)).ShouldNotBeNullOrEmpty();
+        (await _fixture.CreateContext().Set<SavedView>().CountAsync(Ct)).ShouldBe(1);
     }
 
     [TimedFact]
@@ -448,14 +530,35 @@ public abstract class SavedViewTestsBase : IAsyncLifetime
 
     private SavedViewQueryService<TestContext> Query() => new(_fixture.CreateContext());
 
-    private SavedViewCommandService<TestContext> Command(CapturingLoggerProvider? logs = null)
+    private SavedViewCommandService<TestContext> Command(CapturingLoggerProvider? logs = null, TimeSpan? lockTimeout = null)
     {
         var context = _fixture.CreateContext();
         var logger = logs is null
             ? NullLogger<SavedViewCommandService<TestContext>>.Instance
             : new CapturingLoggerFactory(logs).CreateLogger<SavedViewCommandService<TestContext>>();
 
-        return new SavedViewCommandService<TestContext>(context, new FakeTimeProvider(new DateTimeOffset(Now)), logger, TestTasks.QueriesFor(context));
+        return new SavedViewCommandService<TestContext>(context, new FakeTimeProvider(new DateTimeOffset(Now)), logger, TestTasks.QueriesFor(context))
+        {
+            LockTimeout = lockTimeout ?? TransactionLock.CommandTimeout,
+        };
+    }
+
+    // Holds warp:saved-view on a second connection (as another user's write would) until the barrier lets it finish.
+    private Task<(bool LockHeld, int Result)> HoldTheLockAsync(BarrierSignal barrier)
+    {
+        var context = _fixture.CreateContext();
+
+        return TestTasks.QueriesFor(context).RunUnderTransactionLockAsync(
+            context,
+            TransactionLock.SavedViewKey,
+            async (_, ct) =>
+            {
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return 0;
+            },
+            Ct);
     }
 
     private async Task<int> SeedViewAsync(
@@ -501,13 +604,13 @@ public abstract class SavedViewTestsBase : IAsyncLifetime
         await context.SaveChangesAsync(Ct);
     }
 
-    private async Task<DashboardHost> CreateDashboardHostAsync()
+    private async Task<DashboardHost> CreateDashboardHostAsync(TimeSpan? lockTimeout = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.WebHost.UseDefaultServiceProvider(o => o.ValidateScopes = true);
         builder.Services.AddScoped<ISavedViewQueryService>(_ => Query());
-        builder.Services.AddScoped<ISavedViewCommandService>(_ => Command());
+        builder.Services.AddScoped<ISavedViewCommandService>(_ => Command(lockTimeout: lockTimeout));
 
         var app = builder.Build();
 

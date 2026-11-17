@@ -24,15 +24,19 @@ public interface ISavedViewCommandService
     /// <remarks>Persists <paramref name="view"/> as given: callers validate it first with <see cref="SavedViewValidation.TryValidate"/>.</remarks>
     Task<SavedViewWriteResult> Upsert(SavedView view, string actor, CancellationToken ct);
 
-    /// <summary>Deletes a view as <paramref name="actor"/>: a shared view by anyone, a personal view by its author only.</summary>
+    /// <summary>
+    /// Deletes a view as <paramref name="actor"/>: a shared view by anyone, a personal view by its author only. Throws
+    /// <see cref="TimeoutException"/> when another write held the saved-view lock too long.
+    /// </summary>
     Task<SavedViewDeleteStatus> Delete(int id, string actor, CancellationToken ct);
 }
 
 /// <summary>
 /// <see cref="ISavedViewCommandService"/> over the user's <typeparamref name="TContext"/>, with a structured
 /// <c>LogInformation</c> audit naming the acting user and the page, never the query (§1.2: it holds tag values an operator
-/// filtered on). Inserts and edits run under the transaction-scoped <c>warp:saved-view</c> lock (§2.16), so two saves at
-/// once cannot both pass a cap; without a provider they run unguarded.
+/// filtered on). Inserts, edits and deletes run under the transaction-scoped <c>warp:saved-view</c> lock (§2.16), so two
+/// saves at once cannot both pass a cap and a delete cannot act on a sharing flag the author is changing at that moment;
+/// without a provider they run unguarded.
 /// </summary>
 public sealed class SavedViewCommandService<TContext> : ISavedViewCommandService
     where TContext : DbContext
@@ -83,24 +87,43 @@ public sealed class SavedViewCommandService<TContext> : ISavedViewCommandService
     public async Task<SavedViewDeleteStatus> Delete(int id, string actor, CancellationToken ct)
     {
         var user = MetricAnnotationValidation.NormalizeAuthor(actor);
-        var view = await _context.Set<SavedView>()
+
+        // The sharing check and the delete run under the lock an unshare takes, re-reading the row there: read outside it,
+        // a view the author made personal a moment ago could still be deleted by someone else as "shared".
+        var (status, page) = await TransactionLock.RunAsync(
+            _sqlQueries,
+            _context,
+            TransactionLock.SavedViewKey,
+            LockTimeout,
+            (x, token) => DeleteAsync(x, id, user, token),
+            ct);
+        if (status == SavedViewDeleteStatus.Deleted)
+        {
+            _logger.LogInformation("Saved view {Id} deleted by {Actor} on {Page}", id, user, page);
+        }
+
+        return status;
+    }
+
+    private static async Task<(SavedViewDeleteStatus Status, string? Page)> DeleteAsync(DbContext context, int id, string user, CancellationToken ct)
+    {
+        var view = await context.Set<SavedView>()
             .Where(x => x.Id == id)
             .FirstOrDefaultAsync(ct);
         if (view is null)
         {
-            return SavedViewDeleteStatus.NotFound;
+            return (SavedViewDeleteStatus.NotFound, null);
         }
 
         if (!view.Shared && !IsAuthor(view, user))
         {
-            return SavedViewDeleteStatus.Forbidden;
+            return (SavedViewDeleteStatus.Forbidden, view.Page);
         }
 
-        _context.Set<SavedView>().Remove(view);
-        await _context.SaveChangesAsync(ct);
-        _logger.LogInformation("Saved view {Id} deleted by {Actor} on {Page}", id, user, view.Page);
+        context.Set<SavedView>().Remove(view);
+        await context.SaveChangesAsync(ct);
 
-        return SavedViewDeleteStatus.Deleted;
+        return (SavedViewDeleteStatus.Deleted, view.Page);
     }
 
     private static async Task<SavedViewWriteResult> InsertAsync(DbContext context, SavedView view, string user, DateTime now, CancellationToken ct)

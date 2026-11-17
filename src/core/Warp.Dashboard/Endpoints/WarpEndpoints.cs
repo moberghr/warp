@@ -1059,7 +1059,15 @@ public static class WarpEndpoints
 
         apiGroup.MapDelete("views/{id:int}", async ([FromServices] ISavedViewCommandService svc, int id, HttpContext http, CancellationToken ct) =>
         {
-            var status = await svc.Delete(id, DashboardUser.Name(http), ct);
+            SavedViewDeleteStatus status;
+            try
+            {
+                status = await svc.Delete(id, DashboardUser.Name(http), ct);
+            }
+            catch (TimeoutException)
+            {
+                return Results.Json(new { error = "Another saved view was being written; try again." }, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             return status switch
             {
