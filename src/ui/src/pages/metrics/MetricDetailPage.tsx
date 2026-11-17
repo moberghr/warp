@@ -19,6 +19,7 @@ import { Badge } from '@/components/ui/badge';
 import { Hint } from '@/components/ui/tooltip';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { PageHeading } from '@/components/PageHeading';
+import { ViewsMenu } from '@/components/ViewsMenu';
 import * as api from '@/api';
 import { parseFilterChip } from '@/lib/metricPattern';
 import { queryKeys } from '@/lib/queryClient';
@@ -277,9 +278,12 @@ export default function MetricDetailPage() {
   return (
     <div>
       <Link to="/metrics" className="text-sm text-primary hover:underline">← Metrics</Link>
-      <PageHeading className="mb-1 mt-2">
-        <span className="font-mono">{instrument.name}</span>
-      </PageHeading>
+      <div className="mb-1 mt-2 flex items-center justify-between gap-3">
+        <PageHeading className="">
+          <span className="font-mono">{instrument.name}</span>
+        </PageHeading>
+        <ViewsMenu page="metric" target={instrument.name} />
+      </div>
       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground mb-4">
         <Hint text={kindNote ?? undefined}>
           <span className={kindNote ? 'underline decoration-dotted underline-offset-2' : undefined}>{kindLabel(instrument.kind)}</span>

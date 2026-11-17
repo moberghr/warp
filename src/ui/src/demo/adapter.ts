@@ -18,6 +18,8 @@ import {
 import { demoSlos, demoSloDetail } from './data/slo';
 import { DEMO_DEFAULT_BOARD, demoBoards, demoBoardTiles, demoMetricBoard } from './data/metricBoard';
 import { demoAnnotationList } from './data/annotations';
+import { demoDeleteSavedView, demoSavedViewList, demoUpsertSavedView, type DemoViewResult } from './data/savedViews';
+import type { SavedViewUpsert } from '@/types/savedViews';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
@@ -115,6 +117,11 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const sloResult = routeSlo(method, url, config);
     if (sloResult !== undefined) {
       return sloResult;
+    }
+
+    // Saved views (§8.34): kept in memory for the session with the server's rules (visibility, 403, 404).
+    if (url === '/views' || url.startsWith('/views?') || /^\/views\/[^/?]+$/.test(url)) {
+      return routeSavedViews(method, url, config);
     }
 
     // Annotations (#333): GET lists the demo notes of one target; POST (upsert) and DELETE succeed without persisting.
@@ -873,6 +880,21 @@ function parseBody(raw: unknown): unknown {
   }
 
   return raw;
+}
+
+function routeSavedViews(method: string, url: string, config: InternalAxiosRequestConfig): Promise<AxiosResponse> {
+  if (method === 'get') {
+    return resolve(demoSavedViewList(config.params ?? {}), config);
+  }
+
+  const result: DemoViewResult = method === 'delete'
+    ? demoDeleteSavedView(Number(url.split('/').pop()))
+    : demoUpsertSavedView(parseBody(config.data) as SavedViewUpsert);
+  if (result.status >= 400) {
+    return Promise.reject({ response: { status: result.status, statusText: 'Error', data: result.body, headers: {}, config } });
+  }
+
+  return resolve(result.body, config);
 }
 
 function resolve(

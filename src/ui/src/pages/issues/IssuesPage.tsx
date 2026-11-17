@@ -10,6 +10,7 @@ import { ErrorSource, ErrorGroupKind, ErrorGroupStatus } from '@/types/issues';
 import type { ErrorGroupSummary } from '@/types/issues';
 import { SourceBadge, StatusChip, IssueFlags } from './shared';
 import { PageHeading } from '@/components/PageHeading';
+import { ViewsMenu } from '@/components/ViewsMenu';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { queryKeys } from '@/lib/queryClient';
 import { parseIssuesParams, writeIssuesParams, type IssuesFilters } from './issuesModel';
@@ -109,7 +110,10 @@ export default function IssuesPage() {
   return (
     <div>
       <div className="mb-4">
-        <PageHeading className="">Issues</PageHeading>
+        <div className="flex items-center justify-between gap-3">
+          <PageHeading className="">Issues</PageHeading>
+          <ViewsMenu page="issues" target={null} />
+        </div>
         <p className="text-sm text-muted-foreground mt-1">
           Errors grouped by fingerprint across jobs, endpoints, outbound calls, and the browser — with a resolution workflow.
         </p>

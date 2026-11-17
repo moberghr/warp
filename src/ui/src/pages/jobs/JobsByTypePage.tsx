@@ -12,6 +12,7 @@ import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
 import { useListParams } from '@/hooks/useListParams';
 import { useJobsByType } from '@/api/hooks/useJobs';
 import * as api from '@/api';
+import { ViewsMenu } from '@/components/ViewsMenu';
 import type { JobModel } from '@/types';
 import type { JobExecutionStatModel } from '@/types/applications';
 import { parseMetricsDimension, writeMetricsDimension, type JobMetricsDimension } from './jobsModel';
@@ -91,7 +92,10 @@ export default function JobsByTypePage() {
         <h1 className="text-2xl font-bold">
           Jobs · <span className="font-mono">{shortType(type)}</span>
         </h1>
-        <span className="text-sm text-muted-foreground">{data.totalCount} total</span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-muted-foreground">{data.totalCount} total</span>
+          <ViewsMenu page="jobs-by-type" target={type} />
+        </div>
       </div>
 
       <MetricsHeader stat={stat} dimension={dimension} onDimensionChange={setDimension} />

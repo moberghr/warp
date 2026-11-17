@@ -121,6 +121,9 @@ const TYPES = [
   { type: 'Acme.Billing.CalculateTaxRequest', handler: 'Acme.Billing.CalculateTaxHandler' },
 ];
 
+/** Every demo job type (saved-view fixtures point at one). */
+export const demoJobTypeNames: readonly string[] = TYPES.map((x) => x.type);
+
 function jobType(i: number) {
   return TYPES[i % TYPES.length];
 }

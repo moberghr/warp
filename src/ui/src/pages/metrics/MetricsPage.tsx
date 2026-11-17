@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { Hint } from '@/components/ui/tooltip';
 import * as api from '@/api';
 import { queryKeys } from '@/lib/queryClient';
+import { SAVED_VIEWS_QUERY_KEY, viewCountsByInstrument } from '@/lib/savedViewsModel';
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
 import type { MetricInstrument } from '@/types/metrics';
 import { collapseTooltip, kindLabel, unitLabel } from './metricModel';
@@ -22,6 +23,13 @@ export default function MetricsPage() {
     queryFn: () => api.getMetrics(),
     refetchInterval: 30_000,
   });
+
+  // The metric views the caller can see, counted per instrument; a failed read just shows no counts.
+  const viewsQuery = useQuery({
+    queryKey: [...SAVED_VIEWS_QUERY_KEY, 'metric', null],
+    queryFn: () => api.getSavedViews({ page: 'metric' }),
+  });
+  const viewCounts = useMemo(() => viewCountsByInstrument(viewsQuery.data?.views ?? []), [viewsQuery.data]);
 
   // MetricQueryService.ListInstruments already orders the registry by name.
   const instruments = useMemo(() => (Array.isArray(query.data) ? query.data : []), [query.data]);
@@ -43,6 +51,13 @@ export default function MetricsPage() {
             {row.original.collapsedAt && (
               <Hint text={collapseTooltip(row.original)}>
                 <Badge variant="destructive">collapsed</Badge>
+              </Hint>
+            )}
+            {(viewCounts.get(row.original.name) ?? 0) > 0 && (
+              <Hint text="Saved views of this metric you can open (yours and shared ones)">
+                <Badge variant="secondary">
+                  {viewCounts.get(row.original.name)} {viewCounts.get(row.original.name) === 1 ? 'view' : 'views'}
+                </Badge>
               </Hint>
             )}
           </div>
@@ -87,7 +102,7 @@ export default function MetricsPage() {
         cell: ({ row }) => <RelativeTime date={row.original.lastSeenAt} display="relative" />,
       },
     ],
-    [],
+    [viewCounts],
   );
 
   if (query.isError) return <ErrorState message="Unable to load metrics" />;
