@@ -21,8 +21,8 @@ deployable services and a handful of third parties.
 | `shop-web` | The browser storefront (SPA). | Client observability ingest |
 | `migrator` | Applies EF Core migrations before the others start. | — |
 
-All three .NET services set `ApplicationName` (`shop-api`, `shop-worker`) and `ApplicationVersion` from
-the build, and share one PostgreSQL (or SQL Server) database.
+Both Warp services (`shop-api`, `shop-worker`) set `ApplicationName` and `ApplicationVersion` from the
+build. All three .NET services, the migrator included, share one PostgreSQL (or SQL Server) database.
 
 **Third parties**
 
