@@ -97,7 +97,7 @@ export default function DashboardPage() {
         <MetricCard label="Processing" value={stats.processing} icon={<Loader className="h-5 w-5" />} color={stats.processing > 0 ? "text-purple-600" : undefined} href="/jobs/processing" />
         <MetricCard label="Scheduled" value={stats.scheduled} icon={<Clock className="h-5 w-5" />} href="/jobs/scheduled" />
         <MetricCard label="Failed" value={stats.failed} icon={<XCircle className="h-5 w-5" />} color={stats.failed > 0 ? "text-red-600" : undefined} href="/jobs/failed" />
-        <MetricCard label="Messages" value={stats.messages} icon={<Mail className="h-5 w-5" />} href="/messages" />
+        <MetricCard label="Messages" value={stats.messages} icon={<Mail className="h-5 w-5" />} href="/messages/enqueued" />
         <MetricCard label="Batches" value={stats.batchesProcessing} icon={<Layers className="h-5 w-5" />} href="/batches/processing" />
         <MetricCard
           label="Dropped (24h)"
