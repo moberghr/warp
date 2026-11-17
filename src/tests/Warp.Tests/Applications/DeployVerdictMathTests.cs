@@ -416,6 +416,37 @@ public class DeployVerdictMathTests
     }
 
     [TimedFact]
+    public void Build_SloEvaluatedBetweenTheDeployAndTheRoundedUpStart_IsNoData()
+    {
+        // Deployed 11:00:10, so the clean window starts at 11:05. Build must hand SloCheck window.From, not the deploy
+        // instant: the 11:03 evaluation is after the deploy but before the release's first complete bucket.
+        var deploy = new ApplicationDeployModel
+        {
+            Id = Guid.NewGuid(),
+            Application = "api",
+            Version = "2.0.0",
+            FirstSeenAt = At("11:00:10"),
+            InstanceId = Guid.NewGuid(),
+        };
+        var resolved = DeployVerdictMath.Resolve([deploy], null, null)!;
+        var window = Window(deploy.FirstSeenAt, null, 5);
+        window.From.ShouldBe(At("11:05:00"));
+
+        var verdict = DeployVerdictMath.Build(
+            resolved,
+            window,
+            [],
+            [
+                Slo("Early", SloState.Breaching, evaluatedAt: At("11:03:00")),
+                Slo("Late", SloState.Healthy, evaluatedAt: At("11:06:00")),
+            ]);
+
+        verdict.Checks.Select(x => x.State).ShouldBe(["noData", "healthy"]);
+        verdict.Checks[0].Reason.ShouldBe("Last evaluated at 2026-11-16T11:03:00Z, before the deploy's first complete bucket (2026-11-16T11:05:00Z).");
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+    }
+
+    [TimedFact]
     public void Build_SparseData_PassesAndCountsTheChecksWithData()
     {
         var resolved = DeployVerdictMath.Resolve([Deploy("2.0.0", -1)], null, null)!;
