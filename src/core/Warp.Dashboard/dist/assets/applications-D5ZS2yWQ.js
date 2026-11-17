@@ -1,1 +1,0 @@
-import{sn as e}from"./types-BatnEUE7.js";var t={Registered:1,HeartbeatLost:2,Recovered:3,Stopped:4,StaleSwept:5};function n(t){return e(t)}export{n,t};
