@@ -20,22 +20,37 @@ Each section links to the reference page for the full detail.
 | [Pause](#pause) | [Pause / resume](../features/pause.md) |
 | [Batched completions](#batched-completions) | [Batched completions](../features/batched-completions.md) |
 
-The policy addons are registered once in `shop-worker`. Order matters: DI insertion order is outer to inner,
-so `AddRetry()` comes before `AddTimeout()`, and `AddConcurrency()` before `AddRateLimit()`.
+The policy addons run in `shop-worker`. Order matters: DI insertion order is outer to inner, so
+`AddConcurrency()` comes before `AddRateLimit()`, `AddCircuitBreaker()` before `AddRetry()`, and `AddRetry()`
+before `AddTimeout()`.
 
 ```csharp
 // shop-worker
 builder.Services.AddWarpServer<ShopDbContext>(opt =>
 {
     opt.UsePostgreSql();
-    opt.AddRetry(o => o.MaxRetries = 3);   // before AddTimeout
-    opt.AddTimeout();
     opt.AddConcurrency();                  // before AddRateLimit
     opt.AddRateLimit();
-    opt.AddCircuitBreaker();
+    opt.AddCircuitBreaker();               // before AddRetry, so it counts settled failures only
+    opt.AddRetry(o => o.MaxRetries = 3);   // before AddTimeout
+    opt.AddTimeout();
     opt.AddNoRestart();
 });
+
+// shop-api: hosts the dashboard and enqueues jobs
+builder.Services.AddWarp<ShopDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.AddConcurrency();   // the Concurrency limits page
+    opt.AddRateLimit();     // the Rate limits page
+    opt.AddNoRestart();     // stamps [NoRestart] on the jobs shop-api enqueues
+});
 ```
+
+`shop-api` registers three addons too. The dashboard runs there, and the **Concurrency limits** and **Rate
+limits** pages read through services that only `AddConcurrency()` and `AddRateLimit()` register. Without them
+the pages are hidden in `shop-api`, even though `shop-worker` enforces the limits. `AddNoRestart()` is needed
+in every process that enqueues a `[NoRestart]` job (see [No-restart](#no-restart)).
 
 ## Retry
 
@@ -138,16 +153,18 @@ public class ReserveStock(IPublisher publisher) : IMessageHandler<OrderPlaced>
 - *Given* `shop-worker` runs with `opt.AddRetry(o => o.MaxRetries = 0)` for this test, `Threshold = 5`, and
   Stockroom is stopped.
 - *When* you place six orders.
-- *Then* the first five `ReserveStock` jobs end `Failed`. The sixth stays in **Enqueued** with a future
-  `ScheduleTime`, and its handler output shows `Rescheduled due to circuit breaker 'stockroom' (open)`.
+- *Then* the first five `ReserveStock` jobs end `Failed`. The sixth stays in **Scheduled** with a future
+  `ScheduleTime`, and its **History** shows `Rescheduled due to circuit breaker 'stockroom' (open)`.
   Start Stockroom again. After `Duration` one job runs as the probe (other jobs log `(probe-in-progress)`),
   succeeds, the circuit closes, and the remaining reservations complete.
 - `Covered by:` `CircuitBreakerIntegrationTests`
   (`GivenFailingHandler_WhenThresholdHit_ThenCircuitOpensAndSubsequentJobsRescheduled`),
   `CircuitBreakerRetryOrderingTests`, `CircuitBreakerTests`.
 
-Pitfall: intermediate retry attempts do not count as breaker failures; only an exhausted retry budget does.
-With the default delays a real outage takes several minutes of retries before the circuit opens.
+Pitfall: with `AddCircuitBreaker()` before `AddRetry()`, intermediate retry attempts do not count as breaker
+failures; only an exhausted retry budget does. With the default delays a real outage takes several minutes of
+retries before the circuit opens. Register them the other way round and the breaker sits inside retry, sees
+every failed attempt, and opens after five attempts instead of five failed jobs.
 
 ## Rate limit
 
@@ -167,10 +184,10 @@ public class PrintShippingLabel : IJob
 
 **Test scenario.**
 
-- *Given* an operator sets an override of 2 per 60 s for key `shipit-labels` on the dashboard
-  **Rate limits** page (`/warp/ratelimits`).
+- *Given* `shop-api` registers `AddRateLimit()` (see the registration above), and an operator sets an
+  override of 2 per 60 s for key `shipit-labels` on the dashboard **Rate limits** page (`/warp/ratelimits`).
 - *When* you pay for three orders within a few seconds, so three `PrintShippingLabel` jobs run.
-- *Then* two labels print. The third job's handler output shows
+- *Then* two labels print. The third job's **History** shows
   `Throttled — rate limit 'shipit-labels' (2/60s), rescheduled to <time>`, it sits in `Scheduled`, and it
   completes in the next window. Remove the override and the attribute's 60 per minute applies again. With
   the default `Skip` mode the third job would end `Deleted` with `Cancelled — rate limit ... exceeded`.
@@ -200,10 +217,10 @@ public class SendConfirmationEmail : IMessageHandler<OrderPlaced>
 
 **Test scenario.**
 
-- *Given* an operator lowers the `mailer` limit to 1 on the **Concurrency limits** page (`/warp/concurrency`),
-  and `SendConfirmationEmail` waits on a breakpoint.
+- *Given* `shop-api` registers `AddConcurrency()`, an operator lowers the `mailer` limit to 1 on the
+  **Concurrency limits** page (`/warp/concurrency`), and `SendConfirmationEmail` waits on a breakpoint.
 - *When* you place two orders.
-- *Then* one `SendConfirmationEmail` is `Processing`. The other's handler output shows
+- *Then* one `SendConfirmationEmail` is `Processing`. The other's **History** shows
   `Requeued — 'mailer' full (1 slots)` and it returns to `Enqueued` until the first finishes, then completes.
   Remove the admin row and five run at once again.
 - `Covered by:` `SemaphoreIntegrationTests`
@@ -242,7 +259,7 @@ await publisher.SaveChangesAsync(ct);
 - *Given* `ProcessPaymentCallbackHandler` waits on a breakpoint.
 - *When* you replay two PayFast sandbox callbacks for the same order, then one for a different order.
 - *Then* the first callback is `Processing`. The second shows `Requeued — 'order:<id>' full (1 slots)` in its
-  handler output and runs only after the first completes. The callback for the other order runs at the same
+  **History** and runs only after the first completes. The callback for the other order runs at the same
   time as the first. The concurrency key is visible in each job's metadata.
 - `Covered by:` `MutexIntegrationTests` (`GivenTwoJobsWithSameMutex_WhenWaitMode_ThenSecondRequeuesUntilFirstFinishes`,
   `GivenTwoJobsWithDifferentKeys_WhenWaitMode_BothEnterHandlerSimultaneously`), `MutexTests`,
@@ -281,8 +298,9 @@ public class CapturePayment : IJob
 - `Covered by:` `NoRestartIntegrationTests` (`GivenNoRestartAttributeJob_WhenPublishedAndStale_ThenMarkedFailed`),
   `NoRestartCrashRecoveryTests`, `NoRestartAddonTests`, `CrashRecoveryTests`.
 
-Pitfall: without `opt.AddNoRestart()` the attribute is silently ignored. `WithRestart(false)` at publish works
-without the addon.
+Pitfall: the attribute is read when the job is enqueued, so `opt.AddNoRestart()` must run in every process
+that enqueues `CapturePayment`, not only in `shop-worker`. A process without it enqueues the job with no
+restart flag, and the attribute is silently ignored. `WithRestart(false)` at publish works without the addon.
 
 ## Pause
 
@@ -316,7 +334,8 @@ builder.Services.AddWarpServer<ShopDbContext>(opt =>
   then enqueue a Stockroom job and place an order.
 - *Then* the Stockroom job stays `Enqueued`, while the order's payment and email jobs complete on the
   default group. A job that was already `Processing` when you paused runs to completion. Resume the group and
-  the waiting job is picked up within one heartbeat.
+  the waiting job is picked up within about 15 s: one heartbeat (5 s) for the workers to see the resume,
+  plus one `PollingInterval` (10 s) before they fetch again.
 - `Covered by:` `PauseIntegrationTests` (`PauseWorkerGroup_JobsStayEnqueued`,
   `PauseWorkerGroup_Resume_JobsGetProcessed`), `PauseStateHolderTests`.
 
@@ -343,12 +362,14 @@ builder.Services.AddWarpServer<ShopDbContext>(opt =>
 
 **Test scenario.**
 
-- *Given* `shop-worker` in dispatcher mode with `CompletionFlushInterval` raised to 5 s for the test.
-- *When* you enqueue 200 `ApplyTrackingUpdate` jobs, then a single one a minute later.
-- *Then* all 200 end `Completed`. The single job's handler output shows it finished, but the job stays
-  `Processing` on the dashboard for up to 5 s before it flips to `Completed`. Stop `shop-worker` gracefully
-  right after a job finishes: the buffered completion is flushed on shutdown and the job is `Completed`, not
-  left `Processing`.
+- *Given* `shop-worker` in dispatcher mode with `CompletionFlushInterval` raised to 5 s for the test, and
+  `ApplyTrackingUpdate` handlers that take about 50 ms.
+- *When* you enqueue 2,000 `ApplyTrackingUpdate` jobs at once, so every worker stays busy.
+- *Then* all 2,000 end `Completed`. While the backlog drains, finished jobs flip to `Completed` in groups (up
+  to 50 per worker, or every 5 s) rather than one by one, so a job can show `Processing` for a few seconds
+  after its handler output says it finished. A lone job does not show this delay: a worker flushes its buffer
+  as soon as it has nothing else to run. Stop `shop-worker` gracefully while the backlog drains: the buffered
+  completions are flushed on shutdown and those jobs are `Completed`, not left `Processing`.
 - `Covered by:` `BatchedCompletionIntegrationTests` (`GivenManyShortJobs_WhenProcessed_ThenAllReachCompletedState`,
   `GivenShutdown_WhenServerStops_ThenPendingCompletionsAreFlushed`), `CompletionBatchTests`.
 
