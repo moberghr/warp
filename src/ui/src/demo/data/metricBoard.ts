@@ -12,6 +12,16 @@ import { demoNoteCoversTile, demoTileAnnotations } from './annotations';
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+const FINE_MS = 5 * MINUTE;
+/** MetricFlushInterval's default: data newer than this is still being written. */
+const FLUSH_MS = 30_000;
+
+/** The server's CompleteUntil: the start of the fine bucket holding `now − flush`, clamped to the range. */
+export function demoCompleteUntil(from: number, to: number, now: number): number {
+  const cutoff = Math.floor((now - FLUSH_MS) / FINE_MS) * FINE_MS;
+
+  return Math.min(to, Math.max(from, cutoff));
+}
 
 function tile(partial: Partial<MetricBoardTile> & Pick<MetricBoardTile, 'id' | 'name' | 'instrument'>): MetricBoardTile {
   return {
@@ -172,17 +182,24 @@ function status(t: MetricBoardTile, current: number, dayAgo: number, weekAgo: nu
   return null;
 }
 
-/** GET /metrics/board?from=&to= — every demo tile evaluated over the window. */
-export function demoMetricBoard(fromIso: string | undefined, toIso: string | undefined): MetricBoard {
-  const to = toIso ? Date.parse(toIso) : Date.now();
+/**
+ * GET /metrics/board?from=&to= — every demo tile evaluated over the window. As on the server, the values and their
+ * baselines stop at `completeUntil` (the newest bucket is still filling) while the sparklines run to `to`.
+ */
+export function demoMetricBoard(fromIso: string | undefined, toIso: string | undefined, now = Date.now()): MetricBoard {
+  const to = toIso ? Date.parse(toIso) : now;
   const from = fromIso ? Date.parse(fromIso) : to - DAY;
   const span = to - from;
+  const complete = demoCompleteUntil(from, to, now);
   const tiles: MetricBoardTileResult[] = demoBoardTiles.map((t) => {
     const shape = shapes[t.id] ?? shapes[6];
-    const current = windowValue(shape, t, from, to, true);
-    const dayAgo = windowValue(shape, t, from - DAY, to - DAY, false);
-    const weekAgo = windowValue(shape, t, from - 7 * DAY, to - 7 * DAY, false);
-    const ruled = status(t, current, dayAgo, weekAgo);
+    const empty = complete <= from;
+    const current = empty ? null : windowValue(shape, t, from, complete, true);
+    const dayAgo = empty ? null : windowValue(shape, t, from - DAY, complete - DAY, false);
+    const weekAgo = empty ? null : windowValue(shape, t, from - 7 * DAY, complete - 7 * DAY, false);
+    const ruled = current === null || dayAgo === null || weekAgo === null
+      ? (t.statusRule === MetricTileStatusRule.None ? null : SloState.NoData)
+      : status(t, current, dayAgo, weekAgo);
     // Notes (#333) attached as the server does: every overlapping note is shown, but only an active acknowledged-noise
     // note that COVERS the tile (about everything it reads) turns a problem into Acknowledged.
     const annotations = demoTileAnnotations(t, from, to);
@@ -208,5 +225,7 @@ export function demoMetricBoard(fromIso: string | undefined, toIso: string | und
     to: new Date(to).toISOString(),
     resolution: span <= 6 * HOUR ? MetricTier.Fine : span <= 7 * DAY ? MetricTier.Hourly : MetricTier.Daily,
     tiles,
+    completeUntil: new Date(complete).toISOString(),
+    annotationsTruncated: false,
   };
 }

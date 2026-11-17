@@ -54,6 +54,8 @@ import {
   formatTileValue,
   sparklinePoints,
   acknowledgedHint,
+  annotationsTruncatedHint,
+  completeUntilHint,
   statusCounts,
   tileStatusClass,
   validateTileDraft,
@@ -121,6 +123,8 @@ export default function MetricBoardPage() {
   const tiles = board?.tiles ?? [];
   const counts = statusCounts(tiles);
   const span = board ? { from: Date.parse(board.from), to: Date.parse(board.to) } : null;
+  const completeHint = board ? completeUntilHint(board) : null;
+  const truncatedHint = board ? annotationsTruncatedHint(board) : null;
 
   return (
     <div>
@@ -172,6 +176,16 @@ export default function MetricBoardPage() {
         )}
         <span className="ml-auto flex gap-3 text-xs text-muted-foreground">
           {boardQuery.isPlaceholderData && <span aria-live="polite">updating…</span>}
+          {completeHint && (
+            <Hint text="Values and their 1d / 7d baselines stop where the processes are still writing data, so complete data is compared with complete data. The sparklines run to the end of the range.">
+              <span>{completeHint}</span>
+            </Hint>
+          )}
+          {truncatedHint && (
+            <Hint text="More notes overlap this range than the board reads: it keeps the ones active at the end and acknowledged noise first, newest first.">
+              <span>{truncatedHint}</span>
+            </Hint>
+          )}
           {deploysQuery.isError && <span className="text-destructive">Unable to load deploys; no deploy markers are drawn.</span>}
           {counts.breaching > 0 && <span className="text-red-600">{counts.breaching} breaching</span>}
           {counts.warning > 0 && <span className="text-amber-600">{counts.warning} warning</span>}

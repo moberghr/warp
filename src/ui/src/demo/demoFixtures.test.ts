@@ -13,7 +13,7 @@ import { demoDeploys } from './data/applications';
 import { MetricAnnotationTarget, type MetricAnnotationList } from '@/types/annotations';
 import { demoSlos } from './data/slo';
 import { demoAnnotations, demoNoteAppliesTo, demoNoteCoversTile } from './data/annotations';
-import { demoBoardTiles } from './data/metricBoard';
+import { demoBoardTiles, demoMetricBoard } from './data/metricBoard';
 import type { MetricAnnotation } from '@/types/annotations';
 import { SloState } from '@/types/slo';
 
@@ -205,6 +205,23 @@ describe('demo metrics board fixtures', () => {
     expect(board.tiles.some((x) => x.status !== null)).toBe(true);
     expect(board.tiles.every((x) => x.sparkline.length > 0)).toBe(true);
     expect(board.tiles.flatMap((x) => x.sparkline).every((p) => Date.parse(p.timestamp) < to)).toBe(true);
+  });
+
+  it('cuts the values at the still-filling bucket like the server, and runs the sparklines to the end', () => {
+    const now = Date.UTC(2026, 4, 25, 14, 37, 10);
+    const live = demoMetricBoard(new Date(now - 6 * 3_600_000).toISOString(), new Date(now).toISOString(), now);
+    const past = demoMetricBoard(new Date(now - 30 * 3_600_000).toISOString(), new Date(now - 24 * 3_600_000).toISOString(), now);
+    const fresh = demoMetricBoard(new Date(now - 60_000).toISOString(), new Date(now).toISOString(), now);
+
+    expect(live.completeUntil).toBe('2026-05-25T14:35:00.000Z');
+    expect(live.annotationsTruncated).toBe(false);
+    expect(live.tiles.every((x) => x.current !== null)).toBe(true);
+    expect(live.tiles.every((x) => Date.parse(x.sparkline[x.sparkline.length - 1].timestamp) >= Date.parse(live.completeUntil))).toBe(true);
+    expect(past.completeUntil).toBe(past.to);
+    // Nothing complete yet: no values, and a tile with a rule reads NoData.
+    expect(fresh.completeUntil).toBe(fresh.from);
+    expect(fresh.tiles.every((x) => x.current === null && x.dayAgo === null && x.weekAgo === null)).toBe(true);
+    expect(fresh.tiles.every((x) => x.status === (x.tile.statusRule === MetricTileStatusRule.None ? null : SloState.NoData))).toBe(true);
   });
 
   it('accepts tile upserts and deletes', async () => {

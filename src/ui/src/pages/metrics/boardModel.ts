@@ -1,11 +1,13 @@
 // Pure model behind the metrics health board (#326): tile value / change / rule labels, status colours, sparkline
 // points, and the tile editor's draft logic. Mirrors the client-checkable rules of Warp.Core.Metrics.MetricBoardValidation
 // so most mistakes show before a round trip; the server stays the authority and its 400 message is always shown.
+import { DateTime } from 'luxon';
 import { MetricKind } from '@/types/metrics';
 import {
   MetricDeviationDirection,
   MetricTileKind,
   MetricTileStatusRule,
+  type MetricBoard,
   type MetricBoardTile,
   type MetricBoardTileResult,
 } from '@/types/metricBoard';
@@ -168,6 +170,28 @@ export function acknowledgedHint(result: Pick<MetricBoardTileResult, 'status' | 
   }
 
   return `${SloStateLabel[result.unacknowledgedStatus]} by its rule, acknowledged by a known-noise note`;
+}
+
+/**
+ * The board header's note when the values stop before the window's end (#328): `values up to 14:35 (newest bucket still
+ * filling)`, local time. Null when they run to the end, or when the server sent no usable instant.
+ */
+export function completeUntilHint(board: Pick<MetricBoard, 'from' | 'to' | 'completeUntil'>): string | null {
+  const until = Date.parse(board.completeUntil);
+  if (!Number.isFinite(until) || until >= Date.parse(board.to)) {
+    return null;
+  }
+
+  if (until <= Date.parse(board.from)) {
+    return 'no complete values yet (newest bucket still filling)';
+  }
+
+  return `values up to ${DateTime.fromMillis(until).toFormat('HH:mm')} (newest bucket still filling)`;
+}
+
+/** The board header's note when the server capped the instrument notes it read (some tiles miss a note), else null. */
+export function annotationsTruncatedHint(board: Pick<MetricBoard, 'annotationsTruncated'>): string | null {
+  return board.annotationsTruncated ? 'some notes not shown' : null;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

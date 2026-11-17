@@ -5,7 +5,9 @@ import { SloComparison, SloGaugeAggregate, SloState } from '@/types/slo';
 import {
   acceptsTileInstrument,
   acknowledgedHint,
+  annotationsTruncatedHint,
   buildTileRequest,
+  completeUntilHint,
   changeStatusRule,
   changeTileKind,
   defaultAggregate,
@@ -141,6 +143,29 @@ describe('acknowledgedHint', () => {
   it('says nothing for any other status', () => {
     expect(acknowledgedHint({ status: SloState.Breaching, unacknowledgedStatus: SloState.Breaching })).toBeNull();
     expect(acknowledgedHint({ status: SloState.Acknowledged, unacknowledgedStatus: null })).toBeNull();
+  });
+});
+
+// The board response's #328 cut and #333 note cap (MetricBoardModel.CompleteUntil / AnnotationsTruncated). TZ is UTC.
+describe('board header hints', () => {
+  const board = { from: '2026-05-25T08:00:00Z', to: '2026-05-25T14:40:12Z' };
+
+  it('names the instant the values stop at while the newest bucket is still filling', () => {
+    expect(completeUntilHint({ ...board, completeUntil: '2026-05-25T14:35:00Z' })).toBe('values up to 14:35 (newest bucket still filling)');
+  });
+
+  it('says nothing when the values run to the end of the range, or the instant is unusable', () => {
+    expect(completeUntilHint({ ...board, completeUntil: board.to })).toBeNull();
+    expect(completeUntilHint({ ...board, completeUntil: '' })).toBeNull();
+  });
+
+  it('says there is nothing complete yet when the cut is at the start', () => {
+    expect(completeUntilHint({ ...board, completeUntil: board.from })).toBe('no complete values yet (newest bucket still filling)');
+  });
+
+  it('flags a truncated note list only when the server says so', () => {
+    expect(annotationsTruncatedHint({ annotationsTruncated: true })).toBe('some notes not shown');
+    expect(annotationsTruncatedHint({ annotationsTruncated: false })).toBeNull();
   });
 });
 

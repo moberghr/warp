@@ -81,4 +81,12 @@ export interface MetricBoard {
   to: string;
   resolution: MetricTier;
   tiles: MetricBoardTileResult[];
+  /**
+   * Where the tile values and their 1d / 7d baselines stop (#328, ISO instant): the start of the fine bucket still being
+   * written. Equal to `to` for a range that ended earlier, to `from` when nothing in it is complete yet. The sparklines
+   * still run to `to`.
+   */
+  completeUntil: string;
+  /** True when more instrument notes overlap the range than the board reads: some are left off the tiles. */
+  annotationsTruncated: boolean;
 }
