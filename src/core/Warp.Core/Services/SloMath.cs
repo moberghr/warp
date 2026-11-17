@@ -158,9 +158,10 @@ internal static class SloMath
     /// <see cref="EvaluateCount"/> (the <c>MetricThreshold</c> maths, so "5xx ≤ 10" reads the same on a tile and an SLO);
     /// otherwise the budget is the headroom over <c>|target|</c>, and a zero target is all-or-nothing (1, or minus the
     /// overshoot). Attainment is the observed value; burn is <c>1 − budget</c>. On a 0–1 ratio (<paramref name="ratio"/>)
-    /// at least a target below 1 is the <see cref="EvaluateRate"/> budget instead, <c>(observed − t) / (1 − t)</c>: the
-    /// headroom is measured against the allowed bad share, so "success ≥ 0.98" at 0.995 is Healthy. Over <c>t</c> the
-    /// headroom can never reach 25 % of <c>t</c> on a ratio, so the plain formula would never read Healthy.
+    /// at least is the <see cref="EvaluateRate"/> budget instead, <c>(observed − t) / (1 − t)</c>: the headroom is measured
+    /// against the allowed bad share, so "success ≥ 0.98" at 0.995 is Healthy (over <c>t</c> the headroom can never reach
+    /// 25 % of <c>t</c> on a ratio, so the plain formula would never read Healthy). At <c>t ≥ 1</c> no bad share is
+    /// allowed, so it is all-or-nothing as in <see cref="EvaluateRate"/>: exactly 1.0 is Healthy, anything below Breaching.
     /// </summary>
     public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateBound(double observed, double target, SloComparison comparison, bool ratio = false)
     {
@@ -169,11 +170,14 @@ internal static class SloMath
             return NoDataResult;
         }
 
-        if (ratio && comparison == SloComparison.AtLeast && target < 1)
+        if (ratio && comparison == SloComparison.AtLeast)
         {
-            var rateBudget = (observed - target) / (1.0 - target);
+            // EvaluateRate's maths: burn is the bad share over the allowed bad share. At t >= 1 nothing bad is allowed,
+            // so the bound is all-or-nothing: a full 1.0 is fully Healthy, anything less is far past the budget.
+            var allowedBad = Math.Max(1e-9, 1.0 - target);
+            var rateBurn = (1.0 - observed) / allowedBad;
 
-            return Finite((observed, rateBudget, 1.0 - rateBudget));
+            return Finite((observed, 1.0 - rateBurn, rateBurn));
         }
 
         if (comparison != SloComparison.AtLeast && target > 0)

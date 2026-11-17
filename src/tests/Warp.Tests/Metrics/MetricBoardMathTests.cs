@@ -43,6 +43,7 @@ public class MetricBoardMathTests
     [InlineData(0.98, 0.98, 0.0)]
     [InlineData(0.97, 0.98, -0.5)]
     [InlineData(0.5, 0.0, 0.5)]
+    [InlineData(1.0, 1.0, 1.0)]
     public void EvaluateBound_AtLeastOnARatio_IsTheRateBudget(double observed, double target, double expectedBudget)
     {
         var (attainment, budget, burn) = SloMath.EvaluateBound(observed, target, SloComparison.AtLeast, ratio: true);
@@ -72,6 +73,27 @@ public class MetricBoardMathTests
         var tile = Tile(MetricTileStatusRule.Threshold, threshold: 0.98, comparison: SloComparison.AtLeast, kind: MetricTileKind.Ratio);
 
         MetricBoardMath.Status(tile, current, null, null).ShouldBe(expected);
+    }
+
+    [TimedTheory]
+    [InlineData(1.0, SloState.Healthy)]
+    [InlineData(0.9999, SloState.Breaching)]
+    [InlineData(0.0, SloState.Breaching)]
+    public void Status_AtLeastOneOnARatioTile_IsAllOrNothing(double current, SloState expected)
+    {
+        // "Success ≥ 1.0" allows no bad share, as an SLO with target 1 (EvaluateRate): a full 1.0 is Healthy, never the
+        // Warning a zero headroom would give.
+        var tile = Tile(MetricTileStatusRule.Threshold, threshold: 1.0, comparison: SloComparison.AtLeast, kind: MetricTileKind.Ratio);
+
+        MetricBoardMath.Status(tile, current, null, null).ShouldBe(expected);
+    }
+
+    [TimedFact]
+    public void EvaluateBound_AtLeastOneOnARatio_MatchesEvaluateRateWithTargetOne()
+    {
+        SloMath.EvaluateBound(1.0, 1.0, SloComparison.AtLeast, ratio: true).ShouldBe(SloMath.EvaluateRate(1000, 1000, 1.0));
+        SloMath.EvaluateBound(0.999, 1.0, SloComparison.AtLeast, ratio: true).BudgetRemaining
+            .ShouldBe(SloMath.EvaluateRate(999, 1000, 1.0).BudgetRemaining, 1e-3);
     }
 
     [TimedFact]

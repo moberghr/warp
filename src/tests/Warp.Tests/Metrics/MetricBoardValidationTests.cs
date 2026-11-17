@@ -172,6 +172,8 @@ public class MetricBoardValidationTests
     [InlineData("missing threshold", "A threshold rule requires a finite Threshold.")]
     [InlineData("infinite threshold", "A threshold rule requires a finite Threshold.")]
     [InlineData("undefined comparison", "Comparison '9' is not valid: use AtMost (1) or AtLeast (2).")]
+    [InlineData("ratio threshold above 1", "A ratio tile's Threshold is a share between 0 and 1.")]
+    [InlineData("ratio threshold below 0", "A ratio tile's Threshold is a share between 0 and 1.")]
     [InlineData("baseline 3", "A deviation rule requires BaselineDays of 1 or 7.")]
     [InlineData("undefined direction", "DeviationDirection '9' is not valid: use Drop (1), Rise (2) or Either (3).")]
     [InlineData("zero deviation", "A deviation rule requires a MaxDeviation greater than zero.")]
@@ -185,6 +187,26 @@ public class MetricBoardValidationTests
         MetricBoardValidation.TryValidate(tile, kind, out var error).ShouldBeFalse();
 
         error.ShouldNotBeNull().ShouldStartWith(expected);
+    }
+
+    [TimedTheory]
+    [InlineData(0.0)]
+    [InlineData(1.0)]
+    public void TryValidate_RatioThresholdAtTheShareBounds_IsAccepted(double threshold)
+    {
+        var tile = RatioTile();
+        Threshold(tile, threshold, SloComparison.AtLeast);
+
+        MetricBoardValidation.TryValidate(tile, MetricKind.Counter, out var error).ShouldBeTrue(error);
+    }
+
+    [TimedFact]
+    public void TryValidate_ValueTileThresholdAboveOne_IsAccepted()
+    {
+        var tile = ValueTile();
+        Threshold(tile, 250, SloComparison.AtMost);
+
+        MetricBoardValidation.TryValidate(tile, MetricKind.Counter, out var error).ShouldBeTrue(error);
     }
 
     [TimedFact]
@@ -238,7 +260,7 @@ public class MetricBoardValidationTests
     private static (MetricBoardTile Tile, MetricKind? Kind) Invalid(string branch)
     {
         var ratio = branch is "ratio on gauge" or "missing ratio tag" or "long ratio tag" or "version ratio tag" or "missing good"
-            or "long bad" or "malformed good" or "malformed bad" or "overlap" or "ratio deviation of 1";
+            or "long bad" or "malformed good" or "malformed bad" or "overlap" or "ratio deviation of 1" or "ratio threshold above 1" or "ratio threshold below 0";
         var tile = ratio ? RatioTile() : ValueTile();
         var kind = string.Equals(branch, "ratio on gauge", StringComparison.Ordinal) ? MetricKind.Gauge : MetricKind.Counter;
         Action<MetricBoardTile> breakIt = branch switch
@@ -266,6 +288,8 @@ public class MetricBoardValidationTests
             "missing threshold" => x => x.StatusRule = MetricTileStatusRule.Threshold,
             "infinite threshold" => x => Threshold(x, double.PositiveInfinity, null),
             "undefined comparison" => x => Threshold(x, 1, (SloComparison)9),
+            "ratio threshold above 1" => x => Threshold(x, 1.01, SloComparison.AtLeast),
+            "ratio threshold below 0" => x => Threshold(x, -0.01, SloComparison.AtMost),
             "baseline 3" => x => Deviation(x, 3, 0.3, MetricDeviationDirection.Drop),
             "undefined direction" => x => Deviation(x, 1, 0.3, (MetricDeviationDirection)9),
             "zero deviation" => x => Deviation(x, 1, 0, MetricDeviationDirection.Drop),

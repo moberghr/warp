@@ -217,6 +217,14 @@ public static class MetricBoardValidation
                     return false;
                 }
 
+                // A ratio tile reads a 0–1 share: a bound outside it could never be met (or never be missed).
+                if (tile.Kind == MetricTileKind.Ratio && threshold is < 0 or > 1)
+                {
+                    error = "A ratio tile's Threshold is a share between 0 and 1.";
+
+                    return false;
+                }
+
                 if (tile.Comparison is { } comparison && !Enum.IsDefined(comparison))
                 {
                     error = $"Comparison '{(int)comparison}' is not valid: use AtMost (1) or AtLeast (2).";
