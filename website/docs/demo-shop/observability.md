@@ -67,7 +67,10 @@ traces while they are fresh.
 both places, but the ShipIt tracking poll calls ShipIt thousands of times an hour and should not fill the
 database with call-log rows.
 
-**Wiring.** Each surface picks its `RecordingSink` (`Database` by default, `Otel` or `Both`):
+**Wiring.** Endpoints pick their `RecordingSink` (`Database` by default, `Otel` or `Both`). The adapter sink
+is different: `AddAdapters(o => o.Sink = …)` sets it for the whole process, every adapter included. An `Otel`
+adapter sink on `shop-worker` would also drop the PayFast and Mailer rows that the trace view and Issues
+need. So `shop-worker` keeps the default sink and turns down the volume on the ShipIt adapter alone:
 
 ```csharp
 // shop-api
@@ -81,23 +84,33 @@ builder.Services.AddWarp<ShopDbContext>(opt =>
 builder.Services.AddWarpServer<ShopDbContext>(opt =>
 {
     opt.UsePostgreSql();
-    opt.AddAdapters(o => o.Sink = RecordingSink.Otel);   // span attributes only, no adapter_call_log rows
+    opt.AddAdapters();   // default Database sink, for PayFast, Mailer and ShipIt alike
+
+    opt.AddAdapter<IShipItApi>("shipit", a =>
+    {
+        a.BaseUrl = new Uri("https://api.shipit.example");
+        a.Recording.RecordCalls = CallRecording.FailuresOnly;   // rows for failed ShipIt calls only
+    });
 });
 ```
+
+If ShipIt calls should leave the database entirely, run the tracking poller in its own process with
+`AddAdapters(o => o.Sink = RecordingSink.Otel)`.
 
 **Test scenario.**
 
 - *Given* the wiring above and an OTLP collector receiving the `Warp` source.
 - *When* a checkout runs and the ShipIt tracking job polls a parcel.
 - *Then* the checkout request has a row on the dashboard's **Endpoints** page and its ASP.NET request span
-  in Tempo carries `warp.endpoint.*` attributes. The ShipIt call has a `Client` span with `warp.adapter.*`
-  attributes, and `SELECT count(*) FROM warp.adapter_call_log WHERE adapter_name = 'shipit'` does not grow.
-  The `warp.adapter.calls` meter still counts every call.
+  in Tempo carries `warp.endpoint.*` attributes. The ShipIt call has a `Client` span in Tempo, and
+  `SELECT count(*) FROM warp.adapter_call_log WHERE adapter_name = 'shipit'` does not grow while the calls
+  succeed. The `warp.adapter.calls` meter and the ShipIt call count on the **Adapters** page still count every
+  call. Make ShipIt return 503 and the failed calls get rows. PayFast and Mailer calls keep a row each.
 - `Covered by:` `RecordingSinkWiringTests`, `SpanEnrichmentTests`, `OTelAggregateMetricsTests`,
-  `OTelJobMetricsSinkTestsBase`.
+  `OTelJobMetricsSinkTestsBase`, `AdapterRecorderTestsBase`.
 
 Pitfall: an `Otel`-only endpoint sink writes no rows, so it produces no Issues. Keep `shop-api` on `Both` if you
-want checkout 500s to become Issues.
+want checkout 500s to become Issues. The same holds for adapters, process-wide.
 
 ## Endpoint observability
 
@@ -154,7 +167,8 @@ To observe every controller instead, use `app.MapControllers().WithWarpObservabi
   `InvalidOperationException` when the cart contains SKU `TEST-500`.
 - *When* you check out a cart with `TEST-500` three times, and poll `GET /api/orders/{id}/status` a few times.
 - *Then* the **Endpoints** page lists `POST /api/checkout` with 3 failed calls and a non-zero error rate. The
-  call drawer shows the status 500, the exception type and the related jobs (none for the failed calls).
+  call detail page of a failed call shows the status 500, the exception type and the related jobs (none for
+  the failed calls).
   `GET /api/orders/{id}/status` does not appear. Within about a minute **Issues** shows one Endpoint issue,
   `InvalidOperationException` on `POST /api/checkout`, with count 3.
 - `Covered by:` `HostEndpointObservabilityTestsBase`, `WarpEndpointIdentityFactoryTests`,
@@ -203,7 +217,8 @@ app.MapWarpClientObservability();   // POST /warp/ingest + GET /warp/ingest/clie
 - *Then* the **Client** page for `shop-web` shows the error in the event stream, the custom `cart.opened`
   event, and LCP / CLS / INP p75 tiles after the page hides. The error's detail has a stack and breadcrumbs.
   The session timeline lists the API requests of that visit with links to `/trace/{traceId}`. **Issues** gets
-  one Client issue whose title is the normalized message `cart test <num>`.
+  one Client issue whose title is the normalized message. It keeps the browser's prefix, so in Chrome it
+  reads `Uncaught Error: cart test <num>`.
 - `Covered by:` `ClientIngestEndpointTests`, `ClientEventFlusherTestsBase`, `ClientEventQueryTestsBase`,
   `ClientEventKeysTests`, `ClientEventRecorderTests`, `ClientIngestMeterTests`, `ClientEventCleanupTestsBase`.
 
@@ -238,15 +253,20 @@ builder.Services.AddWarpServer<ShopDbContext>(opt =>
 });
 ```
 
+`shop-worker` also calls `AddSlo` for the metric objectives on [Metrics and SLOs](./metrics-and-slos.md#slos-and-error-budgets).
+Repeated `AddSlo` calls merge, so both sets are seeded. One combined call is easier to read; the guide splits
+it only to keep each objective next to its feature.
+
 **Test scenario.**
 
 - *Given* `shop-worker` running with the `payments` group.
 - *When* you pause the `shop-worker` server from the **Applications** page, ship 10 orders, wait two minutes,
   and resume it.
 - *Then* while paused, the **Queues** family on the **Counters** page shows the `payments` row with backlog
-  depth 10 and an oldest age that grows with each sample (60 s cadence). After resume, depth returns to 0 and
-  the queue-wait p95 and p99 for `payments` read around two minutes. The SLO above reads **Breaching** on the
-  **SLOs** page. `GET /warp/api/queues/metrics` returns the same numbers.
+  depth 10 and an oldest age that grows with each sample (60 s cadence). After resume, depth returns to 0. The
+  queue-wait average for `payments` reads around two minutes, and p95 and p99 read 300 s: percentiles are
+  bucket upper bounds, and a two-minute wait falls in the 60 s to 300 s bucket. The SLO above reads
+  **Breaching** on the **SLOs** page. `GET /warp/api/queues/metrics` returns the same numbers.
 - `Covered by:` `QueueWaitClaimTestsBase`, `BacklogSamplerTestsBase`, `QueueMetricsQueryTestsBase`,
   `QueueWaitKeysTests`, `SloEvaluatorTestsBase`.
 
@@ -359,19 +379,20 @@ opt.ApplicationEnvironment = "production";
 - *When* you roll out 1.4.2 with three replicas starting at the same time.
 - *Then* **Applications > shop-api** lists three live instances on 1.4.2 and the **Deploys** card shows one
   entry `1.4.1 → 1.4.2`. `SELECT count(*) FROM warp.application_deploy WHERE application = 'shop-api' AND
-  version = '1.4.2'` returns 1. Rolling back to 1.4.1 adds no row. On the Metrics page, the deploy appears as a
-  dashed marker labelled `1.4.2`.
-- `Covered by:` `ApplicationDeployTestsBase`, `ApplicationRegistryTestsBase`, `ApplicationQueryTestsBase`,
-  `ApplicationTracingTests`; UI: `deployModel.test.ts`.
+  version = '1.4.2'` returns 1. Rolling back to 1.4.1 adds no row. On a metric's detail page the deploy
+  appears as a dashed marker. With `shop-api` selected as the application it is labelled `1.4.2`; with no
+  application selected it is labelled `shop-api 1.4.2`.
+- `Covered by:` `ApplicationDeployTestsBase`, `ApplicationRegistryTestsBase`, `ApplicationQueryTestsBase`;
+  UI: `deployModel.test.ts`, `metricModel.test.ts`.
 
 Pitfall: without both `ApplicationName` and a non-blank `ApplicationVersion`, no deploy is recorded and the
 verdict below returns 404.
 
 ## Post-deploy verdict
 
-**In the shop.** After CI rolls out `shop-api`, the pipeline should wait ten minutes and fail the release if
-checkout breaks. The answer comes from the [health board](./metrics-and-slos.md#health-board) tiles and SLOs
-scoped to `shop-api`.
+**In the shop.** After CI rolls out `shop-api`, the pipeline should judge at least ten minutes of traffic and
+fail the release if checkout breaks. The answer comes from the [health board](./metrics-and-slos.md#health-board)
+tiles and SLOs scoped to `shop-api` (or to no application).
 
 **Wiring.** No registration: the route is served by any `AddWarp` process with the dashboard, behind the
 dashboard's authorization. A CI step after the deploy:
@@ -386,27 +407,39 @@ curl -fsS -H "Authorization: Bearer $WARP_CI_TOKEN" --get \
   --data-urlencode "minCoverage=0.5" | jq '{verdict, summary, checksWithData, checksTotal, settlesAt: .window.settlesAt}'
 ```
 
-Poll while `verdict` is `pending`, fail the job on `fail`. `minCoverage=0.5` turns a `pass` that rests on
-fewer than half of the checks into `noData`, so a quiet first ten minutes (no checkouts yet) does not read as
-healthy; the `summary` line starts with the count, e.g. `pass (3 of 5 checks had data): 3 healthy, 2 no data`.
+Poll while `verdict` is `pending`, fail the job on `fail`. The verdict judges only complete 5-minute buckets
+that start after the deploy; the bucket the deploy fell into is never counted. A deploy stays `pending` until
+`minWindowMinutes` of that clean data exists and is complete, which adds the bucket close plus about 30 s
+(`MetricFlushInterval`). With `minWindowMinutes=10` the verdict settles about 10.5 to 15.5 minutes after the
+deploy, depending on where in its bucket the deploy fell (about 5 to 10.5 minutes at the default of 5);
+`window.settlesAt` says when. `minCoverage=0.5` turns a `pass` that rests on fewer than half of the checks
+into `noData`, so a quiet first window (no checkouts yet) does not read as healthy; the `summary` line starts
+with the count, e.g. `pass (3 of 6 checks had data): 3 healthy, 3 no data`.
 The full script is in
 [Calling it from CI](../features/applications.md#post-deploy-verdict).
 
 **Test scenario.**
 
-- *Given* board tiles scoped to `shop-api` (checkout success %, 5xx count, PayFast latency) and the
-  checkout SLOs from [Metrics and SLOs](./metrics-and-slos.md).
-- *When* you deploy a build of `shop-api` that throws on every checkout with SKU `TEST-500`, send a few such
-  checkouts, and call the route at minute 2 and again at minute 11.
+- *Given* the board tiles scoped to `shop-api` ("Checkout success", "Checkout 5xx", "PayFast callbacks") and
+  the SLOs scoped to `shop-api` ("Checkout success", "Checkout: no 5xx", "Checkouts vs last week") from
+  [Metrics and SLOs](./metrics-and-slos.md). The PayFast authorise latency SLO is scoped to `shop-worker`, so
+  it counts in `shop-worker`'s verdict, not in this one.
+- *When* you deploy a build of `shop-api` that throws on every checkout with SKU `TEST-500`, send 10 such
+  checkouts between minute 6 and minute 10 (after the deploy's own bucket has closed, so they count), and
+  call the route at minute 2 and again at about minute 16.
 - *Then* the first call returns `"verdict": "pending"` with `window.settled: false`. The second returns
-  `"verdict": "fail"`, `deploy.previousVersion` set to the old version, and a `checks` entry for the 5xx tile
-  with `"state": "breaching"`. With an active acknowledged-noise annotation that covers that tile (no filter,
-  or the tile's own filter or a wider one), the check reads `"state": "acknowledged"` and no longer fails the
-  verdict. A version that never registered returns 404.
+  `"verdict": "fail"`, `deploy.previousVersion` set to the old version, a `checks` entry for the "Checkout 5xx"
+  tile with `"state": "breaching"` (more than its limit of 5), and one for the "Checkout: no 5xx" SLO, also
+  breaching. With an active acknowledged-noise annotation that covers the tile (no filter, or the tile's own
+  filter or a wider one), the tile's check reads `"state": "acknowledged"`. The verdict is still `fail`,
+  because the "Checkout: no 5xx" SLO still breaches: annotations never acknowledge an SLO. A version that
+  never registered returns 404.
   If you deploy again at minute 1, the earlier build is never left `pending`: asked by its version, it is
-  judged over its one minute and settled at the second deploy.
+  settled at the second deploy. Its window holds no complete bucket after the deploy, so expect its checks to
+  read no data.
 - `Covered by:` `DeployVerdictTestsBase`, `DeployVerdictMathTests`, `DeployVerdictQueryTests`; UI:
   `verdictModel.test.ts`.
 
-Pitfall: unscoped board tiles count in every application's verdict. On the shared database, scope the
-checkout tiles to `shop-api`, or a `shop-worker` deploy fails on a checkout problem.
+Pitfall: unscoped board tiles and SLOs count in every application's verdict, and a check scoped to another
+application never counts. On the shared database, scope the checkout tiles to `shop-api`, or a `shop-worker`
+deploy fails on a checkout problem.
