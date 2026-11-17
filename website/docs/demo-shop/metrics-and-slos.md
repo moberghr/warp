@@ -72,8 +72,10 @@ The detail page of each instrument then offers:
 - **Version dimension.** Breakdown or filter by **application version** (`{version}` in the API) to compare
   1.4.1 and 1.4.2 during a rolling deploy.
 - **Custom range.** A from/to picker. The range lives in the URL (`?from=…&to=…`, no `to` for "until now").
-- **Deploy markers.** Each [recorded deploy](./observability.md#applications-and-deploys) is a dashed line
-  labelled with its version. **Since last deploy** sets the range from the newest deploy to now.
+- **Deploy markers.** Each [recorded deploy](./observability.md#applications-and-deploys) is a dashed line.
+  With one application selected it is labelled with the version (`1.4.2`); with none selected, with the
+  application and version (`shop-api 1.4.2`). **Since last deploy** sets the range from the newest deploy to
+  now.
 - **Rate toggle.** **Per bucket / Per minute / Per second** for counters and histogram counts (`?rate=minute`),
   so a 6h view and a 24h view have the same scale.
 
@@ -86,8 +88,9 @@ The detail page of each instrument then offers:
   `payfast.callback.latency` and `stockroom.sync.lag`. Breakdown by `outcome` on `checkout.completed` shows
   8 / 1 / 1. `SELECT sum(sum) FROM warp.metric_point WHERE instrument = 'checkout.completed'` returns 10.
 - *When* you roll out 1.4.2 while one 1.4.1 instance still runs, and place orders against both.
-- *Then* breakdown by **application version** draws two lines, `1.4.1` and `1.4.2`. A dashed marker labelled
-  `1.4.2` sits at the deploy time. **Since last deploy** sets the URL to `?from=<deploy time>` with no `to`.
+- *Then* breakdown by **application version** draws two lines, `1.4.1` and `1.4.2`. A dashed marker sits at
+  the deploy time, labelled `1.4.2` with `shop-api` selected as the application, or `shop-api 1.4.2` with no
+  application selected. **Since last deploy** sets the URL to `?from=<deploy time>` with no `to`.
 - *When* you switch **Per minute** on a 24h range.
 - *Then* the axis reads "Sum per minute", the URL has `?rate=minute`, and a refresh keeps it.
 - `Covered by:` `WarpMeterCollectorTests`, `MetricSeriesTests`, `MetricBucketsTests`, `MetricCardinalityTests`,
@@ -118,8 +121,9 @@ opt.DailyStatisticsRetention = TimeSpan.FromDays(90);    // default
 - *When* you run `SELECT tier, min(bucket_start), count(*) FROM warp.metric_point WHERE instrument =
   'checkout.completed' GROUP BY tier`.
 - *Then* tier 1 (fine) only covers about the last 6 hours, tier 2 (hourly) covers the rest, and no fine bucket
-  older than 6 hours remains. The 24h chart on the Metrics page is continuous across the boundary and its
-  total equals the sum of all rows.
+  older than 6 hours remains. The 24h chart on the Metrics page is continuous across the boundary. Its
+  headline sums complete buckets only, so it equals the sum of all rows minus the newest, still-filling
+  bucket, which the chart's tooltip labels "still filling".
 - `Covered by:` `StatisticRollupTestsBase`, `MetricRollupTestsBase`, `MetricRollupHeavyTestsBase`,
   `MetricTiersTests`.
 
@@ -133,7 +137,9 @@ not a failure), "p95 PayFast authorise under 2 s", "Stockroom sync lag under 15 
 "no 5xx on the checkout route", and "checkout volume not below half of last week". The payments queue-wait
 objective is on the [Observability](./observability.md#queue-metrics) page.
 
-**Wiring.** On `shop-worker`, which runs the `SloEvaluator`:
+**Wiring.** On `shop-worker`, which runs the `SloEvaluator`. The payments queue-wait objective comes from a
+second `AddSlo` call on the Observability page. Repeated `AddSlo` calls merge, so both sets are seeded; one
+combined call is easier to read if you wire it yourself.
 
 ```csharp
 opt.AddSlo(o => o
@@ -179,7 +185,8 @@ written in the route attribute, so check the exact form before you filter on it.
 - *When* you stop the Stockroom sync so `stockroom.sync.lag` climbs past 900 for more than 3 minutes of the hour.
 - *Then* "Stockroom sync lag" goes Warning, then Breaching.
 - *When* you rename the ratio tag in the code to `result` without changing the objective.
-- *Then* "Checkout success" reads **No data**, not Healthy, and never alerts.
+- *Then* once its whole 1-hour window holds no `success` or `error` events, which takes up to an hour after
+  the rename, "Checkout success" reads **No data**, not Healthy, and never alerts.
 - `Covered by:` `SloEvaluatorTestsBase`, `MetricSloEvaluatorTestsBase`, `SloMathTests`, `SloValidationTests`,
   `SloCommandQueryTestsBase`, `MetricFilterTests`, `CustomMetricsEndToEndTestsBase`.
 
@@ -213,7 +220,8 @@ opt.AddMetricBoard(b => b
 ```
 
 A value tile on a histogram counts measurements, so "PayFast callbacks" catches a broken callback route, not
-slow callbacks. PayFast latency is gated by the `MetricLatency` SLO, which the verdict also counts.
+slow callbacks. PayFast authorise latency is gated by the `MetricLatency` SLO. That SLO is scoped to
+`shop-worker`, so it counts in `shop-worker`'s verdict, never in `shop-api`'s.
 
 "At least 0.98" on a ratio tile uses the success-rate budget, `(value − 0.98) / (1 − 0.98)`: 99.5 % delivered
 is **Healthy**, 98.0–98.4 % is **Warning** and anything below 98 % is **Breaching**.
@@ -221,10 +229,12 @@ is **Healthy**, 98.0–98.4 % is **Warning** and anything below 98 % is **Breach
 **Test scenario.**
 
 - *Given* the tiles above and a day of normal traffic.
-- *When* you deploy a `shop-api` build that throws on SKU `TEST-500`, send 10 such checkouts, and open
+- *When* you deploy a `shop-api` build that throws on SKU `TEST-500`, send 10 such checkouts, wait for the
+  5-minute bucket they landed in to close (up to about 5.5 minutes, including the 30 s flush), and open
   **Metrics > Board** with **Since last deploy**.
 - *Then* "Checkout 5xx" is red (**Breaching**) with value 10, its sparkline shows a dashed deploy line, and
-  "Checkout success" shows the drop against 1 day earlier. The other tiles stay green. `GET
+  "Checkout success" shows the drop against 1 day earlier. Tile values stop at the last complete bucket, so
+  right after sending, the tile still reads the earlier value. The other tiles stay green. `GET
   /warp/api/metrics/board?from=<deploy>&to=<now>` returns the same states.
 - `Covered by:` `MetricBoardTestsBase`, `MetricBoardMathTests`, `MetricBoardValidationTests`; UI:
   `boardModel.test.ts`.
@@ -238,8 +248,9 @@ checkout tile without `application: "shop-api"` can fail a `shop-worker` release
 checkout records `outcome=error` although the order is fine. It predates the current release and is known. The
 team wants that written down next to the chart, and not to fail a deploy for it.
 
-**Wiring.** Add a note on the **Metrics** detail page or on a tile, or through the API. Mark it acknowledged
-noise so a Warning or Breaching tile on the same instrument reads **Acknowledged**:
+**Wiring.** Add a note in the **Notes** panel of the metric's detail page (or of an SLO's detail page),
+or through the API. Tiles have no add-note control; they only list the notes that apply. Mark the note
+acknowledged noise so a Warning or Breaching tile it covers reads **Acknowledged**:
 
 ```bash
 curl -fsS -H "Authorization: Bearer $WARP_OPS_TOKEN" -H "Content-Type: application/json" \
@@ -269,7 +280,8 @@ acknowledge it: a note about one slice cannot excuse a problem in the rest.
 - *When* you add the note above.
 - *Then* the tile reads **Acknowledged**, its value and sparkline do not change, the tooltip lists the note and
   names the rule's own verdict (`unacknowledgedStatus` in the API), and the sparkline shows a shaded band. The
-  verdict check for that tile reads `"acknowledged": true` and does not fail the deploy. The
+  verdict check for that tile reads `"acknowledged": true` and no longer fails the deploy. Other checks, such
+  as the "Checkout success" SLO, keep their own state. The
   `metric_annotation` row has your user name as `author`.
 - *When* you change the note's `tagFilter` to `outcome=error`.
 - *Then* the note is still listed on the tile, but the tile shows its real status again: the note covers only
