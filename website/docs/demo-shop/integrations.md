@@ -101,12 +101,12 @@ using (WarpAdapterCall.Group(order.Region))
 - **Given** `shop-worker` runs with the wiring above, and a ShipIt sandbox you control.
 - **When** you place orders in two regions and let them ship.
 - **Then** `/warp/adapters` lists `payfast` and `shipit` with a health pill, call count, error rate and
-  latency. `/warp/adapters/shipit` shows operations `CreateShipment` and `GetTracking`, and a **Region**
-  table with one row per region.
+  latency. `/warp/adapters/shipit` shows operations `CreateShipment` and `GetTracking` in the **Operations**
+  card, and a **Regions** card with one row per region.
 - **When** you make the sandbox return `503` for the EU region only and ship more EU and UK orders.
-- **Then** the EU row in the **Region** table shows its **Error %** in red while UK stays green. The
-  Region table has no per-operation split; to see which operations failed, filter the recent-calls list
-  or look at the **Operation** table. Click a failed call to open its call detail page
+- **Then** the EU row in the **Regions** card shows its **Error %** in red, while the UK row shows a
+  plain `0%`. The Regions card has no per-operation split; to see which operations failed, filter the
+  recent-calls list or look at the **Operations** card. Click a failed call to open its call detail page
   (`/warp/adapters/shipit/calls/{id}`): it shows status `503` and the captured response body. On a PayFast
   call's detail page there is never a body.
 - **When**, on a fresh test database, you register ShipIt with `limit: 5, perSeconds: 60`, run two
