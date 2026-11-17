@@ -229,9 +229,11 @@ is **Healthy**, 98.0–98.4 % is **Warning** and anything below 98 % is **Breach
 **Test scenario.**
 
 - *Given* the tiles above and a day of normal traffic.
-- *When* you deploy a `shop-api` build that throws on SKU `TEST-500`, send 10 such checkouts, wait for the
-  5-minute bucket they landed in to close (up to about 5.5 minutes, including the 30 s flush), and open
-  **Metrics > Board** with **Since last deploy**.
+- *When* you deploy a `shop-api` build that throws on SKU `TEST-500`, wait for the next 5-minute boundary
+  after the deploy, send 10 such checkouts, wait for the bucket they landed in to close (up to about 5.5
+  minutes, including the 30 s flush), and open **Metrics > Board** with **Since last deploy**. Sending them
+  after the boundary matters: the range starts at the deploy, so the bucket the deploy fell into is counted
+  only in proportion to the part of it after the deploy, and checkouts sent in it would read as fewer than 10.
 - *Then* "Checkout 5xx" is red (**Breaching**) with value 10, its sparkline shows a dashed deploy line, and
   "Checkout success" shows the drop against 1 day earlier. Tile values stop at the last complete bucket, so
   right after sending, the tile still reads the earlier value. The other tiles stay green. `GET
