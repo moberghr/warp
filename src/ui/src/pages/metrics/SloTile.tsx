@@ -5,7 +5,7 @@ import { Link } from 'react-router-dom';
 import { SloStatePill } from '@/pages/slo/shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import type { MetricBoardTileResult } from '@/types/metricBoard';
-import { tileStatusClass } from './boardModel';
+import { tileState, tileStatusClass } from './boardModel';
 import { sloTileView } from './sloTileModel';
 
 const formatInstant = (iso: string) => new Date(iso).toLocaleString(DASHBOARD_LOCALE);
@@ -41,7 +41,8 @@ export function SloTileCard({
   }
 
   return (
-    <div className={`rounded-lg border-2 bg-card p-3 ${view.enabled ? tileStatusClass(view.state) : 'border-border'}`} data-testid="slo-tile">
+    // tileState, not view.state: the API projects Healthy for an objective never evaluated, which must not read green.
+    <div className={`rounded-lg border-2 bg-card p-3 ${tileStatusClass(tileState(result))}`} data-testid="slo-tile">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <Link to={view.href} className="block truncate text-sm font-medium hover:underline" title={view.objectiveName}>
@@ -52,7 +53,13 @@ export function SloTileCard({
             {view.application && ` · @${view.application}`}
           </div>
         </div>
-        <SloStatePill state={view.state} enabled={view.enabled} />
+        {view.enabled && view.display === 'not-evaluated' ? (
+          <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+            Not evaluated
+          </span>
+        ) : (
+          <SloStatePill state={view.state} enabled={view.enabled} />
+        )}
       </div>
 
       {view.note ? (

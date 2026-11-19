@@ -100,6 +100,24 @@ describe('SloTileCard', () => {
     expect(screen.getByText('target 90.00%')).toBeTruthy();
   });
 
+  it('shows a never-evaluated objective as Not evaluated with a neutral border, never a green Healthy', () => {
+    // The API projects Healthy for an objective with no evaluation yet.
+    wrap(<SloTileCard result={result({ ...objective, evaluated: false, state: SloState.Healthy, lastEvaluatedAt: null })} onEdit={() => {}} onDelete={() => {}} />);
+
+    expect(screen.getByText('Not evaluated')).toBeTruthy();
+    expect(screen.queryByText('Healthy')).toBeNull();
+    expect(screen.queryByText('94.31%')).toBeNull();
+    const card = screen.getByTestId('slo-tile');
+    expect(card.className).toContain('border-border');
+    expect(card.className).not.toContain('border-green');
+  });
+
+  it('shows an evaluated healthy objective with a green border', () => {
+    wrap(<SloTileCard result={result(objective)} onEdit={() => {}} onDelete={() => {}} />);
+
+    expect(screen.getByTestId('slo-tile').className).toContain('border-green');
+  });
+
   it('shows a missing objective and removes the tile from it', () => {
     const onDelete = vi.fn();
     wrap(<SloTileCard result={result(null, true)} onEdit={() => {}} onDelete={onDelete} />);
