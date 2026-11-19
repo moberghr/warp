@@ -949,9 +949,14 @@ public static class WarpEndpoints
                 return Results.NotFound(new { error = "The metric board tile or its board no longer exists: it was deleted while you edited it." });
             }
 
-            return id is null
-                ? Results.BadRequest($"A metric board holds at most {Warp.Core.Metrics.MetricBoardValidation.MaxTiles} tiles.")
-                : Results.Ok(new { id });
+            if (id is not null)
+            {
+                return Results.Ok(new { id });
+            }
+
+            return Results.BadRequest(tile.Kind == MetricTileKind.Chart
+                ? $"A metric board holds at most {Warp.Core.Metrics.MetricBoardValidation.MaxTiles} tiles, of which at most {Warp.Core.Metrics.MetricBoardValidation.MaxChartTiles} charts."
+                : $"A metric board holds at most {Warp.Core.Metrics.MetricBoardValidation.MaxTiles} tiles.");
         });
 
         apiGroup.MapDelete("metrics/board/tiles/{id:int}", async ([FromServices] IMetricBoardCommandService svc, int id, CancellationToken ct) =>
@@ -1619,7 +1624,8 @@ public sealed record MetricBoardTileUpsertRequest(
     int? BaselineDays = null,
     double? MaxDeviation = null,
     MetricDeviationDirection? DeviationDirection = null,
-    int? BoardId = null)
+    int? BoardId = null,
+    string? ChartQuery = null)
 {
     public Warp.Core.Data.Entities.MetricBoardTile ToTile() => new()
     {
@@ -1628,6 +1634,7 @@ public sealed record MetricBoardTileUpsertRequest(
         Name = Name ?? string.Empty,
         Instrument = Instrument ?? string.Empty,
         Kind = Kind,
+        ChartQuery = ChartQuery,
         Position = Position,
         Application = Application,
         TagFilter = TagFilter,

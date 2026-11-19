@@ -38,6 +38,13 @@ public class MetricBoardTile
 
     public MetricTileKind Kind { get; set; } = MetricTileKind.Value;
 
+    /// <summary>
+    /// <see cref="MetricTileKind.Chart"/>: the metric page's controls as a URL query string without the range
+    /// (<c>breakdown=…&amp;filter=k:v&amp;compare=7d&amp;percentile=95</c>, ≤ 2000 characters, stored canonical). The board's
+    /// range drives the chart. Null for every other kind.
+    /// </summary>
+    public string? ChartQuery { get; set; }
+
     /// <summary><see cref="MetricTileKind.Ratio"/>: the tag whose value classifies an event as good or bad.</summary>
     public string? RatioTag { get; set; }
 

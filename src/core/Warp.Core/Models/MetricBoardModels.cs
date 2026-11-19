@@ -23,6 +23,9 @@ public sealed class MetricBoardTileModel
 
     public MetricTileKind Kind { get; init; }
 
+    /// <summary>A chart tile's stored metric-page controls (a URL query string without the range); null for other kinds.</summary>
+    public string? ChartQuery { get; init; }
+
     public string? RatioTag { get; init; }
 
     public string? GoodValues { get; init; }

@@ -17,6 +17,15 @@ public static class MetricBoardValidation
     /// <summary>The most tiles one board holds; the board read and the upsert endpoint both enforce it.</summary>
     public const int MaxTiles = 48;
 
+    /// <summary>
+    /// The most <see cref="MetricTileKind.Chart"/> tiles one board holds (within <see cref="MaxTiles"/>): each chart is its
+    /// own series request every refresh, while value and ratio tiles share one batched read.
+    /// </summary>
+    public const int MaxChartTiles = 12;
+
+    /// <summary>The longest chart tile query (<see cref="MetricBoardTile.ChartQuery"/>).</summary>
+    public const int MaxChartQueryLength = MetricChartQuery.MaxLength;
+
     /// <summary>The most boards a host holds, the Default board included.</summary>
     public const int MaxBoards = 100;
 
@@ -77,7 +86,8 @@ public static class MetricBoardValidation
     /// <summary>
     /// Whether a tile of <paramref name="tile"/> kind can read an instrument of registry kind
     /// <paramref name="instrument"/>: a ratio counts events, so it refuses a gauge (the <c>MetricRatio</c> rule); a value
-    /// tile reads anything (a gauge as its level, the event-counting kinds as their events).
+    /// tile reads anything (a gauge as its level, the event-counting kinds as their events), and so does a chart (the
+    /// metric page charts every kind).
     /// </summary>
     public static bool AcceptsInstrument(MetricTileKind tile, MetricKind instrument)
         => tile != MetricTileKind.Ratio || instrument != MetricKind.Gauge;
@@ -123,6 +133,13 @@ public static class MetricBoardValidation
             return false;
         }
 
+        // A chart carries its application and filters in ChartQuery (the metric page's grammar), never in these columns.
+        if (tile.Kind == MetricTileKind.Chart)
+        {
+            tile.Application = null;
+            tile.TagFilter = null;
+        }
+
         // No board, or a non-positive id, is the Default board.
         tile.BoardId = tile.BoardId > 0 ? tile.BoardId : null;
         tile.Application = string.IsNullOrWhiteSpace(tile.Application) ? null : tile.Application.Trim();
@@ -164,10 +181,17 @@ public static class MetricBoardValidation
     {
         if (!Enum.IsDefined(tile.Kind))
         {
-            error = $"Kind '{(int)tile.Kind}' is not valid: use Value (1) or Ratio (2).";
+            error = $"Kind '{(int)tile.Kind}' is not valid: use Value (1), Ratio (2) or Chart (3).";
 
             return false;
         }
+
+        if (tile.Kind == MetricTileKind.Chart)
+        {
+            return TryValidateChart(tile, out error);
+        }
+
+        tile.ChartQuery = null;
 
         if (instrumentKind is { } known && !AcceptsInstrument(tile.Kind, known))
         {
@@ -203,6 +227,24 @@ public static class MetricBoardValidation
         };
 
         error = null;
+
+        return true;
+    }
+
+    // A chart is the metric page's chart: every value/ratio column is cleared, and the query is checked and stored canonical.
+    private static bool TryValidateChart(MetricBoardTile tile, out string? error)
+    {
+        tile.RatioTag = null;
+        tile.GoodValues = null;
+        tile.BadValues = null;
+        tile.GaugeAggregate = null;
+
+        if (!MetricChartQuery.TryNormalize(tile.ChartQuery, out var normalized, out error))
+        {
+            return false;
+        }
+
+        tile.ChartQuery = normalized;
 
         return true;
     }
@@ -260,6 +302,15 @@ public static class MetricBoardValidation
     private static bool TryValidateRule(MetricBoardTile tile, out string? error)
     {
         error = null;
+
+        // A chart is a picture, not a check: it has no status, so it never counts in the deploy verdict.
+        if (tile.Kind == MetricTileKind.Chart && tile.StatusRule != MetricTileStatusRule.None)
+        {
+            error = "A chart tile has no status rule: use StatusRule None (1).";
+
+            return false;
+        }
+
         switch (tile.StatusRule)
         {
             case MetricTileStatusRule.None:

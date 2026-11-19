@@ -1331,6 +1331,7 @@ public static class ServiceConfiguration
         tile.Property(p => p.Application).HasMaxLength(200);
         tile.Property(p => p.TagFilter).HasMaxLength(512);
         tile.Property(p => p.Kind).HasConversion<int>();
+        tile.Property(p => p.ChartQuery).HasMaxLength(2000);
         tile.Property(p => p.RatioTag).HasMaxLength(64);
         tile.Property(p => p.GoodValues).HasMaxLength(512);
         tile.Property(p => p.BadValues).HasMaxLength(512);

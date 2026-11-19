@@ -158,7 +158,7 @@ public class MetricBoardValidationTests
     [InlineData("long filter", "TagFilter must be at most 512 characters.")]
     [InlineData("malformed filter", "TagFilter is invalid: Filter entry 'status' is missing '='.")]
     [InlineData("version filter", "TagFilter is invalid: the '{version}' key is reserved for the Metrics page")]
-    [InlineData("undefined kind", "Kind '9' is not valid: use Value (1) or Ratio (2).")]
+    [InlineData("undefined kind", "Kind '9' is not valid: use Value (1), Ratio (2) or Chart (3).")]
     [InlineData("ratio on gauge", "A ratio tile cannot use gauge instrument 'payments': gauges have no event count.")]
     [InlineData("undefined aggregate", "GaugeAggregate '9' is not valid: use Average (1), Min (2) or Max (3).")]
     [InlineData("missing ratio tag", "A ratio tile requires RatioTag (the tag whose value marks an event good or bad), at most 64 characters.")]

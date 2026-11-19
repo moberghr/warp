@@ -354,6 +354,28 @@ export function writeRangeParams(params: URLSearchParams, selection: RangeSelect
 // `compare=1d,7d`, `percentile`, `view=ratio`, `numerator`, `minmax=1`. Defaults are left out, and a value that does
 // not parse is ignored (the control reads its default), so a hand-edited or stale link never breaks the page.
 
+/**
+ * Every query key the metric detail page reads, in this order. A chart tile on a board stores these minus the range
+ * keys; the server mirrors the list (MetricChartQuery.MetricQueryKeys, kept equal by MetricChartQueryKeysSyncTests).
+ */
+export const metricQueryKeys = [
+  'range',
+  'from',
+  'to',
+  'application',
+  'breakdown',
+  'filter',
+  'compare',
+  'percentile',
+  'view',
+  'numerator',
+  'minmax',
+  'rate',
+] as const;
+
+/** The keys that pick the window (writeRangeParams). A chart tile never stores them: the board's range drives it. */
+export const METRIC_RANGE_KEYS = ['range', 'from', 'to'] as const;
+
 /** The keys writeControlParams owns beside the range's; `rate` is written on its own (rateParam) and kept as is. */
 const CONTROL_KEYS = ['application', 'breakdown', 'filter', 'compare', 'percentile', 'view', 'numerator', 'minmax'] as const;
 

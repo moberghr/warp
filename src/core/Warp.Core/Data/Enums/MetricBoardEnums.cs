@@ -14,6 +14,13 @@ public enum MetricTileKind
     /// <c>BadValues</c>, every other value ignored (the <c>MetricRatio</c> SLO rule). Counters and histograms only.
     /// </summary>
     Ratio = 2,
+
+    /// <summary>
+    /// The metric page's chart of the instrument, with the controls stored in <c>ChartQuery</c> (breakdown, filters,
+    /// compare, percentile, ratio view, rate) and the board's range. A picture, not a check: it has no status rule, so it
+    /// never counts in the deploy verdict, and the board read computes nothing for it (the dashboard reads the series).
+    /// </summary>
+    Chart = 3,
 }
 
 /// <summary>How a health-board tile picks its status colour. Values start at 1 (§8.11).</summary>

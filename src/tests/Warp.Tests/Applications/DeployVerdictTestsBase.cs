@@ -234,6 +234,32 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetVerdict_ChartTileBesideAThresholdTile_IsNotACheck()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 4));
+        var chart = new MetricBoardTile
+        {
+            Name = "Errors by version",
+            Instrument = "c",
+            Position = 2,
+            Kind = MetricTileKind.Chart,
+            ChartQuery = "breakdown=service.version",
+            StatusRule = MetricTileStatusRule.None,
+            CreatedAt = Now,
+            UpdatedAt = Now,
+        };
+        await SeedTilesAsync(Tile("Errors", threshold: 10), chart);
+
+        var verdict = await Service().GetVerdict(Query("api"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+        verdict.ChecksTotal.ShouldBe(1);
+        verdict.Checks.ShouldHaveSingleItem().Name.ShouldBe("Errors");
+    }
+
+    [TimedFact]
     public async Task GetVerdict_TileWithoutDataAndNoSlos_IsNoData()
     {
         await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));

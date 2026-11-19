@@ -200,8 +200,16 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
     private async Task<MetricBoardModel> EvaluateAsync(MetricBoardSummaryModel? board, List<MetricBoardTile> tiles, DateTime from, DateTime to, CancellationToken ct)
     {
         var tier = MetricSeriesMath.TierForLength(to - from);
-        var specs = tiles.ToDictionary(x => x.Id, x => MetricTileSpec.TryCreate(x, out var spec) ? spec : null);
+
+        // Chart tiles are pictures the dashboard draws from the series API: they get their registry kind and unit (one
+        // registry read for the board) and nothing else, never a place in the batched value read or the annotation read.
+        var evaluated = tiles.FindAll(x => x.Kind != MetricTileKind.Chart);
+        var specs = evaluated.ToDictionary(x => x.Id, x => MetricTileSpec.TryCreate(x, out var spec) ? spec : null);
         var names = tiles
+            .Select(x => x.Instrument)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var evaluatedNames = evaluated
             .Select(x => x.Instrument)
             .Distinct(StringComparer.Ordinal)
             .ToList();
@@ -222,16 +230,17 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
 
         // Annotations (#333): one more statement for the whole board, every instrument note overlapping the window,
         // matched to the tiles in memory (never a read per tile).
-        var (annotations, annotationsTruncated) = await ReadAnnotationsAsync(names, from, to, ct);
+        var (annotations, annotationsTruncated) = await ReadAnnotationsAsync(evaluatedNames, from, to, ct);
 
         // Two statements at most: instruments only read without tags (no filter, no ratio on any of their tiles) are
         // summed per bucket alone; the rest per bucket and tag set. An unregistered instrument is not read at all.
-        var tagged = tiles
+        var tagged = evaluated
             .Where(x => instruments.ContainsKey(x.Instrument))
             .Where(x => specs[x.Id]?.NeedsTags == true)
             .Select(x => x.Instrument)
             .ToHashSet(StringComparer.Ordinal);
-        var untagged = instruments.Keys
+        var untagged = evaluatedNames
+            .Where(instruments.ContainsKey)
             .Where(x => !tagged.Contains(x))
             .ToList();
         var rows = new List<MetricBoardRow>();
@@ -253,6 +262,18 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         foreach (var tile in tiles)
         {
             var known = instruments.TryGetValue(tile.Instrument, out var info);
+            if (tile.Kind == MetricTileKind.Chart)
+            {
+                results.Add(new MetricBoardTileResult
+                {
+                    Tile = Project(tile),
+                    InstrumentKind = known ? info.Kind : null,
+                    Unit = known ? info.Unit : null,
+                });
+
+                continue;
+            }
+
             var spec = specs[tile.Id];
             var applying = annotations.FindAll(x => MetricAnnotationMatch.AppliesTo(x, tile));
             var covering = applying.FindAll(x => MetricAnnotationMatch.Covers(x, tile));
@@ -326,6 +347,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         Application = x.Application,
         TagFilter = x.TagFilter,
         Kind = x.Kind,
+        ChartQuery = x.ChartQuery,
         RatioTag = x.RatioTag,
         GoodValues = x.GoodValues,
         BadValues = x.BadValues,

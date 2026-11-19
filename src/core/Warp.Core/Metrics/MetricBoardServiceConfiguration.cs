@@ -64,8 +64,9 @@ public sealed class MetricTileCheck
 }
 
 /// <summary>
-/// Tiles seeded from config via <c>opt.AddMetricBoard(b =&gt; b.Value(...).Ratio(...))</c> (#326), in board order. Seeding
-/// is insert-if-absent (matched on name, or on instrument + kind + application + filter + ratio tag + aggregate), so a
+/// Tiles seeded from config via <c>opt.AddMetricBoard(b =&gt; b.Value(...).Ratio(...).Chart(...))</c> (#326), in board
+/// order. Seeding is insert-if-absent (matched on name, or on instrument + kind + application + filter + ratio tag +
+/// aggregate + chart query), so a
 /// later dashboard edit is never clobbered on restart — the DB row wins. A tile deleted in the dashboard is seeded again
 /// on the next start while it stays in code.
 /// </summary>
@@ -124,6 +125,36 @@ public sealed class MetricBoardOptions
             },
             check);
 
+    /// <summary>
+    /// A chart tile: the metric page's chart of <paramref name="instrument"/> with these controls, over the board's range.
+    /// The parameters are the page's own (<paramref name="filter"/> in the <c>MetricFilter</c> grammar <c>k=v[,k=v]</c>,
+    /// trailing <c>*</c>; <paramref name="compare"/> <c>1d</c>, <c>7d</c> or <c>1d,7d</c>; <paramref name="percentile"/>
+    /// 1–99 on a histogram; a <paramref name="numerator"/> pattern turns on the ratio view of the breakdown;
+    /// <paramref name="minMax"/> draws a gauge's min / max lines; <paramref name="rate"/> <c>minute</c> or <c>second</c>),
+    /// stored as the page's URL query. A chart has no status rule. At most
+    /// <see cref="MetricBoardValidation.MaxChartTiles"/> per board.
+    /// </summary>
+    public MetricBoardOptions Chart(
+        string name,
+        string instrument,
+        string? application = null,
+        string? breakdown = null,
+        string? filter = null,
+        string? compare = null,
+        int? percentile = null,
+        string? numerator = null,
+        bool minMax = false,
+        string? rate = null)
+        => Add(
+            new MetricBoardTile
+            {
+                Name = name,
+                Instrument = instrument,
+                Kind = MetricTileKind.Chart,
+                ChartQuery = MetricChartQuery.Build(application, breakdown, filter, compare, percentile, numerator, minMax, rate),
+            },
+            null);
+
     // The seeder's field match: a tile whose name was edited in the dashboard is still found by what it reads.
     internal static bool SameFields(MetricBoardTile a, MetricBoardTile b)
         => string.Equals(a.Instrument, b.Instrument, StringComparison.Ordinal)
@@ -131,7 +162,8 @@ public sealed class MetricBoardOptions
             && string.Equals(a.Application, b.Application, StringComparison.Ordinal)
             && string.Equals(a.TagFilter, b.TagFilter, StringComparison.Ordinal)
             && string.Equals(a.RatioTag, b.RatioTag, StringComparison.Ordinal)
-            && a.GaugeAggregate == b.GaugeAggregate;
+            && a.GaugeAggregate == b.GaugeAggregate
+            && string.Equals(a.ChartQuery, b.ChartQuery, StringComparison.Ordinal);
 
     private MetricBoardOptions Add(MetricBoardTile tile, MetricTileCheck? check)
     {
@@ -151,7 +183,12 @@ public sealed class MetricBoardOptions
 
         if (Seeded.Exists(x => SameFields(x, tile)))
         {
-            throw new ArgumentException($"Metric board tile '{tile.Name}' reads the same instrument, kind, application, filter, ratio tag and aggregate as another tile.", nameof(tile));
+            throw new ArgumentException($"Metric board tile '{tile.Name}' reads the same instrument, kind, application, filter, ratio tag, aggregate and chart query as another tile.", nameof(tile));
+        }
+
+        if (tile.Kind == MetricTileKind.Chart && Seeded.Count(x => x.Kind == MetricTileKind.Chart) >= MetricBoardValidation.MaxChartTiles)
+        {
+            throw new ArgumentException($"A metric board holds at most {MetricBoardValidation.MaxChartTiles} chart tiles.", nameof(tile));
         }
 
         if (Seeded.Count >= MetricBoardValidation.MaxTiles)
@@ -367,6 +404,7 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
         {
             (nameof(MetricBoardTile.Instrument), string.Equals(stored.Instrument, seed.Instrument, StringComparison.Ordinal)),
             (nameof(MetricBoardTile.Kind), stored.Kind == seed.Kind),
+            (nameof(MetricBoardTile.ChartQuery), string.Equals(stored.ChartQuery, seed.ChartQuery, StringComparison.Ordinal)),
             (nameof(MetricBoardTile.Application), string.Equals(stored.Application, seed.Application, StringComparison.Ordinal)),
             (nameof(MetricBoardTile.TagFilter), string.Equals(stored.TagFilter, seed.TagFilter, StringComparison.Ordinal)),
             (nameof(MetricBoardTile.RatioTag), string.Equals(stored.RatioTag, seed.RatioTag, StringComparison.Ordinal)),
@@ -539,6 +577,13 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
                 continue;
             }
 
+            if (tile.Kind == MetricTileKind.Chart && stored.Count(x => x.Kind == MetricTileKind.Chart) >= MetricBoardValidation.MaxChartTiles)
+            {
+                _logger.LogError("Metric board tile '{Name}' was NOT seeded: board '{Board}' already holds {Max} chart tiles.", tile.Name, board, MetricBoardValidation.MaxChartTiles);
+
+                continue;
+            }
+
             tile.BoardId = boardId;
             tile.Position = ++position;
             tile.CreatedAt = now;
@@ -559,6 +604,7 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
         Application = x.Application,
         TagFilter = x.TagFilter,
         Kind = x.Kind,
+        ChartQuery = x.ChartQuery,
         RatioTag = x.RatioTag,
         GoodValues = x.GoodValues,
         BadValues = x.BadValues,

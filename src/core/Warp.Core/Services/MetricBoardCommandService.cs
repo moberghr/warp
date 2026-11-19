@@ -13,7 +13,9 @@ public interface IMetricBoardCommandService
 {
     /// <summary>
     /// Insert (Id &lt;= 0, the store assigns the key) or update a tile; returns its id, null when the tile's board already
-    /// holds <see cref="MetricBoardValidation.MaxTiles"/> tiles (an insert, or an edit that moves the tile there), or 0 when
+    /// holds <see cref="MetricBoardValidation.MaxTiles"/> tiles (an insert, or an edit that moves the tile there) or, for a
+    /// chart tile, <see cref="MetricBoardValidation.MaxChartTiles"/> charts (an insert, a move, or an edit that turns a
+    /// value or ratio tile into a chart), or 0 when
     /// Id &gt; 0 names no tile or <see cref="MetricBoardTile.BoardId"/> names no board (deleted meanwhile: an edit never
     /// re-creates either). On an insert a null board id, or the Default board's id, puts the tile on the Default board
     /// (stored as null). On an edit a null board id keeps the tile on its board; the Default board's id moves it there.
@@ -204,6 +206,17 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
             return null;
         }
 
+        // A chart arriving on the board (an insert, a move, or a value/ratio tile turned into a chart) must fit the chart
+        // cap too: each chart is its own series request every refresh.
+        var newChart = tile.Kind == MetricTileKind.Chart && (moving || existing!.Kind != MetricTileKind.Chart);
+        if (newChart && await context.Set<MetricBoardTile>()
+            .Where(x => x.BoardId == boardId)
+            .Where(x => x.Kind == MetricTileKind.Chart)
+            .CountAsync(ct) >= MetricBoardValidation.MaxChartTiles)
+        {
+            return null;
+        }
+
         if (existing is null)
         {
             if (tile.Position == 0)
@@ -231,6 +244,7 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
         existing.Application = tile.Application;
         existing.TagFilter = tile.TagFilter;
         existing.Kind = tile.Kind;
+        existing.ChartQuery = tile.ChartQuery;
         existing.RatioTag = tile.RatioTag;
         existing.GoodValues = tile.GoodValues;
         existing.BadValues = tile.BadValues;
