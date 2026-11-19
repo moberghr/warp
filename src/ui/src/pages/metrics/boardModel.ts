@@ -33,6 +33,11 @@ export function isChartTile(tile: Pick<MetricBoardTile, 'kind'>): boolean {
   return tile.kind === MetricTileKind.Chart;
 }
 
+/** An SLO tile: an objective's current evaluation, with no instrument and no status rule of its own. */
+export function isSloTile(tile: Pick<MetricBoardTile, 'kind'>): boolean {
+  return tile.kind === MetricTileKind.Slo;
+}
+
 function percent(fraction: number, digits = 2): string {
   return `${(fraction * 100).toFixed(digits)}%`;
 }
@@ -71,6 +76,10 @@ export function formatTileChange(tile: Pick<MetricBoardTile, 'kind'>, current: n
 /** What the tile reads, in one line: `payment.results · result: ok / declined,error · region=eu · @shop`. */
 export function describeTile(tile: MetricBoardTile): string {
   const parts = [tile.instrument];
+  if (isSloTile(tile)) {
+    return `SLO #${tile.sloDefinitionId ?? '?'}`;
+  }
+
   if (isChartTile(tile)) {
     const controls = describeChartQuery(tile.chartQuery);
 
@@ -155,17 +164,30 @@ export function sparklinePoints(result: Pick<MetricBoardTileResult, 'tile' | 'sp
     .sort((a, b) => a.x - b.x);
 }
 
+/**
+ * The state a tile contributes to the board header: its rule's status, or for an SLO tile its objective's state (an
+ * enabled, evaluated objective only; a missing or disabled one counts nothing).
+ */
+export function tileState(result: Pick<MetricBoardTileResult, 'tile' | 'status' | 'slo'>): SloState | null {
+  if (isSloTile(result.tile)) {
+    return result.slo && result.slo.enabled && result.slo.evaluated ? result.slo.state : null;
+  }
+
+  return result.status;
+}
+
 /** Counts per status for the board header: `{ breaching: 1, warning: 0, ... }`. */
 export function statusCounts(
-  results: MetricBoardTileResult[],
+  results: Pick<MetricBoardTileResult, 'tile' | 'status' | 'slo'>[],
 ): Record<'healthy' | 'warning' | 'breaching' | 'acknowledged' | 'noData', number> {
   const counts = { healthy: 0, warning: 0, breaching: 0, acknowledged: 0, noData: 0 };
   for (const r of results) {
-    if (r.status === SloState.Healthy) counts.healthy++;
-    else if (r.status === SloState.Warning) counts.warning++;
-    else if (r.status === SloState.Breaching) counts.breaching++;
-    else if (r.status === SloState.Acknowledged) counts.acknowledged++;
-    else if (r.status === SloState.NoData) counts.noData++;
+    const status = tileState(r);
+    if (status === SloState.Healthy) counts.healthy++;
+    else if (status === SloState.Warning) counts.warning++;
+    else if (status === SloState.Breaching) counts.breaching++;
+    else if (status === SloState.Acknowledged) counts.acknowledged++;
+    else if (status === SloState.NoData) counts.noData++;
   }
 
   return counts;
@@ -219,6 +241,7 @@ export const emptyTileDraft: MetricBoardTile = {
   tagFilter: null,
   kind: MetricTileKind.Value,
   chartQuery: null,
+  sloDefinitionId: null,
   ratioTag: null,
   goodValues: null,
   badValues: null,
@@ -241,10 +264,28 @@ export function acceptsTileInstrument(kind: MetricTileKind, instrument: MetricKi
  * has no status rule, so it drops the filter, application, ratio, aggregate and rule; the other kinds drop chartQuery.
  */
 export function changeTileKind(draft: MetricBoardTile, kind: MetricTileKind): MetricBoardTile {
+  // An SLO tile shows its objective: no instrument, no filter, no rule; the objective carries its own scope.
+  if (kind === MetricTileKind.Slo) {
+    return {
+      ...changeStatusRule(draft, MetricTileStatusRule.None),
+      kind,
+      instrument: '',
+      application: null,
+      tagFilter: null,
+      chartQuery: null,
+      ratioTag: null,
+      goodValues: null,
+      badValues: null,
+      gaugeAggregate: null,
+      sloDefinitionId: draft.sloDefinitionId ?? null,
+    };
+  }
+
   if (kind === MetricTileKind.Chart) {
     return {
       ...changeStatusRule(draft, MetricTileStatusRule.None),
       kind,
+      sloDefinitionId: null,
       application: null,
       tagFilter: null,
       ratioTag: null,
@@ -255,8 +296,8 @@ export function changeTileKind(draft: MetricBoardTile, kind: MetricTileKind): Me
   }
 
   return kind === MetricTileKind.Ratio
-    ? { ...draft, kind, chartQuery: null, gaugeAggregate: null, ratioTag: draft.ratioTag ?? '', goodValues: draft.goodValues ?? '', badValues: draft.badValues ?? '' }
-    : { ...draft, kind, chartQuery: null, ratioTag: null, goodValues: null, badValues: null };
+    ? { ...draft, kind, chartQuery: null, sloDefinitionId: null, gaugeAggregate: null, ratioTag: draft.ratioTag ?? '', goodValues: draft.goodValues ?? '', badValues: draft.badValues ?? '' }
+    : { ...draft, kind, chartQuery: null, sloDefinitionId: null, ratioTag: null, goodValues: null, badValues: null };
 }
 
 /** Switches the status rule with sensible defaults: at most 0 / ± 30 % (2 points on a ratio) against 7 days. */
@@ -286,6 +327,13 @@ function blank(value: string | null | undefined): boolean {
 export function validateTileDraft(draft: MetricBoardTile, instrumentKind: MetricKind | null): string | null {
   if (blank(draft.name)) {
     return 'Give the tile a name.';
+  }
+  if (isSloTile(draft)) {
+    if (draft.sloDefinitionId == null || draft.sloDefinitionId <= 0) {
+      return 'Pick the objective this tile shows.';
+    }
+
+    return draft.statusRule === MetricTileStatusRule.None ? null : "An SLO tile shows its objective's state; it has no status colour of its own.";
   }
   if (blank(draft.instrument)) {
     return 'Pick the instrument this tile reads.';
@@ -348,6 +396,10 @@ export function validateTileDraft(draft: MetricBoardTile, instrumentKind: Metric
 /** The request to send: text fields trimmed, empty ones nulled, fields of another kind or rule left out. */
 export function buildTileRequest(draft: MetricBoardTile): MetricBoardTile {
   const clean = (value: string | null | undefined) => (blank(value) ? null : value!.trim());
+  if (isSloTile(draft)) {
+    return { ...changeTileKind(draft, MetricTileKind.Slo), name: draft.name.trim() };
+  }
+
   if (isChartTile(draft)) {
     return {
       ...changeTileKind(draft, MetricTileKind.Chart),
@@ -366,6 +418,7 @@ export function buildTileRequest(draft: MetricBoardTile): MetricBoardTile {
     name: draft.name.trim(),
     instrument: draft.instrument.trim(),
     chartQuery: null,
+    sloDefinitionId: null,
     application: clean(draft.application),
     tagFilter: clean(draft.tagFilter),
     ratioTag: ratio ? clean(draft.ratioTag) : null,

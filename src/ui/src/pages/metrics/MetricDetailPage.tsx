@@ -271,7 +271,7 @@ export default function MetricDetailPage() {
         )}
         {instrument.description && <span>· {instrument.description}</span>}
         <span className="ml-auto">
-          <AddToBoardButton instrument={instrument.name} params={searchParams} />
+          <AddToBoardButton source={{ kind: 'chart', instrument: instrument.name, params: searchParams }} />
         </span>
       </div>
 

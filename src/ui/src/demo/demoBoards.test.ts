@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEMO_CHECKOUT_BOARD, DEMO_DEFAULT_BOARD, DEMO_PAYMENTS_BOARD, demoBoards, demoBoardTiles, demoMetricBoard } from './data/metricBoard';
 import { demoDeployVerdict } from './data/applications';
+import { demoSloDetail, demoSlos } from './data/slo';
 import { demoMetrics, demoMetricSeries } from './data/metrics';
 import { MetricTileKind } from '@/types/metricBoard';
 import { chartControls } from '@/pages/metrics/chartTileModel';
@@ -22,11 +23,16 @@ describe('demo named boards', () => {
     }
   });
 
-  it('points every tile at a demo instrument and a demo board', () => {
+  it('points every tile at a demo instrument (an SLO tile at a demo objective) and a demo board', () => {
     const instruments = new Set(demoMetrics.map((x) => x.name));
+    const objectives = new Set(demoSlos().items.map((x) => x.id));
     const ids = new Set(demoBoards.map((x) => x.id));
     for (const tile of demoBoardTiles) {
-      expect(instruments.has(tile.instrument)).toBe(true);
+      if (tile.kind === MetricTileKind.Slo) {
+        expect(objectives.has(tile.sloDefinitionId!)).toBe(true);
+      } else {
+        expect(instruments.has(tile.instrument)).toBe(true);
+      }
       expect(tile.boardId === null || ids.has(tile.boardId)).toBe(true);
     }
   });
@@ -64,7 +70,9 @@ describe('demo named boards', () => {
     expect(paymentTiles.length).toBeGreaterThan(0);
     expect(paymentTiles.every((x) => tileNames.has(x.name))).toBe(true);
     expect(every!.checks.filter((x) => x.source === 'tile').length).toBeGreaterThan(paymentTiles.length);
-    expect(payments!.checks.filter((x) => x.source === 'slo')).toEqual(every!.checks.filter((x) => x.source === 'slo'));
+    // With a board, only the objectives that have an SLO tile on it count; without one, every objective of the app.
+    expect(payments!.checks.filter((x) => x.source === 'slo').map((x) => x.name)).toEqual(['Payment success ratio ≥ 90%']);
+    expect(every!.checks.filter((x) => x.source === 'slo').length).toBeGreaterThan(1);
     expect(demoDeployVerdict('billing-service', undefined, undefined, 0, undefined, 'Nope')).toBeNull();
   });
 
@@ -95,5 +103,27 @@ describe('demo named boards', () => {
     const byGateway = demoMetricSeries('payment.results', buildSeriesQuery(chartControls(charts[0].chartQuery, { range: '6h', custom: null }).controls, null, now))!;
     expect(byGateway.series.filter((x) => x.compare === null).map((x) => x.name).sort()).toEqual(['adyen', 'checkout', 'nets']);
     expect(byGateway.series.some((x) => x.compare === '7d')).toBe(true);
+  });
+
+  it('puts one SLO tile on the Checkout and Payments boards, read with the objective state', () => {
+    const checkout = demoMetricBoard(from, to, now, DEMO_CHECKOUT_BOARD)!;
+    const payments = demoMetricBoard(from, to, now, DEMO_PAYMENTS_BOARD)!;
+
+    const checkoutSlo = checkout.tiles.filter((x) => x.tile.kind === MetricTileKind.Slo);
+    const paymentsSlo = payments.tiles.filter((x) => x.tile.kind === MetricTileKind.Slo);
+    expect(checkoutSlo.map((x) => x.slo?.name)).toEqual(['Checkout p95 ≤ 0.5 s']);
+    expect(paymentsSlo.map((x) => x.slo?.name)).toEqual(['Payment success ratio ≥ 90%']);
+    for (const result of [...checkoutSlo, ...paymentsSlo]) {
+      expect(result.missing).toBe(false);
+      expect(result.slo!.state).toBe(demoSloDetail(result.tile.sloDefinitionId!)!.state);
+      expect([result.current, result.status, result.sparkline.length]).toEqual([null, null, 0]);
+    }
+  });
+
+  it('counts no SLO in the verdict of a board without an SLO tile', () => {
+    const fallback = demoDeployVerdict('billing-service', undefined, undefined, 0, undefined, 'Default');
+
+    expect(fallback).not.toBeNull();
+    expect(fallback!.checks.filter((x) => x.source === 'slo')).toEqual([]);
   });
 });

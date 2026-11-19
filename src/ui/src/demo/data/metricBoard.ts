@@ -10,6 +10,7 @@ import type { MetricBoard, MetricBoardSparkPoint, MetricBoardSummary, MetricBoar
 import { SloComparison, SloGaugeAggregate, SloState } from '@/types/slo';
 import { demoNoteCoversTile, demoTileAnnotations } from './annotations';
 import { demoMetrics } from './metrics';
+import { demoSloDetail } from './slo';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -38,6 +39,7 @@ function tile(partial: Partial<MetricBoardTile> & Pick<MetricBoardTile, 'id' | '
     tagFilter: null,
     kind: MetricTileKind.Value,
     chartQuery: null,
+    sloDefinitionId: null,
     ratioTag: null,
     goodValues: null,
     badValues: null,
@@ -162,6 +164,10 @@ export const demoBoardTiles: MetricBoardTile[] = [
     kind: MetricTileKind.Chart,
     chartQuery: 'percentile=95',
   }),
+  // SLO tiles (spec 2026-11-19 batch 2): an objective's current evaluation from the demo SLOs (data/slo.ts). With a
+  // board, the verdict counts only these objectives (resolved question 1).
+  tile({ id: 13, boardId: DEMO_CHECKOUT_BOARD, position: 5, name: 'Checkout p95 ≤ 0.5 s', instrument: '', kind: MetricTileKind.Slo, sloDefinitionId: 8 }),
+  tile({ id: 14, boardId: DEMO_PAYMENTS_BOARD, position: 3, name: 'Payment success ratio', instrument: '', kind: MetricTileKind.Slo, sloDefinitionId: 4 }),
 ];
 
 const boardOf = (t: MetricBoardTile) => t.boardId ?? DEMO_DEFAULT_BOARD;
@@ -297,6 +303,26 @@ export function demoMetricBoard(fromIso: string | undefined, toIso: string | und
   const span = to - from;
   const complete = demoCompleteUntil(from, to, now);
   const tiles: MetricBoardTileResult[] = demoBoardTiles.filter((t) => summary === null || boardOf(t) === summary.id).map((t) => {
+    if (t.kind === MetricTileKind.Slo) {
+      // As on the server: the objective with its current evaluation, or missing when it no longer exists.
+      const objective = demoSloDetail(t.sloDefinitionId ?? 0) ?? null;
+
+      return {
+        tile: t,
+        instrumentKind: null,
+        unit: null,
+        current: null,
+        dayAgo: null,
+        weekAgo: null,
+        status: null,
+        unacknowledgedStatus: null,
+        annotations: [],
+        sparkline: [],
+        slo: objective,
+        missing: objective === null,
+      };
+    }
+
     if (t.kind === MetricTileKind.Chart) {
       // As on the server: a chart tile carries its instrument's kind and unit and nothing computed (the page reads the series).
       const instrument = demoMetrics.find((x) => x.name === t.instrument);

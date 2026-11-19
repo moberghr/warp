@@ -1,7 +1,7 @@
 // DTOs for the metrics health board (#326) — Warp.Core/Models/MetricBoardModels.cs, serialized camelCase.
 // Enums are numeric on the wire (§8.11, start at 1).
 import type { MetricKind, MetricTier } from './metrics';
-import type { SloComparison, SloGaugeAggregate, SloState } from './slo';
+import type { SloComparison, SloGaugeAggregate, SloObjective, SloState } from './slo';
 import type { MetricAnnotation } from './annotations';
 
 /** What a tile shows (MetricTileKind). */
@@ -10,6 +10,8 @@ export const MetricTileKind = {
   Ratio: 2,
   /** The metric page's chart with the stored controls (chartQuery) over the board's range; no status rule. */
   Chart: 3,
+  /** An SLO objective's current evaluation (sloDefinitionId); no status rule of its own, no instrument. */
+  Slo: 4,
 } as const;
 export type MetricTileKind = (typeof MetricTileKind)[keyof typeof MetricTileKind];
 
@@ -68,6 +70,8 @@ export interface MetricBoardTile {
    * stored canonical by the server. Null for every other kind (and for a chart with no controls).
    */
   chartQuery: string | null;
+  /** An SLO tile's objective (a soft reference); null for every other kind. Optional so older drafts still type. */
+  sloDefinitionId?: number | null;
   ratioTag: string | null;
   goodValues: string | null;
   badValues: string | null;
@@ -106,6 +110,10 @@ export interface MetricBoardTileResult {
   /** Instrument annotations that apply to the tile and overlap the window, newest first (#333). */
   annotations: MetricAnnotation[];
   sparkline: MetricBoardSparkPoint[];
+  /** An SLO tile's objective with its current evaluation (one objective read for the board); null otherwise or when missing. */
+  slo?: SloObjective | null;
+  /** True for an SLO tile whose objective no longer exists. */
+  missing?: boolean;
 }
 
 export interface MetricBoard {

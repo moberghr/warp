@@ -2,6 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getSlo, ackSlo, getAnnotations } from '@/api';
 import { AnnotationPanel } from '@/pages/metrics/AnnotationPanel';
+import { AddToBoardButton } from '@/pages/metrics/AddToBoardButton';
 import { SloKind, SloKindLabel, SloState, isMetricKind, type SloObjective } from '@/types/slo';
 import { SloStatePill } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
@@ -63,6 +64,7 @@ export default function SloDetailPage() {
           {isMetricKind(o.kind) && <MetricScope objective={o} />}
         </div>
         <div className="flex items-center gap-3">
+          <AddToBoardButton source={{ kind: 'slo', objective: o }} />
           <SloStatePill state={o.state} enabled={o.enabled} />
           {o.state === SloState.Breaching && (
             <button type="button" onClick={() => ackMutation.mutate()} className="px-3 py-1.5 rounded-lg bg-amber-500 text-white text-sm hover:bg-amber-600">

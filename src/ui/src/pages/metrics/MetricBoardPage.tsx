@@ -29,6 +29,8 @@ import { fractionToPercent, percentToFraction } from '@/pages/slo/sloForm';
 import { MetricsTabs } from './MetricsTabs';
 import { ChartTileCard } from './ChartTile';
 import { ChartTileEditor } from './ChartTileEditor';
+import { SloTileCard } from './SloTile';
+import { objectiveOptions } from './sloTileModel';
 import { MAX_CHART_TILES, chartTileIds } from './chartTileModel';
 import {
   RANGES,
@@ -55,6 +57,7 @@ import {
   describeTile,
   emptyTileDraft,
   isChartTile,
+  isSloTile,
   formatTileChange,
   formatTileValue,
   sparklinePoints,
@@ -314,7 +317,14 @@ export default function MetricBoardPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {tiles.map((result) => (isChartTile(result.tile) ? (
+          {tiles.map((result) => (isSloTile(result.tile) ? (
+            <SloTileCard
+              key={result.tile.id}
+              result={result}
+              onEdit={() => openDraft({ ...result.tile })}
+              onDelete={() => setPendingDelete(result.tile)}
+            />
+          ) : isChartTile(result.tile) ? (
             <ChartTileCard
               key={result.tile.id}
               result={result}
@@ -701,6 +711,9 @@ function TileForm({
   const instrumentKind = picked?.kind ?? null;
   const ratio = draft.kind === MetricTileKind.Ratio;
   const chart = isChartTile(draft);
+  const slo = isSloTile(draft);
+  const objectivesQuery = useQuery({ queryKey: ['slo'] as const, queryFn: api.getSlos, enabled: slo });
+  const objectives = objectiveOptions(objectivesQuery.data?.items ?? []);
   const clientError = validateTileDraft(draft, instrumentKind);
   // A new chart, or a tile turned into one, needs room under the chart cap (the server enforces it; this says why early).
   const chartsFull = chart && chartIds.length >= MAX_CHART_TILES && !chartIds.includes(draft.id);
@@ -729,22 +742,46 @@ function TileForm({
               <option value={MetricTileKind.Value}>Value (events, or a gauge's level)</option>
               <option value={MetricTileKind.Ratio}>Ratio (good ÷ good + bad)</option>
               <option value={MetricTileKind.Chart}>Chart (the metric page's chart over the board's range)</option>
+              <option value={MetricTileKind.Slo}>SLO (an objective's state, budget and burn)</option>
             </select>
           </Field>
-          <Field label="Instrument">
-            <select
-              className={`${inputClass} font-mono`}
-              value={draft.instrument}
-              onChange={(e) => {
-                const next = (metrics ?? []).find((x) => x.name === e.target.value);
-                set({ instrument: e.target.value, gaugeAggregate: ratio ? null : defaultAggregate(next?.kind ?? null) });
-              }}
-            >
-              <option value="">Select an instrument…</option>
-              {draft.instrument !== '' && !instruments.some((x) => x.name === draft.instrument) && <option value={draft.instrument}>{draft.instrument}</option>}
-              {instruments.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
-            </select>
-          </Field>
+          {slo && (
+            <Field label="Objective">
+              <select
+                className={inputClass}
+                aria-label="Objective"
+                value={draft.sloDefinitionId ?? ''}
+                onChange={(e) => {
+                  const id = e.target.value === '' ? null : Number(e.target.value);
+                  const picked = objectivesQuery.data?.items.find((x) => x.id === id);
+                  // A new tile takes the objective's name until the operator types one.
+                  set({ sloDefinitionId: id, name: draft.name.trim() === '' && picked ? picked.name : draft.name });
+                }}
+              >
+                <option value="">{objectivesQuery.isError ? 'Unable to load the objectives' : 'Select an objective…'}</option>
+                {draft.sloDefinitionId != null && !objectives.some((x) => x.id === draft.sloDefinitionId) && (
+                  <option value={draft.sloDefinitionId}>Objective #{draft.sloDefinitionId} (deleted)</option>
+                )}
+                {objectives.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+              </select>
+            </Field>
+          )}
+          {!slo && (
+            <Field label="Instrument">
+              <select
+                className={`${inputClass} font-mono`}
+                value={draft.instrument}
+                onChange={(e) => {
+                  const next = (metrics ?? []).find((x) => x.name === e.target.value);
+                  set({ instrument: e.target.value, gaugeAggregate: ratio ? null : defaultAggregate(next?.kind ?? null) });
+                }}
+              >
+                <option value="">Select an instrument…</option>
+                {draft.instrument !== '' && !instruments.some((x) => x.name === draft.instrument) && <option value={draft.instrument}>{draft.instrument}</option>}
+                {instruments.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
+              </select>
+            </Field>
+          )}
           {chart && (
             <ChartTileEditor
               instrument={picked}
@@ -755,7 +792,7 @@ function TileForm({
               deploys={deploys}
             />
           )}
-          {!chart && !ratio && instrumentKind === MetricKind.Gauge && (
+          {!chart && !slo && !ratio && instrumentKind === MetricKind.Gauge && (
             <Field label="Gauge value over the window">
               <select className={inputClass} value={draft.gaugeAggregate ?? SloGaugeAggregate.Average} onChange={(e) => set({ gaugeAggregate: Number(e.target.value) as SloGaugeAggregate })}>
                 <option value={SloGaugeAggregate.Average}>Average (every sample, never summed)</option>
@@ -777,7 +814,7 @@ function TileForm({
               </Field>
             </>
           )}
-          {!chart && (
+          {!chart && !slo && (
             <>
               <Field label="Tag filter (k=v,k=v; trailing * allowed)">
                 <input className={`${inputClass} font-mono`} placeholder="http.response.status_code=5*" value={draft.tagFilter ?? ''} onChange={(e) => set({ tagFilter: e.target.value })} />

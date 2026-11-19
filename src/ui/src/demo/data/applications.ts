@@ -12,10 +12,10 @@ import { FROZEN_NOW } from '@/lib/demoMode';
 import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { IDS } from '@/demo/data';
 import { ApplicationInstanceEventType } from '@/types/applications';
-import { MetricDeviationDirection, MetricTileStatusRule, type MetricBoardTileResult } from '@/types/metricBoard';
+import { MetricDeviationDirection, MetricTileKind, MetricTileStatusRule, type MetricBoardTileResult } from '@/types/metricBoard';
 import { SloComparison, SloState, type SloObjective } from '@/types/slo';
 import { checkTarget, checkThreshold, formatBudget, formatObserved, formatTarget } from '@/pages/slo/sloDisplay';
-import { demoBoards, demoMetricBoard } from './metricBoard';
+import { DEMO_DEFAULT_BOARD, demoBoardTiles, demoBoards, demoMetricBoard } from './metricBoard';
 import { demoSlos } from './slo';
 import type {
   ApplicationDeployModel,
@@ -293,7 +293,8 @@ export function filterDemoDeploys(application?: string, from?: string, to?: stri
 
 // ============================================================
 // Post-deploy verdicts (GET /applications/verdict), built the way the server builds them: the demo board's tiles with a
-// status rule evaluated over the deploy's window, plus the enabled demo SLOs scoped to the application (or to none), so
+// status rule evaluated over the deploy's window, plus the enabled demo SLOs scoped to the application (or to none) —
+// with a board, only the objectives that have an SLO tile on it — so
 // every check names a tile or objective that exists on the Board and SLOs pages. Each demo application has SLOs of its
 // own, so their verdicts differ. A superseded deploy is judged over its own lifetime and without SLOs (their current
 // state describes the newer release).
@@ -534,9 +535,14 @@ export function demoDeployVerdict(
       .map(tileCheck)
       .filter((x): x is DeployVerdictCheck => x !== null)
     : [];
+  // Like the server: with a board, only the objectives that have an SLO tile on it (a board without one counts none).
+  const shown = named
+    ? new Set(demoBoardTiles.filter((x) => x.kind === MetricTileKind.Slo && (x.boardId ?? DEMO_DEFAULT_BOARD) === named.id).map((x) => x.sloDefinitionId))
+    : null;
   const slos = next
     ? []
     : demoSlos().items
+      .filter((x) => shown === null || shown.has(x.id))
       .filter((x) => x.enabled && appliesTo(x.application, name))
       .sort((a, b) => a.name.localeCompare(b.name, 'en'))
       .map((x) => sloCheck(x, from));

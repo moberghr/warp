@@ -1,5 +1,6 @@
-// "Add to board" on the metric detail page (spec 2026-11-19 batch 1): saves the chart as it is set up now (the URL's
-// controls, the range left out) as a chart tile on a picked board, under a name that defaults to the instrument's.
+// "Add to board" (spec 2026-11-19): on the metric detail page it saves the chart as it is set up now (the URL's controls,
+// the range left out) as a chart tile, named after the instrument by default (batch 1); on the SLO detail page it saves
+// an SLO tile showing the objective, named after it by default (batch 2). Either goes on a picked board.
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -9,11 +10,12 @@ import { inputClass } from '@/pages/slo/shared';
 import type { MetricBoardSummary } from '@/types/metricBoard';
 import { MAX_TILES } from './boardModel';
 import { writeBoardParam } from './boardsModel';
-import { addToBoardError, boardTileCounts, chartTileFromPage } from './chartTileModel';
+import { addToBoardError, boardTileCounts } from './chartTileModel';
+import { addToBoardName, addToBoardTile, type AddToBoardSource } from './sloTileModel';
 
 const buttonClass = 'h-8 rounded-md border border-border px-3 text-sm text-muted-foreground hover:bg-muted';
 
-export function AddToBoardButton({ instrument, params }: { instrument: string; params: URLSearchParams }) {
+export function AddToBoardButton({ source }: { source: AddToBoardSource }) {
   const [open, setOpen] = useState(false);
   const [added, setAdded] = useState<MetricBoardSummary | null>(null);
 
@@ -25,8 +27,7 @@ export function AddToBoardButton({ instrument, params }: { instrument: string; p
       </span>
       {open && (
         <AddToBoardDialog
-          instrument={instrument}
-          params={params}
+          source={source}
           onCancel={() => setOpen(false)}
           onAdded={(board) => {
             setOpen(false);
@@ -50,13 +51,11 @@ function AddedLink({ board }: { board: MetricBoardSummary }) {
 }
 
 function AddToBoardDialog({
-  instrument,
-  params,
+  source,
   onCancel,
   onAdded,
 }: {
-  instrument: string;
-  params: URLSearchParams;
+  source: AddToBoardSource;
   onCancel: () => void;
   onAdded: (board: MetricBoardSummary) => void;
 }) {
@@ -64,7 +63,7 @@ function AddToBoardDialog({
   const boardsQuery = useQuery({ queryKey: ['metrics', 'boards'] as const, queryFn: api.getMetricBoards });
   const tilesQuery = useQuery({ queryKey: ['metrics', 'board', 'tiles'] as const, queryFn: api.getMetricBoardTiles });
   const boards = useMemo(() => boardsQuery.data ?? [], [boardsQuery.data]);
-  const [name, setName] = useState(instrument);
+  const [name, setName] = useState(() => addToBoardName(source));
   const [picked, setPicked] = useState<number | null>(null);
   const board = boards.find((x) => x.id === picked) ?? boards.find((x) => x.isDefault) ?? boards[0];
   const counts = useMemo(
@@ -72,10 +71,10 @@ function AddToBoardDialog({
     [tilesQuery.data, boards],
   );
   const boardCounts = board && counts ? (counts.get(board.id) ?? { tileCount: 0, chartCount: 0 }) : null;
-  const clientError = board ? addToBoardError(name, boardCounts, MAX_TILES) : 'Loading the boards…';
+  const clientError = board ? addToBoardError(name, boardCounts, MAX_TILES, source.kind === 'chart') : 'Loading the boards…';
 
   const save = useMutation({
-    mutationFn: () => api.upsertMetricBoardTile(chartTileFromPage(instrument, name, params, board!.id)),
+    mutationFn: () => api.upsertMetricBoardTile(addToBoardTile(source, name, board!.id)),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['metrics', 'board'] });
       void queryClient.invalidateQueries({ queryKey: ['metrics', 'boards'] });
@@ -88,7 +87,9 @@ function AddToBoardDialog({
       <div role="dialog" aria-label="Add to board" className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
         <h2 className="mb-1 text-lg font-semibold">Add to board</h2>
         <p className="mb-4 text-xs text-muted-foreground">
-          The chart as it is set up now (breakdown, filters, compare, percentile, view). The board&apos;s range drives it.
+          {source.kind === 'chart'
+            ? 'The chart as it is set up now (breakdown, filters, compare, percentile, view). The board’s range drives it.'
+            : 'The objective’s current state, attainment, error budget and burn rates, linking back here.'}
         </p>
         <div className="space-y-3 text-sm">
           <label className="block">

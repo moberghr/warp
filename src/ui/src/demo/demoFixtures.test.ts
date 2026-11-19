@@ -187,12 +187,12 @@ describe('demo metrics board fixtures', () => {
     return response.data as T;
   };
 
-  it('every tile reads an instrument of the demo registry', async () => {
+  it('every tile reads an instrument of the demo registry (an SLO tile reads an objective instead)', async () => {
     const tiles = await call<MetricBoardTile[]>('get', '/metrics/board/tiles');
     const names = new Set(demoMetrics.map((x) => x.name));
 
     expect(tiles.length).toBeGreaterThan(0);
-    expect(tiles.filter((x) => !names.has(x.instrument))).toEqual([]);
+    expect(tiles.filter((x) => x.kind !== MetricTileKind.Slo && !names.has(x.instrument))).toEqual([]);
   });
 
   it('evaluates every tile over the requested window, with a coloured tile and a sparkline inside it', async () => {

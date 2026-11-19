@@ -134,6 +134,7 @@ export function chartTileFromPage(instrument: string, name: string, params: URLS
     tagFilter: null,
     kind: MetricTileKind.Chart,
     chartQuery: chartQueryFromParams(params),
+    sloDefinitionId: null,
     ratioTag: null,
     goodValues: null,
     badValues: null,
@@ -149,9 +150,10 @@ export function chartTileFromPage(instrument: string, name: string, params: URLS
 
 /**
  * Which tile the "Add to board" form can save, or why not: a name, and room for one more chart (and one more tile) on
- * the board. `board` is the picked board's tile and chart counts, when known.
+ * the board. `board` is the picked board's tile and chart counts, when known. `chart` false (an SLO tile) skips the
+ * chart cap.
  */
-export function addToBoardError(name: string, board: { tileCount: number; chartCount: number } | null, maxTiles: number): string | null {
+export function addToBoardError(name: string, board: { tileCount: number; chartCount: number } | null, maxTiles: number, chart = true): string | null {
   if (name.trim() === '') {
     return 'Give the tile a name.';
   }
@@ -164,7 +166,7 @@ export function addToBoardError(name: string, board: { tileCount: number; chartC
     return `That board already holds ${maxTiles} tiles.`;
   }
 
-  if (board !== null && board.chartCount >= MAX_CHART_TILES) {
+  if (chart && board !== null && board.chartCount >= MAX_CHART_TILES) {
     return `That board already holds ${MAX_CHART_TILES} charts.`;
   }
 
