@@ -287,6 +287,8 @@ Seeding is **insert-if-absent**, as for [SLO objectives](./slo-error-budget.md).
 | **Value** | Matching events: the sum for a counter or up-down counter, the measurement count for a histogram. On a gauge, the average (sample-weighted across processes and series, never a total), min or max of every sample. | Any |
 | **Ratio** | Good events ÷ (good + bad) on one tag, with other values ignored: the `MetricRatio` SLO rule. | Counters, up-down counters, histograms (a gauge has no event count) |
 
+Two more kinds show a chart or an objective instead of one number: [chart and SLO tiles](#chart-and-slo-tiles). They have no status rule of their own, and the rules and the batched read below apply to value and ratio tiles only.
+
 **Status rules.** Status uses the SLO maths (`SloMath`) and the SLO states:
 
 - **None**: the tile shows its numbers only.
@@ -295,17 +297,17 @@ Seeding is **insert-if-absent**, as for [SLO objectives](./slo-error-budget.md).
 
 A tile reads **No data** when its value (or the chosen baseline) is empty. That covers: no row of the instrument in the window, a gauge with no sample, a ratio with no good or bad event, a value baseline of zero or less, and an instrument that is not in the registry or whose kind the tile cannot read. A counter with traffic but no matching event reads 0, so "5xx ≤ 0" works.
 
-**How it is read.** The whole board is one batched, tier-bounded read of `metric_point`. One statement covers the current, 1d and 7d windows of every tile's instrument (two at most, grouped with and without tags), plus the registry rows. Each window reads every tier that overlaps it. A stored bucket that only partly overlaps a window counts in proportion to the overlap, exactly as the SLO evaluator reads a window, so a "since last deploy" window that starts mid-hour compares fairly with an hourly baseline. The sparkline follows the series resolution rules (up to 6 hours fine, up to 7 days hourly, longer daily). A board holds at most 48 tiles.
+**How it is read.** The whole board is one batched, tier-bounded read of `metric_point`. One statement covers the current, 1d and 7d windows of every tile's instrument (two at most, grouped with and without tags), plus the registry rows. Each window reads every tier that overlaps it. A stored bucket that only partly overlaps a window counts in proportion to the overlap, exactly as the SLO evaluator reads a window, so a "since last deploy" window that starts mid-hour compares fairly with an hourly baseline. The sparkline follows the series resolution rules (up to 6 hours fine, up to 7 days hourly, longer daily). A board holds at most 48 tiles, of which at most 12 are [chart tiles](#chart-and-slo-tiles).
 
 **The still-filling bucket is left out of the values.** The newest fine bucket is still being written (each process flushes once per `MetricFlushInterval`), while the 1d and 7d baselines are complete. Comparing them as they are reads every deviation tile as a drop near the end of a live window. So the board applies the [series rule](#reading-metrics) to its values: the current window **and** both shifted baselines stop at `completeUntil`, the start of the fine bucket that holds `now − MetricFlushInterval` (with the default 30 s interval at 12:00:10, that is 11:55). The three values then compare complete data with complete data. `completeUntil` is in the response; it equals `to` for a range that ended earlier, and equals `from` when nothing in the range is complete yet, in which case the tiles read No data. The sparklines still draw the filling bucket. Thresholds see the same cut, so the last few minutes of events count once their bucket is complete.
 
-**Post-deploy verdict.** The board also answers the question for a machine. `GET {prefix}/api/applications/verdict?application=<name>` evaluates the tiles scoped to that application (or to none) over the window since its latest deploy, adds its SLOs, and returns `pass`, `warn`, `fail`, `pending` or `noData` with one check per tile and SLO. A CI step can call it after a rollout; see [Post-deploy verdict](./applications.md#post-deploy-verdict). The application detail page shows the same verdict next to its deploys.
+**Post-deploy verdict.** The board also answers the question for a machine. `GET {prefix}/api/applications/verdict?application=<name>` evaluates the tiles scoped to that application (or to none) over the window since its latest deploy, adds its SLOs (with `board=<name>`, only the ones that have an [SLO tile](#chart-and-slo-tiles) on that board), and returns `pass`, `warn`, `fail`, `pending` or `noData` with one check per tile and SLO. A CI step can call it after a rollout; see [Post-deploy verdict](./applications.md#post-deploy-verdict). The application detail page shows the same verdict next to its deploys.
 
 **API.** `GET {prefix}/api/metrics/board?from=&to=[&board={id}]` takes ISO instants at most 90 days apart and an optional board id (without it, the [Default board](#named-boards)); bad input is a 400 and an unknown board a 404. `GET {prefix}/api/metrics/board/tiles` lists the tiles of every board. `POST {prefix}/api/metrics/board/tiles` inserts (`id: 0`) or updates a tile, validated against the instrument registry, and answers a 400 with the reason on failure; its optional `boardId` puts a new tile on a board (null or the Default board's id is the Default board). On an edit, `boardId` moves the tile to that board (send the Default board's id to move it to Default), and leaving it out keeps the tile on its board. `DELETE {prefix}/api/metrics/board/tiles/{id}` removes one. These routes carry the dashboard's authorization like every other route.
 
 ### Named boards
 
-One board for every team gets crowded. Tiles can be grouped on **named boards**: a Checkout board for the shop team, a Payments board for the payments team. Boards are always shared, and each holds at most 48 tiles; a host holds at most 100 boards.
+One board for every team gets crowded. Tiles can be grouped on **named boards**: a Checkout board for the shop team, a Payments board for the payments team. Boards are always shared, and each holds at most 48 tiles, at most 12 of them charts; a host holds at most 100 boards.
 
 The **Default** board always exists. It is created once, the first time anything uses the boards (the board list, a new board, or the seeder), under the same `warp:metric-board` lock, so ten replicas create one. Every tile with no board belongs to it, which is how the tiles stored before named boards existed show up there with no data migration. The Default board can be renamed but never deleted (a 400).
 
@@ -331,7 +333,51 @@ Seeding stays insert-if-absent. A board created by a seed remembers the name the
 
 **API.** `GET {prefix}/api/metrics/boards` lists the boards in picker order with their tile counts (`id`, `name`, `description`, `position`, `application`, `isDefault`, `tileCount`, `createdBy`). `POST {prefix}/api/metrics/boards` creates (`id: 0`) or renames a board (`name`, `description`, `position`, `application`, which is only the scope the picker suggests and never filters tiles); a blank or duplicate name is a 400, editing a deleted board a 404. `DELETE {prefix}/api/metrics/boards/{id}` deletes a board and its tiles in one `SaveChanges` (204; 400 for the Default board; 404 when it does not exist). Every `{ "error": ... }` body is for people. The creator is the signed-in dashboard user, and every create, rename and delete is logged at Information with that name.
 
-The [post-deploy verdict](./applications.md#post-deploy-verdict) counts the tiles of every board unless you pass `board=<name>`. As in the seeder, the name `Default` means the Default board even after a rename, unless another board is now called `Default`.
+The [post-deploy verdict](./applications.md#post-deploy-verdict) counts the tiles of every board and every SLO of the application unless you pass `board=<name>`. With a board, it counts that board's tiles and only the SLOs that have an [SLO tile](#chart-and-slo-tiles) on it. As in the seeder, the name `Default` means the Default board even after a rename, unless another board is now called `Default`.
+
+### Chart and SLO tiles
+
+A value or ratio tile is one number with a status. Two more kinds put the chart a team built on the metric page, and its objectives, on the same board:
+
+| Kind | Shows | Status |
+|---|---|---|
+| **Chart** | The metric page's chart of one instrument with that page's controls: breakdown, filters, the 1d and 7d overlays, the percentile, the ratio view, min and max lines and the rate toggle. It is two grid columns wide on a desktop and has no legend or controls of its own. Its title opens the metric page with the tile's controls and the board's range. | None. A chart is a picture, not a check, so it never counts in the verdict. |
+| **SLO** | One [objective](./slo-error-budget.md): its state (including Acknowledged and No data), attainment against target, error budget left, fast and slow burn, and when it was last evaluated. It links to the SLO page. | The objective's own state. The tile adds no rule. |
+
+**Add to board.** The metric detail page and the SLO detail page each have an **Add to board** button. Pick a board and a tile name (the instrument's name or the objective's name by default). On the metric page it saves the chart as it is set up at that moment. The tile editor on the board can also create and edit both kinds: a chart has the metric page's controls and a live preview, and an SLO tile has an objective picker.
+
+**What a chart tile stores.** The metric page's controls **without the range**, as the page writes them in its URL: `application`, `breakdown`, `filter`, `compare`, `percentile`, `view`, `numerator`, `minmax` and `rate`, in the `chart_query` column (at most 2000 characters). The range is not stored because the board's range drives every tile, so one range picker moves the whole board. The query is checked against the keys the page reads: an unknown or repeated key, a range key (`range`, `from`, `to`), a value the page would not read or a filter that does not parse is a 400. It is stored in one order with defaults left out, so the same controls always store the same string. A chart's application and filters live only in its query. Its `application` and `tagFilter` columns stay empty, and so do the status-rule columns.
+
+**Lazy loading.** A chart is not part of the board's batched read: the board read returns it with its query, the instrument's kind and unit, and nothing computed. The page then asks the series API (`GET {prefix}/api/metrics/{id}/series`) for each chart with the board's range and the tile's controls, only once the tile scrolls into view, and refetches it on the metric page's cadence (a range that already ended is not refetched). Value and ratio tiles share one read, but each chart is its own request on every refresh. That is why a board holds at most **12** chart tiles within its 48. The cap is checked under the `warp:metric-board` lock on an insert, a move to another board, and an edit that turns a tile into a chart; a write over it is a 400.
+
+**What an SLO tile stores.** Only the objective's id, in the `slo_definition_id` column (a soft reference with no foreign key, like an annotation's). The objective carries its own application and filters, so the tile's other columns stay empty, and an id that names no objective is a 400 (`The objective was not found`). The board read joins all SLO tiles of the board to **one** read of the objectives, whatever their number, and reads no objective at all when the board has no SLO tile. **Deleting an objective deletes its tiles** in the same transaction, together with its notes. A tile whose objective is gone anyway (deleted by an older binary during a rolling deploy) reads `missing: true`; the board says so and offers to remove it. The board header counts the SLO tiles by their objective's state.
+
+**From code.** `Chart(...)` takes the metric page's controls as typed parameters and builds the stored query itself, so a seeded query is always one the page can read: `filter` in the `k=v[,k=v]` grammar of the other tiles, `compare` as `1d`, `7d` or `1d,7d`, `percentile` from 1 to 99, a `numerator` for the ratio view of the breakdown, `minMax` for a gauge's min and max lines, and `rate` as `minute` or `second`. `Slo(name, application, label)` names an objective by its name (ignoring case) and its application (exactly; leave it out for an objective with no application). `label` is the tile's name, the objective's name by default. Tile names are unique per board, so a ratio tile and an SLO tile both called "Checkout success" need a label on one of them:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.AddSlo(o => o.AddMetricRatio(
+        "Checkout success", "shop.checkout.completed",
+        ratioTag: "outcome", goodValues: "ok", badValues: "error,declined",
+        target: 0.995, application: "shop-api"));
+
+    opt.AddMetricBoard("Checkout", b => b
+        .Ratio("Checkout success", "shop.checkout.completed", "outcome", "ok", "error,declined",
+            application: "shop-api", check: MetricTileCheck.AtLeast(0.98))
+        .Chart("Checkout errors by version", "shop.checkout.completed",
+            application: "shop-api", breakdown: "{version}", filter: "outcome=error", compare: "7d")
+        .Chart("Checkout latency p95", "http.server.request.duration",
+            application: "shop-api", filter: "http.route=api/checkout*", percentile: 95)
+        .Slo("Checkout success", application: "shop-api", label: "Checkout success SLO"));
+});
+```
+
+The first chart stores `application=shop-api&breakdown=%7Bversion%7D&filter=outcome%3Aerror&compare=7d`, the query the metric page writes for the same view. A `{version}` breakdown needs [`ByVersion()`](#comparing-versions).
+
+Seeding stays insert-if-absent. A seeded chart matches a stored tile on the same board by name, or by instrument and query; a seeded SLO tile by name, or by objective. The objective is looked up when the board is seeded: no match, or more than one, logs at **Error** and skips the tile, and the next start tries again. So the objective must be stored before the board seeder runs. `AddSlo` puts its seeder ahead of the board seeder whatever order you call them in, and the .NET host starts hosted services one after the other by default, so an objective seeded by the same process is there in time. A host that sets `HostOptions.ServicesStartConcurrently = true`, or that seeds the objective from another process, can skip the tile on its first start and seed it on a later one. A 13th chart in one board's code throws at registration. A chart the seeder finds no room for (12 charts already stored on that board) is skipped and logged at Error.
+
+**API.** The body of `POST {prefix}/api/metrics/board/tiles` takes `kind` 3 (Chart) with `instrument` and `chartQuery`, or `kind` 4 (SLO) with `sloDefinitionId`, both with `statusRule` 1 (None). In `GET {prefix}/api/metrics/board`, a chart tile carries `tile.chartQuery`, `instrumentKind` and `unit` and nothing computed. An SLO tile carries `slo`, the objective with its current evaluation as the SLO API returns it, or `missing: true`.
 
 ## Annotations
 
@@ -450,4 +496,4 @@ See also [Configuration](/docs/operations/configuration#custom-application-metri
 
 ## Migration
 
-Additive: five new tables (`metric_point`, `metric_instrument`, `metric_board_tile` and `metric_board` for the [health board](#health-board) and its [named boards](#named-boards), and `metric_annotation` for [annotations](#annotations)), nine nullable columns on `slo_definition` for the metric SLO kinds, the nullable `metric_point.version` column for [comparing versions](#comparing-versions), the nullable `metric_board_tile.board_id` column (null is the Default board, so existing tiles need no data migration) and the nullable `metric_board.seed_key` column (the name a code seed declared, so a renamed seeded board is kept), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
+Additive: five new tables (`metric_point`, `metric_instrument`, `metric_board_tile` and `metric_board` for the [health board](#health-board) and its [named boards](#named-boards), and `metric_annotation` for [annotations](#annotations)), nine nullable columns on `slo_definition` for the metric SLO kinds, the nullable `metric_point.version` column for [comparing versions](#comparing-versions), the nullable `metric_board_tile.board_id` column (null is the Default board, so existing tiles need no data migration), the nullable `metric_board.seed_key` column (the name a code seed declared, so a renamed seeded board is kept) and the two nullable columns of [chart and SLO tiles](#chart-and-slo-tiles), `metric_board_tile.chart_query` and `metric_board_tile.slo_definition_id` (no foreign key), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.

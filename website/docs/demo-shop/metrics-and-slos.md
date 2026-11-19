@@ -312,8 +312,16 @@ opt.AddMetricBoard("Checkout", b => b
         check: MetricTileCheck.AtLeast(0.98))
     .Value("Checkout 5xx", "http.server.request.duration",
         tagFilter: "http.route=api/checkout*,http.response.status_code=5*", application: "shop-api",
-        check: MetricTileCheck.AtMost(5)));
+        check: MetricTileCheck.AtMost(5))
+    .Chart("Checkout errors by version", "checkout.completed",
+        application: "shop-api", breakdown: "{version}", filter: "outcome=error", compare: "7d")
+    .Slo("Checkout success", application: "shop-api", label: "Checkout success SLO"));
 ```
+
+The chart tile is the chart below, kept on the board: errors split by application version, with last week as a
+dashed overlay. It stores the page's controls but not the range, so it follows the board's range picker. The
+SLO tile shows the "Checkout success" objective from [SLOs and error budgets](#slos-and-error-budgets). The
+board already has a ratio tile with that name, and tile names are unique per board, hence the `label`.
 
 Then share the chart as a link. Open `checkout.completed`, filter on `outcome = error`, break down by
 **application version** and pick **Since last deploy**. Every control is in the page URL, so the address bar
@@ -323,8 +331,13 @@ now holds the whole view; bookmark it or paste it in the team channel:
 /warp/metrics/{id}?from=2026-11-17T09%3A40%3A00.000Z&application=shop-api&breakdown=%7Bversion%7D&filter=outcome%3Aerror
 ```
 
+The same view can go on the board instead: **Add to board** on the metric page saves it as a chart tile on the
+board you pick, without the range. **Add to board** on the SLO detail page does the same for an objective.
+
 A CI step can gate on the board alone with `GET /warp/api/applications/verdict?application=shop-api&board=Checkout`;
-the response's `board` field reads `"Checkout"`.
+the response's `board` field reads `"Checkout"`. With `board`, the verdict counts the board's tiles that have a
+status rule and only the SLOs that have a tile on it, so "Checkout success" counts and "Checkouts vs last week"
+does not. The chart never counts. What the team sees on the board is what gates the release.
 
 **Test scenario.**
 
@@ -333,7 +346,25 @@ the response's `board` field reads `"Checkout"`.
 - *Then* the chart opens with the same filter, breakdown and range.
 - *When* you rename the Checkout board to "Checkout (EU)" on **Metrics > Board** and restart `shop-api`.
 - *Then* there is still one board, now "Checkout (EU)", with the seeded tiles; no second "Checkout" board appears.
-- `Covered by:` `MetricNamedBoardTestsBase`, `DeployVerdictTestsBase`; UI: `metricModel.test.ts`.
+- *When* you roll out `shop-api` 1.4.3 with a bug that fails card checkouts, place orders, and open the Checkout
+  board with **Since last deploy** about ten minutes later.
+- *Then* "Checkout errors by version" draws a `1.4.3` line climbing while `1.4.2` stays flat, the "Checkout
+  success" tile turns red, and the "Checkout success SLO" tile shows the objective's burn and budget (Warning or
+  Breaching once the SLO evaluator has run). The chart is fetched only when it scrolls into view.
+- *When* the CI step calls `GET /warp/api/applications/verdict?application=shop-api&board=Checkout` after the
+  settle time.
+- *Then* the verdict is `fail`, with one check per status tile and one for the "Checkout success" SLO, and no
+  check for the chart or for "Checkouts vs last week". Without `board`, every `shop-api` SLO counts.
+- *When* you delete the "Checkout success" objective on the **SLOs** page.
+- *Then* its tile disappears from the board with it. It comes back on the next start of `shop-api` once the
+  objective is seeded again.
+- `Covered by:` `MetricNamedBoardTestsBase`, `MetricChartTileTestsBase`, `MetricSloTileTestsBase`,
+  `DeployVerdictTestsBase`; UI: `metricModel.test.ts`, `chartTileModel.test.ts`, `sloTileModel.test.ts`.
 
 Pitfall: a link carries the filter values you typed. Filter on outcomes, routes and versions, never on order
 ids or customer data, the same rule as for tag values.
+
+Pitfall: the objective is seeded by `shop-worker` and the board by `shop-api`. An SLO tile is resolved against
+the stored objectives when the board is seeded, so on a fresh database where `shop-api` starts first the SLO tile
+is skipped with an Error log naming it, and seeded on the next start of `shop-api`. Start `shop-worker` first,
+or add the tile with **Add to board** on the SLO page.
