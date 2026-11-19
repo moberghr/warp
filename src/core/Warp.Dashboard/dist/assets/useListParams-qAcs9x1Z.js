@@ -1,1 +1,0 @@
-import{E as e}from"./format-DXnqC7-V.js";import{g as t,m as n}from"./savedViewsModel-ChTwJ34g.js";function r(){let[r,i]=e(),{page:a,type:o}=n(r),s=e=>i(r=>t(r,{...n(r),...e}),{replace:!0});return{page:a,type:o,setPage:e=>s({page:e}),setType:e=>s({type:e,page:0})}}export{r as t};
