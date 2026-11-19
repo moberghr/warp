@@ -87,11 +87,11 @@ describe('demo metrics fixtures', () => {
   };
   const series = (name: string, query = '') => get<MetricSeries>(`/metrics/${encodeUrlSafeId(name)}/series?${query}`);
 
-  it('reports the metrics addon and the 7.5.0 version', async () => {
+  it('reports the metrics addon and the 7.6.0 version', async () => {
     const addons = await get<WarpAddonsInfo>('/addons');
 
     expect(addons.metrics).toBe(true);
-    expect(addons.version).toBe('7.5.0');
+    expect(addons.version).toBe('7.6.0');
   });
 
   it('serves the instrument registry', async () => {
