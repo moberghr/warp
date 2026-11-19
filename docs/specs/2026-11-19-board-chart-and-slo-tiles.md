@@ -1,7 +1,7 @@
 # Chart and SLO tiles on metric boards
 
 - **Date:** 2026-11-19
-- **Status:** draft, awaiting approval
+- **Status:** approved 2026-11-19
 - **Scope classification:** new feature, additive. Existing Value and Ratio tiles, the board read and the verdict are unchanged.
 - **Security impact:** low. A chart tile stores what the operator configured on the metric page (instrument, breakdown, filters); an SLO tile stores an objective id. No payloads.
 - **Schema impact:** additive. Two nullable columns on `metric_board_tile` (`chart_query`, `slo_definition_id`). Hosts pick them up with `dotnet ef migrations add`.
@@ -45,7 +45,7 @@ Named boards are the dashboard, but a tile is a single number with a status chec
 
 ## Verdict
 
-Unchanged. Chart tiles have no status rule, so they are never counted. With `board=<name>`, SLOs are still counted by application scope, not by whether they are on the board (see open question 1).
+Chart tiles have no status rule, so they are never counted. Without `board`: unchanged. With `board=<name>`: the board's status-rule tiles plus **only the SLOs that have an Slo tile on that board** (still application-scoped and enabled; resolved question 1). The objective ids come from the same board read, so the verdict still adds no query.
 
 ## Code
 
@@ -88,8 +88,8 @@ opt.AddMetricBoard("Checkout", b => b
 2. **SLO tiles:** kind, column, board-read join, SLO delete cascade, seeder overload, card, "Add to board" on the SLO page.
 3. **Docs and demo**, then a full review round.
 
-## Open questions
+## Resolved questions (2026-11-19)
 
-1. **Verdict with `board=<name>` and SLO tiles:** today a board-scoped verdict counts every SLO of the application. Should it count only the SLOs that are on that board? Recommendation: **yes**, as a deliberate change with a release note, because "the Checkout board is green" should mean the same thing on the screen and in CI. Without `board`, unchanged (every SLO of the application).
-2. **Chart tile cap:** 12 per board. Enough?
-3. **SLO history:** a trend of attainment/budget over time needs an `slo_evaluation_history` table written by the evaluator each tick (with retention). Out of scope here; worth a follow-up issue?
+1. **Verdict with `board=<name>`:** counts only the SLOs that have a tile on that board (still filtered by application scope and `Enabled`), plus that board's status-rule tiles. A board with no SLO tiles counts no SLOs. Without `board`, unchanged: every SLO of the application. A behaviour change from the boards batch on this branch, never released, but it goes in the release notes because a CI step pinned to `board=` reads a different check set.
+2. **Chart tile cap:** 12 per board.
+3. **SLO history:** out of scope; a follow-up issue.
