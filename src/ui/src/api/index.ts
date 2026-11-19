@@ -452,16 +452,6 @@ export const upsertAnnotation = (body: import('@/types/annotations').MetricAnnot
 
 export const deleteAnnotation = (id: number) => api.delete(`/annotations/${id}`);
 
-// Saved views (§8.34): the caller's own views plus every shared view, optionally of one page and target. POST creates
-// (id 0) or updates; errors are { error } (400 validation or a cap, 403 someone else's personal view, 404 deleted).
-export const getSavedViews = (params: { page?: import('@/types/savedViews').SavedViewPage; target?: string }) =>
-  api.get<import('@/types/savedViews').SavedViewList>('/views', { params }).then(r => r.data);
-
-export const upsertSavedView = (body: import('@/types/savedViews').SavedViewUpsert) =>
-  api.post<{ id: number }>('/views', body).then(r => r.data);
-
-export const deleteSavedView = (id: number) => api.delete(`/views/${id}`);
-
 // Extensions
 export const getExtensions = () =>
   api.get<ExtensionManifest[]>('/extensions').then(r => r.data);

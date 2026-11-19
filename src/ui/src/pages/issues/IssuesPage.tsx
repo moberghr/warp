@@ -10,7 +10,6 @@ import { ErrorSource, ErrorGroupKind, ErrorGroupStatus } from '@/types/issues';
 import type { ErrorGroupSummary } from '@/types/issues';
 import { SourceBadge, StatusChip, IssueFlags } from './shared';
 import { PageHeading } from '@/components/PageHeading';
-import { ViewsMenu } from '@/components/ViewsMenu';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { queryKeys } from '@/lib/queryClient';
 import { parseIssuesParams, writeIssuesParams, type IssuesFilters } from './issuesModel';
@@ -19,7 +18,7 @@ import { parseIssuesParams, writeIssuesParams, type IssuesFilters } from './issu
 // 5xx, adapter failures, and client-side errors — with a resolution workflow. By default the list
 // shows only Unresolved exception groups; the "show 4xx" toggle folds in StatusCode groups.
 export default function IssuesPage() {
-  // The filters live in the URL (a shared link, a refresh or a saved view keeps them); a change replaces the history
+  // The filters live in the URL (a shared link or a refresh keeps them); a change replaces the history
   // entry so Back leaves the page rather than stepping through every click.
   const [searchParams, setSearchParams] = useSearchParams();
   const { source, status, application, show4xx } = useMemo(() => parseIssuesParams(searchParams), [searchParams]);
@@ -110,10 +109,7 @@ export default function IssuesPage() {
   return (
     <div>
       <div className="mb-4">
-        <div className="flex items-center justify-between gap-3">
-          <PageHeading className="">Issues</PageHeading>
-          <ViewsMenu page="issues" target={null} />
-        </div>
+        <PageHeading className="">Issues</PageHeading>
         <p className="text-sm text-muted-foreground mt-1">
           Errors grouped by fingerprint across jobs, endpoints, outbound calls, and the browser — with a resolution workflow.
         </p>

@@ -349,26 +349,10 @@ export function writeRangeParams(params: URLSearchParams, selection: RangeSelect
   return next;
 }
 
-// Every other control lives in the URL too (saved views and shareable links, spec 2026-11-17 Part 2 step A):
+// Every other control lives in the URL too (shareable links and a refresh, spec 2026-11-17 Part 2 step A):
 // `application`, `breakdown`, repeated `filter=key:value` (the series API's syntax, `{version}` included),
 // `compare=1d,7d`, `percentile`, `view=ratio`, `numerator`, `minmax=1`. Defaults are left out, and a value that does
 // not parse is ignored (the control reads its default), so a hand-edited or stale link never breaks the page.
-
-/** Every query key the metric detail page reads. Saved views (batch 3) validate a stored query against it. */
-export const metricQueryKeys = [
-  'range',
-  'from',
-  'to',
-  'application',
-  'breakdown',
-  'filter',
-  'compare',
-  'percentile',
-  'view',
-  'numerator',
-  'minmax',
-  'rate',
-] as const;
 
 /** The keys writeControlParams owns beside the range's; `rate` is written on its own (rateParam) and kept as is. */
 const CONTROL_KEYS = ['application', 'breakdown', 'filter', 'compare', 'percentile', 'view', 'numerator', 'minmax'] as const;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ErrorGroupStatus, ErrorSource } from '@/types/issues';
-import { DEFAULT_ISSUES_FILTERS, issuesQueryKeys, parseIssuesParams, writeIssuesParams, type IssuesFilters } from './issuesModel';
+import { DEFAULT_ISSUES_FILTERS, parseIssuesParams, writeIssuesParams, type IssuesFilters } from './issuesModel';
 
 const write = (filters: IssuesFilters) => writeIssuesParams(new URLSearchParams(), filters);
 
@@ -27,7 +27,7 @@ describe('issues URL parameters', () => {
     expect(new Set(cases.map(([field]) => field))).toEqual(new Set(Object.keys(DEFAULT_ISSUES_FILTERS)));
 
     const all = write({ source: ErrorSource.Client, status: ErrorGroupStatus.Ignored, application: 'a', show4xx: true });
-    expect(new Set(all.keys())).toEqual(new Set(issuesQueryKeys));
+    expect(new Set(all.keys())).toEqual(new Set(['source', 'status', 'application', 'show4xx']));
   });
 
   it('leaves the defaults out of the URL', () => {

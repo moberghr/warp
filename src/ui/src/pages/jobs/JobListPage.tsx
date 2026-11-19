@@ -8,7 +8,6 @@ import { RelativeTime } from '@/components/RelativeTime';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { DataTable } from '@/components/DataTable';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
-import { ViewsMenu } from '@/components/ViewsMenu';
 import { usePersistedPageSize } from '@/hooks/usePersistedPageSize';
 import { useListParams } from '@/hooks/useListParams';
 import {
@@ -250,10 +249,7 @@ export default function JobListPage() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">{title} Jobs</h1>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-muted-foreground">{data.totalCount} total</span>
-          <ViewsMenu page="jobs" target={activeState} />
-        </div>
+        <span className="text-sm text-muted-foreground">{data.totalCount} total</span>
       </div>
 
       {/* Failed type filter bar */}

@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_JOB_LIST_PARAMS,
-  jobsByTypeQueryKeys,
-  jobsQueryKeys,
   parseJobListParams,
   parseMetricsDimension,
   writeJobListParams,
@@ -25,7 +23,7 @@ describe('jobs list URL parameters', () => {
   it('leaves the defaults out of the URL and lists every key it writes', () => {
     expect(write(DEFAULT_JOB_LIST_PARAMS).toString()).toBe('');
     expect(parseJobListParams(new URLSearchParams())).toEqual(DEFAULT_JOB_LIST_PARAMS);
-    expect(new Set(write({ page: 1, type: 'T' }).keys())).toEqual(new Set(jobsQueryKeys));
+    expect(new Set(write({ page: 1, type: 'T' }).keys())).toEqual(new Set(['page', 'type']));
   });
 
   it('keeps other parameters', () => {
@@ -50,6 +48,6 @@ describe('jobs-by-type metrics dimension', () => {
   });
 
   it('lists its keys', () => {
-    expect(new Set([...writeMetricsDimension(new URLSearchParams('page=1'), 'handler').keys()])).toEqual(new Set(jobsByTypeQueryKeys));
+    expect(new Set([...writeMetricsDimension(new URLSearchParams('page=1'), 'handler').keys()])).toEqual(new Set(['page', 'metrics']));
   });
 });

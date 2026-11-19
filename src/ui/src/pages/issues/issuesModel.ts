@@ -1,4 +1,4 @@
-// The Issues list's filters as URL state, so a shared link, a refresh or a saved view reproduces the list. Pure: the
+// The Issues list's filters as URL state, so a shared link or a refresh reproduces the list. Pure: the
 // page reads and writes through here. Defaults are left out of the URL, and an unknown value reads as the default.
 
 import { ErrorGroupStatus, ErrorSource } from '@/types/issues';
@@ -20,8 +20,8 @@ export const DEFAULT_ISSUES_FILTERS: IssuesFilters = {
   show4xx: false,
 };
 
-/** Every query key the Issues list reads. Saved views (batch 3) validate a stored query against it. */
-export const issuesQueryKeys = ['source', 'status', 'application', 'show4xx'] as const;
+/** Every query key the Issues list reads (and owns when writing). */
+const ISSUES_KEYS = ['source', 'status', 'application', 'show4xx'] as const;
 
 const SOURCE_TOKENS: Record<ErrorSource, string> = {
   [ErrorSource.Job]: 'job',
@@ -56,7 +56,7 @@ export function parseIssuesParams(params: URLSearchParams): IssuesFilters {
 /** A copy of `params` carrying `filters` (defaults left out) and every other parameter unchanged. */
 export function writeIssuesParams(params: URLSearchParams, filters: IssuesFilters): URLSearchParams {
   const next = new URLSearchParams(params);
-  for (const key of issuesQueryKeys) {
+  for (const key of ISSUES_KEYS) {
     next.delete(key);
   }
 

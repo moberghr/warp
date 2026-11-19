@@ -67,7 +67,7 @@ import {
   unitLabel,
   upsertChip,
 } from './metricModel';
-import { metricQueryKeys, parseControlParams, writeControlParams } from './metricModel';
+import { parseControlParams, writeControlParams } from './metricModel';
 
 const T0 = Date.UTC(2026, 10, 13, 10, 0, 0);
 const MIN5 = 5 * 60_000;
@@ -1243,6 +1243,8 @@ describe('control URL parameters', () => {
     const custom = writeControlParams(new URLSearchParams(), { ...DEFAULT_CONTROLS, custom: { from, to } });
     const written = new Set([...everything.keys(), ...custom.keys()]);
 
-    expect(written).toEqual(new Set(metricQueryKeys));
+    expect(written).toEqual(
+      new Set(['range', 'from', 'to', 'application', 'breakdown', 'filter', 'compare', 'percentile', 'view', 'numerator', 'minmax', 'rate']),
+    );
   });
 });

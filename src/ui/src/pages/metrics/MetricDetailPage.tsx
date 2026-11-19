@@ -19,7 +19,6 @@ import { Badge } from '@/components/ui/badge';
 import { Hint } from '@/components/ui/tooltip';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import { PageHeading } from '@/components/PageHeading';
-import { ViewsMenu } from '@/components/ViewsMenu';
 import * as api from '@/api';
 import { parseFilterChip } from '@/lib/metricPattern';
 import { queryKeys } from '@/lib/queryClient';
@@ -120,7 +119,7 @@ export default function MetricDetailPage() {
   const [chipDraft, setChipDraft] = useState({ key: '', value: '' });
   const [patternDraft, setPatternDraft] = useState('');
   const [customDraft, setCustomDraft] = useState<{ from: string; to: string } | null>(null);
-  // Every control lives in the URL, so a shared link, a refresh or a saved view reproduces the chart. A change
+  // Every control lives in the URL, so a shared link or a refresh reproduces the chart. A change
   // replaces the history entry rather than pushing one, so Back leaves the page instead of undoing each click.
   const [searchParams, setSearchParams] = useSearchParams();
   const controls = useMemo(() => parseControlParams(searchParams), [searchParams]);
@@ -278,12 +277,9 @@ export default function MetricDetailPage() {
   return (
     <div>
       <Link to="/metrics" className="text-sm text-primary hover:underline">← Metrics</Link>
-      <div className="mb-1 mt-2 flex items-center justify-between gap-3">
-        <PageHeading className="">
-          <span className="font-mono">{instrument.name}</span>
-        </PageHeading>
-        <ViewsMenu page="metric" target={instrument.name} />
-      </div>
+      <PageHeading className="mb-1 mt-2">
+        <span className="font-mono">{instrument.name}</span>
+      </PageHeading>
       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground mb-4">
         <Hint text={kindNote ?? undefined}>
           <span className={kindNote ? 'underline decoration-dotted underline-offset-2' : undefined}>{kindLabel(instrument.kind)}</span>
