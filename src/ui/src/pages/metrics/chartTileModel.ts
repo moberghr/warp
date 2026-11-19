@@ -121,7 +121,10 @@ export function chartTileIds(tiles: readonly Pick<MetricBoardTileResult, 'tile'>
 
 /**
  * The tile "Add to board" saves from the metric page: a chart of `instrument` with the page's current controls (the
- * range left out: the board's range drives the tile), named `name`, on board `boardId` (null = Default).
+ * range left out: the board's range drives the tile), named `name`, on board `boardId` (null = Default). The query is
+ * built from the controls the page PARSED, never copied from the URL: a stale or hand-edited link (`compare=30d`,
+ * `view=foo`, `percentile=75`, a repeated filter key) shows the page fine, since the page ignores what it cannot read,
+ * and copying it would make the save a 400 or store a control the tile cannot show.
  */
 export function chartTileFromPage(instrument: string, name: string, params: URLSearchParams, boardId: number | null): MetricBoardTile {
   return {
@@ -133,7 +136,7 @@ export function chartTileFromPage(instrument: string, name: string, params: URLS
     application: null,
     tagFilter: null,
     kind: MetricTileKind.Chart,
-    chartQuery: chartQueryFromParams(params),
+    chartQuery: chartQueryFromControls(parseControlParams(params), parseRate(params.get('rate'))),
     sloDefinitionId: null,
     ratioTag: null,
     goodValues: null,

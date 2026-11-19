@@ -109,6 +109,23 @@ describe('chartQueryFromParams / chartTileFromPage (Add to board)', () => {
     expect(parseControlParams(new URLSearchParams(tile.chartQuery!)).percentile).toBe(95);
   });
 
+  it.each([
+    ['compare=30d', null],
+    ['view=foo', null],
+    ['rate=hour', null],
+    ['percentile=75', null],
+    ['filter=status:5*0', null],
+    ['filter=noseparator', null],
+    ['minmax=yes', null],
+    ['breakdown=gateway&compare=30d,7d&view=foo&percentile=75', 'breakdown=gateway&compare=7d'],
+    ['filter=status:5*&filter=status:4*', 'filter=status%3A4*'],
+    ['rate=second&percentile=99', 'percentile=99&rate=second'],
+  ])('saves only what the page shows from a stale URL (%s)', (query, expected) => {
+    const tile = chartTileFromPage('c', 'c', new URLSearchParams(`range=7d&${query}`), null);
+
+    expect(tile.chartQuery).toBe(expected);
+  });
+
   it('builds a plain chart (null query) from a URL with the range only', () => {
     expect(chartTileFromPage('c', 'c', new URLSearchParams('range=7d'), null).chartQuery).toBeNull();
   });
