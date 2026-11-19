@@ -27,6 +27,9 @@ import { SloStatePill, inputClass } from '@/pages/slo/shared';
 import { errorMessage, errorStatus } from '@/lib/apiError';
 import { fractionToPercent, percentToFraction } from '@/pages/slo/sloForm';
 import { MetricsTabs } from './MetricsTabs';
+import { ChartTileCard } from './ChartTile';
+import { ChartTileEditor } from './ChartTileEditor';
+import { MAX_CHART_TILES, chartTileIds } from './chartTileModel';
 import {
   RANGES,
   customRangeLabel,
@@ -51,6 +54,7 @@ import {
   describeRule,
   describeTile,
   emptyTileDraft,
+  isChartTile,
   formatTileChange,
   formatTileValue,
   sparklinePoints,
@@ -310,7 +314,17 @@ export default function MetricBoardPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {tiles.map((result) => (
+          {tiles.map((result) => (isChartTile(result.tile) ? (
+            <ChartTileCard
+              key={result.tile.id}
+              result={result}
+              selection={selection}
+              refetchMs={refetchMs}
+              deploys={deploysQuery.data}
+              onEdit={() => openDraft({ ...result.tile })}
+              onDelete={() => setPendingDelete(result.tile)}
+            />
+          ) : (
             <TileCard
               key={result.tile.id}
               result={result}
@@ -320,7 +334,7 @@ export default function MetricBoardPage() {
               onEdit={() => openDraft({ ...result.tile })}
               onDelete={() => setPendingDelete(result.tile)}
             />
-          ))}
+          )))}
         </div>
       )}
 
@@ -370,6 +384,10 @@ export default function MetricBoardPage() {
         <TileForm
           draft={draft}
           boards={boards}
+          chartIds={chartTileIds(tiles)}
+          selection={selection}
+          refetchMs={refetchMs}
+          deploys={deploysQuery.data}
           onChange={setDraft}
           onCancel={() => openDraft(null)}
           onSave={() => saveMutation.mutate(draft)}
@@ -651,6 +669,10 @@ function Sparkline({
 function TileForm({
   draft,
   boards,
+  chartIds,
+  selection,
+  refetchMs,
+  deploys,
   onChange,
   onCancel,
   onSave,
@@ -659,6 +681,11 @@ function TileForm({
 }: {
   draft: MetricBoardTile;
   boards: MetricBoardSummary[];
+  /** The ids of the chart tiles on the board the editor was opened from. */
+  chartIds: number[];
+  selection: RangeSelection;
+  refetchMs: number | false;
+  deploys: ApplicationDeployModel[] | undefined;
   onChange: (d: MetricBoardTile) => void;
   onCancel: () => void;
   onSave: () => void;
@@ -673,7 +700,10 @@ function TileForm({
   const picked: MetricInstrument | undefined = (metrics ?? []).find((x) => x.name === draft.instrument);
   const instrumentKind = picked?.kind ?? null;
   const ratio = draft.kind === MetricTileKind.Ratio;
+  const chart = isChartTile(draft);
   const clientError = validateTileDraft(draft, instrumentKind);
+  // A new chart, or a tile turned into one, needs room under the chart cap (the server enforces it; this says why early).
+  const chartsFull = chart && chartIds.length >= MAX_CHART_TILES && !chartIds.includes(draft.id);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
@@ -698,6 +728,7 @@ function TileForm({
             <select className={inputClass} value={draft.kind} onChange={(e) => onChange(changeTileKind(draft, Number(e.target.value) as MetricTileKind))}>
               <option value={MetricTileKind.Value}>Value (events, or a gauge's level)</option>
               <option value={MetricTileKind.Ratio}>Ratio (good ÷ good + bad)</option>
+              <option value={MetricTileKind.Chart}>Chart (the metric page's chart over the board's range)</option>
             </select>
           </Field>
           <Field label="Instrument">
@@ -714,7 +745,17 @@ function TileForm({
               {instruments.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
             </select>
           </Field>
-          {!ratio && instrumentKind === MetricKind.Gauge && (
+          {chart && (
+            <ChartTileEditor
+              instrument={picked}
+              query={draft.chartQuery}
+              onChange={(chartQuery) => set({ chartQuery })}
+              selection={selection}
+              refetchMs={refetchMs}
+              deploys={deploys}
+            />
+          )}
+          {!chart && !ratio && instrumentKind === MetricKind.Gauge && (
             <Field label="Gauge value over the window">
               <select className={inputClass} value={draft.gaugeAggregate ?? SloGaugeAggregate.Average} onChange={(e) => set({ gaugeAggregate: Number(e.target.value) as SloGaugeAggregate })}>
                 <option value={SloGaugeAggregate.Average}>Average (every sample, never summed)</option>
@@ -736,72 +777,77 @@ function TileForm({
               </Field>
             </>
           )}
-          <Field label="Tag filter (k=v,k=v; trailing * allowed)">
-            <input className={`${inputClass} font-mono`} placeholder="http.response.status_code=5*" value={draft.tagFilter ?? ''} onChange={(e) => set({ tagFilter: e.target.value })} />
-          </Field>
-          <Field label="Application (optional)">
-            <input className={inputClass} value={draft.application ?? ''} onChange={(e) => set({ application: e.target.value || null })} />
-          </Field>
-
-          <Field label="Status colour">
-            <select className={inputClass} value={draft.statusRule} onChange={(e) => onChange(changeStatusRule(draft, Number(e.target.value) as MetricTileStatusRule))}>
-              <option value={MetricTileStatusRule.None}>None</option>
-              <option value={MetricTileStatusRule.Threshold}>Threshold</option>
-              <option value={MetricTileStatusRule.Deviation}>Deviation from a baseline</option>
-            </select>
-          </Field>
-          {draft.statusRule === MetricTileStatusRule.Threshold && (
-            <div className="flex gap-2">
-              <select className={inputClass} value={draft.comparison ?? SloComparison.AtMost} onChange={(e) => set({ comparison: Number(e.target.value) as SloComparison })}>
-                <option value={SloComparison.AtMost}>At most</option>
-                <option value={SloComparison.AtLeast}>At least</option>
-              </select>
-              <input
-                className={`${inputClass} tabular-nums`}
-                type="number"
-                step="any"
-                aria-label={ratio ? 'Threshold (%)' : 'Threshold'}
-                value={draft.threshold === null ? '' : ratio ? fractionToPercent(draft.threshold) : draft.threshold}
-                onChange={(e) => set({ threshold: e.target.value === '' ? null : ratio ? percentToFraction(Number(e.target.value)) : Number(e.target.value) })}
-              />
-              {ratio && <span className="self-center text-muted-foreground">%</span>}
-            </div>
-          )}
-          {draft.statusRule === MetricTileStatusRule.Deviation && (
+          {!chart && (
             <>
-              <Field label="Bad move">
-                <select className={inputClass} value={draft.deviationDirection ?? MetricDeviationDirection.Either} onChange={(e) => set({ deviationDirection: Number(e.target.value) as MetricDeviationDirection })}>
-                  <option value={MetricDeviationDirection.Drop}>A drop</option>
-                  <option value={MetricDeviationDirection.Rise}>A rise</option>
-                  <option value={MetricDeviationDirection.Either}>Either way</option>
+              <Field label="Tag filter (k=v,k=v; trailing * allowed)">
+                <input className={`${inputClass} font-mono`} placeholder="http.response.status_code=5*" value={draft.tagFilter ?? ''} onChange={(e) => set({ tagFilter: e.target.value })} />
+              </Field>
+              <Field label="Application (optional)">
+                <input className={inputClass} value={draft.application ?? ''} onChange={(e) => set({ application: e.target.value || null })} />
+              </Field>
+
+              <Field label="Status colour">
+                <select className={inputClass} value={draft.statusRule} onChange={(e) => onChange(changeStatusRule(draft, Number(e.target.value) as MetricTileStatusRule))}>
+                  <option value={MetricTileStatusRule.None}>None</option>
+                  <option value={MetricTileStatusRule.Threshold}>Threshold</option>
+                  <option value={MetricTileStatusRule.Deviation}>Deviation from a baseline</option>
                 </select>
               </Field>
-              <Field label={ratio ? 'Allowed move (percentage points)' : 'Allowed move (% of the baseline)'}>
-                <input
-                  className={`${inputClass} tabular-nums`}
-                  type="number"
-                  step="any"
-                  value={draft.maxDeviation === null ? '' : fractionToPercent(draft.maxDeviation)}
-                  onChange={(e) => set({ maxDeviation: e.target.value === '' ? null : percentToFraction(Number(e.target.value)) })}
-                />
-              </Field>
-              <Field label="Baseline">
-                <select className={inputClass} value={draft.baselineDays ?? 7} onChange={(e) => set({ baselineDays: Number(e.target.value) })}>
-                  <option value={1}>Same window 1 day earlier</option>
-                  <option value={7}>Same window 7 days earlier</option>
-                </select>
-              </Field>
+              {draft.statusRule === MetricTileStatusRule.Threshold && (
+                <div className="flex gap-2">
+                  <select className={inputClass} value={draft.comparison ?? SloComparison.AtMost} onChange={(e) => set({ comparison: Number(e.target.value) as SloComparison })}>
+                    <option value={SloComparison.AtMost}>At most</option>
+                    <option value={SloComparison.AtLeast}>At least</option>
+                  </select>
+                  <input
+                    className={`${inputClass} tabular-nums`}
+                    type="number"
+                    step="any"
+                    aria-label={ratio ? 'Threshold (%)' : 'Threshold'}
+                    value={draft.threshold === null ? '' : ratio ? fractionToPercent(draft.threshold) : draft.threshold}
+                    onChange={(e) => set({ threshold: e.target.value === '' ? null : ratio ? percentToFraction(Number(e.target.value)) : Number(e.target.value) })}
+                  />
+                  {ratio && <span className="self-center text-muted-foreground">%</span>}
+                </div>
+              )}
+              {draft.statusRule === MetricTileStatusRule.Deviation && (
+                <>
+                  <Field label="Bad move">
+                    <select className={inputClass} value={draft.deviationDirection ?? MetricDeviationDirection.Either} onChange={(e) => set({ deviationDirection: Number(e.target.value) as MetricDeviationDirection })}>
+                      <option value={MetricDeviationDirection.Drop}>A drop</option>
+                      <option value={MetricDeviationDirection.Rise}>A rise</option>
+                      <option value={MetricDeviationDirection.Either}>Either way</option>
+                    </select>
+                  </Field>
+                  <Field label={ratio ? 'Allowed move (percentage points)' : 'Allowed move (% of the baseline)'}>
+                    <input
+                      className={`${inputClass} tabular-nums`}
+                      type="number"
+                      step="any"
+                      value={draft.maxDeviation === null ? '' : fractionToPercent(draft.maxDeviation)}
+                      onChange={(e) => set({ maxDeviation: e.target.value === '' ? null : percentToFraction(Number(e.target.value)) })}
+                    />
+                  </Field>
+                  <Field label="Baseline">
+                    <select className={inputClass} value={draft.baselineDays ?? 7} onChange={(e) => set({ baselineDays: Number(e.target.value) })}>
+                      <option value={1}>Same window 1 day earlier</option>
+                      <option value={7}>Same window 7 days earlier</option>
+                    </select>
+                  </Field>
+                </>
+              )}
             </>
           )}
         </div>
         {clientError && <p className="mt-4 text-xs text-amber-600">{clientError}</p>}
+        {!clientError && chartsFull && <p className="mt-4 text-xs text-amber-600">This board already holds {MAX_CHART_TILES} charts.</p>}
         {serverError && <p role="alert" className="mt-2 text-sm text-red-600">{serverError}</p>}
         <div className="mt-6 flex justify-end gap-2">
           <button type="button" onClick={onCancel} className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800">Cancel</button>
           <button
             type="button"
             onClick={onSave}
-            disabled={saving || clientError !== null}
+            disabled={saving || clientError !== null || chartsFull}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           >
             {saving ? 'Saving…' : 'Save'}

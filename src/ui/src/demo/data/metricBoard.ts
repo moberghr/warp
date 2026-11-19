@@ -9,6 +9,7 @@ import { MetricDeviationDirection, MetricTileKind, MetricTileStatusRule } from '
 import type { MetricBoard, MetricBoardSparkPoint, MetricBoardSummary, MetricBoardTile, MetricBoardTileResult } from '@/types/metricBoard';
 import { SloComparison, SloGaugeAggregate, SloState } from '@/types/slo';
 import { demoNoteCoversTile, demoTileAnnotations } from './annotations';
+import { demoMetrics } from './metrics';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -36,6 +37,7 @@ function tile(partial: Partial<MetricBoardTile> & Pick<MetricBoardTile, 'id' | '
     application: null,
     tagFilter: null,
     kind: MetricTileKind.Value,
+    chartQuery: null,
     ratioTag: null,
     goodValues: null,
     badValues: null,
@@ -140,6 +142,26 @@ export const demoBoardTiles: MetricBoardTile[] = [
     threshold: 0.9,
   }),
   tile({ id: 10, boardId: DEMO_PAYMENTS_BOARD, position: 2, name: 'Declines', instrument: 'payment.results', tagFilter: 'result=declined' }),
+  // Chart tiles (spec 2026-11-19 batch 1): the metric page's chart with stored controls, over the board's range. The
+  // series come from the demo series API (data/metrics.ts), like the metric page's.
+  tile({
+    id: 11,
+    boardId: DEMO_CHECKOUT_BOARD,
+    position: 3,
+    name: 'Payment errors by gateway',
+    instrument: 'payment.results',
+    kind: MetricTileKind.Chart,
+    chartQuery: 'breakdown=gateway&filter=result%3Aerror&compare=7d',
+  }),
+  tile({
+    id: 12,
+    boardId: DEMO_CHECKOUT_BOARD,
+    position: 4,
+    name: 'Request latency p95',
+    instrument: 'http.server.request.duration',
+    kind: MetricTileKind.Chart,
+    chartQuery: 'percentile=95',
+  }),
 ];
 
 const boardOf = (t: MetricBoardTile) => t.boardId ?? DEMO_DEFAULT_BOARD;
@@ -275,6 +297,24 @@ export function demoMetricBoard(fromIso: string | undefined, toIso: string | und
   const span = to - from;
   const complete = demoCompleteUntil(from, to, now);
   const tiles: MetricBoardTileResult[] = demoBoardTiles.filter((t) => summary === null || boardOf(t) === summary.id).map((t) => {
+    if (t.kind === MetricTileKind.Chart) {
+      // As on the server: a chart tile carries its instrument's kind and unit and nothing computed (the page reads the series).
+      const instrument = demoMetrics.find((x) => x.name === t.instrument);
+
+      return {
+        tile: t,
+        instrumentKind: instrument?.kind ?? null,
+        unit: instrument?.unit ?? null,
+        current: null,
+        dayAgo: null,
+        weekAgo: null,
+        status: null,
+        unacknowledgedStatus: null,
+        annotations: [],
+        sparkline: [],
+      };
+    }
+
     const shape = shapes[t.id] ?? shapes[6];
     const empty = complete <= from;
     const current = empty ? null : windowValue(shape, t, from, complete, true);

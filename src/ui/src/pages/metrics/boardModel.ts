@@ -15,6 +15,7 @@ import { SloComparison, SloGaugeAggregate, SloGaugeAggregateLabel, SloState, Slo
 import { parseValueList, validateTagFilter, valueListsOverlap } from '@/pages/slo/sloForm';
 import { withUnit } from '@/lib/metricUnit';
 import { changePercent, formatChange, formatNumber } from './metricModel';
+import { describeChartQuery } from './chartTileModel';
 
 /** The most tiles a board holds (MetricBoardValidation.MaxTiles). */
 export const MAX_TILES = 48;
@@ -25,6 +26,11 @@ export const MAX_TILES = 48;
 
 function isRatio(tile: Pick<MetricBoardTile, 'kind'>): boolean {
   return tile.kind === MetricTileKind.Ratio;
+}
+
+/** A chart tile: the metric page's chart over the board's range, with no value and no status rule. */
+export function isChartTile(tile: Pick<MetricBoardTile, 'kind'>): boolean {
+  return tile.kind === MetricTileKind.Chart;
 }
 
 function percent(fraction: number, digits = 2): string {
@@ -65,6 +71,12 @@ export function formatTileChange(tile: Pick<MetricBoardTile, 'kind'>, current: n
 /** What the tile reads, in one line: `payment.results · result: ok / declined,error · region=eu · @shop`. */
 export function describeTile(tile: MetricBoardTile): string {
   const parts = [tile.instrument];
+  if (isChartTile(tile)) {
+    const controls = describeChartQuery(tile.chartQuery);
+
+    return controls === '' ? tile.instrument : `${tile.instrument} · ${controls}`;
+  }
+
   if (isRatio(tile)) {
     parts.push(`${tile.ratioTag}: ${tile.goodValues} / ${tile.badValues}`);
   } else if (tile.gaugeAggregate) {
@@ -206,6 +218,7 @@ export const emptyTileDraft: MetricBoardTile = {
   application: null,
   tagFilter: null,
   kind: MetricTileKind.Value,
+  chartQuery: null,
   ratioTag: null,
   goodValues: null,
   badValues: null,
@@ -218,16 +231,32 @@ export const emptyTileDraft: MetricBoardTile = {
   deviationDirection: null,
 };
 
-/** Mirrors MetricBoardValidation.AcceptsInstrument: a ratio counts events, so it refuses a gauge. */
+/** Mirrors MetricBoardValidation.AcceptsInstrument: a ratio counts events, so it refuses a gauge; a chart reads every kind. */
 export function acceptsTileInstrument(kind: MetricTileKind, instrument: MetricKind): boolean {
   return kind !== MetricTileKind.Ratio || instrument !== MetricKind.Gauge;
 }
 
-/** Switches the draft's kind, dropping the fields the new kind does not use. */
+/**
+ * Switches the draft's kind, dropping the fields the new kind does not use. A chart keeps its controls in chartQuery and
+ * has no status rule, so it drops the filter, application, ratio, aggregate and rule; the other kinds drop chartQuery.
+ */
 export function changeTileKind(draft: MetricBoardTile, kind: MetricTileKind): MetricBoardTile {
+  if (kind === MetricTileKind.Chart) {
+    return {
+      ...changeStatusRule(draft, MetricTileStatusRule.None),
+      kind,
+      application: null,
+      tagFilter: null,
+      ratioTag: null,
+      goodValues: null,
+      badValues: null,
+      gaugeAggregate: null,
+    };
+  }
+
   return kind === MetricTileKind.Ratio
-    ? { ...draft, kind, gaugeAggregate: null, ratioTag: draft.ratioTag ?? '', goodValues: draft.goodValues ?? '', badValues: draft.badValues ?? '' }
-    : { ...draft, kind, ratioTag: null, goodValues: null, badValues: null };
+    ? { ...draft, kind, chartQuery: null, gaugeAggregate: null, ratioTag: draft.ratioTag ?? '', goodValues: draft.goodValues ?? '', badValues: draft.badValues ?? '' }
+    : { ...draft, kind, chartQuery: null, ratioTag: null, goodValues: null, badValues: null };
 }
 
 /** Switches the status rule with sensible defaults: at most 0 / ± 30 % (2 points on a ratio) against 7 days. */
@@ -263,6 +292,11 @@ export function validateTileDraft(draft: MetricBoardTile, instrumentKind: Metric
   }
   if (instrumentKind !== null && !acceptsTileInstrument(draft.kind, instrumentKind)) {
     return 'A ratio tile needs a counter or histogram: gauges have no event count.';
+  }
+
+  // A chart's controls come from the metric page's own pickers, so they parse; the server checks the query anyway.
+  if (isChartTile(draft)) {
+    return draft.statusRule === MetricTileStatusRule.None ? null : 'A chart tile has no status colour.';
   }
 
   const filterError = validateTagFilter(draft.tagFilter, 'Tag filter');
@@ -314,6 +348,15 @@ export function validateTileDraft(draft: MetricBoardTile, instrumentKind: Metric
 /** The request to send: text fields trimmed, empty ones nulled, fields of another kind or rule left out. */
 export function buildTileRequest(draft: MetricBoardTile): MetricBoardTile {
   const clean = (value: string | null | undefined) => (blank(value) ? null : value!.trim());
+  if (isChartTile(draft)) {
+    return {
+      ...changeTileKind(draft, MetricTileKind.Chart),
+      name: draft.name.trim(),
+      instrument: draft.instrument.trim(),
+      chartQuery: clean(draft.chartQuery),
+    };
+  }
+
   const ratio = isRatio(draft);
   const threshold = draft.statusRule === MetricTileStatusRule.Threshold;
   const deviation = draft.statusRule === MetricTileStatusRule.Deviation;
@@ -322,6 +365,7 @@ export function buildTileRequest(draft: MetricBoardTile): MetricBoardTile {
     ...draft,
     name: draft.name.trim(),
     instrument: draft.instrument.trim(),
+    chartQuery: null,
     application: clean(draft.application),
     tagFilter: clean(draft.tagFilter),
     ratioTag: ratio ? clean(draft.ratioTag) : null,

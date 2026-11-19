@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { DEMO_CHECKOUT_BOARD, DEMO_DEFAULT_BOARD, DEMO_PAYMENTS_BOARD, demoBoards, demoBoardTiles, demoMetricBoard } from './data/metricBoard';
 import { demoDeployVerdict } from './data/applications';
-import { demoMetrics } from './data/metrics';
+import { demoMetrics, demoMetricSeries } from './data/metrics';
+import { MetricTileKind } from '@/types/metricBoard';
+import { chartControls } from '@/pages/metrics/chartTileModel';
+import { buildSeriesQuery } from '@/pages/metrics/metricModel';
 
 // Named boards (§8.34) in demo mode: three boards whose tiles read demo instruments, a board read per board, and the
 // verdict's board parameter behaving as on the server.
@@ -63,5 +66,34 @@ describe('demo named boards', () => {
     expect(every!.checks.filter((x) => x.source === 'tile').length).toBeGreaterThan(paymentTiles.length);
     expect(payments!.checks.filter((x) => x.source === 'slo')).toEqual(every!.checks.filter((x) => x.source === 'slo'));
     expect(demoDeployVerdict('billing-service', undefined, undefined, 0, undefined, 'Nope')).toBeNull();
+  });
+
+  it('puts two chart tiles on the Checkout board, read with their kind and unit and nothing computed', () => {
+    const checkout = demoMetricBoard(from, to, now, DEMO_CHECKOUT_BOARD)!;
+    const charts = checkout.tiles.filter((x) => x.tile.kind === MetricTileKind.Chart);
+
+    expect(charts.map((x) => x.tile.name)).toEqual(['Payment errors by gateway', 'Request latency p95']);
+    for (const chart of charts) {
+      expect(chart.instrumentKind).toBe(demoMetrics.find((x) => x.name === chart.tile.instrument)!.kind);
+      expect([chart.current, chart.status, chart.sparkline.length]).toEqual([null, null, 0]);
+    }
+  });
+
+  it('serves every chart tile its series from the demo series API, with the tile controls applied', () => {
+    const charts = demoBoardTiles.filter((x) => x.kind === MetricTileKind.Chart);
+
+    for (const tile of charts) {
+      const kind = demoMetrics.find((x) => x.name === tile.instrument)!.kind;
+      const { controls } = chartControls(tile.chartQuery, { range: '6h', custom: null });
+
+      const series = demoMetricSeries(tile.instrument, buildSeriesQuery(controls, kind, now))!;
+
+      expect(series.series.length).toBeGreaterThan(0);
+      expect(series.series.some((x) => x.points.some((p) => p.value > 0))).toBe(true);
+    }
+
+    const byGateway = demoMetricSeries('payment.results', buildSeriesQuery(chartControls(charts[0].chartQuery, { range: '6h', custom: null }).controls, null, now))!;
+    expect(byGateway.series.filter((x) => x.compare === null).map((x) => x.name).sort()).toEqual(['adyen', 'checkout', 'nets']);
+    expect(byGateway.series.some((x) => x.compare === '7d')).toBe(true);
   });
 });

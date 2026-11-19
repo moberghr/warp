@@ -8,6 +8,8 @@ import type { MetricAnnotation } from './annotations';
 export const MetricTileKind = {
   Value: 1,
   Ratio: 2,
+  /** The metric page's chart with the stored controls (chartQuery) over the board's range; no status rule. */
+  Chart: 3,
 } as const;
 export type MetricTileKind = (typeof MetricTileKind)[keyof typeof MetricTileKind];
 
@@ -61,6 +63,11 @@ export interface MetricBoardTile {
   application: string | null;
   tagFilter: string | null;
   kind: MetricTileKind;
+  /**
+   * A chart tile's metric-page controls: the page's URL query without the range (`breakdown=…&filter=k:v&compare=7d`),
+   * stored canonical by the server. Null for every other kind (and for a chart with no controls).
+   */
+  chartQuery: string | null;
   ratioTag: string | null;
   goodValues: string | null;
   badValues: string | null;
@@ -78,7 +85,7 @@ export interface MetricBoardSparkPoint {
   value: number | null;
 }
 
-/** One evaluated tile of GET /api/metrics/board. */
+/** One evaluated tile of GET /api/metrics/board. A chart tile carries its kind and unit only: the page reads its series. */
 export interface MetricBoardTileResult {
   tile: MetricBoardTile;
   /** Null when the instrument is not in the registry. */
