@@ -267,11 +267,6 @@ public static class ServiceConfiguration
         services.TryAddScoped<IMetricAnnotationQueryService, MetricAnnotationQueryService<TContext>>();
         services.TryAddScoped<IMetricAnnotationCommandService, MetricAnnotationCommandService<TContext>>();
 
-        // Saved views (§8.34): a page + its URL query under a name, personal or shared. Registered in AddWarp so a
-        // dashboard-only host serves them; the saved_view table is always in the schema (§2.11).
-        services.TryAddScoped<ISavedViewQueryService, SavedViewQueryService<TContext>>();
-        services.TryAddScoped<ISavedViewCommandService, SavedViewCommandService<TContext>>();
-
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
         // /api/webhooks endpoints (§2.14 stays-on-TContext). The WebhookDelivery table is always in the
@@ -489,7 +484,6 @@ public static class ServiceConfiguration
         AddMetricBoardEntity(modelBuilder, schema);
         AddMetricBoardTileEntity(modelBuilder, schema);
         AddMetricAnnotationEntity(modelBuilder, schema);
-        AddSavedViewEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -1407,29 +1401,6 @@ public static class ServiceConfiguration
         annotation.HasIndex(p => p.SloDefinitionId);
 
         annotation.Metadata.SetSchema(schema);
-    }
-
-    public static void AddSavedViewEntity(ModelBuilder modelBuilder, string? schema)
-    {
-        var view = modelBuilder.Entity<SavedView>();
-
-        view.Property(p => p.Id);
-        view.HasKey(p => p.Id);
-
-        view.Property(p => p.Name).HasMaxLength(SavedViews.SavedViewValidation.MaxNameLength);
-        view.Property(p => p.Page).HasMaxLength(SavedViews.SavedViewValidation.MaxPageLength);
-        view.Property(p => p.Target).HasMaxLength(SavedViews.SavedViewValidation.MaxTargetLength);
-        view.Property(p => p.Query).HasMaxLength(SavedViews.SavedViewValidation.MaxQueryLength);
-        view.Property(p => p.Shared);
-        view.Property(p => p.Author).HasMaxLength(Metrics.MetricAnnotationValidation.MaxAuthorLength);
-        view.Property(p => p.CreatedAt);
-        view.Property(p => p.UpdatedAt);
-
-        // The Views menu reads one page (and target); the per-author cap counts by author.
-        view.HasIndex(p => new { p.Page, p.Target });
-        view.HasIndex(p => p.Author);
-
-        view.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)

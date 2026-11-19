@@ -135,7 +135,6 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
         tables.ShouldContain("warp.metric_board_tile");
         tables.ShouldContain("warp.metric_board");
         tables.ShouldContain("warp.metric_annotation");
-        tables.ShouldContain("warp.saved_view");
         tables.ShouldContain(".host_order");
         operations.OfType<EnsureSchemaOperation>().ShouldContain(x => string.Equals(x.Name, "warp", StringComparison.Ordinal));
 
@@ -182,13 +181,6 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
         var boardTable = creates
             .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "metric_board", StringComparison.Ordinal));
         boardTable.Columns.Single(x => string.Equals(x.Name, "seed_key", StringComparison.Ordinal)).IsNullable.ShouldBeTrue("seed_key");
-
-        // Saved views: target is nullable (an issues view has none), the rest required.
-        var viewTable = creates
-            .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "saved_view", StringComparison.Ordinal));
-        viewTable.Columns.Single(x => string.Equals(x.Name, "target", StringComparison.Ordinal)).IsNullable.ShouldBeTrue("target");
-        viewTable.Columns.Single(x => string.Equals(x.Name, "query", StringComparison.Ordinal)).IsNullable.ShouldBeFalse("query");
-        viewTable.Columns.Single(x => string.Equals(x.Name, "author", StringComparison.Ordinal)).IsNullable.ShouldBeFalse("author");
     }
 
     private static async Task<SaveOutcome> SaveTwiceAsync(HostDbContext context, DbTransaction transaction, string reference)

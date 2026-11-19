@@ -257,21 +257,6 @@ public class ServiceRegistrationTopologyTests
     }
 
     [TimedFact]
-    public void AddWarp_Only_ResolvesTheSavedViewServices()
-    {
-        // A dashboard-only host saves and lists views with no AddMetrics and no server.
-        var services = NewServices();
-        services.AddWarp<TestContext>(_ => { });
-
-        using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
-        using var scope = sp.CreateScope();
-
-        scope.ServiceProvider.GetService<ISavedViewQueryService>().ShouldBeOfType<SavedViewQueryService<TestContext>>();
-        scope.ServiceProvider.GetService<ISavedViewCommandService>().ShouldBeOfType<SavedViewCommandService<TestContext>>();
-        services.Count(x => x.ServiceType == typeof(ISavedViewCommandService)).ShouldBe(1);
-    }
-
-    [TimedFact]
     public void AddMetricBoard_CalledTwice_RegistersOneSeederAndOneMergedBoard()
     {
         var services = NewServices();
