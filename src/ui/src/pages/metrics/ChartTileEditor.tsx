@@ -2,7 +2,7 @@
 // percentile, rate, ratio view, min/max), written back as the tile's stored query, with a live preview of the chart over
 // the board's range.
 import { useMemo, useState } from 'react';
-import { parseFilterChip } from '@/lib/metricPattern';
+import { parseFilterChip, parsePattern } from '@/lib/metricPattern';
 import { inputClass } from '@/pages/slo/shared';
 import { MetricKind, type MetricInstrument } from '@/types/metrics';
 import type { ApplicationDeployModel } from '@/types/applications';
@@ -54,7 +54,7 @@ export function ChartTileEditor({
   return (
     <div className="space-y-3">
       <Row label="Application (optional)">
-        <input className={inputClass} value={controls.application ?? ''} onChange={(e) => set({ application: e.target.value.trim() || null })} />
+        <DraftInput className={inputClass} aria-label="Application" value={controls.application ?? ''} onCommit={(application) => set({ application })} />
       </Row>
       <Row label="Break down by">
         <select
@@ -134,12 +134,13 @@ export function ChartTileEditor({
             <button type="button" className={toggleClass(!ratio)} onClick={() => set({ view: 'values', numerator: null })}>Values</button>
             <button type="button" className={toggleClass(ratio)} onClick={() => set({ view: 'ratio' })}>Ratio</button>
             {ratio && (
-              <input
+              <DraftInput
                 className={`${inputClass} w-32 font-mono`}
                 aria-label="Numerator pattern"
                 placeholder="numerator e.g. 5*"
                 value={controls.numerator ?? ''}
-                onChange={(e) => set({ numerator: e.target.value.trim() || null })}
+                isValid={(x) => parsePattern(x) !== null}
+                onCommit={(numerator) => set({ numerator })}
               />
             )}
           </div>
@@ -161,6 +162,64 @@ export function ChartTileEditor({
         </Row>
       )}
     </div>
+  );
+}
+
+/**
+ * A text control that keeps what is typed locally and writes it back (trimmed, blank = null) only on blur or Enter: a
+ * write per keystroke re-fetched the preview on every key, and a numerator that is invalid halfway through typing
+ * (`5*0` on the way to `5*`) was dropped by the query round-trip, resetting the field under the cursor. An invalid value
+ * stays in the field, marked, and is not written. A new committed `value` (another control rewrote the query) replaces
+ * the draft.
+ */
+function DraftInput({
+  value,
+  onCommit,
+  isValid,
+  className,
+  placeholder,
+  'aria-label': ariaLabel,
+}: {
+  value: string;
+  onCommit: (value: string | null) => void;
+  isValid?: (value: string) => boolean;
+  className: string;
+  placeholder?: string;
+  'aria-label': string;
+}) {
+  const [draft, setDraft] = useState(value);
+  const [committed, setCommitted] = useState(value);
+  if (value !== committed) {
+    setCommitted(value);
+    setDraft(value);
+  }
+
+  const text = draft.trim();
+  const invalid = text !== '' && isValid !== undefined && !isValid(text);
+  const commit = () => {
+    if (invalid || text === value) {
+      return;
+    }
+
+    onCommit(text === '' ? null : text);
+  };
+
+  return (
+    <input
+      className={className}
+      aria-label={ariaLabel}
+      aria-invalid={invalid}
+      placeholder={placeholder}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          commit();
+        }
+      }}
+    />
   );
 }
 
