@@ -21,6 +21,13 @@ public enum MetricTileKind
     /// never counts in the deploy verdict, and the board read computes nothing for it (the dashboard reads the series).
     /// </summary>
     Chart = 3,
+
+    /// <summary>
+    /// An SLO objective's current evaluation (state, attainment against target, error budget, burn rates), named by
+    /// <c>SloDefinitionId</c>. It adds no status rule of its own: the objective's state is shown, and with a <c>board</c>
+    /// the deploy verdict counts the objectives that have a tile on that board.
+    /// </summary>
+    Slo = 4,
 }
 
 /// <summary>How a health-board tile picks its status colour. Values start at 1 (§8.11).</summary>

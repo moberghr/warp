@@ -119,7 +119,12 @@ public static class MetricBoardValidation
             return false;
         }
 
-        if (string.IsNullOrWhiteSpace(tile.Instrument) || tile.Instrument.Length > 128)
+        // An SLO tile reads its objective, not an instrument: the non-null column is stored empty.
+        if (tile.Kind == MetricTileKind.Slo)
+        {
+            tile.Instrument = string.Empty;
+        }
+        else if (string.IsNullOrWhiteSpace(tile.Instrument) || tile.Instrument.Length > 128)
         {
             error = "Instrument is required and must be a valid instrument name of at most 128 characters.";
 
@@ -133,8 +138,9 @@ public static class MetricBoardValidation
             return false;
         }
 
-        // A chart carries its application and filters in ChartQuery (the metric page's grammar), never in these columns.
-        if (tile.Kind == MetricTileKind.Chart)
+        // A chart carries its application and filters in ChartQuery (the metric page's grammar), never in these columns; an
+        // SLO tile shows its objective, which carries its own application and filters.
+        if (tile.Kind is MetricTileKind.Chart or MetricTileKind.Slo)
         {
             tile.Application = null;
             tile.TagFilter = null;
@@ -181,11 +187,17 @@ public static class MetricBoardValidation
     {
         if (!Enum.IsDefined(tile.Kind))
         {
-            error = $"Kind '{(int)tile.Kind}' is not valid: use Value (1), Ratio (2) or Chart (3).";
+            error = $"Kind '{(int)tile.Kind}' is not valid: use Value (1), Ratio (2), Chart (3) or Slo (4).";
 
             return false;
         }
 
+        if (tile.Kind == MetricTileKind.Slo)
+        {
+            return TryValidateSlo(tile, out error);
+        }
+
+        tile.SloDefinitionId = null;
         if (tile.Kind == MetricTileKind.Chart)
         {
             return TryValidateChart(tile, out error);
@@ -249,6 +261,28 @@ public static class MetricBoardValidation
         return true;
     }
 
+    // An SLO tile shows its objective: every value/ratio/chart column is cleared, and the objective id is required (that it
+    // names an existing objective is checked at write time by the caller, against the store).
+    private static bool TryValidateSlo(MetricBoardTile tile, out string? error)
+    {
+        tile.ChartQuery = null;
+        tile.RatioTag = null;
+        tile.GoodValues = null;
+        tile.BadValues = null;
+        tile.GaugeAggregate = null;
+
+        if (tile.SloDefinitionId is not > 0)
+        {
+            error = "An SLO tile requires SloDefinitionId, the id of an existing objective.";
+
+            return false;
+        }
+
+        error = null;
+
+        return true;
+    }
+
     private static bool TryValidateRatio(MetricBoardTile tile, out string? error)
     {
         if (string.IsNullOrWhiteSpace(tile.RatioTag) || tile.RatioTag.Length > 64)
@@ -307,6 +341,14 @@ public static class MetricBoardValidation
         if (tile.Kind == MetricTileKind.Chart && tile.StatusRule != MetricTileStatusRule.None)
         {
             error = "A chart tile has no status rule: use StatusRule None (1).";
+
+            return false;
+        }
+
+        // An SLO tile shows the objective's own state; it adds no rule of its own.
+        if (tile.Kind == MetricTileKind.Slo && tile.StatusRule != MetricTileStatusRule.None)
+        {
+            error = "An SLO tile has no status rule of its own (it shows the objective's state): use StatusRule None (1).";
 
             return false;
         }
@@ -424,14 +466,32 @@ public static class MetricBoardValidation
 /// </summary>
 public static class MetricBoardTileValidator
 {
-    public static async Task<(bool Ok, string? Error)> ValidateAsync(MetricBoardTile tile, IMetricQueryService metrics, CancellationToken ct)
+    /// <summary>The error an SLO tile gets when its <see cref="MetricBoardTile.SloDefinitionId"/> names no objective.</summary>
+    public const string ObjectiveNotFound = "The objective was not found: no SLO has that SloDefinitionId.";
+
+    public static Task<(bool Ok, string? Error)> ValidateAsync(MetricBoardTile tile, IMetricQueryService metrics, CancellationToken ct)
+        => ValidateAsync(tile, metrics, null, ct);
+
+    /// <summary>
+    /// Validates <paramref name="tile"/> against the registry and, for an SLO tile when <paramref name="objectives"/> is
+    /// given, checks that its objective exists (one single-row read; <see cref="ObjectiveNotFound"/> otherwise).
+    /// </summary>
+    public static async Task<(bool Ok, string? Error)> ValidateAsync(MetricBoardTile tile, IMetricQueryService metrics, ISloQueryService? objectives, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(tile);
         ArgumentNullException.ThrowIfNull(metrics);
 
-        var kind = string.IsNullOrEmpty(tile.Instrument) ? null : await metrics.GetInstrumentKindAsync(tile.Instrument, ct);
-        var ok = MetricBoardValidation.TryValidate(tile, kind, out var error);
+        var kind = tile.Kind == MetricTileKind.Slo || string.IsNullOrEmpty(tile.Instrument) ? null : await metrics.GetInstrumentKindAsync(tile.Instrument, ct);
+        if (!MetricBoardValidation.TryValidate(tile, kind, out var error))
+        {
+            return (false, error);
+        }
 
-        return (ok, error);
+        if (tile.Kind == MetricTileKind.Slo && objectives is not null && await objectives.GetObjective(tile.SloDefinitionId!.Value, ct) is null)
+        {
+            return (false, ObjectiveNotFound);
+        }
+
+        return (true, null);
     }
 }

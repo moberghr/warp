@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Warp.Core.Enums;
 using Warp.Core.Metrics;
 using Warp.Core.Models;
 
@@ -15,7 +16,8 @@ public interface IDeployVerdictService
     /// Judges the deploy <paramref name="query"/> names (the latest one when it gives no version). Board tiles scoped to the
     /// application or to none are evaluated over the complete fine buckets after the deploy (see
     /// <c>DeployVerdictMath.Window</c>) against their rules and baselines, and the enabled SLOs
-    /// scoped the same way contribute their current state. Bounded: one deploy read, one batched board read and one SLO read
+    /// scoped the same way contribute their current state — with a <see cref="DeployVerdictQuery.Board"/>, only the objectives
+    /// that have an SLO tile on that board. Bounded: one deploy read, one batched board read and one SLO read
     /// (none for a superseded deploy), whatever the number of tiles and objectives. Returns null when the application has no
     /// recorded deploy matching the version and environment. With <see cref="DeployVerdictQuery.Board"/> only that board's
     /// tiles count (one more read, the board list); without it the tiles of every board do. The board is matched by its
@@ -84,7 +86,7 @@ public sealed class DeployVerdictService : IDeployVerdictService
 
         // An SLO only has a current state, which describes whatever runs now: it says nothing about a superseded release.
         var slos = resolved.Next is null
-            ? (await _slos.GetObjectives(ct)).Items
+            ? await ReadObjectivesAsync(board, window, tiles, ct)
             : [];
 
         return DeployVerdictMath.Build(resolved, window, tiles, slos, query.MinCoverage, board?.Name);
@@ -99,6 +101,45 @@ public sealed class DeployVerdictService : IDeployVerdictService
         return boards.FirstOrDefault(x => MetricBoardStore.SameName(x.Name, name))
             ?? (MetricBoardStore.SameName(name, MetricBoardValidation.DefaultBoardName) ? boards.FirstOrDefault(x => x.IsDefault) : null)
             ?? throw new MetricBoardNotFoundException($"No metric board is named '{name}'.");
+    }
+
+    // No board: every SLO. With a board: only the objectives that have an SLO tile on it (resolved question 1 of the board
+    // tiles spec), taken from the board read already made, which joined them to its one objective read. An empty window
+    // skipped that read, so the board's tiles are listed instead (one statement) and the objectives read only when one of
+    // them is an SLO tile.
+    private async Task<IReadOnlyList<SloObjectiveModel>> ReadObjectivesAsync(MetricBoardSummaryModel? board, DeployVerdictWindow window, IReadOnlyList<MetricBoardTileResult> tiles, CancellationToken ct)
+    {
+        if (board is null)
+        {
+            return (await _slos.GetObjectives(ct)).Items;
+        }
+
+        if (window.To > window.From)
+        {
+            return
+            [
+                .. tiles
+                    .Where(x => x.Tile.Kind == MetricTileKind.Slo)
+                    .Select(x => x.Slo)
+                    .OfType<SloObjectiveModel>()
+                    .DistinctBy(x => x.Id),
+            ];
+        }
+
+        var ids = (await _board.GetTiles(ct))
+            .Where(x => x.Kind == MetricTileKind.Slo)
+            .Where(x => board.IsDefault ? x.BoardId == null || x.BoardId == board.Id : x.BoardId == board.Id)
+            .Select(x => x.SloDefinitionId)
+            .OfType<int>()
+            .ToHashSet();
+        if (ids.Count == 0)
+        {
+            return [];
+        }
+
+        var objectives = await _slos.GetObjectives(ct);
+
+        return [.. objectives.Items.Where(x => ids.Contains(x.Id))];
     }
 
     // No board: every board's tiles, as before named boards existed (a tile moved to a named board keeps counting).

@@ -1163,6 +1163,7 @@ public abstract class MetricBoardTestsBase : IAsyncLifetime
         builder.Services.AddScoped<IMetricQueryService>(_ => new MetricQueryService<TestContext>(_fixture.CreateContext(), Options.Create(new WarpConfiguration())));
         builder.Services.AddScoped<IMetricBoardQueryService>(_ => Query());
         builder.Services.AddScoped<IMetricBoardCommandService>(_ => Command(lockTimeout));
+        builder.Services.AddScoped<ISloQueryService>(_ => new SloQueryService<TestContext>(_fixture.CreateContext()));
 
         var app = builder.Build();
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);

@@ -255,7 +255,8 @@ public static class ServiceConfiguration
         services.TryAddScoped<IMetricBoardQueryService>(x => new MetricBoardQueryService<TContext>(
             x.GetRequiredService<TContext>(),
             x.GetRequiredService<IOptions<WarpConfiguration>>(),
-            x.GetRequiredService<TimeProvider>()));
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<ISloQueryService>()));
         services.TryAddScoped<IMetricBoardCommandService, MetricBoardCommandService<TContext>>();
 
         // Post-deploy verdict: composes the deploy history, the board and the SLOs above (no query of its own). Registered in
@@ -1332,6 +1333,7 @@ public static class ServiceConfiguration
         tile.Property(p => p.TagFilter).HasMaxLength(512);
         tile.Property(p => p.Kind).HasConversion<int>();
         tile.Property(p => p.ChartQuery).HasMaxLength(2000);
+        tile.Property(p => p.SloDefinitionId);
         tile.Property(p => p.RatioTag).HasMaxLength(64);
         tile.Property(p => p.GoodValues).HasMaxLength(512);
         tile.Property(p => p.BadValues).HasMaxLength(512);

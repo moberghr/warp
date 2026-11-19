@@ -284,6 +284,9 @@ public static class SloServiceConfiguration
         var seederType = typeof(SloSeeder<>).MakeGenericType(ResolveContextType(builder));
         builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton(typeof(IHostedService), seederType));
 
+        // Objectives are seeded before boards: a board's SLO tile resolves its objective by name at seed time.
+        Warp.Core.Metrics.MetricBoardServiceConfiguration.MoveSeederLast(builder.Services);
+
         return builder;
     }
 

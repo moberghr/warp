@@ -54,12 +54,15 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
     private readonly TContext _context;
     private readonly IOptions<WarpConfiguration> _options;
     private readonly TimeProvider _timeProvider;
+    private readonly ISloQueryService _objectives;
 
-    public MetricBoardQueryService(TContext context, IOptions<WarpConfiguration> options, TimeProvider timeProvider)
+    // The objective read is optional for direct construction (tests); AddWarp registers ISloQueryService, so DI passes it.
+    public MetricBoardQueryService(TContext context, IOptions<WarpConfiguration> options, TimeProvider timeProvider, ISloQueryService? objectives = null)
     {
         _context = context;
         _options = options;
         _timeProvider = timeProvider;
+        _objectives = objectives ?? new SloQueryService<TContext>(context);
     }
 
     public async Task<IReadOnlyList<MetricBoardSummaryModel>> GetBoards(CancellationToken ct)
@@ -203,9 +206,12 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
 
         // Chart tiles are pictures the dashboard draws from the series API: they get their registry kind and unit (one
         // registry read for the board) and nothing else, never a place in the batched value read or the annotation read.
-        var evaluated = tiles.FindAll(x => x.Kind != MetricTileKind.Chart);
+        // SLO tiles read no instrument at all: they are joined to ONE objective read for the whole board.
+        var evaluated = tiles.FindAll(x => x.Kind is not (MetricTileKind.Chart or MetricTileKind.Slo));
         var specs = evaluated.ToDictionary(x => x.Id, x => MetricTileSpec.TryCreate(x, out var spec) ? spec : null);
+        var objectives = await ReadObjectivesAsync(tiles, ct);
         var names = tiles
+            .Where(x => x.Kind != MetricTileKind.Slo)
             .Select(x => x.Instrument)
             .Distinct(StringComparer.Ordinal)
             .ToList();
@@ -261,6 +267,19 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         var results = new List<MetricBoardTileResult>(tiles.Count);
         foreach (var tile in tiles)
         {
+            if (tile.Kind == MetricTileKind.Slo)
+            {
+                var objective = objectives.GetValueOrDefault(tile.SloDefinitionId ?? 0);
+                results.Add(new MetricBoardTileResult
+                {
+                    Tile = Project(tile),
+                    Slo = objective,
+                    Missing = objective is null,
+                });
+
+                continue;
+            }
+
             var known = instruments.TryGetValue(tile.Instrument, out var info);
             if (tile.Kind == MetricTileKind.Chart)
             {
@@ -348,6 +367,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         TagFilter = x.TagFilter,
         Kind = x.Kind,
         ChartQuery = x.ChartQuery,
+        SloDefinitionId = x.SloDefinitionId,
         RatioTag = x.RatioTag,
         GoodValues = x.GoodValues,
         BadValues = x.BadValues,
@@ -371,6 +391,20 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         var cutoff = MetricTiers.BucketStart(MetricTier.Fine, now - flush, fineMinutes);
 
         return new DateTime(Math.Clamp(cutoff.Ticks, from.Ticks, to.Ticks), DateTimeKind.Utc);
+    }
+
+    // Every objective the board's SLO tiles show, from ONE objective read (whatever the number of SLO tiles; none without
+    // an SLO tile). A tile whose objective is gone finds no entry and reads as missing.
+    private async Task<Dictionary<int, SloObjectiveModel>> ReadObjectivesAsync(List<MetricBoardTile> tiles, CancellationToken ct)
+    {
+        if (!tiles.Exists(x => x.Kind == MetricTileKind.Slo))
+        {
+            return [];
+        }
+
+        var list = await _objectives.GetObjectives(ct);
+
+        return list.Items.ToDictionary(x => x.Id);
     }
 
     private async Task<List<MetricBoardRow>> ReadRowsAsync(IReadOnlyCollection<string> instruments, DateTime from, DateTime to, bool byTags, CancellationToken ct)

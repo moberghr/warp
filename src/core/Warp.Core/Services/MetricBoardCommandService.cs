@@ -24,7 +24,7 @@ public interface IMetricBoardCommandService
     /// </summary>
     /// <remarks>
     /// Persists <paramref name="tile"/> as given: callers validate (and normalize) it first with
-    /// <see cref="MetricBoardTileValidator.ValidateAsync"/>, as the dashboard upsert endpoint does.
+    /// <see cref="MetricBoardTileValidator"/>, as the dashboard upsert endpoint does.
     /// </remarks>
     Task<int?> Upsert(MetricBoardTile tile, CancellationToken ct);
 
@@ -245,6 +245,7 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
         existing.TagFilter = tile.TagFilter;
         existing.Kind = tile.Kind;
         existing.ChartQuery = tile.ChartQuery;
+        existing.SloDefinitionId = tile.SloDefinitionId;
         existing.RatioTag = tile.RatioTag;
         existing.GoodValues = tile.GoodValues;
         existing.BadValues = tile.BadValues;

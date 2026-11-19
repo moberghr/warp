@@ -919,13 +919,15 @@ public static class WarpEndpoints
         apiGroup.MapPost("metrics/board/tiles", async (
             [FromServices] IMetricBoardCommandService svc,
             [FromServices] IMetricQueryService metrics,
+            [FromServices] ISloQueryService objectives,
             [FromBody] MetricBoardTileUpsertRequest body,
             CancellationToken ct) =>
         {
             var tile = body.ToTile();
 
-            // The seeder runs the same validator: the instrument's registry kind decides whether a ratio is allowed.
-            var (ok, error) = await Warp.Core.Metrics.MetricBoardTileValidator.ValidateAsync(tile, metrics, ct);
+            // The seeder runs the same validator: the instrument's registry kind decides whether a ratio is allowed, and an
+            // SLO tile must name an existing objective.
+            var (ok, error) = await Warp.Core.Metrics.MetricBoardTileValidator.ValidateAsync(tile, metrics, objectives, ct);
             if (!ok)
             {
                 return Results.BadRequest(error);
@@ -1625,7 +1627,8 @@ public sealed record MetricBoardTileUpsertRequest(
     double? MaxDeviation = null,
     MetricDeviationDirection? DeviationDirection = null,
     int? BoardId = null,
-    string? ChartQuery = null)
+    string? ChartQuery = null,
+    int? SloDefinitionId = null)
 {
     public Warp.Core.Data.Entities.MetricBoardTile ToTile() => new()
     {
@@ -1635,6 +1638,7 @@ public sealed record MetricBoardTileUpsertRequest(
         Instrument = Instrument ?? string.Empty,
         Kind = Kind,
         ChartQuery = ChartQuery,
+        SloDefinitionId = SloDefinitionId,
         Position = Position,
         Application = Application,
         TagFilter = TagFilter,

@@ -74,6 +74,9 @@ public sealed class MetricBoardOptions
 {
     internal List<MetricBoardTile> Seeded { get; } = [];
 
+    // The objective each seeded SLO tile names, keyed by the seed instance: the seeder resolves it to an id at seed time.
+    internal Dictionary<MetricBoardTile, SloTileSeed> SloSeeds { get; } = new(ReferenceEqualityComparer.Instance);
+
     /// <summary>
     /// A value tile: the matching events of <paramref name="instrument"/> over the window (sum for a counter or up-down
     /// counter, measurement count for a histogram), or a gauge's <paramref name="aggregate"/> (average by default).
@@ -155,6 +158,48 @@ public sealed class MetricBoardOptions
             },
             null);
 
+    /// <summary>
+    /// An SLO tile showing the objective named <paramref name="name"/> (matched ignoring case) of
+    /// <paramref name="application"/> (matched exactly; null matches an objective with no application). The tile is
+    /// labelled <paramref name="label"/>, the objective's name by default (tile names are unique per board, so two
+    /// applications' objectives of one name need a label each). The objective is resolved when the board is seeded,
+    /// after the SLO seeder: no match, or more than one, logs at Error and skips the tile. An SLO tile has no status rule
+    /// of its own.
+    /// </summary>
+    public MetricBoardOptions Slo(string name, string? application = null, string? label = null)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > 200)
+        {
+            throw new ArgumentException("An SLO tile needs the objective's name, at most 200 characters.", nameof(name));
+        }
+
+        var objective = new SloTileSeed(name.Trim(), string.IsNullOrWhiteSpace(application) ? null : application.Trim());
+        if (objective.Application?.Length > 200)
+        {
+            throw new ArgumentException("Application must be at most 200 characters.", nameof(application));
+        }
+
+        if (SloSeeds.Values.Any(x => string.Equals(x.Name, objective.Name, StringComparison.OrdinalIgnoreCase) && string.Equals(x.Application, objective.Application, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException($"Metric board SLO tile '{objective.Name}' names the same objective as another tile.", nameof(name));
+        }
+
+        var tile = new MetricBoardTile
+        {
+            Name = string.IsNullOrWhiteSpace(label) ? objective.Name : label.Trim(),
+            Kind = MetricTileKind.Slo,
+        };
+        if (tile.Name.Length > 200)
+        {
+            throw new ArgumentException("An SLO tile's label must be at most 200 characters.", nameof(label));
+        }
+
+        Append(tile);
+        SloSeeds[tile] = objective;
+
+        return this;
+    }
+
     // The seeder's field match: a tile whose name was edited in the dashboard is still found by what it reads.
     internal static bool SameFields(MetricBoardTile a, MetricBoardTile b)
         => string.Equals(a.Instrument, b.Instrument, StringComparison.Ordinal)
@@ -163,7 +208,8 @@ public sealed class MetricBoardOptions
             && string.Equals(a.TagFilter, b.TagFilter, StringComparison.Ordinal)
             && string.Equals(a.RatioTag, b.RatioTag, StringComparison.Ordinal)
             && a.GaugeAggregate == b.GaugeAggregate
-            && string.Equals(a.ChartQuery, b.ChartQuery, StringComparison.Ordinal);
+            && string.Equals(a.ChartQuery, b.ChartQuery, StringComparison.Ordinal)
+            && a.SloDefinitionId == b.SloDefinitionId;
 
     private MetricBoardOptions Add(MetricBoardTile tile, MetricTileCheck? check)
     {
@@ -175,13 +221,21 @@ public sealed class MetricBoardOptions
             throw new ArgumentException($"Invalid metric board tile '{tile.Name}': {error}", nameof(tile));
         }
 
+        Append(tile);
+
+        return this;
+    }
+
+    private void Append(MetricBoardTile tile)
+    {
         // The seeder matches by name or by fields, so a repeat of either would silently seed only the first.
         if (Seeded.Exists(x => string.Equals(x.Name, tile.Name, StringComparison.Ordinal)))
         {
             throw new ArgumentException($"Duplicate metric board tile name '{tile.Name}': tile names must be unique.", nameof(tile));
         }
 
-        if (Seeded.Exists(x => SameFields(x, tile)))
+        // An SLO seed has no objective id yet (it is resolved at seed time): Slo() checks the objective's name instead.
+        if (tile.Kind != MetricTileKind.Slo && Seeded.Exists(x => SameFields(x, tile)))
         {
             throw new ArgumentException($"Metric board tile '{tile.Name}' reads the same instrument, kind, application, filter, ratio tag, aggregate and chart query as another tile.", nameof(tile));
         }
@@ -197,10 +251,11 @@ public sealed class MetricBoardOptions
         }
 
         Seeded.Add(tile);
-
-        return this;
     }
 }
+
+/// <summary>The objective a seeded SLO tile names: its name (matched ignoring case) and application (matched exactly).</summary>
+internal sealed record SloTileSeed(string Name, string? Application);
 
 /// <summary>
 /// One board to seed from code: the Default board (<see cref="Name"/> null) or a named board, matched by name ignoring case.
@@ -255,6 +310,22 @@ internal sealed class MetricBoardSeeds
 /// </summary>
 public static class MetricBoardServiceConfiguration
 {
+    // The SLO seeder must run before the board seeder: an SLO tile is resolved against the stored objectives. Hosted services
+    // start in registration order, so AddSlo moves an already-registered board seeder after its own seeder, and
+    // AddMetricBoard appends (TryAddEnumerable) after one registered before it.
+    internal static void MoveSeederLast(IServiceCollection services)
+    {
+        var seeders = services
+            .Where(x => x.ServiceType == typeof(IHostedService))
+            .Where(x => x.ImplementationType is { IsGenericType: true } type && type.GetGenericTypeDefinition() == typeof(MetricBoardSeeder<>))
+            .ToList();
+        foreach (var seeder in seeders)
+        {
+            services.Remove(seeder);
+            services.Add(seeder);
+        }
+    }
+
     /// <summary>Seeds tiles on the Default board, which owns every tile without a board.</summary>
     public static IWarpBuilder AddMetricBoard(this IWarpBuilder builder, Action<MetricBoardOptions> configure)
         => AddMetricBoardCore(builder, null, configure);
@@ -360,6 +431,10 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
             var metrics = scope.ServiceProvider.GetRequiredService<IMetricQueryService>();
             var queries = scope.ServiceProvider.GetService<IWarpSqlQueries<TContext>>();
 
+            // SLO tiles name their objective; one read of the objectives resolves every one of them (the SLO seeder ran
+            // first: AddSlo orders its seeder before this one).
+            var objectives = await ReadObjectivesAsync(context, cancellationToken);
+
             // Validated before the lock (one registry read per seed), so the locked section is the board read and the inserts.
             var boards = new List<PreparedBoard>();
             foreach (var board in _seeds.Boards)
@@ -370,6 +445,11 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
                     // Validated first, so the match sees the normalized fields the stored row was written with (a gauge's
                     // default aggregate).
                     var tile = Copy(seed);
+                    if (board.Tiles.SloSeeds.TryGetValue(seed, out var objective) && !TryResolve(tile, objective, objectives, board.Name))
+                    {
+                        continue;
+                    }
+
                     var (ok, error) = await MetricBoardTileValidator.ValidateAsync(tile, metrics, cancellationToken);
                     tiles.Add(new PreparedTile(tile, ok, error));
                 }
@@ -396,6 +476,49 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
+    // The (id, name, application) of every objective, only when an SLO tile is seeded; a handful of rows, matched in memory
+    // so a collation never decides whether two names are one.
+    private async Task<List<(int Id, string Name, string? Application)>> ReadObjectivesAsync(TContext context, CancellationToken ct)
+    {
+        if (!_seeds.Boards.Exists(x => x.Tiles.SloSeeds.Count > 0))
+        {
+            return [];
+        }
+
+        var rows = await context.Set<SloDefinition>()
+            .AsNoTracking()
+            .Select(x =>
+                new
+                {
+                    x.Id,
+                    x.Name,
+                    x.Application,
+                })
+            .ToListAsync(ct);
+
+        return rows.ConvertAll(x => (x.Id, x.Name, x.Application));
+    }
+
+    // Exactly one objective must match the seed's name (ignoring case) and application (exactly; null matches null).
+    private bool TryResolve(MetricBoardTile tile, SloTileSeed seed, List<(int Id, string Name, string? Application)> objectives, string? board)
+    {
+        var matches = objectives.FindAll(x => string.Equals(x.Name, seed.Name, StringComparison.OrdinalIgnoreCase) && string.Equals(x.Application, seed.Application, StringComparison.Ordinal));
+        if (matches.Count != 1)
+        {
+            _logger.LogError(
+                "Metric board SLO tile '{Name}' on board '{Board}' was NOT seeded: {Count} objectives match that name and application (exactly one must).",
+                tile.Name,
+                board ?? MetricBoardValidation.DefaultBoardName,
+                matches.Count);
+
+            return false;
+        }
+
+        tile.SloDefinitionId = matches[0].Id;
+
+        return true;
+    }
+
     // The names of the fields two tiles disagree on, for the skip log: field names only, never a value (§1.2: a filter
     // holds tag values).
     internal static IEnumerable<string> DifferingFields(MetricBoardTile stored, MetricBoardTile seed)
@@ -405,6 +528,7 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
             (nameof(MetricBoardTile.Instrument), string.Equals(stored.Instrument, seed.Instrument, StringComparison.Ordinal)),
             (nameof(MetricBoardTile.Kind), stored.Kind == seed.Kind),
             (nameof(MetricBoardTile.ChartQuery), string.Equals(stored.ChartQuery, seed.ChartQuery, StringComparison.Ordinal)),
+            (nameof(MetricBoardTile.SloDefinitionId), stored.SloDefinitionId == seed.SloDefinitionId),
             (nameof(MetricBoardTile.Application), string.Equals(stored.Application, seed.Application, StringComparison.Ordinal)),
             (nameof(MetricBoardTile.TagFilter), string.Equals(stored.TagFilter, seed.TagFilter, StringComparison.Ordinal)),
             (nameof(MetricBoardTile.RatioTag), string.Equals(stored.RatioTag, seed.RatioTag, StringComparison.Ordinal)),
@@ -605,6 +729,7 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
         TagFilter = x.TagFilter,
         Kind = x.Kind,
         ChartQuery = x.ChartQuery,
+        SloDefinitionId = x.SloDefinitionId,
         RatioTag = x.RatioTag,
         GoodValues = x.GoodValues,
         BadValues = x.BadValues,

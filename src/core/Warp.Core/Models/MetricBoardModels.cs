@@ -26,6 +26,9 @@ public sealed class MetricBoardTileModel
     /// <summary>A chart tile's stored metric-page controls (a URL query string without the range); null for other kinds.</summary>
     public string? ChartQuery { get; init; }
 
+    /// <summary>An SLO tile's objective id (a soft reference); null for other kinds.</summary>
+    public int? SloDefinitionId { get; init; }
+
     public string? RatioTag { get; init; }
 
     public string? GoodValues { get; init; }
@@ -91,6 +94,15 @@ public sealed class MetricBoardTileResult
     public IReadOnlyList<MetricAnnotationModel> Annotations { get; init; } = [];
 
     public IReadOnlyList<MetricBoardSparkPoint> Sparkline { get; init; } = [];
+
+    /// <summary>
+    /// An SLO tile's objective with its current evaluation (from the one objective read of the board); null for other kinds
+    /// and when the objective no longer exists (<see cref="Missing"/>).
+    /// </summary>
+    public SloObjectiveModel? Slo { get; init; }
+
+    /// <summary>True for an SLO tile whose objective no longer exists (deleted by an older binary, mid rolling deploy).</summary>
+    public bool Missing { get; init; }
 }
 
 /// <summary>One named board as the picker lists it.</summary>

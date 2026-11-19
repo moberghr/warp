@@ -117,6 +117,14 @@ public sealed class SloCommandService<TContext> : ISloCommandService
             .ToListAsync(ct);
         _context.Set<MetricAnnotation>().RemoveRange(annotations);
 
+        // So are the board tiles showing it: a board never shows a dead objective in the normal path (the board read's
+        // missing flag covers a delete made by an older binary mid rolling deploy).
+        var tiles = await _context.Set<MetricBoardTile>()
+            .Where(x => x.Kind == MetricTileKind.Slo)
+            .Where(x => x.SloDefinitionId == id)
+            .ToListAsync(ct);
+        _context.Set<MetricBoardTile>().RemoveRange(tiles);
+
         _context.Set<SloDefinition>().Remove(definition);
         await _context.SaveChangesAsync(ct);
         _logger.LogInformation("SLO objective {Id} deleted", id);

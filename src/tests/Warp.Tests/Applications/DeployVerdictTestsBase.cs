@@ -360,8 +360,9 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     [InlineData("Checkout", DeployVerdicts.Fail, "Checkout errors", "Checkout")]
     [InlineData("checkout", DeployVerdicts.Fail, "Checkout errors", "Checkout")]
     [InlineData("Default", DeployVerdicts.Pass, "Default errors", "Default")]
-    public async Task GetVerdict_WithBoard_CountsOnlyThatBoardsTilesAndKeepsTheSlos(string board, string expected, string tile, string resolved)
+    public async Task GetVerdict_WithBoard_CountsOnlyThatBoardsTilesAndNoSloWithoutAnSloTile(string board, string expected, string tile, string resolved)
     {
+        // Resolved question 1 of the board tiles spec: with board=, only the SLOs that have an SLO tile on that board count.
         await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
         await SeedMetricsAsync(Point(Now.AddMinutes(-30), 20));
         var checkout = await SeedBoardAsync("Checkout");
@@ -375,7 +376,81 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         verdict.ShouldNotBeNull();
         verdict.Verdict.ShouldBe(expected);
         verdict.Board.ShouldBe(resolved);
-        verdict.Checks.Select(x => (x.Source, x.Name)).ShouldBe([(DeployVerdictSources.Tile, tile), (DeployVerdictSources.Slo, "Api success")]);
+        verdict.Checks.Select(x => (x.Source, x.Name)).ShouldBe([(DeployVerdictSources.Tile, tile)]);
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_WithBoardHoldingAnSloTile_CountsOnlyThatSlo()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 20));
+        var checkout = await SeedBoardAsync("Checkout");
+        var shown = await SeedSloAsync("Checkout success", "api", SloState.Warning);
+        await SeedSloAsync("Search success", "api", SloState.Breaching);
+        await SeedTilesAsync(Tile("Checkout errors", threshold: 100, boardId: checkout), SloTile("Checkout success", shown, checkout, position: 2));
+
+        var verdict = await Service().GetVerdict(Query("api", board: "Checkout"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Warn);
+        verdict.Checks.Select(x => (x.Source, x.Name, x.State)).ShouldBe(
+        [
+            (DeployVerdictSources.Tile, "Checkout errors", "healthy"),
+            (DeployVerdictSources.Slo, "Checkout success", "warning"),
+        ]);
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_WithoutBoard_CountsEverySloWhateverTheTiles()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        var checkout = await SeedBoardAsync("Checkout");
+        var shown = await SeedSloAsync("Checkout success", "api", SloState.Healthy);
+        await SeedSloAsync("Search success", "api", SloState.Breaching);
+        await SeedTilesAsync(SloTile("Checkout success", shown, checkout));
+
+        var verdict = await Service().GetVerdict(Query("api"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Fail);
+        verdict.Checks.Select(x => (x.Source, x.Name)).ShouldBe(
+        [
+            (DeployVerdictSources.Slo, "Checkout success"),
+            (DeployVerdictSources.Slo, "Search success"),
+        ]);
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_WithBoardHoldingAnSloTileOfAnotherApplication_DoesNotCountIt()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        var checkout = await SeedBoardAsync("Checkout");
+        var admin = await SeedSloAsync("Admin success", "admin", SloState.Breaching);
+        var api = await SeedSloAsync("Api success", "api", SloState.Healthy);
+        await SeedTilesAsync(SloTile("Admin success", admin, checkout), SloTile("Api success", api, checkout, position: 2));
+
+        var verdict = await Service().GetVerdict(Query("api", board: "Checkout"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+        verdict.Checks.ShouldHaveSingleItem().Name.ShouldBe("Api success");
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_WithBoardHoldingAnSloTileWhileTheWindowIsEmpty_StillListsThatSlo()
+    {
+        // The deploy is this instant: no board read is made, so the board's SLO tiles are listed instead.
+        await SeedDeployAsync("api", "2.0.0", Now);
+        var checkout = await SeedBoardAsync("Checkout");
+        var shown = await SeedSloAsync("Checkout success", "api", SloState.Healthy);
+        await SeedSloAsync("Search success", "api", SloState.Healthy);
+        await SeedTilesAsync(SloTile("Checkout success", shown, checkout));
+
+        var verdict = await Service().GetVerdict(Query("api", board: "Checkout"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pending);
+        verdict.Checks.ShouldHaveSingleItem().Name.ShouldBe("Checkout success");
     }
 
     [TimedTheory]
@@ -659,6 +734,19 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         UpdatedAt = Now,
     };
 
+    private static MetricBoardTile SloTile(string name, int objective, int? boardId = null, int position = 1) => new()
+    {
+        BoardId = boardId,
+        Name = name,
+        Instrument = string.Empty,
+        Position = position,
+        Kind = MetricTileKind.Slo,
+        SloDefinitionId = objective,
+        StatusRule = MetricTileStatusRule.None,
+        CreatedAt = Now,
+        UpdatedAt = Now,
+    };
+
     private static MetricPoint Point(DateTime bucket, double sum, string? application = null) => new()
     {
         Instrument = "c",
@@ -724,7 +812,7 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         await context.SaveChangesAsync(Ct);
     }
 
-    private async Task SeedSloAsync(string name, string? application, SloState state, DateTime? evaluatedAt = default)
+    private async Task<int> SeedSloAsync(string name, string? application, SloState state, DateTime? evaluatedAt = default)
     {
         var definition = new SloDefinition
         {
@@ -743,6 +831,8 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
             State = state,
             LastEvaluatedAt = evaluatedAt ?? Now,
         });
+
+        return definition.Id;
     }
 
     private async Task SeedAsync<T>(T entity)

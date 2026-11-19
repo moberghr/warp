@@ -279,6 +279,33 @@ public class ServiceRegistrationTopologyTests
     }
 
     [TimedFact]
+    public void AddSlo_AfterAddMetricBoard_StartsTheSloSeederBeforeTheBoardSeeder()
+    {
+        // A board's SLO tile resolves its objective at seed time: objectives are seeded first, whatever the call order.
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddMetricBoard(y => y.Slo("Checkout success"));
+            x.AddSlo(y => y.AddObjective(SloKind.SuccessRate, "*", 0.99, name: "Checkout success"));
+        });
+
+        SeederOrder(services).ShouldBe([typeof(SloSeeder<TestContext>), typeof(MetricBoardSeeder<TestContext>)]);
+    }
+
+    [TimedFact]
+    public void AddSlo_BeforeAddMetricBoard_StartsTheSloSeederBeforeTheBoardSeeder()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddSlo(y => y.AddObjective(SloKind.SuccessRate, "*", 0.99, name: "Checkout success"));
+            x.AddMetricBoard(y => y.Slo("Checkout success"));
+        });
+
+        SeederOrder(services).ShouldBe([typeof(SloSeeder<TestContext>), typeof(MetricBoardSeeder<TestContext>)]);
+    }
+
+    [TimedFact]
     public void AddMetricBoard_NamedBoards_MergeByNameIgnoringCaseAndDefaultIsTheUnnamedBoard()
     {
         var services = NewServices();
@@ -504,6 +531,16 @@ public class ServiceRegistrationTopologyTests
                 .Select(x => x.GetType()),
         ];
     }
+
+    // The seeders in hosted-service registration order, which is the order the host starts them in.
+    private static List<Type?> SeederOrder(IServiceCollection services)
+        =>
+        [
+            .. services
+                .Where(x => x.ServiceType == typeof(IHostedService))
+                .Select(x => x.ImplementationType)
+                .Where(x => x == typeof(SloSeeder<TestContext>) || x == typeof(MetricBoardSeeder<TestContext>)),
+        ];
 
     private sealed class InMemoryServerContextConfigurator : IWarpServerContextConfigurator
     {

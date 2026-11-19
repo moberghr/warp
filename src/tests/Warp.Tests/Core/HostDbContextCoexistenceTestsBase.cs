@@ -180,6 +180,10 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
         // Chart tiles: the stored metric-page query is nullable (every other kind has none), so the column is additive.
         tileTable.Columns.Single(x => string.Equals(x.Name, "chart_query", StringComparison.Ordinal)).IsNullable.ShouldBeTrue("chart_query");
 
+        // SLO tiles: the objective id is nullable (every other kind has none) and a soft reference (no foreign key, checked
+        // above), so the column is additive.
+        tileTable.Columns.Single(x => string.Equals(x.Name, "slo_definition_id", StringComparison.Ordinal)).IsNullable.ShouldBeTrue("slo_definition_id");
+
         // A seeded board's seed key: nullable (boards created in the dashboard have none), so the column is additive.
         var boardTable = creates
             .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "metric_board", StringComparison.Ordinal));

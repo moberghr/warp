@@ -45,6 +45,13 @@ public class MetricBoardTile
     /// </summary>
     public string? ChartQuery { get; set; }
 
+    /// <summary>
+    /// <see cref="MetricTileKind.Slo"/>: the objective shown. A soft reference (no foreign key, like
+    /// <c>MetricAnnotation.SloDefinitionId</c>): deleting the objective deletes its tiles in the same <c>SaveChanges</c>, and
+    /// the board read flags a tile whose objective is gone as missing. Null for every other kind.
+    /// </summary>
+    public int? SloDefinitionId { get; set; }
+
     /// <summary><see cref="MetricTileKind.Ratio"/>: the tag whose value classifies an event as good or bad.</summary>
     public string? RatioTag { get; set; }
 
