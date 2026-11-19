@@ -488,6 +488,8 @@ public class SloValidationTests
     [InlineData(SloKind.MetricThreshold, true)]
     [InlineData(SloKind.MetricVolumeFloor, true)]
     [InlineData(SloKind.MetricGap, true)]
+    [InlineData(SloKind.MetricLatency, true)]
+    [InlineData(SloKind.MetricGaugeThreshold, true)]
     [InlineData(SloKind.SuccessRate, false)]
     [InlineData(SloKind.QueueWaitLatency, false)]
     [InlineData(SloKind.ExecutionLatency, false)]
@@ -506,6 +508,240 @@ public class SloValidationTests
         ((int)SloKind.MetricThreshold).ShouldBe(7);
         ((int)SloKind.MetricVolumeFloor).ShouldBe(8);
         ((int)SloKind.MetricGap).ShouldBe(9);
+        ((int)SloKind.MetricLatency).ShouldBe(10);
+        ((int)SloKind.MetricGaugeThreshold).ShouldBe(11);
+        ((int)SloComparison.AtMost).ShouldBe(1);
+        ((int)SloComparison.AtLeast).ShouldBe(2);
+        ((int)SloGaugeAggregate.Average).ShouldBe(1);
+        ((int)SloGaugeAggregate.Min).ShouldBe(2);
+        ((int)SloGaugeAggregate.Max).ShouldBe(3);
+    }
+
+    [Theory]
+    [InlineData(MetricKind.Gauge, true)]
+    [InlineData(null, true)]
+    [InlineData(MetricKind.Counter, false)]
+    [InlineData(MetricKind.UpDownCounter, false)]
+    [InlineData(MetricKind.Histogram, false)]
+    public void TryValidate_MetricGaugeThreshold_AcceptsOnlyAGaugeOrAnUnknownInstrument(MetricKind? instrument, bool expected)
+    {
+        var def = Metric(SloKind.MetricGaugeThreshold, 100);
+
+        SloValidation.TryValidate(def, null, instrument, out var error).ShouldBe(expected, error);
+        if (!expected)
+        {
+            error.ShouldNotBeNull().ShouldContain("gauge");
+        }
+    }
+
+    [Fact]
+    public void TryValidate_MetricGaugeThresholdWithoutOptions_DefaultsToAtMostAverageAnd95()
+    {
+        var def = Metric(SloKind.MetricGaugeThreshold, 100);
+
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        def.Comparison.ShouldBe(SloComparison.AtMost);
+        def.GaugeAggregate.ShouldBe(SloGaugeAggregate.Average);
+        def.Percentile.ShouldBe(95);
+    }
+
+    [Fact]
+    public void TryValidate_MetricGaugeThreshold_KeepsChosenOptionsAndAllowsANegativeTarget()
+    {
+        var def = Metric(SloKind.MetricGaugeThreshold, -20);
+        def.Comparison = SloComparison.AtLeast;
+        def.GaugeAggregate = SloGaugeAggregate.Min;
+        def.Percentile = 99;
+
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        def.Comparison.ShouldBe(SloComparison.AtLeast);
+        def.GaugeAggregate.ShouldBe(SloGaugeAggregate.Min);
+        def.Percentile.ShouldBe(99);
+    }
+
+    [Fact]
+    public void TryValidate_MetricGaugeThresholdInvalidOptions_Rejected()
+    {
+        var comparison = Metric(SloKind.MetricGaugeThreshold, 1);
+        comparison.Comparison = (SloComparison)9;
+        SloValidation.TryValidate(comparison, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("Comparison");
+
+        var aggregate = Metric(SloKind.MetricGaugeThreshold, 1);
+        aggregate.GaugeAggregate = (SloGaugeAggregate)0;
+        SloValidation.TryValidate(aggregate, out error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("GaugeAggregate");
+
+        var percentile = Metric(SloKind.MetricGaugeThreshold, 1);
+        percentile.Percentile = 100;
+        SloValidation.TryValidate(percentile, out _).ShouldBeFalse();
+
+        SloValidation.TryValidate(Metric(SloKind.MetricGaugeThreshold, double.PositiveInfinity), out _).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(SloKind.MetricThreshold)]
+    [InlineData(SloKind.MetricLatency)]
+    [InlineData(SloKind.SuccessRate)]
+    [InlineData(SloKind.QueueWaitLatency)]
+    [InlineData(SloKind.ExecutionLatency)]
+    [InlineData(SloKind.BacklogDepth)]
+    [InlineData(SloKind.DeadlineAttainment)]
+    public void TryValidate_OtherMetricKinds_ClearTheGaugeOptions(SloKind kind)
+    {
+        var def = Metric(kind, SloValidation.IsRateKind(kind) ? 0.99 : 1);
+        def.Comparison = SloComparison.AtLeast;
+        def.GaugeAggregate = SloGaugeAggregate.Max;
+
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        def.Comparison.ShouldBeNull();
+        def.GaugeAggregate.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(SloKind.SuccessRate, 0.99)]
+    [InlineData(SloKind.QueueWaitLatency, 500)]
+    [InlineData(SloKind.ExecutionLatency, 500)]
+    [InlineData(SloKind.BacklogDepth, 100)]
+    [InlineData(SloKind.DeadlineAttainment, 0.99)]
+    public void TryValidate_NonMetricKinds_ClearEveryMetricOnlyColumn(SloKind kind, double target)
+    {
+        // A stray metric field on a job-domain objective (an edited form, a hand-written POST) must not be stored: the
+        // evaluator of kinds 1-5 never reads it, and a reader would take it to mean something.
+        var def = Def(kind, target);
+        def.TagFilter = "status=5*";
+        def.SecondaryMetric = "orders.finished";
+        def.SecondaryTagFilter = "result=ok";
+        def.RatioTag = "outcome";
+        def.GoodValues = "ok";
+        def.BadValues = "error";
+        def.BaselineDays = 7;
+        def.Comparison = SloComparison.AtLeast;
+        def.GaugeAggregate = SloGaugeAggregate.Min;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeTrue(error);
+
+        def.TagFilter.ShouldBeNull();
+        def.SecondaryMetric.ShouldBeNull();
+        def.SecondaryTagFilter.ShouldBeNull();
+        def.RatioTag.ShouldBeNull();
+        def.GoodValues.ShouldBeNull();
+        def.BadValues.ShouldBeNull();
+        def.BaselineDays.ShouldBeNull();
+        def.Comparison.ShouldBeNull();
+        def.GaugeAggregate.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData("{version}=2.*")]
+    [InlineData("status=5*,{version}=2.4.1")]
+    public void TryValidate_TagFilterOnTheReservedVersionKey_IsRejected(string filter)
+    {
+        var def = Metric(SloKind.MetricThreshold, 0);
+        def.TagFilter = filter;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldStartWith("TagFilter is invalid: the '{version}' key is reserved");
+    }
+
+    [Fact]
+    public void TryValidate_SecondaryTagFilterOnTheReservedVersionKey_IsRejected()
+    {
+        var def = Metric(SloKind.MetricGap, 0);
+        def.SecondaryMetric = "orders.finished";
+        def.SecondaryTagFilter = "{version}=1.*";
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldStartWith("SecondaryTagFilter is invalid: the '{version}' key is reserved");
+    }
+
+    [Fact]
+    public void TryValidate_RatioTagOnTheReservedVersionKey_IsRejected()
+    {
+        var def = Ratio();
+        def.RatioTag = "{version}";
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldStartWith("RatioTag is invalid: the '{version}' key is reserved");
+    }
+
+    [Theory]
+    [InlineData(MetricKind.Histogram, true)]
+    [InlineData(null, true)]
+    [InlineData(MetricKind.Counter, false)]
+    [InlineData(MetricKind.UpDownCounter, false)]
+    [InlineData(MetricKind.Gauge, false)]
+    public void TryValidate_MetricLatency_AcceptsOnlyAHistogramOrAnUnknownInstrument(MetricKind? instrument, bool expected)
+    {
+        var def = Metric(SloKind.MetricLatency, 0.5);
+
+        SloValidation.TryValidate(def, null, instrument, out var error).ShouldBe(expected, error);
+        if (!expected)
+        {
+            error.ShouldNotBeNull().ShouldContain("histogram");
+        }
+    }
+
+    [Fact]
+    public void TryValidate_MetricLatencyWithoutPercentile_DefaultsTo95AndKeepsIt()
+    {
+        var def = Metric(SloKind.MetricLatency, 0.25);
+
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        def.Percentile.ShouldBe(95);
+
+        var p99 = Metric(SloKind.MetricLatency, 0.25);
+        p99.Percentile = 99;
+        SloValidation.TryValidate(p99, out _).ShouldBeTrue();
+        p99.Percentile.ShouldBe(99);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(100)]
+    [InlineData(-5)]
+    public void TryValidate_MetricLatencyPercentileOutOfRange_Rejected(int percentile)
+    {
+        var def = Metric(SloKind.MetricLatency, 0.25);
+        def.Percentile = percentile;
+
+        SloValidation.TryValidate(def, out var error).ShouldBeFalse();
+        error.ShouldNotBeNull().ShouldContain("Percentile");
+    }
+
+    [Fact]
+    public void TryValidate_MetricLatencyThreshold_AllowsZeroRejectsNegativeAndNonFinite()
+    {
+        SloValidation.TryValidate(Metric(SloKind.MetricLatency, 0), out _).ShouldBeTrue();
+        SloValidation.TryValidate(Metric(SloKind.MetricLatency, -0.1), out _).ShouldBeFalse();
+        SloValidation.TryValidate(Metric(SloKind.MetricLatency, double.NaN), out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void TryValidate_MetricLatency_ClearsFieldsOfOtherKindsButKeepsTheTagFilter()
+    {
+        var def = Metric(SloKind.MetricLatency, 0.5);
+        def.TagFilter = "http.route=/api/x";
+        def.RatioTag = "x";
+        def.SecondaryMetric = "s";
+        def.BaselineDays = 1;
+
+        SloValidation.TryValidate(def, out _).ShouldBeTrue();
+        def.TagFilter.ShouldBe("http.route=/api/x");
+        def.RatioTag.ShouldBeNull();
+        def.SecondaryMetric.ShouldBeNull();
+        def.BaselineDays.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(SloKind.MetricThreshold)]
+    [InlineData(SloKind.MetricGap)]
+    public void TryValidate_EventKindOnHistogram_StillPasses(SloKind kind)
+    {
+        var def = Metric(kind, 5);
+        def.SecondaryMetric = kind == SloKind.MetricGap ? "j" : null;
+
+        SloValidation.TryValidate(def, null, MetricKind.Histogram, out _).ShouldBeTrue();
     }
 
     [Fact]

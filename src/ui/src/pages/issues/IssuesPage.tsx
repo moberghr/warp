@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useMemo } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
 import { LoadingState, ErrorState } from '@/components/PageState';
@@ -11,20 +11,39 @@ import type { ErrorGroupSummary } from '@/types/issues';
 import { SourceBadge, StatusChip, IssueFlags } from './shared';
 import { PageHeading } from '@/components/PageHeading';
 import { DASHBOARD_LOCALE } from '@/utils/format';
+import { queryKeys } from '@/lib/queryClient';
+import { parseIssuesParams, writeIssuesParams, type IssuesFilters } from './issuesModel';
 
 // Issues (§8.29): errors grouped by fingerprint across all four sources — job exceptions, endpoint
 // 5xx, adapter failures, and client-side errors — with a resolution workflow. By default the list
 // shows only Unresolved exception groups; the "show 4xx" toggle folds in StatusCode groups.
 export default function IssuesPage() {
-  const [source, setSource] = useState<ErrorSource | undefined>(undefined);
-  const [status, setStatus] = useState<ErrorGroupStatus>(ErrorGroupStatus.Unresolved);
-  const [show4xx, setShow4xx] = useState(false);
+  // The filters live in the URL (a shared link or a refresh keeps them); a change replaces the history
+  // entry so Back leaves the page rather than stepping through every click.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { source, status, application, show4xx } = useMemo(() => parseIssuesParams(searchParams), [searchParams]);
+  const set = (patch: Partial<IssuesFilters>) =>
+    setSearchParams((prev) => writeIssuesParams(prev, { ...parseIssuesParams(prev), ...patch }), { replace: true });
+  const setSource = (next: ErrorSource | null) => set({ source: next });
+  const setStatus = (next: ErrorGroupStatus) => set({ status: next });
 
   const query = useQuery({
-    queryKey: ['issues', 'list', source, status] as const,
-    queryFn: () => api.getIssues({ source, status }),
+    queryKey: ['issues', 'list', source, status, application] as const,
+    queryFn: () => api.getIssues({ source: source ?? undefined, status, application: application ?? undefined }),
     refetchInterval: 30_000,
   });
+
+  const applicationsQuery = useQuery({
+    queryKey: queryKeys.applications,
+    queryFn: () => api.getApplications(),
+    staleTime: 60_000,
+  });
+  const applications = useMemo(() => {
+    const names = Array.isArray(applicationsQuery.data) ? applicationsQuery.data.map((x) => x.name) : [];
+
+    // A linked application the roster no longer lists stays selectable, so the select shows what the list is filtered by.
+    return application !== null && !names.includes(application) ? [...names, application] : names;
+  }, [applicationsQuery.data, application]);
 
   // The list requests exception kinds by default; StatusCode (4xx) groups are filtered out client-side
   // unless the toggle is on. Keeps the volume knob on the client without a second query.
@@ -98,7 +117,7 @@ export default function IssuesPage() {
 
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <div className="inline-flex rounded-md border p-0.5 text-xs">
-          <FilterButton active={source === undefined} onClick={() => setSource(undefined)}>All</FilterButton>
+          <FilterButton active={source === null} onClick={() => setSource(null)}>All</FilterButton>
           <FilterButton active={source === ErrorSource.Job} onClick={() => setSource(ErrorSource.Job)}>Job</FilterButton>
           <FilterButton active={source === ErrorSource.Endpoint} onClick={() => setSource(ErrorSource.Endpoint)}>Endpoint</FilterButton>
           <FilterButton active={source === ErrorSource.Adapter} onClick={() => setSource(ErrorSource.Adapter)}>Adapter</FilterButton>
@@ -111,8 +130,18 @@ export default function IssuesPage() {
           <FilterButton active={status === ErrorGroupStatus.Ignored} onClick={() => setStatus(ErrorGroupStatus.Ignored)}>Ignored</FilterButton>
         </div>
 
+        <select
+          aria-label="Application"
+          className="h-7 rounded-md border border-border bg-background px-2 text-xs"
+          value={application ?? ''}
+          onChange={(e) => set({ application: e.target.value || null })}
+        >
+          <option value="">All applications</option>
+          {applications.map((x) => <option key={x} value={x}>{x}</option>)}
+        </select>
+
         <label className="inline-flex items-center gap-1.5 text-xs text-muted-foreground ml-1 cursor-pointer select-none">
-          <input type="checkbox" checked={show4xx} onChange={(e) => setShow4xx(e.target.checked)} className="h-3.5 w-3.5 rounded border" />
+          <input type="checkbox" checked={show4xx} onChange={(e) => set({ show4xx: e.target.checked })} className="h-3.5 w-3.5 rounded border" />
           Show 4xx
         </label>
       </div>

@@ -8,7 +8,8 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { ApplicationInstanceEventType } from '@/types/applications';
 import type { InstanceView } from '@/types/applications';
-import { StatusDot, KindBadge, formatCpu, formatMem } from './shared';
+import { StatusDot, KindBadge } from './shared';
+import { formatCpu, formatMem } from './instanceModel';
 import { useInstanceLive } from '@/hooks/useTicking';
 import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
 

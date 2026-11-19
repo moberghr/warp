@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
@@ -12,9 +13,11 @@ using Warp.Core.Observability;
 namespace Warp.Http.Observability;
 
 /// <summary>
-/// Observes inbound requests to Warp-mapped HTTP endpoints (the inbound mirror of the outbound adapter
-/// <c>DelegatingHandler</c>). No-ops for any endpoint without a <see cref="WarpEndpointIdentity"/>, so it
-/// never observes the host's own controllers or the dashboard. For each Warp request it records duration,
+/// Observes inbound requests to Warp-mapped HTTP endpoints and to host endpoints the host opted in
+/// (<c>WithWarpObservability()</c> / <see cref="WarpObservedAttribute"/>) — the inbound mirror of the outbound
+/// adapter <c>DelegatingHandler</c>. No-ops for any endpoint that has neither a <see cref="WarpEndpointIdentity"/>
+/// nor the opt-in marker, so it never observes the dashboard or a host endpoint nobody opted in. For each
+/// observed request it records duration,
 /// final status, outcome, caller metadata (IP / user-agent / authenticated user) and — per the capture
 /// tiers — redacted/truncated request + response headers and bodies, handing a completed record to the
 /// lossy <see cref="IEndpointCallRecorder"/>. Recording never blocks or fails the request.
@@ -30,6 +33,9 @@ internal sealed class WarpInboundObservabilityMiddleware
     private readonly TimeSpan _retention;
     private readonly string? _applicationName;
     private readonly bool _enrichSpan;
+#pragma warning disable IDE0028 // ConditionalWeakTable<,> doesn't support collection-expression init
+    private readonly ConditionalWeakTable<Endpoint, OptedInIdentity> _optedIn = new();
+#pragma warning restore IDE0028
 
     public WarpInboundObservabilityMiddleware(
         RequestDelegate next,
@@ -58,7 +64,7 @@ internal sealed class WarpInboundObservabilityMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        var identity = context.GetEndpoint()?.Metadata.GetMetadata<WarpEndpointIdentity>();
+        var identity = ResolveIdentity(context.GetEndpoint());
         if (identity is null)
         {
             await _next(context);
@@ -140,6 +146,25 @@ internal sealed class WarpInboundObservabilityMiddleware
                 }
             }
         }
+    }
+
+    // A Warp endpoint, or a host endpoint opted in by WithWarpObservability, carries its identity from startup.
+    // An endpoint opted in by [WarpObserved] alone has only the marker — its identity is built once per endpoint
+    // and cached (endpoints are fixed for the app's lifetime; the weak table lets a rebuilt data source go).
+    private WarpEndpointIdentity? ResolveIdentity(Endpoint? endpoint)
+    {
+        if (endpoint is null)
+        {
+            return null;
+        }
+
+        var identity = endpoint.Metadata.GetMetadata<WarpEndpointIdentity>();
+        if (identity is not null || endpoint.Metadata.GetMetadata<WarpObservedAttribute>() is null)
+        {
+            return identity;
+        }
+
+        return _optedIn.GetValue(endpoint, static x => new OptedInIdentity(WarpEndpointIdentityFactory.TryCreate(x))).Identity;
     }
 
     private async Task RecordAsync(
@@ -415,4 +440,7 @@ internal sealed class WarpInboundObservabilityMiddleware
             return null;
         }
     }
+
+    // Boxes a possibly-null identity (an excluded endpoint) — ConditionalWeakTable cannot hold null values.
+    private sealed record OptedInIdentity(WarpEndpointIdentity? Identity);
 }

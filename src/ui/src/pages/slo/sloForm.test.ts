@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { MetricKind, type MetricInstrument } from '@/types/metrics';
-import { SloKind, SloState, type SloObjective, type SloUpsertRequest } from '@/types/slo';
+import { SloComparison, SloGaugeAggregate, SloKind, SloState, type SloObjective, type SloUpsertRequest } from '@/types/slo';
 import {
+  acceptsInstrument,
   buildUpsertRequest,
   changeKind,
-  errorMessage,
   fieldsFor,
   fractionToPercent,
   isCountKind,
@@ -307,12 +307,25 @@ describe('edit round-trip (objective -> draft -> request)', () => {
         return { tagFilter: 'http.response.status_code=5*' };
       case SloKind.MetricVolumeFloor:
         return { tagFilter: 'route=/checkout', baselineDays: 1 };
+      case SloKind.MetricLatency:
+        // A non-default percentile: a round-trip that fell back to 95 would pass with the default.
+        return { tagFilter: 'http.route=/checkout', percentile: 99 };
+      case SloKind.MetricGaugeThreshold:
+        // Neither the default comparison (AtMost) nor the default aggregate (Average), for the same reason.
+        return { tagFilter: 'pool=main', percentile: 90, comparison: SloComparison.AtLeast, gaugeAggregate: SloGaugeAggregate.Max };
       default:
         return { tagFilter: 'side=in', secondaryMetric: 'orders.shipped', secondaryTagFilter: 'side=out' };
     }
   };
 
-  it.each([SloKind.MetricRatio, SloKind.MetricThreshold, SloKind.MetricVolumeFloor, SloKind.MetricGap])(
+  it.each([
+    SloKind.MetricRatio,
+    SloKind.MetricThreshold,
+    SloKind.MetricVolumeFloor,
+    SloKind.MetricGap,
+    SloKind.MetricLatency,
+    SloKind.MetricGaugeThreshold,
+  ])(
     'preserves every metric field of kind %s',
     (kind) => {
       const fields = metricFields(kind);
@@ -323,19 +336,6 @@ describe('edit round-trip (objective -> draft -> request)', () => {
   );
 });
 
-describe('errorMessage', () => {
-  it('surfaces a plain-string 400 body', () => {
-    expect(errorMessage({ response: { data: 'GoodValues is invalid: x' } })).toBe('GoodValues is invalid: x');
-  });
-
-  it('falls back to ProblemDetails, then the error message, then a default', () => {
-    expect(errorMessage({ response: { data: { detail: 'bad' } } })).toBe('bad');
-    expect(errorMessage({ response: { data: { title: 'Bad Request' } } })).toBe('Bad Request');
-    expect(errorMessage(new Error('Network Error'))).toBe('Network Error');
-    expect(errorMessage(null)).toBe('Failed to save the objective.');
-  });
-});
-
 describe('isCountKind', () => {
   it('treats threshold, gap and backlog as counts', () => {
     expect(isCountKind(SloKind.MetricThreshold)).toBe(true);
@@ -343,5 +343,140 @@ describe('isCountKind', () => {
     expect(isCountKind(SloKind.BacklogDepth)).toBe(true);
     expect(isCountKind(SloKind.MetricRatio)).toBe(false);
     expect(isCountKind(SloKind.ExecutionLatency)).toBe(false);
+  });
+});
+
+describe('metric latency', () => {
+  const latencyDraft = (patch: Partial<SloUpsertRequest> = {}): SloUpsertRequest => ({
+    ...changeKind(baseDraft, SloKind.MetricLatency),
+    dimension: 'http.server.request.duration',
+    targetValue: 0.25,
+    ...patch,
+  });
+
+  it('limits the instrument picker to histograms', () => {
+    const result = selectableInstruments(
+      [
+        instrument('c', MetricKind.Counter),
+        instrument('h', MetricKind.Histogram),
+        instrument('g', MetricKind.Gauge),
+        instrument('u', MetricKind.UpDownCounter),
+      ],
+      SloKind.MetricLatency,
+    );
+
+    expect(result.map((x) => x.name)).toEqual(['h']);
+    expect(acceptsInstrument(SloKind.MetricThreshold, MetricKind.Histogram)).toBe(true);
+    expect(acceptsInstrument(SloKind.MetricLatency, MetricKind.Counter)).toBe(false);
+  });
+
+  it('defaults the percentile to 95 and shows the percentile and tag filter fields', () => {
+    const draft = changeKind(baseDraft, SloKind.MetricLatency);
+
+    expect(draft.percentile).toBe(95);
+    expect(draft.windowSeconds).toBeGreaterThanOrEqual(600);
+    expect(fieldsFor(SloKind.MetricLatency)).toMatchObject({ tagFilter: true, percentile: true, ratio: false, secondary: false });
+  });
+
+  it('clears the percentile when switching to another metric kind', () => {
+    expect(changeKind(latencyDraft({ percentile: 99 }), SloKind.MetricThreshold).percentile).toBeNull();
+  });
+
+  it.each([0, 100, 95.5])('rejects percentile %s', (percentile) => {
+    expect(validateMetricDraft(latencyDraft({ percentile }))).toMatch(/Percentile/);
+  });
+
+  it('rejects a negative threshold and accepts a valid draft', () => {
+    expect(validateMetricDraft(latencyDraft({ targetValue: -1 }))).toMatch(/Threshold/);
+    expect(validateMetricDraft(latencyDraft())).toBeNull();
+  });
+
+  it('keeps the percentile and tag filter in the request, unlike the other metric kinds', () => {
+    const request = buildUpsertRequest(latencyDraft({ percentile: 99, tagFilter: ' http.route=/x ' }));
+
+    expect(request.percentile).toBe(99);
+    expect(request.tagFilter).toBe('http.route=/x');
+    expect(buildUpsertRequest({ ...latencyDraft({ percentile: 99 }), kind: SloKind.MetricThreshold }).percentile).toBeNull();
+  });
+
+  it('is neither a count nor a ratio kind', () => {
+    expect(isCountKind(SloKind.MetricLatency)).toBe(false);
+  });
+});
+
+describe('metric gauge threshold', () => {
+  const gaugeDraft = (patch: Partial<SloUpsertRequest> = {}): SloUpsertRequest => ({
+    ...changeKind(baseDraft, SloKind.MetricGaugeThreshold),
+    dimension: 'queue.depth',
+    targetValue: 500,
+    ...patch,
+  });
+
+  it('limits the instrument picker to gauges', () => {
+    const result = selectableInstruments(
+      [instrument('c', MetricKind.Counter), instrument('h', MetricKind.Histogram), instrument('g', MetricKind.Gauge)],
+      SloKind.MetricGaugeThreshold,
+    );
+
+    expect(result.map((x) => x.name)).toEqual(['g']);
+  });
+
+  it('defaults to at most, average and 95% compliant', () => {
+    const draft = changeKind(baseDraft, SloKind.MetricGaugeThreshold);
+
+    expect(draft.comparison).toBe(SloComparison.AtMost);
+    expect(draft.gaugeAggregate).toBe(SloGaugeAggregate.Average);
+    expect(draft.percentile).toBe(95);
+    expect(fieldsFor(SloKind.MetricGaugeThreshold)).toMatchObject({ tagFilter: true, percentile: true });
+  });
+
+  it('drops the gauge options when switching to another kind', () => {
+    const next = changeKind(gaugeDraft({ comparison: SloComparison.AtLeast }), SloKind.MetricThreshold);
+
+    expect(next.comparison).toBeUndefined();
+    expect(next.gaugeAggregate).toBeUndefined();
+  });
+
+  it('accepts a negative threshold and rejects a bad compliant share or option', () => {
+    expect(validateMetricDraft(gaugeDraft({ targetValue: -5 }))).toBeNull();
+    expect(validateMetricDraft(gaugeDraft({ percentile: 100 }))).toMatch(/Compliant share/);
+    expect(validateMetricDraft(gaugeDraft({ comparison: 7 as SloComparison }))).toMatch(/at most or at least/);
+    expect(validateMetricDraft(gaugeDraft({ gaugeAggregate: 9 as SloGaugeAggregate }))).toMatch(/aggregate/);
+  });
+
+  it('sends the comparison, aggregate and percentile, and only for this kind', () => {
+    const request = buildUpsertRequest(gaugeDraft({ comparison: SloComparison.AtLeast, gaugeAggregate: SloGaugeAggregate.Min, percentile: 90 }));
+
+    expect(request).toMatchObject({ comparison: SloComparison.AtLeast, gaugeAggregate: SloGaugeAggregate.Min, percentile: 90 });
+    const threshold = buildUpsertRequest({ ...gaugeDraft({ comparison: SloComparison.AtLeast }), kind: SloKind.MetricThreshold });
+    expect(threshold.comparison).toBeUndefined();
+    expect(threshold.percentile).toBeNull();
+  });
+
+  it('carries the gauge options into an edit draft', () => {
+    const draft = objectiveToDraft({
+      id: 9,
+      name: 'depth',
+      kind: SloKind.MetricGaugeThreshold,
+      dimension: 'queue.depth',
+      application: null,
+      targetValue: 500,
+      percentile: 95,
+      windowSeconds: 3600,
+      enabled: true,
+      evaluated: false,
+      attainment: 0,
+      budgetRemaining: 1,
+      burnRateShort: 0,
+      burnRateLong: 0,
+      state: SloState.Healthy,
+      acknowledgedUntil: null,
+      lastEvaluatedAt: null,
+      comparison: SloComparison.AtLeast,
+      gaugeAggregate: SloGaugeAggregate.Max,
+    });
+
+    expect(draft.comparison).toBe(SloComparison.AtLeast);
+    expect(draft.gaugeAggregate).toBe(SloGaugeAggregate.Max);
   });
 });

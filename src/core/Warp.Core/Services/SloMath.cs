@@ -130,6 +130,103 @@ internal static class SloMath
     }
 
     /// <summary>
+    /// Volume ceiling, the mirror of <see cref="EvaluateVolumeFloor"/> for a rise: <c>ratio = observed / baseline</c>,
+    /// breaching when <c>ratio &gt; maxRatio</c> (&gt; 1), budget <c>(maxRatio − ratio) / (maxRatio − 1)</c>, burn
+    /// <c>(ratio − 1) / (maxRatio − 1)</c>. A baseline of zero reads as fully healthy here; the caller reports NoData.
+    /// </summary>
+    public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateVolumeCeiling(double observed, double baseline, double maxRatio)
+    {
+        if (!AllFinite(observed, baseline, maxRatio))
+        {
+            return NoDataResult;
+        }
+
+        if (baseline <= 0)
+        {
+            return (1.0, 1.0, 0.0);
+        }
+
+        var ratio = observed / baseline;
+        var allowed = Math.Max(1e-9, maxRatio - 1.0);
+
+        return Finite((ratio, (maxRatio - ratio) / allowed, (ratio - 1.0) / allowed));
+    }
+
+    /// <summary>
+    /// A level held to a bound (metric health-board threshold tiles, #326): at most / at least <paramref name="target"/>,
+    /// equal never a violation (as <see cref="TryGaugeVerdict"/>). At most a positive target is exactly
+    /// <see cref="EvaluateCount"/> (the <c>MetricThreshold</c> maths, so "5xx ≤ 10" reads the same on a tile and an SLO);
+    /// otherwise the budget is the headroom over <c>|target|</c>, and a zero target is all-or-nothing (1, or minus the
+    /// overshoot). Attainment is the observed value; burn is <c>1 − budget</c>. On a 0–1 ratio (<paramref name="ratio"/>)
+    /// at least is the <see cref="EvaluateRate"/> budget instead, <c>(observed − t) / (1 − t)</c>: the headroom is measured
+    /// against the allowed bad share, so "success ≥ 0.98" at 0.995 is Healthy (over <c>t</c> the headroom can never reach
+    /// 25 % of <c>t</c> on a ratio, so the plain formula would never read Healthy). At <c>t ≥ 1</c> no bad share is
+    /// allowed, so it is all-or-nothing as in <see cref="EvaluateRate"/>: exactly 1.0 is Healthy, anything below Breaching.
+    /// </summary>
+    public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateBound(double observed, double target, SloComparison comparison, bool ratio = false)
+    {
+        if (!AllFinite(observed, target))
+        {
+            return NoDataResult;
+        }
+
+        if (ratio && comparison == SloComparison.AtLeast)
+        {
+            // EvaluateRate's maths: burn is the bad share over the allowed bad share. At t >= 1 nothing bad is allowed,
+            // so the bound is all-or-nothing: a full 1.0 is fully Healthy, anything less is far past the budget.
+            var allowedBad = Math.Max(1e-9, 1.0 - target);
+            var rateBurn = (1.0 - observed) / allowedBad;
+
+            return Finite((observed, 1.0 - rateBurn, rateBurn));
+        }
+
+        if (comparison != SloComparison.AtLeast && target > 0)
+        {
+            return EvaluateCount(observed, target);
+        }
+
+        var headroom = comparison == SloComparison.AtLeast ? observed - target : target - observed;
+        var scale = Math.Abs(target);
+        var allOrNothing = headroom >= 0 ? 1.0 : headroom;
+        var budget = scale < 1e-9 ? allOrNothing : headroom / scale;
+
+        return Finite((observed, budget, 1.0 - budget));
+    }
+
+    /// <summary>
+    /// How far <paramref name="current"/> moved from <paramref name="baseline"/> against a <paramref name="maxDeviation"/>
+    /// in the <paramref name="direction"/> (metric health-board deviation tiles, #326). <paramref name="ratioPoints"/>
+    /// reads both as ratios and the deviation as ratio points — a drop is <see cref="EvaluateRatioDrop"/> (the
+    /// <c>MetricRatio</c>-with-baseline maths) and a rise the same with the two swapped; otherwise the deviation is a
+    /// fraction of the baseline — a drop is <see cref="EvaluateVolumeFloor"/> at <c>1 − maxDeviation</c> (the
+    /// <c>MetricVolumeFloor</c> maths) and a rise <see cref="EvaluateVolumeCeiling"/> at <c>1 + maxDeviation</c>.
+    /// <see cref="MetricDeviationDirection.Either"/> takes whichever side has less budget. The caller reports NoData for
+    /// a missing (or, for a relative deviation, non-positive) baseline.
+    /// </summary>
+    public static (double Attainment, double BudgetRemaining, double BurnRate) EvaluateDeviation(
+        double current,
+        double baseline,
+        double maxDeviation,
+        MetricDeviationDirection direction,
+        bool ratioPoints)
+    {
+        var drop = ratioPoints
+            ? EvaluateRatioDrop(baseline, current, maxDeviation)
+            : EvaluateVolumeFloor(current, baseline, 1.0 - maxDeviation);
+        var rise = ratioPoints
+            ? EvaluateRatioDrop(current, baseline, maxDeviation)
+            : EvaluateVolumeCeiling(current, baseline, 1.0 + maxDeviation);
+
+        return direction switch
+        {
+            MetricDeviationDirection.Drop => drop,
+            MetricDeviationDirection.Rise => rise,
+            _ when IsNoData(drop) || IsNoData(rise) => NoDataResult,
+            _ => drop.BudgetRemaining <= rise.BudgetRemaining ? drop : rise,
+        };
+    }
+
+    /// <summary>
     /// Fraction (0..1) of the bucket <c>[bucketStart, bucketStart + bucketWidth)</c> that overlaps the window
     /// <c>(windowStart, windowEnd]</c>. A coarse bucket that only partly overlaps a window or baseline contributes
     /// its events scaled by this fraction (events assumed uniform within the bucket).
@@ -194,6 +291,68 @@ internal static class SloMath
         }
 
         return QueueWaitKeys.Buckets[^2];
+    }
+
+    /// <summary>
+    /// Splits one histogram row's bucket counts at a latency <paramref name="threshold"/> (<c>MetricLatency</c>): a bucket
+    /// is within the threshold when its UPPER bound is at most the threshold, so a bucket that straddles it — and the
+    /// overflow bucket — counts as over. Percentile resolution is therefore the bucket ladder: a threshold between two
+    /// bounds behaves like the lower one. <paramref name="counts"/> has one entry per bound plus the overflow bucket;
+    /// any other length is a misaligned row and returns false.
+    /// </summary>
+    public static bool TrySplitAtThreshold(IReadOnlyList<double> bounds, IReadOnlyList<long> counts, double threshold, out long within, out long over)
+    {
+        within = 0;
+        over = 0;
+        if (counts.Count != bounds.Count + 1)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < counts.Count; i++)
+        {
+            if (i < bounds.Count && bounds[i] <= threshold)
+            {
+                within += counts[i];
+            }
+            else
+            {
+                over += counts[i];
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// One gauge bucket's verdict for <c>MetricGaugeThreshold</c>: the bucket's <paramref name="aggregate"/> (average =
+    /// <paramref name="sum"/> ÷ <paramref name="count"/>, or the min / max sample) compared with <paramref name="target"/>
+    /// in the <paramref name="comparison"/> direction; equal to the target is never a violation. False when the bucket has
+    /// no usable value (no samples, a missing extreme, or a non-finite aggregate), so it does not count as observed.
+    /// </summary>
+    public static bool TryGaugeVerdict(SloGaugeAggregate aggregate, SloComparison comparison, double target, long count, double sum, double? min, double? max, out bool violates)
+    {
+        violates = false;
+        if (count <= 0)
+        {
+            return false;
+        }
+
+        var value = aggregate switch
+        {
+            SloGaugeAggregate.Min => min,
+            SloGaugeAggregate.Max => max,
+            _ => (double?)(sum / count),
+        };
+
+        if (value is not { } v || !double.IsFinite(v))
+        {
+            return false;
+        }
+
+        violates = comparison == SloComparison.AtLeast ? v < target : v > target;
+
+        return true;
     }
 
     private static bool AllFinite(params ReadOnlySpan<double> values)

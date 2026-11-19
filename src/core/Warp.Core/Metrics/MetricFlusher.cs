@@ -649,6 +649,7 @@ internal static class MetricPointMapper
         // MetricSeries.MaxTagsLength) and MetricBuckets.TryNormalize (bounds); kept as a guard, never a cut.
         if (series.Instrument.Name.Length > MaxNameLength
             || series.Application?.Length > MaxNameLength
+            || series.Version?.Length > MaxNameLength
             || series.Tags.Length > MaxTagsLength
             || buckets?.Length > MaxBucketsLength
             || !TryBoundsCsv(snapshot.Bounds, out var bounds))
@@ -661,6 +662,7 @@ internal static class MetricPointMapper
         {
             Instrument = series.Instrument.Name,
             Application = series.Application,
+            Version = series.Version,
             Tags = series.Tags,
             Tier = MetricTier.Fine,
             BucketStart = snapshot.BucketStart,

@@ -52,12 +52,146 @@ internal static class MetricPointQueries
     }
 
     /// <summary>
+    /// The metrics health board's one batched range filter (#326): the rows of every one of <paramref name="instruments"/>
+    /// that can overlap <c>[from, to)</c>, the same window one day earlier, or the same window seven days earlier — the
+    /// <see cref="InRange"/> tier bounds applied to each of the three windows and OR'ed, so a board of N tiles is one
+    /// statement over three bounded ranges, never a scan of the days in between. Rows of every application come back
+    /// (each tile filters its own); a row in two overlapping windows comes back once.
+    /// </summary>
+    public static IQueryable<MetricPoint> InBoardWindows(
+        IQueryable<MetricPoint> points,
+        IReadOnlyCollection<string> instruments,
+        DateTime from,
+        DateTime to,
+        int fineMinutes)
+    {
+        var names = instruments.ToList();
+        var dayFrom = from.AddDays(-1);
+        var dayTo = to.AddDays(-1);
+        var weekFrom = from.AddDays(-7);
+        var weekTo = to.AddDays(-7);
+        var fine0 = MetricTiers.BucketStart(MetricTier.Fine, from, fineMinutes);
+        var hourly0 = MetricTiers.BucketStart(MetricTier.Hourly, from, fineMinutes);
+        var daily0 = MetricTiers.BucketStart(MetricTier.Daily, from, fineMinutes);
+        var fine1 = MetricTiers.BucketStart(MetricTier.Fine, dayFrom, fineMinutes);
+        var hourly1 = MetricTiers.BucketStart(MetricTier.Hourly, dayFrom, fineMinutes);
+        var daily1 = MetricTiers.BucketStart(MetricTier.Daily, dayFrom, fineMinutes);
+        var fine7 = MetricTiers.BucketStart(MetricTier.Fine, weekFrom, fineMinutes);
+        var hourly7 = MetricTiers.BucketStart(MetricTier.Hourly, weekFrom, fineMinutes);
+        var daily7 = MetricTiers.BucketStart(MetricTier.Daily, weekFrom, fineMinutes);
+
+        return points
+            .Where(x => names.Contains(x.Instrument))
+            .Where(x =>
+                (x.BucketStart < to
+                    && ((x.Tier == MetricTier.Fine && x.BucketStart >= fine0)
+                        || (x.Tier == MetricTier.Hourly && x.BucketStart >= hourly0)
+                        || (x.Tier == MetricTier.Daily && x.BucketStart >= daily0)))
+                || (x.BucketStart < dayTo
+                    && ((x.Tier == MetricTier.Fine && x.BucketStart >= fine1)
+                        || (x.Tier == MetricTier.Hourly && x.BucketStart >= hourly1)
+                        || (x.Tier == MetricTier.Daily && x.BucketStart >= daily1)))
+                || (x.BucketStart < weekTo
+                    && ((x.Tier == MetricTier.Fine && x.BucketStart >= fine7)
+                        || (x.Tier == MetricTier.Hourly && x.BucketStart >= hourly7)
+                        || (x.Tier == MetricTier.Daily && x.BucketStart >= daily7))));
+    }
+
+    /// <summary>
+    /// The board's SQL-side sum of partial rows: per (instrument, application, tier, bucket) — plus tags when
+    /// <paramref name="byTags"/> — so a whole board comes back in one grouped read. Versions and bounds are not kept apart
+    /// (the board reads neither).
+    /// </summary>
+    public static IQueryable<MetricBoardRow> SummedForBoard(IQueryable<MetricPoint> points, bool byTags)
+    {
+        if (!byTags)
+        {
+            return points
+                .GroupBy(x =>
+                    new
+                    {
+                        x.Instrument,
+                        x.Application,
+                        x.Tier,
+                        x.BucketStart,
+                    })
+                .Select(g =>
+                    new MetricBoardRow
+                    {
+                        Instrument = g.Key.Instrument,
+                        Application = g.Key.Application,
+                        Tier = g.Key.Tier,
+                        BucketStart = g.Key.BucketStart,
+                        Tags = MetricSeries.NoTags,
+                        Count = g.Sum(x => x.Count),
+                        Sum = g.Sum(x => x.Sum),
+                        Min = g.Min(x => x.Min),
+                        Max = g.Max(x => x.Max),
+                    });
+        }
+
+        return points
+            .GroupBy(x =>
+                new
+                {
+                    x.Instrument,
+                    x.Application,
+                    x.Tier,
+                    x.BucketStart,
+                    x.Tags,
+                })
+            .Select(g =>
+                new MetricBoardRow
+                {
+                    Instrument = g.Key.Instrument,
+                    Application = g.Key.Application,
+                    Tier = g.Key.Tier,
+                    BucketStart = g.Key.BucketStart,
+                    Tags = g.Key.Tags,
+                    Count = g.Sum(x => x.Count),
+                    Sum = g.Sum(x => x.Sum),
+                    Min = g.Min(x => x.Min),
+                    Max = g.Max(x => x.Max),
+                });
+    }
+
+    /// <summary>
     /// The SQL-side sum of <paramref name="points"/>' partial rows: per (tier, bucket, tags, bounds) when
     /// <paramref name="byTags"/>, per (tier, bucket) alone otherwise (no tags or bounds, as nothing reads them). The one
     /// grouped projection, shared by the dashboard read and the SLO evaluator; each runs it on its own context (§2.14).
+    /// <paramref name="byVersion"/> also keeps application versions apart (the dashboard's tag-level reads, where the
+    /// version is a pseudo-tag); the SLO evaluator does not look at versions and leaves it off.
     /// </summary>
-    public static IQueryable<MetricPointRow> Summed(IQueryable<MetricPoint> points, bool byTags)
+    public static IQueryable<MetricPointRow> Summed(IQueryable<MetricPoint> points, bool byTags, bool byVersion = false)
     {
+        if (byTags && byVersion)
+        {
+            return points
+                .GroupBy(x =>
+                    new
+                    {
+                        x.Tier,
+                        x.BucketStart,
+                        x.Tags,
+                        x.Bounds,
+                        x.Version,
+                    })
+                .Select(g =>
+                    new MetricPointRow
+                    {
+                        Tier = g.Key.Tier,
+                        BucketStart = g.Key.BucketStart,
+                        Tags = g.Key.Tags,
+                        Bounds = g.Key.Bounds,
+                        Version = g.Key.Version,
+                        Count = g.Sum(x => x.Count),
+                        Sum = g.Sum(x => x.Sum),
+                        Min = g.Min(x => x.Min),
+                        Max = g.Max(x => x.Max),
+                        Buckets = null,
+                    });
+        }
+
         if (!byTags)
         {
             return points
@@ -118,15 +252,20 @@ internal static class MetricPointQueries
     /// '-', control characters stripped, capped at 64; empty to null). Every read that filters <c>metric_point</c> by
     /// application uses it.
     /// </summary>
-    public static string? NormalizeApplication(string? application)
+    public static string? NormalizeApplication(string? application) => Normalize(application);
+
+    /// <summary>The form the collector stores a version in: the same sanitiser as <see cref="NormalizeApplication"/>.</summary>
+    public static string? NormalizeVersion(string? version) => Normalize(version);
+
+    private static string? Normalize(string? value)
     {
-        if (application is null)
+        if (value is null)
         {
             return null;
         }
 
         Span<char> buffer = stackalloc char[MetricSeries.MaxValueLength];
-        var length = MetricSeries.Sanitize(application, buffer);
+        var length = MetricSeries.Sanitize(value, buffer);
 
         return length == 0 ? null : buffer[..length].ToString();
     }

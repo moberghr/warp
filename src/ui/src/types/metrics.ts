@@ -46,6 +46,22 @@ export interface MetricPoint {
   max: number | null;
   /** Histograms, when a percentile was requested: upper bound of the bucket the percentile falls in. */
   percentile: number | null;
+  /**
+   * The current range's newest bucket while it is still filling (it ends after now, or within one flush interval of
+   * now), so its value reads low. Always false on an overlay.
+   */
+  incomplete: boolean;
+  /** Length of this point's bucket in seconds (an hourly row in a fine read is 3600); the divisor for a rate. */
+  bucketSeconds: number;
+}
+
+/** The headline value of one range over its complete buckets (the still-filling bucket is left out, never prorated). */
+export interface MetricHeadline {
+  /** Overlay offset label (`1d` / `7d`); null for the current range. */
+  compare: string | null;
+  /** Sum (counter / up-down counter), count (histogram), average (gauge); null when no complete bucket has a measurement. */
+  value: number | null;
+  count: number;
 }
 
 export interface MetricSeriesLine {
@@ -65,5 +81,9 @@ export interface MetricSeries {
   from: string;
   to: string;
   resolution: MetricTier;
+  /** Where the complete buckets end: the headlines cover [from, completeUntil), each overlay the same span shifted back. */
+  completeUntil: string;
   series: MetricSeriesLine[];
+  /** The current range first, then one per overlay. */
+  headlines: MetricHeadline[];
 }

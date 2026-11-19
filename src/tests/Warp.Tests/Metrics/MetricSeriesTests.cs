@@ -143,6 +143,45 @@ public class MetricSeriesTests
         one.ShouldNotBe(otherApp);
     }
 
+    [TimedFact]
+    public void Equals_SameSeriesOfAnotherVersion_IsAnotherSeries()
+    {
+        var info = Info("eq.version");
+        var one = new MetricSeries(info, "app", "a=1", "1.0.0");
+        var two = new MetricSeries(info, "app", "a=1", "1.0.0");
+        var otherVersion = new MetricSeries(info, "app", "a=1", "2.0.0");
+        var noVersion = new MetricSeries(info, "app", "a=1");
+
+        one.ShouldBe(two);
+        one.GetHashCode().ShouldBe(two.GetHashCode());
+        one.ShouldNotBe(otherVersion);
+        one.ShouldNotBe(noVersion);
+    }
+
+    [TimedFact]
+    public void CreateInstrument_WithVersion_StampsItOnEveryAdmittedSeries()
+    {
+        var cardinality = CreateGuard().CreateInstrument(Info($"version.{Guid.NewGuid():N}"), "orders", "2.4.1");
+
+        var series = MetricSeries.Resolve(Tags(("a", "1")), cardinality, null, 6);
+
+        series.Version.ShouldBe("2.4.1");
+    }
+
+    [TimedTheory]
+    [InlineData(null)]
+    [InlineData("2.4.1")]
+    public void TryToPoint_Series_CopiesItsVersionOrLeavesItNull(string? version)
+    {
+        var aggregator = new MetricAggregator(TimeProvider.System, 5);
+        aggregator.Record(new MetricSeries(Info("version.point"), "orders", MetricSeries.NoTags, version), 1);
+
+        MetricPointMapper.TryToPoint(aggregator.Drain().ShouldHaveSingleItem(), out var point).ShouldBeTrue();
+
+        point.Version.ShouldBe(version);
+        point.Application.ShouldBe("orders");
+    }
+
     [TimedTheory]
     [InlineData(null, "{none}")]
     [InlineData("", "{none}")]

@@ -832,7 +832,7 @@ public abstract class OrchestrationTaskTestsBase : IAsyncLifetime
     /// The parent could be requeued and succeed later.
     /// </summary>
     [TimedFact]
-    public async Task Orchestration_WhenParentFailedOnlyOnSucceeded_AwaitingContinuationsAreDeleted()
+    public async Task Orchestration_WhenParentFailedOnlyOnSucceeded_AwaitingContinuationsStayAwaiting()
     {
         var ctx = _fixture.CreateContext();
 
@@ -884,7 +884,7 @@ public abstract class OrchestrationTaskTestsBase : IAsyncLifetime
         });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Run orchestration twice (first finalizes parent, second should clean up continuations)
+        // Run orchestration twice: the first finalizes the parent, the second must still leave its continuations alone
         var orchCtx1 = _fixture.CreateContext();
         await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(orchCtx1, TimeProvider.System, TimeSpan.FromDays(1)).RunOrchestrationCoreAsync(CancellationToken.None);
         var orchCtx2 = _fixture.CreateContext();

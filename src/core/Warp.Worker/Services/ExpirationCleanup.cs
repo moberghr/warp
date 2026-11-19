@@ -67,6 +67,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         await CleanupStaleApplicationInstancesAsync(ct);
         await CleanupExpiredApplicationInstanceLogsAsync(ct);
         await CleanupApplicationInstanceLogsByCountAsync(ct);
+        await CleanupExpiredApplicationDeploysAsync(ct);
         await CleanupExpiredErrorGroupsAsync(ct);
         await CleanupErrorGroupsByCountAsync(ct);
         await CleanupOrphanErrorOccurrencesAsync(ct);
@@ -958,6 +959,53 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
             }
 
             total += await _context.Set<ApplicationInstanceLog>()
+                .Where(x => ids.Contains(x.Id))
+                .ExecuteDeleteAsync(ct);
+
+            if (ids.Count < batchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
+    }
+
+    // Deletes ApplicationDeploy rows first seen longer than ApplicationDeployRetention ago (null = keep forever, the
+    // default). Deploy history is independent of instance liveness — the instance sweeps above never touch it. The
+    // newest deploy of each application + environment is kept however old: deleting it would make the next start of
+    // that long-running version record a fresh "deploy". Batched + MaxSweepBatchesPerTick-capped like the other sweeps.
+    internal async Task<int> CleanupExpiredApplicationDeploysAsync(CancellationToken ct)
+    {
+        if (_configuration.ApplicationDeployRetention is not { } retention)
+        {
+            return 0;
+        }
+
+        var cutoff = _time.GetUtcNow().UtcDateTime - retention;
+        var batchSize = _configuration.ExpirationBatchSize;
+        var batches = 0;
+        var total = 0;
+
+        while (!ct.IsCancellationRequested && batches < MaxSweepBatchesPerTick)
+        {
+            batches++;
+            var ids = await _context.Set<ApplicationDeploy>()
+                .Where(x => x.FirstSeenAt < cutoff)
+                .Where(x => _context.Set<ApplicationDeploy>()
+                    .Where(y => y.Application == x.Application)
+                    .Where(y => y.Environment == x.Environment)
+                    .Any(y => y.FirstSeenAt > x.FirstSeenAt))
+                .Select(x => x.Id)
+                .Take(batchSize)
+                .ToListAsync(ct);
+
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await _context.Set<ApplicationDeploy>()
                 .Where(x => ids.Contains(x.Id))
                 .ExecuteDeleteAsync(ct);
 

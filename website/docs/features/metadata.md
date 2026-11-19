@@ -15,7 +15,7 @@ Pass metadata via `JobParameters` when publishing:
 ```csharp
 await publisher.Enqueue(new ProcessOrder { OrderId = 123 }, new JobParameters
 {
-    Metadata = new Dictionary<string, string>
+    Metadata = new Dictionary<string, object>
     {
         ["tenant"] = "acme-corp",
         ["priority"] = "high",

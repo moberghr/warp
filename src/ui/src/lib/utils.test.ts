@@ -7,7 +7,8 @@ describe('cn', () => {
   });
 
   it('drops falsy values and supports conditionals', () => {
-    expect(cn('a', false, null, undefined, 'b', 0 && 'c')).toBe('a b');
+    const show = (n: number) => n > 0;
+    expect(cn('a', false, null, undefined, 'b', show(0) && 'c')).toBe('a b');
   });
 
   it('merges conflicting tailwind classes (last wins)', () => {

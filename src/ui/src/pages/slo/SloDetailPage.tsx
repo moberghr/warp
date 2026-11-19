@@ -1,11 +1,14 @@
 import { Link, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getSlo, ackSlo } from '@/api';
+import { getSlo, ackSlo, getAnnotations } from '@/api';
+import { AnnotationPanel } from '@/pages/metrics/AnnotationPanel';
+import { AddToBoardButton } from '@/pages/metrics/AddToBoardButton';
 import { SloKind, SloKindLabel, SloState, isMetricKind, type SloObjective } from '@/types/slo';
-import { formatObjectiveValue, formatBudget, SloStatePill } from './shared';
+import { SloStatePill } from './shared';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { baselineLabel, describeMetricKind } from './sloForm';
-import { sloValueDisplay } from './sloDisplay';
+import { errorMessage } from '@/lib/apiError';
+import { formatBudget, formatObserved, formatTarget, sloValueDisplay } from './sloDisplay';
 
 export default function SloDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -18,9 +21,16 @@ export default function SloDetailPage() {
     refetchInterval: 30_000,
   });
 
+  // Known-issue notes on this objective (#333): every note, newest first (capped by the server).
+  const annotationsQuery = useQuery({
+    queryKey: ['annotations', 'slo', objectiveId],
+    queryFn: () => getAnnotations({ slo: objectiveId }),
+    enabled: Number.isInteger(objectiveId) && objectiveId > 0,
+  });
+
   const ackMutation = useMutation({
     mutationFn: () => ackSlo(objectiveId, 60),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['slo', objectiveId] }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['slo', objectiveId] }),
   });
 
   if (isLoading) {
@@ -48,12 +58,13 @@ export default function SloDetailPage() {
         <div>
           <h1 className="text-2xl font-semibold">{o.name}</h1>
           <p className="text-sm text-gray-500 mt-1">
-            {SloKindLabel[o.kind]}{o.percentile ? ` p${o.percentile}` : ''} · <span className="font-mono">{o.dimension}</span>
+            {SloKindLabel[o.kind]}{o.percentile && !isMetricKind(o.kind) ? ` p${o.percentile}` : ''} · <span className="font-mono">{o.dimension}</span>
             {o.application && <span className="text-gray-400"> @{o.application}</span>}
           </p>
           {isMetricKind(o.kind) && <MetricScope objective={o} />}
         </div>
         <div className="flex items-center gap-3">
+          <AddToBoardButton source={{ kind: 'slo', objective: o }} />
           <SloStatePill state={o.state} enabled={o.enabled} />
           {o.state === SloState.Breaching && (
             <button type="button" onClick={() => ackMutation.mutate()} className="px-3 py-1.5 rounded-lg bg-amber-500 text-white text-sm hover:bg-amber-600">
@@ -62,6 +73,9 @@ export default function SloDetailPage() {
           )}
         </div>
       </div>
+      {ackMutation.isError && (
+        <p role="alert" className="-mt-4 mb-4 text-sm text-red-600">{errorMessage(ackMutation.error, 'Failed to acknowledge the objective.')}</p>
+      )}
 
       {display === 'not-evaluated' ? (
         <div className="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-8 text-center text-gray-500">
@@ -84,8 +98,8 @@ export default function SloDetailPage() {
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <Stat label="Target" value={formatObjectiveValue(o.kind, o.targetValue)} />
-            <Stat label="Observed" value={formatObjectiveValue(o.kind, o.attainment)} />
+            <Stat label="Target" value={formatTarget(o)} />
+            <Stat label="Observed" value={formatObserved(o)} />
             <Stat label="Burn (fast)" value={`${o.burnRateShort.toFixed(2)}×`} danger={o.burnRateShort > 1} />
             <Stat label="Burn (slow)" value={`${o.burnRateLong.toFixed(2)}×`} danger={o.burnRateLong > 1} />
           </div>
@@ -98,6 +112,16 @@ export default function SloDetailPage() {
         {o.acknowledgedUntil && <div>Acknowledged until: {new Date(o.acknowledgedUntil).toLocaleString(DASHBOARD_LOCALE)}</div>}
         {isThreshold(o.kind) && <div>Latency/depth objectives compare the windowed observed value to the target (lower is better).</div>}
         {isMetricKind(o.kind) && <div>{describeMetricKind(o.kind)}</div>}
+      </div>
+
+      <div className="mt-6">
+        <AnnotationPanel
+          target={{ sloDefinitionId: o.id }}
+          annotations={annotationsQuery.data?.items}
+          isTruncated={annotationsQuery.data?.isTruncated ?? false}
+          isError={annotationsQuery.isError}
+          invalidate={['annotations', 'slo', objectiveId]}
+        />
       </div>
     </div>
   );

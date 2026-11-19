@@ -57,6 +57,25 @@ public class ApplicationAddonFlagTests
         using var scope = sp.CreateScope();
 
         scope.ServiceProvider.GetRequiredService<IApplicationQueryService>().ShouldNotBeNull();
+        scope.ServiceProvider.GetRequiredService<IApplicationDeployQueryService>().ShouldBeOfType<ApplicationQueryService<TestContext>>();
+    }
+
+    [TimedFact]
+    public void HostOwnApplicationQueryService_RegisteredBeforeAddWarp_WinsAndDeployReadsStillResolve()
+    {
+        // The TryAdd seam (§8.24): a host may implement IApplicationQueryService itself. The deploy reads live on their
+        // own interface, so such a host compiles unchanged and the verdict still gets Warp's deploy history.
+        var services = new ServiceCollection();
+        RegisterMinimalDependencies(services);
+        services.AddScoped<IApplicationQueryService, HostApplicationQueryService>();
+        services.AddWarp<TestContext>();
+
+        var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = sp.CreateScope();
+
+        scope.ServiceProvider.GetRequiredService<IApplicationQueryService>().ShouldBeOfType<HostApplicationQueryService>();
+        scope.ServiceProvider.GetRequiredService<IApplicationDeployQueryService>().ShouldBeOfType<ApplicationQueryService<TestContext>>();
+        scope.ServiceProvider.GetRequiredService<IDeployVerdictService>().ShouldNotBeNull();
     }
 
     [TimedFact]
@@ -160,5 +179,19 @@ public class ApplicationAddonFlagTests
         services.AddDbContext<TestContext>(o => o.UseInMemoryDatabase($"addonflag-{Guid.NewGuid():N}"));
         services.AddSingleton(Mock.Of<IWarpSqlQueries<TestContext>>());
         services.AddSingleton(Mock.Of<IWarpLockProvider>());
+    }
+
+    // A host's own roster implementation: it implements only the members IApplicationQueryService had before deploy
+    // history existed, which is the point of the test.
+    private sealed class HostApplicationQueryService : IApplicationQueryService
+    {
+        public Task<IReadOnlyList<Warp.Core.Models.ApplicationSummaryModel>> GetApplications(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<Warp.Core.Models.ApplicationSummaryModel>>([]);
+
+        public Task<Warp.Core.Models.ApplicationDetailModel?> GetApplicationDetail(string application, CancellationToken ct = default)
+            => Task.FromResult<Warp.Core.Models.ApplicationDetailModel?>(null);
+
+        public Task<Warp.Core.Models.ApplicationInstanceDetailModel?> GetInstanceDetail(string application, Guid instanceId, CancellationToken ct = default)
+            => Task.FromResult<Warp.Core.Models.ApplicationInstanceDetailModel?>(null);
     }
 }

@@ -7,6 +7,8 @@ import type {
   ApplicationSummaryModel,
   ApplicationDetailModel,
   ApplicationInstanceDetailModel,
+  ApplicationDeployModel,
+  DeployVerdictModel,
   JobExecutionMetricsModel,
 } from '@/types/applications';
 import type { EndpointListItem, EndpointDetail, EndpointCallDetail, EndpointHistoryPoint } from '@/types/endpoints';
@@ -216,6 +218,20 @@ export const getInstanceDetail = (id: string, instanceId: string) =>
 export const getApplicationJobStats = (id: string) =>
   api.get<JobExecutionMetricsModel>(`/applications/${encodeURIComponent(id)}/jobstats`).then(r => r.data);
 
+// Detected deploys (#325), newest first. The per-application route takes the URL-safe id; the cross-application
+// route takes the application NAME (the Metrics page's application filter is a name). from/to are ISO instants,
+// either side optional.
+export const getApplicationDeploys = (id: string) =>
+  api.get<ApplicationDeployModel[]>(`/applications/${encodeURIComponent(id)}/deploys`).then(r => r.data);
+
+export const getDeploys = (params: { application?: string; from?: string; to?: string } = {}) =>
+  api.get<ApplicationDeployModel[]>('/applications/deploys', { params }).then(r => r.data);
+
+// Post-deploy verdict: pass / warn / fail / pending / noData for one deploy of an application (by NAME). No version =
+// the latest deploy; no environment = the newest match in any environment.
+export const getDeployVerdict = (params: { application: string; version?: string; environment?: string; minWindowMinutes?: number; minCoverage?: number }) =>
+  api.get<DeployVerdictModel>('/applications/verdict', { params }).then(r => r.data);
+
 export const getStatsHistory = (hours = 24) =>
   api.get<StatsHistoryPoint[]>('/stats/history', { params: { hours } }).then(r => r.data);
 
@@ -400,6 +416,41 @@ export const getMetrics = () =>
 
 export const getMetricSeries = (instrument: string, query: string) =>
   api.get<import('@/types/metrics').MetricSeries>(`/metrics/${encodeUrlSafeId(instrument)}/series?${query}`).then(r => r.data);
+
+// Metrics health board (#326): every tile evaluated over [from, to) in one batched read, and tile CRUD. Registered by
+// AddWarp, so a dashboard-only host serves them; the upsert's 400 body is a plain message string.
+// `board` is a board id; without it the server reads the Default board.
+export const getMetricBoard = (from: string, to: string, board?: number) =>
+  api.get<import('@/types/metricBoard').MetricBoard>('/metrics/board', { params: board === undefined ? { from, to } : { from, to, board } }).then(r => r.data);
+
+// Named boards: the GET creates the Default board on first use; POST creates (id 0) or renames; DELETE removes the board
+// and its tiles (the Default board answers 400). Errors are { error }.
+export const getMetricBoards = () =>
+  api.get<import('@/types/metricBoard').MetricBoardSummary[]>('/metrics/boards').then(r => r.data);
+
+export const upsertMetricBoard = (body: import('@/types/metricBoard').MetricBoardUpsert) =>
+  api.post<{ id: number }>('/metrics/boards', body).then(r => r.data);
+
+export const deleteMetricBoard = (id: number) => api.delete(`/metrics/boards/${id}`);
+
+export const getMetricBoardTiles = () =>
+  api.get<import('@/types/metricBoard').MetricBoardTile[]>('/metrics/board/tiles').then(r => r.data);
+
+export const upsertMetricBoardTile = (body: import('@/types/metricBoard').MetricBoardTile) =>
+  api.post<{ id: number }>('/metrics/board/tiles', body).then(r => r.data);
+
+export const deleteMetricBoardTile = (id: number) => api.delete(`/metrics/board/tiles/${id}`);
+
+// Metric annotations (#333): known-issue notes on an instrument or an SLO objective. The read takes one target and an
+// optional window (notes overlapping it, ongoing ones included); the upsert's 400 body is a plain message string, a 404
+// means the note being edited was deleted meanwhile.
+export const getAnnotations = (params: { instrument?: string; slo?: number; from?: string; to?: string }) =>
+  api.get<import('@/types/annotations').MetricAnnotationList>('/annotations', { params }).then(r => r.data);
+
+export const upsertAnnotation = (body: import('@/types/annotations').MetricAnnotationUpsert) =>
+  api.post<{ id: number }>('/annotations', body).then(r => r.data);
+
+export const deleteAnnotation = (id: number) => api.delete(`/annotations/${id}`);
 
 // Extensions
 export const getExtensions = () =>

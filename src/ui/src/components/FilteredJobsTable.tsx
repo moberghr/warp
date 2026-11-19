@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
@@ -36,11 +36,14 @@ export function FilteredJobsTable({ title, fetchJobs, fetchCounts, onCountsUpdat
   const pageSize = 10;
   const initializedRef = useRef(false);
   const fetchJobsRef = useRef(fetchJobs);
-  fetchJobsRef.current = fetchJobs;
   const fetchCountsRef = useRef(fetchCounts);
-  fetchCountsRef.current = fetchCounts;
   const onCountsUpdateRef = useRef(onCountsUpdate);
-  onCountsUpdateRef.current = onCountsUpdate;
+  // Keep the latest callbacks without re-subscribing; declared before the fetch effects so they see the new values.
+  useLayoutEffect(() => {
+    fetchJobsRef.current = fetchJobs;
+    fetchCountsRef.current = fetchCounts;
+    onCountsUpdateRef.current = onCountsUpdate;
+  });
 
   const updateCounts = useCallback(() => {
     fetchCountsRef.current().then(c => {

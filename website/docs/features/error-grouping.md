@@ -25,6 +25,8 @@ Four sources feed one issue list. Each contributes an occurrence when it sees a 
 
 **Endpoint 4xx** become `status + route` groups (no exception). They're **default-filtered** in the UI (the list shows real errors first; toggle to include them) and **kept off the reliability SLI** — [endpoint observability](./endpoint-observability.md) stays 5xx-only, because "is a member of an issue" is not the same as "counts against the error rate". A `404 /orders/{id}` group is a diagnostic, not an outage.
 
+The endpoint source covers **every observed endpoint** — Warp HTTP endpoints, and your own MVC controllers and minimal APIs once you opt them in with `WithWarpObservability()` or `[WarpObserved]` (see [Observing your own endpoints](./endpoint-observability.md#observing-your-own-endpoints)). An unhandled exception in an opted-in controller action groups exactly like one in a Warp handler: exception type + `METHOD /route/template`. Endpoints you did not opt in produce no issues. Like every endpoint issue, they need the `Database` or `Both` sink — an `Otel`-only sink writes no rows and therefore no issues.
+
 Because the four sources share one list, an issue's **source badge** is part of its identity: a browser `TypeError` and a server-side exception are never the same issue, and you can slice the list by source.
 
 ## How it works

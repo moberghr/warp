@@ -4,11 +4,30 @@
 
 import { MetricKind, MetricTier } from '@/types/metrics';
 import { DASHBOARD_LOCALE } from '@/utils/format';
-import type { FilterChip } from '@/lib/metricPattern';
+import { unitLabel, withUnit } from '@/lib/metricUnit';
+import { parsePattern, type FilterChip } from '@/lib/metricPattern';
 import type { MetricInstrument, MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
+import type { ApplicationDeployModel } from '@/types/applications';
 
 export const REST_NAME = '(rest)';
 export const TOTAL_NAME = 'total';
+
+/**
+ * The reserved key that addresses the application version as if it were a tag (#330, MetricSeriesQuery.VersionKey):
+ * `breakdown={version}` splits by version and a `{version}` filter chip filters by it. Only hosts that opted in with
+ * `AddMetrics(m => m.ByVersion())` write a version; every other row reads as `{none}`.
+ */
+export const VERSION_KEY = '{version}';
+
+/** The breakdown / filter keys offered for an instrument: its tag keys, then the version pseudo-key. */
+export function dimensionKeys(tagKeys: string[]): string[] {
+  return tagKeys.includes(VERSION_KEY) ? tagKeys : [...tagKeys, VERSION_KEY];
+}
+
+/** How a breakdown / filter key reads in a picker. */
+export function dimensionLabel(key: string): string {
+  return key === VERSION_KEY ? 'application version' : key;
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Labels
@@ -25,14 +44,18 @@ export function kindLabel(kind: MetricKind): string {
   return KIND_LABELS[kind] ?? 'Unknown';
 }
 
-/** OTel units are UCUM codes (`ms`, `s`, `By`, `1`); show the ones people read, pass the rest through. */
-export function unitLabel(unit: string | null | undefined): string {
-  if (!unit || unit === '1') {
-    return '';
-  }
-
-  return unit === 'By' ? 'bytes' : unit;
+/**
+ * What a chart of this kind shows when that is not obvious from the kind. An up-down counter is stored as deltas, so
+ * each bucket is its net change, not the level; an ObservableGauge is the instrument for a level.
+ */
+export function kindChartNote(kind: MetricKind): string | null {
+  return kind === MetricKind.UpDownCounter
+    ? 'Charted as the net change per bucket, not the current level. Record a level with an ObservableGauge.'
+    : null;
 }
+
+// The one unit formatter (UCUM codes and `{annotation}` counts), re-exported for the metric pages' existing imports.
+export { unitLabel, withUnit };
 
 const RESOLUTION_LABELS: Record<MetricTier, string> = {
   [MetricTier.Fine]: 'Fine',
@@ -60,9 +83,7 @@ export function formatPercentileValue(value: number | null | undefined, unit: st
     return '—';
   }
 
-  const suffix = unitLabel(unit);
-
-  return `≤ ${formatNumber(value)}${suffix ? ` ${suffix}` : ''}`;
+  return `≤ ${withUnit(formatNumber(value), unit, value)}`;
 }
 
 export function formatNumber(value: number): string {
@@ -103,10 +124,80 @@ export const RANGES = [
 ] as const;
 export type RangeId = (typeof RANGES)[number]['id'];
 
+/** The series API's limit on `to - from` (IMetricQueryService.MaxRangeDays). */
+export const MAX_RANGE_MS = 90 * 24 * 3_600_000;
+
+/** The shortest window a custom range resolves to, so a start at (or a skewed clock just past) now still reads. */
+const MIN_RANGE_MS = 60_000;
+
+/**
+ * A custom window in epoch milliseconds. `to` null means "until now": the window keeps moving like a preset, which is
+ * what "since last deploy" wants.
+ */
+export interface CustomRange {
+  from: number;
+  to: number | null;
+}
+
 export const PERCENTILES = [50, 90, 95, 99] as const;
+
+/**
+ * Rate units for counters and histogram counts: each bucket divided by its length. Per bucket is the stored value, and
+ * changes scale with the bucket size (5 min up to 6h, 1 hour up to 7d, 1 day beyond); a rate does not.
+ */
+export const RATES = [
+  { id: 'bucket', label: 'Per bucket', seconds: null },
+  { id: 'minute', label: 'Per minute', seconds: 60 },
+  { id: 'second', label: 'Per second', seconds: 1 },
+] as const;
+export type RateId = (typeof RATES)[number]['id'];
+
+/** The `rate` URL parameter: anything but `minute` / `second` (or none) is per bucket, the default. */
+export function parseRate(value: string | null | undefined): RateId {
+  return value === 'minute' || value === 'second' ? value : 'bucket';
+}
+
+/** The `rate` URL parameter for a choice: none for the default, so a plain link stays plain. */
+export function rateParam(rate: RateId): string | null {
+  return rate === 'bucket' ? null : rate;
+}
+
+function rateSeconds(rate: RateId): number | null {
+  return RATES.find((x) => x.id === rate)?.seconds ?? null;
+}
+
+/** Counters count events and histograms count measurements; up-down counters and gauges have no rate. */
+export function supportsRate(kind: MetricKind): boolean {
+  return kind === MetricKind.Counter || kind === MetricKind.Histogram;
+}
+
+/** The rate that applies: per bucket for a kind without one, and for the ratio view (the bucket length cancels). */
+export function effectiveRate(kind: MetricKind, rate: RateId, ratio: boolean): RateId {
+  return ratio || !supportsRate(kind) ? 'bucket' : rate;
+}
+
+/** A bucket's value as a rate: value × unit ÷ bucket length. Null when the bucket length is unknown. */
+export function rateValue(value: number | null, bucketSeconds: number | null | undefined, rate: RateId): number | null {
+  const unit = rateSeconds(rate);
+  if (value === null || unit === null) {
+    return value;
+  }
+
+  if (bucketSeconds === null || bucketSeconds === undefined || !Number.isFinite(bucketSeconds) || bucketSeconds <= 0) {
+    return null;
+  }
+
+  return (value * unit) / bucketSeconds;
+}
+
+function rateSuffix(rate: RateId): string {
+  return rate === 'second' ? 'per second' : 'per minute';
+}
 
 export interface MetricControls {
   range: RangeId;
+  /** A custom window; when set it replaces `range`. */
+  custom: CustomRange | null;
   application: string | null;
   breakdown: string | null;
   filters: FilterChip[];
@@ -127,6 +218,7 @@ export interface MetricControls {
 
 export const DEFAULT_CONTROLS: MetricControls = {
   range: '24h',
+  custom: null,
   application: null,
   breakdown: null,
   filters: [],
@@ -142,18 +234,327 @@ export function rangeMs(range: RangeId): number {
   return RANGES.find((x) => x.id === range)?.ms ?? RANGES[2].ms;
 }
 
+/** The window a read covers, resolved against a clock. `live` = its end moves with now; `clamped` = cut to 90 days. */
+export interface MetricWindow {
+  from: number;
+  to: number;
+  live: boolean;
+  clamped: boolean;
+}
+
+/**
+ * The [from, to) a read asks for. A preset ends now; a custom range is used as given, except that its start is cut to
+ * the API's 90-day limit (an old "since deploy") and kept at least a minute before its end, so the read is never a 400.
+ */
+export function resolveWindow(controls: Pick<MetricControls, 'range' | 'custom'>, now: number): MetricWindow {
+  if (controls.custom === null) {
+    return { from: now - rangeMs(controls.range), to: now, live: true, clamped: false };
+  }
+
+  const to = controls.custom.to ?? now;
+  const from = Math.min(Math.max(controls.custom.from, to - MAX_RANGE_MS), to - MIN_RANGE_MS);
+
+  return { from, to, live: controls.custom.to === null || controls.custom.to > now, clamped: from > controls.custom.from };
+}
+
+/**
+ * Why a custom range cannot be applied, or null when it can. `to` null is "until now". The limits are the API's: the
+ * start before the end, at most 90 days apart.
+ */
+export function validateCustomRange(from: number, to: number | null, now: number): string | null {
+  if (!Number.isFinite(from)) {
+    return 'Pick a start time.';
+  }
+
+  if (to !== null && !Number.isFinite(to)) {
+    return 'Pick an end time, or leave it empty for now.';
+  }
+
+  const end = to ?? now;
+  if (from >= end) {
+    return to === null ? 'The start must be in the past.' : 'The start must be before the end.';
+  }
+
+  return end - from > MAX_RANGE_MS ? 'A range can span at most 90 days.' : null;
+}
+
 /**
  * How often a series read refetches: as often as its display resolution can change. The server picks the
- * resolution from the range length (up to 6 hours fine, up to 7 days hourly, longer daily), so a fine chart refetches
- * every minute, an hourly one every 5 minutes and a daily one every 30.
+ * resolution from the window length (up to 6 hours fine, up to 7 days hourly, longer daily), so a fine chart refetches
+ * every minute, an hourly one every 5 minutes and a daily one every 30. A window that ended in the past never changes,
+ * so it is not refetched at all.
  */
-export function seriesRefetchMs(range: RangeId): number {
-  const ms = rangeMs(range);
+export function seriesRefetchMs(span: MetricWindow): number | false {
+  if (!span.live) {
+    return false;
+  }
+
+  const ms = span.to - span.from;
   if (ms <= 6 * 3_600_000) {
     return 60_000;
   }
 
   return ms <= 7 * 24 * 3_600_000 ? 5 * 60_000 : 30 * 60_000;
+}
+
+// The range lives in the URL so a shared link reproduces the view: `range=<preset>` (left out for the default),
+// or `from=<ISO>[&to=<ISO>]` for a custom window, with no `to` meaning "until now".
+
+export interface RangeSelection {
+  range: RangeId;
+  custom: CustomRange | null;
+}
+
+function parseInstant(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const ms = Date.parse(value);
+
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** Reads the range from the URL. An unparseable `from` falls back to the preset, an unparseable `to` to "until now". */
+export function parseRangeParams(params: URLSearchParams): RangeSelection {
+  const preset = RANGES.find((x) => x.id === params.get('range'))?.id ?? DEFAULT_CONTROLS.range;
+  const from = parseInstant(params.get('from'));
+  if (from === null) {
+    return { range: preset, custom: null };
+  }
+
+  return { range: preset, custom: { from, to: parseInstant(params.get('to')) } };
+}
+
+/** A copy of `params` carrying `selection` and every other parameter unchanged. */
+export function writeRangeParams(params: URLSearchParams, selection: RangeSelection): URLSearchParams {
+  const next = new URLSearchParams(params);
+  next.delete('range');
+  next.delete('from');
+  next.delete('to');
+
+  if (selection.custom !== null) {
+    next.set('from', new Date(selection.custom.from).toISOString());
+    if (selection.custom.to !== null) {
+      next.set('to', new Date(selection.custom.to).toISOString());
+    }
+
+    return next;
+  }
+
+  if (selection.range !== DEFAULT_CONTROLS.range) {
+    next.set('range', selection.range);
+  }
+
+  return next;
+}
+
+// Every other control lives in the URL too (shareable links and a refresh, spec 2026-11-17 Part 2 step A):
+// `application`, `breakdown`, repeated `filter=key:value` (the series API's syntax, `{version}` included),
+// `compare=1d,7d`, `percentile`, `view=ratio`, `numerator`, `minmax=1`. Defaults are left out, and a value that does
+// not parse is ignored (the control reads its default), so a hand-edited or stale link never breaks the page.
+
+/**
+ * Every query key the metric detail page reads, in this order. A chart tile on a board stores these minus the range
+ * keys; the server mirrors the list (MetricChartQuery.MetricQueryKeys, kept equal by MetricChartQueryKeysSyncTests).
+ */
+export const metricQueryKeys = [
+  'range',
+  'from',
+  'to',
+  'application',
+  'breakdown',
+  'filter',
+  'compare',
+  'percentile',
+  'view',
+  'numerator',
+  'minmax',
+  'rate',
+] as const;
+
+/** The keys that pick the window (writeRangeParams). A chart tile never stores them: the board's range drives it. */
+export const METRIC_RANGE_KEYS = ['range', 'from', 'to'] as const;
+
+/** The keys writeControlParams owns beside the range's; `rate` is written on its own (rateParam) and kept as is. */
+const CONTROL_KEYS = ['application', 'breakdown', 'filter', 'compare', 'percentile', 'view', 'numerator', 'minmax'] as const;
+
+function nonBlank(value: string | null): string | null {
+  return value !== null && value.trim() !== '' ? value : null;
+}
+
+/** A `key:value` filter as a chip, with the chip editor's rules: key without `:`, value a valid pattern. */
+function filterFromParam(text: string): FilterChip | null {
+  const chip = chipFromQuery(text);
+  if (chip === null || chip.key.trim() === '' || chip.value.trim() === '' || parsePattern(chip.value) === null) {
+    return null;
+  }
+
+  return chip;
+}
+
+/** Reads every metric control from the URL. Unknown or invalid values fall back to the defaults. */
+export function parseControlParams(params: URLSearchParams): MetricControls {
+  const { range, custom } = parseRangeParams(params);
+  const filters = params
+    .getAll('filter')
+    .map(filterFromParam)
+    .filter((x): x is FilterChip => x !== null)
+    .reduce<FilterChip[]>((chips, chip) => upsertChip(chips, chip), []);
+  const compare = new Set((params.get('compare') ?? '').split(',').map((x) => x.trim()));
+  const percentile = Number(params.get('percentile'));
+  const numerator = nonBlank(params.get('numerator'));
+
+  return {
+    range,
+    custom,
+    application: nonBlank(params.get('application')),
+    breakdown: nonBlank(params.get('breakdown')),
+    filters,
+    compareDay: compare.has('1d'),
+    compareWeek: compare.has('7d'),
+    percentile: (PERCENTILES as readonly number[]).includes(percentile) ? percentile : null,
+    view: params.get('view') === 'ratio' ? 'ratio' : 'values',
+    numerator: numerator !== null && parsePattern(numerator) !== null ? numerator : null,
+    showMinMax: params.get('minmax') === '1' || params.get('minmax') === 'true',
+  };
+}
+
+/** A copy of `params` carrying `controls` (defaults left out) and every other parameter, `rate` included, unchanged. */
+export function writeControlParams(params: URLSearchParams, controls: MetricControls): URLSearchParams {
+  const next = writeRangeParams(params, controls);
+  for (const key of CONTROL_KEYS) {
+    next.delete(key);
+  }
+
+  if (controls.application) {
+    next.set('application', controls.application);
+  }
+
+  if (controls.breakdown) {
+    next.set('breakdown', controls.breakdown);
+  }
+
+  for (const chip of controls.filters) {
+    next.append('filter', chipToQuery(chip));
+  }
+
+  const compare = [controls.compareDay ? '1d' : null, controls.compareWeek ? '7d' : null].filter((x) => x !== null);
+  if (compare.length > 0) {
+    next.set('compare', compare.join(','));
+  }
+
+  if (controls.percentile !== null) {
+    next.set('percentile', String(controls.percentile));
+  }
+
+  if (controls.view !== DEFAULT_CONTROLS.view) {
+    next.set('view', controls.view);
+  }
+
+  if (controls.numerator) {
+    next.set('numerator', controls.numerator);
+  }
+
+  if (controls.showMinMax) {
+    next.set('minmax', '1');
+  }
+
+  return next;
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+/** An instant as a `<input type="datetime-local">` value, in the browser's time zone, to the minute. */
+export function toLocalInputValue(ms: number): string {
+  const d = new Date(ms);
+
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** A `<input type="datetime-local">` value as an instant (NaN when empty or invalid). */
+export function fromLocalInputValue(value: string): number {
+  return value ? new Date(value).getTime() : Number.NaN;
+}
+
+/** The custom window as text: `13 Nov, 10:42 → now`. */
+export function customRangeLabel(custom: CustomRange): string {
+  const format = (ms: number) =>
+    new Date(ms).toLocaleString(DASHBOARD_LOCALE, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+  return `${format(custom.from)} → ${custom.to === null ? 'now' : format(custom.to)}`;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Deploy markers (#325 deploy history on the chart)
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface DeployMarker {
+  time: number;
+  label: string;
+}
+
+/**
+ * Vertical chart markers for the deploys inside the window, oldest first. With one application in view the label is
+ * the version; across applications it names the application too. The environment is added only when the deploys in
+ * view span more than one, so the common single-environment chart stays terse.
+ */
+export function deployMarkers(
+  deploys: ApplicationDeployModel[],
+  span: Pick<MetricWindow, 'from' | 'to'>,
+  application: string | null,
+): DeployMarker[] {
+  const inView = deploys
+    .map((x) => ({ deploy: x, time: Date.parse(x.firstSeenAt) }))
+    .filter((x) => Number.isFinite(x.time) && x.time >= span.from && x.time <= span.to)
+    .filter((x) => application === null || x.deploy.application === application)
+    .sort((a, b) => a.time - b.time);
+  const environments = new Set(inView.map((x) => x.deploy.environment ?? ''));
+
+  return inView.map(({ deploy, time }) => {
+    const name = application === null ? `${deploy.application} ${deploy.version}` : deploy.version;
+    const label = environments.size > 1 && deploy.environment ? `${name} (${deploy.environment})` : name;
+
+    return { time, label };
+  });
+}
+
+/**
+ * The deploy "since last deploy" starts from: the newest of `deploys`, which the caller has already scoped to the
+ * selected application, or to every application when none is selected. Null when there is none.
+ */
+export function latestDeploy(deploys: ApplicationDeployModel[] | undefined): ApplicationDeployModel | null {
+  let latest: ApplicationDeployModel | null = null;
+  for (const deploy of deploys ?? []) {
+    if (latest === null || Date.parse(deploy.firstSeenAt) > Date.parse(latest.firstSeenAt)) {
+      latest = deploy;
+    }
+  }
+
+  return latest;
+}
+
+/**
+ * The "Since last deploy" tooltip. A failed deploy read says so rather than "no deploy", which would claim the
+ * application was never deployed. `scoped` = the read was limited to the selected application.
+ */
+export function sinceDeployHint(deploy: ApplicationDeployModel | null, failed: boolean, scoped: boolean): string {
+  if (failed) {
+    return 'Unable to load deploys';
+  }
+
+  if (deploy) {
+    return `From the ${deploy.application} ${deploy.version} deploy`;
+  }
+
+  return scoped ? 'No deploy recorded for this selection' : 'No deploy recorded';
+}
+
+/** The custom range "since last deploy" selects: from the deploy, open-ended to now. */
+export function sinceDeployRange(deploy: ApplicationDeployModel): CustomRange {
+  return { from: Date.parse(deploy.firstSeenAt), to: null };
 }
 
 export function supportsRatio(kind: MetricKind): boolean {
@@ -174,9 +575,10 @@ export function isRatioActive(controls: MetricControls, kind: MetricKind): boole
  * because `filter` repeats and axios would serialise the array as `filter[]=`.
  */
 export function buildSeriesQuery(controls: MetricControls, kind: MetricKind | null, now: number): string {
+  const span = resolveWindow(controls, now);
   const parts: [string, string][] = [
-    ['from', new Date(now - rangeMs(controls.range)).toISOString()],
-    ['to', new Date(now).toISOString()],
+    ['from', new Date(span.from).toISOString()],
+    ['to', new Date(span.to).toISOString()],
   ];
 
   if (controls.application) {
@@ -227,6 +629,45 @@ export function buildNumeratorQuery(controls: MetricControls, kind: MetricKind |
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Query keys: every input a request reads is in its key, so a change of window, filter or numerator refetches instead
+// of reusing the previous window's data. metricModel.test.ts pins that for every control.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** The series request's key: every control buildSeriesQuery reads (the percentile only where it is sent). */
+export function seriesQueryKey(name: string | null, controls: MetricControls, kind: MetricKind | null) {
+  return ['metrics', 'series', name, controls.range, controls.custom, controls.application, controls.breakdown, controls.filters,
+    controls.compareDay, controls.compareWeek, controls.view === 'values' ? controls.percentile : null, kind] as const;
+}
+
+/** The ratio numerator's key: every control buildNumeratorQuery reads, the custom window included. */
+export function numeratorQueryKey(name: string | null, controls: MetricControls, kind: MetricKind | null) {
+  return ['metrics', 'series', 'numerator', name, controls.range, controls.custom, controls.application, controls.breakdown,
+    controls.filters, controls.compareDay, controls.compareWeek, controls.numerator, kind] as const;
+}
+
+/** The deploys drawn as chart markers: the selected application (or all) inside the window. */
+export function deploysRequest(controls: Pick<MetricControls, 'range' | 'custom' | 'application'>, now: number) {
+  const w = resolveWindow(controls, now);
+
+  return { application: controls.application ?? undefined, from: new Date(w.from).toISOString(), to: new Date(w.to + 1).toISOString() };
+}
+
+export function deploysQueryKey(controls: Pick<MetricControls, 'range' | 'custom' | 'application'>) {
+  return ['metrics', 'deploys', controls.application, controls.range, controls.custom] as const;
+}
+
+/** The instrument's notes overlapping the window, whatever their filter. */
+export function annotationsRequest(name: string, controls: Pick<MetricControls, 'range' | 'custom'>, now: number) {
+  const w = resolveWindow(controls, now);
+
+  return { instrument: name, from: new Date(w.from).toISOString(), to: new Date(w.to + 1).toISOString() };
+}
+
+export function annotationsQueryKey(name: string | null, controls: Pick<MetricControls, 'range' | 'custom'>) {
+  return ['annotations', 'instrument', name, controls.range, controls.custom] as const;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Filter chips: `key=value` in the UI (parsed by lib/metricPattern), `key:value` on the wire
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -274,6 +715,8 @@ export type DatasetRole = 'value' | 'percentile' | 'min' | 'max' | 'ratio';
 export interface ChartPoint {
   x: number;
   y: number | null;
+  /** The current range's still-filling bucket: drawn faded and dashed, and left out of the headline. */
+  incomplete?: boolean;
 }
 
 export interface DatasetSpec {
@@ -398,6 +841,8 @@ export interface DatasetOptions {
   percentile: number | null;
   /** Gauges: also draw min and max. */
   showMinMax: boolean;
+  /** Counters and histogram counts: divide each bucket by its length. Per bucket when absent. */
+  rate?: RateId;
 }
 
 /** One dataset per line (top 10 + `(rest)`), plus overlays dashed in the same colour, plus percentile / min / max. */
@@ -425,7 +870,7 @@ export function buildDatasets(series: MetricSeries, options: DatasetOptions): Da
         points.map((p) => {
           const y = pick(p);
 
-          return { x: toMs(p.timestamp), y: y !== null && Number.isFinite(y) ? y : null };
+          return { x: toMs(p.timestamp), y: y !== null && Number.isFinite(y) ? y : null, incomplete: p.incomplete === true };
         }),
         primaryTimes,
         sameResolution
@@ -446,7 +891,8 @@ export function buildDatasets(series: MetricSeries, options: DatasetOptions): Da
       return spec;
     };
 
-    const result: DatasetSpec[] = [build('value', (p) => pointValue(series.kind, p), 'y')];
+    const rate = effectiveRate(series.kind, options.rate ?? 'bucket', false);
+    const result: DatasetSpec[] = [build('value', (p) => rateValue(pointValue(series.kind, p), p.bucketSeconds, rate), 'y')];
 
     if (series.kind === MetricKind.Histogram && options.percentile !== null) {
       result.push(build('percentile', (p) => p.percentile, 'y1', percentileLabel(options.percentile)));
@@ -476,6 +922,18 @@ export function ratioPercent(numerator: number, total: number): number | null {
   const ratio = (numerator / total) * 100;
 
   return Number.isFinite(ratio) ? ratio : null;
+}
+
+/** The bucket timestamps the current range flags as still filling (any line). */
+export function incompleteTimes(series: MetricSeries): Set<number> {
+  return new Set(
+    series.series
+      .filter((x) => x.compare === null)
+      .flatMap((x) => x.points)
+      .filter((x) => x.incomplete === true)
+      .map((x) => toMs(x.timestamp))
+      .filter((x) => Number.isFinite(x))
+  );
 }
 
 /** Per-bucket sum of every line of one compare offset (null = the current range). */
@@ -517,6 +975,7 @@ export function buildRatioDatasets(series: MetricSeries, numeratorSeries: Metric
       return [];
     }
 
+    const filling = compare === null ? incompleteTimes(series) : new Set<number>();
     const totals = sumByBucket(series, compare);
     const numerators = sumByBucket(numeratorSeries, compare);
     for (const t of numerators.keys()) {
@@ -532,7 +991,7 @@ export function buildRatioDatasets(series: MetricSeries, numeratorSeries: Metric
       .sort((a, b) => a - b);
     const points: ChartPoint[] = [...totals.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([x, total]) => ({ x, y: ratioPercent(numerators.get(x) ?? 0, total) }));
+      .map(([x, total]) => ({ x, y: ratioPercent(numerators.get(x) ?? 0, total), incomplete: filling.has(x) }));
     const spec: DatasetSpec = {
       id: `${compare ?? 'now'}|ratio`,
       label: `${numerator} ÷ total${compare ? ` (−${compare})` : ''} · ${resolutionLabel(resolution)}`,
@@ -555,10 +1014,24 @@ export function buildRatioDatasets(series: MetricSeries, numeratorSeries: Metric
 }
 
 /** y-axis titles: what the left and right axes mean for this kind / view. */
-export function axisTitles(kind: MetricKind, unit: string | null | undefined, ratio: boolean): { y: string; y1: string } {
+export function axisTitles(
+  kind: MetricKind,
+  unit: string | null | undefined,
+  ratio: boolean,
+  rate: RateId = 'bucket'
+): { y: string; y1: string } {
   const suffix = unitLabel(unit);
   if (ratio) {
     return { y: 'Share of total (%)', y1: '' };
+  }
+
+  if (effectiveRate(kind, rate, ratio) !== 'bucket') {
+    const per = rateSuffix(rate);
+    if (kind === MetricKind.Histogram) {
+      return { y: `Measurements ${per}`, y1: suffix ? `Percentile (${suffix})` : 'Percentile' };
+    }
+
+    return { y: suffix ? `Sum ${per} (${suffix})` : `Sum ${per}`, y1: '' };
   }
 
   switch (kind) {
@@ -566,7 +1039,112 @@ export function axisTitles(kind: MetricKind, unit: string | null | undefined, ra
       return { y: 'Measurements', y1: suffix ? `Percentile (${suffix})` : 'Percentile' };
     case MetricKind.Gauge:
       return { y: suffix ? `Average (${suffix})` : 'Average', y1: '' };
+    case MetricKind.UpDownCounter:
+      // Stored as deltas, so a bucket is the net change inside it, never the level (an in-flight count hovers near 0).
+      return { y: suffix ? `Net change (${suffix})` : 'Net change', y1: '' };
     default:
       return { y: suffix ? `Sum (${suffix})` : 'Sum', y1: '' };
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Headline: the range value over its complete buckets, and the 1d / 7d comparisons
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface HeadlineComparison {
+  compare: string;
+  value: number | null;
+  /** Change of the current value against this overlay, in percent; null when either side has no value or it is 0. */
+  changePercent: number | null;
+}
+
+export interface HeadlineSummary {
+  label: string;
+  value: number | null;
+  comparisons: HeadlineComparison[];
+  /** The current range has a still-filling bucket, which the value leaves out. */
+  excludesIncomplete: boolean;
+}
+
+/** What the headline of this kind is: the server sums counters, counts histograms and averages gauges. */
+export function headlineLabel(kind: MetricKind): string {
+  switch (kind) {
+    case MetricKind.UpDownCounter:
+      return 'Net change';
+    case MetricKind.Histogram:
+      return 'Measurements';
+    case MetricKind.Gauge:
+      return 'Average';
+    default:
+      return 'Total';
+  }
+}
+
+/** (current - previous) / |previous| in percent; null when it is not defined (a missing side, or a zero baseline). */
+export function changePercent(current: number | null, previous: number | null): number | null {
+  if (current === null || previous === null || !Number.isFinite(current) || !Number.isFinite(previous) || previous === 0) {
+    return null;
+  }
+
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+export function formatChange(percent: number | null): string {
+  if (percent === null) {
+    return '—';
+  }
+
+  const rounded = Math.abs(percent) >= 10 ? Math.round(percent) : Math.round(percent * 10) / 10;
+
+  return `${rounded > 0 ? '+' : ''}${rounded}%`;
+}
+
+/**
+ * The headline strip from the server's headlines (complete buckets only — the still-filling bucket is left out, never
+ * prorated, and each overlay leaves out the bucket aligned with it). Null when the response carries none.
+ */
+export function headlineSummary(series: MetricSeries, rate: RateId = 'bucket'): HeadlineSummary | null {
+  const headlines = series.headlines ?? [];
+  const current = headlines.find((x) => x.compare === null);
+  if (!current) {
+    return null;
+  }
+
+  const effective = effectiveRate(series.kind, rate, false);
+  const span = effective === 'bucket' ? null : headlineSpanSeconds(series);
+  const scale = (value: number | null) => (effective === 'bucket' ? value : rateValue(value, span, effective));
+  const value = scale(current.value);
+
+  return {
+    label: effective === 'bucket' ? headlineLabel(series.kind) : `Average ${rateSuffix(effective)}`,
+    value,
+    comparisons: headlines
+      .filter((x): x is typeof x & { compare: string } => x.compare !== null)
+      .map((x) => {
+        const previous = scale(x.value);
+
+        return { compare: x.compare, value: previous, changePercent: changePercent(value, previous) };
+      }),
+    excludesIncomplete: incompleteTimes(series).size > 0,
+  };
+}
+
+/**
+ * The span a headline covers, for its rate: from the range start (or the first bucket's start, which floors to the
+ * bucket and can sit before it) to where the complete buckets end. Every overlay covers the same span shifted back.
+ * Null when it is not positive.
+ */
+export function headlineSpanSeconds(series: MetricSeries): number | null {
+  const firstPoint = Math.min(
+    ...series.series
+      .filter((x) => x.compare === null)
+      .flatMap((x) => x.points)
+      .map((x) => toMs(x.timestamp))
+      .filter((x) => Number.isFinite(x))
+  );
+  const start = Math.min(toMs(series.from), firstPoint);
+  const end = toMs(series.completeUntil);
+  const seconds = (end - start) / 1000;
+
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }

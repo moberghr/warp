@@ -67,20 +67,9 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
             return;
         }
 
-        // Advisory: DB push is enabled (a real transport was substituted for the null one) but this
-        // server runs in single-worker mode, so JobEnqueued pushes have no dispatcher to short-cut —
-        // individual bare workers still poll (they wake on the local ServerTaskSignals.JobEnqueued
-        // signal, but cross-server JobEnqueued pushes only accelerate dispatcher-mode fetch). This
-        // warning moved here from NotificationListenerTask when the listener relocated to Warp.Core
-        // (which has no access to WarpServerConfiguration.UseDispatcher); this host runs precisely
-        // when UseDispatcher=false, so the condition is identical.
-        if (_notificationTransport is not NullNotificationTransport)
-        {
-            _loggerFactory.CreateLogger<WarpSingleWorkerHost<TContext>>().LogWarning(
-                "Warp DB push is enabled but UseDispatcher=false; worker fetch will keep polling. " +
-                "Enable UseDispatcher on WarpServerConfiguration to get the full benefit.");
-        }
-
+        // No "push without dispatcher" warning: a cross-server JobEnqueued push reaches every bare worker too. The
+        // listener (NotificationListenerTask) fires ServerTaskSignals.SignalJobEnqueued, which each WarpWorker subscribes
+        // to, as well as the dispatcher wake (§2.9).
         foreach (var registration in _state.Groups)
         {
             foreach (var workerId in registration.WorkerIds)

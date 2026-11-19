@@ -101,19 +101,23 @@ Rows whose bounds differ are never merged, so changing an instrument's buckets s
 
 ## Instrument kinds and what is stored
 
-Every measurement is converted to `double` and added to an in-memory aggregate for its **series** and its **5-minute bucket**. A series is the instrument name, the application and the tag set.
+Every measurement is converted to `double` and added to an in-memory aggregate for its **series** and its **5-minute bucket**. A series is the instrument name, the application, the tag set and, only on a host that opted in with `ByVersion()`, the application version.
 
 | Instrument | Stored kind | Per bucket | "Value" on charts and SLOs |
 |---|---|---|---|
 | `Counter<T>` | Counter | count of measurements, sum | sum |
 | `ObservableCounter<T>` | Counter | per-series **delta** from the last cumulative value this process saw (the first observation is a baseline only; a total that went down is a reset and the new total is the delta) | sum |
-| `UpDownCounter<T>`, `ObservableUpDownCounter<T>` | UpDownCounter | sum of deltas | sum |
-| `Histogram<T>` | Histogram | count, sum, min, max, bucket counts | count (rates); percentiles from the buckets |
-| `Gauge<T>`, `ObservableGauge<T>` | Gauge | count, sum, min, max | average (sum / count), min, max |
+| `UpDownCounter<T>`, `ObservableUpDownCounter<T>` | UpDownCounter | sum of deltas | **net change** in the bucket (sum of deltas), not the level |
+| `Histogram<T>` | Histogram | count, sum, min, max, bucket counts | count (rates); percentiles from the buckets; a [`MetricLatency` SLO](./slo-error-budget.md#metric-objectives) reads the bucket counts |
+| `Gauge<T>`, `ObservableGauge<T>` | Gauge | count, sum, min, max | average (sum / count), min, max; a [`MetricGaugeThreshold` SLO](./slo-error-budget.md#metric-objectives) compares one of them per bucket |
 
 Observable instruments are read once per flush, just before the aggregates are written out. Non-finite values (`NaN`, infinities) are ignored.
 
-**Series identity.** `application` is the sanitized `ApplicationName` (or none). It is added automatically as a dimension and is never read from a tag. The tag set is `k1=v1,k2=v2`, sorted by key (ordinal) after the allowlist. Values are formatted with the invariant culture, trimmed and **truncated to 64 characters**; a null or empty value becomes `{none}`; `,` and `=` become `-` and control characters are removed. A tag set that would exceed 512 characters loses its trailing keys. If two meters publish an instrument with the same name, the first one wins and a later one that differs in meter, kind or bounds is not collected (reason `name_conflict`). Instrument names longer than 128 characters are refused (`name_too_long`).
+:::caution Up-down counters chart the net change, not the level
+An `UpDownCounter` or `ObservableUpDownCounter` is stored as deltas, so each bucket on the chart (and the value an SLO reads) is the **net change during that bucket**, not the current level. For an observable up-down counter the first observed total is only a baseline, so the level cannot be rebuilt from what is stored. Instrumenting "in-flight requests" with an up-down counter therefore draws a line hovering around 0, and the Metrics page labels the axis **Net change** for this kind. **To chart a level** (in-flight requests, queue length, pool size), publish it with an `ObservableGauge<T>`, which is charted as the average of the observed values per bucket.
+:::
+
+**Series identity.** `application` is the sanitized `ApplicationName` (or none). It is added automatically as a dimension and is never read from a tag. `version` is the sanitized `ApplicationVersion`, added the same way **only** on a host that called `ByVersion()` (see [Comparing versions](#comparing-versions)); everywhere else it is none, and the series is exactly what it was before. The tag set is `k1=v1,k2=v2`, sorted by key (ordinal) after the allowlist. Values are formatted with the invariant culture, trimmed and **truncated to 64 characters**; a null or empty value becomes `{none}`; `,` and `=` become `-` and control characters are removed. A tag set that would exceed 512 characters loses its trailing keys. If two meters publish an instrument with the same name, the first one wins and a later one that differs in meter, kind or bounds is not collected (reason `name_conflict`). Instrument names longer than 128 characters are refused (`name_too_long`).
 
 ## Topology
 
@@ -170,12 +174,31 @@ The application processes need only `AddWarp`; the service-only server is the on
 
 Two tables in the Warp schema, picked up by your normal `dotnet ef migrations add` (additive: nothing existing changes).
 
-- **`metric_point`**: one row per (instrument, application, tag set, tier, bucket start), holding count, sum, min, max, and for histograms the bucket counts and bounds as CSV text. Indexed on `(Instrument, Tier, BucketStart)` for reads.
+- **`metric_point`**: one row per (instrument, application, version, tag set, tier, bucket start), holding count, sum, min, max, and for histograms the bucket counts and bounds as CSV text. Indexed on `(Instrument, Tier, BucketStart)` for reads.
 - **`metric_instrument`**: a registry (name, meter, kind, unit, description, bounds, observed tag keys, first and last seen, and the collapse badge). The list page reads only this table and never scans points. Rows whose `LastSeenAt` is older than `DailyStatisticsRetention` are removed by `ExpirationCleanup` (never when it is `null`).
 
 **Flush.** Every `MetricFlushInterval` each process drains its in-memory aggregates and inserts one **partial** fine row per active series. A flush also runs once on graceful shutdown. An idle process does no database work. The registry is upserted in a **separate** save: a registry failure never fails or re-adds the points. A failed point write merges the aggregates back so the next flush writes them (additive: nothing is lost or counted twice).
 
-**Compaction.** Once a fine bucket has been closed for longer than twice the flush interval (`bucket start + 5 min + 2 × MetricFlushInterval`), `MetricRollup` merges its partial rows into **one compacted row per series**: count, sum and bucket counts summed, min of mins, max of maxes. This is what turns the 10 partial rows per process per 5 minutes into one row per series per bucket.
+### Comparing versions
+
+During a rolling deploy two versions of an application emit at once and their measurements merge into one series. To tell them apart, opt a host into the version dimension:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.ApplicationName = "checkout-api";
+    opt.ApplicationVersion = typeof(Program).Assembly.GetName().Version?.ToString();
+    opt.AddMetrics(m => m.CollectAspNetCoreHttp().ByVersion());
+});
+```
+
+- **Opt-in per host, default off.** Without `ByVersion()` the `version` column stays null and every row is written exactly as before. It needs `ApplicationName` and `ApplicationVersion` too; without either it does nothing. Hosts can differ: a host that did not opt in writes version-less rows beside a host that did.
+- **The version is a series dimension, like the application.** It is sanitized like a tag value (trimmed, `,` and `=` to `-`, at most 64 characters), it is part of the series key that compaction and the rollup tiers match on, so two versions never merge into one stored row, and a read without a version filter or breakdown sums every version, so totals are unchanged.
+- **Reading it.** The version is addressed as the reserved pseudo-tag `{version}`: `breakdown={version}` draws one line per version, and `filter={version}:2.4.*` keeps matching versions (exact or `prefix*`, like any filter). Rows without a version read as `{none}`. On the Metrics page, **application version** is listed in the breakdown and filter pickers. The pseudo-tag exists only on the Metrics page and in annotations: SLOs and board tiles ignore the version, so a `TagFilter`, `SecondaryTagFilter` or `RatioTag` on `{version}` is rejected (a 400 from the dashboard routes, an exception from the builders) rather than stored as a filter that never matches.
+- **Cost.** Each version running at once adds its own set of series, so a rolling deploy briefly doubles them. Old versions stop being written when their instances stop and age out with the retention tiers, so the steady state is one or two versions per application. The cardinality caps are per process, and a process only ever has one version, so they are unaffected.
+- **Migration.** One nullable column, `metric_point.version`, picked up by your next `dotnet ef migrations add`.
+
+**Compaction.** Once a fine bucket has been closed for longer than twice the flush interval (`bucket start + 5 min + 2 × MetricFlushInterval`), `MetricRollup` merges its partial rows into **one compacted row per series** (including its version, when there is one): count, sum and bucket counts summed, min of mins, max of maxes. This is what turns the 10 partial rows per process per 5 minutes into one row per series per bucket.
 
 **Tiers.** Then the existing [retention tiers](./metrics-retention.md) apply to metric rows too, on the same settings:
 
@@ -211,13 +234,20 @@ Compaction keeps the steady state far smaller: **about 330 rows per series** are
 - **Breakdown by one tag** returns the **top 10 values by volume** plus one `(rest)` series that sums the others. Lines are ranked by the headline value over the range (sum for counters, count for histograms, average for gauges).
 - **Filters** use the same grammar as the SLOs: an exact value, a trailing `*` prefix (`5*`), a bare `*` for any present value, and `{none}` to match a series that lacks the tag. An absent tag reads as `{none}`, so a prefix pattern never matches it.
 - **Compare** `1d` and `7d` returns the same range shifted back, read the same way, drawn as dashed overlays.
+- **Every point carries its bucket length** in `bucketSeconds`: the display bucket, or the stored bucket of a coarser row that kept its own (an hourly row at the edge of a 6-hour read is 3600). Divide by it for a rate.
+- **The newest bucket is flagged while it is still filling.** A point is `incomplete` when its bucket ends after now, or within one `MetricFlushInterval` of now (each process writes its measurements once per interval, so the last ones may not be in yet). For counters and histograms such a bucket reads low, which right after a deploy looks like a volume drop. Only the current range is flagged; overlay buckets are in the past.
+- **Headlines cover complete buckets only.** The response carries one `headlines` entry per range (the current one, then each overlay): the summed sum for counters and up-down counters, the summed count for histograms, the average for gauges, over every line including `(rest)`. The still-filling bucket is left out, **never prorated**, and each overlay leaves out the bucket aligned with it, so "now" and "1d ago" cover the same span. `completeUntil` says where the complete buckets end. The value is `null` when no complete bucket holds a measurement. The breakdown ranking still uses the whole range.
 - **Percentiles** (1 to 99) are computed from the stored bucket counts, so they read as "at most": the answer is the upper bound of the bucket that holds the percentile. A percentile over the overflow bucket reports the last finite bound. When rows have different bounds the ladder with the most samples is used.
 
-The dashboard API is `GET {prefix}/api/metrics` and `GET {prefix}/api/metrics/{id}/series`, where `{id}` is the URL-safe base64 of the instrument name. The series query takes `from` and `to` (ISO 8601), `application`, `breakdown` (a tag key), repeated `filter=key:value`, `compare=1d,7d` and `percentile`. A bad range, percentile, compare value or filter is a 400.
+The dashboard API is `GET {prefix}/api/metrics` and `GET {prefix}/api/metrics/{id}/series`, where `{id}` is the URL-safe base64 of the instrument name. The series query takes `from` and `to` (ISO 8601), `application`, `breakdown` (a tag key, or `{version}`), repeated `filter=key:value` (the key may be `{version}`), `compare=1d,7d` and `percentile`. A bad range, percentile, compare value or filter is a 400.
 
 ## Dashboard
 
-The **Metrics** page (`/metrics`) lists every instrument with its kind, unit, tag keys, last seen and a **collapse badge**. The detail page has a range picker (1h to 30d), an application picker, a breakdown selector, filter chips, the 1d/7d overlays, a percentile selector for histograms, and avg, min and max for gauges. The **ratio view** divides one numerator over the total of the same breakdown: pick the breakdown tag, then a single value or a `prefix*` pattern (for example status `5*`) as the numerator. The numerator is its own request, so a low-volume value that lands in `(rest)` is still counted.
+The **Metrics** page (`/metrics`) lists every instrument with its kind, unit, tag keys, last seen and a **collapse badge**. Units are shown the way people read them: `1` (dimensionless) shows no unit, `By` shows as bytes, and an OpenTelemetry annotation unit such as `{checkout}` (a count of checkouts) shows as a plain word, plural except after a count of exactly 1 (`1,639 checkouts`, `1 checkout`, an axis titled `Sum (checkouts)`, `{request}/s` as `requests/s`). Other units (`s`, `ms`, `%`) are shown as they are. The detail page has a range picker (1h to 30d, or a custom range), an application picker, a breakdown selector, filter chips, the 1d/7d overlays, a percentile selector for histograms, and avg, min and max for gauges. Above the chart a **headline** shows the range's total (count for histograms, average for gauges) and, with overlays on, the same figure 1 day and 7 days ago with the change in percent; all of them leave out the bucket that is still filling. That bucket is drawn **faded and dashed**, and its tooltip says "still filling".
+
+**Custom range and deploys.** **Custom** opens a from/to picker in the browser's time zone; leave **To** empty for "until now", which keeps the window moving like a preset. Any range up to the API's 90 days can be picked, and the resolution follows the same rules as a preset (up to 6 hours fine, up to 7 days hourly, longer daily). The 1d and 7d overlays shift the custom range back, exactly as they shift a preset. The range is kept in the page URL (`?range=7d` for a preset, `?from=…&to=…` for a custom range, `to` left out for "until now"), so a shared link reproduces the view. A range that ended in the past is not refetched. When [deploy history](./applications.md#deploy-history) is recorded, each deploy in the range is drawn as a dashed vertical line labelled with its version (and its application when no application is selected), and **Since last deploy** sets the range to run from the newest deploy until now: the newest deploy of the selected application, or of any application when none is selected. A deploy older than 90 days is cut to the last 90 days, and the page says so.
+
+Counters and histogram counts have a **Per bucket / Per minute / Per second** toggle. Per bucket (the default) is the stored total, so its scale follows the bucket size: switching from 6h (5-minute buckets) to 24h (hourly) multiplies the y-axis by 12, and an overlay served at another resolution is not comparable by eye. Per minute and per second divide each bucket by its own length, put the unit on the axis ("Sum per minute", "Measurements per second"), and turn the headline into the average rate over the span it covers. The choice is kept in the page URL (`?rate=minute` / `?rate=second`), so a refresh or a shared link keeps the scale. Up-down counters, gauges, histogram percentiles and the ratio view are never divided. The **ratio view** divides one numerator over the total of the same breakdown: pick the breakdown tag, then a single value or a `prefix*` pattern (for example status `5*`) as the numerator. The numerator is its own request, so a low-volume value that lands in `(rest)` is still counted.
 
 The nav item shows where `AddMetrics` ran **in the dashboard's own process**. For a dashboard-only host, whose collectors live in other processes, force it on:
 
@@ -226,6 +256,174 @@ app.MapWarpDashboard(o => o.ShowMetrics());
 ```
 
 The routes inherit the dashboard's authorization like every other page, and expose instrument names and tag values, so gate them accordingly.
+
+## Health board
+
+The **Board** tab of the Metrics page (`/metrics/board`) answers the post-deploy question: do the handful of numbers that matter look normal right now? Each tile shows its value over the selected window, the same window **1 day** and **7 days** earlier with the change, a **sparkline** with the window's [deploys](./applications.md#deploy-history) drawn as dashed lines, and a **status colour**. The window selector is the metric page's: the presets, **Since last deploy** (the newest deploy of any application), and a range kept in the URL the same way (`?range=…` or `?from=…&to=…`).
+
+Tiles are stored in the `metric_board_tile` table and edited on the board (**Add tile**, **Edit**, **Delete**). You can also seed them from code:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.AddMetricBoard(b => b
+        .Ratio("Payment success", "payment.results", ratioTag: "result", goodValues: "ok", badValues: "declined,error",
+            check: MetricTileCheck.Deviation(0.02, baselineDays: 7, direction: MetricDeviationDirection.Drop))
+        .Value("Inbound requests", "http.server.request.duration",
+            check: MetricTileCheck.Deviation(0.3, baselineDays: 1, direction: MetricDeviationDirection.Drop))
+        .Value("Server errors (5xx)", "http.server.request.duration", tagFilter: "http.response.status_code=5*",
+            check: MetricTileCheck.AtMost(25))
+        .Value("DB connections", "db.pool.connections", aggregate: SloGaugeAggregate.Max,
+            check: MetricTileCheck.AtMost(80)));
+});
+```
+
+Seeding is **insert-if-absent**, as for [SLO objectives](./slo-error-budget.md). A seeded tile is matched by name, or by instrument + kind + application + filter + ratio tag + aggregate, so renaming it or editing its rule in the dashboard survives a restart. A tile deleted in the dashboard comes back on the next start while it stays in code. A seed whose name a stored tile already has, but with different fields (a dashboard edit), is skipped and logged at Information with the names of the differing fields (never their values). A seed that fails validation against the instrument registry (a ratio on a gauge, for example) is skipped and logged at Error. The seeder reads the board and inserts under a transaction-scoped database lock (`warp:metric-board`), which the dashboard's tile insert takes too: ten replicas starting at once seed one copy, and two inserts at once cannot both pass the 48-tile cap. A dashboard insert that cannot get that lock within 10 seconds (a replica's seed or another insert holds it) answers **503** with an `{ "error": ... }` body; try again. Editing a tile that was deleted meanwhile answers **404** with an `{ "error": ... }` body and does not re-create it; an `id` of 0 or below is a create, and the database assigns the key. `AddMetricBoard` is separate from `AddMetrics` on purpose. It only registers the seeder, so a **dashboard-only host** (no server, no worker, no `AddMetrics`) can own the board. The board's read and edit services are registered by `AddWarp` itself.
+
+**Tile kinds.** The tag filter uses the same `k=v[,k=v]` grammar as the Metrics page and the SLOs: a trailing `*` is a prefix, and an absent tag reads as `{none}`. Tile filters cannot address the `{version}` pseudo-tag: a tile filter or ratio tag on it is rejected with a 400.
+
+| Kind | Value over the window | Instruments |
+|---|---|---|
+| **Value** | Matching events: the sum for a counter or up-down counter, the measurement count for a histogram. On a gauge, the average (sample-weighted across processes and series, never a total), min or max of every sample. | Any |
+| **Ratio** | Good events ÷ (good + bad) on one tag, with other values ignored: the `MetricRatio` SLO rule. | Counters, up-down counters, histograms (a gauge has no event count) |
+
+Two more kinds show a chart or an objective instead of one number: [chart and SLO tiles](#chart-and-slo-tiles). They have no status rule of their own, and the rules and the batched read below apply to value and ratio tiles only.
+
+**Status rules.** Status uses the SLO maths (`SloMath`) and the SLO states:
+
+- **None**: the tile shows its numbers only.
+- **Threshold**: the value must stay *at most* or *at least* the threshold (a value equal to the threshold never violates it). On a ratio tile the threshold is a share from 0 to 1: anything outside that range is rejected (a 400 from the dashboard, a skipped seed). At most a positive threshold is exactly the `MetricThreshold` budget, `(threshold − value) / threshold`. At least on a **ratio** tile is the `MetricRatio` / success-rate budget, `(value − threshold) / (1 − threshold)`: the headroom is measured against the allowed bad share, so "success at least 0.98" reads Healthy at 0.995 (75 % budget), Warning at 0.98–0.985 and Breaching below 0.98. "At least 1.0" allows no bad share at all, so it is all-or-nothing, as for an SLO with target 1: exactly 1.0 is Healthy, anything below is Breaching. Otherwise the budget is the headroom over `|threshold|`. Status is **Breaching** below zero, **Warning** below 25 % budget (a value equal to the threshold has zero budget, so it warns), otherwise **Healthy**.
+- **Deviation**: the value must not move more than the allowance from the same window 1 or 7 days earlier, as a **drop**, a **rise** or **either**. On a value tile the allowance is a fraction of the baseline: a drop is the `MetricVolumeFloor` maths at `1 − allowance`, and a rise is its mirror at `1 + allowance`. On a ratio tile it is ratio points (the baseline `MetricRatio` maths). *Either* takes whichever side has less budget.
+
+A tile reads **No data** when its value (or the chosen baseline) is empty. That covers: no row of the instrument in the window, a gauge with no sample, a ratio with no good or bad event, a value baseline of zero or less, and an instrument that is not in the registry or whose kind the tile cannot read. A counter with traffic but no matching event reads 0, so "5xx ≤ 0" works.
+
+**How it is read.** The whole board is one batched, tier-bounded read of `metric_point`. One statement covers the current, 1d and 7d windows of every tile's instrument (two at most, grouped with and without tags), plus the registry rows. Each window reads every tier that overlaps it. A stored bucket that only partly overlaps a window counts in proportion to the overlap, exactly as the SLO evaluator reads a window, so a "since last deploy" window that starts mid-hour compares fairly with an hourly baseline. The sparkline follows the series resolution rules (up to 6 hours fine, up to 7 days hourly, longer daily). A board holds at most 48 tiles, of which at most 12 are [chart tiles](#chart-and-slo-tiles).
+
+**The still-filling bucket is left out of the values.** The newest fine bucket is still being written (each process flushes once per `MetricFlushInterval`), while the 1d and 7d baselines are complete. Comparing them as they are reads every deviation tile as a drop near the end of a live window. So the board applies the [series rule](#reading-metrics) to its values: the current window **and** both shifted baselines stop at `completeUntil`, the start of the fine bucket that holds `now − MetricFlushInterval` (with the default 30 s interval at 12:00:10, that is 11:55). The three values then compare complete data with complete data. `completeUntil` is in the response; it equals `to` for a range that ended earlier, and equals `from` when nothing in the range is complete yet, in which case the tiles read No data. The sparklines still draw the filling bucket. Thresholds see the same cut, so the last few minutes of events count once their bucket is complete.
+
+**Post-deploy verdict.** The board also answers the question for a machine. `GET {prefix}/api/applications/verdict?application=<name>` evaluates the tiles scoped to that application (or to none) over the window since its latest deploy, adds its SLOs (with `board=<name>`, only the ones that have an [SLO tile](#chart-and-slo-tiles) on that board), and returns `pass`, `warn`, `fail`, `pending` or `noData` with one check per tile and SLO. A CI step can call it after a rollout; see [Post-deploy verdict](./applications.md#post-deploy-verdict). The application detail page shows the same verdict next to its deploys.
+
+**API.** `GET {prefix}/api/metrics/board?from=&to=[&board={id}]` takes ISO instants at most 90 days apart and an optional board id (without it, the [Default board](#named-boards)); bad input is a 400 and an unknown board a 404. `GET {prefix}/api/metrics/board/tiles` lists the tiles of every board. `POST {prefix}/api/metrics/board/tiles` inserts (`id: 0`) or updates a tile, validated against the instrument registry, and answers a 400 with the reason on failure; its optional `boardId` puts a new tile on a board (null or the Default board's id is the Default board). On an edit, `boardId` moves the tile to that board (send the Default board's id to move it to Default), and leaving it out keeps the tile on its board. `DELETE {prefix}/api/metrics/board/tiles/{id}` removes one. These routes carry the dashboard's authorization like every other route.
+
+### Named boards
+
+One board for every team gets crowded. Tiles can be grouped on **named boards**: a Checkout board for the shop team, a Payments board for the payments team. Boards are always shared, and each holds at most 48 tiles, at most 12 of them charts; a host holds at most 100 boards.
+
+The **Default** board always exists. It is created once, the first time anything uses the boards (the board list, a new board, or the seeder), under the same `warp:metric-board` lock, so ten replicas create one. Every tile with no board belongs to it, which is how the tiles stored before named boards existed show up there with no data migration. The Default board can be renamed but never deleted (a 400).
+
+**In the dashboard.** The board picker on Metrics → Board selects, creates (**New board**), renames and deletes boards. The selected board is in the URL as a slug of its name (`/metrics/board?board=checkout`; the Default board leaves the parameter out; when two boards share a slug, the later one in picker order gets `slug-{id}`, with `-2`, `-3`, … appended if that is taken too, so every board has its own link), so a link opens the same board, and the browser remembers the last board you opened. Deleting a board asks first and deletes **its tiles with it**; tiles on other boards are untouched. The tile editor has a **Board** select, so a tile can be moved; moving it onto a full board is refused.
+
+**From code.** `AddMetricBoard("Name", b => …)` seeds a named board and its tiles; the overload without a name seeds the Default board, as before:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.AddMetricBoard("Checkout", b => b
+        .Ratio("Checkout success", "shop.checkout.completed", "outcome", "ok", "error,declined",
+            application: "shop-api", check: MetricTileCheck.AtLeast(0.98))
+        .Value("Checkout 5xx", "http.server.request.duration",
+            tagFilter: "http.route=api/checkout*,http.response.status_code=5*",
+            application: "shop-api", check: MetricTileCheck.AtMost(5)));
+
+    opt.AddMetricBoard(b => b.Value("Inbound requests", "http.server.request.duration"));   // the Default board
+});
+```
+
+Seeding stays insert-if-absent. A board created by a seed remembers the name the code declared (its **seed key**), and a seed is matched by that key first, then by **name, ignoring case** (`Checkout` finds a stored `checkout`); a missing one is created. A tile is matched only against the tiles **of its own board**, by name or by its fields, as above, so two boards can each have a tile called "Volume". Repeated calls for the same board name merge, and the name `Default` is the Default board. Renaming a seeded board in the dashboard keeps its seed key, so the next start still finds it under its new name and seeds nothing twice. A board created in the dashboard has no seed key; when a seed later finds it by name, it adopts the seed key, so a later rename keeps it too. If one seeded board is renamed to another seed's name, that other seed is skipped and logged at Error until one of the two is renamed (names stay unique). The same goes for the Default board: a named seed never lands on it, so if the Default board is renamed to `Checkout` in the dashboard, `AddMetricBoard("Checkout", …)` is skipped and logged at Error (its tiles are not put on the Default board) until one of the two is renamed; once Default is renamed back, the next start creates the Checkout board with its tiles. Board and tile edits made in the dashboard (a description, a tile's rule or name) survive a restart. A board deleted in the dashboard is seeded again, with its seeded tiles, while it stays in code.
+
+**API.** `GET {prefix}/api/metrics/boards` lists the boards in picker order with their tile counts (`id`, `name`, `description`, `position`, `application`, `isDefault`, `tileCount`, `createdBy`). `POST {prefix}/api/metrics/boards` creates (`id: 0`) or renames a board (`name`, `description`, `position`, `application`, which is only the scope the picker suggests and never filters tiles); a blank or duplicate name is a 400, editing a deleted board a 404. `DELETE {prefix}/api/metrics/boards/{id}` deletes a board and its tiles in one `SaveChanges` (204; 400 for the Default board; 404 when it does not exist). Every `{ "error": ... }` body is for people. The creator is the signed-in dashboard user, and every create, rename and delete is logged at Information with that name.
+
+The [post-deploy verdict](./applications.md#post-deploy-verdict) counts the tiles of every board and every SLO of the application unless you pass `board=<name>`. With a board, it counts that board's tiles and only the SLOs that have an [SLO tile](#chart-and-slo-tiles) on it. As in the seeder, the name `Default` means the Default board even after a rename, unless another board is now called `Default`.
+
+### Chart and SLO tiles
+
+A value or ratio tile is one number with a status. Two more kinds put the chart a team built on the metric page, and its objectives, on the same board:
+
+| Kind | Shows | Status |
+|---|---|---|
+| **Chart** | The metric page's chart of one instrument with that page's controls: breakdown, filters, the 1d and 7d overlays, the percentile, the ratio view, min and max lines and the rate toggle. It is two grid columns wide on a desktop and has no legend or controls of its own. Its title opens the metric page with the tile's controls and the board's range. | None. A chart is a picture, not a check, so it never counts in the verdict. |
+| **SLO** | One [objective](./slo-error-budget.md): its state (including Acknowledged and No data), attainment against target, error budget left, fast and slow burn, and when it was last evaluated. It links to the SLO page. | The objective's own state. The tile adds no rule. |
+
+**Add to board.** The metric detail page and the SLO detail page each have an **Add to board** button. Pick a board and a tile name (the instrument's name or the objective's name by default). On the metric page it saves the chart as it is set up at that moment. The tile editor on the board can also create and edit both kinds: a chart has the metric page's controls and a live preview, and an SLO tile has an objective picker.
+
+**What a chart tile stores.** The metric page's controls **without the range**, as the page writes them in its URL: `application`, `breakdown`, `filter`, `compare`, `percentile`, `view`, `numerator`, `minmax` and `rate`, in the `chart_query` column (at most 2000 characters). The range is not stored because the board's range drives every tile, so one range picker moves the whole board. The query is checked against the keys the page reads: an unknown or repeated key, a range key (`range`, `from`, `to`), a value the page would not read or a filter that does not parse is a 400. It is stored in one order with defaults left out, so the same controls always store the same string. A chart's application and filters live only in its query. Its `application` and `tagFilter` columns stay empty, and so do the status-rule columns.
+
+**Lazy loading.** A chart is not part of the board's batched read: the board read returns it with its query, the instrument's kind and unit, and nothing computed. The page then asks the series API (`GET {prefix}/api/metrics/{id}/series`) for each chart with the board's range and the tile's controls, only once the tile scrolls into view, and refetches it on the metric page's cadence (a range that already ended is not refetched). Value and ratio tiles share one read, but each chart is its own request on every refresh. That is why a board holds at most **12** chart tiles within its 48. The cap is checked under the `warp:metric-board` lock on an insert, a move to another board, and an edit that turns a tile into a chart; a write over it is a 400.
+
+**What an SLO tile stores.** Only the objective's id, in the `slo_definition_id` column (a soft reference with no foreign key, like an annotation's). The objective carries its own application and filters, so the tile's other columns stay empty, and an id that names no objective is a 400 (`The objective was not found`). The board read joins all SLO tiles of the board to **one** read of the objectives, whatever their number, and reads no objective at all when the board has no SLO tile. **Deleting an objective deletes its tiles** in the same transaction, together with its notes, under the same lock as every board write, and adding an SLO tile checks the objective again under that lock, so a tile added while its objective is deleted is either deleted with it or refused with the same 400. A tile whose objective is gone anyway (deleted by an older binary during a rolling deploy, deleted outside Warp, or raced in a host with no database provider, where no lock is taken) reads `missing: true`; the board says so and offers to remove it. The board header counts the SLO tiles by their objective's state.
+
+**From code.** `Chart(...)` takes the metric page's controls as typed parameters and builds the stored query itself, so a seeded query is always one the page can read: `filter` in the `k=v[,k=v]` grammar of the other tiles, `compare` as `1d`, `7d` or `1d,7d`, `percentile` as 50, 90, 95 or 99 (the percentiles the metric page draws), a `numerator` for the ratio view of the breakdown, `minMax` for a gauge's min and max lines, and `rate` as `minute` or `second`. `Slo(name, application, label)` names an objective by its name (ignoring case) and its application (exactly; leave it out for an objective with no application). `label` is the tile's name, the objective's name by default. Tile names are unique per board, so a ratio tile and an SLO tile both called "Checkout success" need a label on one of them:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.AddSlo(o => o.AddMetricRatio(
+        "Checkout success", "shop.checkout.completed",
+        ratioTag: "outcome", goodValues: "ok", badValues: "error,declined",
+        target: 0.995, application: "shop-api"));
+
+    opt.AddMetricBoard("Checkout", b => b
+        .Ratio("Checkout success", "shop.checkout.completed", "outcome", "ok", "error,declined",
+            application: "shop-api", check: MetricTileCheck.AtLeast(0.98))
+        .Chart("Checkout errors by version", "shop.checkout.completed",
+            application: "shop-api", breakdown: "{version}", filter: "outcome=error", compare: "7d")
+        .Chart("Checkout latency p95", "http.server.request.duration",
+            application: "shop-api", filter: "http.route=api/checkout*", percentile: 95)
+        .Slo("Checkout success", application: "shop-api", label: "Checkout success SLO"));
+});
+```
+
+The first chart stores `application=shop-api&breakdown=%7Bversion%7D&filter=outcome%3Aerror&compare=7d`, the query the metric page writes for the same view. A `{version}` breakdown needs [`ByVersion()`](#comparing-versions).
+
+Seeding stays insert-if-absent. A seeded chart matches a stored tile on the same board by name, or by instrument and query; a seeded SLO tile by name, or by objective. The objective is looked up when the board is seeded. More than one match logs at **Error** and skips the tile (that does not resolve on its own; the next start tries again). No match logs a **Warning** and the seeder retries that tile in the background, once a minute for ten minutes, without holding up startup; it is seeded as soon as the objective exists, and only a tile whose objective never appears is logged at **Error** after the last attempt (the next start tries again). `AddSlo` puts its seeder ahead of the board seeder whatever order you call them in, and the .NET host starts hosted services one after the other by default, so an objective seeded by the same process is there in time. The retry covers the other cases: a host that sets `HostOptions.ServicesStartConcurrently = true`, or an objective seeded by another process that starts a little later. A 13th chart in one board's code throws at registration. A chart the seeder finds no room for (12 charts already stored on that board) is skipped and logged at Error.
+
+**API.** The body of `POST {prefix}/api/metrics/board/tiles` takes `kind` 3 (Chart) with `instrument` and `chartQuery`, or `kind` 4 (SLO) with `sloDefinitionId`, both with `statusRule` 1 (None). In `GET {prefix}/api/metrics/board`, a chart tile carries `tile.chartQuery`, `instrumentKind` and `unit` and nothing computed. An SLO tile carries `slo`, the objective with its current evaluation as the SLO API returns it, or `missing: true`.
+
+## Annotations
+
+After a deploy you usually know some noise is expected: "duplicate provider notification race, about once a day, predates this release". An **annotation** records that next to the numbers, so the same signal is not investigated again. [Issues](./error-grouping.md) only cover errors Warp sees itself, and annotations work on any instrument or objective.
+
+An annotation is a short note (at most **500** characters) attached to one of these:
+
+- an **instrument**, optionally narrowed by a tag filter in the same `k=v[,k=v]` grammar as the Metrics page, the SLOs and the board tiles;
+- an **SLO objective** (see [SLO / error budget](./slo-error-budget.md#annotations)).
+
+Each note has a **start** and either an **end** or none ("ongoing"), and an **author**. The author is the authenticated dashboard user: the identity name set by whichever gate protects the dashboard (the host's own scheme behind `RequireAuthorization`, or the built-in login). It is never read from the request. On an open dashboard it is `anonymous`.
+
+**Where they show:**
+
+- **Metric detail chart.** Every note on the instrument that overlaps the window is drawn as a shaded band, whatever its filter, and listed under the chart with its author, range and filter. Notes are added, edited and deleted from that list. A new note starts with the page's current filters.
+- **Health board tiles.** A tile shows a "N notes" indicator whose tooltip lists each note, and the bands are drawn on its sparkline. A note is shown on a tile on the same instrument when the two filters do not contradict each other: no tag key that both constrain with values that can never match together. A note without a filter is shown on every tile on the instrument. A note on `error.type=duplicate` is shown on a tile filtered by `route=/pay`. A note on `status=4*` is not shown on a tile on `status=5*`. Notes are attached in the board's batched read, one more statement for the whole board, never one per tile. That read keeps at most **200** notes; when more overlap the window, the response sets `annotationsTruncated` and keeps the notes that can change a verdict first: acknowledged noise still active at the window's end (it is what acknowledges a tile), then the other notes still active at the window's end, then the newest.
+- **SLO detail page.** The objective's notes, with the same editor.
+
+**Acknowledged noise.** An instrument note can be marked *acknowledged noise*. While such a note is active at the window's end (for a live board, that means now), a board tile it **covers** reads **Acknowledged** instead of Warning or Breaching. Covering is stricter than being shown: the note must be about everything the tile reads. It has no filter, or every constraint in it is implied by the tile's own filter (the same key, with the tile's value equal to or narrower than the note's; for a trailing `*`, the tile's value or prefix starts with the note's). A note on `status=5*` or `status=*` covers a tile on `status=5*` or `status=503`; a note on `status=503` does not cover a tile on `status=5*`, and a note on `outcome=error` does not cover an unfiltered tile. Such a note is still shown on the tile, but a known problem in one slice cannot excuse a breach in the rest. The pill's tooltip names the rule's own verdict, and the API returns it as `unacknowledgedStatus`. Healthy and No data tiles are never changed. The flag applies to the tile as a whole, because Warp cannot tell which events the note is about, so **nothing is subtracted from any count**. The tile's value, change and sparkline stay the same, and only the status changes. A note that ended before the window's end does not acknowledge, so a problem that comes back after the known issue was fixed still shows as Breaching. The flag has no effect on SLO evaluation. SLO alerts have their own acknowledgement (`POST …/slo/{id}/ack`), so the flag is cleared on an SLO note. **Timing in the post-deploy verdict.** The [verdict](./applications.md#post-deploy-verdict) checks for a covering note active at `window.to`, its complete-data cut, which trails now by 30 s to 5½ minutes; the live board checks at now. A note that starts now acknowledges on the board at once, but in the verdict only once the cut passes its start, so backdate the note's start to acknowledge a deploy that is already being judged.
+
+**What is stored.** Only what the operator typed, plus the author: the note, the target (instrument name or objective id), the filter string, the range, the acknowledged-noise flag and the author. Nothing else is stored: no tag values, no payloads, no measurement data. The note text is never written to the log. Annotations live in the `metric_annotation` table and are **kept forever**, because they are tiny and nothing sweeps them. Deleting an SLO objective deletes its notes in the same transaction. Notes on an instrument that stops reporting stay, and so does the instrument's history.
+
+**Audit.** Every create, edit and delete writes a structured `LogInformation` record naming the note id, the acting user and the target, the same mechanism as the SLO, board-tile and issue commands. An edit keeps the original author and logs the editor.
+
+**Validation.** The instrument must be in the instrument registry, or the objective must exist. The note must be non-empty and at most 500 characters. The filter must parse. The end must be after the start. Any failure is a 400 with the reason.
+
+**API.**
+
+| Route | |
+|---|---|
+| `GET {prefix}/api/annotations?instrument=…` or `?slo={id}` | That target's notes, every filter included, newest start first. Optional `from` / `to` (ISO instants, either end open) keep only notes overlapping the window, with ongoing notes included. At most **200** are returned, with `isTruncated` set when more matched. Asking for both targets, a malformed instant or an inverted window is a 400. With no target, every note is returned. |
+| `POST {prefix}/api/annotations` | Inserts (`id: 0`) or updates a note. The body has `target` (1 instrument, 2 SLO), `instrument`, `tagFilter`, `sloDefinitionId`, `note`, `startsAt`, `endsAt` (null for ongoing) and `acknowledgedNoise`. Any `author` field is ignored. The answer is a 400 with the reason on bad input, or a 404 when the note being edited no longer exists. |
+| `DELETE {prefix}/api/annotations/{id}` | 204, or 404 when it does not exist. |
+
+`IMetricAnnotationQueryService` and `IMetricAnnotationCommandService` are registered by `AddWarp`, so a dashboard-only host serves annotations without `AddMetrics` or a server. The routes carry the dashboard's authorization like every other route.
+
+## Shareable links
+
+Every control of the metric detail page, the Issues list and the Jobs lists is kept in the page URL, so a refresh, a bookmark or a link pasted in a chat opens the same view. Defaults are left out of the URL, and a value that does not parse reads as the control's default, so a hand-edited or stale link never breaks the page.
+
+| Page | Path | Query parameters |
+|---|---|---|
+| Metric detail | `/metrics/{id}` (`{id}` = URL-safe base64 of the instrument name) | `range` (a preset, default `24h`) or `from` / `to` (ISO instants, no `to` = until now); `application`; `breakdown` (a tag key or `{version}`); `filter=key:value`, repeated (the series API's syntax); `compare=1d,7d`; `percentile` (50, 90, 95, 99); `view=ratio` with `numerator` (a value or `prefix*`); `minmax=1`; `rate=minute` or `rate=second` |
+| Issues | `/issues` | `source` (`job`, `endpoint`, `adapter`, `client`); `status` (`resolved`, `ignored`; unresolved is the default); `application`; `show4xx=1` |
+| Jobs | `/jobs/{state}` (`enqueued`, `processing`, `scheduled`, `retrying`, `awaiting`, `completed`, `failed`, `deleted`) | `page` (zero-based); `type` (the failed list's job-type filter) |
+| Jobs of one type | `/jobs/by-type/{type}` (the type, URI-encoded) | `page`; `metrics=handler` (the header's handler metrics instead of the type's) |
 
 ## Cardinality
 
@@ -292,9 +490,10 @@ This feature is deliberately small. Know these before relying on it:
 | `MetricRollupInterval` | `WarpConfiguration` | `1m` | How often `MetricRollup` runs. `null` disables it. |
 | `FineResolutionMinutes`, `FineResolutionRetention`, `HourlyStatisticsRetention`, `DailyStatisticsRetention` | `WarpConfiguration` | 5 min, 6 h, 7 d, 90 d | The [retention tiers](./metrics-retention.md), shared with `Statistic` rows. |
 | `MaxTagsPerInstrument`, `MaxValuesPerTag`, `MaxSeriesPerInstrument`, `MaxInstruments` | `WarpMetricsOptions` | 6, 100, 500, 300 | The [cardinality caps](#cardinality). |
+| `ByVersion()` | `WarpMetricsOptions` | off | Adds `ApplicationVersion` to every series this host collects. See [Comparing versions](#comparing-versions). |
 
 See also [Configuration](/docs/operations/configuration#custom-application-metrics), [SLO / error budget](./slo-error-budget.md#metric-objectives) and [Metrics retention tiers](./metrics-retention.md).
 
 ## Migration
 
-Additive: two new tables (`metric_point`, `metric_instrument`) and seven nullable columns on `slo_definition` for the metric SLO kinds, all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.
+Additive: five new tables (`metric_point`, `metric_instrument`, `metric_board_tile` and `metric_board` for the [health board](#health-board) and its [named boards](#named-boards), and `metric_annotation` for [annotations](#annotations)), nine nullable columns on `slo_definition` for the metric SLO kinds, the nullable `metric_point.version` column for [comparing versions](#comparing-versions), the nullable `metric_board_tile.board_id` column (null is the Default board, so existing tiles need no data migration), the nullable `metric_board.seed_key` column (the name a code seed declared, so a renamed seeded board is kept) and the two nullable columns of [chart and SLO tiles](#chart-and-slo-tiles), `metric_board_tile.chart_query` and `metric_board_tile.slo_definition_id` (no foreign key), all picked up by a standard `dotnet ef migrations add` / `database update`. Rolling back leaves old binaries unaffected, since they ignore the new tables and columns. Without `AddMetrics`, nothing runs.

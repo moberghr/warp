@@ -250,7 +250,7 @@ The `Services` entry in the dashboard nav is always present. When no `WarpBackgr
 
 ### List page (`/warp/services`)
 
-One row per registered service name. Columns show the scope, an aggregated status summary (`Running 3/3` for per-server, `Running on server-X, 2 waiting` for singletons), aggregate restart count across instances, the last error type if any instance is currently faulted, and a configuration-mismatch indicator. Polls every ~2 s while open.
+One row per registered service name. Columns show the scope, an aggregated status summary (`Running 3/3` for per-server, `Running on 1, Waiting 2` for singletons), aggregate restart count across instances, the last error type if any instance is currently faulted, and a configuration-mismatch indicator. Polls every ~2 s while open.
 
 <Screenshot light="/img/screenshots/19-services-list.png" dark="/img/screenshots/19-services-list-dark.png" alt="Background services list" />
 

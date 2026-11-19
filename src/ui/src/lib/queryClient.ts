@@ -51,6 +51,8 @@ export const queryKeys = {
   recurringDetail: (name: string) => ['recurring', name] as const,
   recurringJobs: (name: string, page: number, pageSize: number) =>
     ['recurring', name, 'jobs', page, pageSize] as const,
+  /** The SLO list (GET slo): one cache for the SLO page and the board's objective picker. */
+  slos: ['slos'] as const,
   servers: ['servers'] as const,
   serverDetail: (id: string) => ['servers', id] as const,
   serverTasks: (id: string) => ['servers', id, 'tasks'] as const,

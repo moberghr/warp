@@ -278,6 +278,15 @@ public class WarpConfiguration
     public int? ApplicationInstanceLogRetentionCount { get; set; }
 
     /// <summary>
+    /// How long <c>ApplicationDeploy</c> rows (detected deploys, §8.23) are kept, by <c>FirstSeenAt</c>.
+    /// <c>ExpirationCleanup</c> never deletes the newest deploy of an application/environment, however old, so a
+    /// long-running version is not recorded again as a fresh deploy the next time an instance of it starts.
+    /// <c>null</c> (default) keeps deploy history forever — it is one row per version per application, and it is
+    /// never removed by the instance sweeps.
+    /// </summary>
+    public TimeSpan? ApplicationDeployRetention { get; set; }
+
+    /// <summary>
     /// Bucket width (minutes) of the finest metrics-retention tier (§8.30). Time-series <c>Statistic</c> keys
     /// (jobstat / qwait hist + pcth; other families emit hourly and are rolled) are emitted at this resolution
     /// (marked <c>m5</c>) and rolled up to hourly then daily by <c>StatisticRollup</c>. Larger values coarsen the

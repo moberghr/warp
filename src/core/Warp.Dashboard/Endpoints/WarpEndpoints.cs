@@ -32,6 +32,10 @@ public static class WarpEndpoints
     {
         var apiGroup = app.MapGroup($"{options.RoutePrefix}/api");
 
+        // The dashboard is never observed by inbound endpoint observability, even when the host opts in a
+        // convention that reaches these endpoints (WithWarpObservability on the dashboard builder).
+        apiGroup.WithMetadata(new ExcludeFromWarpObservabilityAttribute());
+
         // Pin the dashboard's own JSON shape (camelCase, numeric enums) instead of inheriting the
         // host's process-wide ConfigureHttpJsonOptions — see WarpDashboardJson. Registered first so it
         // wraps every route under the prefix, extension sub-groups included.
@@ -748,12 +752,24 @@ public static class WarpEndpoints
 
             var id = await svc.Upsert(definition, ct);
 
-            return Results.Ok(new { id });
+            // 0: the edited objective was deleted meanwhile; an edit never re-creates it.
+            return id == 0
+                ? Results.NotFound(new { error = "The SLO objective no longer exists: it was deleted while you edited it." })
+                : Results.Ok(new { id });
         });
 
         apiGroup.MapDelete("slo/{id:int}", async ([FromServices] ISloCommandService svc, int id, CancellationToken ct) =>
         {
-            var deleted = await svc.Delete(id, ct);
+            bool deleted;
+            try
+            {
+                deleted = await svc.Delete(id, ct);
+            }
+            catch (TimeoutException)
+            {
+                // The delete also removes the objective's board tiles, under the board lock a board write or a seed held.
+                return BoardBusy();
+            }
 
             return deleted ? Results.NoContent() : Results.NotFound();
         });
@@ -797,6 +813,225 @@ public static class WarpEndpoints
                 // 400. Anything else is a server fault and surfaces as a 500.
                 return Results.BadRequest(new { error = e.Message });
             }
+        });
+
+        // Metrics health board (#326). IMetricBoardQueryService / IMetricBoardCommandService are always registered by
+        // AddWarp (dashboard-only hosts resolve them without AddMetrics); the board is a view of the Metrics page, so it
+        // rides the same `metrics` nav flag. Same group conventions (§1.5) as every other route, writes included, like
+        // the SLO upsert. Literal segments, so they win over metrics/{id}.
+        // ?board={id} picks a named board; without it the Default board (which owns the tiles stored before named boards).
+        apiGroup.MapGet("metrics/board", async ([FromServices] IMetricBoardQueryService svc, HttpRequest request, CancellationToken ct) =>
+        {
+            if (!MetricSeriesRequestParser.TryParseRange(request.Query, out var from, out var to, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            if (!TryParseBoardId(request.Query, out var boardId))
+            {
+                return Results.BadRequest(new { error = "'board' must be a board id." });
+            }
+
+            try
+            {
+                if (boardId is null)
+                {
+                    return Results.Ok(await svc.GetBoard(from, to, ct));
+                }
+
+                var board = await svc.GetBoard(boardId.Value, from, to, ct);
+
+                return board is null
+                    ? Results.NotFound(new { error = "The metric board no longer exists." })
+                    : Results.Ok(board);
+            }
+            catch (MetricQueryValidationException e)
+            {
+                return Results.BadRequest(new { error = e.Message });
+            }
+        });
+
+        // Named boards: the picker's list (the Default board is created here on first use, so it always has an id to
+        // rename and to move tiles to), create/rename, and delete with its tiles. Writes take the board lock, so a busy
+        // lock is a 503 like the tile insert.
+        apiGroup.MapGet("metrics/boards", async (
+            [FromServices] IMetricBoardQueryService svc,
+            [FromServices] IMetricBoardCommandService command,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                await command.EnsureDefaultBoard(ct);
+            }
+            catch (TimeoutException)
+            {
+                return BoardBusy();
+            }
+
+            return Results.Ok(await svc.GetBoards(ct));
+        });
+
+        apiGroup.MapPost("metrics/boards", async (
+            [FromServices] IMetricBoardCommandService svc,
+            [FromBody] MetricBoardUpsertRequest body,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var board = body.ToBoard();
+            if (!Warp.Core.Metrics.MetricBoardValidation.TryValidateBoard(board, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            MetricBoardWriteResult result;
+            try
+            {
+                result = await svc.UpsertBoard(board, DashboardUser.Name(http), ct);
+            }
+            catch (TimeoutException)
+            {
+                return BoardBusy();
+            }
+
+            return result.Status switch
+            {
+                MetricBoardWriteStatus.Saved => Results.Ok(new { id = result.Id }),
+                MetricBoardWriteStatus.NotFound => Results.NotFound(new { error = "The metric board no longer exists: it was deleted while you edited it." }),
+                MetricBoardWriteStatus.NameTaken => Results.BadRequest(new { error = $"A metric board named '{board.Name}' already exists." }),
+                _ => Results.BadRequest(new { error = $"At most {Warp.Core.Metrics.MetricBoardValidation.MaxBoards} metric boards can exist." }),
+            };
+        });
+
+        apiGroup.MapDelete("metrics/boards/{id:int}", async ([FromServices] IMetricBoardCommandService svc, int id, HttpContext http, CancellationToken ct) =>
+        {
+            MetricBoardDeleteStatus status;
+            try
+            {
+                status = await svc.DeleteBoard(id, DashboardUser.Name(http), ct);
+            }
+            catch (TimeoutException)
+            {
+                return BoardBusy();
+            }
+
+            return status switch
+            {
+                MetricBoardDeleteStatus.Deleted => Results.NoContent(),
+                MetricBoardDeleteStatus.DefaultBoard => Results.BadRequest(new { error = "The Default board cannot be deleted." }),
+                _ => Results.NotFound(new { error = "The metric board no longer exists." }),
+            };
+        });
+
+        apiGroup.MapGet("metrics/board/tiles", async ([FromServices] IMetricBoardQueryService svc, CancellationToken ct) =>
+            Results.Ok(await svc.GetTiles(ct)));
+
+        apiGroup.MapPost("metrics/board/tiles", async (
+            [FromServices] IMetricBoardCommandService svc,
+            [FromServices] IMetricQueryService metrics,
+            [FromServices] ISloQueryService objectives,
+            [FromBody] MetricBoardTileUpsertRequest body,
+            CancellationToken ct) =>
+        {
+            var tile = body.ToTile();
+
+            // The seeder runs the same validator: the instrument's registry kind decides whether a ratio is allowed, and an
+            // SLO tile must name an existing objective.
+            var (ok, error) = await Warp.Core.Metrics.MetricBoardTileValidator.ValidateAsync(tile, metrics, objectives, ct);
+            if (!ok)
+            {
+                return Results.BadRequest(error);
+            }
+
+            int? id;
+            try
+            {
+                id = await svc.Upsert(tile, ct);
+            }
+            catch (TimeoutException)
+            {
+                // Another write or a replica's seed held the board lock past the wait: busy, not broken, so a retry
+                // can succeed. 503 rather than the unhandled 500.
+                return BoardBusy();
+            }
+
+            if (id == IMetricBoardCommandService.ObjectiveMissing)
+            {
+                // The objective was deleted after the validator saw it (the upsert checks again under the board lock).
+                return Results.BadRequest(Warp.Core.Metrics.MetricBoardTileValidator.ObjectiveNotFound);
+            }
+
+            if (id == 0)
+            {
+                // The edited tile, or the board it is put on, was deleted meanwhile; an edit never re-creates either.
+                return Results.NotFound(new { error = "The metric board tile or its board no longer exists: it was deleted while you edited it." });
+            }
+
+            if (id is not null)
+            {
+                return Results.Ok(new { id });
+            }
+
+            return Results.BadRequest(tile.Kind == MetricTileKind.Chart
+                ? $"A metric board holds at most {Warp.Core.Metrics.MetricBoardValidation.MaxTiles} tiles, of which at most {Warp.Core.Metrics.MetricBoardValidation.MaxChartTiles} charts."
+                : $"A metric board holds at most {Warp.Core.Metrics.MetricBoardValidation.MaxTiles} tiles.");
+        });
+
+        apiGroup.MapDelete("metrics/board/tiles/{id:int}", async ([FromServices] IMetricBoardCommandService svc, int id, CancellationToken ct) =>
+        {
+            var deleted = await svc.Delete(id, ct);
+
+            return deleted ? Results.NoContent() : Results.NotFound();
+        });
+
+        // Metric annotations (#333): known-issue notes on an instrument (optionally filtered) or an SLO objective. The
+        // services are always registered by AddWarp (dashboard-only hosts resolve them) and the routes carry the group's
+        // conventions (§1.5) like every other admin write. The author is the authenticated dashboard user, never a body
+        // field; the audit is the command service's structured LogInformation, naming that user.
+        apiGroup.MapGet("annotations", async ([FromServices] IMetricAnnotationQueryService svc, HttpRequest request, CancellationToken ct) =>
+        {
+            if (!MetricSeriesRequestParser.TryParseAnnotationQuery(request.Query, out var query, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            try
+            {
+                return Results.Ok(await svc.GetAnnotations(query, ct));
+            }
+            catch (MetricQueryValidationException e)
+            {
+                return Results.BadRequest(new { error = e.Message });
+            }
+        });
+
+        apiGroup.MapPost("annotations", async (
+            [FromServices] IMetricAnnotationCommandService svc,
+            [FromServices] IMetricQueryService metrics,
+            [FromServices] ISloQueryService slos,
+            [FromBody] MetricAnnotationUpsertRequest body,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var annotation = body.ToAnnotation();
+            var (ok, error) = await Warp.Core.Metrics.MetricAnnotationValidator.ValidateAsync(annotation, metrics, slos, ct);
+            if (!ok)
+            {
+                return Results.BadRequest(error);
+            }
+
+            var id = await svc.Upsert(annotation, DashboardUser.Name(http), ct);
+
+            // null: the edited note was deleted meanwhile; an edit never re-creates it.
+            return id is null
+                ? Results.NotFound(new { error = "The annotation no longer exists: it was deleted while you edited it." })
+                : Results.Ok(new { id });
+        });
+
+        apiGroup.MapDelete("annotations/{id:int}", async ([FromServices] IMetricAnnotationCommandService svc, int id, HttpContext http, CancellationToken ct) =>
+        {
+            var deleted = await svc.Delete(id, DashboardUser.Name(http), ct);
+
+            return deleted ? Results.NoContent() : Results.NotFound();
         });
 
         // Webhooks — durable outbound delivery. IWebhookQueryService / IWebhookCommandService are always
@@ -924,6 +1159,81 @@ public static class WarpEndpoints
         apiGroup.MapGet("applications", async ([FromServices] IApplicationQueryService svc, CancellationToken ct) =>
             Results.Ok(await svc.GetApplications(ct)));
 
+        // Detected deploys (§8.23) across every application, newest first; ?application= narrows to one by NAME (the
+        // Metrics page's application filter is a name, not a route id). A literal segment, so it wins over {id}.
+        apiGroup.MapGet("applications/deploys", async (
+            [FromServices] IApplicationDeployQueryService svc,
+            [FromQuery] string? application,
+            [FromQuery] DateTime? from,
+            [FromQuery] DateTime? to,
+            CancellationToken ct) =>
+        {
+            var fromUtc = ToUtc(from);
+            var toUtc = ToUtc(to);
+            if (fromUtc >= toUtc)
+            {
+                return Results.BadRequest(new { error = "'from' must be before 'to'." });
+            }
+
+            var name = string.IsNullOrEmpty(application) ? null : application;
+
+            return Results.Ok(await svc.GetDeploys(name, fromUtc, toUtc, ct));
+        });
+
+        // Post-deploy verdict: pass / warn / fail / pending / noData for one deploy of an application, by NAME (a CI step
+        // knows the name, not the route id). Read-only, under the group's conventions like every route (§1.5); a literal
+        // segment, so it wins over {id}. 400 for bad input, 404 when no recorded deploy matches.
+        apiGroup.MapGet("applications/verdict", async (
+            [FromServices] IDeployVerdictService svc,
+            [FromQuery] string? application,
+            [FromQuery] string? version,
+            [FromQuery] string? environment,
+            [FromQuery] string? minWindowMinutes,
+            [FromQuery] string? minCoverage,
+            [FromQuery] string? board,
+            CancellationToken ct) =>
+        {
+            if (!DeployVerdictQuery.TryCreate(application, version, environment, minWindowMinutes, minCoverage, board, out var query, out var error))
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            DeployVerdictModel? verdict;
+            try
+            {
+                verdict = await svc.GetVerdict(query, ct);
+            }
+            catch (MetricBoardNotFoundException e)
+            {
+                return Results.NotFound(new { error = e.Message });
+            }
+
+            return verdict is null
+                ? Results.NotFound(new { error = "No recorded deploy of that application matches the version and environment." })
+                : Results.Ok(verdict);
+        });
+
+        apiGroup.MapGet("applications/{id}/deploys", async (
+            [FromServices] IApplicationDeployQueryService svc,
+            string id,
+            [FromQuery] DateTime? from,
+            [FromQuery] DateTime? to,
+            CancellationToken ct) =>
+        {
+            var application = UrlSafeId.TryDecode(id);
+            if (application is null)
+            {
+                return Results.NotFound();
+            }
+
+            var fromUtc = ToUtc(from);
+            var toUtc = ToUtc(to);
+
+            return fromUtc >= toUtc
+                ? Results.BadRequest(new { error = "'from' must be before 'to'." })
+                : Results.Ok(await svc.GetDeploys(application, fromUtc, toUtc, ct));
+        });
+
         apiGroup.MapGet("applications/{id}", async ([FromServices] IApplicationQueryService svc, string id, CancellationToken ct) =>
         {
             var application = UrlSafeId.TryDecode(id);
@@ -986,6 +1296,44 @@ public static class WarpEndpoints
         return apiGroup;
     }
 
+    // Query-bound instants are compared with UTC columns: an offset-bearing value is converted, a bare one is read as UTC.
+    private static DateTime? ToUtc(DateTime? value)
+    {
+        return value switch
+        {
+            null => null,
+            { Kind: DateTimeKind.Local } local => local.ToUniversalTime(),
+            { Kind: DateTimeKind.Unspecified } unspecified => DateTime.SpecifyKind(unspecified, DateTimeKind.Utc),
+            { } utc => utc,
+        };
+    }
+
+    // Another board write or a replica's seed held the board lock past the wait: busy, not broken, so a retry can succeed.
+    private static IResult BoardBusy()
+        => Results.Json(
+            new { error = "The metric board is busy with another change; try again." },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    // ?board= on the board read: absent or blank = the Default board, else a positive board id.
+    private static bool TryParseBoardId(IQueryCollection query, out int? boardId)
+    {
+        boardId = null;
+        var text = query["board"].ToString();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return true;
+        }
+
+        if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed <= 0)
+        {
+            return false;
+        }
+
+        boardId = parsed;
+
+        return true;
+    }
+
     // Decodes the URL-safe base64 {id} segment back to the recurring job's name and runs the action
     // against it. A malformed id, an empty name, and a name no definition matches are all the same
     // answer over HTTP — 404 — so the ArgumentException IRecurringJobService throws for an unknown
@@ -1023,11 +1371,12 @@ internal static class MetricSeriesRequestParser
     // culture-dependent or partial timestamp is a 400 instead of a guess.
     private static readonly string[] InstantFormats = ["O", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.fff'Z'"];
 
-    public static bool TryParse(IQueryCollection query, [NotNullWhen(true)] out MetricSeriesQuery? parsed, [NotNullWhen(false)] out string? error)
+    // The from/to pair every metric read takes (the series and the health board): ISO instants, from before to, within
+    // the readable calendar and at most MaxRangeDays apart.
+    public static bool TryParseRange(IQueryCollection query, out DateTime from, out DateTime to, [NotNullWhen(false)] out string? error)
     {
-        parsed = null;
-
-        if (!TryParseInstant(query["from"].ToString(), out var from) || !TryParseInstant(query["to"].ToString(), out var to))
+        to = default;
+        if (!TryParseInstant(query["from"].ToString(), out from) || !TryParseInstant(query["to"].ToString(), out to))
         {
             error = "from and to are required ISO 8601 timestamps.";
 
@@ -1052,6 +1401,20 @@ internal static class MetricSeriesRequestParser
         {
             error = $"The range must not exceed {MaxRangeDays} days.";
 
+            return false;
+        }
+
+        error = null;
+
+        return true;
+    }
+
+    public static bool TryParse(IQueryCollection query, [NotNullWhen(true)] out MetricSeriesQuery? parsed, [NotNullWhen(false)] out string? error)
+    {
+        parsed = null;
+
+        if (!TryParseRange(query, out var from, out var to, out error))
+        {
             return false;
         }
 
@@ -1149,6 +1512,66 @@ internal static class MetricSeriesRequestParser
         return true;
     }
 
+    // GET annotations: ?instrument= or ?slo= (an objective id), and an optional ?from= / ?to= window (ISO instants,
+    // either end open). Shape errors are a 400 here; both targets or an inverted window are the service's 400.
+    public static bool TryParseAnnotationQuery(IQueryCollection query, [NotNullWhen(true)] out MetricAnnotationQuery? parsed, [NotNullWhen(false)] out string? error)
+    {
+        parsed = null;
+
+        var sloText = query["slo"].ToString();
+        int? slo = null;
+        if (sloText.Length > 0)
+        {
+            if (!int.TryParse(sloText, NumberStyles.None, CultureInfo.InvariantCulture, out var id) || id <= 0)
+            {
+                error = "slo must be a positive objective id.";
+
+                return false;
+            }
+
+            slo = id;
+        }
+
+        DateTime? from = null;
+        DateTime? to = null;
+        var fromText = query["from"].ToString();
+        var toText = query["to"].ToString();
+        if (fromText.Length > 0)
+        {
+            if (!TryParseInstant(fromText, out var instant))
+            {
+                error = "from must be an ISO 8601 timestamp.";
+
+                return false;
+            }
+
+            from = DateTime.SpecifyKind(instant, DateTimeKind.Utc);
+        }
+
+        if (toText.Length > 0)
+        {
+            if (!TryParseInstant(toText, out var instant))
+            {
+                error = "to must be an ISO 8601 timestamp.";
+
+                return false;
+            }
+
+            to = DateTime.SpecifyKind(instant, DateTimeKind.Utc);
+        }
+
+        parsed = new MetricAnnotationQuery
+        {
+            Instrument = NullIfEmpty(query["instrument"].ToString()),
+            SloDefinitionId = slo,
+            From = from,
+            To = to,
+        };
+        error = null;
+
+        return true;
+    }
+
     private static string? NullIfEmpty(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static bool TryParseInstant(string text, out DateTime instant)
@@ -1173,7 +1596,9 @@ public sealed record SloUpsertRequest(
     string? RatioTag = null,
     string? GoodValues = null,
     string? BadValues = null,
-    int? BaselineDays = null)
+    int? BaselineDays = null,
+    SloComparison? Comparison = null,
+    SloGaugeAggregate? GaugeAggregate = null)
 {
     public Warp.Core.Data.Entities.SloDefinition ToDefinition() => new()
     {
@@ -1193,6 +1618,99 @@ public sealed record SloUpsertRequest(
         GoodValues = GoodValues,
         BadValues = BadValues,
         BaselineDays = BaselineDays,
+        Comparison = Comparison,
+        GaugeAggregate = GaugeAggregate,
+    };
+}
+
+public sealed record MetricBoardTileUpsertRequest(
+    int Id,
+    string Name,
+    string Instrument,
+    MetricTileKind Kind = MetricTileKind.Value,
+    int Position = 0,
+    string? Application = null,
+    string? TagFilter = null,
+    string? RatioTag = null,
+    string? GoodValues = null,
+    string? BadValues = null,
+    SloGaugeAggregate? GaugeAggregate = null,
+    MetricTileStatusRule StatusRule = MetricTileStatusRule.None,
+    SloComparison? Comparison = null,
+    double? Threshold = null,
+    int? BaselineDays = null,
+    double? MaxDeviation = null,
+    MetricDeviationDirection? DeviationDirection = null,
+    int? BoardId = null,
+    string? ChartQuery = null,
+    int? SloDefinitionId = null)
+{
+    public Warp.Core.Data.Entities.MetricBoardTile ToTile() => new()
+    {
+        Id = Id,
+        BoardId = BoardId,
+        Name = Name ?? string.Empty,
+        Instrument = Instrument ?? string.Empty,
+        Kind = Kind,
+        ChartQuery = ChartQuery,
+        SloDefinitionId = SloDefinitionId,
+        Position = Position,
+        Application = Application,
+        TagFilter = TagFilter,
+        RatioTag = RatioTag,
+        GoodValues = GoodValues,
+        BadValues = BadValues,
+        GaugeAggregate = GaugeAggregate,
+        StatusRule = StatusRule,
+        Comparison = Comparison,
+        Threshold = Threshold,
+        BaselineDays = BaselineDays,
+        MaxDeviation = MaxDeviation,
+        DeviationDirection = DeviationDirection,
+    };
+}
+
+// No creator: a new board's creator is the authenticated dashboard user, taken from the request by the route.
+public sealed record MetricBoardUpsertRequest(
+    int Id,
+    string Name,
+    string? Description = null,
+    int Position = 0,
+    string? Application = null)
+{
+    public Warp.Core.Data.Entities.MetricBoard ToBoard() => new()
+    {
+        Id = Id,
+        Name = Name ?? string.Empty,
+        Description = Description,
+        Position = Position,
+        Application = Application,
+    };
+}
+
+public sealed record MetricAnnotationUpsertRequest(
+    int Id,
+    string Note,
+    MetricAnnotationTarget Target = MetricAnnotationTarget.Instrument,
+    string? Instrument = null,
+    string? TagFilter = null,
+    int? SloDefinitionId = null,
+    DateTime StartsAt = default,
+    DateTime? EndsAt = null,
+    bool AcknowledgedNoise = false)
+{
+    // No author: it is the authenticated dashboard user, taken from the request by the route (DashboardUser).
+    public Warp.Core.Data.Entities.MetricAnnotation ToAnnotation() => new()
+    {
+        Id = Id,
+        Note = Note ?? string.Empty,
+        Target = Target,
+        Instrument = Instrument,
+        TagFilter = TagFilter,
+        SloDefinitionId = SloDefinitionId,
+        StartsAt = StartsAt,
+        EndsAt = EndsAt,
+        AcknowledgedNoise = AcknowledgedNoise,
     };
 }
 

@@ -12,7 +12,17 @@ import { FROZEN_NOW } from '@/lib/demoMode';
 import { decodeUrlSafeId } from '@/lib/urlSafeId';
 import { IDS } from '@/demo/data';
 import { ApplicationInstanceEventType } from '@/types/applications';
+import { MetricDeviationDirection, MetricTileKind, MetricTileStatusRule, type MetricBoardTileResult } from '@/types/metricBoard';
+import { SloComparison, SloState, type SloObjective } from '@/types/slo';
+import { checkTarget, checkThreshold, formatBudget, formatObserved, formatTarget } from '@/pages/slo/sloDisplay';
+import { DEMO_DEFAULT_BOARD, demoBoardTiles, demoBoards, demoMetricBoard } from './metricBoard';
+import { demoSlos } from './slo';
 import type {
+  ApplicationDeployModel,
+  DeployVerdictCheck,
+  DeployVerdictCheckState,
+  DeployVerdictModel,
+  DeployVerdictValue,
   ApplicationSummaryModel,
   ApplicationDetailModel,
   ApplicationInstanceDetailModel,
@@ -255,6 +265,317 @@ export const demoJobMetrics: JobExecutionMetricsModel = {
     { identifier: 'Acme.Billing.PublishInvoiceHandler', executedCount: 15330, errorCount: 24, errorRate: 24 / 15330, avgDurationMs: 305.2, p95DurationMs: 640.0, p99DurationMs: 1320.0 },
   ],
 };
+
+// ============================================================
+// Detected deploys (GET /applications/deploys, GET /applications/{id}/deploys), newest first.
+// orders-api is mid rolling-deploy (2.3.0 and 2.3.1 instances live), so its newest deploy is recent.
+// ============================================================
+
+export const demoDeploys: ApplicationDeployModel[] = [
+  { id: 'dep-oa-231', application: 'orders-api', version: '2.3.1', environment: 'production', firstSeenAt: ago(60 * 20), instanceId: ORDERS_API_2, instanceName: 'orders-api-4b2d' },
+  { id: 'dep-cw-231', application: 'checkout-worker', version: '2.3.1', environment: 'production', firstSeenAt: ago(60 * 26), instanceId: IDS.server1, instanceName: 'warp-worker-01' },
+  { id: 'dep-bs-220s', application: 'billing-service', version: '2.2.0', environment: 'staging', firstSeenAt: ago(60 * 30), instanceId: BILLING_PROC, instanceName: 'billing-cron-2' },
+  { id: 'dep-oa-230', application: 'orders-api', version: '2.3.0', environment: 'production', firstSeenAt: ago(60 * 24 * 3), instanceId: ORDERS_API_1, instanceName: 'orders-api-7c9f' },
+  { id: 'dep-cw-230', application: 'checkout-worker', version: '2.3.0', environment: 'production', firstSeenAt: ago(60 * 24 * 3 + 40), instanceId: IDS.server2, instanceName: 'warp-worker-02' },
+  { id: 'dep-bs-220', application: 'billing-service', version: '2.2.0', environment: 'production', firstSeenAt: ago(60 * 24 * 5), instanceId: BILLING_SERVER, instanceName: 'billing-01' },
+  { id: 'dep-oa-220', application: 'orders-api', version: '2.2.0', environment: 'production', firstSeenAt: ago(60 * 24 * 9), instanceId: ORDERS_API_1, instanceName: 'orders-api-7c9f' },
+];
+
+/** The demo router's filter over demoDeploys: by application name and a [from, to) range, either side optional. */
+export function filterDemoDeploys(application?: string, from?: string, to?: string): ApplicationDeployModel[] {
+  const lower = from ? Date.parse(from) : -Infinity;
+  const upper = to ? Date.parse(to) : Infinity;
+
+  return demoDeploys
+    .filter((x) => !application || x.application === application)
+    .filter((x) => Date.parse(x.firstSeenAt) >= lower && Date.parse(x.firstSeenAt) < upper);
+}
+
+// ============================================================
+// Post-deploy verdicts (GET /applications/verdict), built the way the server builds them: the demo board's tiles with a
+// status rule evaluated over the deploy's window, plus the enabled demo SLOs scoped to the application (or to none) —
+// with a board, only the objectives that have an SLO tile on it — so
+// every check names a tile or objective that exists on the Board and SLOs pages. Each demo application has SLOs of its
+// own, so their verdicts differ. A superseded deploy is judged over its own lifetime and without SLOs (their current
+// state describes the newer release).
+// ============================================================
+
+const VERDICT_MIN_WINDOW_MS = 5 * 60_000;
+const VERDICT_MAX_RANGE_MS = 90 * 24 * 3_600_000;
+// The server defaults the window is cut with: FineResolutionMinutes and MetricFlushInterval.
+const VERDICT_FINE_MINUTES = 5;
+const VERDICT_FLUSH_MS = 30_000;
+
+/** The verdict window: the clean span of complete fine buckets after the deploy, and when it settles. */
+export interface DemoVerdictWindow {
+  from: number;
+  to: number;
+  settlesAt: number;
+  settled: boolean;
+  /** A superseded deploy replaced before a complete bucket after it: settled, nothing to judge. */
+  emptySuperseded: boolean;
+}
+
+// MetricTiers.BucketStart(Fine): the minute floored to a multiple of the bucket width, seconds dropped.
+function floorToBucket(ms: number, fineMinutes: number): number {
+  const hour = Math.floor(ms / 3_600_000) * 3_600_000;
+  const minute = Math.floor((ms - hour) / 60_000);
+
+  return hour + Math.floor(minute / fineMinutes) * fineMinutes * 60_000;
+}
+
+function ceilToBucket(ms: number, fineMinutes: number): number {
+  const floor = floorToBucket(ms, fineMinutes);
+
+  return floor === ms ? floor : floor + fineMinutes * 60_000;
+}
+
+/**
+ * The server's DeployVerdictMath.Window: from = the deploy rounded UP to a fine bucket (the mixed bucket holding the deploy
+ * is never judged), to = the board's cut (the bucket holding now − flush) or, when superseded, the next deploy rounded
+ * DOWN if earlier. A live deploy settles once the clean window holds minWindow (and at least one bucket) plus a flush; a
+ * superseded one once its last bucket is complete, or at once when no whole bucket lies between the two deploys.
+ */
+export function demoVerdictWindow(
+  deployedAt: number,
+  supersededAt: number | null,
+  now: number,
+  minWindowMs: number = VERDICT_MIN_WINDOW_MS,
+  fineMinutes: number = VERDICT_FINE_MINUTES,
+  flushMs: number = VERDICT_FLUSH_MS,
+): DemoVerdictWindow {
+  const fine = Math.max(1, fineMinutes);
+  const flush = Math.max(0, flushMs);
+  const cleanStart = ceilToBucket(deployedAt, fine);
+  const completeUntil = floorToBucket(now - flush, fine);
+
+  let end: number;
+  let settlesAt: number;
+  if (supersededAt !== null) {
+    end = floorToBucket(supersededAt, fine);
+    settlesAt = end > cleanStart ? end + flush : supersededAt;
+  } else {
+    const required = ceilToBucket(cleanStart + minWindowMs, fine);
+    end = Infinity;
+    settlesAt = (required > cleanStart ? required : cleanStart + fine * 60_000) + flush;
+  }
+
+  const to = Math.max(Math.min(end, completeUntil), cleanStart);
+  const emptySuperseded = supersededAt !== null && end <= cleanStart;
+
+  return {
+    from: to - cleanStart > VERDICT_MAX_RANGE_MS ? to - VERDICT_MAX_RANGE_MS : cleanStart,
+    to,
+    settlesAt,
+    settled: emptySuperseded || now >= settlesAt,
+    emptySuperseded,
+  };
+}
+
+const STATE_TOKEN: Record<SloState, DeployVerdictCheckState> = {
+  [SloState.Healthy]: 'healthy',
+  [SloState.Warning]: 'warning',
+  [SloState.Breaching]: 'breaching',
+  [SloState.Acknowledged]: 'acknowledged',
+  [SloState.NoData]: 'noData',
+};
+
+const phrase = (state: DeployVerdictCheckState) => (state === 'noData' ? 'no data' : state);
+const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+const num = (value: number | null) => (value === null || !Number.isFinite(value) ? 'n/a' : `${Number(value.toPrecision(4))}`);
+const appliesTo = (scope: string | null, application: string) => scope === null || scope === application;
+
+function tileCheck(result: MetricBoardTileResult): DeployVerdictCheck | null {
+  if (result.status === null) {
+    return null;
+  }
+
+  const { tile } = result;
+  const state = STATE_TOKEN[result.status];
+  const unacknowledged = STATE_TOKEN[result.unacknowledgedStatus ?? result.status];
+  const deviation = tile.statusRule === MetricTileStatusRule.Deviation;
+  const baseline = deviation ? (tile.baselineDays === 1 ? result.dayAgo : result.weekAgo) : null;
+  const direction = tile.deviationDirection === MetricDeviationDirection.Drop
+    ? 'drop'
+    : tile.deviationDirection === MetricDeviationDirection.Rise ? 'rise' : 'change';
+  const detail = deviation
+    ? `${num(result.current)} vs ${tile.baselineDays ?? 7}-day baseline ${num(baseline)} (max ${direction} ${num(tile.maxDeviation)})`
+    : `${num(result.current)} vs ${tile.comparison === SloComparison.AtLeast ? 'at least' : 'at most'} ${num(tile.threshold)}`;
+
+  return {
+    source: 'tile',
+    id: tile.id,
+    name: tile.name,
+    application: tile.application,
+    state,
+    unacknowledgedState: state === 'acknowledged' ? unacknowledged : null,
+    acknowledged: state === 'acknowledged',
+    value: result.current,
+    baseline,
+    target: deviation ? tile.maxDeviation : tile.threshold,
+    threshold: null,
+    budgetRemaining: null,
+    reason: state === 'acknowledged'
+      ? `Acknowledged noise (would be ${phrase(unacknowledged)}): ${detail}.`
+      : `${capitalized(phrase(state))}: ${detail}.`,
+  };
+}
+
+function sloCheck(slo: SloObjective, windowStart: number): DeployVerdictCheck {
+  const stale = slo.lastEvaluatedAt !== null && Date.parse(slo.lastEvaluatedAt) < windowStart;
+  const state: DeployVerdictCheckState = !slo.evaluated || stale ? 'noData' : STATE_TOKEN[slo.state];
+  const hasValue = slo.evaluated && state !== 'noData';
+  const reason = !slo.evaluated
+    ? 'Not evaluated yet.'
+    : stale
+      ? `Last evaluated at ${slo.lastEvaluatedAt}, before the deploy's first complete bucket (${new Date(windowStart).toISOString()}).`
+      : `${capitalized(phrase(state))}: observed ${formatObserved(slo)} vs target ${formatTarget(slo)}, budget remaining ${formatBudget(slo.budgetRemaining)}.`;
+
+  return {
+    source: 'slo',
+    id: slo.id,
+    name: slo.name,
+    application: slo.application,
+    state,
+    unacknowledgedState: null,
+    acknowledged: state === 'acknowledged',
+    value: hasValue ? slo.attainment : null,
+    baseline: null,
+    target: checkTarget(slo),
+    threshold: checkThreshold(slo),
+    budgetRemaining: hasValue ? slo.budgetRemaining : null,
+    reason,
+  };
+}
+
+/**
+ * The server's coverage gate: the share of checks with data reaches `minCoverage`. Compared as a share with a 1e-9
+ * epsilon, as the server does, so 14 of 25 meets 0.56 although `0.56 * 25` is 14.000000000000002 in floating point.
+ */
+export function coverageMet(withData: number, count: number, minCoverage: number): boolean {
+  return count > 0 && withData / count >= minCoverage - 1e-9;
+}
+
+/** The server's aggregation: pending until settled, any breaching fails, thin coverage is noData, then warn, then pass. */
+function aggregate(states: DeployVerdictCheckState[], settled: boolean, minCoverage: number): DeployVerdictValue {
+  const withData = states.filter((x) => x !== 'noData').length;
+  if (!settled) {
+    return 'pending';
+  }
+  if (states.includes('breaching')) {
+    return 'fail';
+  }
+  if (minCoverage > 0 && !coverageMet(withData, states.length, minCoverage)) {
+    return 'noData';
+  }
+  if (states.includes('warning')) {
+    return 'warn';
+  }
+
+  return states.some((x) => x === 'healthy' || x === 'acknowledged') ? 'pass' : 'noData';
+}
+
+function summary(verdict: DeployVerdictValue, states: DeployVerdictCheckState[], settlesAt: string, emptySuperseded: boolean): string {
+  if (verdict === 'pending') {
+    return `pending: settles at ${settlesAt}`;
+  }
+  if (emptySuperseded) {
+    return `${verdict}: superseded at ${settlesAt}, before a complete metric bucket after the deploy; nothing to judge`;
+  }
+
+  const coverage = `${states.filter((x) => x !== 'noData').length} of ${states.length} checks had data`;
+  if (states.length === 0) {
+    return `${verdict} (${coverage}): no board tile with a rule and no SLO covers this application`;
+  }
+
+  const order: DeployVerdictCheckState[] = ['breaching', 'warning', 'acknowledged', 'healthy', 'noData'];
+  const parts = order
+    .map((state) => ({ state, count: states.filter((x) => x === state).length }))
+    .filter((x) => x.count > 0)
+    .map((x) => `${x.count} ${phrase(x.state)}`);
+
+  return `${verdict} (${coverage}): ${parts.join(', ')}`;
+}
+
+/** The demo router's verdict: the deploy picked like the server does (newest match), checks from the board and SLO fixtures. */
+export function demoDeployVerdict(
+  application?: string,
+  version?: string,
+  environment?: string,
+  minCoverage = 0,
+  deploys: ApplicationDeployModel[] = demoDeploys,
+  board?: string,
+): DeployVerdictModel | null {
+  // Like the server: a named board narrows the tile checks to it (unknown: no verdict, the router's 404); no board = every board.
+  const named = board ? demoBoards.find((x) => x.name.toLowerCase() === board.trim().toLowerCase()) : undefined;
+  if (board && named === undefined) {
+    return null;
+  }
+
+  const history = deploys
+    .filter((x) => x.application === application)
+    .sort((a, b) => Date.parse(b.firstSeenAt) - Date.parse(a.firstSeenAt));
+  const deploy = history
+    .filter((x) => !version || x.version === version)
+    .find((x) => !environment || (x.environment ?? '') === environment);
+  if (!deploy) {
+    return null;
+  }
+
+  const sameEnvironment = history.filter((x) => (x.environment ?? '') === (deploy.environment ?? ''));
+  const index = sameEnvironment.indexOf(deploy);
+  const next = index > 0 ? sameEnvironment[index - 1] : null;
+  const window = demoVerdictWindow(Date.parse(deploy.firstSeenAt), next ? Date.parse(next.firstSeenAt) : null, FROZEN_NOW);
+  const { from, to, settled } = window;
+
+  const name = deploy.application;
+  const tiles = to > from
+    ? (demoMetricBoard(new Date(from).toISOString(), new Date(to).toISOString(), undefined, named?.id ?? 'all')?.tiles ?? [])
+      .filter((x) => appliesTo(x.tile.application, name))
+      .map(tileCheck)
+      .filter((x): x is DeployVerdictCheck => x !== null)
+    : [];
+  // Like the server: with a board, only the objectives that have an SLO tile on it (a board without one counts none).
+  const shown = named
+    ? new Set(demoBoardTiles.filter((x) => x.kind === MetricTileKind.Slo && (x.boardId ?? DEMO_DEFAULT_BOARD) === named.id).map((x) => x.sloDefinitionId))
+    : null;
+  const slos = next
+    ? []
+    : demoSlos().items
+      .filter((x) => shown === null || shown.has(x.id))
+      .filter((x) => x.enabled && appliesTo(x.application, name))
+      .sort((a, b) => a.name.localeCompare(b.name, 'en'))
+      .map((x) => sloCheck(x, from));
+  const checks = [...tiles, ...slos];
+  const states = checks.map((x) => x.state);
+  const verdict = aggregate(states, settled, minCoverage);
+  const settlesAtIso = new Date(window.settlesAt).toISOString();
+
+  return {
+    verdict,
+    summary: summary(verdict, states, settlesAtIso, window.emptySuperseded),
+    checksWithData: states.filter((x) => x !== 'noData').length,
+    checksTotal: states.length,
+    board: named?.name ?? null,
+    deploy: {
+      application: deploy.application,
+      version: deploy.version,
+      environment: deploy.environment,
+      firstSeenAt: deploy.firstSeenAt,
+      instanceName: deploy.instanceName,
+      previousVersion: sameEnvironment[index + 1]?.version ?? null,
+      supersededBy: next?.version ?? null,
+    },
+    window: {
+      from: new Date(from).toISOString(),
+      to: new Date(to).toISOString(),
+      minWindowSeconds: VERDICT_MIN_WINDOW_MS / 1000,
+      settlesAt: settlesAtIso,
+      settled,
+    },
+    checks,
+  };
+}
 
 // URL-safe base64 of the application name → the name, so the demo router maps the {id} path segment
 // back to a fixture key. One codec shared with the other name-addressed routes (see lib/urlSafeId).

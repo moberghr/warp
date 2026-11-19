@@ -379,4 +379,72 @@ public class SloMathTests
         SloMath.IsNoData(SloMath.EvaluateRatioDrop(0.99, 0.97, 0.05)).ShouldBeFalse();
         SloMath.IsNoData(SloMath.NoDataResult).ShouldBeTrue();
     }
+
+    [Fact]
+    public void TrySplitAtThreshold_ThresholdOnABound_CountsThatBucketAsWithin()
+    {
+        // Bounds 0.1, 0.25, 0.5 plus overflow; threshold 0.25 keeps the first two buckets.
+        SloMath.TrySplitAtThreshold([0.1, 0.25, 0.5], [10, 20, 30, 40], 0.25, out var within, out var over).ShouldBeTrue();
+
+        within.ShouldBe(30);
+        over.ShouldBe(70);
+    }
+
+    [Fact]
+    public void TrySplitAtThreshold_ThresholdBetweenBounds_BehavesLikeTheLowerBound()
+    {
+        // 0.3 sits inside (0.25, 0.5]: that bucket's events may be faster than 0.3, but the ladder cannot tell, so they are over.
+        SloMath.TrySplitAtThreshold([0.1, 0.25, 0.5], [10, 20, 30, 40], 0.3, out var within, out var over).ShouldBeTrue();
+
+        within.ShouldBe(30);
+        over.ShouldBe(70);
+    }
+
+    [Fact]
+    public void TrySplitAtThreshold_ThresholdAboveTheLadder_LeavesOnlyTheOverflowBucketOver()
+    {
+        SloMath.TrySplitAtThreshold([0.1, 0.25, 0.5], [10, 20, 30, 40], 1000, out var within, out var over).ShouldBeTrue();
+
+        within.ShouldBe(60);
+        over.ShouldBe(40);
+    }
+
+    [Fact]
+    public void TrySplitAtThreshold_ThresholdBelowTheFirstBound_IsAllOver()
+    {
+        SloMath.TrySplitAtThreshold([0.1, 0.25], [5, 5, 5], 0.05, out var within, out var over).ShouldBeTrue();
+
+        within.ShouldBe(0);
+        over.ShouldBe(15);
+    }
+
+    [Fact]
+    public void TrySplitAtThreshold_CountsNotAlignedWithBounds_ReturnsFalse()
+    {
+        SloMath.TrySplitAtThreshold([0.1, 0.25], [5, 5], 0.1, out _, out _).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(SloGaugeAggregate.Average, SloComparison.AtMost, 100, false)] // avg 100: equal is not a violation
+    [InlineData(SloGaugeAggregate.Average, SloComparison.AtMost, 99, true)]
+    [InlineData(SloGaugeAggregate.Max, SloComparison.AtMost, 150, true)] // max 160
+    [InlineData(SloGaugeAggregate.Max, SloComparison.AtMost, 160, false)]
+    [InlineData(SloGaugeAggregate.Min, SloComparison.AtLeast, 40, false)] // min 40
+    [InlineData(SloGaugeAggregate.Min, SloComparison.AtLeast, 41, true)]
+    [InlineData(SloGaugeAggregate.Average, SloComparison.AtLeast, 101, true)]
+    public void TryGaugeVerdict_ComparesTheChosenAggregateInTheChosenDirection(SloGaugeAggregate aggregate, SloComparison comparison, double target, bool expected)
+    {
+        // Four samples summing to 400 (avg 100), min 40, max 160.
+        SloMath.TryGaugeVerdict(aggregate, comparison, target, 4, 400, 40, 160, out var violates).ShouldBeTrue();
+
+        violates.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void TryGaugeVerdict_NoSamplesMissingExtremeOrNonFinite_IsNotObserved()
+    {
+        SloMath.TryGaugeVerdict(SloGaugeAggregate.Average, SloComparison.AtMost, 1, 0, 0, null, null, out _).ShouldBeFalse();
+        SloMath.TryGaugeVerdict(SloGaugeAggregate.Max, SloComparison.AtMost, 1, 3, 3, 1, null, out _).ShouldBeFalse();
+        SloMath.TryGaugeVerdict(SloGaugeAggregate.Average, SloComparison.AtMost, 1, 1, double.NaN, null, null, out _).ShouldBeFalse();
+    }
 }

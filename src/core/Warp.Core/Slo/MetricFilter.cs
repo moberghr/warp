@@ -19,6 +19,10 @@ internal sealed class MetricFilter
 
     public bool IsEmpty => _clauses.Length == 0;
 
+    // The reserved version pseudo-tag (MetricSeriesQuery.VersionKey) is injected only by the Metrics page read; the SLO
+    // evaluator and the board never see it, so a filter on it can never match there.
+    public const string ReservedVersionKeyError = "the '{version}' key is reserved for the Metrics page: objectives and board tiles ignore the application version, so a filter on it would never match. Remove it.";
+
     public static bool TryParse(string? text, out MetricFilter filter, out string? error)
     {
         filter = Empty;
@@ -124,6 +128,28 @@ internal sealed class MetricFilter
         return true;
     }
 
+    public bool Constrains(string key) => Array.Exists(_clauses, x => string.Equals(x.Key, key, StringComparison.Ordinal));
+
+    // True when every tag set `narrower` matches is also matched by this filter: each clause here is implied by a clause
+    // of `narrower` on the same key whose pattern is equal or narrower. An empty filter covers everything; a key only this
+    // filter constrains is not covered (`narrower` lets every value of it through). The acknowledged-noise rule (#333):
+    // a note must cover the whole tile, not merely overlap it, to change its verdict.
+    public bool Covers(MetricFilter narrower)
+    {
+        ArgumentNullException.ThrowIfNull(narrower);
+
+        foreach (var (key, pattern) in _clauses)
+        {
+            var index = Array.FindIndex(narrower._clauses, x => string.Equals(x.Key, key, StringComparison.Ordinal));
+            if (index < 0 || !pattern.Includes(narrower._clauses[index].Value))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public bool Matches(IReadOnlyDictionary<string, string> tags)
     {
         ArgumentNullException.ThrowIfNull(tags);
@@ -140,8 +166,37 @@ internal sealed class MetricFilter
         return true;
     }
 
+    // True when some tag set could match both filters: every key both constrain has overlapping patterns, and a key only
+    // one side constrains narrows nothing on the other. An empty filter overlaps everything. "{none}" (the absent tag) is
+    // never matched by a prefix pattern, so it overlaps only itself. The annotation-to-tile rule (#333).
+    public bool Overlaps(MetricFilter other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+
+        foreach (var (key, pattern) in _clauses)
+        {
+            var shared = Array.FindIndex(other._clauses, x => string.Equals(x.Key, key, StringComparison.Ordinal));
+            if (shared < 0)
+            {
+                continue;
+            }
+
+            var theirs = other._clauses[shared].Value;
+            var absent = IsAbsent(pattern) || IsAbsent(theirs);
+            if (absent ? pattern != theirs : !pattern.Overlaps(theirs))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     // "k1=v1,k2=v2" or "-" (the stored canonical form): the query service's parser, so the two never drift.
     public static Dictionary<string, string> ParseCanonicalTags(string? canonical) => Services.MetricSeriesMath.ParseTags(canonical);
+
+    private static bool IsAbsent(MetricValuePattern pattern)
+        => !pattern.IsPrefix && string.Equals(pattern.Text, NoneValue, StringComparison.Ordinal);
 }
 
 // One value, optionally ending in '*'. A null actual value (tag absent) is "{none}": only an exact "{none}" matches.
@@ -173,6 +228,23 @@ internal readonly record struct MetricValuePattern(string Text, bool IsPrefix)
         return IsPrefix
             ? actual.StartsWith(Text, StringComparison.Ordinal)
             : string.Equals(actual, Text, StringComparison.Ordinal);
+    }
+
+    // True when every value `other` matches is matched here too: an equal literal, or a literal or longer prefix under
+    // this prefix. A prefix (even a bare '*') never matches the absent tag "{none}", so it never includes it.
+    public bool Includes(MetricValuePattern other)
+    {
+        if (!IsPrefix)
+        {
+            return !other.IsPrefix && string.Equals(Text, other.Text, StringComparison.Ordinal);
+        }
+
+        if (!other.IsPrefix && string.Equals(other.Text, MetricFilter.NoneValue, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return other.Text.StartsWith(Text, StringComparison.Ordinal);
     }
 
     // True when some value could match both patterns: equal literals, a literal under the other's prefix, one prefix

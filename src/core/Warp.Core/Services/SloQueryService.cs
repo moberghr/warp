@@ -67,6 +67,8 @@ public sealed class SloQueryService<TContext> : ISloQueryService
         GoodValues = d.GoodValues,
         BadValues = d.BadValues,
         BaselineDays = d.BaselineDays,
+        Comparison = d.Comparison,
+        GaugeAggregate = d.GaugeAggregate,
         Evaluated = e is not null,
         Attainment = e?.Attainment ?? 0,
         BudgetRemaining = e?.BudgetRemaining ?? 1.0,

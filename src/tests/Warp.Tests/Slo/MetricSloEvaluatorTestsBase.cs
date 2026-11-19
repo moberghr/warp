@@ -549,6 +549,304 @@ public abstract class MetricSloEvaluatorTestsBase : IAsyncLifetime
         evaluator.TotalOnlyReads.ShouldBe(0);
     }
 
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_EnoughEventsUnderThreshold_IsHealthy()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(Histogram(Duration, "-", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 90, 8, 2, 0));
+        var id = await SeedObjectiveAsync(Latency(0.25, 95));
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        // 98 of 100 events in buckets bounded at <= 0.25: 2% slow against the 5% a p95 allows, burn 0.4.
+        var eval = await EvalAsync(id);
+        eval.State.ShouldBe(SloState.Healthy);
+        eval.Attainment.ShouldBe(0.98, Tolerance);
+        eval.BurnRateLong.ShouldBe(0.4, Tolerance);
+        eval.BudgetRemaining.ShouldBe(0.6, Tolerance);
+        spy.Received.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_TooManySlowEvents_BreachesWithLabelFromDefinition()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(
+            Histogram(Duration, "http.route=/api/x", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 80, 10, 5, 5),
+            Histogram(Duration, "http.route=/api/y", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 0, 0, 0, 1000));
+        var def = Latency(0.25, 95);
+        def.TagFilter = "http.route=/api/x";
+        var id = await SeedObjectiveAsync(def);
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        // Only /api/x matches: 90 of 100 within 0.25, 10% slow against 5% allowed.
+        var eval = await EvalAsync(id);
+        eval.State.ShouldBe(SloState.Breaching);
+        eval.Attainment.ShouldBe(0.9, Tolerance);
+        eval.BurnRateLong.ShouldBe(2, Tolerance);
+        var evt = spy.Received.ShouldHaveSingleItem().ShouldBeOfType<SloBreachedEvent>();
+        evt.Kind.ShouldBe(SloKind.MetricLatency);
+        evt.Metric.ShouldBe($"{Duration} [http.route=/api/x] p95 <= 0.25");
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_BadRecentBucketOverAGoodHistory_BurnsTheShortWindow()
+    {
+        // Short window = 3600 / 12 floored to 5 min: [12:27, 12:32). 1000 fast events at 12:00 are outside it; the
+        // still-filling 12:30 bucket (10 events, all slow) is inside it, clipped at now.
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(
+            Histogram(Duration, "-", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 1000, 0, 0, 0),
+            Histogram(Duration, "-", MetricTier.Fine, At(12, 30), "0.1,0.25,0.5", 0, 0, 0, 10));
+        var id = await SeedObjectiveAsync(Latency(0.25, 95));
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.BurnRateShort.ShouldBe(1.0 / 0.05, Tolerance);
+        eval.BurnRateLong.ShouldBe(10.0 / 1010 / 0.05, Tolerance);
+        eval.BurnRateShort.ShouldBeGreaterThan(eval.BurnRateLong);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_BadRecentBucketOverAGoodHistory_BurnsTheShortWindow()
+    {
+        // Long window [11:32, 12:32): 28 min of the 11:00 hour + six 5-min buckets 12:00-12:25, all compliant, and the
+        // 12:30 bucket (2 min so far) in violation: 2 of 60 observed minutes. Short window [12:27, 12:32): 3 compliant
+        // minutes of the 12:25 bucket and the 2 violating ones: 40 %.
+        await SeedInstrumentAsync(Depth, MetricKind.Gauge);
+        await SeedPointsAsync(
+        [
+            Gauge(Depth, "-", MetricTier.Hourly, At(11, 0), count: 120, sum: 6000, min: 1, max: 99),
+            .. Enumerable.Range(0, 6).Select(x => Gauge(Depth, "-", MetricTier.Fine, At(12, 5 * x), count: 10, sum: 500, min: 10, max: 90)),
+            Gauge(Depth, "-", MetricTier.Fine, At(12, 30), count: 4, sum: 800, min: 150, max: 250, compacted: false),
+        ]);
+        var id = await SeedObjectiveAsync(GaugeThreshold(100, SloComparison.AtMost, SloGaugeAggregate.Average, 95));
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(58.0 / 60, Tolerance);
+        eval.BurnRateLong.ShouldBe(2.0 / 60 / 0.05, Tolerance);
+        eval.BurnRateShort.ShouldBe(0.4 / 0.05, Tolerance);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_ThresholdBetweenBounds_ComparesWithBucketUpperBounds()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+
+        // 0.3 lies inside (0.25, 0.5]: those events cannot be told apart from 0.45 ones, so they count as slow.
+        await SeedPointsAsync(Histogram(Duration, "-", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 50, 40, 10, 0));
+        var id = await SeedObjectiveAsync(Latency(0.3, 95));
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(0.9, Tolerance);
+        eval.State.ShouldBe(SloState.Breaching);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_WindowAcrossFineAndHourlyTiersAndLadders_ProratesAndSplitsEachRow()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(
+            Histogram(Duration, "-", MetricTier.Hourly, At(10, 0), "0.1,0.25,0.5", 0, 0, 0, 900), // before the window: not read
+            Histogram(Duration, "-", MetricTier.Hourly, At(11, 0), "0.1,0.25,0.5", 60, 0, 0, 60), // 28 of 60 min: 28 within, 28 over
+            Histogram(Duration, "-", MetricTier.Fine, At(12, 0), "0.1,0.25,0.5", 100, 0, 0, 0), // 100 within
+            Histogram(Duration, "-", MetricTier.Fine, At(12, 5), "0.2,1", 10, 2, 0)); // its own ladder: 10 within, 2 over
+        var id = await SeedObjectiveAsync(Latency(0.25, 70));
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(138.0 / 168, Tolerance);
+        eval.State.ShouldBe(SloState.Healthy);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_NoEventsInTheWindow_IsNoData_NoAlert()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(Histogram(Duration, "-", MetricTier.Hourly, At(9, 0), "0.1,0.25,0.5", 0, 0, 0, 50));
+        var id = await SeedObjectiveAsync(Latency(0.25, 95));
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        (await EvalAsync(id)).State.ShouldBe(SloState.NoData);
+        spy.Received.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_RowsWithoutBucketDetail_AreNoData()
+    {
+        // The rollup keeps the counts but drops the bucket CSV when a sum would not fit the column: no split is possible.
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(Fine(Duration, "-", At(12, 0), sum: 50, count: 100));
+        var id = await SeedObjectiveAsync(Latency(0.25, 95));
+
+        await RunAsync(new SpyNotifier());
+
+        (await EvalAsync(id)).State.ShouldBe(SloState.NoData);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricLatency_CounterInstrument_IsNoDataAndLoggedAtError()
+    {
+        await SeedInstrumentAsync("orders.failed", MetricKind.Counter);
+        await SeedPointsAsync(Fine("orders.failed", "-", At(12, 0), sum: 5));
+        var def = Latency(1, 95);
+        def.Dimension = "orders.failed";
+        var id = await SeedObjectiveAsync(def);
+        var spy = new SpyNotifier();
+        var logs = new CapturingLoggerProvider();
+
+        await RunAsync(spy, new FakeTimeProvider(new DateTimeOffset(Now)), LoggerFor(logs));
+
+        (await EvalAsync(id)).State.ShouldBe(SloState.NoData);
+        spy.Received.ShouldBeEmpty();
+        var error = logs.Logs.Where(x => x.Level == LogLevel.Error).ShouldHaveSingleItem();
+        error.Message.ShouldContain("orders.failed");
+        error.Message.ShouldContain("Counter");
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_AverageUnderTarget_IsHealthy()
+    {
+        await SeedInstrumentAsync(Depth, MetricKind.Gauge);
+        await SeedPointsAsync(
+            Gauge(Depth, "-", MetricTier.Fine, At(12, 0), count: 10, sum: 500, min: 10, max: 90),
+            Gauge(Depth, "-", MetricTier.Fine, At(12, 5), count: 10, sum: 800, min: 40, max: 120));
+        var id = await SeedObjectiveAsync(GaugeThreshold(100, SloComparison.AtMost, SloGaugeAggregate.Average, 95));
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        var eval = await EvalAsync(id);
+        eval.State.ShouldBe(SloState.Healthy);
+        eval.Attainment.ShouldBe(1, Tolerance);
+        spy.Received.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_MaxOverTargetInABucket_BreachesWithLabelFromDefinition()
+    {
+        await SeedInstrumentAsync(Depth, MetricKind.Gauge);
+        await SeedPointsAsync(
+            Gauge(Depth, "queue=orders", MetricTier.Fine, At(12, 0), count: 10, sum: 500, min: 10, max: 90),
+            Gauge(Depth, "queue=orders", MetricTier.Fine, At(12, 5), count: 10, sum: 800, min: 40, max: 120),
+            Gauge(Depth, "queue=other", MetricTier.Fine, At(12, 10), count: 10, sum: 99000, min: 9000, max: 9999));
+        var def = GaugeThreshold(100, SloComparison.AtMost, SloGaugeAggregate.Max, 95);
+        def.TagFilter = "queue=orders";
+        var id = await SeedObjectiveAsync(def);
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        // Two observed 5-minute buckets of queue=orders, one with max 120: half the observed time violates.
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(0.5, Tolerance);
+        eval.State.ShouldBe(SloState.Breaching);
+        var evt = spy.Received.ShouldHaveSingleItem().ShouldBeOfType<SloBreachedEvent>();
+        evt.Kind.ShouldBe(SloKind.MetricGaugeThreshold);
+        evt.Metric.ShouldBe($"{Depth} [queue=orders] max <= 100 in 95% of the window");
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_AtLeastOnTheMinimum_BreachesWhenABucketDipsBelow()
+    {
+        await SeedInstrumentAsync("pool.free", MetricKind.Gauge);
+        await SeedPointsAsync(
+            Gauge("pool.free", "-", MetricTier.Fine, At(12, 0), count: 10, sum: 300, min: 20, max: 40),
+            Gauge("pool.free", "-", MetricTier.Fine, At(12, 5), count: 10, sum: 300, min: 2, max: 40));
+        var def = GaugeThreshold(5, SloComparison.AtLeast, SloGaugeAggregate.Min, 95);
+        def.Dimension = "pool.free";
+        var id = await SeedObjectiveAsync(def);
+
+        await RunAsync(new SpyNotifier());
+
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(0.5, Tolerance);
+        eval.State.ShouldBe(SloState.Breaching);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_TwoProcessesInOneBucket_AreAveragedNotSummed()
+    {
+        // Two partial rows for one bucket (two processes, or one before compaction): avg 50 and avg 150 make 100, at
+        // the target, so it complies; summed they would read 200.
+        await SeedInstrumentAsync(Depth, MetricKind.Gauge);
+        await SeedPointsAsync(
+            Gauge(Depth, "-", MetricTier.Fine, At(12, 0), count: 2, sum: 100, min: 40, max: 60, compacted: false),
+            Gauge(Depth, "-", MetricTier.Fine, At(12, 0), count: 2, sum: 300, min: 140, max: 160, compacted: false));
+        var avgId = await SeedObjectiveAsync(GaugeThreshold(100, SloComparison.AtMost, SloGaugeAggregate.Average, 95));
+        var max = GaugeThreshold(100, SloComparison.AtMost, SloGaugeAggregate.Max, 95);
+        max.Name = "max";
+        var maxId = await SeedObjectiveAsync(max);
+
+        await RunAsync(new SpyNotifier());
+
+        (await EvalAsync(avgId)).State.ShouldBe(SloState.Healthy);
+        (await EvalAsync(maxId)).State.ShouldBe(SloState.Breaching);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_WindowAcrossFineAndHourlyTiers_WeighsBucketsByTheTimeTheyCover()
+    {
+        await SeedInstrumentAsync(Depth, MetricKind.Gauge);
+        await SeedPointsAsync(
+            Gauge(Depth, "-", MetricTier.Hourly, At(10, 0), count: 10, sum: 99000, min: 1, max: 9999), // before the window: not read
+            Gauge(Depth, "-", MetricTier.Hourly, At(11, 0), count: 120, sum: 6000, min: 1, max: 99), // avg 50, 28 min in the window
+            Gauge(Depth, "-", MetricTier.Fine, At(12, 0), count: 10, sum: 2000, min: 150, max: 250), // avg 200, 5 min, violates
+            Gauge(Depth, "-", MetricTier.Fine, At(12, 30), count: 4, sum: 80, min: 10, max: 30, compacted: false)); // still filling: 2 min
+        var id = await SeedObjectiveAsync(GaugeThreshold(100, SloComparison.AtMost, SloGaugeAggregate.Average, 80));
+
+        await RunAsync(new SpyNotifier());
+
+        // Observed 28 + 5 + 2 = 35 minutes, 5 of them in violation.
+        var eval = await EvalAsync(id);
+        eval.Attainment.ShouldBe(30.0 / 35, Tolerance);
+        eval.State.ShouldBe(SloState.Healthy);
+        eval.BurnRateShort.ShouldBe(0, Tolerance);
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_NoSamplesInTheWindow_IsNoData_NoAlert()
+    {
+        await SeedInstrumentAsync(Depth, MetricKind.Gauge);
+        await SeedPointsAsync(Gauge(Depth, "-", MetricTier.Hourly, At(9, 0), count: 10, sum: 99000, min: 1, max: 9999));
+        var id = await SeedObjectiveAsync(GaugeThreshold(100, SloComparison.AtMost, SloGaugeAggregate.Average, 95));
+        var spy = new SpyNotifier();
+
+        await RunAsync(spy);
+
+        (await EvalAsync(id)).State.ShouldBe(SloState.NoData);
+        spy.Received.ShouldBeEmpty();
+    }
+
+    [TimedFact]
+    public async Task Evaluate_MetricGaugeThreshold_HistogramInstrument_IsNoDataAndLoggedAtError()
+    {
+        await SeedInstrumentAsync(Duration, MetricKind.Histogram);
+        await SeedPointsAsync(Fine(Duration, "-", At(12, 0), sum: 5, count: 10));
+        var def = GaugeThreshold(1, SloComparison.AtMost, SloGaugeAggregate.Average, 95);
+        def.Dimension = Duration;
+        var id = await SeedObjectiveAsync(def);
+        var logs = new CapturingLoggerProvider();
+
+        await RunAsync(new SpyNotifier(), new FakeTimeProvider(new DateTimeOffset(Now)), LoggerFor(logs));
+
+        (await EvalAsync(id)).State.ShouldBe(SloState.NoData);
+        var error = logs.Logs.Where(x => x.Level == LogLevel.Error).ShouldHaveSingleItem();
+        error.Message.ShouldContain(Duration);
+        error.Message.ShouldContain("Histogram");
+    }
+
     private static DateTime At(int hour, int minute) => new(Now.Year, Now.Month, Now.Day, hour, minute, 0, DateTimeKind.Utc);
 
     private static DateTime Hour(DateTime day, int hour) => new(day.Year, day.Month, day.Day, hour, 0, 0, DateTimeKind.Utc);
@@ -558,6 +856,35 @@ public abstract class MetricSloEvaluatorTestsBase : IAsyncLifetime
 
     private static SloDefinition Threshold(string instrument, double max, string? filter)
         => new() { Name = $"{instrument} under {max}", Kind = SloKind.MetricThreshold, Dimension = instrument, TagFilter = filter, TargetValue = max, WindowSeconds = 3600, Enabled = true };
+
+    private const string Duration = "http.server.request.duration";
+
+    private const string Depth = "queue.depth";
+
+    private static SloDefinition GaugeThreshold(double threshold, SloComparison comparison, SloGaugeAggregate aggregate, int percentile)
+        => new() { Name = $"depth {aggregate} {comparison} {threshold}", Kind = SloKind.MetricGaugeThreshold, Dimension = Depth, TargetValue = threshold, Comparison = comparison, GaugeAggregate = aggregate, Percentile = percentile, WindowSeconds = 3600, Enabled = true };
+
+    private static MetricPoint Gauge(string instrument, string tags, MetricTier tier, DateTime bucket, long count, double sum, double min, double max, bool compacted = true)
+    {
+        var point = Point(instrument, tags, tier, bucket, count, sum, compacted);
+        point.Min = min;
+        point.Max = max;
+
+        return point;
+    }
+
+    private static SloDefinition Latency(double threshold, int percentile)
+        => new() { Name = $"latency p{percentile} under {threshold}", Kind = SloKind.MetricLatency, Dimension = Duration, TargetValue = threshold, Percentile = percentile, WindowSeconds = 3600, Enabled = true };
+
+    // One histogram row: the bounds CSV and its counts (one per bound plus the overflow bucket).
+    private static MetricPoint Histogram(string instrument, string tags, MetricTier tier, DateTime bucket, string bounds, params long[] counts)
+    {
+        var point = Point(instrument, tags, tier, bucket, counts.Sum(), 0, tier != MetricTier.Fine);
+        point.Bounds = bounds;
+        point.Buckets = string.Join(',', counts);
+
+        return point;
+    }
 
     private static MetricPoint Fine(string instrument, string tags, DateTime bucket, double sum, long count = 1, bool compacted = false)
         => Point(instrument, tags, MetricTier.Fine, bucket, count, sum, compacted);

@@ -5,7 +5,24 @@ import axios from 'axios';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
-import { Spread, InstancesTable, fromInstanceView } from './shared';
+import { Spread, InstancesTable } from './shared';
+import { fromInstanceView } from './instanceModel';
+import { withPreviousVersion, type DeployRow } from './deployModel';
+import {
+  checkStateLabel,
+  coverageLabel,
+  describeDeploy,
+  orderChecks,
+  shouldLoadVerdict,
+  verdictClass,
+  verdictLabel,
+  verdictPanel,
+  verdictRefetchMs,
+  type VerdictPanel,
+} from './verdictModel';
+import { errorMessage } from '@/lib/apiError';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { RelativeTime } from '@/components/RelativeTime';
 import { DASHBOARD_LOCALE } from '@/utils/format';
 import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
 import { useLiveInstanceCount } from '@/hooks/useTicking';
@@ -27,6 +44,27 @@ export default function ApplicationDetailPage() {
     queryFn: () => api.getApplicationJobStats(id),
     enabled: !!id,
   });
+
+  // Detected deploys (#325) — first instance of each new version; kept after the instances are gone.
+  const deploysQuery = useQuery({
+    queryKey: ['applications', 'deploys', id] as const,
+    queryFn: () => api.getApplicationDeploys(id),
+    enabled: !!id,
+  });
+
+  const deploys = useMemo(() => withPreviousVersion(deploysQuery.data ?? []), [deploysQuery.data]);
+
+  // Post-deploy verdict of the latest deploy, from the same endpoint a CI step calls. Asked once there is a deploy to
+  // judge (or the deploy history failed to load, so the verdict can still answer); it polls while pending so the panel
+  // settles on its own.
+  const applicationName = detailQuery.data?.name;
+  const verdictQuery = useQuery({
+    queryKey: ['applications', 'verdict', applicationName] as const,
+    queryFn: () => api.getDeployVerdict({ application: applicationName! }),
+    enabled: shouldLoadVerdict(applicationName, { isError: deploysQuery.isError, count: deploys.length }),
+    refetchInterval: (query) => verdictRefetchMs(query.state.data?.verdict),
+  });
+  const verdict = verdictPanel({ data: verdictQuery.data, isError: verdictQuery.isError, error: verdictQuery.error });
 
   const detail = detailQuery.data;
 
@@ -101,7 +139,131 @@ export default function ApplicationDetailPage() {
           <InstancesTable instances={instances} />
         </CardContent>
       </Card>
+
+      {verdict.kind !== 'hidden' && <VerdictCard panel={verdict} />}
+
+      <Card className="mt-4">
+        <CardHeader><CardTitle className="text-base">Deploys</CardTitle></CardHeader>
+        <CardContent className="p-0">
+          {deploysQuery.isError ? (
+            <p role="alert" className="text-sm text-destructive py-4 text-center">
+              Unable to load the deploys: {errorMessage(deploysQuery.error, 'the request failed.')}
+            </p>
+          ) : deploysQuery.isLoading ? (
+            <p className="text-sm text-muted-foreground py-4 text-center">Loading…</p>
+          ) : (
+            <DeploysTable deploys={deploys} />
+          )}
+        </CardContent>
+      </Card>
     </div>
+  );
+}
+
+function DeploysTable({ deploys }: { deploys: DeployRow[] }) {
+  if (deploys.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground py-4 text-center">
+        No deploys recorded. Set <code className="font-mono text-xs">ApplicationVersion</code> to track them.
+      </p>
+    );
+  }
+
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Version</TableHead>
+          <TableHead className="hidden sm:table-cell w-32">Environment</TableHead>
+          <TableHead className="hidden md:table-cell">First instance</TableHead>
+          <TableHead className="w-40">Deployed</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {deploys.map((x) => (
+          <TableRow key={x.id}>
+            <TableCell className="font-mono text-sm">
+              {x.previousVersion && <span className="text-muted-foreground">{x.previousVersion} &rarr; </span>}
+              {x.version}
+            </TableCell>
+            <TableCell className="hidden sm:table-cell text-sm text-muted-foreground">{x.environment ?? '—'}</TableCell>
+            <TableCell className="hidden md:table-cell text-sm text-muted-foreground">{x.instanceName ?? x.instanceId}</TableCell>
+            <TableCell className="text-sm text-muted-foreground" title={new Date(x.firstSeenAt).toLocaleString(DASHBOARD_LOCALE)}>
+              <RelativeTime date={x.firstSeenAt} />
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function VerdictCard({ panel }: { panel: Exclude<VerdictPanel, { kind: 'hidden' }> }) {
+  if (panel.kind !== 'verdict') {
+    return (
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle className="text-base">Latest deploy verdict</CardTitle>
+          {panel.kind === 'noMatch' ? (
+            <p className="text-sm text-muted-foreground">No matching deploy: none of this application's recorded deploys matches.</p>
+          ) : (
+            <p role="alert" className="text-sm text-destructive">Unable to load the verdict: {panel.message}</p>
+          )}
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  const { verdict } = panel;
+  const checks = orderChecks(verdict.checks);
+
+  return (
+    <Card className="mt-4">
+      <CardHeader>
+        <CardTitle className="text-base flex flex-wrap items-center gap-2">
+          Latest deploy verdict
+          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${verdictClass(verdict.verdict)}`}>
+            {verdictLabel(verdict.verdict)}
+          </span>
+          <span className="text-xs font-normal text-muted-foreground">{coverageLabel(verdict)}</span>
+        </CardTitle>
+        {panel.staleError && (
+          <p role="alert" className="text-sm text-destructive">Showing the last verdict; refreshing it failed: {panel.staleError}</p>
+        )}
+        <p className="text-sm text-muted-foreground">
+          <span className="font-mono">{describeDeploy(verdict.deploy)}</span>
+          {' · deployed '}
+          <RelativeTime date={verdict.deploy.firstSeenAt} />
+          {' · '}
+          {verdict.summary}
+        </p>
+      </CardHeader>
+      {checks.length > 0 && (
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Check</TableHead>
+                <TableHead className="w-32">State</TableHead>
+                <TableHead className="hidden md:table-cell">Reason</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {checks.map((x) => (
+                <TableRow key={`${x.source}-${x.id}`}>
+                  <TableCell className="text-sm">
+                    <span className="text-muted-foreground text-xs uppercase mr-2">{x.source === 'tile' ? 'Tile' : 'SLO'}</span>
+                    {x.name}
+                  </TableCell>
+                  <TableCell className="text-sm">{checkStateLabel(x.state)}</TableCell>
+                  <TableCell className="hidden md:table-cell text-sm text-muted-foreground">{x.reason}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      )}
+    </Card>
   );
 }
 

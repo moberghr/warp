@@ -14,7 +14,7 @@ namespace Warp.Core.Services;
 /// as live/stale (servers heartbeat faster on the 3s server <c>Heartbeat</c>, but the same generous grace
 /// still marks a healthy server live, so one window keeps the projection simple).
 /// </summary>
-public class ApplicationQueryService<TContext> : IApplicationQueryService
+public class ApplicationQueryService<TContext> : IApplicationQueryService, IApplicationDeployQueryService
     where TContext : DbContext
 {
     // Cap the per-instance lifecycle timeline so the detail page stays bounded; older rows remain within
@@ -95,6 +95,59 @@ public class ApplicationQueryService<TContext> : IApplicationQueryService
             Instance = instance,
             RecentEvents = recentEvents,
         };
+    }
+
+    public async Task<IReadOnlyList<ApplicationDeployModel>> GetDeploys(string? application, DateTime? since, DateTime? until, CancellationToken ct = default)
+    {
+        var query = _context.Set<ApplicationDeploy>().AsNoTracking();
+
+        if (application is not null)
+        {
+            query = query.Where(x => x.Application == application);
+        }
+
+        if (since is { } lower)
+        {
+            query = query.Where(x => x.FirstSeenAt >= lower);
+        }
+
+        if (until is { } upper)
+        {
+            query = query.Where(x => x.FirstSeenAt < upper);
+        }
+
+        var rows = await query
+            .OrderByDescending(x => x.FirstSeenAt)
+            .ThenBy(x => x.Application)
+            .Take(IApplicationDeployQueryService.MaxDeploys)
+            .Select(x =>
+                new
+                {
+                    x.Id,
+                    x.Application,
+                    x.Version,
+                    x.Environment,
+                    x.FirstSeenAt,
+                    x.InstanceId,
+                    x.InstanceName,
+                })
+            .ToListAsync(ct);
+
+        // The empty-string environment is the storage sentinel for "none" (it keeps the unique key NULL-free).
+        return
+        [
+            .. rows.Select(x =>
+                new ApplicationDeployModel
+                {
+                    Id = x.Id,
+                    Application = x.Application,
+                    Version = x.Version,
+                    Environment = x.Environment.Length == 0 ? null : x.Environment,
+                    FirstSeenAt = x.FirstSeenAt,
+                    InstanceId = x.InstanceId,
+                    InstanceName = x.InstanceName,
+                }),
+        ];
     }
 
     // Reads Server rows (with a non-null Application — the feature is opt-in) and ApplicationInstance rows

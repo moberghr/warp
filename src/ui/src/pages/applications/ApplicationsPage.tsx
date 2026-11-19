@@ -6,7 +6,8 @@ import { LoadingState, ErrorState } from '@/components/PageState';
 import * as api from '@/api';
 import { encodeAppId } from '@/types/applications';
 import type { ApplicationSummaryModel } from '@/types/applications';
-import { InstancesTable, Spread, formatCpu, formatMem, fromInstanceView, fromServer } from './shared';
+import { InstancesTable, Spread } from './shared';
+import { formatCpu, formatMem, fromInstanceView, fromServer } from './instanceModel';
 import { PageHeading } from '@/components/PageHeading';
 import { INSTANCE_ROSTER_POLL_MS } from '@/lib/queryClient';
 

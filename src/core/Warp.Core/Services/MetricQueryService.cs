@@ -25,11 +25,18 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
 {
     private readonly TContext _context;
     private readonly IOptions<WarpConfiguration> _options;
+    private readonly TimeProvider _timeProvider;
 
     public MetricQueryService(TContext context, IOptions<WarpConfiguration> options)
+        : this(context, options, TimeProvider.System)
+    {
+    }
+
+    public MetricQueryService(TContext context, IOptions<WarpConfiguration> options, TimeProvider timeProvider)
     {
         _context = context;
         _options = options;
+        _timeProvider = timeProvider;
     }
 
     public async Task<MetricInstrumentModel[]> ListInstruments(CancellationToken ct)
@@ -136,8 +143,10 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
             return null;
         }
 
-        var primary = await ReadLinesAsync(info.Name, info.Kind, from, to, query, filter, null, null, TimeSpan.Zero, ct);
+        var cutoff = CompleteCutoff(MetricSeriesMath.TierForLength(to - from));
+        var primary = await ReadLinesAsync(info.Name, info.Kind, from, to, query, filter, null, null, TimeSpan.Zero, cutoff, ct);
         var lines = new List<MetricSeriesLine>(primary.Lines);
+        var headlines = new List<MetricHeadlineModel> { primary.Headline };
 
         // An overlay keeps the primary's breakdown values (the rest folded into "(rest)") so its lines pair
         // with the current ones instead of competing for their own top 10.
@@ -151,8 +160,9 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
         foreach (var offset in query.Compare.Distinct().Order())
         {
             var span = MetricCompareOffsets.Span(offset);
-            var shifted = await ReadLinesAsync(info.Name, info.Kind, from - span, to - span, query, filter, keep, MetricCompareOffsets.Label(offset), span, ct);
+            var shifted = await ReadLinesAsync(info.Name, info.Kind, from - span, to - span, query, filter, keep, MetricCompareOffsets.Label(offset), span, cutoff, ct);
             lines.AddRange(shifted.Lines);
+            headlines.Add(shifted.Headline);
         }
 
         return new MetricSeriesModel
@@ -163,7 +173,9 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
             From = from,
             To = to,
             Resolution = primary.Tier,
+            CompleteUntil = new DateTime(Math.Clamp(cutoff.Ticks, from.Ticks, to.Ticks), DateTimeKind.Utc),
             Series = lines,
+            Headlines = headlines,
         };
     }
 
@@ -192,6 +204,7 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
                         BucketStart = x.BucketStart,
                         Tags = x.Tags,
                         Bounds = x.Bounds,
+                        Version = x.Version,
                         Count = x.Count,
                         Sum = x.Sum,
                         Min = x.Min,
@@ -200,7 +213,7 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
                     });
         }
 
-        return MetricPointQueries.Summed(points, byTags: read != MetricRead.Total);
+        return MetricPointQueries.Summed(points, byTags: read != MetricRead.Total, byVersion: read != MetricRead.Total);
     }
 
     // The cheapest read that answers the query: bucket CSVs only for a histogram percentile, per-series rows only when
@@ -217,7 +230,17 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
 
     private int FineMinutes => Math.Max(1, _options.Value.FineResolutionMinutes);
 
-    private async Task<(MetricTier Tier, List<MetricSeriesLine> Lines)> ReadLinesAsync(
+    // The start of the first display bucket that is still filling. A bucket is complete once its end, plus one flush
+    // interval for the processes that have not written their last measurements yet, has passed: so the bucket holding
+    // (now - flush interval) and everything after it are incomplete, and every bucket before it is complete.
+    private DateTime CompleteCutoff(MetricTier tier)
+    {
+        var flush = _options.Value.MetricFlushInterval > TimeSpan.Zero ? _options.Value.MetricFlushInterval : TimeSpan.Zero;
+
+        return MetricTiers.BucketStart(tier, _timeProvider.GetUtcNow().UtcDateTime - flush, FineMinutes);
+    }
+
+    private async Task<(MetricTier Tier, List<MetricSeriesLine> Lines, MetricHeadlineModel Headline)> ReadLinesAsync(
         string instrument,
         MetricKind kind,
         DateTime from,
@@ -227,6 +250,7 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
         HashSet<string>? keep,
         string? compare,
         TimeSpan shift,
+        DateTime cutoff,
         CancellationToken ct)
     {
         // The display resolution follows the range length; the read covers every overlapping tier and re-bins.
@@ -234,17 +258,24 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
         var fineMinutes = FineMinutes;
         var rows = await PointRows(instrument, from, to, query.Application, ReadFor(kind, query)).ToListAsync(ct);
 
-        var tagCache = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+        var tagCache = new Dictionary<(string Tags, string? Version), Dictionary<string, string>>();
         var boundsCache = new Dictionary<string, double[]?>(StringComparer.Ordinal);
         var byValue = new Dictionary<string, BucketMap>(StringComparer.Ordinal);
         var corrupt = 0;
 
         foreach (var row in rows)
         {
-            if (!tagCache.TryGetValue(row.Tags, out var tags))
+            if (!tagCache.TryGetValue((row.Tags, row.Version), out var tags))
             {
+                // The version is a pseudo-tag, so the one filter matcher and the one breakdown path serve it too. A row
+                // without one leaves it absent, which both read as {none}, exactly like a missing tag.
                 tags = MetricFilter.ParseCanonicalTags(row.Tags);
-                tagCache[row.Tags] = tags;
+                if (row.Version is not null)
+                {
+                    tags[MetricSeriesQuery.VersionKey] = row.Version;
+                }
+
+                tagCache[(row.Tags, row.Version)] = tags;
             }
 
             if (!filter.Matches(tags))
@@ -285,9 +316,36 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
         }
 
         var grouped = query.Breakdown is null ? [.. byValue] : GroupRest(byValue, kind, keep);
-        var lines = grouped.ConvertAll(x => BuildLine(x.Key, x.Value, kind, query.Percentile, compare, tier, shift));
+        var lines = grouped.ConvertAll(x => BuildLine(x.Key, x.Value, kind, query.Percentile, compare, tier, shift, cutoff, fineMinutes));
 
-        return (tier, lines);
+        return (tier, lines, Headline(byValue.Values, kind, compare, shift, cutoff));
+    }
+
+    // Every series of the range (before the top 10 split, so (rest) counts), complete buckets only: a bucket counts when
+    // it starts before the cutoff once shifted onto the current range, so an overlay drops the buckets aligned with the
+    // current range's still-filling one rather than comparing a full bucket against a partial one.
+    private static MetricHeadlineModel Headline(IEnumerable<BucketMap> series, MetricKind kind, string? compare, TimeSpan shift, DateTime cutoff)
+    {
+        long count = 0;
+        double sum = 0;
+        foreach (var buckets in series)
+        {
+            foreach (var (bucket, accumulator) in buckets)
+            {
+                if (bucket + shift < cutoff)
+                {
+                    count += accumulator.Count;
+                    sum += accumulator.Sum;
+                }
+            }
+        }
+
+        return new MetricHeadlineModel
+        {
+            Compare = compare,
+            Value = count > 0 ? HeadlineValue(kind, count, sum) : null,
+            Count = count,
+        };
     }
 
     // Ranking: the top 10 breakdown values by the absolute headline value over the range stay, ties broken by
@@ -342,7 +400,9 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
         int? percentile,
         string? compare,
         MetricTier tier,
-        TimeSpan shift)
+        TimeSpan shift,
+        DateTime cutoff,
+        int fineMinutes)
     {
         var tracksExtremes = kind is MetricKind.Histogram or MetricKind.Gauge;
         var points = new List<MetricPointModel>(buckets.Count);
@@ -357,6 +417,8 @@ public sealed class MetricQueryService<TContext> : IMetricQueryService
                 Min = tracksExtremes ? accumulator.Min : null,
                 Max = tracksExtremes ? accumulator.Max : null,
                 Percentile = kind == MetricKind.Histogram && percentile is not null ? accumulator.Percentile(percentile.Value) : null,
+                Incomplete = compare is null && bucket >= cutoff,
+                BucketSeconds = MetricSeriesMath.BucketSeconds((MetricTier)Math.Max((int)tier, (int)accumulator.Coarsest), fineMinutes),
             });
         }
 
@@ -426,6 +488,9 @@ internal sealed class MetricPointRow
 
     public string? Bounds { get; init; }
 
+    /// <summary>The application version of the rows summed here; null when the writer did not opt into it, or the read did not group by it.</summary>
+    public string? Version { get; init; }
+
     public long Count { get; init; }
 
     public double Sum { get; init; }
@@ -458,6 +523,14 @@ internal static class MetricSeriesMath
 
         return length <= TimeSpan.FromDays(HourlyRangeDays) ? MetricTier.Hourly : MetricTier.Daily;
     }
+
+    public static int BucketSeconds(MetricTier tier, int fineMinutes) => tier switch
+    {
+        MetricTier.Fine => fineMinutes * 60,
+        MetricTier.Hourly => 3600,
+        MetricTier.Daily => 86400,
+        _ => throw new ArgumentOutOfRangeException(nameof(tier), tier, "Unknown metric tier."),
+    };
 
     public static DateTime AsUtc(DateTime value) => value.Kind == DateTimeKind.Local
         ? value.ToUniversalTime()

@@ -194,11 +194,18 @@ public static class ServiceConfiguration
             x.GetRequiredService<TimeProvider>(),
             x.GetRequiredService<IOptions<WarpConfiguration>>()));
 
+        // Deploy history (#325) on its own interface: a host that registered its own IApplicationQueryService before
+        // AddWarp (the TryAdd seam) keeps compiling, and still gets Warp's DB-backed deploy reads here.
+        services.TryAddScoped<IApplicationDeployQueryService>(x => new ApplicationQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>()));
+
         // Adapter call-scope primitive is always available (§2.15 telemetry is unconditional): every
         // BeginCall emits its Activity + meters, and manual scopes (e.g. the webhook executor) can record
         // regardless of AddAdapters(). AddAdapters() runs earlier in the AddWarp lambda and TryAdds the real
         // DbAdapterCallRecorder + flusher, so it wins; absent it, the null recorder discards rows while
-        // telemetry still flows. The dashboard "adapters" flag keys on DbAdapterCallRecorder, not this.
+        // telemetry still flows. The dashboard "adapters" flag keys on IAdapterRecordingMarker, not this.
         services.TryAddSingleton<AdapterRegistry>();
         services.TryAddSingleton<IAdapterCallRecorder, NullAdapterCallRecorder>();
         services.TryAddSingleton<IWarpAdapters, WarpAdapters>();
@@ -239,7 +246,27 @@ public static class ServiceConfiguration
         // AddMetrics() gates only the collector, the flusher and the addons flag.
         services.TryAddScoped<IMetricQueryService>(x => new MetricQueryService<TContext>(
             x.GetRequiredService<TContext>(),
-            x.GetRequiredService<IOptions<WarpConfiguration>>()));
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
+            x.GetRequiredService<TimeProvider>()));
+
+        // Metrics health board (#326) read/command. Registered in AddWarp (not AddMetrics / AddMetricBoard) so a
+        // dashboard-only host serves the board without the collector; the metric_board_tile table is always in the
+        // schema (§2.11), AddMetricBoard() only seeds tiles from code.
+        services.TryAddScoped<IMetricBoardQueryService>(x => new MetricBoardQueryService<TContext>(
+            x.GetRequiredService<TContext>(),
+            x.GetRequiredService<IOptions<WarpConfiguration>>(),
+            x.GetRequiredService<TimeProvider>(),
+            x.GetRequiredService<ISloQueryService>()));
+        services.TryAddScoped<IMetricBoardCommandService, MetricBoardCommandService<TContext>>();
+
+        // Post-deploy verdict: composes the deploy history, the board and the SLOs above (no query of its own). Registered in
+        // AddWarp beside them so a dashboard-only host (or a CI-facing one) serves /api/applications/verdict.
+        services.TryAddScoped<IDeployVerdictService, DeployVerdictService>();
+
+        // Metric annotations (#333): known-issue notes on instruments and SLOs. Registered in AddWarp for the same reason
+        // as the board: a dashboard-only host edits and shows them; the metric_annotation table is always in the schema.
+        services.TryAddScoped<IMetricAnnotationQueryService, MetricAnnotationQueryService<TContext>>();
+        services.TryAddScoped<IMetricAnnotationCommandService, MetricAnnotationCommandService<TContext>>();
 
         // Webhooks dashboard read + redeliver command services. Registered in AddWarp (not AddWebhooks) so
         // dashboard-only / publisher-only processes that never call AddWebhooks() can still serve the
@@ -448,12 +475,16 @@ public static class ServiceConfiguration
         AddClientEventLogEntity(modelBuilder, schema);
         AddApplicationInstanceEntity(modelBuilder, schema);
         AddApplicationInstanceLogEntity(modelBuilder, schema);
+        AddApplicationDeployEntity(modelBuilder, schema);
         AddErrorGroupEntity(modelBuilder, schema);
         AddErrorOccurrenceEntity(modelBuilder, schema);
         AddSloDefinitionEntity(modelBuilder, schema);
         AddSloEvaluationEntity(modelBuilder, schema);
         AddMetricPointEntity(modelBuilder, schema);
         AddMetricInstrumentEntity(modelBuilder, schema);
+        AddMetricBoardEntity(modelBuilder, schema);
+        AddMetricBoardTileEntity(modelBuilder, schema);
+        AddMetricAnnotationEntity(modelBuilder, schema);
     }
 
     private static void AddJobEntity(ModelBuilder modelBuilder, string? schema)
@@ -1201,6 +1232,8 @@ public static class ServiceConfiguration
         slo.Property(p => p.GoodValues).HasMaxLength(512);
         slo.Property(p => p.BadValues).HasMaxLength(512);
         slo.Property(p => p.BaselineDays);
+        slo.Property(p => p.Comparison).HasConversion<int>();
+        slo.Property(p => p.GaugeAggregate).HasConversion<int>();
         slo.Property(p => p.CreatedAt);
         slo.Property(p => p.UpdatedAt);
 
@@ -1242,6 +1275,7 @@ public static class ServiceConfiguration
 
         point.Property(p => p.Instrument).HasMaxLength(128);
         point.Property(p => p.Application).HasMaxLength(128);
+        point.Property(p => p.Version).HasMaxLength(128);
         point.Property(p => p.Tags).HasMaxLength(512);
         point.Property(p => p.Tier).HasConversion<int>();
         point.Property(p => p.BucketStart);
@@ -1282,6 +1316,94 @@ public static class ServiceConfiguration
         instrument.Property(p => p.CollapsedTags).HasMaxLength(256);
 
         instrument.Metadata.SetSchema(schema);
+    }
+
+    public static void AddMetricBoardTileEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var tile = modelBuilder.Entity<MetricBoardTile>();
+
+        tile.Property(p => p.Id);
+        tile.HasKey(p => p.Id);
+
+        tile.Property(p => p.BoardId);
+        tile.Property(p => p.Name).HasMaxLength(200);
+        tile.Property(p => p.Position);
+        tile.Property(p => p.Instrument).HasMaxLength(128);
+        tile.Property(p => p.Application).HasMaxLength(200);
+        tile.Property(p => p.TagFilter).HasMaxLength(512);
+        tile.Property(p => p.Kind).HasConversion<int>();
+        tile.Property(p => p.ChartQuery).HasMaxLength(2000);
+        tile.Property(p => p.SloDefinitionId);
+        tile.Property(p => p.RatioTag).HasMaxLength(64);
+        tile.Property(p => p.GoodValues).HasMaxLength(512);
+        tile.Property(p => p.BadValues).HasMaxLength(512);
+        tile.Property(p => p.GaugeAggregate).HasConversion<int>();
+        tile.Property(p => p.StatusRule).HasConversion<int>();
+        tile.Property(p => p.Comparison).HasConversion<int>();
+        tile.Property(p => p.Threshold);
+        tile.Property(p => p.BaselineDays);
+        tile.Property(p => p.MaxDeviation);
+        tile.Property(p => p.DeviationDirection).HasConversion<int>();
+        tile.Property(p => p.CreatedAt);
+        tile.Property(p => p.UpdatedAt);
+
+        // A board is a handful of rows read whole, in board order. Names are NOT unique: only the config seeds are kept
+        // apart (MetricBoardOptions rejects a repeat), the dashboard may create a tile under any name, and the seeder skips
+        // a seed whose name a stored tile already has. No unique index, as for SloDefinition (NULL-uniqueness differs
+        // across providers). A board read filters by board first, then orders; the Default board's tiles have a null
+        // BoardId, which both providers index.
+        tile.HasIndex(p => new { p.BoardId, p.Position, p.Id });
+
+        tile.Metadata.SetSchema(schema);
+    }
+
+    public static void AddMetricBoardEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var board = modelBuilder.Entity<MetricBoard>();
+
+        board.Property(p => p.Id);
+        board.HasKey(p => p.Id);
+
+        board.Property(p => p.Name).HasMaxLength(200);
+        board.Property(p => p.Description).HasMaxLength(500);
+        board.Property(p => p.Position);
+        board.Property(p => p.Application).HasMaxLength(200);
+        board.Property(p => p.IsDefault);
+        board.Property(p => p.SeedKey).HasMaxLength(200);
+        board.Property(p => p.CreatedAt);
+        board.Property(p => p.UpdatedAt);
+        board.Property(p => p.CreatedBy).HasMaxLength(200);
+
+        // At most MetricBoardValidation.MaxBoards rows, always read whole. No unique index on Name: uniqueness ignores
+        // case, which a collation decides differently per provider, so the command service and the seeder enforce it in
+        // memory under the warp:metric-board lock (the SLO seeder's rule).
+        board.Metadata.SetSchema(schema);
+    }
+
+    public static void AddMetricAnnotationEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var annotation = modelBuilder.Entity<MetricAnnotation>();
+
+        annotation.Property(p => p.Id);
+        annotation.HasKey(p => p.Id);
+
+        annotation.Property(p => p.Target).HasConversion<int>();
+        annotation.Property(p => p.Instrument).HasMaxLength(128);
+        annotation.Property(p => p.TagFilter).HasMaxLength(512);
+        annotation.Property(p => p.SloDefinitionId);
+        annotation.Property(p => p.Note).HasMaxLength(500);
+        annotation.Property(p => p.Author).HasMaxLength(200);
+        annotation.Property(p => p.StartsAt);
+        annotation.Property(p => p.EndsAt);
+        annotation.Property(p => p.AcknowledgedNoise);
+        annotation.Property(p => p.CreatedAt);
+        annotation.Property(p => p.UpdatedAt);
+
+        // Reads are per target and overlap a window: a chart / the board reads by instrument, the SLO page by objective.
+        annotation.HasIndex(p => new { p.Instrument, p.StartsAt });
+        annotation.HasIndex(p => p.SloDefinitionId);
+
+        annotation.Metadata.SetSchema(schema);
     }
 
     public static void AddWebhookDeliveryEntity(ModelBuilder modelBuilder, string? schema)
@@ -1384,6 +1506,36 @@ public static class ServiceConfiguration
         log.HasIndex(p => p.ExpireAt);
 
         log.Metadata.SetSchema(schema);
+    }
+
+    public static void AddApplicationDeployEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var deploy = modelBuilder.Entity<ApplicationDeploy>();
+
+        deploy.Property(p => p.Id);
+        deploy.HasKey(p => p.Id);
+
+        deploy.Property(p => p.Application).HasMaxLength(200).IsRequired();
+        deploy.Property(p => p.Version).HasMaxLength(200).IsRequired();
+        deploy.Property(p => p.Environment).HasMaxLength(200).IsRequired();
+        deploy.Property(p => p.FirstSeenAt);
+
+        // InstanceId is a soft reference (Server.Id OR ApplicationInstance.Id) — no FK, the instance is swept
+        // long before its deploy record.
+        deploy.Property(p => p.InstanceId);
+        deploy.Property(p => p.InstanceName).HasMaxLength(256);
+
+        // One deploy per (application, environment, version): the race between two instances of a new version
+        // registering at once is settled here, and the loser treats its duplicate-key error as "already recorded".
+        deploy.HasIndex(p => new { p.Application, p.Environment, p.Version }).IsUnique();
+
+        // Deploy history for one application within a time range, newest first.
+        deploy.HasIndex(p => new { p.Application, p.FirstSeenAt });
+
+        // Deploy history across applications, and the retention sweep.
+        deploy.HasIndex(p => p.FirstSeenAt);
+
+        deploy.Metadata.SetSchema(schema);
     }
 
     public static void AddBackgroundServiceLogEntity(ModelBuilder modelBuilder, string? schema)

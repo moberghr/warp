@@ -82,6 +82,14 @@ public static class MetricCompareOffsets
 /// <summary>One series read: the range, an optional application, one breakdown tag, tag filters, overlays and a percentile.</summary>
 public sealed class MetricSeriesQuery
 {
+    /// <summary>
+    /// The reserved key that addresses the application version (<c>AddMetrics(m =&gt; m.ByVersion())</c>) as if it were a
+    /// tag: <see cref="Breakdown"/> = <c>{version}</c> splits by version and a <see cref="Filters"/> entry
+    /// <c>{version}</c> → <c>2.4.*</c> filters by it. Rows written without a version read as <c>{none}</c>. Braced like
+    /// Warp's other reserved tokens (<c>{none}</c>, <c>{other}</c>), so it cannot clash with an ordinary tag key.
+    /// </summary>
+    public const string VersionKey = "{version}";
+
     /// <summary>Inclusive start of the range (UTC).</summary>
     public DateTime From { get; init; }
 
@@ -128,6 +136,20 @@ public sealed class MetricPointModel
 
     /// <summary>Histograms only, when a percentile was requested: the upper bound of the bucket the percentile falls in.</summary>
     public double? Percentile { get; init; }
+
+    /// <summary>
+    /// True on the current range's newest bucket while it is still filling: it ends after now, or within one
+    /// <see cref="WarpConfiguration.MetricFlushInterval"/> of now (processes flush once per interval, so its last
+    /// measurements may not be written yet). Its value reads low and <see cref="MetricSeriesModel.Headlines"/> leave it
+    /// out. Always false on a compare overlay, whose buckets are in the past.
+    /// </summary>
+    public bool Incomplete { get; init; }
+
+    /// <summary>
+    /// The length of this point's bucket in seconds: the display bucket, or the stored bucket of a coarser row that kept
+    /// its own (an hourly row in a fine read is an hour). Divide by it for a rate (per minute / per second).
+    /// </summary>
+    public int BucketSeconds { get; init; }
 }
 
 /// <summary>One line of a series response: the total, one breakdown value, <c>(rest)</c>, or an overlay of one of those.</summary>
@@ -161,5 +183,35 @@ public sealed class MetricSeriesModel
     /// <summary>The resolution of the current range (overlays carry their own on each line).</summary>
     public MetricTier Resolution { get; init; }
 
+    /// <summary>
+    /// Where the complete buckets end: the start of the current range's first still-filling bucket
+    /// (<see cref="MetricPointModel.Incomplete"/>), clamped to [<see cref="From"/>, <see cref="To"/>]. The headlines cover
+    /// [<see cref="From"/>, <see cref="CompleteUntil"/>), and each overlay the same span shifted back.
+    /// </summary>
+    public DateTime CompleteUntil { get; init; }
+
     public IReadOnlyList<MetricSeriesLine> Series { get; init; } = [];
+
+    /// <summary>
+    /// One headline per range: the current range first (<see cref="MetricHeadlineModel.Compare"/> null), then each
+    /// overlay. Every line of the range is included, <c>(rest)</c> too, but only the complete buckets.
+    /// </summary>
+    public IReadOnlyList<MetricHeadlineModel> Headlines { get; init; } = [];
+}
+
+/// <summary>
+/// The headline value of one range over its complete buckets only: the summed sum (counter, up-down counter), the summed
+/// measurement count (histogram) or the average (gauge). The still-filling bucket is left out, never prorated, and an
+/// overlay leaves out the buckets aligned with it, so the current range and its overlays cover the same span.
+/// </summary>
+public sealed class MetricHeadlineModel
+{
+    /// <summary>The overlay offset label (<c>1d</c> / <c>7d</c>); null for the current range.</summary>
+    public string? Compare { get; init; }
+
+    /// <summary>Null when the complete buckets hold no measurement.</summary>
+    public double? Value { get; init; }
+
+    /// <summary>The measurements behind <see cref="Value"/>.</summary>
+    public long Count { get; init; }
 }

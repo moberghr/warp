@@ -5,8 +5,10 @@ using Moq;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Data.Queries;
+using Warp.Core.Enums;
 using Warp.Core.Metrics;
 using Warp.Core.Services;
+using Warp.Core.Slo;
 using Warp.Worker;
 using Warp.Worker.Services;
 
@@ -211,6 +213,202 @@ public class ServiceRegistrationTopologyTests
     }
 
     [TimedFact]
+    public void AddWarp_Only_ResolvesTheMetricBoardServicesWithoutAnyHostedSeeder()
+    {
+        // A dashboard-only host serves the health board (#326) with no AddMetrics and no AddMetricBoard.
+        var services = NewServices();
+        services.AddWarp<TestContext>(_ => { });
+
+        using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = sp.CreateScope();
+
+        scope.ServiceProvider.GetService<IMetricBoardQueryService>().ShouldNotBeNull();
+        scope.ServiceProvider.GetService<IMetricBoardCommandService>().ShouldNotBeNull();
+        services.ShouldNotContain(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>));
+    }
+
+    [TimedFact]
+    public void AddWarp_Only_ResolvesTheDeployVerdictService()
+    {
+        // A dashboard-only (or CI-facing) host serves the post-deploy verdict with no server, no AddMetrics and no AddSlo.
+        var services = NewServices();
+        services.AddWarp<TestContext>(_ => { });
+
+        using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = sp.CreateScope();
+
+        scope.ServiceProvider.GetService<IDeployVerdictService>().ShouldBeOfType<DeployVerdictService>();
+        services.Count(x => x.ServiceType == typeof(IDeployVerdictService)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public void AddWarp_Only_ResolvesTheMetricAnnotationServices()
+    {
+        // A dashboard-only host edits and shows annotations (#333) with no AddMetrics and no server.
+        var services = NewServices();
+        services.AddWarp<TestContext>(_ => { });
+
+        using var sp = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        using var scope = sp.CreateScope();
+
+        scope.ServiceProvider.GetService<IMetricAnnotationQueryService>().ShouldNotBeNull();
+        scope.ServiceProvider.GetService<IMetricAnnotationCommandService>().ShouldNotBeNull();
+        services.Count(x => x.ServiceType == typeof(IMetricAnnotationCommandService)).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public void AddMetricBoard_CalledTwice_RegistersOneSeederAndOneMergedBoard()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddMetricBoard(y => y.Value("A", "a"));
+            x.AddMetricBoard(y => y.Value("B", "b"));
+        });
+
+        services.Count(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>)).ShouldBe(1);
+        services.Count(x => x.ServiceType == typeof(IMetricsMarker)).ShouldBe(0);
+        var seeds = services
+            .Where(x => x.ServiceType == typeof(MetricBoardSeeds))
+            .Select(x => x.ImplementationInstance)
+            .OfType<MetricBoardSeeds>()
+            .ShouldHaveSingleItem();
+        var board = seeds.Boards.ShouldHaveSingleItem();
+        board.Name.ShouldBeNull();
+        board.Tiles.Seeded.Select(x => x.Name).ShouldBe(["A", "B"]);
+    }
+
+    [TimedFact]
+    public void AddSlo_AfterAddMetricBoard_StartsTheSloSeederBeforeTheBoardSeeder()
+    {
+        // A board's SLO tile resolves its objective at seed time: objectives are seeded first, whatever the call order.
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddMetricBoard(y => y.Slo("Checkout success"));
+            x.AddSlo(y => y.AddObjective(SloKind.SuccessRate, "*", 0.99, name: "Checkout success"));
+        });
+
+        SeederOrder(services).ShouldBe([typeof(SloSeeder<TestContext>), typeof(MetricBoardSeeder<TestContext>)]);
+    }
+
+    [TimedFact]
+    public void AddSlo_BeforeAddMetricBoard_StartsTheSloSeederBeforeTheBoardSeeder()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddSlo(y => y.AddObjective(SloKind.SuccessRate, "*", 0.99, name: "Checkout success"));
+            x.AddMetricBoard(y => y.Slo("Checkout success"));
+        });
+
+        SeederOrder(services).ShouldBe([typeof(SloSeeder<TestContext>), typeof(MetricBoardSeeder<TestContext>)]);
+    }
+
+    [TimedFact]
+    public void AddMetricBoard_NamedBoards_MergeByNameIgnoringCaseAndDefaultIsTheUnnamedBoard()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddMetricBoard("Checkout", y => y.Value("A", "a"));
+            x.AddMetricBoard("checkout", y => y.Value("B", "b"));
+            x.AddMetricBoard("Payments", _ => { });
+            x.AddMetricBoard("default", y => y.Value("C", "c"));
+            x.AddMetricBoard(y => y.Value("D", "d"));
+        });
+
+        services.Count(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>)).ShouldBe(1);
+        var seeds = services
+            .Where(x => x.ServiceType == typeof(MetricBoardSeeds))
+            .Select(x => x.ImplementationInstance)
+            .OfType<MetricBoardSeeds>()
+            .ShouldHaveSingleItem();
+        seeds.Boards.Select(x => x.Name).ShouldBe(["Checkout", "Payments", null]);
+        seeds.Boards[0].Tiles.Seeded.Select(x => x.Name).ShouldBe(["A", "B"]);
+        seeds.Boards[1].Tiles.Seeded.ShouldBeEmpty();
+        seeds.Boards[2].Tiles.Seeded.Select(x => x.Name).ShouldBe(["C", "D"]);
+    }
+
+    [TimedFact]
+    public void AddMetricBoard_TheSameTileNameOnTwoBoards_IsAllowed()
+    {
+        var services = NewServices();
+
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddMetricBoard("Checkout", y => y.Value("Volume", "a"));
+            x.AddMetricBoard("Payments", y => y.Value("Volume", "a"));
+        });
+
+        services.ShouldContain(x => x.ServiceType == typeof(MetricBoardSeeds));
+    }
+
+    [TimedTheory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AddMetricBoard_BlankName_Throws(string name)
+    {
+        var services = NewServices();
+
+        Should.Throw<ArgumentException>(() => services.AddWarp<TestContext>(x => x.AddMetricBoard(name, y => y.Value("A", "a"))));
+    }
+
+    [TimedFact]
+    public void AddSlo_CalledTwice_RegistersOneSeederAndOneMergedSetOfObjectives()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x =>
+        {
+            x.AddSlo(y => y.AddObjective(SloKind.SuccessRate, "SendEmail", 0.99));
+            x.AddSlo();
+            x.AddSlo(y => y.AddMetricThreshold("5xx", "http.server.request.duration", 0));
+        });
+
+        services.Count(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(SloSeeder<TestContext>)).ShouldBe(1);
+        services.Count(x => x.ServiceType == typeof(ISloMarker)).ShouldBe(1);
+        var options = services
+            .Where(x => x.ServiceType == typeof(SloOptions))
+            .Select(x => x.ImplementationInstance)
+            .OfType<SloOptions>()
+            .ShouldHaveSingleItem();
+        options.Seeded.Select(x => x.Name).ShouldBe(["SuccessRate SendEmail", "5xx"]);
+    }
+
+    [TimedFact]
+    public void AddSlo_DuplicateMetricNameAcrossTwoCalls_Throws()
+    {
+        // The duplicate-name check spans the merged set: a repeat in a second AddSlo would otherwise seed only one.
+        var services = NewServices();
+
+        Should.Throw<ArgumentException>(() => services.AddWarp<TestContext>(x =>
+        {
+            x.AddSlo(y => y.AddMetricThreshold("5xx", "http.server.request.duration", 0));
+            x.AddSlo(y => y.AddMetricThreshold("5XX", "http.server.duration", 0));
+        }));
+    }
+
+    [TimedFact]
+    public void AddSlo_NoObjectives_RegistersTheMarkerButNoSeeder()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x => x.AddSlo());
+
+        services.Count(x => x.ServiceType == typeof(ISloMarker)).ShouldBe(1);
+        services.ShouldNotContain(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(SloSeeder<TestContext>));
+        services.ShouldNotContain(x => x.ServiceType == typeof(SloOptions));
+    }
+
+    [TimedFact]
+    public void AddMetricBoard_NoTiles_RegistersNoSeeder()
+    {
+        var services = NewServices();
+        services.AddWarp<TestContext>(x => x.AddMetricBoard(_ => { }));
+
+        services.ShouldNotContain(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(MetricBoardSeeder<TestContext>));
+    }
+
+    [TimedFact]
     public void AddMetrics_CollectorHost_IsRegisteredBeforeTheFlusher()
     {
         // Hosted services stop in reverse registration order: the flusher must stop first, so its final drain still
@@ -333,6 +531,16 @@ public class ServiceRegistrationTopologyTests
                 .Select(x => x.GetType()),
         ];
     }
+
+    // The seeders in hosted-service registration order, which is the order the host starts them in.
+    private static List<Type?> SeederOrder(IServiceCollection services)
+        =>
+        [
+            .. services
+                .Where(x => x.ServiceType == typeof(IHostedService))
+                .Select(x => x.ImplementationType)
+                .Where(x => x == typeof(SloSeeder<TestContext>) || x == typeof(MetricBoardSeeder<TestContext>)),
+        ];
 
     private sealed class InMemoryServerContextConfigurator : IWarpServerContextConfigurator
     {

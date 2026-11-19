@@ -79,8 +79,8 @@ public sealed class AuthMetadataTests
         v1.ShouldNotBeNull();
         v2.ShouldNotBeNull();
 
-        v1.Metadata.GetMetadata<Microsoft.AspNetCore.Routing.EndpointNameMetadata>()?.EndpointName.ShouldBe("MultiV1");
-        v2.Metadata.GetMetadata<Microsoft.AspNetCore.Routing.EndpointNameMetadata>()?.EndpointName.ShouldBe("MultiV2");
+        v1.Metadata.GetMetadata<Microsoft.AspNetCore.Routing.EndpointNameMetadata>().ShouldNotBeNull().EndpointName.ShouldBe("MultiV1");
+        v2.Metadata.GetMetadata<Microsoft.AspNetCore.Routing.EndpointNameMetadata>().ShouldNotBeNull().EndpointName.ShouldBe("MultiV2");
     }
 
     [TimedFact]

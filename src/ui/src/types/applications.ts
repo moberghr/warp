@@ -71,6 +71,76 @@ export interface ApplicationInstanceDetailModel {
   recentEvents: ApplicationInstanceLogModel[];
 }
 
+/**
+ * One detected deploy (#325): the first instance of an application to register with a version not seen
+ * before for that application + environment. Mirrors Warp.Core/Models/ApplicationDeployModel.cs.
+ */
+export interface ApplicationDeployModel {
+  id: string;
+  application: string;
+  version: string;
+  /** Null when the reporting instance set no ApplicationEnvironment. */
+  environment: string | null;
+  firstSeenAt: string;
+  /** The first instance seen with this version (a server or a non-server process) — it may since be gone. */
+  instanceId: string;
+  instanceName: string | null;
+}
+
+/** Post-deploy verdict values (GET /applications/verdict). Mirrors Warp.Core/Models/DeployVerdictModels.cs. */
+export type DeployVerdictValue = 'pass' | 'warn' | 'fail' | 'pending' | 'noData';
+
+export type DeployVerdictCheckState = 'healthy' | 'warning' | 'breaching' | 'acknowledged' | 'noData';
+
+export interface DeployVerdictCheck {
+  source: 'tile' | 'slo';
+  id: number;
+  name: string;
+  /** Null when the tile or SLO covers every application. */
+  application: string | null;
+  state: DeployVerdictCheckState;
+  /** For an acknowledged tile, the state its rule gives. */
+  unacknowledgedState: DeployVerdictCheckState | null;
+  acknowledged: boolean;
+  /** The tile's value, or the SLO's attainment (a share for rate kinds and metric latency / gauge objectives). */
+  value: number | null;
+  baseline: number | null;
+  /** On `value`'s scale: for a metric latency or gauge SLO, the required share (`percentile / 100`). */
+  target: number | null;
+  /** A metric latency or gauge SLO's threshold (instrument unit); null for every other check. */
+  threshold: number | null;
+  budgetRemaining: number | null;
+  reason: string;
+}
+
+export interface DeployVerdictModel {
+  verdict: DeployVerdictValue;
+  summary: string;
+  /** How many of `checks` had data (any state but noData); a pass resting on few checks is weak evidence. */
+  checksWithData: number;
+  /** The number of `checks`. */
+  checksTotal: number;
+  /** The board whose tiles were judged (its stored name), or null when every board's tiles counted. */
+  board: string | null;
+  deploy: {
+    application: string;
+    version: string;
+    environment: string | null;
+    firstSeenAt: string;
+    instanceName: string | null;
+    previousVersion: string | null;
+    supersededBy: string | null;
+  };
+  window: {
+    from: string;
+    to: string;
+    minWindowSeconds: number;
+    settlesAt: string;
+    settled: boolean;
+  };
+  checks: DeployVerdictCheck[];
+}
+
 /** Execution metrics for a single job type or handler, folded from the durable Statistic aggregates. */
 export interface JobExecutionStatModel {
   /** The job Type or HandlerType assembly-qualified name this row aggregates. */

@@ -132,6 +132,9 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
         var tables = creates.ConvertAll(x => $"{x.Schema}.{x.Name}");
         tables.ShouldContain("warp.metric_point");
         tables.ShouldContain("warp.metric_instrument");
+        tables.ShouldContain("warp.metric_board_tile");
+        tables.ShouldContain("warp.metric_board");
+        tables.ShouldContain("warp.metric_annotation");
         tables.ShouldContain(".host_order");
         operations.OfType<EnsureSchemaOperation>().ShouldContain(x => string.Equals(x.Name, "warp", StringComparison.Ordinal));
 
@@ -146,16 +149,45 @@ public abstract class HostDbContextCoexistenceTestsBase : IAsyncLifetime
             tables.ShouldContain(table);
         }
 
-        // The seven nullable metric-SLO columns land on slo_definition.
+        // The nine nullable metric-SLO columns land on slo_definition (seven for #329's kinds, plus comparison and
+        // gauge_aggregate for #331): nullable, so the migration is additive on a table with rows.
         var sloColumns = creates
             .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "slo_definition", StringComparison.Ordinal))
             .Columns
             .ToDictionary(x => x.Name, StringComparer.Ordinal);
-        foreach (var column in new[] { "tag_filter", "secondary_metric", "secondary_tag_filter", "ratio_tag", "good_values", "bad_values", "baseline_days" })
+        foreach (var column in new[] { "tag_filter", "secondary_metric", "secondary_tag_filter", "ratio_tag", "good_values", "bad_values", "baseline_days", "comparison", "gauge_aggregate" })
         {
             sloColumns.ShouldContainKey(column);
             sloColumns[column].IsNullable.ShouldBeTrue(column);
         }
+
+        // #330: metric_point.version is nullable (null = collected without ByVersion), so existing rows stay valid.
+        var pointColumns = creates
+            .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "metric_point", StringComparison.Ordinal))
+            .Columns
+            .ToDictionary(x => x.Name, StringComparer.Ordinal);
+        pointColumns.ShouldContainKey("version");
+        pointColumns["version"].IsNullable.ShouldBeTrue("version");
+
+        // Named boards: metric_board_tile.board_id is nullable (null = the Default board), so existing tiles stay valid
+        // with no data migration, and it is a soft reference: no foreign key to metric_board.
+        var tileTable = creates
+            .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "metric_board_tile", StringComparison.Ordinal));
+        var boardColumn = tileTable.Columns.Single(x => string.Equals(x.Name, "board_id", StringComparison.Ordinal));
+        boardColumn.IsNullable.ShouldBeTrue("board_id");
+        tileTable.ForeignKeys.ShouldBeEmpty();
+
+        // Chart tiles: the stored metric-page query is nullable (every other kind has none), so the column is additive.
+        tileTable.Columns.Single(x => string.Equals(x.Name, "chart_query", StringComparison.Ordinal)).IsNullable.ShouldBeTrue("chart_query");
+
+        // SLO tiles: the objective id is nullable (every other kind has none) and a soft reference (no foreign key, checked
+        // above), so the column is additive.
+        tileTable.Columns.Single(x => string.Equals(x.Name, "slo_definition_id", StringComparison.Ordinal)).IsNullable.ShouldBeTrue("slo_definition_id");
+
+        // A seeded board's seed key: nullable (boards created in the dashboard have none), so the column is additive.
+        var boardTable = creates
+            .Single(x => string.Equals(x.Schema, "warp", StringComparison.Ordinal) && string.Equals(x.Name, "metric_board", StringComparison.Ordinal));
+        boardTable.Columns.Single(x => string.Equals(x.Name, "seed_key", StringComparison.Ordinal)).IsNullable.ShouldBeTrue("seed_key");
     }
 
     private static async Task<SaveOutcome> SaveTwiceAsync(HostDbContext context, DbTransaction transaction, string reference)

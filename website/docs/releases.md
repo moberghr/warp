@@ -4,6 +4,94 @@ sidebar_position: 6
 
 # Releases
 
+## 7.6.0
+
+*2026-11-19*
+
+Minor release with **an additive schema change (you generate one migration)**, **three small behaviour changes in SLO seeding and the SLO API**, and no breaking API change. It finishes the metrics work started in 7.5.0: Warp now records each deploy, tells a CI step whether a release is healthy, gives you named dashboards (boards) of value, chart and SLO tiles, two more SLO kinds, notes on charts, and observability for your own controllers. Read [Upgrading](#upgrading-from-75x) first.
+
+### Deploy history and the post-deploy verdict
+
+- **Deploys are recorded.** The first instance of an application that starts with a version not seen before for that application and environment records an `ApplicationDeploy` row. It needs `ApplicationName` and `ApplicationVersion`; nothing is recorded without them. The Applications page shows the history, and the metric page draws deploy markers and offers "since last deploy". Kept forever by default; `ApplicationDeployRetention` sets an age limit, and the newest deploy of each application and environment is never deleted.
+- **The verdict answers "is this release healthy?" for a CI step.** `GET {prefix}/api/applications/verdict?application=<name>[&version=][&environment=][&minWindowMinutes=][&minCoverage=][&board=]` returns `pass`, `warn`, `fail`, `pending` or `noData`, a summary, and one check per board tile with a status rule and per SLO. It judges only complete 5-minute buckets that start after the deploy, so with the defaults it settles between 5.5 and 10.5 minutes after the deploy, and a `fail` is never downgraded. `board=<name>` limits it to that board's tile checks and the SLOs that have a tile on that board. The Applications page shows the latest verdict. See [Applications](/docs/features/applications).
+- **APIs:** `IApplicationDeployQueryService`, `IDeployVerdictService`, `GET {prefix}/api/applications/{id}/deploys`, `GET {prefix}/api/applications/deploys`.
+
+### Boards: named dashboards of value, chart and SLO tiles
+
+`opt.AddMetricBoard(...)` and **Metrics → Board** give each team a screen of tiles with status checks:
+
+```csharp
+opt.AddMetricBoard("Checkout", b => b
+    .Ratio("Checkout success", "shop.checkout.completed", "outcome", "ok", "error,declined",
+        application: "shop-api", check: MetricTileCheck.AtLeast(0.98))
+    .Chart("Checkout errors by version", "shop.checkout.completed",
+        application: "shop-api", breakdown: "{version}", filter: "outcome=error*", compare: "7d")
+    .Slo("Checkout success", application: "shop-api", label: "Checkout success SLO"));
+```
+
+- **Value and ratio tiles** show one number with a sparkline and an optional status rule: a threshold (`MetricTileCheck.AtMost`/`AtLeast`) or a maximum move against 1 or 7 days earlier (`Deviation`).
+- **Chart tiles** show the metric page's chart (breakdown, filters, compare, percentile, ratio view, rate), driven by the board's time range. At most 12 per board, loaded only when scrolled into view.
+- **SLO tiles** show an objective's state, attainment, error budget and burn rate. Deleting the objective deletes its tiles.
+- **"Add to board"** on the metric page and the SLO page saves what you are looking at as a tile.
+- **Named boards.** A board picker creates, renames and deletes boards, and `?board=checkout` links to one. The `Default` board always exists and cannot be deleted; `AddMetricBoard(b => ...)` without a name seeds it. At most 48 tiles per board and 100 boards.
+- **Seeding from code is insert-if-absent.** A dashboard edit or rename is never overwritten on restart. An SLO tile whose objective is seeded by another process retries every minute for 10 minutes before logging an Error.
+
+See [Named boards](/docs/features/custom-metrics).
+
+### Two more SLO kinds
+
+- **`MetricLatency`** (`AddMetricLatency`) holds a histogram to "p95 ≤ 0.5 s", framed as the share of events within the threshold.
+- **`MetricGaugeThreshold`** (`AddMetricGaugeThreshold`) holds a gauge's average, min or max at most or at least a limit for a share of the observed time.
+
+`SloKind` gains members 10 and 11, so a `switch` over `SloKind` in your code gets two new cases. See [SLOs](/docs/features/slo-error-budget).
+
+### The metric page
+
+- **Version breakdown.** `AddMetrics(m => m.ByVersion())` adds `ApplicationVersion` as a series dimension, so old and new versions stay apart during a rolling deploy (`breakdown={version}`). Off by default.
+- **Custom time range**, deploy markers and "since last deploy".
+- **Per-second / per-minute rate** toggle for counters; up-down counters are labelled as net change per bucket.
+- **The still-filling bucket** is flagged on the chart and left out of headline numbers.
+- **Shareable links.** Every chart control is in the URL, and so are the Issues filters (which gain an application filter) and the Jobs list state.
+
+### Notes on charts and SLOs
+
+Annotations mark a time range on an instrument (optionally narrowed by a tag filter) or on an SLO, with a note and the author. A note on an instrument can flag the range as acknowledged noise, which the board and the verdict then report as Acknowledged instead of Breaching. API: `GET/POST/DELETE {prefix}/api/annotations`.
+
+### Observability for your own endpoints
+
+[Endpoint observability](/docs/features/endpoint-observability) used to cover only Warp's own HTTP endpoints. `WithWarpObservability()` on any endpoint builder (`MapControllers()`, `MapGet(...)`, a route group) or `[WarpObserved]` on a controller or action records those endpoints exactly like Warp endpoints, with the same options, Issues and dashboard pages. `[ExcludeFromWarpObservability]` always wins, and the dashboard's own endpoints are never observed.
+
+### Behaviour changes
+
+1. **SLO upsert of an id that does not exist** returns 404 instead of re-creating the objective, and an id of 0 or below is always an insert with a store-generated key.
+2. **SLO config seeding on SQL Server matches like PostgreSQL.** Names still ignore case, but every other field must match exactly. Before, SQL Server's case-insensitive collation also matched a seed that differed from a stored row only by the case of a field.
+3. **Config SLOs that share a match key on purpose** (two queue-wait targets on one queue) are all inserted on a fresh database. A tier added in a later deploy still matches the stored one; add it in the dashboard.
+
+Also fixed: repeated `AddAdapters` calls now merge, so an explicit `Sink` wins whatever the order relative to `AddAdapter`. Before, `AddAdapter` followed by `AddAdapters(o => o.Sink = RecordingSink.Otel)` still wrote call-log rows.
+
+The new audit log lines for board and annotation edits include the acting dashboard user's name at Information level. Payloads and tag values are still never logged.
+
+### Schema change: one additive migration
+
+Run your normal `dotnet ef migrations add <Name>` and apply it:
+
+- **four new tables:** `application_deploy`, `metric_annotation`, `metric_board`, `metric_board_tile`;
+- **one new nullable column on `metric_point`:** `version`;
+- **two new nullable columns on `slo_definition`:** `comparison`, `gauge_aggregate`.
+
+Nothing is dropped or renamed. Old binaries ignore the new tables and columns, so a rolling deploy is safe.
+
+### API additions
+
+Additive only: the deploy and verdict services and models above, `AddMetricBoard` (with and without a name), `MetricBoardOptions` (`Value`, `Ratio`, `Chart`, `Slo`), `MetricTileCheck`, `IMetricBoardQueryService`, `IMetricBoardCommandService`, `IMetricAnnotationQueryService`, `IMetricAnnotationCommandService`, `SloKind.MetricLatency` and `MetricGaugeThreshold`, `SloComparison`, `SloGaugeAggregate`, `AddMetricLatency`, `AddMetricGaugeThreshold`, `WarpMetricsOptions.ByVersion()`, `WarpConfiguration.ApplicationDeployRetention`, `WithWarpObservability`, `WarpObservedAttribute` and `ExcludeFromWarpObservabilityAttribute`. `SloCommandService`'s constructor gained an optional parameter (source compatible; rebuild if you construct it yourself).
+
+### Upgrading from 7.5.x
+
+1. Generate and apply the migration (above).
+2. If you call the SLO upsert API with ids from another database, expect a 404 for ids that do not exist here.
+3. To get deploy history and the verdict, set `ApplicationName` and `ApplicationVersion` on every process of the application.
+4. Nothing else needs to change. Boards, chart and SLO tiles, annotations and host endpoint observability are all opt-in.
+
 ## 7.5.0
 
 *2026-11-16*

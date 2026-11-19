@@ -12,8 +12,12 @@ import {
   demoInstanceDetails,
   demoJobMetrics,
   decodeAppId,
+  filterDemoDeploys,
+  demoDeployVerdict,
 } from './data/applications';
 import { demoSlos, demoSloDetail } from './data/slo';
+import { DEMO_DEFAULT_BOARD, demoBoards, demoBoardTiles, demoMetricBoard } from './data/metricBoard';
+import { demoAnnotationList } from './data/annotations';
 import { WebhookDeliveryStatus } from '@/types/webhooks';
 import type { ConcurrencyLimitInfo, RateLimitInfo, SagaDetail, SagaStats } from '@/types';
 import type { BackgroundServiceLeaseDto } from '@/types/backgroundServices';
@@ -111,6 +115,15 @@ export function createDemoAdapter(isLoginMode: boolean) {
     const sloResult = routeSlo(method, url, config);
     if (sloResult !== undefined) {
       return sloResult;
+    }
+
+    // Annotations (#333): GET lists the demo notes of one target; POST (upsert) and DELETE succeed without persisting.
+    if (url === '/annotations' || url.startsWith('/annotations?') || /^\/annotations\/[^/?]+$/.test(url)) {
+      if (method === 'get') {
+        return resolve(demoAnnotationList(config.params ?? {}), config);
+      }
+
+      return resolve(method === 'post' ? { id: 0 } : {}, config);
     }
 
     // Metrics: /addons reports metrics:true in demo mode (see routeGet), so the nav is visible and
@@ -504,7 +517,50 @@ function routeMetrics(
   url: string,
   config: InternalAxiosRequestConfig,
 ): Promise<AxiosResponse> | undefined {
-  if (method !== 'get' || !url.startsWith('/metrics')) {
+  if (!url.startsWith('/metrics')) {
+    return undefined;
+  }
+
+  // Health board (#326) — literal segments, matched before /metrics/{id}/series as on the server.
+  if (url === '/metrics/board' || url.startsWith('/metrics/board?')) {
+    if (method !== 'get') {
+      return undefined;
+    }
+
+    const params: Record<string, string | number | undefined> = config.params ?? {};
+    const board = params.board === undefined ? DEMO_DEFAULT_BOARD : Number(params.board);
+    const read = demoMetricBoard(params.from as string | undefined, params.to as string | undefined, undefined, board);
+    if (read === null) {
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data: { error: 'The metric board no longer exists.' }, headers: {}, config } });
+    }
+
+    return resolve(read, config);
+  }
+
+  // Named boards (§8.34): GET lists the three demo boards; POST (create / rename) and DELETE succeed without persisting,
+  // except that the Default board cannot be deleted, as on the server.
+  if (url === '/metrics/boards' || /^\/metrics\/boards\/[^/?]+$/.test(url)) {
+    if (method === 'get') {
+      return resolve(demoBoards, config);
+    }
+
+    if (method === 'delete' && url === `/metrics/boards/${DEMO_DEFAULT_BOARD}`) {
+      return Promise.reject({ response: { status: 400, statusText: 'Bad Request', data: { error: 'The Default board cannot be deleted.' }, headers: {}, config } });
+    }
+
+    return resolve(method === 'post' ? { id: 0 } : {}, config);
+  }
+
+  if (url === '/metrics/board/tiles' || /^\/metrics\/board\/tiles\/[^/?]+$/.test(url)) {
+    // GET lists the demo tiles; POST (upsert) and DELETE succeed without persisting in demo mode.
+    if (method === 'get') {
+      return resolve(demoBoardTiles, config);
+    }
+
+    return resolve(method === 'post' ? { id: 0 } : {}, config);
+  }
+
+  if (method !== 'get') {
     return undefined;
   }
 
@@ -548,6 +604,36 @@ function routeApplications(
   // GET /applications — roster
   if (method === 'get' && (url === '/applications' || url.startsWith('/applications?'))) {
     return resolve(demoApplications, config);
+  }
+
+  // GET /applications/deploys?application=&from=&to= — deploys across applications (a literal segment, so it is
+  // matched before the {id} route, as on the server).
+  if (method === 'get' && (url === '/applications/deploys' || url.startsWith('/applications/deploys?'))) {
+    const params: Record<string, string | undefined> = config.params ?? {};
+
+    return resolve(filterDemoDeploys(params.application, params.from, params.to), config);
+  }
+
+  // GET /applications/verdict?application=&version=&environment=&minCoverage=&board= — post-deploy verdict (a literal
+  // segment, like deploys). A board name narrows the tile checks; an unknown one is a 404, as on the server.
+  if (method === 'get' && (url === '/applications/verdict' || url.startsWith('/applications/verdict?'))) {
+    const params: Record<string, string | undefined> = config.params ?? {};
+    const verdict = demoDeployVerdict(params.application, params.version, params.environment, Number(params.minCoverage ?? 0) || 0, undefined, params.board);
+    if (!verdict) {
+      const data = params.board && !demoBoards.some((x) => x.name.toLowerCase() === params.board!.trim().toLowerCase())
+        ? { error: `No metric board is named '${params.board}'.` }
+        : { error: 'No recorded deploy of that application matches the version and environment.' };
+
+      return Promise.reject({ response: { status: 404, statusText: 'Not Found', data, headers: {}, config } });
+    }
+
+    return resolve(verdict, config);
+  }
+
+  // GET /applications/{id}/deploys — one application's deploys.
+  const deploysMatch = url.match(/^\/applications\/([^/?]+)\/deploys$/);
+  if (method === 'get' && deploysMatch) {
+    return resolve(filterDemoDeploys(decodeAppId(decodeURIComponent(deploysMatch[1]))), config);
   }
 
   // GET /applications/{id}/instances/{instanceId} — single-instance detail (checked before the {id} route).
@@ -818,7 +904,7 @@ function routeGet(url: string, params: Record<string, unknown>): unknown {
   // whether they appear in the top nav (hide-on-404 pattern). push:false keeps SignalR
   // off in demo (no backend hub).
   if (url === '/addons') {
-    return { retry: true, concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true, metrics: true, version: '7.5.0' };
+    return { retry: true, concurrency: false, rateLimits: false, push: false, sagas: false, services: true, adapters: true, endpoints: true, client: true, webhooks: true, applications: true, slo: true, metrics: true, version: '7.6.0' };
   }
 
   // Client (browser) observability (§8.27).

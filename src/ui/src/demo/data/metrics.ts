@@ -4,13 +4,15 @@
 // without a table of canned responses. Same query, same picture: nothing here is random.
 
 import { MetricKind, MetricTier } from '@/types/metrics';
-import type { MetricInstrument, MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
+import type { MetricHeadline, MetricInstrument, MetricPoint, MetricSeries, MetricSeriesLine } from '@/types/metrics';
 import { matchesPattern } from '@/lib/metricPattern';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const FINE_MS = 5 * MINUTE;
+/** MetricFlushInterval's default: a bucket is still filling until one interval after it ends. */
+const FLUSH_MS = 30_000;
 
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
 
@@ -45,7 +47,8 @@ export const demoMetrics: MetricInstrument[] = [
     name: 'payment.results',
     meter: 'Shop.Payments',
     kind: MetricKind.Counter,
-    unit: '1',
+    // An OpenTelemetry annotation unit: a count of payments, shown as "payments".
+    unit: '{payment}',
     description: 'Payment attempts by pipeline step, gateway and outcome.',
     bounds: [],
     tagKeys: ['step', 'gateway', 'result'],
@@ -134,7 +137,7 @@ function bucketPoint(
   if (kind === MetricKind.Gauge) {
     const avg = weight * (0.7 + 0.3 * traffic(t)) * wobble;
 
-    return { timestamp, value: avg, count: 12, sum: avg * 12, min: avg * 0.8, max: avg * 1.25, percentile: null };
+    return { timestamp, value: avg, count: 12, sum: avg * 12, min: avg * 0.8, max: avg * 1.25, percentile: null, incomplete: false, bucketSeconds: bucketMs / 1000 };
   }
 
   const count = Math.round(weight * 60 * traffic(t) * wobble * buckets);
@@ -144,10 +147,10 @@ function bucketPoint(
     const raw = percentile === null ? null : (BASE_PERCENTILE_MS[percentile] ?? 100) * (0.8 + noise(t, `${groupName}|p${percentile}`) * 0.5);
     const bound = raw === null ? null : (BOUNDS.find((b) => b >= raw) ?? BOUNDS[BOUNDS.length - 1]);
 
-    return { timestamp, value: count, count, sum: count * avgMs, min: 3, max: avgMs * 14, percentile: count > 0 ? bound : null };
+    return { timestamp, value: count, count, sum: count * avgMs, min: 3, max: avgMs * 14, percentile: count > 0 ? bound : null, incomplete: false, bucketSeconds: bucketMs / 1000 };
   }
 
-  return { timestamp, value: count, count, sum: count, min: null, max: null, percentile: null };
+  return { timestamp, value: count, count, sum: count, min: null, max: null, percentile: null, incomplete: false, bucketSeconds: bucketMs / 1000 };
 }
 
 function buildLines(
@@ -161,6 +164,7 @@ function buildLines(
   keep: string[] | null,
   percentile: number | null,
   now: number,
+  cutoff: number,
 ): MetricSeriesLine[] {
   const selected = (combos[instrument.name] ?? []).filter((c) => matches(c, filters));
   const { tier, bucketMs } = tierFor(now - (from - shiftMs));
@@ -183,8 +187,18 @@ function buildLines(
     const points: MetricPoint[] = [];
     for (let t = start; t < to - shiftMs; t += bucketMs) {
       const point = bucketPoint(instrument.kind, `${instrument.name}|${name}`, weight, t, bucketMs, percentile);
+      // The current range's newest bucket is still filling: flagged, and only the elapsed share of it is in.
+      const incomplete = compare === null && t >= cutoff;
+      const filled = incomplete && instrument.kind !== MetricKind.Gauge ? Math.min(1, Math.max(0, (now - t) / bucketMs)) : 1;
       // The API shifts an overlay forward so it lines up with the current range.
-      points.push({ ...point, timestamp: new Date(t + shiftMs).toISOString() });
+      points.push({
+        ...point,
+        value: instrument.kind === MetricKind.Gauge ? point.value : Math.round(point.value * filled),
+        count: instrument.kind === MetricKind.Gauge ? point.count : Math.round(point.count * filled),
+        sum: point.sum * filled,
+        timestamp: new Date(t + shiftMs).toISOString(),
+        incomplete,
+      });
     }
 
     return { name, compare, resolution: tier, points };
@@ -213,12 +227,16 @@ export function demoMetricSeries(instrumentName: string, query: string): MetricS
   const percentile = params.get('percentile') ? Number(params.get('percentile')) : null;
   const compares = (params.get('compare') ?? '').split(',').filter(Boolean);
 
-  const primary = buildLines(instrument, from, to, 0, null, breakdown, filters, null, percentile, now);
+  // The API's rule: the display bucket holding (now - flush interval) and everything after it are still filling.
+  const { bucketMs } = tierFor(now - from);
+  const cutoff = Math.floor((now - FLUSH_MS) / bucketMs) * bucketMs;
+  const primary = buildLines(instrument, from, to, 0, null, breakdown, filters, null, percentile, now, cutoff);
   const keep = breakdown === null ? null : primary.filter((x) => x.name !== '(rest)').map((x) => x.name);
   const overlays = compares
     .filter((c) => c === '1d' || c === '7d')
     .sort()
-    .flatMap((c) => buildLines(instrument, from, to, c === '1d' ? DAY : 7 * DAY, c, breakdown, filters, keep, percentile, now));
+    .flatMap((c) => buildLines(instrument, from, to, c === '1d' ? DAY : 7 * DAY, c, breakdown, filters, keep, percentile, now, cutoff));
+  const offsets = [null, ...new Set(overlays.map((x) => x.compare))];
 
   return {
     instrument: instrument.name,
@@ -227,6 +245,24 @@ export function demoMetricSeries(instrumentName: string, query: string): MetricS
     from: new Date(from).toISOString(),
     to: new Date(to).toISOString(),
     resolution: tierFor(now - from).tier,
+    completeUntil: new Date(Math.min(Math.max(cutoff, from), to)).toISOString(),
     series: [...primary, ...overlays],
+    headlines: offsets.map((compare) => demoHeadline(instrument.kind, [...primary, ...overlays].filter((x) => x.compare === compare), compare, cutoff)),
   };
+}
+
+// The API's headline: every line of the range, complete buckets only (an overlay's timestamps are already shifted).
+function demoHeadline(kind: MetricKind, lines: MetricSeriesLine[], compare: string | null, cutoff: number): MetricHeadline {
+  const points = lines.flatMap((x) => x.points).filter((x) => Date.parse(x.timestamp) < cutoff);
+  const count = points.reduce((acc, x) => acc + x.count, 0);
+  const sum = points.reduce((acc, x) => acc + x.sum, 0);
+  if (count === 0) {
+    return { compare, value: null, count };
+  }
+
+  if (kind === MetricKind.Gauge) {
+    return { compare, value: sum / count, count };
+  }
+
+  return { compare, value: kind === MetricKind.Histogram ? count : sum, count };
 }

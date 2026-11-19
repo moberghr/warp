@@ -144,6 +144,8 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         AddLifecycleLog(context, ApplicationInstanceEventType.Registered, now);
 
         await context.SaveChangesAsync(ct);
+
+        await RecordDeployAsync(context, now, ct);
     }
 
     // Internal (not private) so tests can drive one tick of the periodic-refresh body deterministically —
@@ -200,6 +202,20 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
         AddLifecycleLog(context, ApplicationInstanceEventType.Stopped, now);
 
         await context.SaveChangesAsync(ct);
+    }
+
+    // Deploy history is a diagnostic: a failure to record it (an unmigrated table, a transient error) is logged and
+    // must not fail startup after the instance row committed. A later instance of the same version retries it.
+    private async Task RecordDeployAsync(DbContext context, DateTime now, CancellationToken ct)
+    {
+        try
+        {
+            await ApplicationDeployRecorder.RecordAsync(context, _configuration, _instanceId, System.Environment.MachineName, now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to record the deploy of application version {Version} for instance {InstanceId}.", _configuration.ApplicationVersion, _instanceId);
+        }
     }
 
     private void AddLifecycleLog(DbContext context, ApplicationInstanceEventType eventType, DateTime now)

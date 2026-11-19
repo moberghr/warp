@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -23,7 +24,8 @@ namespace Warp.Tests.Metrics;
 /// registry list, tier by range, partial fine rows summed on read, breakdown top 10 plus <c>(rest)</c>, exact and
 /// wildcard filters, compare overlays labelled with the resolution they were served at, histogram percentiles from
 /// merged buckets (and the overflow bucket), gauge average/min/max, the application filter and the unknown
-/// instrument. "Now" is a fixed instant; every row and range is seeded relative to it, and the service never reads a clock.
+/// instrument, and the still-filling newest bucket. "Now" is a fixed instant; every row and range is seeded relative to
+/// it, and the tests that depend on the clock pass a <see cref="FakeTimeProvider"/> set relative to it.
 /// </summary>
 [GenerateDatabaseTests]
 public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
@@ -639,6 +641,60 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetSeries_BreakdownByVersion_SplitsLinesByApplicationVersionAndVersionlessRowsReadAsNone()
+    {
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-30), sum: 3, version: "1.0.0"),
+                Point("c", Now.AddMinutes(-30), sum: 5, version: "2.0.0"),
+                Point("c", Now.AddMinutes(-20), sum: 7, version: "2.0.0"),
+                Point("c", Now.AddMinutes(-20), sum: 1),
+            ]);
+
+        var result = await CreateService().GetSeries("c", Query(Now.AddHours(-1), Now, breakdown: MetricSeriesQuery.VersionKey), Ct);
+
+        var lines = result.ShouldNotBeNull().Series.ToDictionary(x => x.Name, x => x.Points.Sum(y => y.Sum));
+        lines.ShouldBe(new Dictionary<string, double> { ["2.0.0"] = 12, ["1.0.0"] = 3, ["{none}"] = 1 });
+    }
+
+    [TimedFact]
+    public async Task GetSeries_FilterByVersionPrefix_KeepsOnlyMatchingVersions()
+    {
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-30), sum: 3, version: "1.0.0", tags: "route=a"),
+                Point("c", Now.AddMinutes(-30), sum: 5, version: "2.0.0", tags: "route=a"),
+                Point("c", Now.AddMinutes(-30), sum: 4, version: "2.1.0", tags: "route=b"),
+                Point("c", Now.AddMinutes(-30), sum: 9, tags: "route=a"),
+            ]);
+
+        var result = await CreateService().GetSeries(
+            "c",
+            Query(Now.AddHours(-1), Now, filters: new Dictionary<string, string> { [MetricSeriesQuery.VersionKey] = "2.*" }),
+            Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.Sum(x => x.Sum).ShouldBe(9);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_NoVersionDimensionAsked_SumsEveryVersionIntoTheTotal()
+    {
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-30), sum: 3, version: "1.0.0"),
+                Point("c", Now.AddMinutes(-30), sum: 5, version: "2.0.0"),
+                Point("c", Now.AddMinutes(-30), sum: 1),
+            ]);
+
+        var result = await CreateService().GetSeries("c", Query(Now.AddHours(-1), Now), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().Sum.ShouldBe(9);
+    }
+
+    [TimedFact]
     public async Task GetMetrics_Route_ListsTheRegistry()
     {
         await SeedAsync([Instrument("c", MetricKind.Counter)], []);
@@ -821,6 +877,300 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
         }
     }
 
+    [TimedFact]
+    public async Task GetSeries_CurrentBucketHalfElapsed_FlagsItIncompleteAndTheHeadlineLeavesItOut()
+    {
+        var clock = Now.AddMinutes(2.5);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-10), count: 2, sum: 10),
+                Point("c", Now.AddMinutes(-5), count: 4, sum: 20),
+                Point("c", Now, count: 1, sum: 3),
+            ]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-1), clock), Ct);
+
+        result.ShouldNotBeNull();
+        var points = result.Series.ShouldHaveSingleItem().Points;
+        points.Select(x => (x.Timestamp, x.Incomplete)).ShouldBe([(Now.AddMinutes(-10), false), (Now.AddMinutes(-5), false), (Now, true)]);
+        points[^1].Sum.ShouldBe(3);
+        var headline = result.Headlines.ShouldHaveSingleItem();
+        headline.Compare.ShouldBeNull();
+        headline.Value.ShouldBe(30);
+        headline.Count.ShouldBe(6);
+        result.CompleteUntil.ShouldBe(Now);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_BucketEndedWithinOneFlushInterval_StaysIncomplete()
+    {
+        var clock = Now.AddSeconds(10);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-10), sum: 10),
+                Point("c", Now.AddMinutes(-5), sum: 20),
+            ]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-1), clock), Ct);
+
+        var points = result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points;
+        points.Select(x => x.Incomplete).ShouldBe([false, true]);
+        result.Headlines.ShouldHaveSingleItem().Value.ShouldBe(10);
+        result.CompleteUntil.ShouldBe(Now.AddMinutes(-5));
+    }
+
+    [TimedFact]
+    public async Task GetSeries_ExactlyOneFlushIntervalAfterTheBucketEnd_IsComplete()
+    {
+        // The boundary: at 12:00:30 the 11:55 bucket ended exactly one 30 s flush interval ago, so it is complete.
+        var clock = Now.AddSeconds(30);
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-5), sum: 20)]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-1), clock), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().Incomplete.ShouldBeFalse();
+        result.Headlines.ShouldHaveSingleItem().Value.ShouldBe(20);
+        result.CompleteUntil.ShouldBe(Now);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_ConfiguredFlushInterval_KeepsTheBucketIncompleteForThatLong()
+    {
+        // MetricFlushInterval = 2 min: at 12:01 the 11:55 bucket ended only 1 minute ago, so it is still filling.
+        var clock = Now.AddMinutes(1);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [Point("c", Now.AddMinutes(-10), sum: 10), Point("c", Now.AddMinutes(-5), sum: 20)]);
+        var service = new MetricQueryService<TestContext>(
+            _fixture.CreateContext(),
+            Options.Create(new WarpConfiguration { MetricFlushInterval = TimeSpan.FromMinutes(2) }),
+            new FakeTimeProvider(new DateTimeOffset(clock)));
+
+        var result = await service.GetSeries("c", Query(clock.AddHours(-1), clock), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.Select(x => x.Incomplete).ShouldBe([false, true]);
+        result.Headlines.ShouldHaveSingleItem().Value.ShouldBe(10);
+        result.CompleteUntil.ShouldBe(Now.AddMinutes(-5));
+    }
+
+    [TimedFact]
+    public async Task GetSeries_HourlyRangeWithADayOverlay_FlagsTheFillingHourAndBothHeadlinesLeaveItOut()
+    {
+        // A 24 h range reads at hourly resolution. At 12:30 the 12:00 hour is still filling (its fine rows are partial),
+        // so it is flagged and left out of the current headline; the 1d overlay leaves out the hour aligned with it.
+        var clock = Now.AddMinutes(30);
+        var yesterday = Now.AddDays(-1);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddHours(-1), sum: 10, tier: MetricTier.Hourly),
+                Point("c", Now, sum: 3),
+                Point("c", Now.AddMinutes(15), sum: 4),
+                Point("c", yesterday.AddHours(-1), sum: 5, tier: MetricTier.Hourly),
+                Point("c", yesterday, sum: 7, tier: MetricTier.Hourly),
+            ]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-24), clock, compare: [MetricCompareOffset.Day]), Ct);
+
+        result.ShouldNotBeNull();
+        result.Resolution.ShouldBe(MetricTier.Hourly);
+        result.CompleteUntil.ShouldBe(Now);
+        var current = result.Series.Single(x => x.Compare is null).Points;
+
+        // The range starts at 12:30 yesterday, so yesterday's 12:00 hour is its (complete) first bucket.
+        current.Select(x => (x.Timestamp, x.Sum, x.Incomplete)).ShouldBe([(yesterday, 7d, false), (Now.AddHours(-1), 10d, false), (Now, 7d, true)]);
+        result.Headlines.Select(x => (x.Compare, x.Value)).ShouldBe([(null, 17d), ("1d", 5d)]);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_DailyRangeWithADayOverlay_FlagsTodayAndBothHeadlinesLeaveItOut()
+    {
+        // A 10-day range reads at daily resolution: today is still filling, yesterday is complete.
+        var clock = Now.AddMinutes(2.5);
+        var today = Now.Date;
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", today.AddDays(-2), sum: 20, tier: MetricTier.Daily),
+                Point("c", today.AddDays(-1), sum: 50, tier: MetricTier.Daily),
+                Point("c", Now, sum: 3),
+            ]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddDays(-10), clock, compare: [MetricCompareOffset.Day]), Ct);
+
+        result.ShouldNotBeNull();
+        result.Resolution.ShouldBe(MetricTier.Daily);
+        result.CompleteUntil.ShouldBe(today);
+        var current = result.Series.Single(x => x.Compare is null).Points;
+        current.Single(x => x.Timestamp == today).Incomplete.ShouldBeTrue();
+        current.Where(x => x.Timestamp < today).ShouldAllBe(x => !x.Incomplete);
+        result.Headlines.Select(x => (x.Compare, x.Value)).ShouldBe([(null, 70d), ("1d", 20d)]);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_BucketClosedForLongerThanAFlushInterval_IsComplete()
+    {
+        var clock = Now.AddSeconds(31);
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-5), sum: 20)]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-1), clock), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().Incomplete.ShouldBeFalse();
+        result.Headlines.ShouldHaveSingleItem().Value.ShouldBe(20);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_CompareWithAFillingBucket_OverlayHeadlineLeavesOutTheAlignedBucketAndFlagsNothing()
+    {
+        var clock = Now.AddMinutes(2.5);
+        var yesterday = Now.AddDays(-1);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", Now.AddMinutes(-5), sum: 20),
+                Point("c", Now, sum: 3),
+                Point("c", yesterday.AddMinutes(-5), sum: 5),
+                Point("c", yesterday, sum: 7),
+            ]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-1), clock, compare: [MetricCompareOffset.Day]), Ct);
+
+        result.ShouldNotBeNull();
+        result.Headlines.Select(x => (x.Compare, x.Value)).ShouldBe([(null, 20d), ("1d", 5d)]);
+        var overlay = result.Series.Single(x => string.Equals(x.Compare, "1d", StringComparison.Ordinal));
+        overlay.Points.Select(x => (x.Timestamp, x.Sum, x.Incomplete)).ShouldBe([(Now.AddMinutes(-5), 5d, false), (Now, 7d, false)]);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_BreakdownWithAFillingBucket_HeadlineCoversEveryLineIncludingRest()
+    {
+        var clock = Now.AddMinutes(2.5);
+        var points = Enumerable.Range(0, 12)
+            .SelectMany(x =>
+                new[]
+                {
+                    Point("c", Now.AddMinutes(-5), sum: x + 1, tags: $"route=r{x:D2}"),
+                    Point("c", Now, sum: 100, tags: $"route=r{x:D2}"),
+                })
+            .ToArray();
+        await SeedAsync([Instrument("c", MetricKind.Counter)], points);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-1), clock, breakdown: "route"), Ct);
+
+        result.ShouldNotBeNull();
+        result.Series.Select(x => x.Name).ShouldContain("(rest)");
+        result.Series.ShouldAllBe(x => x.Points.Single(y => y.Timestamp == Now).Incomplete);
+        result.Headlines.ShouldHaveSingleItem().Value.ShouldBe(78);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_GaugeWithAFillingBucket_HeadlineAveragesTheCompleteBucketsOnly()
+    {
+        var clock = Now.AddMinutes(2.5);
+        await SeedAsync(
+            [Instrument("g", MetricKind.Gauge)],
+            [
+                Point("g", Now.AddMinutes(-10), count: 2, sum: 20),
+                Point("g", Now.AddMinutes(-5), count: 2, sum: 40),
+                Point("g", Now, count: 1, sum: 1000),
+            ]);
+
+        var result = await CreateService(clock).GetSeries("g", Query(clock.AddHours(-1), clock), Ct);
+
+        result.ShouldNotBeNull().Headlines.ShouldHaveSingleItem().Value.ShouldBe(15);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_OnlyTheFillingBucketHasData_HeadlineIsNull()
+    {
+        var clock = Now.AddMinutes(2.5);
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now, sum: 3)]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(clock.AddHours(-1), clock), Ct);
+
+        var headline = result.ShouldNotBeNull().Headlines.ShouldHaveSingleItem();
+        headline.Value.ShouldBeNull();
+        headline.Count.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_RangeEndingInThePast_FlagsNothingAndCompleteUntilIsTheRangeEnd()
+    {
+        var clock = Now.AddDays(1);
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-5), sum: 20)]);
+
+        var result = await CreateService(clock).GetSeries("c", Query(Now.AddHours(-1), Now), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldAllBe(x => !x.Incomplete);
+        result.CompleteUntil.ShouldBe(Now);
+        result.Headlines.ShouldHaveSingleItem().Value.ShouldBe(20);
+    }
+
+    [TimedFact]
+    public async Task GetMetricSeries_FillingBucket_SerializesTheFlagAndTheHeadlines()
+    {
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-10), sum: 4), Point("c", Now, sum: 1)]);
+        var (app, client) = await CreateDashboardHost(Now.AddMinutes(2.5));
+        try
+        {
+            var response = await client.GetAsync(SeriesUrl("c", Now.AddHours(-1), Now.AddMinutes(2.5)), Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.OK);
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
+            var points = json.RootElement.GetProperty("series")[0].GetProperty("points").EnumerateArray().ToList();
+            points.Select(x => x.GetProperty("incomplete").GetBoolean()).ShouldBe([false, true]);
+            var headline = json.RootElement.GetProperty("headlines").EnumerateArray().ShouldHaveSingleItem();
+            headline.GetProperty("value").GetDouble().ShouldBe(4);
+            json.RootElement.GetProperty("completeUntil").GetDateTime().ShouldBe(Now);
+        }
+        finally
+        {
+            await DisposeHostAsync(app, client);
+        }
+    }
+
+    [TimedFact]
+    public async Task GetSeries_SixHourRangeMixingFineAndHourlyRows_GivesEachPointItsOwnBucketLength()
+    {
+        var hour = new DateTime(2026, 11, 13, 6, 0, 0, DateTimeKind.Utc);
+        await SeedAsync(
+            [Instrument("c", MetricKind.Counter)],
+            [
+                Point("c", hour, sum: 120, tier: MetricTier.Hourly, compacted: true),
+                Point("c", Now.AddMinutes(-30), sum: 10),
+            ]);
+
+        var result = await CreateService().GetSeries("c", Query(Now.AddHours(-6), Now), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.Select(x => (x.Timestamp, x.BucketSeconds)).ShouldBe([(hour, 3600), (Now.AddMinutes(-30), 300)]);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_HourlyAndDailyRanges_GiveTheDisplayBucketLength()
+    {
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddHours(-2), sum: 10)]);
+        var service = CreateService();
+
+        var day = await service.GetSeries("c", Query(Now.AddHours(-24), Now), Ct);
+        var month = await service.GetSeries("c", Query(Now.AddDays(-30), Now), Ct);
+
+        day.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().BucketSeconds.ShouldBe(3600);
+        month.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().BucketSeconds.ShouldBe(86400);
+    }
+
+    [TimedFact]
+    public async Task GetSeries_ConfiguredFineResolution_GivesThatBucketLength()
+    {
+        await SeedAsync([Instrument("c", MetricKind.Counter)], [Point("c", Now.AddMinutes(-3), sum: 10)]);
+        var service = new MetricQueryService<TestContext>(_fixture.CreateContext(), Options.Create(new WarpConfiguration { FineResolutionMinutes = 1 }));
+
+        var result = await service.GetSeries("c", Query(Now.AddHours(-1), Now), Ct);
+
+        result.ShouldNotBeNull().Series.ShouldHaveSingleItem().Points.ShouldHaveSingleItem().BucketSeconds.ShouldBe(60);
+    }
+
     private static MetricSeriesQuery Query(
         DateTime from,
         DateTime to,
@@ -863,11 +1213,13 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
         MetricTier tier = MetricTier.Fine,
         bool compacted = false,
         string? buckets = null,
-        string? bounds = null)
+        string? bounds = null,
+        string? version = null)
         => new()
         {
             Instrument = instrument,
             Application = application,
+            Version = version,
             Tags = tags,
             Tier = tier,
             BucketStart = bucket,
@@ -920,6 +1272,9 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
     private MetricQueryService<TestContext> CreateService()
         => new(_fixture.CreateContext(), Options.Create(new WarpConfiguration()));
 
+    private MetricQueryService<TestContext> CreateService(DateTime now)
+        => new(_fixture.CreateContext(), Options.Create(new WarpConfiguration()), new FakeTimeProvider(new DateTimeOffset(now)));
+
     private async Task SeedAsync(MetricInstrument[] instruments, MetricPoint[] points)
     {
         var context = _fixture.CreateContext();
@@ -928,14 +1283,15 @@ public abstract class MetricQueryServiceTestsBase : IAsyncLifetime
         await context.SaveChangesAsync(Ct);
     }
 
-    private async Task<(WebApplication App, HttpClient Client)> CreateDashboardHost()
+    private async Task<(WebApplication App, HttpClient Client)> CreateDashboardHost(DateTime? now = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.WebHost.UseDefaultServiceProvider(o => o.ValidateScopes = true);
         builder.Services.AddScoped<IMetricQueryService>(_ => new MetricQueryService<TestContext>(
             _fixture.CreateContext(),
-            Options.Create(new WarpConfiguration())));
+            Options.Create(new WarpConfiguration()),
+            now is null ? TimeProvider.System : new FakeTimeProvider(new DateTimeOffset(now.Value))));
 
         var app = builder.Build();
         app.MapWarpApiEndpoints(new WarpDashboardOptions(), []);

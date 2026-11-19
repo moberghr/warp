@@ -21,8 +21,9 @@ namespace Warp.Worker.Services;
 /// row, then daily rows older than <c>DailyStatisticsRetention</c> are pruned (never when it is null).</item>
 /// </list>
 /// <para>
-/// The series key is (Instrument, Application, Tags, BucketStart, Bounds), so rows with different bucket bounds
-/// never merge. Keys are matched in memory with ordinal comparison and every write targets rows by primary key, so
+/// The series key is (Instrument, Application, Version, Tags, BucketStart, Bounds), so rows with different bucket
+/// bounds never merge, and neither do rows of different application versions (a host that opted into
+/// <c>ByVersion()</c>; Version is null otherwise, which keys exactly as before). Keys are matched in memory with ordinal comparison and every write targets rows by primary key, so
 /// a case-insensitive database collation can only widen a candidate fetch, never merge or drop a row.
 /// </para>
 /// <para>
@@ -364,6 +365,7 @@ public sealed class MetricRollup<TContext> : IServerTask
     {
         Instrument = key.Instrument,
         Application = key.Application,
+        Version = key.Version,
         Tags = key.Tags,
         Tier = tier,
         BucketStart = key.BucketStart,
@@ -401,10 +403,10 @@ public sealed class MetricRollup<TContext> : IServerTask
             row.Instrument);
     }
 
-    private readonly record struct SeriesKey(string Instrument, string? Application, string Tags, DateTime BucketStart, string? Bounds)
+    private readonly record struct SeriesKey(string Instrument, string? Application, string? Version, string Tags, DateTime BucketStart, string? Bounds)
     {
         public static SeriesKey Of(MetricPoint point, DateTime bucketStart)
-            => new(point.Instrument, point.Application, point.Tags, bucketStart, point.Bounds);
+            => new(point.Instrument, point.Application, point.Version, point.Tags, bucketStart, point.Bounds);
     }
 
     // One pass's bucket detail, summed as counts per target and formatted to its CSV once, in Apply, before the pass

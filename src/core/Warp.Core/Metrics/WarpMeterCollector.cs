@@ -33,6 +33,7 @@ internal sealed class WarpMeterCollector : IDisposable
     private readonly MetricAggregator _aggregator;
     private readonly MetricCardinalityGuard _guard;
     private readonly string? _application;
+    private readonly string? _version;
     private readonly Lock _gate = new();
     private readonly Lock _observeGate = new();
 
@@ -48,12 +49,16 @@ internal sealed class WarpMeterCollector : IDisposable
         WarpMetricsOptions options,
         MetricAggregator aggregator,
         MetricCardinalityGuard guard,
-        string? application)
+        string? application,
+        string? version = null)
     {
         _options = options;
         _aggregator = aggregator;
         _guard = guard;
         _application = MetricPointQueries.NormalizeApplication(application);
+
+        // A version without an application is ignored, like every other §8.23 setting.
+        _version = _application is null ? null : MetricPointQueries.NormalizeVersion(version);
     }
 
     /// <summary>True while the listener is running.</summary>
@@ -61,6 +66,9 @@ internal sealed class WarpMeterCollector : IDisposable
 
     /// <summary>The application every series carries, sanitized like a tag value; null when none is set.</summary>
     public string? Application => _application;
+
+    /// <summary>The version every series carries (only with <c>ByVersion()</c> and an application), sanitized like a tag value.</summary>
+    public string? Version => _version;
 
     /// <summary>
     /// Starts the listener. Idempotent. Starts nothing when no meter is collected, so a host that named no meter
@@ -274,7 +282,7 @@ internal sealed class WarpMeterCollector : IDisposable
 
             var state = new CollectedInstrument(
                 info,
-                _guard.CreateInstrument(info, _application),
+                _guard.CreateInstrument(info, _application, _version),
                 tags?.ToFrozenSet(StringComparer.Ordinal));
 
             listener.EnableMeasurementEvents(instrument, state);

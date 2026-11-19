@@ -5,6 +5,8 @@ import { getSlos, upsertSlo, deleteSlo, ackSlo, getMetrics } from '@/api';
 import { queryKeys } from '@/lib/queryClient';
 import type { MetricInstrument } from '@/types/metrics';
 import {
+  SloComparison,
+  SloGaugeAggregate,
   SloKind,
   SloKindLabel,
   SloState,
@@ -13,13 +15,15 @@ import {
   isMetricKind,
   isRatioKind,
 } from '@/types/slo';
-import { formatObjectiveValue, formatBudget, SloStatePill, inputClass } from './shared';
+import { SloStatePill, inputClass } from './shared';
 import { PageHeading } from '@/components/PageHeading';
+import { errorMessage } from '@/lib/apiError';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import {
   MIN_METRIC_WINDOW_SECONDS,
   buildUpsertRequest,
   changeKind,
-  errorMessage,
+  DEFAULT_LATENCY_PERCENTILE,
   fieldsFor,
   fractionToPercent,
   objectiveToDraft,
@@ -27,7 +31,7 @@ import {
   selectableInstruments,
   validateMetricDraft,
 } from './sloForm';
-import { showsSloValues } from './sloDisplay';
+import { formatBudget, formatObserved, formatTarget, showsSloValues } from './sloDisplay';
 
 const emptyDraft: SloUpsertRequest = {
   id: 0,
@@ -44,18 +48,21 @@ const emptyDraft: SloUpsertRequest = {
 export default function SloPage() {
   const queryClient = useQueryClient();
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['slos'],
+    queryKey: queryKeys.slos,
     queryFn: getSlos,
     refetchInterval: 30_000,
   });
 
   const [draft, setDraft] = useState<SloUpsertRequest | null>(null);
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['slos'] });
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: queryKeys.slos });
   const saveMutation = useMutation({ mutationFn: (d: SloUpsertRequest) => upsertSlo(buildUpsertRequest(d)), onSuccess: () => { setDraft(null); invalidate(); } });
   const openDraft = (d: SloUpsertRequest | null) => { saveMutation.reset(); setDraft(d); };
-  const deleteMutation = useMutation({ mutationFn: deleteSlo, onSuccess: invalidate });
-  const ackMutation = useMutation({ mutationFn: (id: number) => ackSlo(id, 60), onSuccess: invalidate });
+  // Settled, not success: a failed delete or ack may still have changed the row (or the row is already gone), so the
+  // list is re-read either way and the error is shown above it.
+  const deleteMutation = useMutation({ mutationFn: deleteSlo, onSettled: invalidate });
+  const ackMutation = useMutation({ mutationFn: (id: number) => ackSlo(id, 60), onSettled: invalidate });
+  const [pendingDelete, setPendingDelete] = useState<SloObjective | null>(null);
 
   const objectives = data?.items ?? [];
 
@@ -77,6 +84,12 @@ export default function SloPage() {
         </button>
       </div>
 
+      {deleteMutation.isError && (
+        <p role="alert" className="mb-3 text-sm text-red-600">{errorMessage(deleteMutation.error, 'Failed to delete the objective.')}</p>
+      )}
+      {ackMutation.isError && (
+        <p role="alert" className="mb-3 text-sm text-red-600">{errorMessage(ackMutation.error, 'Failed to acknowledge the objective.')}</p>
+      )}
       {isLoading && <p className="text-gray-500">Loading…</p>}
       {isError && <p className="text-red-600">Failed to load SLO objectives.</p>}
 
@@ -107,7 +120,7 @@ export default function SloPage() {
                   key={o.id}
                   objective={o}
                   onEdit={() => openDraft(objectiveToDraft(o))}
-                  onDelete={() => deleteMutation.mutate(o.id)}
+                  onDelete={() => setPendingDelete(o)}
                   onAck={() => ackMutation.mutate(o.id)}
                 />
               ))}
@@ -116,6 +129,21 @@ export default function SloPage() {
         </div>
       )}
 
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => !open && setPendingDelete(null)}
+        title={`Delete objective "${pendingDelete?.name ?? ''}"?`}
+        description="Its evaluation and its notes are deleted with it. An objective seeded in code is re-created on the next start."
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={() => {
+          if (pendingDelete) {
+            deleteMutation.mutate(pendingDelete.id);
+          }
+          setPendingDelete(null);
+        }}
+      />
+
       {draft && (
         <ObjectiveForm
           draft={draft}
@@ -123,7 +151,7 @@ export default function SloPage() {
           onCancel={() => openDraft(null)}
           onSave={() => saveMutation.mutate(draft)}
           saving={saveMutation.isPending}
-          serverError={saveMutation.isError ? errorMessage(saveMutation.error) : null}
+          serverError={saveMutation.isError ? errorMessage(saveMutation.error, 'Failed to save the objective.') : null}
         />
       )}
     </div>
@@ -151,14 +179,14 @@ function ObjectiveRow({
     <tr className="hover:bg-gray-50 dark:hover:bg-gray-900/50">
       <td className="px-4 py-3">
         <Link to={`/slo/${o.id}`} className="font-medium text-blue-600 hover:underline">{o.name}</Link>
-        <div className="text-xs text-gray-500">{SloKindLabel[o.kind]}{o.percentile ? ` p${o.percentile}` : ''}</div>
+        <div className="text-xs text-gray-500">{SloKindLabel[o.kind]}{o.percentile && !isMetricKind(o.kind) ? ` p${o.percentile}` : ''}</div>
       </td>
       <td className="px-4 py-3">
         <span className="font-mono text-xs">{o.dimension}</span>
         {o.application && <span className="ml-1 text-xs text-gray-400">@{o.application}</span>}
       </td>
-      <td className="px-4 py-3 text-right tabular-nums">{formatObjectiveValue(o.kind, o.targetValue)}</td>
-      <td className="px-4 py-3 text-right tabular-nums">{hasValues ? formatObjectiveValue(o.kind, o.attainment) : '—'}</td>
+      <td className="px-4 py-3 text-right tabular-nums">{formatTarget(o)}</td>
+      <td className="px-4 py-3 text-right tabular-nums">{hasValues ? formatObserved(o) : '—'}</td>
       <td className="px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="h-2 w-24 rounded bg-gray-200 dark:bg-gray-700 overflow-hidden">
@@ -203,7 +231,7 @@ function ObjectiveForm({
   const ratio = isRatioKind(draft.kind);
 
   const { data: metrics } = useQuery({ queryKey: queryKeys.metrics, queryFn: getMetrics, enabled: metric });
-  const instruments = selectableInstruments(metrics ?? []);
+  const instruments = selectableInstruments(metrics ?? [], draft.kind);
   const primary = instruments.find((x) => x.name === draft.dimension);
   const clientError = validateMetricDraft(draft);
   const saveDisabled = saving || !draft.name || !draft.dimension || clientError !== null;
@@ -264,6 +292,28 @@ function ObjectiveForm({
                     <input className={`${inputClass} font-mono`} value={draft.secondaryTagFilter ?? ''} onChange={(e) => set({ secondaryTagFilter: e.target.value })} />
                   </Field>
                 </>
+              )}
+              {draft.kind === SloKind.MetricGaugeThreshold && (
+                <>
+                  <Field label="Compare the per-bucket">
+                    <select className={inputClass} value={draft.gaugeAggregate ?? SloGaugeAggregate.Average} onChange={(e) => set({ gaugeAggregate: Number(e.target.value) as SloGaugeAggregate })}>
+                      <option value={SloGaugeAggregate.Average}>Average (samples from every process averaged)</option>
+                      <option value={SloGaugeAggregate.Min}>Minimum</option>
+                      <option value={SloGaugeAggregate.Max}>Maximum</option>
+                    </select>
+                  </Field>
+                  <Field label="Must stay">
+                    <select className={inputClass} value={draft.comparison ?? SloComparison.AtMost} onChange={(e) => set({ comparison: Number(e.target.value) as SloComparison })}>
+                      <option value={SloComparison.AtMost}>At most the threshold</option>
+                      <option value={SloComparison.AtLeast}>At least the threshold</option>
+                    </select>
+                  </Field>
+                </>
+              )}
+              {fields.percentile && (
+                <Field label={draft.kind === SloKind.MetricGaugeThreshold ? 'Compliant share of the window (%, 1–99)' : 'Percentile (1–99)'}>
+                  <input className={`${inputClass} tabular-nums`} type="number" min={1} max={99} value={draft.percentile ?? DEFAULT_LATENCY_PERCENTILE} onChange={(e) => set({ percentile: Number(e.target.value) })} />
+                </Field>
               )}
               <MetricTarget draft={draft} onChange={(targetValue) => set({ targetValue })} />
             </>
@@ -375,7 +425,11 @@ function MetricTarget({ draft, onChange }: { draft: SloUpsertRequest; onChange: 
         ? 'Minimum fraction of baseline (%)'
         : draft.kind === SloKind.MetricGap
           ? 'Max gap (primary − secondary events)'
-          : 'Max events in window';
+          : draft.kind === SloKind.MetricLatency
+            ? "Threshold (instrument's unit; compared with bucket upper bounds)"
+            : draft.kind === SloKind.MetricGaugeThreshold
+              ? 'Threshold (gauge value)'
+              : 'Max events in window';
 
   return (
     <Field label={label}>

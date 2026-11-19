@@ -1,7 +1,7 @@
 // Static SLO fixtures (§8.31) for hosted demo mode + docs screenshots. Mirrors SloList / SloObjective
-// (src/ui/src/types/slo.ts). Values are hand-picked to show one healthy, one warning, and one breaching
-// objective (plus one metric SLO of each metric kind, ids 4-7: healthy, breaching, no data, healthy) so the state pills and budget bars all appear on the /slo page.
-import { SloKind, SloState, type SloObjective, type SloList } from '@/types/slo';
+// (src/ui/src/types/slo.ts). Some are scoped to a demo application so each one's post-deploy verdict differs. Values are hand-picked to show one healthy, one warning, and one breaching
+// objective (plus one metric SLO of each metric kind, ids 4-9: healthy, breaching, no data, healthy, healthy, breaching) so the state pills and budget bars all appear on the /slo page.
+import { SloComparison, SloGaugeAggregate, SloKind, SloState, type SloObjective, type SloList } from '@/types/slo';
 
 const objectives: SloObjective[] = [
   {
@@ -9,7 +9,7 @@ const objectives: SloObjective[] = [
     name: 'Email success rate ≥ 99.5%',
     kind: SloKind.SuccessRate,
     dimension: 'Shop.Jobs.SendReceiptEmail',
-    application: null,
+    application: 'checkout-worker',
     targetValue: 0.995,
     percentile: null,
     windowSeconds: 3600,
@@ -28,7 +28,7 @@ const objectives: SloObjective[] = [
     name: 'Default queue-wait p95 < 30s',
     kind: SloKind.QueueWaitLatency,
     dimension: 'default',
-    application: null,
+    application: 'checkout-worker',
     targetValue: 30000,
     percentile: 95,
     windowSeconds: 3600,
@@ -47,7 +47,7 @@ const objectives: SloObjective[] = [
     name: 'Charge deadline attainment ≥ 99%',
     kind: SloKind.DeadlineAttainment,
     dimension: 'Shop.Jobs.ChargeOrder',
-    application: null,
+    application: 'billing-service',
     targetValue: 0.99,
     percentile: null,
     windowSeconds: 21600,
@@ -89,7 +89,7 @@ const objectives: SloObjective[] = [
     name: 'Adyen 5xx = 0',
     kind: SloKind.MetricThreshold,
     dimension: 'http.server.request.duration',
-    application: null,
+    application: 'billing-service',
     targetValue: 0,
     percentile: null,
     windowSeconds: 1800,
@@ -144,6 +144,47 @@ const objectives: SloObjective[] = [
     acknowledgedUntil: null,
     lastEvaluatedAt: '2026-07-31T09:14:00Z',
     secondaryMetric: 'notifications.processed',
+  },
+  {
+    id: 8,
+    name: 'Checkout p95 ≤ 0.5 s',
+    kind: SloKind.MetricLatency,
+    dimension: 'http.server.request.duration',
+    application: 'orders-api',
+    targetValue: 0.5,
+    percentile: 95,
+    windowSeconds: 3600,
+    enabled: true,
+    evaluated: true,
+    attainment: 0.972,
+    budgetRemaining: 0.44,
+    burnRateShort: 0.4,
+    burnRateLong: 0.56,
+    state: SloState.Healthy,
+    acknowledgedUntil: null,
+    lastEvaluatedAt: '2026-07-31T09:14:00Z',
+    tagFilter: 'http.route=/checkout',
+  },
+  {
+    id: 9,
+    name: 'Webhook queue depth ≤ 500',
+    kind: SloKind.MetricGaugeThreshold,
+    dimension: 'webhooks.queue.depth',
+    application: 'billing-service',
+    targetValue: 500,
+    percentile: 95,
+    windowSeconds: 3600,
+    enabled: true,
+    evaluated: true,
+    attainment: 0.917,
+    budgetRemaining: -0.67,
+    burnRateShort: 0,
+    burnRateLong: 1.67,
+    state: SloState.Breaching,
+    acknowledgedUntil: null,
+    lastEvaluatedAt: '2026-07-31T09:14:00Z',
+    comparison: SloComparison.AtMost,
+    gaugeAggregate: SloGaugeAggregate.Max,
   },
 ];
 

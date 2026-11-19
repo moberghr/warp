@@ -118,19 +118,11 @@ public abstract class MessageIntegrationTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
-    public async Task GivenMessageWithFailingHandler_WhenProcessed_ThenMessageStillCompletesWithFailedJobs()
+    public async Task GivenSeveralMultiHandlerMessages_WhenProcessed_ThenEachCompletesWithAllItsHandlerJobs()
     {
-        // MultiRequest has 2 handlers. We can't make only one fail easily,
-        // so test a SingleHandlerMessage with a separate failing-handler message scenario.
-        // Instead, publish a MultiRequest (2 handlers, both succeed) and a separate test
-        // that verifies message completion semantics.
-        // For a failing scenario, we verify that when all handler jobs finish (even if failed),
-        // the message reaches a terminal state.
-
-        // We need a message type whose handler throws. We don't have one directly,
-        // but ThrowExceptionRequest is an IJob, not IMessage.
-        // Let's test the general case: publish multiple messages including multi-handler,
-        // verify all reach terminal state.
+        // Three MultiRequest messages (two handlers each, both succeed) in one save: every message completes and
+        // spawned exactly its own two handler jobs. (No handler fails here: the test data has no message with a
+        // throwing handler.)
         await using var server = await WarpTestServer.StartAsync(Fixture);
         var publisher = server.CreatePublisher();
 

@@ -3,6 +3,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Shouldly;
+using Warp.Adapters.Http;
+using Warp.Adapters.Refit;
 using Warp.Core;
 using Warp.Core.Adapters;
 using Warp.Core.ClientObservability;
@@ -10,6 +12,7 @@ using Warp.Core.Data.Queries;
 using Warp.Core.Endpoints;
 using Warp.Core.Observability;
 using Warp.Http.Observability;
+using Warp.Tests.Adapters;
 
 namespace Warp.Tests.Observability;
 
@@ -64,6 +67,77 @@ public class RecordingSinkWiringTests
         using var sp = services.BuildServiceProvider();
         sp.GetRequiredService<IAdapterCallRecorder>().ShouldBeOfType<DbAdapterCallRecorder>();
         sp.GetRequiredService<AdapterRecordingSettings>().EnrichSpanDetail.ShouldBeTrue();
+    }
+
+    [TimedTheory]
+    [InlineData("http", true)]
+    [InlineData("http", false)]
+    [InlineData("refit", true)]
+    [InlineData("refit", false)]
+    public void AddAdapterAndAddAdaptersOtel_EitherOrder_NoFlusher_NoDbRecorder_EnrichesSpan(string binding, bool adapterFirst)
+    {
+        // AddAdapter (HTTP or Refit) calls AddAdapters() with the default sink; it must not override an explicit
+        // Otel sink, before or after it.
+        var services = BuildServices(opt =>
+        {
+            if (adapterFirst)
+            {
+                AddProbeAdapter(opt, binding);
+            }
+
+            opt.AddAdapters(o => o.Sink = RecordingSink.Otel);
+            if (!adapterFirst)
+            {
+                AddProbeAdapter(opt, binding);
+            }
+        });
+
+        services.ShouldNotContain(d => d.ImplementationType == typeof(AdapterCallFlusher<TestContext>));
+        services.ShouldNotContain(d => d.ServiceType == typeof(DbAdapterCallRecorder));
+
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<IAdapterCallRecorder>().ShouldBeOfType<NullAdapterCallRecorder>();
+        sp.GetServices<AdapterRecordingSettings>().ShouldHaveSingleItem().EnrichSpanDetail.ShouldBeTrue();
+        sp.GetService<IAdapterRecordingMarker>().ShouldNotBeNull();
+    }
+
+    [TimedTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AddAdapterAndAddAdaptersBoth_EitherOrder_OneFlusherAndDbRecorder_EnrichesSpan(bool adapterFirst)
+    {
+        var services = BuildServices(opt =>
+        {
+            if (adapterFirst)
+            {
+                AddProbeAdapter(opt, "http");
+            }
+
+            opt.AddAdapters(o => o.Sink = RecordingSink.Both);
+            if (!adapterFirst)
+            {
+                AddProbeAdapter(opt, "http");
+            }
+        });
+
+        services.Count(d => d.ImplementationType == typeof(AdapterCallFlusher<TestContext>)).ShouldBe(1);
+        services.Count(d => d.ServiceType == typeof(DbAdapterCallRecorder)).ShouldBe(1);
+
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<IAdapterCallRecorder>().ShouldBeOfType<DbAdapterCallRecorder>();
+        sp.GetServices<AdapterRecordingSettings>().ShouldHaveSingleItem().EnrichSpanDetail.ShouldBeTrue();
+    }
+
+    [TimedFact]
+    public void AddAdapter_Alone_KeepsTheDatabaseSink()
+    {
+        var services = BuildServices(opt => AddProbeAdapter(opt, "refit"));
+
+        services.Count(d => d.ImplementationType == typeof(AdapterCallFlusher<TestContext>)).ShouldBe(1);
+
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<IAdapterCallRecorder>().ShouldBeOfType<DbAdapterCallRecorder>();
+        sp.GetServices<AdapterRecordingSettings>().ShouldHaveSingleItem().EnrichSpanDetail.ShouldBeFalse();
     }
 
     [TimedFact]
@@ -140,6 +214,18 @@ public class RecordingSinkWiringTests
 
         // The rate limiter is registered regardless of sink (it guards the public endpoint, not the DB write).
         sp.GetService<ClientIngestRateLimiter>().ShouldNotBeNull();
+    }
+
+    private static void AddProbeAdapter(WarpBuilder<TestContext> opt, string binding)
+    {
+        if (string.Equals(binding, "refit", StringComparison.Ordinal))
+        {
+            opt.AddAdapter<IProbeApi>("probe", _ => { });
+
+            return;
+        }
+
+        opt.AddAdapter("probe", _ => { });
     }
 
     private static ServiceCollection BuildServices(Action<WarpBuilder<TestContext>> configure)

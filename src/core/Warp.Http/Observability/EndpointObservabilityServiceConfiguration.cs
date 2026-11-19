@@ -62,9 +62,11 @@ public static class EndpointObservabilityServiceConfiguration
 
     /// <summary>
     /// Installs the inbound observability middleware. Place after <c>UseRouting</c> (so the matched endpoint
-    /// and its <see cref="WarpEndpointIdentity"/> are resolved) and before the endpoints execute. No-ops for
-    /// any endpoint that is not Warp-mapped. Requires <c>AddEndpointObservability()</c> to have registered
-    /// the recorder.
+    /// and its <see cref="WarpEndpointIdentity"/> are resolved) and before the endpoints execute — on a
+    /// <c>WebApplication</c> that never calls <c>UseRouting</c>, the implicit routing step runs first, which is
+    /// equivalent. No-ops for any endpoint that is neither Warp-mapped nor opted in
+    /// (<c>WithWarpObservability()</c> / <see cref="WarpObservedAttribute"/>). Requires
+    /// <c>AddEndpointObservability()</c> to have registered the recorder.
     /// </summary>
     public static IApplicationBuilder UseWarpHttpObservability(this IApplicationBuilder app)
     {
