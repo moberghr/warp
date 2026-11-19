@@ -760,7 +760,16 @@ public static class WarpEndpoints
 
         apiGroup.MapDelete("slo/{id:int}", async ([FromServices] ISloCommandService svc, int id, CancellationToken ct) =>
         {
-            var deleted = await svc.Delete(id, ct);
+            bool deleted;
+            try
+            {
+                deleted = await svc.Delete(id, ct);
+            }
+            catch (TimeoutException)
+            {
+                // The delete also removes the objective's board tiles, under the board lock a board write or a seed held.
+                return BoardBusy();
+            }
 
             return deleted ? Results.NoContent() : Results.NotFound();
         });
@@ -943,6 +952,12 @@ public static class WarpEndpoints
                 // Another write or a replica's seed held the board lock past the wait: busy, not broken, so a retry
                 // can succeed. 503 rather than the unhandled 500.
                 return BoardBusy();
+            }
+
+            if (id == IMetricBoardCommandService.ObjectiveMissing)
+            {
+                // The objective was deleted after the validator saw it (the upsert checks again under the board lock).
+                return Results.BadRequest(Warp.Core.Metrics.MetricBoardTileValidator.ObjectiveNotFound);
             }
 
             if (id == 0)

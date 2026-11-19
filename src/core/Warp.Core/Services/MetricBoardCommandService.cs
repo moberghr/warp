@@ -19,7 +19,9 @@ public interface IMetricBoardCommandService
     /// Id &gt; 0 names no tile or <see cref="MetricBoardTile.BoardId"/> names no board (deleted meanwhile: an edit never
     /// re-creates either). On an insert a null board id, or the Default board's id, puts the tile on the Default board
     /// (stored as null). On an edit a null board id keeps the tile on its board; the Default board's id moves it there.
-    /// An insert with Position 0 is appended after the last tile of its board. Throws <see cref="TimeoutException"/> when
+    /// An insert with Position 0 is appended after the last tile of its board. Returns <see cref="ObjectiveMissing"/> for an
+    /// SLO tile whose objective no longer exists (deleted after the caller validated it; the check is repeated under the
+    /// board lock, which <c>SloCommandService.Delete</c> takes too). Throws <see cref="TimeoutException"/> when
     /// the write cannot take the board lock in time (the dashboard route answers 503).
     /// </summary>
     /// <remarks>
@@ -27,6 +29,12 @@ public interface IMetricBoardCommandService
     /// <see cref="MetricBoardTileValidator"/>, as the dashboard upsert endpoint does.
     /// </remarks>
     Task<int?> Upsert(MetricBoardTile tile, CancellationToken ct);
+
+    /// <summary>
+    /// What <see cref="Upsert"/> returns for an SLO tile whose objective does not exist (never a tile id, which is
+    /// positive). The dashboard route answers 400 with <c>MetricBoardTileValidator.ObjectiveNotFound</c>.
+    /// </summary>
+    public const int ObjectiveMissing = -1;
 
     Task<bool> Delete(int id, CancellationToken ct);
 
@@ -178,6 +186,13 @@ public sealed class MetricBoardCommandService<TContext> : IMetricBoardCommandSer
         if (tile.Id > 0 && existing is null)
         {
             return 0;
+        }
+
+        // The caller's validator saw the objective before the lock; SloCommandService.Delete removes it (and its tiles)
+        // under this same lock, so checking again here is what keeps a tile from outliving its objective.
+        if (tile.Kind == MetricTileKind.Slo && !await context.Set<SloDefinition>().AnyAsync(x => x.Id == tile.SloDefinitionId, ct))
+        {
+            return IMetricBoardCommandService.ObjectiveMissing;
         }
 
         // An edit that names no board keeps the tile where it is (an omitted boardId is not a move to Default: the dashboard

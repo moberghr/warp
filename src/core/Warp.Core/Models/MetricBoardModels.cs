@@ -101,7 +101,10 @@ public sealed class MetricBoardTileResult
     /// </summary>
     public SloObjectiveModel? Slo { get; init; }
 
-    /// <summary>True for an SLO tile whose objective no longer exists (deleted by an older binary, mid rolling deploy).</summary>
+    /// <summary>
+    /// True for an SLO tile whose objective no longer exists (deleted by an older binary mid rolling deploy, outside Warp,
+    /// or in a race in a host without a provider, where no board lock is taken).
+    /// </summary>
     public bool Missing { get; init; }
 }
 

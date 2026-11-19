@@ -24,6 +24,7 @@ using Warp.Dashboard.Endpoints;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.Observability;
+using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Metrics;
 
@@ -122,6 +123,91 @@ public abstract class MetricSloTileTestsBase : IAsyncLifetime
         result.ShouldBeTrue();
         var names = await _fixture.CreateContext().Set<MetricBoardTile>().Select(x => x.Name).ToListAsync(Ct);
         names.ShouldBe(["Other objective", "Volume"], ignoreOrder: true);
+    }
+
+    [TimedFact]
+    public async Task Upsert_SloTileWhoseObjectiveWasDeletedAfterValidation_ReturnsObjectiveMissingAndStoresNothing()
+    {
+        // The route's validator saw the objective; it is deleted before the insert takes the board lock.
+        var objective = await SeedObjectiveAsync("Checkout success", null);
+        var tile = Validated(Slo("Checkout", objective));
+        await _fixture.CreateContext().Set<SloDefinition>().Where(x => x.Id == objective).ExecuteDeleteAsync(Ct);
+
+        var id = await Command().Upsert(tile, Ct);
+
+        id.ShouldBe(IMetricBoardCommandService.ObjectiveMissing);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Delete_ObjectiveWhileATileInsertHoldsTheBoardLock_WaitsForItThenDeletesThatTileToo()
+    {
+        // N=2: a second connection is a tile insert that passed its objective check and added an SLO tile under the board
+        // lock, pinned inside its transaction by a BarrierSignal. The delete must wait for it (it writes board tiles) and
+        // then remove the tile the insert committed: no tile may outlive its objective.
+        var objective = await SeedObjectiveAsync("Checkout success", null);
+        var barrier = new BarrierSignal();
+        var holderContext = _fixture.CreateContext();
+        var holder = TestTasks.QueriesFor(holderContext).RunUnderTransactionLockAsync(
+            holderContext,
+            "warp:metric-board",
+            async (context, ct) =>
+            {
+                var tile = Validated(Slo("Checkout", objective));
+                tile.CreatedAt = Now;
+                tile.UpdatedAt = Now;
+                context.Set<MetricBoardTile>().Add(tile);
+                await context.SaveChangesAsync(ct);
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return tile.Id;
+            },
+            Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+
+        var delete = SloCommand().Delete(objective, Ct);
+
+        // Held at the lock: it does not finish while the insert is inside.
+        await Should.ThrowAsync<TimeoutException>(() => delete.WaitAsync(TimeSpan.FromMilliseconds(500), Ct));
+        barrier.CanFinish.Release();
+        (await holder).LockHeld.ShouldBeTrue();
+        (await delete).ShouldBeTrue();
+        (await _fixture.CreateContext().Set<SloDefinition>().AnyAsync(Ct)).ShouldBeFalse();
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Delete_ObjectiveWhileTheBoardLockIsHeldPastTheTimeout_ThrowsTimeoutAndDeletesNothing()
+    {
+        var objective = await SeedObjectiveAsync("Checkout success", null);
+        await SeedTilesAsync(Validated(Slo("Checkout", objective)));
+        var barrier = new BarrierSignal();
+        var holderContext = _fixture.CreateContext();
+        var holder = TestTasks.QueriesFor(holderContext).RunUnderTransactionLockAsync(
+            holderContext,
+            "warp:metric-board",
+            async (_, ct) =>
+            {
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return 0;
+            },
+            Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        try
+        {
+            await Should.ThrowAsync<TimeoutException>(() => SloCommand(TimeSpan.FromMilliseconds(300)).Delete(objective, Ct));
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+            await holder;
+        }
+
+        (await _fixture.CreateContext().Set<SloDefinition>().AnyAsync(Ct)).ShouldBeTrue();
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeTrue();
     }
 
     [TimedFact]
@@ -379,6 +465,16 @@ public abstract class MetricSloTileTestsBase : IAsyncLifetime
         var context = _fixture.CreateContext();
 
         return new(context, TimeProvider.System, NullLogger<MetricBoardCommandService<TestContext>>.Instance, TestTasks.QueriesFor(context));
+    }
+
+    private SloCommandService<TestContext> SloCommand(TimeSpan? lockTimeout = null)
+    {
+        var context = _fixture.CreateContext();
+
+        return new(context, TimeProvider.System, NullLogger<SloCommandService<TestContext>>.Instance, TestTasks.QueriesFor(context))
+        {
+            LockTimeout = lockTimeout ?? TimeSpan.FromSeconds(10),
+        };
     }
 
     private async Task<int> SeedObjectiveAsync(string name, string? application, SloState state = SloState.Healthy, DateTime? acknowledgedUntil = null)
