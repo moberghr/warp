@@ -1,11 +1,11 @@
 # Saved views and named metric boards
 
 - **Date:** 2026-11-17
-- **Status:** draft, awaiting approval
+- **Status:** implemented
 - **Scope classification:** new feature, additive. Nothing changes for a host that does not use it, except that existing board tiles are shown on a board named "Default".
 - **Security impact:** low. Stores what the operator types (names, a query string) and the acting dashboard user's name (§1.2 allows the actor name in audit lines). No payloads, no tag values beyond what the operator put in a filter.
 - **Schema impact:** additive. Two new tables (`metric_board`, `saved_view`) and one nullable column (`metric_board_tile.board_id`). Hosts pick them up with `dotnet ef migrations add`.
-- **Delivery:** a new branch `feat/saved-views`, stacked on `feat/metrics-follow-ups` (79 unpushed commits). Merge the follow-ups PR first, then rebase.
+- **Delivery:** on `feat/metrics-follow-ups`, merged together with the follow-ups.
 
 ## Problem
 
