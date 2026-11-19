@@ -59,13 +59,13 @@ function chartResult(id: number, chartQuery: string | null): MetricBoardTileResu
   };
 }
 
-function renderCard(result: MetricBoardTileResult) {
+function renderCard(result: MetricBoardTileResult, refetchMs = 60_000) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter>
-        <ChartTileCard result={result} selection={{ range: '24h', custom: null }} refetchMs={60_000} deploys={[]} onEdit={() => {}} onDelete={() => {}} />
+        <ChartTileCard result={result} selection={{ range: '24h', custom: null }} refetchMs={refetchMs} deploys={[]} onEdit={() => {}} onDelete={() => {}} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -91,7 +91,40 @@ describe('ChartTileCard', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it('stops refetching while scrolled out of view, and resumes when back', async () => {
+    vi.useFakeTimers();
+    renderCard(chartResult(3, 'breakdown=gateway'), 1_000);
+    const advance = (ms: number) => act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+    scroll(true);
+    await advance(0);
+    expect(getMetricSeries).toHaveBeenCalledTimes(1);
+    await advance(1_000);
+    expect(getMetricSeries).toHaveBeenCalledTimes(2);
+
+    scroll(false);
+    await advance(10_000);
+    expect(getMetricSeries).toHaveBeenCalledTimes(2);
+
+    scroll(true);
+    await advance(1_000);
+    expect(getMetricSeries.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  it('disconnects its observer on unmount', () => {
+    const { unmount } = renderCard(chartResult(4, null));
+    expect(observers).toHaveLength(1);
+    expect(observers[0].target).not.toBeNull();
+
+    unmount();
+
+    expect(observers).toHaveLength(0);
   });
 
   it('reads no series until the tile scrolls into view', async () => {
