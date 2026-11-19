@@ -9,7 +9,8 @@ namespace Warp.Tests.Metrics;
 /// stored query is validated against) equals the dashboard's own <c>metricQueryKeys</c>, read from
 /// <c>src/ui/src/pages/metrics/metricModel.ts</c>: a control the page starts writing without the server learning it would
 /// make every "Add to board" with that control a 400, and a key the server accepts but the page never reads is a
-/// parameter a tile could smuggle into a link. The range keys are checked the same way (<c>METRIC_RANGE_KEYS</c>).
+/// parameter a tile could smuggle into a link. The range keys are checked the same way (<c>METRIC_RANGE_KEYS</c>), and so
+/// are the percentiles the page can draw (<c>PERCENTILES</c>).
 /// </summary>
 [Trait("Category", "NoDb")]
 public partial class MetricChartQueryKeysSyncTests
@@ -32,6 +33,22 @@ public partial class MetricChartQueryKeysSyncTests
         var keys = ReadConstArray(source, "METRIC_RANGE_KEYS");
 
         MetricChartQuery.RangeKeys.ShouldBe(keys);
+    }
+
+    [TimedFact]
+    public void Percentiles_EqualTheDashboardsList()
+    {
+        // The page reads any other percentile as none, so a tile holding one would draw no percentile line.
+        var source = File.ReadAllText(Path.Combine(PagesDirectory(), "metrics", "metricModel.ts"));
+
+        var match = Regex.Match(source, @"export const PERCENTILES\s*=\s*\[(?<body>[^\]]*)\]\s*as const", RegexOptions.None, TimeSpan.FromSeconds(1));
+        match.Success.ShouldBeTrue("'export const PERCENTILES = [...] as const' not found");
+        var percentiles = match.Groups["body"].Value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(x => int.Parse(x, System.Globalization.CultureInfo.InvariantCulture))
+            .ToList();
+
+        MetricChartQuery.Percentiles.ShouldBe(percentiles);
     }
 
     // `export const name = [ 'a', 'b', ... ] as const;` → ["a", "b", ...], in order.

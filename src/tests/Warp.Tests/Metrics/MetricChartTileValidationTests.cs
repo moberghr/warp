@@ -54,6 +54,8 @@ public class MetricChartTileValidationTests
     [TimedTheory]
     [InlineData("compare=2d")]
     [InlineData("percentile=100")]
+    [InlineData("percentile=75")]
+    [InlineData("percentile=1")]
     [InlineData("percentile=p95")]
     [InlineData("view=table")]
     [InlineData("numerator=5*0")]
@@ -66,6 +68,36 @@ public class MetricChartTileValidationTests
         MetricBoardValidation.TryValidate(ChartTile(query), MetricKind.Histogram, out var error).ShouldBeFalse();
 
         error.ShouldNotBeNull().ShouldStartWith("ChartQuery");
+    }
+
+    [TimedFact]
+    public void TryValidate_ChartQueryWithAnApplicationOfTwoHundredCharacters_IsAccepted()
+    {
+        // Application names up to 200 are accepted everywhere else (board, tile, verdict).
+        var tile = ChartTile("application=" + new string('a', 200));
+
+        MetricBoardValidation.TryValidate(tile, MetricKind.Counter, out var error).ShouldBeTrue(error);
+    }
+
+    [TimedFact]
+    public void TryValidate_ChartQueryWithAnApplicationOverTwoHundredCharacters_IsRejected()
+    {
+        MetricBoardValidation.TryValidate(ChartTile("application=" + new string('a', 201)), MetricKind.Counter, out var error).ShouldBeFalse();
+
+        error.ShouldNotBeNull().ShouldContain("200");
+    }
+
+    [TimedTheory]
+    [InlineData("breakdown=%ZZ", "breakdown=%25ZZ")]
+    [InlineData("breakdown=a%", "breakdown=a%25")]
+    public void TryValidate_ChartQueryWithAMalformedEscape_KeepsItAsTyped(string query, string stored)
+    {
+        // Uri.UnescapeDataString does not throw on a malformed escape; the text is kept, as URLSearchParams keeps it.
+        var tile = ChartTile(query);
+
+        MetricBoardValidation.TryValidate(tile, MetricKind.Counter, out var error).ShouldBeTrue(error);
+
+        tile.ChartQuery.ShouldBe(stored);
     }
 
     [TimedFact]
@@ -236,6 +268,7 @@ public class MetricChartTileValidationTests
     [InlineData("status", null, null)]
     [InlineData(null, "2d", null)]
     [InlineData(null, null, 100)]
+    [InlineData(null, null, 75)]
     public void Chart_InvalidParameter_ThrowsAtRegistration(string? filter, string? compare, int? percentile)
     {
         Should.Throw<ArgumentException>(() => new MetricBoardOptions().Chart("Bad", "c", filter: filter, compare: compare, percentile: percentile));

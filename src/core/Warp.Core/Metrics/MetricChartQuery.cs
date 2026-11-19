@@ -18,6 +18,8 @@ internal static class MetricChartQuery
     /// <summary>The longest stored chart query.</summary>
     public const int MaxLength = 2000;
 
+    // An application name is bounded like everywhere else (board, tile, verdict: 200); a tag key keeps the 128 of a key.
+    private const int MaxApplicationLength = 200;
     private const int MaxNameLength = 128;
     private const int MaxValueLength = 512;
 
@@ -27,6 +29,12 @@ internal static class MetricChartQuery
 
     /// <summary>The keys that pick the window. A tile never stores them: the board's range drives every tile.</summary>
     public static IReadOnlyList<string> RangeKeys { get; } = ["range", "from", "to"];
+
+    /// <summary>
+    /// The percentiles the metric page can draw: <c>PERCENTILES</c> in <c>metricModel.ts</c>, which reads any other value
+    /// as no percentile. A tile holding another one would render without its line and lose it on the next edit.
+    /// </summary>
+    public static IReadOnlyList<int> Percentiles { get; } = [50, 90, 95, 99];
 
     /// <summary>
     /// Builds the canonical query of a seeded chart from typed parameters (<c>MetricBoardOptions.Chart</c>). The filter is
@@ -146,20 +154,10 @@ internal static class MetricChartQuery
                 continue;
             }
 
+            // Uri.UnescapeDataString never throws on .NET Core: a malformed escape is kept as typed, as URLSearchParams does.
             var separator = part.IndexOf('=', StringComparison.Ordinal);
-            string key;
-            string value;
-            try
-            {
-                key = Decode(separator < 0 ? part : part[..separator]);
-                value = Decode(separator < 0 ? string.Empty : part[(separator + 1)..]);
-            }
-            catch (UriFormatException)
-            {
-                error = "ChartQuery is not a valid URL query string.";
-
-                return false;
-            }
+            var key = Decode(separator < 0 ? part : part[..separator]);
+            var value = Decode(separator < 0 ? string.Empty : part[(separator + 1)..]);
 
             if (RangeKeys.Contains(key, StringComparer.Ordinal))
             {
@@ -206,9 +204,10 @@ internal static class MetricChartQuery
         {
             case "application":
             case "breakdown":
-                if (value.Length > MaxNameLength)
+                var maxLength = string.Equals(key, "application", StringComparison.Ordinal) ? MaxApplicationLength : MaxNameLength;
+                if (value.Length > maxLength)
                 {
-                    error = $"ChartQuery {key} must be at most {MaxNameLength} characters.";
+                    error = $"ChartQuery {key} must be at most {maxLength} characters.";
 
                     return false;
                 }
@@ -236,9 +235,9 @@ internal static class MetricChartQuery
                 return true;
 
             case "percentile":
-                if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var percentile) || percentile is < 1 or > 99)
+                if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var percentile) || !Percentiles.Contains(percentile))
                 {
-                    error = "ChartQuery percentile must be an integer between 1 and 99.";
+                    error = $"ChartQuery percentile must be one of {string.Join(", ", Percentiles)}.";
 
                     return false;
                 }

@@ -132,7 +132,7 @@ public sealed class MetricBoardOptions
     /// A chart tile: the metric page's chart of <paramref name="instrument"/> with these controls, over the board's range.
     /// The parameters are the page's own (<paramref name="filter"/> in the <c>MetricFilter</c> grammar <c>k=v[,k=v]</c>,
     /// trailing <c>*</c>; <paramref name="compare"/> <c>1d</c>, <c>7d</c> or <c>1d,7d</c>; <paramref name="percentile"/>
-    /// 1–99 on a histogram; a <paramref name="numerator"/> pattern turns on the ratio view of the breakdown;
+    /// 50, 90, 95 or 99 on a histogram (the percentiles the page draws); a <paramref name="numerator"/> pattern turns on the ratio view of the breakdown;
     /// <paramref name="minMax"/> draws a gauge's min / max lines; <paramref name="rate"/> <c>minute</c> or <c>second</c>),
     /// stored as the page's URL query. A chart has no status rule. At most
     /// <see cref="MetricBoardValidation.MaxChartTiles"/> per board.
