@@ -295,7 +295,7 @@ acknowledge it: a note about one slice cannot excuse a problem in the rest.
 
 Pitfall: a note stores only what you type. Do not paste order ids, customer names or card data into it.
 
-## Named boards and saved views
+## Named boards and shareable links
 
 **In the shop.** The checkout team wants its own board instead of scrolling past the payments tiles, and during
 a rolling deploy it keeps opening the same chart: checkout errors split by version. It should be one click, for
@@ -315,13 +315,12 @@ opt.AddMetricBoard("Checkout", b => b
         check: MetricTileCheck.AtMost(5)));
 ```
 
-Then save the chart as a view. Open `checkout.completed`, filter on `outcome = error`, break down by
-**application version**, pick **Since last deploy**, and use **Views > Save view** with the name "Checkout
-errors by version" and **Shared** on. The stored query is the page's own URL state:
+Then share the chart as a link. Open `checkout.completed`, filter on `outcome = error`, break down by
+**application version** and pick **Since last deploy**. Every control is in the page URL, so the address bar
+now holds the whole view; bookmark it or paste it in the team channel:
 
 ```text
-page=metric  target=checkout.completed
-query=from=2026-11-17T09%3A40%3A00.000Z&application=shop-api&breakdown=%7Bversion%7D&filter=outcome%3Aerror
+/warp/metrics/{id}?from=2026-11-17T09%3A40%3A00.000Z&application=shop-api&breakdown=%7Bversion%7D&filter=outcome%3Aerror
 ```
 
 A CI step can gate on the board alone with `GET /warp/api/applications/verdict?application=shop-api&board=Checkout`;
@@ -329,17 +328,12 @@ the response's `board` field reads `"Checkout"`.
 
 **Test scenario.**
 
-- *Given* the seeding above and a signed-in user `alice` (the built-in login or your own gate).
-- *When* `alice` saves "Checkout errors by version" as shared, and `bob` signs in and opens `checkout.completed`.
-- *Then* `bob` sees the view under **Views > Shared**, choosing it opens the chart with the same filter,
-  breakdown and range, and `GET /warp/api/views?page=metric&target=checkout.completed` lists it with
-  `"author": "alice"`. The Metrics list shows "1 view" beside `checkout.completed`.
-- *When* `bob` saves a personal view on the same chart, then `alice` reloads.
-- *Then* `alice` does not see it, and a `DELETE /warp/api/views/{id}` of it as `alice` answers 403.
+- *Given* the seeding above.
+- *When* you open the link above in a new tab.
+- *Then* the chart opens with the same filter, breakdown and range.
 - *When* you rename the Checkout board to "Checkout (EU)" on **Metrics > Board** and restart `shop-api`.
 - *Then* there is still one board, now "Checkout (EU)", with the seeded tiles; no second "Checkout" board appears.
-- `Covered by:` `SavedViewTestsBase`, `SavedViewValidationTests`, `SavedViewQueryKeysSyncTests`,
-  `MetricNamedBoardTestsBase`, `DeployVerdictTestsBase`; UI: `savedViewsModel.test.ts`, `demoSavedViews.test.ts`.
+- `Covered by:` `MetricNamedBoardTestsBase`, `DeployVerdictTestsBase`; UI: `metricModel.test.ts`.
 
-Pitfall: a saved view stores the filter values you typed. Filter on outcomes, routes and versions, never on order
+Pitfall: a link carries the filter values you typed. Filter on outcomes, routes and versions, never on order
 ids or customer data, the same rule as for tag values.

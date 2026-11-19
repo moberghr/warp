@@ -1,7 +1,7 @@
 # Saved views and named metric boards
 
 - **Date:** 2026-11-17
-- **Status:** implemented
+- **Status:** implemented, except Part 2 Step B. Step B (the saved view store and the Views menu) was built, then removed on 2026-11-19: named boards cover the use case. Part 1 (named boards) and Part 2 Step A (URL state, so every page can be shared as a link) remain, and the `saved_view` table below no longer exists.
 - **Scope classification:** new feature, additive. Nothing changes for a host that does not use it, except that existing board tiles are shown on a board named "Default".
 - **Security impact:** low. Stores what the operator types (names, a query string) and the acting dashboard user's name (§1.2 allows the actor name in audit lines). No payloads, no tag values beyond what the operator put in a filter.
 - **Schema impact:** additive. Two new tables (`metric_board`, `saved_view`) and one nullable column (`metric_board_tile.board_id`). Hosts pick them up with `dotnet ef migrations add`.
