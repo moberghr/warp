@@ -366,5 +366,7 @@ ids or customer data, the same rule as for tag values.
 
 Pitfall: the objective is seeded by `shop-worker` and the board by `shop-api`. An SLO tile is resolved against
 the stored objectives when the board is seeded, so on a fresh database where `shop-api` starts first the SLO tile
-is skipped with an Error log naming it, and seeded on the next start of `shop-api`. Start `shop-worker` first,
-or add the tile with **Add to board** on the SLO page.
+is not there at first: `shop-api` logs a Warning naming it and retries once a minute, for ten minutes, in the
+background. The tile appears within a minute of `shop-worker` seeding the objective. If `shop-worker` is not
+started within those ten minutes, the tile is logged at Error and seeded on the next start of `shop-api` (or add
+it with **Add to board** on the SLO page).

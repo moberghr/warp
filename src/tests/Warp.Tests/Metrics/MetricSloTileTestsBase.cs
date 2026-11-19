@@ -378,17 +378,79 @@ public abstract class MetricSloTileTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task Seeder_UnknownObjective_SkipsTheTileAndLogsAnError()
+    public async Task Seeder_UnknownObjective_SkipsTheTileAndWarnsThatItWillRetry()
     {
+        // Another process may still seed the objective: a Warning, not an Error, on the first miss.
         await SeedObjectiveAsync("Checkout success", "shop-api");
         var logs = new CapturingLoggerProvider();
-
-        await SeedFromConfigAsync(b => b.Slo("Checkout success").Value("Volume", "c"), logs);
+        await using var run = await StartSeederAsync(b => b.Slo("Checkout success").Value("Volume", "c"), logs);
 
         (await Query().GetTiles(Ct)).ShouldHaveSingleItem().Name.ShouldBe("Volume");
-        var log = logs.Logs.Single(x => x.Level == LogLevel.Error);
+        var log = logs.Logs.Single(x => x.Level == LogLevel.Warning);
         log.Fields["Name"].ShouldBe("Checkout success");
-        log.Fields["Count"].ShouldBe(0);
+        log.Message.ShouldContain("will retry");
+        logs.Logs.ShouldNotContain(x => x.Level == LogLevel.Error);
+        run.Seeder.Retry.ShouldNotBeNull().IsCompleted.ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Seeder_ObjectiveSeededAfterTheFirstPass_TileAppearsOnTheNextRetry()
+    {
+        var logs = new CapturingLoggerProvider();
+        await using var run = await StartSeederAsync(b => b.Slo("Checkout success").Value("Volume", "c"), logs);
+        (await Query().GetTiles(Ct)).ShouldHaveSingleItem().Name.ShouldBe("Volume");
+
+        // The SLO seeder of another process commits the objective; one retry interval later the tile is seeded.
+        var objective = await SeedObjectiveAsync("Checkout success", null);
+        run.Time.Advance(MetricBoardSeeds.RetryInterval);
+        (await run.RetryPassed.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+
+        await run.Seeder.Retry.ShouldNotBeNull().WaitAsync(TimeSpan.FromSeconds(5), Ct);
+        var tiles = await Query().GetTiles(Ct);
+        tiles.Select(x => x.Name).ShouldBe(["Volume", "Checkout success"]);
+        tiles.Single(x => x.Kind == MetricTileKind.Slo).SloDefinitionId.ShouldBe(objective);
+        logs.Logs.ShouldNotContain(x => x.Level == LogLevel.Error);
+    }
+
+    [TimedFact]
+    public async Task Seeder_ObjectiveNeverSeeded_LogsAnErrorOnlyAfterTheLastRetry()
+    {
+        var logs = new CapturingLoggerProvider();
+        await using var run = await StartSeederAsync(b => b.Slo("Checkout success"), logs);
+
+        for (var attempt = 1; attempt <= MetricBoardSeeds.MaxRetries; attempt++)
+        {
+            logs.Logs.ShouldNotContain(x => x.Level == LogLevel.Error);
+            run.Time.Advance(MetricBoardSeeds.RetryInterval);
+            (await run.RetryPassed.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue();
+        }
+
+        await run.Seeder.Retry.ShouldNotBeNull().WaitAsync(TimeSpan.FromSeconds(5), Ct);
+        logs.Logs.Count(x => x.Level == LogLevel.Warning).ShouldBe(1);
+        var error = logs.Logs.Single(x => x.Level == LogLevel.Error);
+        error.Fields["Name"].ShouldBe("Checkout success");
+        error.Fields["Count"].ShouldBe(0);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+
+        // Given up: a later objective is not picked up any more.
+        await SeedObjectiveAsync("Checkout success", null);
+        run.Time.Advance(MetricBoardSeeds.RetryInterval);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Seeder_StopAsync_CancelsThePendingRetry()
+    {
+        await using var run = await StartSeederAsync(b => b.Slo("Checkout success"));
+        var retry = run.Seeder.Retry.ShouldNotBeNull();
+
+        await run.Seeder.StopAsync(Ct);
+
+        retry.IsCompleted.ShouldBeTrue();
+        await SeedObjectiveAsync("Checkout success", null);
+        run.Time.Advance(MetricBoardSeeds.RetryInterval);
+        run.RetryPassed.CurrentCount.ShouldBe(0);
+        (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
     }
 
     [TimedFact]
@@ -399,11 +461,14 @@ public abstract class MetricSloTileTestsBase : IAsyncLifetime
         await SeedObjectiveAsync("CHECKOUT SUCCESS", null);
         var logs = new CapturingLoggerProvider();
 
-        await SeedFromConfigAsync(b => b.Slo("Checkout success"), logs);
+        await using var run = await StartSeederAsync(b => b.Slo("Checkout success"), logs);
 
         (await _fixture.CreateContext().Set<MetricBoardTile>().AnyAsync(Ct)).ShouldBeFalse();
         var log = logs.Logs.Single(x => x.Level == LogLevel.Error);
         log.Fields["Count"].ShouldBe(2);
+
+        // Two matches never resolve on their own: no retry.
+        run.Seeder.Retry.ShouldBeNull();
     }
 
     private static MetricBoardTile Slo(string name, int objective) => new()
@@ -554,19 +619,33 @@ public abstract class MetricSloTileTestsBase : IAsyncLifetime
 
     private async Task SeedFromConfigAsync(Action<MetricBoardOptions> configure, CapturingLoggerProvider? logs = null)
     {
+        await using var run = await StartSeederAsync(configure, logs);
+    }
+
+    // Starts a seeder on a fake clock (its retry timer only ticks when the test advances it); disposing the run stops the
+    // seeder (cancelling any retry) and then its service provider.
+    private async Task<SeederRun> StartSeederAsync(Action<MetricBoardOptions> configure, CapturingLoggerProvider? logs = null)
+    {
         var seeds = new MetricBoardSeeds();
         configure(seeds.For(null).Tiles);
         var services = new ServiceCollection();
         services.AddScoped(_ => _fixture.CreateContext());
         services.AddScoped<IMetricQueryService>(_ => new MetricQueryService<TestContext>(_fixture.CreateContext(), Options.Create(new WarpConfiguration())));
         services.AddSingleton(TestTasks.QueriesFor(_fixture.CreateContext()));
-        await using var provider = services.BuildServiceProvider();
+        var provider = services.BuildServiceProvider();
         var logger = logs is null
             ? NullLogger<MetricBoardSeeder<TestContext>>.Instance
             : new CapturingLoggerFactory(logs).CreateLogger<MetricBoardSeeder<TestContext>>();
-        var seeder = new MetricBoardSeeder<TestContext>(provider.GetRequiredService<IServiceScopeFactory>(), seeds, TimeProvider.System, logger);
+        var time = new FakeTimeProvider(new DateTimeOffset(Now));
+        var retryPassed = new SemaphoreSlim(0);
+        var seeder = new MetricBoardSeeder<TestContext>(provider.GetRequiredService<IServiceScopeFactory>(), seeds, time, logger)
+        {
+            RetryPassed = retryPassed,
+        };
 
         await seeder.StartAsync(Ct);
+
+        return new SeederRun(seeder, provider, time, retryPassed);
     }
 
     private async Task<DashboardHost> CreateDashboardHostAsync()
@@ -597,6 +676,17 @@ public abstract class MetricSloTileTestsBase : IAsyncLifetime
             Interlocked.Increment(ref _count);
 
             return result;
+        }
+    }
+
+    private sealed record SeederRun(MetricBoardSeeder<TestContext> Seeder, ServiceProvider Provider, FakeTimeProvider Time, SemaphoreSlim RetryPassed) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            await Seeder.StopAsync(CancellationToken.None);
+            Seeder.Dispose();
+            RetryPassed.Dispose();
+            await Provider.DisposeAsync();
         }
     }
 

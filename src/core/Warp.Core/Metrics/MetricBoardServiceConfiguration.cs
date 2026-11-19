@@ -270,6 +270,15 @@ internal sealed class MetricBoardSeed
 /// <summary>Every board seeded from code, in registration order. Repeated <c>AddMetricBoard</c> calls merge into one instance.</summary>
 internal sealed class MetricBoardSeeds
 {
+    /// <summary>
+    /// How many background passes retry an SLO tile whose objective did not exist at startup before it is given up
+    /// (logged at Error).
+    /// </summary>
+    public const int MaxRetries = 10;
+
+    /// <summary>How long the background retry of such a tile waits between passes.</summary>
+    public static readonly TimeSpan RetryInterval = TimeSpan.FromMinutes(1);
+
     public List<MetricBoardSeed> Boards { get; } = [];
 
     /// <summary>The seed of board <paramref name="name"/> (null = Default), added when it is the first call for that board.</summary>
@@ -401,14 +410,22 @@ public static class MetricBoardServiceConfiguration
 /// <c>warp:metric-board</c> lock (§2.16), shared with the dashboard's writes: N replicas starting at once would otherwise
 /// each find a board missing and each seed a copy. The schema is migrator-gated present, so a failure is a real error,
 /// logged at Error and non-fatal (boards and tiles can still be authored in the dashboard).
+/// An SLO tile whose objective does not exist YET (another process seeds it, or the host starts hosted services
+/// concurrently so the SLO seeder has not run) is retried in the background: every
+/// <see cref="MetricBoardSeeds.RetryInterval"/>, at most <see cref="MetricBoardSeeds.MaxRetries"/> times, re-running the
+/// pass for those tiles only (insert-if-absent, so a re-run is safe), never blocking startup and cancelled by
+/// <see cref="StopAsync"/>. The first miss logs a Warning, only the last an Error. An ambiguous objective (two match) is
+/// never retried: it does not resolve on its own.
 /// </summary>
-internal sealed class MetricBoardSeeder<TContext> : IHostedService
+internal sealed class MetricBoardSeeder<TContext> : IHostedService, IDisposable
     where TContext : DbContext
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly MetricBoardSeeds _seeds;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<MetricBoardSeeder<TContext>> _logger;
+    private readonly CancellationTokenSource _stopping = new();
+    private Task? _retry;
 
     public MetricBoardSeeder(IServiceScopeFactory scopeFactory, MetricBoardSeeds seeds, TimeProvider timeProvider, ILogger<MetricBoardSeeder<TContext>> logger)
     {
@@ -422,8 +439,65 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
     // so a race test can pin one seeder there (N=2 BarrierSignal) and prove the other cannot read until it commits.
     internal Func<CancellationToken, Task>? BeforeSave { get; init; }
 
+    // Test seam: released after every retry pass, so a test advancing a fake clock knows the pass it triggered is done.
+    internal SemaphoreSlim? RetryPassed { get; init; }
+
+    // The background retry, null when none was needed (test seam: completes when every pending tile resolved or gave up).
+    internal Task? Retry => _retry;
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        var pending = await SeedPassAsync(_seeds.Boards, retriesLeft: MetricBoardSeeds.MaxRetries, cancellationToken);
+        if (pending.Count == 0)
+        {
+            return;
+        }
+
+        // Created before StartAsync returns, so the first tick comes one interval after startup whatever the scheduling.
+        var timer = new PeriodicTimer(MetricBoardSeeds.RetryInterval, _timeProvider);
+        _retry = RetryAsync(timer, pending, _stopping.Token);
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await _stopping.CancelAsync();
+        if (_retry is not null)
+        {
+            await _retry.WaitAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }
+    }
+
+    public void Dispose() => _stopping.Dispose();
+
+    private async Task RetryAsync(PeriodicTimer timer, List<MetricBoardSeed> pending, CancellationToken ct)
+    {
+        using (timer)
+        {
+            try
+            {
+                for (var attempt = 1; attempt <= MetricBoardSeeds.MaxRetries && pending.Count > 0; attempt++)
+                {
+                    if (!await timer.WaitForNextTickAsync(ct))
+                    {
+                        return;
+                    }
+
+                    pending = await SeedPassAsync(pending, MetricBoardSeeds.MaxRetries - attempt, ct);
+                    RetryPassed?.Release();
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // The host is stopping, so the retry ends quietly.
+            }
+        }
+    }
+
+    // One seed pass over the given boards. It returns, per board, the SLO tiles whose objective matched nothing while
+    // retries are left, for the background retry; on the last pass those are logged at Error and dropped instead.
+    private async Task<List<MetricBoardSeed>> SeedPassAsync(IReadOnlyList<MetricBoardSeed> seeds, int retriesLeft, CancellationToken cancellationToken)
+    {
+        var pending = new List<MetricBoardSeed>();
         try
         {
             using var scope = _scopeFactory.CreateScope();
@@ -433,21 +507,32 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
 
             // SLO tiles name their objective; one read of the objectives resolves every one of them (the SLO seeder ran
             // first: AddSlo orders its seeder before this one).
-            var objectives = await ReadObjectivesAsync(context, cancellationToken);
+            var objectives = await ReadObjectivesAsync(context, seeds, cancellationToken);
 
             // Validated before the lock (one registry read per seed), so the locked section is the board read and the inserts.
             var boards = new List<PreparedBoard>();
-            foreach (var board in _seeds.Boards)
+            foreach (var board in seeds)
             {
                 var tiles = new List<PreparedTile>();
+                var missing = new MetricBoardSeed { Name = board.Name };
                 foreach (var seed in board.Tiles.Seeded)
                 {
                     // Validated first, so the match sees the normalized fields the stored row was written with (a gauge's
                     // default aggregate).
                     var tile = Copy(seed);
-                    if (board.Tiles.SloSeeds.TryGetValue(seed, out var objective) && !TryResolve(tile, objective, objectives, board.Name))
+                    if (board.Tiles.SloSeeds.TryGetValue(seed, out var objective))
                     {
-                        continue;
+                        var resolution = TryResolve(tile, objective, objectives, board.Name, retriesLeft);
+                        if (resolution == SloResolution.NotFound && retriesLeft > 0)
+                        {
+                            missing.Tiles.Seeded.Add(seed);
+                            missing.Tiles.SloSeeds[seed] = objective;
+                        }
+
+                        if (resolution != SloResolution.Resolved)
+                        {
+                            continue;
+                        }
                     }
 
                     var (ok, error) = await MetricBoardTileValidator.ValidateAsync(tile, metrics, cancellationToken);
@@ -455,6 +540,10 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
                 }
 
                 boards.Add(new PreparedBoard(board.Name, tiles));
+                if (missing.Tiles.Seeded.Count > 0)
+                {
+                    pending.Add(missing);
+                }
             }
 
             var (boardsAdded, tilesAdded) = await TransactionLock.RunAsync(queries, context, TransactionLock.MetricBoardKey, TransactionLock.SeedTimeout, (x, ct) => SeedAsync(x, boards, ct), cancellationToken);
@@ -467,20 +556,26 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
             {
                 _logger.LogInformation("Seeded {Count} metric board tile(s) from config", tilesAdded);
             }
+
+            return pending;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Metric board seeding failed — {Count} config-declared tile(s) were NOT seeded and will be missing until created in the dashboard. The schema is expected present (migrator gating), so this is a real error, not a startup race.", _seeds.Boards.Sum(x => x.Tiles.Seeded.Count));
+            _logger.LogError(ex, "Metric board seeding failed — {Count} config-declared tile(s) were NOT seeded and will be missing until created in the dashboard. The schema is expected present (migrator gating), so this is a real error, not a startup race.", seeds.Sum(x => x.Tiles.Seeded.Count));
+
+            return [];
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-
     // The (id, name, application) of every objective, only when an SLO tile is seeded; a handful of rows, matched in memory
     // so a collation never decides whether two names are one.
-    private async Task<List<(int Id, string Name, string? Application)>> ReadObjectivesAsync(TContext context, CancellationToken ct)
+    private static async Task<List<(int Id, string Name, string? Application)>> ReadObjectivesAsync(TContext context, IReadOnlyList<MetricBoardSeed> seeds, CancellationToken ct)
     {
-        if (!_seeds.Boards.Exists(x => x.Tiles.SloSeeds.Count > 0))
+        if (!seeds.Any(x => x.Tiles.SloSeeds.Count > 0))
         {
             return [];
         }
@@ -499,24 +594,42 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
         return rows.ConvertAll(x => (x.Id, x.Name, x.Application));
     }
 
-    // Exactly one objective must match the seed's name (ignoring case) and application (exactly; null matches null).
-    private bool TryResolve(MetricBoardTile tile, SloTileSeed seed, List<(int Id, string Name, string? Application)> objectives, string? board)
+    // Exactly one objective must match the seed's name (ignoring case) and application (exactly; null matches null). No
+    // match may still appear (another process seeds it): a Warning on the first miss, quiet while retrying, an Error once
+    // no retry is left. Two matches never resolve on their own: an Error at once.
+    private SloResolution TryResolve(MetricBoardTile tile, SloTileSeed seed, List<(int Id, string Name, string? Application)> objectives, string? board, int retriesLeft)
     {
         var matches = objectives.FindAll(x => string.Equals(x.Name, seed.Name, StringComparison.OrdinalIgnoreCase) && string.Equals(x.Application, seed.Application, StringComparison.Ordinal));
-        if (matches.Count != 1)
+        var boardName = board ?? MetricBoardValidation.DefaultBoardName;
+        if (matches.Count == 1)
+        {
+            tile.SloDefinitionId = matches[0].Id;
+
+            return SloResolution.Resolved;
+        }
+
+        if (matches.Count > 1 || retriesLeft == 0)
         {
             _logger.LogError(
                 "Metric board SLO tile '{Name}' on board '{Board}' was NOT seeded: {Count} objectives match that name and application (exactly one must).",
                 tile.Name,
-                board ?? MetricBoardValidation.DefaultBoardName,
+                boardName,
                 matches.Count);
 
-            return false;
+            return matches.Count > 1 ? SloResolution.Ambiguous : SloResolution.NotFound;
         }
 
-        tile.SloDefinitionId = matches[0].Id;
+        if (retriesLeft == MetricBoardSeeds.MaxRetries)
+        {
+            _logger.LogWarning(
+                "Metric board SLO tile '{Name}' on board '{Board}' was not seeded yet: no objective matches that name and application. It may still be seeded by another process; will retry every {Interval} up to {Retries} times.",
+                tile.Name,
+                boardName,
+                MetricBoardSeeds.RetryInterval,
+                MetricBoardSeeds.MaxRetries);
+        }
 
-        return true;
+        return SloResolution.NotFound;
     }
 
     // The names of the fields two tiles disagree on, for the skip log: field names only, never a value (§1.2: a filter
@@ -741,6 +854,13 @@ internal sealed class MetricBoardSeeder<TContext> : IHostedService
         MaxDeviation = x.MaxDeviation,
         DeviationDirection = x.DeviationDirection,
     };
+
+    private enum SloResolution
+    {
+        Resolved = 1,
+        NotFound = 2,
+        Ambiguous = 3,
+    }
 
     private sealed record PreparedTile(MetricBoardTile Tile, bool Ok, string? Error);
 
