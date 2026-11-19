@@ -11,7 +11,7 @@ import {
   chartQueryFromParams,
   chartTileFromPage,
   chartTileHref,
-  chartTileIds,
+  chartCapReached,
   describeChartQuery,
 } from './chartTileModel';
 import { buildTileRequest, changeTileKind, describeTile, emptyTileDraft, validateTileDraft } from './boardModel';
@@ -233,8 +233,33 @@ describe('board counts for Add to board', () => {
     expect(counts.get(5)).toEqual({ tileCount: 1, chartCount: 1 });
   });
 
-  it('lists the chart tile ids of a board read', () => {
-    expect(chartTileIds(tiles.map((tile) => ({ tile })))).toEqual([2, 3]);
+  describe('chartCapReached (the tile editor)', () => {
+    // Board 5 is full of charts; Default (id 1) holds one.
+    const stored: MetricBoardTile[] = [
+      { ...emptyTileDraft, id: 1, boardId: null, kind: MetricTileKind.Chart },
+      ...Array.from({ length: MAX_CHART_TILES }, (_, i) => ({ ...emptyTileDraft, id: 100 + i, boardId: 5, kind: MetricTileKind.Chart })),
+    ];
+    const chart = { ...emptyTileDraft, kind: MetricTileKind.Chart };
+
+    it('counts the board the tile is saved to, not the one on screen', () => {
+      expect(chartCapReached({ ...chart, id: 0, boardId: 5 }, stored, 1)).toBe(true);
+      expect(chartCapReached({ ...chart, id: 0, boardId: null }, stored, 1)).toBe(false);
+      expect(chartCapReached({ ...chart, id: 0, boardId: 1 }, stored, 1)).toBe(false);
+    });
+
+    it('moving a chart off a full board onto Default is allowed, onto the full board is not', () => {
+      expect(chartCapReached({ ...chart, id: 100, boardId: 1 }, stored, 1)).toBe(false);
+      expect(chartCapReached({ ...chart, id: 1, boardId: 5 }, stored, 1)).toBe(true);
+    });
+
+    it('never counts the edited chart itself, so editing a chart on a full board stays allowed', () => {
+      expect(chartCapReached({ ...chart, id: 100, boardId: 5 }, stored, 1)).toBe(false);
+    });
+
+    it('is false for a non-chart tile and while the tiles are unknown', () => {
+      expect(chartCapReached({ ...emptyTileDraft, id: 0, boardId: 5 }, stored, 1)).toBe(false);
+      expect(chartCapReached({ ...chart, id: 0, boardId: 5 }, undefined, 1)).toBe(false);
+    });
   });
 
   it('refuses a blank name, a full board and a board full of charts', () => {

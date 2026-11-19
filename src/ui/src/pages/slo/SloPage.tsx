@@ -48,14 +48,14 @@ const emptyDraft: SloUpsertRequest = {
 export default function SloPage() {
   const queryClient = useQueryClient();
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['slos'],
+    queryKey: queryKeys.slos,
     queryFn: getSlos,
     refetchInterval: 30_000,
   });
 
   const [draft, setDraft] = useState<SloUpsertRequest | null>(null);
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['slos'] });
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: queryKeys.slos });
   const saveMutation = useMutation({ mutationFn: (d: SloUpsertRequest) => upsertSlo(buildUpsertRequest(d)), onSuccess: () => { setDraft(null); invalidate(); } });
   const openDraft = (d: SloUpsertRequest | null) => { saveMutation.reset(); setDraft(d); };
   // Settled, not success: a failed delete or ack may still have changed the row (or the row is already gone), so the

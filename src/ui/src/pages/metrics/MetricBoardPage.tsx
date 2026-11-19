@@ -31,7 +31,7 @@ import { ChartTileCard } from './ChartTile';
 import { ChartTileEditor } from './ChartTileEditor';
 import { SloTileCard } from './SloTile';
 import { objectiveOptions } from './sloTileModel';
-import { MAX_CHART_TILES, chartTileIds } from './chartTileModel';
+import { MAX_CHART_TILES, chartCapReached } from './chartTileModel';
 import {
   RANGES,
   customRangeLabel,
@@ -394,7 +394,6 @@ export default function MetricBoardPage() {
         <TileForm
           draft={draft}
           boards={boards}
-          chartIds={chartTileIds(tiles)}
           selection={selection}
           refetchMs={refetchMs}
           deploys={deploysQuery.data}
@@ -676,10 +675,9 @@ function Sparkline({
   );
 }
 
-function TileForm({
+export function TileForm({
   draft,
   boards,
-  chartIds,
   selection,
   refetchMs,
   deploys,
@@ -691,8 +689,6 @@ function TileForm({
 }: {
   draft: MetricBoardTile;
   boards: MetricBoardSummary[];
-  /** The ids of the chart tiles on the board the editor was opened from. */
-  chartIds: number[];
   selection: RangeSelection;
   refetchMs: number | false;
   deploys: ApplicationDeployModel[] | undefined;
@@ -712,11 +708,14 @@ function TileForm({
   const ratio = draft.kind === MetricTileKind.Ratio;
   const chart = isChartTile(draft);
   const slo = isSloTile(draft);
-  const objectivesQuery = useQuery({ queryKey: ['slo'] as const, queryFn: api.getSlos, enabled: slo });
+  // The SLO page's own key, so the two share one cache (and its invalidation).
+  const objectivesQuery = useQuery({ queryKey: queryKeys.slos, queryFn: api.getSlos, enabled: slo });
   const objectives = objectiveOptions(objectivesQuery.data?.items ?? []);
   const clientError = validateTileDraft(draft, instrumentKind);
-  // A new chart, or a tile turned into one, needs room under the chart cap (the server enforces it; this says why early).
-  const chartsFull = chart && chartIds.length >= MAX_CHART_TILES && !chartIds.includes(draft.id);
+  // A new chart, a tile turned into one, or one moved to another board needs room under the chart cap ON THE BOARD IT IS
+  // SAVED TO (the server enforces it; this says why early). Every board's tiles, the list "Add to board" reads too.
+  const tilesQuery = useQuery({ queryKey: ['metrics', 'board', 'tiles'] as const, queryFn: api.getMetricBoardTiles, enabled: chart });
+  const chartsFull = chartCapReached(draft, tilesQuery.data, boards.find((x) => x.isDefault)?.id ?? null);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
@@ -877,7 +876,7 @@ function TileForm({
           )}
         </div>
         {clientError && <p className="mt-4 text-xs text-amber-600">{clientError}</p>}
-        {!clientError && chartsFull && <p className="mt-4 text-xs text-amber-600">This board already holds {MAX_CHART_TILES} charts.</p>}
+        {!clientError && chartsFull && <p className="mt-4 text-xs text-amber-600">The board this tile is saved to already holds {MAX_CHART_TILES} charts.</p>}
         {serverError && <p role="alert" className="mt-2 text-sm text-red-600">{serverError}</p>}
         <div className="mt-6 flex justify-end gap-2">
           <button type="button" onClick={onCancel} className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800">Cancel</button>

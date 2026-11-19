@@ -2,7 +2,7 @@
 // the range (one grammar for the page, a shared link and a tile), and the board's range drives every chart. These
 // helpers convert between that stored query, the page's controls and links, and build the tile "Add to board" saves.
 import { encodeUrlSafeId } from '@/lib/urlSafeId';
-import { MetricTileKind, MetricTileStatusRule, type MetricBoardTile, type MetricBoardTileResult } from '@/types/metricBoard';
+import { MetricTileKind, MetricTileStatusRule, type MetricBoardTile } from '@/types/metricBoard';
 import {
   DEFAULT_CONTROLS,
   METRIC_RANGE_KEYS,
@@ -114,9 +114,28 @@ export function describeChartQuery(query: string | null): string {
   return parts.join(' · ');
 }
 
-/** The ids of the chart tiles among a board's tiles (their count is what the chart cap counts). */
-export function chartTileIds(tiles: readonly Pick<MetricBoardTileResult, 'tile'>[]): number[] {
-  return tiles.filter((x) => x.tile.kind === MetricTileKind.Chart).map((x) => x.tile.id);
+/**
+ * Whether saving `draft` as a chart would put a 13th chart on the board it is saved TO (the editor can move a tile, so
+ * the board on screen is not the one that counts). `tiles` is every stored tile (GET metrics/board/tiles); a tile with no
+ * board, and a draft with none, count on the Default board (`defaultId`). The draft itself is never counted, so an edit
+ * of a chart already on a full board stays allowed. False while the tiles are unknown: the server enforces the cap.
+ */
+export function chartCapReached(
+  draft: Pick<MetricBoardTile, 'id' | 'boardId' | 'kind'>,
+  tiles: readonly MetricBoardTile[] | undefined,
+  defaultId: number | null,
+): boolean {
+  if (draft.kind !== MetricTileKind.Chart || tiles === undefined) {
+    return false;
+  }
+
+  const target = draft.boardId ?? defaultId;
+  const charts = tiles
+    .filter((x) => x.kind === MetricTileKind.Chart)
+    .filter((x) => x.id !== draft.id)
+    .filter((x) => (x.boardId ?? defaultId) === target).length;
+
+  return charts >= MAX_CHART_TILES;
 }
 
 /**
