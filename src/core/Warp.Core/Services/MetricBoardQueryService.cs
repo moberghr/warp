@@ -48,7 +48,7 @@ public interface IMetricBoardQueryService
 }
 
 /// <summary><see cref="IMetricBoardQueryService"/> over the user's <typeparamref name="TContext"/> (§2.14 stays-on-TContext).</summary>
-public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
+public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService, IMetricBoardVerdictReader
     where TContext : DbContext
 {
     private readonly TContext _context;
@@ -128,13 +128,11 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         return board is null ? null : await ReadBoardAsync(board, from, to, ct);
     }
 
-    public async Task<MetricBoardModel> GetAllBoards(DateTime rangeStart, DateTime rangeEnd, CancellationToken ct)
-    {
-        var (from, to) = ValidateRange(rangeStart, rangeEnd);
-        var tiles = await AllTiles().ToListAsync(ct);
+    public Task<MetricBoardModel> GetAllBoards(DateTime rangeStart, DateTime rangeEnd, CancellationToken ct)
+        => ReadAllBoardsAsync(rangeStart, rangeEnd, joinObjectives: true, ct);
 
-        return await EvaluateAsync(null, tiles, from, to, ct);
-    }
+    Task<MetricBoardModel> IMetricBoardVerdictReader.GetAllBoardsWithoutObjectives(DateTime rangeStart, DateTime rangeEnd, CancellationToken ct)
+        => ReadAllBoardsAsync(rangeStart, rangeEnd, joinObjectives: false, ct);
 
     // The board the read reports when no Default row exists yet: the legacy null-board tiles read as Default all the same.
     private static MetricBoard VirtualDefault() => new() { Name = MetricBoardValidation.DefaultBoardName, IsDefault = true };
@@ -183,6 +181,14 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             .ThenBy(x => x.Id)
             .Take(MetricBoardValidation.MaxTiles * MetricBoardValidation.MaxBoards);
 
+    private async Task<MetricBoardModel> ReadAllBoardsAsync(DateTime rangeStart, DateTime rangeEnd, bool joinObjectives, CancellationToken ct)
+    {
+        var (from, to) = ValidateRange(rangeStart, rangeEnd);
+        var tiles = await AllTiles().ToListAsync(ct);
+
+        return await EvaluateAsync(null, tiles, from, to, joinObjectives, ct);
+    }
+
     private async Task<MetricBoardModel> ReadBoardAsync(MetricBoard board, DateTime from, DateTime to, CancellationToken ct)
     {
         // The Default board also owns the tiles with no board id (every tile stored before named boards existed).
@@ -197,10 +203,10 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
             .Take(MetricBoardValidation.MaxTiles)
             .ToListAsync(ct);
 
-        return await EvaluateAsync(Summarize(board, tiles.Count), tiles, from, to, ct);
+        return await EvaluateAsync(Summarize(board, tiles.Count), tiles, from, to, joinObjectives: true, ct);
     }
 
-    private async Task<MetricBoardModel> EvaluateAsync(MetricBoardSummaryModel? board, List<MetricBoardTile> tiles, DateTime from, DateTime to, CancellationToken ct)
+    private async Task<MetricBoardModel> EvaluateAsync(MetricBoardSummaryModel? board, List<MetricBoardTile> tiles, DateTime from, DateTime to, bool joinObjectives, CancellationToken ct)
     {
         var tier = MetricSeriesMath.TierForLength(to - from);
 
@@ -209,7 +215,7 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         // SLO tiles read no instrument at all: they are joined to ONE objective read for the whole board.
         var evaluated = tiles.FindAll(x => x.Kind is not (MetricTileKind.Chart or MetricTileKind.Slo));
         var specs = evaluated.ToDictionary(x => x.Id, x => MetricTileSpec.TryCreate(x, out var spec) ? spec : null);
-        var objectives = await ReadObjectivesAsync(tiles, ct);
+        var objectives = joinObjectives ? await ReadObjectivesAsync(tiles, ct) : [];
         var names = tiles
             .Where(x => x.Kind != MetricTileKind.Slo)
             .Select(x => x.Instrument)
@@ -269,12 +275,13 @@ public sealed class MetricBoardQueryService<TContext> : IMetricBoardQueryService
         {
             if (tile.Kind == MetricTileKind.Slo)
             {
+                // Not joined (the verdict without a board reads every objective itself): unknown, not missing.
                 var objective = objectives.GetValueOrDefault(tile.SloDefinitionId ?? 0);
                 results.Add(new MetricBoardTileResult
                 {
                     Tile = Project(tile),
                     Slo = objective,
-                    Missing = objective is null,
+                    Missing = joinObjectives && objective is null,
                 });
 
                 continue;

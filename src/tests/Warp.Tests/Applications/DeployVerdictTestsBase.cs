@@ -1,9 +1,12 @@
+using System.Data.Common;
 using System.Net;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -454,6 +457,97 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
     }
 
     [TimedTheory]
+    [InlineData(null, false)]
+    [InlineData("Checkout", false)]
+    [InlineData(null, true)]
+    [InlineData("Checkout", true)]
+    public async Task GetVerdict_WithSloTilesOnTheBoards_ReadsTheObjectivesOnce(string? board, bool emptyWindow)
+    {
+        // Without a board the verdict reads every objective itself, so the all-boards read must not join its SLO tiles to
+        // a second objective read; with a board the board read's own join is the only one (or, for an empty window, the
+        // tile list then one objective read).
+        await SeedDeployAsync("api", "2.0.0", emptyWindow ? Now : Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 4));
+        var checkout = await SeedBoardAsync("Checkout");
+        var shown = await SeedSloAsync("Checkout success", "api", SloState.Healthy);
+        var other = await SeedSloAsync("Search success", "api", SloState.Healthy);
+        await SeedTilesAsync(
+            Tile("Errors", threshold: 10, boardId: checkout),
+            SloTile("Checkout success", shown, checkout, position: 2),
+            SloTile("Search success", other));
+        var counter = new StatementCounter();
+
+        var verdict = await CountingService(counter).GetVerdict(Query("api", board: board), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Checks.Count(x => string.Equals(x.Source, DeployVerdictSources.Slo, StringComparison.Ordinal)).ShouldBe(board is null ? 2 : 1);
+        var evaluations = _fixture.CreateContext().Model.FindEntityType(typeof(SloEvaluation))!.GetTableName()!;
+        counter.Reading(evaluations).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_WithBoardHoldingAnSloTileOfADisabledObjective_DoesNotCountIt()
+    {
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-30), 4));
+        var checkout = await SeedBoardAsync("Checkout");
+        var disabled = await SeedSloAsync("Checkout success", "api", SloState.Breaching, enabled: false);
+        await SeedTilesAsync(Tile("Checkout errors", threshold: 10, boardId: checkout), SloTile("Checkout success", disabled, checkout, position: 2));
+
+        var verdict = await Service().GetVerdict(Query("api", board: "Checkout"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+        verdict.Checks.ShouldHaveSingleItem().Name.ShouldBe("Checkout errors");
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_BoardDefaultWhileTheWindowIsEmpty_ListsTheDefaultBoardsSloTilesOnly()
+    {
+        // Deployed this instant: no board read is made, so the Default board's SLO tiles (stored with no board id) are
+        // listed from the tiles, and an SLO tile on another board does not count.
+        await SeedDeployAsync("api", "2.0.0", Now);
+        await SeedAsync(new MetricBoard { Name = "Default", IsDefault = true, CreatedAt = Now, UpdatedAt = Now });
+        var checkout = await SeedBoardAsync("Checkout");
+        var shown = await SeedSloAsync("Platform success", "api", SloState.Healthy);
+        var elsewhere = await SeedSloAsync("Checkout success", "api", SloState.Breaching);
+        await SeedTilesAsync(SloTile("Platform success", shown), SloTile("Checkout success", elsewhere, checkout));
+
+        var verdict = await Service().GetVerdict(Query("api", board: "default"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pending);
+        verdict.Board.ShouldBe("Default");
+        verdict.Checks.ShouldHaveSingleItem().Name.ShouldBe("Platform success");
+    }
+
+    [TimedFact]
+    public async Task GetVerdict_SupersededVersionWithBoard_JudgesThatBoardsTilesOverItsLifetimeWithoutSlos()
+    {
+        // 1.0.0 ran 10:00-11:00. Its bucket at 10:30 is 4 (healthy under Checkout's threshold of 10, breaching the Default
+        // board's threshold of 1, which does not count); the SLO tile on Checkout describes whatever runs now: not counted.
+        await SeedDeployAsync("api", "1.0.0", Now.AddHours(-2));
+        await SeedDeployAsync("api", "2.0.0", Now.AddHours(-1));
+        await SeedMetricsAsync(Point(Now.AddMinutes(-90), 4), Point(Now.AddMinutes(-30), 50));
+        var checkout = await SeedBoardAsync("Checkout");
+        var slo = await SeedSloAsync("Checkout success", "api", SloState.Breaching);
+        await SeedTilesAsync(
+            Tile("Checkout errors", threshold: 10, boardId: checkout),
+            SloTile("Checkout success", slo, checkout, position: 2),
+            Tile("Platform errors", threshold: 1));
+
+        var verdict = await Service().GetVerdict(Query("api", version: "1.0.0", board: "Checkout"), Ct);
+
+        verdict.ShouldNotBeNull();
+        verdict.Verdict.ShouldBe(DeployVerdicts.Pass);
+        verdict.Deploy.SupersededBy.ShouldBe("2.0.0");
+        verdict.Window.To.ShouldBe(Now.AddHours(-1));
+        var check = verdict.Checks.ShouldHaveSingleItem();
+        check.Name.ShouldBe("Checkout errors");
+        check.Value.ShouldBe(4);
+    }
+
+    [TimedTheory]
     [InlineData("Default")]
     [InlineData("default")]
     public async Task GetVerdict_BoardDefaultAfterTheDefaultBoardWasRenamed_IsStillTheDefaultBoard(string board)
@@ -758,6 +852,23 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         Sum = sum,
     };
 
+    // Every context the verdict's three read services use goes through `counter`.
+    private DeployVerdictService CountingService(StatementCounter counter)
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(Now));
+        var options = Options.Create(new WarpConfiguration());
+        var contextOptions = (DbContextOptions<TestContext>)_fixture.CreateContext().GetService<IDbContextOptions>();
+
+        return new DeployVerdictService(
+            new ApplicationQueryService<TestContext>(Counting(), time, options),
+            new MetricBoardQueryService<TestContext>(Counting(), options, time, new SloQueryService<TestContext>(Counting())),
+            new SloQueryService<TestContext>(Counting()),
+            time,
+            options);
+
+        TestContext Counting() => new(new DbContextOptionsBuilder<TestContext>(contextOptions).AddInterceptors(counter).Options);
+    }
+
     private DeployVerdictService Service()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(Now));
@@ -812,11 +923,12 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
         await context.SaveChangesAsync(Ct);
     }
 
-    private async Task<int> SeedSloAsync(string name, string? application, SloState state, DateTime? evaluatedAt = default)
+    private async Task<int> SeedSloAsync(string name, string? application, SloState state, DateTime? evaluatedAt = default, bool enabled = true)
     {
         var definition = new SloDefinition
         {
             Name = name,
+            Enabled = enabled,
             Kind = SloKind.SuccessRate,
             Application = application,
             TargetValue = 0.99,
@@ -864,6 +976,30 @@ public abstract class DeployVerdictTestsBase : IAsyncLifetime
             Client.Dispose();
             await App.StopAsync(CancellationToken.None);
             await App.DisposeAsync();
+        }
+    }
+
+    private sealed class StatementCounter : DbCommandInterceptor
+    {
+        private readonly List<string> _commands = [];
+
+        // The statements whose text names `table`.
+        public int Reading(string table)
+        {
+            lock (_commands)
+            {
+                return _commands.Count(x => x.Contains(table, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        public override DbCommand CommandInitialized(CommandEndEventData eventData, DbCommand result)
+        {
+            lock (_commands)
+            {
+                _commands.Add(result.CommandText);
+            }
+
+            return result;
         }
     }
 }

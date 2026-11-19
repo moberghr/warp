@@ -147,7 +147,12 @@ public sealed class DeployVerdictService : IDeployVerdictService
     {
         if (board is null)
         {
-            return (await _board.GetAllBoards(window.From, window.To, ct)).Tiles;
+            // Without the SLO join where the board service allows it: ReadObjectivesAsync reads every objective anyway.
+            var all = _board is IMetricBoardVerdictReader reader
+                ? await reader.GetAllBoardsWithoutObjectives(window.From, window.To, ct)
+                : await _board.GetAllBoards(window.From, window.To, ct);
+
+            return all.Tiles;
         }
 
         // The Default board through its own read, which also covers a Default board that was never created (id 0).
