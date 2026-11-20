@@ -234,9 +234,23 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             return leased;
         }
 
-        var spacing = TimeSpan.FromTicks(Math.Max(1, window.Ticks / Math.Max(count, 1)));
+        // A window shorter than one activation tick: slots closer together than the tick are released
+        // together anyway, and a released batch is consumed in well under a second, so it only ever meets
+        // the window open at that moment and only `count` of it can get in. So a short window takes one
+        // window's worth per activation tick and nothing more. Measured on 50 per 2 s (500 jobs, 10 s ticks):
+        // ~0.9 refused runs per job and 62 statements per job, against 2.4 and 90 for count x tick / window
+        // per step, which drained faster but re-ran most of each batch. Lowering ScheduledActivationInterval
+        // toward the window restores the full rate.
+        var shortWindow = window < _gate.ActivationInterval;
+        var step = shortWindow ? _gate.ActivationInterval : window;
+        var perStep = Math.Max(count, 1);
+        var spacing = TimeSpan.FromTicks(Math.Max(1, step.Ticks / perStep));
+
+        // Fixed windows, and every short-window step, bring their jobs back together at the start of the step.
+        // Sliding and TokenBucket on a full-length window keep their evenly spaced positions.
+        var bucket = shortWindow || style == RateLimitStyle.Fixed ? step : TimeSpan.Zero;
         var first = evaluation.NextSlot is { } cursor && cursor > evaluation.NextAvailable ? cursor : evaluation.NextAvailable;
-        var size = _gate.LeaseSize(count, spacing);
+        var size = _gate.LeaseSize(perStep, spacing);
 
         if (!await _store.SetNextSlotAsync(key, first + (spacing * size), ct))
         {
@@ -248,25 +262,25 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
         }
 
         var spare = Enumerable.Range(1, size - 1)
-            .Select(x => ToScheduleTime(first + (spacing * x), style, window, evaluation.NextAvailable))
+            .Select(x => ToScheduleTime(first + (spacing * x), bucket, evaluation.NextAvailable))
             .ToList();
         _gate.RecordRejection(key, policy, count, windowSeconds, now, evaluation.NextAvailable, spare);
 
-        return ToScheduleTime(first, style, window, evaluation.NextAvailable);
+        return ToScheduleTime(first, bucket, evaluation.NextAvailable);
     }
 
-    // Fixed windows: the start of the window the cursor position falls in, anchored on the reopening instant
-    // (itself a window boundary) so the mapping holds however the window is aligned.
-    private static DateTime ToScheduleTime(DateTime position, RateLimitStyle style, TimeSpan window, DateTime reopening)
+    // The start of the bucket the cursor position falls in, anchored on the reopening instant so the mapping
+    // holds however the window is aligned. A zero bucket keeps the position as-is.
+    private static DateTime ToScheduleTime(DateTime position, TimeSpan bucket, DateTime reopening)
     {
-        if (style != RateLimitStyle.Fixed || position <= reopening || window <= TimeSpan.Zero)
+        if (bucket <= TimeSpan.Zero || position <= reopening)
         {
             return position;
         }
 
-        var windowsAhead = (position - reopening).Ticks / window.Ticks;
+        var bucketsAhead = (position - reopening).Ticks / bucket.Ticks;
 
-        return reopening.AddTicks(windowsAhead * window.Ticks);
+        return reopening.AddTicks(bucketsAhead * bucket.Ticks);
     }
 
     private async Task<RateLimitEvaluation> Evaluate(

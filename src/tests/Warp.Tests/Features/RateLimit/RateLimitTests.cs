@@ -1066,6 +1066,42 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         (await ReadStateAsync(jobId)).ShouldBe(State.Completed);
     }
 
+    [TimedFact]
+    public async Task WaitMode_WindowShorterThanActivation_TakesOneWindowPerActivationStep()
+    {
+        // 2 per 2s, but throttled jobs only come back on a 10s activation tick, and a batch released on one
+        // tick only ever meets the window open at that moment. So each 10s step gets 2 jobs (one window's
+        // worth): two at the reopening instant, the third a full activation step later, not 2s later.
+        var clock = new FakeTimeProvider(CacheTestStart);
+        var windowStart = CacheTestStart.UtcDateTime;
+        var seedCtx = _fixture.CreateContext();
+        seedCtx.Set<RateLimitBucket>().Add(new RateLimitBucket
+        {
+            Name = "rl-short-window",
+            WindowStartUtc = windowStart,
+            CurrentCount = 2,
+            UpdatedAt = windowStart,
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        var jobs = new[]
+        {
+            await SeedRateLimitedJobAsync("rl-short-window", 2, 2, RateLimitMode.Wait, windowStart.AddMinutes(-3)),
+            await SeedRateLimitedJobAsync("rl-short-window", 2, 2, RateLimitMode.Wait, windowStart.AddMinutes(-2)),
+            await SeedRateLimitedJobAsync("rl-short-window", 2, 2, RateLimitMode.Wait, windowStart.AddMinutes(-1)),
+        };
+        var worker = CreateWorker(timeProvider: clock, activationInterval: TimeSpan.FromSeconds(10));
+
+        for (var i = 0; i < jobs.Length; i++)
+        {
+            await worker.GetAndProcessJob(CancellationToken.None);
+        }
+
+        var reopen = windowStart.AddSeconds(2);
+        (await ReadScheduleTimeAsync(jobs[0])).ShouldBe(reopen);
+        (await ReadScheduleTimeAsync(jobs[1])).ShouldBe(reopen);
+        (await ReadScheduleTimeAsync(jobs[2])).ShouldBe(reopen.AddSeconds(10));
+    }
+
     // 10s into a minute, so a 60s Fixed window seeded at WindowStart has 50s left to run.
     private static readonly DateTimeOffset CacheTestStart = new(2026, 11, 19, 12, 0, 10, TimeSpan.Zero);
 
@@ -1148,12 +1184,12 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
     }
 
     private WarpWorkerService<TestContext> CreateWorker(
-        FakeLockProvider? lockProvider = null, TimeProvider? timeProvider = null, BarrierSignal? barrier = null) =>
-        CreateWorkerWithServices(lockProvider, timeProvider, barrier).Worker;
+        FakeLockProvider? lockProvider = null, TimeProvider? timeProvider = null, BarrierSignal? barrier = null, TimeSpan? activationInterval = null) =>
+        CreateWorkerWithServices(lockProvider, timeProvider, barrier, activationInterval).Worker;
 
     /// <summary>One worker and the container it runs in — the container holds the process-wide <c>RateLimitGate</c>, so two calls model two servers.</summary>
     private (WarpWorkerService<TestContext> Worker, ServiceProvider Services) CreateWorkerWithServices(
-        FakeLockProvider? lockProvider = null, TimeProvider? timeProvider = null, BarrierSignal? barrier = null)
+        FakeLockProvider? lockProvider = null, TimeProvider? timeProvider = null, BarrierSignal? barrier = null, TimeSpan? activationInterval = null)
     {
         lockProvider ??= new FakeLockProvider();
         timeProvider ??= TimeProvider.System;
@@ -1168,6 +1204,12 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         services.AddSingleton<IDatabaseExceptionClassifier>(Warp.Tests.Helpers.TestTasks.ClassifierFor(_fixture.CreateContext()));
         services.AddSingleton(timeProvider);
         services.AddSingleton(barrier ?? new BarrierSignal());
+        if (activationInterval is { } interval)
+        {
+            // What the worker registers in a real server; this harness builds the worker by hand.
+            services.AddSingleton<IScheduledActivationCadence>(new FixedActivationCadence(interval));
+        }
+
         new Warp.Core.WarpBuilder<TestContext>(services).AddRateLimit();
 
         var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
@@ -1201,5 +1243,10 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
             _counterBuffer);
 
         return (worker, provider);
+    }
+
+    private sealed class FixedActivationCadence(TimeSpan interval) : IScheduledActivationCadence
+    {
+        public TimeSpan Interval => interval;
     }
 }

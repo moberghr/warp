@@ -125,10 +125,29 @@ public class RateLimitGateTests
     }
 
     [TimedFact]
+    public void Ctor_NoActivationCadence_DoesNotStepSlots()
+    {
+        new RateLimitGate([]).ActivationInterval.ShouldBe(TimeSpan.Zero);
+    }
+
+    [TimedFact]
+    public void Ctor_ActivationCadence_TakesTheLongestInterval()
+    {
+        var gate = new RateLimitGate([new Cadence(TimeSpan.FromSeconds(5)), new Cadence(TimeSpan.FromSeconds(10))]);
+
+        gate.ActivationInterval.ShouldBe(TimeSpan.FromSeconds(10));
+    }
+
+    [TimedFact]
     public void LeaseSize_InstanceScopedGate_LeasesOneSlot()
     {
         var gate = new RateLimitGate(maxLeaseSize: 1);
 
         gate.LeaseSize(1_000, TimeSpan.FromMilliseconds(1)).ShouldBe(1);
+    }
+
+    private sealed class Cadence(TimeSpan interval) : IScheduledActivationCadence
+    {
+        public TimeSpan Interval => interval;
     }
 }

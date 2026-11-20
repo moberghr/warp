@@ -42,13 +42,23 @@ internal sealed class RateLimitGate
     {
     }
 
+    // The DI constructor: the worker's activation cadence, when this process has a worker.
+    public RateLimitGate(IEnumerable<IScheduledActivationCadence> cadence)
+        : this(MaxLeaseSize, cadence.Select(x => x.Interval).DefaultIfEmpty(TimeSpan.Zero).Max())
+    {
+    }
+
     // A gate that leases <paramref name="maxLeaseSize"/> slots at most. The behaviour's public
     // constructor builds a private gate per instance with a lease of one — an instance-scoped gate
     // cannot hand leftover slots to the next job, so a larger lease would only waste them.
-    internal RateLimitGate(int maxLeaseSize)
+    internal RateLimitGate(int maxLeaseSize, TimeSpan activationInterval = default)
     {
         _maxLeaseSize = Math.Max(1, maxLeaseSize);
+        ActivationInterval = activationInterval > TimeSpan.Zero ? activationInterval : TimeSpan.Zero;
     }
+
+    // Slots closer together than this are released by one activation tick anyway. Zero when unknown.
+    internal TimeSpan ActivationInterval { get; }
 
     internal int Count => _entries.Count;
 

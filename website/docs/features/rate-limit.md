@@ -117,7 +117,25 @@ How slots map to times depends on the style:
 - **Leased blocks.** A server reserves a few slots at a time (up to 20, never more than about 5 seconds of the key's capacity), so most throttled jobs on a hot key are placed without touching the database. Slots a server reserved but did not use delay the next jobs by at most that much.
 - **Not strict FIFO.** A newly published job that finds spare capacity runs at once, ahead of jobs already waiting for a slot. A waiting job that then finds its window full is refused again and takes a new slot.
 - **The cursor marks a queue.** If you delete a large backlog of throttled jobs, the cursor stays ahead until that time has passed. Until then, jobs that find the key full queue behind it. Jobs that find capacity are not affected.
-- **Activation sets a floor.** Slots are released by `ScheduledJobActivation` (see [below](#db-push-does-not-accelerate-wait)). With a window shorter than `ScheduledActivationInterval`, several windows' slots come due on one tick and only the current window's capacity is available, so some jobs are refused again. Throughput in that shape is bounded by the activation interval, not by the limit.
+- **Windows shorter than the activation interval.** Throttled jobs come back when `ScheduledJobActivation` runs (see [below](#db-push-does-not-accelerate-wait)), every `ScheduledActivationInterval` (10 s by default). A batch released on one tick only meets the window open at that moment, so a window shorter than the interval gets **one window's worth per tick**. That keeps every job to about one run, but drains slower than the limit allows.
+
+  For example, a backlog of 10,000 jobs behind a limit of 50 per 2 s:
+
+  | Activation interval | Effective rate | Drain time |
+  |---|---|---|
+  | 10 s (default) | 50 per 10 s = 5 jobs/s | about 33 minutes |
+  | 2 s | 50 per 2 s = 25 jobs/s | about 7 minutes |
+
+  To get the full rate, set the activation interval to the window or less. The cost is one indexed query for due rows per tick:
+
+  ```csharp
+  services.AddWarpServer<AppDbContext>(opt =>
+  {
+      opt.ScheduledActivationInterval = TimeSpan.FromSeconds(2);
+  });
+  ```
+
+  Windows of 10 s or longer, such as a per-minute limit, are not affected.
 
 **Schema:** `NextSlotUtc` is a new nullable column on `rate_limit_bucket`. Add it with your usual `dotnet ef migrations add` before deploying; it is additive.
 
@@ -145,6 +163,8 @@ Rate-limit keys appear in `JobLog.Message` rows and on the dashboard `/warp/rate
 ## Admin overrides
 
 Live limits are runtime-tunable via `IRateLimitOverrideManager` and exposed on the dashboard at `/warp/ratelimits` (hide-on-404 nav probe). Set / clear / list endpoints sit under `/api/ratelimits`. An admin row replaces the `count` and `perSeconds` of whatever the job resolved — see [Precedence](#precedence).
+
+**When a change takes effect.** Lowering a limit applies to the next check on every server. Raising or removing one applies at once on the server that made the change, and on the others within about **5 seconds**: each server keeps refusing a key it has [already seen exhausted](#refusing-a-known-exhausted-key-from-memory) for up to that long. During those seconds, `Skip`-mode jobs on the key can be **deleted** although the new limit would have admitted them; `Wait`-mode jobs are only rescheduled. If dropped jobs matter, raise the limit before the traffic arrives rather than during it.
 
 ## OpenTelemetry
 
