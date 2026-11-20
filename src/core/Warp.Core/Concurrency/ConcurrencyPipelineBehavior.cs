@@ -78,7 +78,7 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
 
             if (handle != null)
             {
-                _localHolds.Enter(lockName);
+                _localHolds.Enter(lockName, effectiveLimit);
             }
 
             concurrencySpan?.SetTag(WarpTelemetryAttributes.WarpConcurrencyAcquired, handle != null);
@@ -107,7 +107,7 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         finally
         {
             // Local count first, database lock second — the safe order (see ConcurrencyLocalHolds).
-            _localHolds.Exit(lockName);
+            _localHolds.Exit(lockName, effectiveLimit);
             await handle.DisposeAsync();
         }
     }

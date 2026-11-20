@@ -502,8 +502,50 @@ public abstract class MutexTestsBase : IAsyncLifetime
         (await ReadStateAsync(secondId)).ShouldBe(State.Completed);
     }
 
-    private async Task<Guid> SeedMutexJobAsync(Type requestType, string key, DateTime scheduleTime)
+    [TimedFact]
+    public async Task SemaphoreSlotsHeldByThisProcess_MutexOnSameKey_StillAcquires()
     {
+        // A mutex and a semaphore of 2 on the same key are independent limits (§8.6). On PostgreSQL the mutex
+        // locks the bare key and the semaphore locks two numbered slot names, so with both semaphore slots
+        // held by THIS process the mutex lock is still free. The job must reach the provider and run, not be
+        // refused (and, in Skip mode, deleted) by the local hold count. The provider below keeps the two
+        // shapes apart as PostgreSQL does; FakeSemaphoreProvider pools them as SQL Server does.
+        var firstSlot = await SeedConcurrencyJobAsync(typeof(BarrierRequest), "local:shapes", 2, DateTime.UtcNow.AddMinutes(-3));
+        var secondSlot = await SeedConcurrencyJobAsync(typeof(BarrierRequest), "local:shapes", 2, DateTime.UtcNow.AddMinutes(-2));
+        var mutexJob = await SeedMutexJobAsync(typeof(UnitRequest), "local:shapes", DateTime.UtcNow.AddMinutes(-1));
+        var barrier = new BarrierSignal();
+        var semaphores = new CountingSemaphoreProvider(new IndependentShapesSemaphoreProvider(new FakeSemaphoreProvider()));
+        var workers = CreateWorkers(3, semaphores, barrier);
+
+        var holdingFirst = workers[0].GetAndProcessJob(CancellationToken.None);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeTrue("the first semaphore slot must be held before the next job runs");
+        var holdingSecond = workers[1].GetAndProcessJob(CancellationToken.None);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeTrue("both semaphore slots must be held before the mutex job runs");
+
+        await workers[2].GetAndProcessJob(CancellationToken.None);
+        barrier.CanFinish.Release(2);
+        await holdingFirst;
+        await holdingSecond;
+
+        semaphores.Attempts.ShouldBe(3, "the mutex job must be decided by the provider, not refused from the semaphore's holds");
+        (await ReadStateAsync(mutexJob)).ShouldBe(State.Completed);
+        (await ReadStateAsync(firstSlot)).ShouldBe(State.Completed);
+        (await ReadStateAsync(secondSlot)).ShouldBe(State.Completed);
+    }
+
+    private async Task<Guid> SeedMutexJobAsync(Type requestType, string key, DateTime scheduleTime) =>
+        await SeedConcurrencyJobAsync(requestType, key, limit: null, scheduleTime);
+
+    private async Task<Guid> SeedConcurrencyJobAsync(Type requestType, string key, int? limit, DateTime scheduleTime)
+    {
+        var metadata = new Dictionary<string, object> { ["ConcurrencyKey"] = key };
+        if (limit is { } slots)
+        {
+            metadata["ConcurrencyLimit"] = slots;
+        }
+
         var ctx = _fixture.CreateContext();
         var id = Guid.NewGuid();
         ctx.Set<Job>().Add(new Job
@@ -516,7 +558,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
             Queue = "default",
             Type = requestType.AssemblyQualifiedName,
             Message = "{}",
-            Metadata = SerializeMutexMetadata(key),
+            Metadata = JsonSerializer.Serialize(metadata),
         });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
@@ -533,6 +575,14 @@ public abstract class MutexTestsBase : IAsyncLifetime
     private (WarpWorkerService<TestContext> First, WarpWorkerService<TestContext> Second) CreateWorkerPair(
         IWarpSemaphoreProvider semaphores, BarrierSignal barrier)
     {
+        var workers = CreateWorkers(2, semaphores, barrier);
+
+        return (workers[0], workers[1]);
+    }
+
+    /// <summary>Workers sharing one container — one process, so one <c>ConcurrencyLocalHolds</c>.</summary>
+    private List<WarpWorkerService<TestContext>> CreateWorkers(int count, IWarpSemaphoreProvider semaphores, BarrierSignal barrier)
+    {
         var services = new ServiceCollection();
         services.AddWarpMediator();
         services.AddLogging();
@@ -547,7 +597,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
 
         var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
         {
-            WorkerCount = 2,
+            WorkerCount = count,
             ServerId = ServerId,
             Queues = DefaultQueues,
         });
@@ -557,7 +607,7 @@ public abstract class MutexTestsBase : IAsyncLifetime
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
         var groupConfig = new WorkerGroupConfiguration
         {
-            WorkerCount = 2,
+            WorkerCount = count,
             Queues = DefaultQueues,
         };
 
@@ -574,7 +624,21 @@ public abstract class MutexTestsBase : IAsyncLifetime
                 Warp.Tests.Helpers.TestTasks.NullSignals,
                 _counterBuffer);
 
-        return (Build(), Build());
+        return [.. Enumerable.Range(0, count).Select(_ => Build())];
+    }
+
+    /// <summary>
+    /// Keeps a mutex and a semaphore on one name apart, as PostgreSQL does (it locks <c>name</c> for a mutex and
+    /// <c>name:0..N-1</c> for a semaphore of N). <c>FakeSemaphoreProvider</c> pools them, as SQL Server does.
+    /// </summary>
+    private sealed class IndependentShapesSemaphoreProvider : IWarpSemaphoreProvider
+    {
+        private readonly IWarpSemaphoreProvider _inner;
+
+        public IndependentShapesSemaphoreProvider(IWarpSemaphoreProvider inner) => _inner = inner;
+
+        public Task<IAsyncDisposable?> TryAcquireAsync(string name, int maxCount, TimeSpan timeout, CancellationToken ct) =>
+            _inner.TryAcquireAsync(maxCount == 1 ? name : $"{name}#semaphore", maxCount, timeout, ct);
     }
 
     /// <summary>Counts how often the lock provider is asked — the round trips a local refusal saves.</summary>
