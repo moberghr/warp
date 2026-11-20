@@ -813,6 +813,7 @@ public static class ServiceConfiguration
         bucket.Property(p => p.CurrentCount);
         bucket.Property(p => p.TimestampsJson);
         bucket.Property(p => p.UpdatedAt);
+        bucket.Property(p => p.NextSlotUtc);
 
         bucket.Metadata.SetSchema(schema);
     }

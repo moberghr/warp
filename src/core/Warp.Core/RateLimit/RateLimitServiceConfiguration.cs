@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Warp.Core.Handlers;
 
 namespace Warp.Core.RateLimit;
@@ -19,7 +20,10 @@ public static class RateLimitServiceConfiguration
     {
         // RateLimitBucket and RateLimitOverride entities are registered unconditionally by
         // WarpModelCustomizer. This opt-in only wires the runtime behavior + admin manager.
-        builder.Services.AddScoped<IRateLimitManager, RateLimitManager<TContext>>();
+        // Process-wide: remembers rejections across jobs and holds this process's leased Wait-mode slots.
+        builder.Services.TryAddSingleton<RateLimitGate>();
+        builder.Services.AddScoped<RateLimitManager<TContext>>();
+        builder.Services.AddScoped<IRateLimitManager, GateInvalidatingRateLimitManager<TContext>>();
         builder.Services.AddScoped<IRateLimitStore, RateLimitStore<TContext>>();
         builder.Services.AddScoped<RateLimitResolver>();
 

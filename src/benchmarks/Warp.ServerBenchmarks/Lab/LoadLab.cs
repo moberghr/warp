@@ -15,6 +15,7 @@ using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
 using Warp.Core.Helper;
+using Warp.Core.RateLimit;
 using Warp.Core.Services;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
@@ -46,22 +47,35 @@ public enum LoadScenario
     /// fraction of the mutex arm's rather than all-but-one.
     /// </summary>
     Semaphore = 5,
+
+    /// <summary>
+    /// N jobs spread over <c>--keys</c> rate-limit keys, each admitting <c>--limit</c> starts per
+    /// <c>--window</c> seconds, so the surplus is rejected by <c>RateLimitPipelineBehavior</c> and (in
+    /// Wait mode) rescheduled. Measures what each throttled execution costs and how many times a
+    /// backlog re-executes before it drains.
+    /// </summary>
+    RateLimit = 6,
 }
 
 /// <summary>
 /// Requeue churn read from the durable <c>stats:</c> family (§8.33) after a run. The ratio of
-/// <see cref="RequeuedConcurrency"/> to <see cref="Succeeded"/> is the number PA-02 turns on: how many
-/// full claim/reject/requeue cycles the system pays per job it actually completes.
+/// rejected cycles to <see cref="Succeeded"/> is the number PA-02 turns on: how many full
+/// claim/reject/requeue cycles the system pays per job it actually completes.
 /// </summary>
-public sealed record ChurnCounts(long Succeeded, long Deleted, long Requeued, long RequeuedConcurrency, long DeletedConcurrency);
+public sealed record ChurnCounts(
+    long Succeeded, long Deleted, long Requeued, long RequeuedConcurrency, long DeletedConcurrency, long RequeuedRateLimit, long DeletedRateLimit);
 
 /// <summary>The arm's full shape, recorded beside its results so a stored measurement can be matched to the run that produced it.</summary>
 public sealed record ArmParameters(
     int Jobs, int Workers, bool Dispatcher, int PayloadBytes, int Repeats, int Warmup,
-    int ConcurrencyKeys, int ConcurrencyLimit, string ConcurrencyMode, int HandlerMs);
+    int ConcurrencyKeys, int ConcurrencyLimit, string ConcurrencyMode, int HandlerMs, int Servers, int WindowSeconds, string RateLimitStyle);
 
-/// <summary>The concurrency arm's shape: how many groups, how wide each is, what happens to the surplus, and how long a group stays busy.</summary>
-public sealed record ConcurrencyShape(int Keys, int Limit, ConcurrencyMode Mode, int HandlerMs);
+/// <summary>
+/// A gated arm's shape: how many groups, how wide each is (concurrent slots, or starts per window for the
+/// rate-limit arm), what happens to the surplus, and how long a group stays busy.
+/// </summary>
+public sealed record ConcurrencyShape(
+    int Keys, int Limit, ConcurrencyMode Mode, int HandlerMs, int WindowSeconds = 1, RateLimitStyle Style = RateLimitStyle.Fixed);
 
 public static class LoadLab
 {
@@ -87,8 +101,11 @@ public static class LoadLab
         ConcurrencyMode concurrencyMode = ConcurrencyMode.Wait,
         int handlerMs = 0,
         int warmupRuns = 0,
-        string? jsonPath = null)
+        string? jsonPath = null,
+        int windowSeconds = 1,
+        RateLimitStyle rateLimitStyle = RateLimitStyle.Fixed)
     {
+        var shape = new ConcurrencyShape(concurrencyKeys, concurrencyLimit, concurrencyMode, handlerMs, windowSeconds, rateLimitStyle);
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
 
@@ -180,11 +197,11 @@ public static class LoadLab
                     : $"  jobs={jobs:N0}  dispatcher={useDispatcher}  prefetch={FormatKnob(prefetchCount)}  completionBatch={FormatKnob(completionBatchSize)}  tune={tune}  arrival={FormatArrival(arrivalPerSecond)}"
                         + DescribePayload(scenario, payloadBytes, types))
                 + (scenario == LoadScenario.JobsWithDashboard ? $"  tabs={tabs}" : string.Empty)
-                + DescribeConcurrency(scenario, concurrencyKeys, concurrencyLimit, concurrencyMode, handlerMs));
+                + DescribeConcurrency(scenario, shape));
 
             // Warm up: JIT, connection pool, EF query compilation, server registration. Measuring these
             // would attribute one-time startup cost to steady-state load.
-            await WarmUpAsync(host, scenario, new ConcurrencyShape(concurrencyKeys, concurrencyLimit, concurrencyMode, handlerMs));
+            await WarmUpAsync(host, scenario, shape);
             Console.WriteLine("Warmed up. Settling...");
             await Task.Delay(TimeSpan.FromSeconds(scenario == LoadScenario.Idle ? 45 : 5));
 
@@ -222,7 +239,7 @@ public static class LoadLab
                 try
                 {
                     processed = await RunScenarioAsync(
-                        host, scenario, jobs, tabs, idleWindow, payloadBytes, types, arrivalPerSecond, new ConcurrencyShape(concurrencyKeys, concurrencyLimit, concurrencyMode, handlerMs));
+                        host, scenario, jobs, tabs, idleWindow, payloadBytes, types, arrivalPerSecond, shape);
                 }
                 finally
                 {
@@ -246,7 +263,7 @@ public static class LoadLab
                 // outside the measured window (§6.2, CounterBufferFlushInterval = 2s) — a couple of
                 // seconds of writes on a multi-minute run. The churn figures themselves are complete,
                 // because ReadChurnAsync waits for that flush before it reads.
-                var churn = IsConcurrency(scenario) ? await ReadChurnAsync(host) : null;
+                var churn = IsGated(scenario) ? await ReadChurnAsync(host) : null;
 
                 Report(scenario, delta, sw.Elapsed, processed, withStatements, harnessQueries, churn);
                 bloat?.Report();
@@ -278,7 +295,10 @@ public static class LoadLab
                         concurrencyKeys,
                         concurrencyLimit,
                         concurrencyMode.ToString(),
-                        handlerMs));
+                        handlerMs,
+                        servers,
+                        windowSeconds,
+                        rateLimitStyle.ToString()));
             }
 
             if (!sqlServer)
@@ -740,7 +760,9 @@ public static class LoadLab
                         config.UsePostgreSql();
                     }
 
+                    // Concurrency before RateLimit (§2.12), so a mutex reject never spends a token.
                     config.AddConcurrency();
+                    config.AddRateLimit();
                     config.WorkerCount = workers;
                     config.UseDispatcher = useDispatcher;
 
@@ -768,7 +790,12 @@ public static class LoadLab
         // Warmed in the arm's own shape, not the plain-jobs shape: a concurrency arm's first jobs
         // otherwise pay to JIT the policy pipeline, the semaphore provider and the requeue path inside
         // the measured window. The handler delay is dropped so the warmup still drains quickly.
-        await PublishAsync(host, 200, 0, 1, 0, scenario, concurrency with { HandlerMs = 0 });
+        // A rate-limit warmup is sized to two windows' worth: enough to exercise the reject path, without
+        // a 200-job backlog trickling through the limit before the first measured run can start.
+        var warmupJobs = scenario == LoadScenario.RateLimit
+            ? Math.Min(200, 2 * Math.Max(concurrency.Limit, 1) * Math.Max(concurrency.Keys, 1))
+            : 200;
+        await PublishAsync(host, warmupJobs, 0, 1, 0, scenario, concurrency with { HandlerMs = 0 });
         await WaitForDrainAsync(host, TimeSpan.FromMinutes(2));
 
         await using var scope = host.Services.CreateAsyncScope();
@@ -797,6 +824,10 @@ public static class LoadLab
         // folded history behind and the ratio climbs run over run.
         await context.Set<Statistic>().ExecuteDeleteAsync();
         await context.Set<Job>().ExecuteDeleteAsync();
+
+        // The rate-limit arm's live window. Left behind, the next run would open inside the previous
+        // run's spent window and throttle from its first job.
+        await context.Set<RateLimitBucket>().ExecuteDeleteAsync();
     }
 
     private static async Task<int> RunScenarioAsync(
@@ -902,7 +933,7 @@ public static class LoadLab
             var publisher = scope.ServiceProvider.GetRequiredService<IPublisher>();
             for (var i = 0; i < batch; i++)
             {
-                if (IsConcurrency(scenario))
+                if (IsGated(scenario))
                 {
                     await EnqueueConcurrencyOneAsync(publisher, scenario, concurrency, published + i);
                 }
@@ -1020,6 +1051,11 @@ public static class LoadLab
         {
             parameters.WithMutex(key, concurrency.Mode);
         }
+        else if (scenario == LoadScenario.RateLimit)
+        {
+            var mode = concurrency.Mode == ConcurrencyMode.Skip ? RateLimitMode.Skip : RateLimitMode.Wait;
+            parameters.WithRateLimit(key, Math.Max(concurrency.Limit, 1), TimeSpan.FromSeconds(Math.Max(concurrency.WindowSeconds, 1)), mode, concurrency.Style);
+        }
         else
         {
             parameters.WithSemaphore(key, Math.Max(concurrency.Limit, 1), concurrency.Mode);
@@ -1089,7 +1125,9 @@ public static class LoadLab
             totals.GetValueOrDefault("stats:deleted"),
             totals.GetValueOrDefault("stats:requeued"),
             totals.GetValueOrDefault("stats:requeued-concurrency"),
-            totals.GetValueOrDefault("stats:deleted-concurrency"));
+            totals.GetValueOrDefault("stats:deleted-concurrency"),
+            totals.GetValueOrDefault("stats:requeued-ratelimit"),
+            totals.GetValueOrDefault("stats:deleted-ratelimit"));
     }
 
     /// <summary>
@@ -1113,25 +1151,31 @@ public static class LoadLab
         return mixed % (ulong)Math.Max(keys, 1);
     }
 
-    private static bool IsConcurrency(LoadScenario scenario) =>
-        scenario is LoadScenario.Mutex or LoadScenario.Semaphore;
+    /// <summary>Arms whose jobs carry a policy key and can therefore be refused after the claim.</summary>
+    private static bool IsGated(LoadScenario scenario) =>
+        scenario is LoadScenario.Mutex or LoadScenario.Semaphore or LoadScenario.RateLimit;
 
-    /// <summary>Only the arms that HONOUR --payload/--types report them: the concurrency arms always publish a single-type, zero-payload DelayRequest, and echoing values they ignore makes a saved transcript unreproducible from its own header.</summary>
+    /// <summary>Only the arms that HONOUR --payload/--types report them: the gated arms always publish a single-type, zero-payload DelayRequest, and echoing values they ignore makes a saved transcript unreproducible from its own header.</summary>
     private static string DescribePayload(LoadScenario scenario, int payloadBytes, int types) =>
-        IsConcurrency(scenario) ? string.Empty : $"  payload={payloadBytes}B  types={types}";
+        IsGated(scenario) ? string.Empty : $"  payload={payloadBytes}B  types={types}";
 
-    private static string DescribeConcurrency(LoadScenario scenario, int keys, int limit, ConcurrencyMode mode, int handlerMs)
+    private static string DescribeConcurrency(LoadScenario scenario, ConcurrencyShape shape)
     {
-        if (!IsConcurrency(scenario))
+        if (!IsGated(scenario))
         {
             return string.Empty;
         }
 
+        if (scenario == LoadScenario.RateLimit)
+        {
+            return $"  keys={shape.Keys}  limit={shape.Limit}/{shape.WindowSeconds}s  style={shape.Style}  mode={shape.Mode}  handlerMs={shape.HandlerMs}";
+        }
+
         // A Mutex is a Semaphore of one by definition (§8.6) — reporting the --limit the operator
         // happened to pass would print a width that arm does not have.
-        var effectiveLimit = scenario == LoadScenario.Mutex ? 1 : limit;
+        var effectiveLimit = scenario == LoadScenario.Mutex ? 1 : shape.Limit;
 
-        return $"  keys={keys}  limit={effectiveLimit}  mode={mode}  handlerMs={handlerMs}";
+        return $"  keys={shape.Keys}  limit={effectiveLimit}  mode={shape.Mode}  handlerMs={shape.HandlerMs}";
     }
 
     private static async Task WaitForDrainAsync(IHost host, TimeSpan timeout)
@@ -1250,18 +1294,20 @@ public static class LoadLab
         var settled = churn.Succeeded + churn.Deleted;
 
         Console.WriteLine();
-        Console.WriteLine($"{"concurrency churn",-28}{"total",16}{string.Empty,14}{"per settled",12}");
+        Console.WriteLine($"{"policy churn",-28}{"total",16}{string.Empty,14}{"per settled",12}");
         WriteChurnRow("settled (succ + del)", settled, settled);
         WriteChurnRow("  succeeded", churn.Succeeded, settled);
         WriteChurnRow("  deleted", churn.Deleted, settled);
         WriteChurnRow("requeues (all reasons)", churn.Requeued, settled);
         WriteChurnRow("  reason=concurrency", churn.RequeuedConcurrency, settled);
+        WriteChurnRow("  reason=ratelimit", churn.RequeuedRateLimit, settled);
         WriteChurnRow("skips (deleted-concurrency)", churn.DeletedConcurrency, settled);
+        WriteChurnRow("skips (deleted-ratelimit)", churn.DeletedRateLimit, settled);
 
         // Per job that actually RAN, not per settled job. In Skip mode a rejected job IS the Deleted
         // row, so dividing by settled puts the same job in numerator and denominator and pins the
         // ratio near 1.00 however much contention the arm really produced.
-        var rejected = churn.RequeuedConcurrency + churn.DeletedConcurrency;
+        var rejected = churn.RequeuedConcurrency + churn.DeletedConcurrency + churn.RequeuedRateLimit + churn.DeletedRateLimit;
         Console.WriteLine(
             $"{"rejected cycles / succeeded",-28}{rejected,16:N0}{string.Empty,14}"
             + $"{(churn.Succeeded > 0 ? (rejected / (double)churn.Succeeded).ToString("N2", CultureInfo.InvariantCulture) : "n/a"),12}");

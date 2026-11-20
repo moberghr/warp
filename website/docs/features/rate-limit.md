@@ -93,6 +93,34 @@ The distributed lock is held only for the brief **check-and-increment** — neve
 
 Live state lives in `RateLimitBucket`; the entity is contributed only when `AddRateLimit()` is registered.
 
+## Refusing a known-exhausted key from memory
+
+Each check that refuses a job also computes the instant the key can next admit. Every server remembers that instant for the key. Until then, later jobs on the key are refused from memory: no lock, no override lookup, no bucket read. A hot key that is over its limit then costs one database check per process every few seconds, not one per job.
+
+This is safe across servers. Other processes can only *use* capacity, never give it back, so the reopening instant is a lower bound everywhere: before it, the database check would refuse too. The cache never refuses a job the database would have admitted.
+
+The one thing that can reopen a key early is an admin raising or removing its [override](#admin-overrides). The server that makes the change applies it at once. Other servers trust a remembered refusal for at most **5 seconds**, so they pick the change up within that time.
+
+## How `Wait` spreads a backlog
+
+Every job a full key refuses in `Wait` mode used to be rescheduled to the **same** instant: the moment the key reopened. The whole backlog woke together, `count` of it got in, and the rest ran again only to be refused again, at every window. A backlog of B jobs at C per window ran about B²/2C times before it drained.
+
+Now each throttled job gets its **own slot**, handed out from one cursor on the bucket row (`RateLimitBucket.NextSlotUtc`). The cursor is shared by the whole cluster, so two servers never hand out the same slot. Each throttled job therefore comes back about when there is capacity for it, and runs about once.
+
+How slots map to times depends on the style:
+
+| Style | Throttled jobs come back… |
+|---|---|
+| `Fixed` | `count` at a time, at the **start of each following window**. A Fixed window admits its whole count at once, so this drains a backlog as fast as the limit allows. |
+| `Sliding`, `TokenBucket` | One every `perSeconds / count`, since their capacity returns gradually. |
+
+- **Leased blocks.** A server reserves a few slots at a time (up to 20, never more than about 5 seconds of the key's capacity), so most throttled jobs on a hot key are placed without touching the database. Slots a server reserved but did not use delay the next jobs by at most that much.
+- **Not strict FIFO.** A newly published job that finds spare capacity runs at once, ahead of jobs already waiting for a slot. A waiting job that then finds its window full is refused again and takes a new slot.
+- **The cursor marks a queue.** If you delete a large backlog of throttled jobs, the cursor stays ahead until that time has passed. Until then, jobs that find the key full queue behind it. Jobs that find capacity are not affected.
+- **Activation sets a floor.** Slots are released by `ScheduledJobActivation` (see [below](#db-push-does-not-accelerate-wait)). With a window shorter than `ScheduledActivationInterval`, several windows' slots come due on one tick and only the current window's capacity is available, so some jobs are refused again. Throughput in that shape is bounded by the activation interval, not by the limit.
+
+**Schema:** `NextSlotUtc` is a new nullable column on `rate_limit_bucket`. Add it with your usual `dotnet ef migrations add` before deploying; it is additive.
+
 ## Composition with concurrency control
 
 When a job carries both `[Mutex]` / `[Semaphore]` and `[RateLimit]`, register `AddConcurrency()` **before** `AddRateLimit()`:
@@ -127,6 +155,8 @@ Each acquire attempt emits a `warp.rate_limit_check` span (Internal kind) with t
 - `warp.rate_limit.window_seconds`
 - `warp.rate_limit.style` (`fixed` / `sliding`)
 - `warp.rate_limit.outcome` (`acquired` / `skipped` / `throttled` / `lock_contention`)
+
+- `warp.rate_limit.cached` (`true` when the refusal came from the [in-process cache](#refusing-a-known-exhausted-key-from-memory))
 
 `acquired` is the green path; `skipped` is the `Skip` rejection; `throttled` is the `Wait` reschedule; `lock_contention` is the brief retry path after a failed `TryAcquire` on the distributed lock.
 

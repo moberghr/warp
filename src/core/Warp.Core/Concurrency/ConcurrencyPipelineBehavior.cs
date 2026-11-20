@@ -12,17 +12,31 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
     private readonly IWarpSemaphoreProvider _semaphoreProvider;
     private readonly ConcurrencyLimitResolver _limitResolver;
     private readonly TimeProvider _timeProvider;
+    private readonly ConcurrencyLocalHolds _localHolds;
 
+    // Builds a behaviour with a private, instance-scoped ConcurrencyLocalHolds — every
+    // refusal goes to the database. The DI-registered shims share the process-wide one.
     public ConcurrencyPipelineBehavior(
         IJobContext jobContext,
         IWarpSemaphoreProvider semaphoreProvider,
         ConcurrencyLimitResolver limitResolver,
         TimeProvider timeProvider)
+        : this(jobContext, semaphoreProvider, limitResolver, timeProvider, new ConcurrencyLocalHolds())
+    {
+    }
+
+    internal ConcurrencyPipelineBehavior(
+        IJobContext jobContext,
+        IWarpSemaphoreProvider semaphoreProvider,
+        ConcurrencyLimitResolver limitResolver,
+        TimeProvider timeProvider,
+        ConcurrencyLocalHolds localHolds)
     {
         _jobContext = jobContext;
         _semaphoreProvider = semaphoreProvider;
         _limitResolver = limitResolver;
         _timeProvider = timeProvider;
+        _localHolds = localHolds;
     }
 
     public async Task<TResponse> HandleAsync(
@@ -48,21 +62,29 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         var adminLimit = await _limitResolver.GetLimit(meta.ConcurrencyKey, cancellationToken);
         var effectiveLimit = adminLimit ?? meta.ConcurrencyLimit ?? 1;
 
+        var lockName = $"warp:concurrency:{meta.ConcurrencyKey}";
         IAsyncDisposable? handle;
         using (var concurrencySpan = WarpTelemetry.StartConcurrencyActivity())
         {
             concurrencySpan?.SetTag(WarpTelemetryAttributes.WarpConcurrencyKey, meta.ConcurrencyKey);
             concurrencySpan?.SetTag(WarpTelemetryAttributes.WarpConcurrencyLimit, effectiveLimit);
 
-            handle = await _semaphoreProvider.TryAcquireAsync(
-                $"warp:concurrency:{meta.ConcurrencyKey}",
-                effectiveLimit,
-                TimeSpan.Zero,
-                cancellationToken);
+            // This process alone already fills the key, so the database acquire cannot succeed — refuse
+            // without the round trip. Exact, not a guess: see ConcurrencyLocalHolds.
+            var locallyFull = _localHolds.IsSaturated(lockName, effectiveLimit);
+            handle = locallyFull
+                ? null
+                : await _semaphoreProvider.TryAcquireAsync(lockName, effectiveLimit, TimeSpan.Zero, cancellationToken);
+
+            if (handle != null)
+            {
+                _localHolds.Enter(lockName);
+            }
 
             concurrencySpan?.SetTag(WarpTelemetryAttributes.WarpConcurrencyAcquired, handle != null);
             if (handle == null)
             {
+                concurrencySpan?.SetTag(WarpTelemetryAttributes.WarpConcurrencyLocal, locallyFull);
                 concurrencySpan?.AddEvent(new System.Diagnostics.ActivityEvent(WarpTelemetryAttributes.WarpConcurrencyHeldByOtherEvent));
             }
         }
@@ -84,6 +106,8 @@ public class ConcurrencyPipelineBehavior<TRequest, TResponse> : IPipelineBehavio
         }
         finally
         {
+            // Local count first, database lock second — the safe order (see ConcurrencyLocalHolds).
+            _localHolds.Exit(lockName);
             await handle.DisposeAsync();
         }
     }
@@ -122,8 +146,9 @@ internal sealed class ConcurrencyJobPipelineBehavior<TRequest, TResponse> : Conc
         IJobContext jobContext,
         IWarpSemaphoreProvider semaphoreProvider,
         ConcurrencyLimitResolver limitResolver,
-        TimeProvider timeProvider)
-        : base(jobContext, semaphoreProvider, limitResolver, timeProvider)
+        TimeProvider timeProvider,
+        ConcurrencyLocalHolds localHolds)
+        : base(jobContext, semaphoreProvider, limitResolver, timeProvider, localHolds)
     {
     }
 }
@@ -136,8 +161,9 @@ internal sealed class ConcurrencyMessagePipelineBehavior<TRequest, TResponse> : 
         IJobContext jobContext,
         IWarpSemaphoreProvider semaphoreProvider,
         ConcurrencyLimitResolver limitResolver,
-        TimeProvider timeProvider)
-        : base(jobContext, semaphoreProvider, limitResolver, timeProvider)
+        TimeProvider timeProvider,
+        ConcurrencyLocalHolds localHolds)
+        : base(jobContext, semaphoreProvider, limitResolver, timeProvider, localHolds)
     {
     }
 }

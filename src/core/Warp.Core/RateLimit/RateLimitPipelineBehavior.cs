@@ -15,19 +15,35 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
     private readonly IRateLimitStore _store;
     private readonly RateLimitResolver _resolver;
     private readonly TimeProvider _timeProvider;
+    private readonly RateLimitGate _gate;
 
+    // Builds a behaviour with a private, instance-scoped RateLimitGate: correct, but it
+    // remembers nothing across jobs and leases one slot at a time. The DI-registered shims share the
+    // process-wide gate instead.
     public RateLimitPipelineBehavior(
         IJobContext jobContext,
         IWarpLockProvider lockProvider,
         IRateLimitStore store,
         RateLimitResolver resolver,
         TimeProvider timeProvider)
+        : this(jobContext, lockProvider, store, resolver, timeProvider, new RateLimitGate(maxLeaseSize: 1))
+    {
+    }
+
+    internal RateLimitPipelineBehavior(
+        IJobContext jobContext,
+        IWarpLockProvider lockProvider,
+        IRateLimitStore store,
+        RateLimitResolver resolver,
+        TimeProvider timeProvider,
+        RateLimitGate gate)
     {
         _jobContext = jobContext;
         _lockProvider = lockProvider;
         _store = store;
         _resolver = resolver;
         _timeProvider = timeProvider;
+        _gate = gate;
     }
 
     public async Task<TResponse> HandleAsync(
@@ -51,19 +67,40 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
         }
 
         var key = meta.RateLimitKey;
-        var ovr = await _resolver.GetOverride(key, cancellationToken);
-        var effectiveCount = ovr?.Count ?? meta.RateLimitCount.Value;
-        var effectiveWindow = TimeSpan.FromSeconds(ovr?.WindowSeconds ?? meta.RateLimitWindowSeconds.Value);
         var style = meta.RateLimitStyle ?? RateLimitStyle.Fixed;
         var mode = meta.RateLimitMode ?? RateLimitMode.Skip;
+        var policy = new RateLimitPolicy(meta.RateLimitCount.Value, meta.RateLimitWindowSeconds.Value, style);
 
         using var span = WarpTelemetry.StartRateLimitActivity();
         span?.SetTag(WarpTelemetryAttributes.WarpRateLimitKey, key);
+
+        // Known-exhausted key: refuse from memory — no override lookup, no lock, no bucket read. Sound
+        // across servers because a recorded rejection is a lower bound on when the key reopens (see
+        // RateLimitGate); a Wait-mode refusal needs a leased slot, and falls through when none is left.
+        var cachedNow = _timeProvider.GetUtcNow().UtcDateTime;
+        if (_gate.TryRefuse(key, policy, mode, cachedNow, out var cached))
+        {
+            span?.SetTag(WarpTelemetryAttributes.WarpRateLimitCount, cached.EffectiveCount);
+            span?.SetTag(WarpTelemetryAttributes.WarpRateLimitWindowSeconds, cached.EffectiveWindowSeconds);
+            span?.SetTag(WarpTelemetryAttributes.WarpRateLimitStyle, style.ToString());
+            span?.SetTag(WarpTelemetryAttributes.WarpRateLimitCached, true);
+            Refuse(request, key, mode, cached.EffectiveCount, cached.EffectiveWindowSeconds, cached.ScheduleTo, cachedNow, span);
+
+            return default!;
+        }
+
+        var ovr = await _resolver.GetOverride(key, cancellationToken);
+        var effectiveCount = ovr?.Count ?? meta.RateLimitCount.Value;
+        var effectiveWindow = TimeSpan.FromSeconds(ovr?.WindowSeconds ?? meta.RateLimitWindowSeconds.Value);
+
         span?.SetTag(WarpTelemetryAttributes.WarpRateLimitCount, effectiveCount);
         span?.SetTag(WarpTelemetryAttributes.WarpRateLimitWindowSeconds, (int)effectiveWindow.TotalSeconds);
         span?.SetTag(WarpTelemetryAttributes.WarpRateLimitStyle, style.ToString());
 
-        await using var lockHandle = await _lockProvider.TryAcquireAsync(
+        // The lock guards the check-and-increment ONLY. It must be released before the handler runs: held
+        // across next(), every admitted job on the key ran one at a time and every other worker queued on
+        // the lock for the full handler duration — the opposite of a rate limit (§8.8).
+        var lockHandle = await _lockProvider.TryAcquireAsync(
             $"warp:ratelimit:{key}",
             TimeSpan.FromSeconds(5),
             cancellationToken);
@@ -92,43 +129,144 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
             return default!;
         }
 
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var evaluation = await Evaluate(key, effectiveCount, effectiveWindow, style, now, cancellationToken);
-
-        if (evaluation.Allowed)
+        bool allowed;
+        await using (lockHandle)
         {
-            span?.SetTag(WarpTelemetryAttributes.WarpRateLimitOutcome, WarpTelemetryAttributes.WarpRateLimitOutcomeAcquired);
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            var evaluation = await Evaluate(key, effectiveCount, effectiveWindow, style, now, cancellationToken);
+            allowed = evaluation.Allowed;
 
-            return await next(request, cancellationToken);
+            if (!allowed)
+            {
+                var windowSeconds = (int)effectiveWindow.TotalSeconds;
+                var scheduleTo = evaluation.NextAvailable;
+                if (mode == RateLimitMode.Wait)
+                {
+                    scheduleTo = await AssignSlotAsync(key, policy, effectiveCount, effectiveWindow, style, evaluation, now, cancellationToken);
+                }
+                else
+                {
+                    _gate.RecordRejection(key, policy, effectiveCount, windowSeconds, now, evaluation.NextAvailable, []);
+                }
+
+                Refuse(request, key, mode, effectiveCount, windowSeconds, scheduleTo, now, span);
+            }
         }
 
-        var windowSeconds = (int)effectiveWindow.TotalSeconds;
+        if (!allowed)
+        {
+            return default!;
+        }
+
+        span?.SetTag(WarpTelemetryAttributes.WarpRateLimitOutcome, WarpTelemetryAttributes.WarpRateLimitOutcomeAcquired);
+
+        return await next(request, cancellationToken);
+    }
+
+    private void Refuse(
+        TRequest request,
+        string key,
+        RateLimitMode mode,
+        int effectiveCount,
+        int windowSeconds,
+        DateTime scheduleTo,
+        DateTime now,
+        System.Diagnostics.Activity? span)
+    {
         if (mode == RateLimitMode.Wait)
         {
             _jobContext.Outcome = new JobOutcome
             {
-                State = JobOutcome.RescheduledState(evaluation.NextAvailable, now),
-                ScheduleTime = evaluation.NextAvailable,
+                State = JobOutcome.RescheduledState(scheduleTo, now),
+                ScheduleTime = scheduleTo,
 
                 // Routed message children keep HandlerType on requeue (§8.14) — it IS the routing decision.
                 ClearHandlerType = request is not IMessage,
                 Reason = OutcomeReason.RateLimit,
-                LogMessage = $"Throttled — rate limit '{key}' ({effectiveCount}/{windowSeconds}s), rescheduled to {evaluation.NextAvailable:O}",
+                LogMessage = $"Throttled — rate limit '{key}' ({effectiveCount}/{windowSeconds}s), rescheduled to {scheduleTo:O}",
             };
             span?.SetTag(WarpTelemetryAttributes.WarpRateLimitOutcome, WarpTelemetryAttributes.WarpRateLimitOutcomeThrottled);
-        }
-        else
-        {
-            _jobContext.Outcome = new JobOutcome
-            {
-                State = State.Deleted,
-                Reason = OutcomeReason.RateLimit,
-                LogMessage = $"Cancelled — rate limit '{key}' exceeded ({effectiveCount}/{windowSeconds}s)",
-            };
-            span?.SetTag(WarpTelemetryAttributes.WarpRateLimitOutcome, WarpTelemetryAttributes.WarpRateLimitOutcomeSkipped);
+
+            return;
         }
 
-        return default!;
+        _jobContext.Outcome = new JobOutcome
+        {
+            State = State.Deleted,
+            Reason = OutcomeReason.RateLimit,
+            LogMessage = $"Cancelled — rate limit '{key}' exceeded ({effectiveCount}/{windowSeconds}s)",
+        };
+        span?.SetTag(WarpTelemetryAttributes.WarpRateLimitOutcome, WarpTelemetryAttributes.WarpRateLimitOutcomeSkipped);
+    }
+
+    /// <summary>
+    /// Picks the instant a throttled Wait-mode job is rescheduled to. Every job refused in one window used
+    /// to be rescheduled onto the same instant — the key's reopening — so the whole backlog woke together,
+    /// <c>count</c> of it was admitted and the rest re-executed only to be refused again, every window:
+    /// quadratic in the backlog. Instead each job takes its own slot from the cluster-wide cursor on the
+    /// bucket row, one position per <c>window / count</c>, so a throttled job comes back roughly when there
+    /// is capacity for it. Runs under the key's lock, so the cursor read in the evaluation is still current.
+    /// <para>
+    /// A <see cref="RateLimitStyle.Fixed"/> window admits its whole <c>count</c> at once, so its jobs are
+    /// scheduled at the START of the window their position falls in: exactly <c>count</c> per window, at
+    /// the earliest instant it allows. Spreading them across the window instead would delay the last of a
+    /// backlog by up to a whole window for nothing. Sliding and TokenBucket return capacity gradually, so
+    /// their positions are used as-is.
+    /// </para>
+    /// </summary>
+    private async Task<DateTime> AssignSlotAsync(
+        string key,
+        RateLimitPolicy policy,
+        int count,
+        TimeSpan window,
+        RateLimitStyle style,
+        RateLimitEvaluation evaluation,
+        DateTime now,
+        CancellationToken ct)
+    {
+        var windowSeconds = (int)window.TotalSeconds;
+
+        // A slot this process leased earlier and has not used is still a reservation on the cursor.
+        if (_gate.TryTakeLeasedSlot(key, evaluation.NextAvailable, out var leased))
+        {
+            _gate.RecordRejection(key, policy, count, windowSeconds, now, evaluation.NextAvailable, []);
+
+            return leased;
+        }
+
+        var spacing = TimeSpan.FromTicks(Math.Max(1, window.Ticks / Math.Max(count, 1)));
+        var first = evaluation.NextSlot is { } cursor && cursor > evaluation.NextAvailable ? cursor : evaluation.NextAvailable;
+        var size = _gate.LeaseSize(count, spacing);
+
+        if (!await _store.SetNextSlotAsync(key, first + (spacing * size), ct))
+        {
+            // No bucket row to hold the cursor — unreachable in practice (a refusal implies an earlier
+            // accept wrote the row). Fall back to the unspread reopening instant rather than fail the job.
+            _gate.RecordRejection(key, policy, count, windowSeconds, now, evaluation.NextAvailable, []);
+
+            return evaluation.NextAvailable;
+        }
+
+        var spare = Enumerable.Range(1, size - 1)
+            .Select(x => ToScheduleTime(first + (spacing * x), style, window, evaluation.NextAvailable))
+            .ToList();
+        _gate.RecordRejection(key, policy, count, windowSeconds, now, evaluation.NextAvailable, spare);
+
+        return ToScheduleTime(first, style, window, evaluation.NextAvailable);
+    }
+
+    // Fixed windows: the start of the window the cursor position falls in, anchored on the reopening instant
+    // (itself a window boundary) so the mapping holds however the window is aligned.
+    private static DateTime ToScheduleTime(DateTime position, RateLimitStyle style, TimeSpan window, DateTime reopening)
+    {
+        if (style != RateLimitStyle.Fixed || position <= reopening || window <= TimeSpan.Zero)
+        {
+            return position;
+        }
+
+        var windowsAhead = (position - reopening).Ticks / window.Ticks;
+
+        return reopening.AddTicks(windowsAhead * window.Ticks);
     }
 
     private async Task<RateLimitEvaluation> Evaluate(
@@ -141,12 +279,14 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
     {
         var bucket = await _store.GetAsync(key, ct);
 
-        return style switch
+        var evaluation = style switch
         {
             RateLimitStyle.Sliding => await EvaluateSliding(key, count, window, now, bucket, ct),
             RateLimitStyle.TokenBucket => await EvaluateTokenBucket(key, count, window, now, bucket, ct),
             _ => await EvaluateFixed(key, count, window, now, bucket, ct),
         };
+
+        return evaluation with { NextSlot = bucket?.NextSlotUtc };
     }
 
     private async Task<RateLimitEvaluation> EvaluateTokenBucket(
@@ -324,7 +464,7 @@ public class RateLimitPipelineBehavior<TRequest, TResponse> : IPipelineBehavior<
 
     private static string SerializeTokens(double tokens) => JsonSerializer.Serialize(tokens);
 
-    private readonly record struct RateLimitEvaluation(bool Allowed, DateTime NextAvailable);
+    private readonly record struct RateLimitEvaluation(bool Allowed, DateTime NextAvailable, DateTime? NextSlot = null);
 }
 
 /// <summary>
@@ -339,8 +479,9 @@ internal sealed class RateLimitJobPipelineBehavior<TRequest, TResponse> : RateLi
         IWarpLockProvider lockProvider,
         IRateLimitStore store,
         RateLimitResolver resolver,
-        TimeProvider timeProvider)
-        : base(jobContext, lockProvider, store, resolver, timeProvider)
+        TimeProvider timeProvider,
+        RateLimitGate gate)
+        : base(jobContext, lockProvider, store, resolver, timeProvider, gate)
     {
     }
 }
@@ -354,8 +495,9 @@ internal sealed class RateLimitMessagePipelineBehavior<TRequest, TResponse> : Ra
         IWarpLockProvider lockProvider,
         IRateLimitStore store,
         RateLimitResolver resolver,
-        TimeProvider timeProvider)
-        : base(jobContext, lockProvider, store, resolver, timeProvider)
+        TimeProvider timeProvider,
+        RateLimitGate gate)
+        : base(jobContext, lockProvider, store, resolver, timeProvider, gate)
     {
     }
 }

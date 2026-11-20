@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Data;
@@ -865,6 +866,269 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         ((JsonElement)metadata["RateLimitWindowSeconds"]).GetInt32().ShouldBe(30);
     }
 
+    [TimedFact]
+    public async Task KnownExhaustedKey_SkipMode_SecondJobRefusedFromMemory()
+    {
+        // Job 1 is refused by the database. The bucket row is then deleted — a database evaluation of job 2
+        // would now see a fresh key and ADMIT it, so a refusal can only have come from the in-process gate.
+        var clock = new FakeTimeProvider(CacheTestStart);
+        await SeedFullFixedBucketAsync("rl-cache-skip", count: 1);
+        var job1 = await SeedRateLimitedJobAsync("rl-cache-skip", 1, 60, RateLimitMode.Skip, CacheTestStart.UtcDateTime.AddMinutes(-2));
+        var job2 = await SeedRateLimitedJobAsync("rl-cache-skip", 1, 60, RateLimitMode.Skip, CacheTestStart.UtcDateTime.AddMinutes(-1));
+        var worker = CreateWorker(timeProvider: clock);
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+        await DeleteBucketAsync("rl-cache-skip");
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        (await ReadStateAsync(job1)).ShouldBe(State.Deleted);
+        (await ReadStateAsync(job2)).ShouldBe(State.Deleted);
+        (await ReadBucketAsync("rl-cache-skip")).ShouldBeNull("a cached refusal must not touch the bucket");
+    }
+
+    [TimedFact]
+    public async Task CachedRejection_PastMaxClosedAge_ReevaluatedAgainstDatabase()
+    {
+        // The window still has 50s to run, but a cached refusal is trusted for MaxClosedAge at most (an admin
+        // may have raised the limit on another server). Past it, job 2 goes back to the database, which —
+        // with the bucket row gone — admits it.
+        var clock = new FakeTimeProvider(CacheTestStart);
+        await SeedFullFixedBucketAsync("rl-cache-age", count: 1);
+        var job1 = await SeedRateLimitedJobAsync("rl-cache-age", 1, 60, RateLimitMode.Skip, CacheTestStart.UtcDateTime.AddMinutes(-2));
+        var job2 = await SeedRateLimitedJobAsync("rl-cache-age", 1, 60, RateLimitMode.Skip, CacheTestStart.UtcDateTime.AddMinutes(-1));
+        var worker = CreateWorker(timeProvider: clock);
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+        await DeleteBucketAsync("rl-cache-age");
+        clock.Advance(RateLimitGate.MaxClosedAge + TimeSpan.FromSeconds(1));
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        (await ReadStateAsync(job1)).ShouldBe(State.Deleted);
+        (await ReadStateAsync(job2)).ShouldBe(State.Completed);
+    }
+
+    [TimedFact]
+    public async Task AdminLimitRaised_ForgetsCachedRejection()
+    {
+        var clock = new FakeTimeProvider(CacheTestStart);
+        await SeedFullFixedBucketAsync("rl-cache-admin", count: 1);
+        var job1 = await SeedRateLimitedJobAsync("rl-cache-admin", 1, 60, RateLimitMode.Skip, CacheTestStart.UtcDateTime.AddMinutes(-2));
+        var job2 = await SeedRateLimitedJobAsync("rl-cache-admin", 1, 60, RateLimitMode.Skip, CacheTestStart.UtcDateTime.AddMinutes(-1));
+        var (worker, services) = CreateWorkerWithServices(timeProvider: clock);
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+        await using (var scope = services.CreateAsyncScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<IRateLimitManager>()
+                .AddOrUpdateLimit("rl-cache-admin", 5, 60, Xunit.TestContext.Current.CancellationToken);
+        }
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        (await ReadStateAsync(job1)).ShouldBe(State.Deleted);
+        (await ReadStateAsync(job2)).ShouldBe(State.Completed, "raising the limit on this process must take effect for the next job");
+    }
+
+    [TimedFact]
+    public async Task WaitMode_FixedWindow_ThrottledJobsFillEachWindowThenTheNext()
+    {
+        // 2 per 60s. Three throttled jobs used to share one reopening instant, where only two fit. Now the
+        // first two are scheduled at the next window's start (a Fixed window admits its count at once) and
+        // the third at the start of the window after, and the cursor is left at the first position not used.
+        var clock = new FakeTimeProvider(CacheTestStart);
+        await SeedFullFixedBucketAsync("rl-slots", count: 2);
+        var jobs = new[]
+        {
+            await SeedRateLimitedJobAsync("rl-slots", 2, 60, RateLimitMode.Wait, CacheTestStart.UtcDateTime.AddMinutes(-3)),
+            await SeedRateLimitedJobAsync("rl-slots", 2, 60, RateLimitMode.Wait, CacheTestStart.UtcDateTime.AddMinutes(-2)),
+            await SeedRateLimitedJobAsync("rl-slots", 2, 60, RateLimitMode.Wait, CacheTestStart.UtcDateTime.AddMinutes(-1)),
+        };
+        var worker = CreateWorker(timeProvider: clock);
+
+        for (var i = 0; i < jobs.Length; i++)
+        {
+            await worker.GetAndProcessJob(CancellationToken.None);
+        }
+
+        var reopen = WindowStart.AddSeconds(60);
+        (await ReadScheduleTimeAsync(jobs[0])).ShouldBe(reopen);
+        (await ReadScheduleTimeAsync(jobs[1])).ShouldBe(reopen);
+        (await ReadScheduleTimeAsync(jobs[2])).ShouldBe(reopen.AddSeconds(60));
+        (await ReadBucketAsync("rl-slots")).ShouldNotBeNull().NextSlotUtc.ShouldBe(reopen.AddSeconds(90));
+    }
+
+    [TimedFact]
+    public async Task WaitMode_TokenBucket_ThrottledJobsSpacedAtRefillRate()
+    {
+        // 4 per 60s refills one token every 15s. An empty bucket's first throttled job waits for the next
+        // token; the second waits for the one after, not for the same instant.
+        var clock = new FakeTimeProvider(CacheTestStart);
+        var now = CacheTestStart.UtcDateTime;
+        var seedCtx = _fixture.CreateContext();
+        seedCtx.Set<RateLimitBucket>().Add(new RateLimitBucket
+        {
+            Name = "rl-tb-slots",
+            WindowStartUtc = now,
+            CurrentCount = 0,
+            TimestampsJson = JsonSerializer.Serialize(0.0),
+            UpdatedAt = now,
+        });
+        await seedCtx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        var job1 = await SeedRateLimitedJobAsync("rl-tb-slots", 4, 60, RateLimitMode.Wait, now.AddMinutes(-2), RateLimitStyle.TokenBucket);
+        var job2 = await SeedRateLimitedJobAsync("rl-tb-slots", 4, 60, RateLimitMode.Wait, now.AddMinutes(-1), RateLimitStyle.TokenBucket);
+        var worker = CreateWorker(timeProvider: clock);
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        (await ReadScheduleTimeAsync(job1)).ShouldBe(now.AddSeconds(15));
+        (await ReadScheduleTimeAsync(job2)).ShouldBe(now.AddSeconds(30));
+    }
+
+    [TimedFact]
+    public async Task WaitMode_LeasedSlotBlock_ServedFromMemoryUntilExhausted()
+    {
+        // 60 per 60s → one slot a second, so a lease takes LeaseHorizon (5s) worth: five slots. Job 1 leases
+        // them; the bucket row is then deleted, so jobs 2-5 can only be placed from the leased block. Job 6
+        // finds the block empty, goes to the database, sees a fresh key and runs.
+        var clock = new FakeTimeProvider(CacheTestStart);
+        await SeedFullFixedBucketAsync("rl-lease", count: 60);
+        var jobs = new List<Guid>();
+        for (var i = 0; i < 6; i++)
+        {
+            jobs.Add(await SeedRateLimitedJobAsync("rl-lease", 60, 60, RateLimitMode.Wait, CacheTestStart.UtcDateTime.AddMinutes(-10 + i)));
+        }
+
+        var worker = CreateWorker(timeProvider: clock);
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+        var reopen = WindowStart.AddSeconds(60);
+        (await ReadBucketAsync("rl-lease")).ShouldNotBeNull().NextSlotUtc.ShouldBe(reopen.AddSeconds(5));
+        await DeleteBucketAsync("rl-lease");
+
+        for (var i = 1; i < 6; i++)
+        {
+            await worker.GetAndProcessJob(CancellationToken.None);
+        }
+
+        for (var i = 0; i < 5; i++)
+        {
+            (await ReadScheduleTimeAsync(jobs[i])).ShouldBe(reopen, "a Fixed window admits its count at once, so its slots all start with it");
+        }
+
+        (await ReadStateAsync(jobs[5])).ShouldBe(State.Completed);
+    }
+
+    [TimedFact]
+    public async Task WaitMode_TwoServers_DrawFromOneCursor()
+    {
+        // Two containers = two servers, each with its own gate. The cursor lives on the bucket row, so the
+        // second server's throttled job lands in the NEXT window, not in the one already promised away.
+        var clock = new FakeTimeProvider(CacheTestStart);
+        await SeedFullFixedBucketAsync("rl-two-servers", count: 1);
+        var job1 = await SeedRateLimitedJobAsync("rl-two-servers", 1, 60, RateLimitMode.Wait, CacheTestStart.UtcDateTime.AddMinutes(-2));
+        var job2 = await SeedRateLimitedJobAsync("rl-two-servers", 1, 60, RateLimitMode.Wait, CacheTestStart.UtcDateTime.AddMinutes(-1));
+
+        await CreateWorker(timeProvider: clock).GetAndProcessJob(CancellationToken.None);
+        await CreateWorker(timeProvider: clock).GetAndProcessJob(CancellationToken.None);
+
+        var reopen = WindowStart.AddSeconds(60);
+        (await ReadScheduleTimeAsync(job1)).ShouldBe(reopen);
+        (await ReadScheduleTimeAsync(job2)).ShouldBe(reopen.AddSeconds(60));
+    }
+
+    [TimedFact]
+    public async Task AdmittedJob_LockReleasedBeforeHandlerRuns()
+    {
+        // The lock guards the check-and-increment only. It used to stay held until the behaviour returned,
+        // across the handler, so admitted jobs on a key ran one at a time and every other worker queued on
+        // the lock for the handler's full duration. Pin the handler and prove the lock is free meanwhile.
+        var locks = new FakeLockProvider();
+        var barrier = new BarrierSignal();
+        var jobId = await SeedRateLimitedJobAsync("rl-lock-scope", 5, 60, RateLimitMode.Skip, DateTime.UtcNow.AddMinutes(-1), requestType: typeof(BarrierRequest));
+        var worker = CreateWorker(locks, barrier: barrier);
+
+        var running = worker.GetAndProcessJob(CancellationToken.None);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeTrue("the handler must be running before the lock is probed");
+
+        var probe = await locks.TryAcquireAsync("warp:ratelimit:rl-lock-scope", TimeSpan.Zero, Xunit.TestContext.Current.CancellationToken);
+        var lockWasFree = probe != null;
+        if (probe != null)
+        {
+            await probe.DisposeAsync();
+        }
+
+        barrier.CanFinish.Release();
+        await running;
+
+        lockWasFree.ShouldBeTrue("the rate-limit lock must not be held while the handler runs");
+        (await ReadStateAsync(jobId)).ShouldBe(State.Completed);
+    }
+
+    // 10s into a minute, so a 60s Fixed window seeded at WindowStart has 50s left to run.
+    private static readonly DateTimeOffset CacheTestStart = new(2026, 11, 19, 12, 0, 10, TimeSpan.Zero);
+
+    private static readonly DateTime WindowStart = new(2026, 11, 19, 12, 0, 0, DateTimeKind.Utc);
+
+    private async Task SeedFullFixedBucketAsync(string key, int count)
+    {
+        var ctx = _fixture.CreateContext();
+        ctx.Set<RateLimitBucket>().Add(new RateLimitBucket
+        {
+            Name = key,
+            WindowStartUtc = WindowStart,
+            CurrentCount = count,
+            UpdatedAt = WindowStart,
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+    }
+
+    private async Task<Guid> SeedRateLimitedJobAsync(
+        string key, int count, int windowSeconds, RateLimitMode mode, DateTime scheduleTime, RateLimitStyle? style = null, Type? requestType = null)
+    {
+        var ctx = _fixture.CreateContext();
+        var id = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = id,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = scheduleTime,
+            ScheduleTime = scheduleTime,
+            Queue = "default",
+            Type = (requestType ?? typeof(UnitRequest)).AssemblyQualifiedName,
+            Message = "{}",
+            Metadata = SerializeMetadata(key, count, windowSeconds, mode, style),
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        return id;
+    }
+
+    private async Task DeleteBucketAsync(string key) =>
+        await _fixture.CreateContext().Set<RateLimitBucket>()
+            .Where(x => x.Name == key)
+            .ExecuteDeleteAsync(Xunit.TestContext.Current.CancellationToken);
+
+    private async Task<RateLimitBucket?> ReadBucketAsync(string key) =>
+        await _fixture.CreateContext().Set<RateLimitBucket>()
+            .AsNoTracking()
+            .Where(x => x.Name == key)
+            .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
+
+    private async Task<State> ReadStateAsync(Guid jobId) =>
+        await _fixture.CreateContext().Set<Job>()
+            .Where(x => x.Id == jobId)
+            .Select(x => x.CurrentState)
+            .FirstAsync(Xunit.TestContext.Current.CancellationToken);
+
+    private async Task<DateTime> ReadScheduleTimeAsync(Guid jobId) =>
+        await _fixture.CreateContext().Set<Job>()
+            .Where(x => x.Id == jobId)
+            .Select(x => x.ScheduleTime)
+            .FirstAsync(Xunit.TestContext.Current.CancellationToken);
+
     private ServiceCollection BuildPublisherServices()
     {
         var services = new ServiceCollection();
@@ -883,9 +1147,16 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         return services;
     }
 
-    private WarpWorkerService<TestContext> CreateWorker(FakeLockProvider? lockProvider = null)
+    private WarpWorkerService<TestContext> CreateWorker(
+        FakeLockProvider? lockProvider = null, TimeProvider? timeProvider = null, BarrierSignal? barrier = null) =>
+        CreateWorkerWithServices(lockProvider, timeProvider, barrier).Worker;
+
+    /// <summary>One worker and the container it runs in — the container holds the process-wide <c>RateLimitGate</c>, so two calls model two servers.</summary>
+    private (WarpWorkerService<TestContext> Worker, ServiceProvider Services) CreateWorkerWithServices(
+        FakeLockProvider? lockProvider = null, TimeProvider? timeProvider = null, BarrierSignal? barrier = null)
     {
         lockProvider ??= new FakeLockProvider();
+        timeProvider ??= TimeProvider.System;
         var services = new ServiceCollection();
         services.AddWarpMediator();
         services.AddLogging();
@@ -895,7 +1166,8 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
         services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
         services.AddSingleton<IWarpLockProvider>(lockProvider);
         services.AddSingleton<IDatabaseExceptionClassifier>(Warp.Tests.Helpers.TestTasks.ClassifierFor(_fixture.CreateContext()));
-        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton(timeProvider);
+        services.AddSingleton(barrier ?? new BarrierSignal());
         new Warp.Core.WarpBuilder<TestContext>(services).AddRateLimit();
 
         var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
@@ -916,16 +1188,18 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
             Queues = DefaultQueues,
         };
 
-        return new WarpWorkerService<TestContext>(
+        var worker = new WarpWorkerService<TestContext>(
             WorkerId,
             scopeFactory,
             new NullLogger<WarpWorkerService<TestContext>>(),
             workerConfig,
             groupConfig,
-            TimeProvider.System,
+            timeProvider,
             Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             Warp.Tests.Helpers.TestTasks.NullTransport,
             Warp.Tests.Helpers.TestTasks.NullSignals,
             _counterBuffer);
+
+        return (worker, provider);
     }
 }

@@ -139,6 +139,8 @@ jobs:
             filter: '*PayloadSizeBenchmark*'
           - name: concurrency
             filter: '*ConcurrencyBenchmark*'
+          - name: rate-limit
+            filter: '*RateLimitBenchmark*'
           - name: failure-path
             filter: '*FailurePathBenchmark*'
           - name: publish

@@ -459,6 +459,142 @@ public abstract class MutexTestsBase : IAsyncLifetime
         ((JsonElement)metadata["ConcurrencyLimit"]).GetInt32().ShouldBe(1);
     }
 
+    [TimedFact]
+    public async Task MutexHeldByThisProcess_SecondJob_RefusedWithoutDatabaseAttempt()
+    {
+        // Two workers in ONE container = two workers of one process. The first holds the mutex inside its
+        // handler; the second job on the same key must be refused from the process's own holds, without
+        // asking the lock provider at all.
+        var holderId = await SeedMutexJobAsync(typeof(BarrierRequest), "local:held", DateTime.UtcNow.AddMinutes(-2));
+        var refusedId = await SeedMutexJobAsync(typeof(UnitRequest), "local:held", DateTime.UtcNow.AddMinutes(-1));
+        var barrier = new BarrierSignal();
+        var semaphores = new CountingSemaphoreProvider(new FakeSemaphoreProvider());
+        var (holder, refuser) = CreateWorkerPair(semaphores, barrier);
+
+        var holding = holder.GetAndProcessJob(CancellationToken.None);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+            .ShouldBeTrue("the holder must be inside its handler before the second job runs");
+
+        await refuser.GetAndProcessJob(CancellationToken.None);
+        barrier.CanFinish.Release();
+        await holding;
+
+        semaphores.Attempts.ShouldBe(1, "only the holder may reach the lock provider");
+        (await ReadStateAsync(holderId)).ShouldBe(State.Completed);
+        (await ReadStateAsync(refusedId)).ShouldBe(State.Deleted);
+    }
+
+    [TimedFact]
+    public async Task MutexReleasedByThisProcess_NextJobAcquires()
+    {
+        // The local hold is released with the lock, so the process's next job on the key goes to the
+        // provider and runs rather than being refused from a stale count.
+        var firstId = await SeedMutexJobAsync(typeof(UnitRequest), "local:released", DateTime.UtcNow.AddMinutes(-2));
+        var secondId = await SeedMutexJobAsync(typeof(UnitRequest), "local:released", DateTime.UtcNow.AddMinutes(-1));
+        var semaphores = new CountingSemaphoreProvider(new FakeSemaphoreProvider());
+        var (worker, _) = CreateWorkerPair(semaphores, new BarrierSignal());
+
+        await worker.GetAndProcessJob(CancellationToken.None);
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        semaphores.Attempts.ShouldBe(2);
+        (await ReadStateAsync(firstId)).ShouldBe(State.Completed);
+        (await ReadStateAsync(secondId)).ShouldBe(State.Completed);
+    }
+
+    private async Task<Guid> SeedMutexJobAsync(Type requestType, string key, DateTime scheduleTime)
+    {
+        var ctx = _fixture.CreateContext();
+        var id = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = id,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = scheduleTime,
+            ScheduleTime = scheduleTime,
+            Queue = "default",
+            Type = requestType.AssemblyQualifiedName,
+            Message = "{}",
+            Metadata = SerializeMutexMetadata(key),
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        return id;
+    }
+
+    private async Task<State> ReadStateAsync(Guid jobId) =>
+        await _fixture.CreateContext().Set<Job>()
+            .Where(x => x.Id == jobId)
+            .Select(x => x.CurrentState)
+            .FirstAsync(Xunit.TestContext.Current.CancellationToken);
+
+    /// <summary>Two workers sharing one container — one process, so one <c>ConcurrencyLocalHolds</c>.</summary>
+    private (WarpWorkerService<TestContext> First, WarpWorkerService<TestContext> Second) CreateWorkerPair(
+        IWarpSemaphoreProvider semaphores, BarrierSignal barrier)
+    {
+        var services = new ServiceCollection();
+        services.AddWarpMediator();
+        services.AddLogging();
+        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        services.AddTestServerContext<TestContext>();
+        services.AddScoped<JobContext>();
+        services.AddScoped<IJobContext>(x => x.GetRequiredService<JobContext>());
+        services.AddSingleton(semaphores);
+        services.AddSingleton(barrier);
+        services.AddSingleton(TimeProvider.System);
+        new Warp.Core.WarpBuilder<TestContext>(services).AddConcurrency();
+
+        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
+        {
+            WorkerCount = 2,
+            ServerId = ServerId,
+            Queues = DefaultQueues,
+        });
+        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
+        services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
+
+        var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+        var groupConfig = new WorkerGroupConfiguration
+        {
+            WorkerCount = 2,
+            Queues = DefaultQueues,
+        };
+
+        WarpWorkerService<TestContext> Build() =>
+            new(
+                Guid.NewGuid(),
+                scopeFactory,
+                new NullLogger<WarpWorkerService<TestContext>>(),
+                workerConfig,
+                groupConfig,
+                TimeProvider.System,
+                Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
+                Warp.Tests.Helpers.TestTasks.NullTransport,
+                Warp.Tests.Helpers.TestTasks.NullSignals,
+                _counterBuffer);
+
+        return (Build(), Build());
+    }
+
+    /// <summary>Counts how often the lock provider is asked — the round trips a local refusal saves.</summary>
+    private sealed class CountingSemaphoreProvider : IWarpSemaphoreProvider
+    {
+        private readonly IWarpSemaphoreProvider _inner;
+        private int _attempts;
+
+        public CountingSemaphoreProvider(IWarpSemaphoreProvider inner) => _inner = inner;
+
+        public int Attempts => Volatile.Read(ref _attempts);
+
+        public Task<IAsyncDisposable?> TryAcquireAsync(string name, int maxCount, TimeSpan timeout, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _attempts);
+
+            return _inner.TryAcquireAsync(name, maxCount, timeout, ct);
+        }
+    }
+
     private WarpWorkerService<TestContext> CreateWorker(FakeSemaphoreProvider? lockProvider = null)
     {
         lockProvider ??= new FakeSemaphoreProvider();
