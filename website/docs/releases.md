@@ -4,6 +4,53 @@ sidebar_position: 6
 
 # Releases
 
+## 7.7.0
+
+*2026-11-20*
+
+Minor release with **an additive schema change (you generate one migration)**, **behaviour changes in rate limiting and concurrency control**, and no breaking API change. A rate-limited backlog in `Wait` mode no longer re-runs at every window, refused jobs cost far less database work, and a bug that made admitted rate-limited jobs run one at a time is fixed. Read [Upgrading](#upgrading-from-76x) first.
+
+### Rate limit: a throttled backlog no longer re-runs every window
+
+Every job a full key refused in `Wait` mode used to be rescheduled to the **same** instant, the moment the key reopened. The whole backlog woke together, `count` of it got in, and the rest ran again only to be refused again, at every window: a backlog of B jobs at C per window ran about B²/2C times. 30,000 jobs behind 200 per minute meant roughly 2.2 million executions to complete 30,000.
+
+- **Each throttled job gets its own slot** from one cursor on the bucket row, shared by the whole cluster. `Fixed` windows bring jobs back `count` at a time at the start of each following window; `Sliding` and `TokenBucket` space them `perSeconds / count` apart. Each throttled job now runs about once.
+- **A key known to be full is refused from memory.** Once a check says a key reopens at T, later jobs on that key are refused until T without the lock, the override lookup or the bucket read. It is safe across servers: other servers can only use capacity up, never give it back.
+- **Fixed: the rate-limit lock was held while the handler ran.** It is now released after the check, as documented. Before, admitted jobs on a key ran one at a time and every other worker waited on the lock for the handler's whole duration.
+
+Measured on 2,000 jobs at 100 per 10 seconds (PostgreSQL, 16 workers): refused runs per completed job **7.66 → 0.95**, database statements per job **314 → 60**, time workers spent waiting on the key's lock **19.4 → 3.9 minutes**. The CI benchmark's backlog case went from 200.8 to 60.6 statements per job. See [How `Wait` spreads a backlog](/docs/features/rate-limit#how-wait-spreads-a-backlog).
+
+### Mutex and semaphore: refusals without a round trip
+
+When this process already holds every slot of a key (taken with the same limit), the next job on that key is refused without asking the database. The answer is exact: every slot counted is a real database hold. Slots held by other servers still go to the database as before.
+
+### Behaviour changes
+
+1. **`Wait`-mode rate-limit reschedules are spread out.** Throttled jobs on one key no longer share one `ScheduleTime`; each comes back at its own slot. A newly published job that finds spare capacity still runs at once, so the order is not strictly FIFO.
+2. **Windows shorter than `ScheduledActivationInterval`** (10 s by default) take one window's worth of jobs per activation tick, which keeps each job to about one run but drains slower than the limit allows: 50 per 2 s delivers 5 jobs a second with the default interval. To get the full rate, set `ScheduledActivationInterval` to the window or less. Windows of 10 s or longer, such as per-minute limits, are not affected. See [the example](/docs/features/rate-limit#how-wait-spreads-a-backlog).
+3. **Raising or removing a rate-limit override** applies at once on the server that makes the change and within about **5 seconds** on the others. During those seconds `Skip`-mode jobs on that key can be deleted although the new limit would have admitted them; `Wait`-mode jobs are only rescheduled.
+4. **Admitted rate-limited jobs run concurrently.** With the lock fix above, a key admitting `count` jobs now runs them side by side instead of one at a time.
+5. **Mutex `Wait` jobs are refused sooner** when this process holds the key, so a refused job goes back to the queue sooner and is claimed again more often while the holder runs.
+
+### Schema change: one additive migration
+
+Run your normal `dotnet ef migrations add <Name>` and apply it:
+
+- **one new nullable column on `rate_limit_bucket`:** `next_slot_utc`.
+
+Nothing is dropped or renamed. Apply the migration before the new version runs: the new binaries read the column. Old binaries ignore it, so a rolling deploy is safe once the migration is applied.
+
+### API additions
+
+Additive only: `RateLimitBucket.NextSlotUtc`, `IRateLimitStore.SetNextSlotAsync` (default-implemented, so a custom store keeps compiling and works as before, without backlog spreading), and the span attributes `warp.rate_limit.cached` and `warp.concurrency.local`.
+
+### Upgrading from 7.6.x
+
+1. Generate and apply the migration (above) before deploying.
+2. If you use a rate-limit window shorter than 10 seconds in `Wait` mode, lower `ScheduledActivationInterval` to the window or less.
+3. If you raise rate-limit overrides during a burst of `Skip`-mode traffic, expect up to 5 seconds before every server applies it.
+4. Nothing else needs to change.
+
 ## 7.6.0
 
 *2026-11-19*
