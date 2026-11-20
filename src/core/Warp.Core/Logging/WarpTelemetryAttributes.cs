@@ -49,6 +49,9 @@ public static class WarpTelemetryAttributes
     public const string WarpConcurrencyAcquired = "warp.concurrency.acquired";
     public const string WarpConcurrencyHeldByOtherEvent = "warp.concurrency.held_by_other";
 
+    /// <summary>True when the refusal was decided from this process's own holds, without a database round trip.</summary>
+    public const string WarpConcurrencyLocal = "warp.concurrency.local";
+
     public const string WarpRateLimitKey = "warp.rate_limit.key";
     public const string WarpRateLimitCount = "warp.rate_limit.count";
     public const string WarpRateLimitWindowSeconds = "warp.rate_limit.window_seconds";
@@ -58,6 +61,9 @@ public static class WarpTelemetryAttributes
     public const string WarpRateLimitOutcomeSkipped = "skipped";
     public const string WarpRateLimitOutcomeThrottled = "throttled";
     public const string WarpRateLimitOutcomeLockContention = "lock_contention";
+
+    /// <summary>True when the refusal was decided from the in-process rejection cache, without the lock or a bucket read.</summary>
+    public const string WarpRateLimitCached = "warp.rate_limit.cached";
 
     /// <summary>
     /// Metadata dictionary keys read by the worker to enrich consumer-span tags. Mirrors property

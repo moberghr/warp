@@ -11,6 +11,7 @@ using Warp.Core.Diagnostics;
 using Warp.Core.Events;
 using Warp.Core.Logging;
 using Warp.Core.Metrics;
+using Warp.Core.RateLimit;
 using Warp.Core.Services;
 using Warp.Worker.BackgroundServices;
 using Warp.Worker.Services;
@@ -190,6 +191,10 @@ public static class ServiceConfiguration
         services.AddScoped<IServerTask, BacklogSampler<TContext>>();
         services.AddScoped<IServerTask, RecurringJobScheduler<TContext>>();
         services.AddScoped<IServerTask, ScheduledJobActivation<TContext>>();
+
+        // Throttled Wait-mode jobs come back through ScheduledJobActivation, so the rate-limit gate
+        // steps their slots no closer together than its cadence. Harmless without AddRateLimit().
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IScheduledActivationCadence, ScheduledActivationCadence>());
         services.AddScoped<IServerTask, Orchestrator<TContext>>();
         services.AddScoped<IServerTask, MessageRouter<TContext>>();
 

@@ -1,6 +1,7 @@
 using System.Globalization;
 using BenchmarkDotNet.Running;
 using Warp.Core.Concurrency;
+using Warp.Core.RateLimit;
 using Warp.ServerBenchmarks.Benchmarks;
 using Warp.ServerBenchmarks.Lab;
 
@@ -351,6 +352,8 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
     var limit = 1;
     var mode = ConcurrencyMode.Wait;
     var handlerMs = 0;
+    var windowSeconds = 1;
+    var style = RateLimitStyle.Fixed;
 
     for (var i = 1; i < args.Length; i++)
     {
@@ -442,10 +445,18 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
         {
             handlerMs = int.Parse(args[i]["--handler-ms=".Length..]);
         }
+        else if (args[i].StartsWith("--window=", StringComparison.OrdinalIgnoreCase))
+        {
+            windowSeconds = int.Parse(args[i]["--window=".Length..]);
+        }
+        else if (args[i].StartsWith("--style=", StringComparison.OrdinalIgnoreCase))
+        {
+            style = Enum.Parse<RateLimitStyle>(args[i]["--style=".Length..], ignoreCase: true);
+        }
     }
 
     await LoadLab.RunAsync(
-        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs, warmup, jsonPath);
+        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs, warmup, jsonPath, windowSeconds, style);
 }
 else
 {

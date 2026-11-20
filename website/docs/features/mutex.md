@@ -173,7 +173,7 @@ public class DropWhenFull : IJob { }
 
 1. **Enqueue** always succeeds — the slot is not checked at publish time.
 2. **Worker picks up** the job and marks it as `Processing`.
-3. **Pipeline runs**: the behavior resolves the effective limit (admin row > attribute/extension limit > 1) and asks `IWarpSemaphoreProvider.TryAcquireAsync($"warp:concurrency:{key}", limit, TimeSpan.Zero, ct)` for a slot.
+3. **Pipeline runs**: the behavior resolves the effective limit (admin row > attribute/extension limit > 1) and asks `IWarpSemaphoreProvider.TryAcquireAsync($"warp:concurrency:{key}", limit, TimeSpan.Zero, ct)` for a slot. If **this process** already holds `limit` slots of the key, it skips that call and treats the key as full. Every slot a process holds is a real database hold, so the acquire could not succeed. This saves a database round trip and a lock-pool connection. The span carries `warp.concurrency.local = true`. Slots held by other servers are not visible to this check, so those refusals still go to the database.
 4. **If full**: the behavior sets `IJobContext.Outcome` according to the configured `ConcurrencyMode`. `Skip` → `Deleted` with a log entry `Cancelled — '{key}' full ({N} slots)`. `Wait` → `Enqueued` with `ScheduleTime = now` and a log entry `Requeued — '{key}' full ({N} slots)`.
 5. **If a slot is free**: the slot is acquired, the handler executes, and the slot is released when the handler completes (or fails).
 

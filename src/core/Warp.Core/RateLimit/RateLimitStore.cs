@@ -27,6 +27,15 @@ public class RateLimitStore<TContext> : IRateLimitStore
             .FirstOrDefaultAsync(ct);
     }
 
+    public async Task<bool> SetNextSlotAsync(string name, DateTime nextSlotUtc, CancellationToken ct)
+    {
+        var affected = await _context.Set<RateLimitBucket>()
+            .Where(x => x.Name == name)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.NextSlotUtc, nextSlotUtc), ct);
+
+        return affected > 0;
+    }
+
     /// <summary>
     /// Persists the bucket state before the handler runs. This is one of the few places that
     /// deviates from CLAUDE.md §5.7 ("Services should not call SaveChanges — the caller saves"):

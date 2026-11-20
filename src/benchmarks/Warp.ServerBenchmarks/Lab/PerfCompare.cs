@@ -494,7 +494,7 @@ public static partial class PerfCompare
         {
             section.AppendLine("```");
             section.AppendLine(CultureInfo.InvariantCulture, $"BenchmarkDotNet v{host.BenchmarkDotNetVersion}, {host.OsVersion}");
-            section.AppendLine(CultureInfo.InvariantCulture, $"{host.ProcessorName}, {host.PhysicalProcessorCount} CPU, {host.LogicalCoreCount} logical and {host.PhysicalCoreCount} physical cores");
+            section.AppendLine(CultureInfo.InvariantCulture, $"{host.ProcessorName}, {host.PhysicalProcessorCount?.ToString(CultureInfo.InvariantCulture) ?? "?"} CPU, {host.LogicalCoreCount?.ToString(CultureInfo.InvariantCulture) ?? "?"} logical and {host.PhysicalCoreCount?.ToString(CultureInfo.InvariantCulture) ?? "?"} physical cores");
             section.AppendLine(CultureInfo.InvariantCulture, $".NET SDK {host.DotNetCliVersion}, {host.RuntimeVersion}, {host.Architecture}");
             if (environment.Job is { Length: > 0 } job)
             {
@@ -723,9 +723,11 @@ public static partial class PerfCompare
         string? BenchmarkDotNetVersion,
         string? OsVersion,
         string? ProcessorName,
-        int PhysicalProcessorCount,
-        int PhysicalCoreCount,
-        int LogicalCoreCount,
+        // Nullable: BenchmarkDotNet leaves these null where it cannot read them (seen on Windows hosts),
+        // and a non-nullable int made the whole report unreadable over one hardware field.
+        int? PhysicalProcessorCount,
+        int? PhysicalCoreCount,
+        int? LogicalCoreCount,
         string? RuntimeVersion,
         string? Architecture,
         string? DotNetCliVersion);
