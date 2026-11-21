@@ -20,10 +20,6 @@ internal sealed class EnqueueNotificationState
     /// committed yet. Sent on commit, dropped on rollback.</summary>
     public List<Notification>? Deferred { get; set; }
 
-    /// <summary>Set by a caller that captures and dispatches this save itself, so the interceptor
-    /// does not send the same notifications again.</summary>
-    public bool Suppressed { get; set; }
-
     /// <summary>Set by the interceptor whenever it sees a save on this context. A caller resets it,
     /// saves, and reads it back to learn whether the interceptor is wired onto this context.</summary>
     public bool Observed { get; set; }

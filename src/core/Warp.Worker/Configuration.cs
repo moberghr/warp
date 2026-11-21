@@ -60,18 +60,6 @@ public class WarpServerConfiguration : WarpConfiguration
     /// </summary>
     public int WorkerCount { get; set; } = DefaultWorkerCount;
 
-    // TEMPORARY A/B switch for #322, removed once the benchmark picks a winner. It decides who sends
-    // the wake-up for jobs a handler staged, when the worker commits the handler's context. Off is
-    // variant A: the worker captures and dispatches them itself, as before, and suppresses the
-    // EnqueueNotificationInterceptor for that one save. On is variant B: the worker just saves and
-    // the interceptor dispatches, as for any other save. Internal, so it is not bindable from
-    // configuration; benchmarks outside the IVT turn it on with the environment variable
-    // WARP_EXPERIMENT_ENQUEUE_WAKE set to "interceptor".
-    internal bool EnqueueWakeFromInterceptor { get; set; } = string.Equals(
-        Environment.GetEnvironmentVariable("WARP_EXPERIMENT_ENQUEUE_WAKE"),
-        "interceptor",
-        StringComparison.OrdinalIgnoreCase);
-
     /// <summary>
     /// Whether this server runs the job worker (fetch/execute loop + job-orchestration server
     /// tasks). Default <c>true</c> — a server processes jobs. Set to <c>false</c> (or call

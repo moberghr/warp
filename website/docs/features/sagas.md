@@ -100,7 +100,7 @@ public class OrderWorkflow(IPublisher publisher) :
 
 :::warning[Do not call `publisher.SaveChangesAsync` inside a saga handler]
 
-The saga proxy commits everything in one transaction after `HandleAsync` returns — your saga state changes, any jobs/messages you enqueued via the publisher, and (on completion) the row deletion. Calling `publisher.SaveChangesAsync(ct)` inside the handler commits the publisher's pending rows **early**, which means by the time the proxy runs its own `SaveChanges` those rows are `Unchanged` and **push notifications are silently dropped** — the children fall back to polling. Let the proxy save for you.
+The saga proxy commits everything in one transaction after `HandleAsync` returns — your saga state changes, any jobs/messages you enqueued via the publisher, and (on completion) the row deletion. Calling `publisher.SaveChangesAsync(ct)` inside the handler commits the publisher's pending rows **early**, in their own transaction: if the saga's own save then fails (a version or unique-key conflict requeues the message), those jobs and messages are already committed and run anyway, for a saga step that did not happen. Let the proxy save for you.
 
 :::
 

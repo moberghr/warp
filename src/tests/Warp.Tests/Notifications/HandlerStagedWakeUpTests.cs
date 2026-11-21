@@ -10,9 +10,9 @@ using Warp.Tests.TestData.Handlers;
 namespace Warp.Tests.Notifications;
 
 // Issue #322, worker side. A job the handler stages is committed by the worker's handler-scope
-// save. Both variants of WarpServerConfiguration.EnqueueWakeFromInterceptor (A: the worker
-// dispatches and suppresses the interceptor; B: the interceptor dispatches) must send exactly one
-// wake-up for it, never zero (a missed wake-up) and never two (an extra NOTIFY on every job).
+// save, which the enqueue interceptor announces like any other TContext save (the worker sends
+// nothing itself). Exactly one wake-up must go out for it: never zero (a missed wake-up) and never
+// two (an extra NOTIFY on every job).
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class HandlerStagedWakeUpTestsBase : IntegrationTestBase
 {
@@ -23,19 +23,13 @@ public abstract class HandlerStagedWakeUpTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task WorkerSave_HandlerStagedChild_SendsExactlyOneWakeUp(bool interceptorOwnsWorkerSave)
+    [TimedFact]
+    public async Task WorkerSave_HandlerStagedChild_SendsExactlyOneWakeUp()
     {
         var transport = new RecordingTransport();
         var server = await WarpTestServer.StartAsync(
             Fixture,
-            opt =>
-            {
-                opt.Queues = ["default", ChildQueue];
-                opt.EnqueueWakeFromInterceptor = interceptorOwnsWorkerSave;
-            },
+            opt => opt.Queues = ["default", ChildQueue],
             services =>
             {
                 // What UseDatabasePush() wires for the send side, with a recording transport.

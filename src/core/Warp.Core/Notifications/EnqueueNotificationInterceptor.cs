@@ -154,13 +154,6 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
         var state = EnqueueNotificationState.For(context);
         state.Observed = true;
 
-        if (state.Suppressed)
-        {
-            state.Captured = null;
-
-            return;
-        }
-
         var pending = NotificationDispatch.CapturePending(context);
         state.Captured = pending.Count > 0 ? pending : null;
     }

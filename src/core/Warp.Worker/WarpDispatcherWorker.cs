@@ -286,13 +286,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             handlerStopwatch.Stop();
 
             // Commit handler's work (outbox: published jobs + business entities) before disposing.
-            // Capture pending push notifications for any child jobs the handler added, fire post-commit.
-            // CancellationToken.None on FireAsync: the handler already committed; cancelling the
-            // notification throw on shutdown would skip _batch.Add below and orphan this job as
-            // Processing. Notifications are fast (in-DB LISTEN/NOTIFY or Service Broker) and
-            // idempotent — uncancellable is safer than losing the completion.
+            // Jobs the handler staged are announced by the enqueue interceptor on this save, like any other
+            // TContext save: local workers inline, other servers through the relay (#322).
             var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
-            await SaveHandlerContext(handlerContext, CancellationToken.None);
+            await handlerContext.SaveChangesAsync(default);
 
             // Read metadata and outcome from handler scope before disposing
             JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
@@ -585,33 +582,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         }
 
         return true;
-    }
-
-    // #322 A/B (see WarpServerConfiguration.EnqueueWakeFromInterceptor). Either way exactly one
-    // wake-up goes out for the jobs the handler staged.
-    private async Task SaveHandlerContext(TContext handlerContext, CancellationToken dispatchToken)
-    {
-        if (_configuration.EnqueueWakeFromInterceptor)
-        {
-            await handlerContext.SaveChangesAsync(default);
-
-            return;
-        }
-
-        var state = EnqueueNotificationState.For(handlerContext);
-        state.Suppressed = true;
-        List<Notification> handlerPending;
-        try
-        {
-            handlerPending = NotificationDispatch.CapturePending(handlerContext);
-            await handlerContext.SaveChangesAsync(default);
-        }
-        finally
-        {
-            state.Suppressed = false;
-        }
-
-        await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, dispatchToken);
     }
 
     private static async Task ExecuteJob(Job job, IServiceProvider provider, CancellationToken cancellationToken)

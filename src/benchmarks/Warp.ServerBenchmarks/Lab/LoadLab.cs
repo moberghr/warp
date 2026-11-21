@@ -58,8 +58,7 @@ public enum LoadScenario
 
     /// <summary>
     /// N jobs whose handler stages one child job without saving, so the worker's handler-scope save
-    /// commits it and must announce it. 2N jobs run in all. The arm for the #322 A/B comparison of who
-    /// sends that wake-up; set WARP_EXPERIMENT_ENQUEUE_WAKE=interceptor for variant B.
+    /// commits it and the enqueue interceptor announces it (#322). 2N jobs run in all.
     /// </summary>
     FanOut = 7,
 }
@@ -206,7 +205,7 @@ public static class LoadLab
                         + DescribePayload(scenario, payloadBytes, types))
                 + (scenario == LoadScenario.JobsWithDashboard ? $"  tabs={tabs}" : string.Empty)
                 + DescribeConcurrency(scenario, shape)
-                + $"  push={push}  enqueueWake={Environment.GetEnvironmentVariable("WARP_EXPERIMENT_ENQUEUE_WAKE") ?? "worker"}");
+                + $"  push={push}");
 
             // Warm up: JIT, connection pool, EF query compilation, server registration. Measuring these
             // would attribute one-time startup cost to steady-state load.
