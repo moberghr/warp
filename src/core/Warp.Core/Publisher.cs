@@ -333,9 +333,7 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
 
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
     {
-        var pending = NotificationDispatch.CapturePending(_context);
-        await _context.SaveChangesAsync(cancellationToken);
-        await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport, cancellationToken);
+        await EnqueueNotifyingSave.SaveChangesAsync(_context, _signals, _notificationTransport, cancellationToken);
     }
 
     public void Dispose()

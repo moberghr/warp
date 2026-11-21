@@ -55,6 +55,13 @@ public enum LoadScenario
     /// backlog re-executes before it drains.
     /// </summary>
     RateLimit = 6,
+
+    /// <summary>
+    /// N jobs whose handler stages one child job without saving, so the worker's handler-scope save
+    /// commits it and must announce it. 2N jobs run in all. The arm for the #322 A/B comparison of who
+    /// sends that wake-up; set WARP_EXPERIMENT_ENQUEUE_WAKE=interceptor for variant B.
+    /// </summary>
+    FanOut = 7,
 }
 
 /// <summary>
@@ -103,7 +110,8 @@ public static class LoadLab
         int warmupRuns = 0,
         string? jsonPath = null,
         int windowSeconds = 1,
-        RateLimitStyle rateLimitStyle = RateLimitStyle.Fixed)
+        RateLimitStyle rateLimitStyle = RateLimitStyle.Fixed,
+        bool push = false)
     {
         var shape = new ConcurrencyShape(concurrencyKeys, concurrencyLimit, concurrencyMode, handlerMs, windowSeconds, rateLimitStyle);
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
@@ -171,7 +179,7 @@ public static class LoadLab
             // single-process run cannot show at all.
             for (var i = 0; i < servers; i++)
             {
-                hosts.Add(BuildHost(connectionString, workers, useDispatcher, prefetchCount, completionBatchSize, sqlServer));
+                hosts.Add(BuildHost(connectionString, workers, useDispatcher, prefetchCount, completionBatchSize, sqlServer, push));
             }
 
             var host = hosts[0];
@@ -197,7 +205,8 @@ public static class LoadLab
                     : $"  jobs={jobs:N0}  dispatcher={useDispatcher}  prefetch={FormatKnob(prefetchCount)}  completionBatch={FormatKnob(completionBatchSize)}  tune={tune}  arrival={FormatArrival(arrivalPerSecond)}"
                         + DescribePayload(scenario, payloadBytes, types))
                 + (scenario == LoadScenario.JobsWithDashboard ? $"  tabs={tabs}" : string.Empty)
-                + DescribeConcurrency(scenario, shape));
+                + DescribeConcurrency(scenario, shape)
+                + $"  push={push}  enqueueWake={Environment.GetEnvironmentVariable("WARP_EXPERIMENT_ENQUEUE_WAKE") ?? "worker"}");
 
             // Warm up: JIT, connection pool, EF query compilation, server registration. Measuring these
             // would attribute one-time startup cost to steady-state load.
@@ -731,7 +740,7 @@ public static class LoadLab
     private static string FormatKnob(int? value) => value?.ToString(CultureInfo.InvariantCulture) ?? "default";
 
     private static IHost BuildHost(
-        string connectionString, int workers, bool useDispatcher, int? prefetchCount, int? completionBatchSize, bool sqlServer)
+        string connectionString, int workers, bool useDispatcher, int? prefetchCount, int? completionBatchSize, bool sqlServer, bool push)
     {
         return Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
             .ConfigureLogging(logging => logging.SetMinimumLevel(LogLevel.Error))
@@ -774,6 +783,11 @@ public static class LoadLab
                     if (completionBatchSize is { } batch)
                     {
                         config.CompletionBatchSize = batch;
+                    }
+
+                    if (push)
+                    {
+                        config.UseDatabasePush();
                     }
                 });
             })
@@ -862,7 +876,8 @@ public static class LoadLab
         await stopPolling.CancelAsync();
         await pollers;
 
-        return jobs;
+        // Every FanOut job runs a child as well, and both are jobs the system processed.
+        return scenario == LoadScenario.FanOut ? jobs * 2 : jobs;
     }
 
     /// <summary>
@@ -936,6 +951,10 @@ public static class LoadLab
                 if (IsGated(scenario))
                 {
                     await EnqueueConcurrencyOneAsync(publisher, scenario, concurrency, published + i);
+                }
+                else if (scenario == LoadScenario.FanOut)
+                {
+                    await publisher.Enqueue(new SpawnOneChildRequest());
                 }
                 else
                 {

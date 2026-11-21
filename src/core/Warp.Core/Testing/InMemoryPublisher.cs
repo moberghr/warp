@@ -36,6 +36,9 @@ public sealed record PublishedBatch
     public ContinuationOptions Options { get; init; }
 
     public IReadOnlyDictionary<string, object>? Metadata { get; init; }
+
+    /// <summary>The queue the caller asked for; null means the default queue.</summary>
+    public string? Queue { get; init; }
 }
 
 /// <summary>A record of one <see cref="IPublisher.Enqueue{T}(T)"/>, <c>Schedule</c>, or
@@ -134,13 +137,13 @@ public sealed class InMemoryPublisher : IPublisher, IBatchPublisher
         where T : class, IJob
         => Task.FromResult(Record(job, PublishedJobKind.Job, queue, scheduleTime, parentJobId));
 
-    public Task<Guid> StartNew<T>(List<T> batchJobMessages, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null)
+    public Task<Guid> StartNew<T>(List<T> batchJobMessages, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null, string? queue = null)
         where T : class, IJob
-        => Task.FromResult(RecordBatch(batchJobMessages, PublishedBatchKind.StartNew, parentId: null, name, options, metadata));
+        => Task.FromResult(RecordBatch(batchJobMessages, PublishedBatchKind.StartNew, parentId: null, name, options, metadata, queue));
 
-    public Task<Guid> ContinueBatchWith<T>(List<T> batchJobMessages, Guid parentId, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null)
+    public Task<Guid> ContinueBatchWith<T>(List<T> batchJobMessages, Guid parentId, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null, string? queue = null)
         where T : class, IJob
-        => Task.FromResult(RecordBatch(batchJobMessages, PublishedBatchKind.Continuation, parentId, name, options, metadata));
+        => Task.FromResult(RecordBatch(batchJobMessages, PublishedBatchKind.Continuation, parentId, name, options, metadata, queue));
 
     public Task SaveChangesAsync(CancellationToken cancellationToken = default)
     {
@@ -149,7 +152,7 @@ public sealed class InMemoryPublisher : IPublisher, IBatchPublisher
         return Task.CompletedTask;
     }
 
-    private Guid RecordBatch<T>(List<T> children, PublishedBatchKind kind, Guid? parentId, string? name, ContinuationOptions options, Dictionary<string, object>? metadata)
+    private Guid RecordBatch<T>(List<T> children, PublishedBatchKind kind, Guid? parentId, string? name, ContinuationOptions options, Dictionary<string, object>? metadata, string? queue)
         where T : class, IJob
     {
         if (children == null || children.Count == 0)
@@ -166,6 +169,7 @@ public sealed class InMemoryPublisher : IPublisher, IBatchPublisher
             Name = name,
             ParentId = parentId,
             Options = options,
+            Queue = queue,
             Metadata = metadata,
         });
 

@@ -323,6 +323,10 @@ public static class ServiceConfiguration
         // construction; with no subscribers the SignalXxx calls are cheap no-ops.
         services.TryAddSingleton<ServerTaskSignals<TContext>>();
 
+        // Wakes workers for jobs committed by ANY save of TContext, not only IPublisher.SaveChangesAsync
+        // (#322). Added to TContext's options in ConfigureDbContextOptions.
+        services.TryAddSingleton<EnqueueNotificationInterceptor<TContext>>();
+
         // Operational-event notifier fan-out. Registered by AddWarp (not AddWarpServer) so every dispatch
         // site — the webhook executor, the saga command service, the server-side stale sweep — resolves it,
         // and so it works in any AddWarp process. Non-generic + guarded: with no IWarpNotifier registered
@@ -438,10 +442,27 @@ public static class ServiceConfiguration
                 var options = (DbContextOptions<TContext>)originalFactory(sp);
                 var builder = new DbContextOptionsBuilder<TContext>(options);
                 builder.AddWarpInterceptors();
+                AddEnqueueNotificationInterceptor(builder, sp);
                 builder.ReplaceService<IModelCustomizer, WarpModelCustomizer>();
                 return builder.Options;
             },
             descriptor.Lifetime));
+    }
+
+    // TContext only: the server context (AddWarpInterceptors in Warp.Worker) must not get it — server
+    // tasks dispatch their own notifications post-commit (§2.14/§8.25). AddWarp runs twice under
+    // AddWarpServer, which wraps this factory twice, so the instance is added at most once.
+    private static void AddEnqueueNotificationInterceptor<TContext>(DbContextOptionsBuilder<TContext> builder, IServiceProvider sp)
+        where TContext : DbContext
+    {
+        var interceptor = sp.GetRequiredService<EnqueueNotificationInterceptor<TContext>>();
+        var existing = builder.Options.FindExtension<CoreOptionsExtension>()?.Interceptors;
+        if (existing != null && existing.Contains(interceptor))
+        {
+            return;
+        }
+
+        builder.AddInterceptors(interceptor);
     }
 
     public static DbContextOptionsBuilder AddWarpInterceptors(this DbContextOptionsBuilder optionsBuilder)

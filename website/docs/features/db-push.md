@@ -39,6 +39,16 @@ The provider-specific transport is wired by whichever `UsePostgreSql()` / `UseSq
 
 A cross-process `JobEnqueued` wakes workers in both modes: the listener wakes the dispatcher **and** signals every bare worker of the process. With `UseDispatcher = true` one fetch hands out the work; with `UseDispatcher = false` every bare worker of the process wakes at once and each fetches for itself. Push is not "without effect" in either mode.
 
+## Which Saves Send a Notification
+
+Any save of your `DbContext` that commits new `Enqueued` jobs sends a `JobEnqueued` notification per queue: `IPublisher.SaveChangesAsync()`, `IBatchPublisher.SaveChangesAsync()`, and a plain `db.SaveChangesAsync()` after `Enqueue`. Warp adds an EF Core interceptor to the context registered with `AddWarp` to do this.
+
+- **Explicit transactions:** a save inside `db.Database.BeginTransactionAsync()` sends its notification when the transaction commits, and nothing on rollback. Sending it earlier would wake a worker onto rows it cannot see yet.
+- **Synchronous `SaveChanges()`:** the in-process wake-up fires immediately and the notification is published without blocking the caller.
+- **Not covered:** `System.Transactions.TransactionScope` and a transaction committed outside EF (`Database.UseTransaction`). There the notification goes out at save time or not at all, and the job waits for the next poll.
+
+Up to 7.7.0, only the publishers' `SaveChangesAsync` sent it, so jobs committed with `db.SaveChangesAsync()` waited up to `MaxPollingInterval` (5 minutes with push on). Without push, the in-process wake-up was skipped the same way.
+
 ## Scheduled Jobs
 
 Push accelerates *immediate* enqueues. Jobs published via `Schedule(job, at)` sit in `State.Scheduled` until `ScheduledJobActivation` flips them to `Enqueued` — only then does the `JobEnqueued` notification fire. Dispatcher pickup after activation is &lt;50ms via push, but the activation itself is time-driven and bounded by `ScheduledActivationInterval` (default 10s). If you need sub-second precision on scheduled jobs, lower that interval — polling is the only mechanism, since there's no event for "wall-clock time has advanced."

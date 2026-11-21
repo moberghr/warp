@@ -354,6 +354,7 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
     var handlerMs = 0;
     var windowSeconds = 1;
     var style = RateLimitStyle.Fixed;
+    var push = false;
 
     for (var i = 1; i < args.Length; i++)
     {
@@ -453,10 +454,14 @@ else if (args.Length > 0 && string.Equals(args[0], "load", StringComparison.Ordi
         {
             style = Enum.Parse<RateLimitStyle>(args[i]["--style=".Length..], ignoreCase: true);
         }
+        else if (string.Equals(args[i], "--push", StringComparison.OrdinalIgnoreCase))
+        {
+            push = true;
+        }
     }
 
     await LoadLab.RunAsync(
-        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs, warmup, jsonPath, windowSeconds, style);
+        scenario, jobs, workers, tabs, TimeSpan.FromSeconds(idleSeconds), connectionString, useDispatcher, prefetchCount, completionBatchSize, payloadBytes, tune, repeats, types, arrival, sqlServer, loadServers, keys, limit, mode, handlerMs, warmup, jsonPath, windowSeconds, style, push);
 }
 else
 {

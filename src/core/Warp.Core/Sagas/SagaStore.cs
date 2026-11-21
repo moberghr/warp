@@ -134,10 +134,9 @@ public sealed class SagaStore<TContext> : ISagaStore
 
     public async Task SaveChangesAsync(CancellationToken cancellationToken)
     {
-        var pending = NotificationDispatch.CapturePending(_context);
         try
         {
-            await _context.SaveChangesAsync(cancellationToken);
+            await EnqueueNotifyingSave.SaveChangesAsync(_context, _signals, _notificationTransport, cancellationToken);
         }
         catch (DbUpdateConcurrencyException ex)
         {
@@ -158,8 +157,6 @@ public sealed class SagaStore<TContext> : ISagaStore
             _context.ChangeTracker.Clear();
             throw new SagaSaveConflictException(SagaSaveConflictKind.UniqueConstraint, ex);
         }
-
-        await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport, cancellationToken);
     }
 
     public void DiscardPendingChanges() => _context.ChangeTracker.Clear();

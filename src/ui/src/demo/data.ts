@@ -892,6 +892,8 @@ export function getMessages(state?: string): JobGroupModel[] {
 // Batches
 // ============================================================
 
+const batchNames = ['Nightly invoice run', 'Departure seat sync', 'Catalog reindex', 'Shipment labels', 'Price export'];
+
 function makeBatch(
   seed: number,
   state: number,
@@ -905,9 +907,11 @@ function makeBatch(
     currentState: state as typeof State.Enqueued,
     jobCount: totalJobs,
     createTime: ago(200 + seed * 45),
-    type: null,
+    // A batch's name is optional (IBatchPublisher.StartNew's `name`); every fifth one is left unnamed
+    // so the list's empty-name rendering stays exercised.
+    type: seed % 5 === 2 ? null : batchNames[seed % batchNames.length],
     payload: null,
-    queue: 'default',
+    queue: seed % 3 === 1 ? 'bulk' : 'default',
     totalJobs,
     completedJobs: completed,
     failedJobs: failed,

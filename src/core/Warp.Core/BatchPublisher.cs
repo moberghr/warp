@@ -17,10 +17,15 @@ namespace Warp.Core;
 
 public interface IBatchPublisher
 {
-    Task<Guid> StartNew<T>(List<T> batchJobMessages, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null)
+    /// <summary>Stages a new batch. <paramref name="queue"/> places the batch and every item on that
+    /// queue; null uses <see cref="WarpConfiguration.DefaultQueue"/>, like <c>IPublisher.Enqueue</c>.</summary>
+    Task<Guid> StartNew<T>(List<T> batchJobMessages, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null, string? queue = null)
         where T : class, IJob;
 
-    Task<Guid> ContinueBatchWith<T>(List<T> batchJobMessages, Guid parentId, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null)
+    /// <summary>Stages a batch that starts when <paramref name="parentId"/> finishes. A null
+    /// <paramref name="queue"/> uses <see cref="WarpConfiguration.DefaultQueue"/>; the parent's queue
+    /// is not inherited.</summary>
+    Task<Guid> ContinueBatchWith<T>(List<T> batchJobMessages, Guid parentId, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null, string? queue = null)
         where T : class, IJob;
 
     Task SaveChangesAsync(CancellationToken cancellationToken = default);
@@ -50,19 +55,19 @@ public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
         _signals = signals;
     }
 
-    public async Task<Guid> StartNew<T>(List<T> batchJobMessages, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null)
+    public async Task<Guid> StartNew<T>(List<T> batchJobMessages, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null, string? queue = null)
         where T : class, IJob
     {
-        return await BaseCreateBatch(batchJobMessages, State.Enqueued, null, name, options, metadata);
+        return await BaseCreateBatch(batchJobMessages, State.Enqueued, null, name, options, metadata, queue);
     }
 
-    public async Task<Guid> ContinueBatchWith<T>(List<T> batchJobMessages, Guid parentId, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null)
+    public async Task<Guid> ContinueBatchWith<T>(List<T> batchJobMessages, Guid parentId, string? name = null, ContinuationOptions options = ContinuationOptions.OnlyOnSucceeded, Dictionary<string, object>? metadata = null, string? queue = null)
         where T : class, IJob
     {
-        return await BaseCreateBatch(batchJobMessages, State.Awaiting, parentId, name, options, metadata);
+        return await BaseCreateBatch(batchJobMessages, State.Awaiting, parentId, name, options, metadata, queue);
     }
 
-    private async Task<Guid> BaseCreateBatch<T>(List<T> batchJobMessages, State batchJobsState, Guid? parentId, string? name, ContinuationOptions options, Dictionary<string, object>? adHocMetadata = null)
+    private async Task<Guid> BaseCreateBatch<T>(List<T> batchJobMessages, State batchJobsState, Guid? parentId, string? name, ContinuationOptions options, Dictionary<string, object>? adHocMetadata, string? queue)
         where T : class, IJob
     {
         if (batchJobMessages == null || batchJobMessages.Count == 0)
@@ -72,6 +77,10 @@ public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
+        // One queue for the batch row and every item, so the dashboard, the Created logs and the
+        // JobsEnqueued telemetry tags all agree. Same fallback as IPublisher.Enqueue.
+        var resolvedQueue = queue ?? _warpConfiguration.DefaultQueue ?? "default";
+
         // Create the batch job (replaces both the old Batch entity and placeholder job)
         // StartNew (no parent) → Processing immediately; continuation → Awaiting until parent finishes
         var batchJob = new Job
@@ -80,7 +89,7 @@ public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
             Type = name,
             CreateTime = now,
             CurrentState = parentId != null ? State.Awaiting : State.Processing,
-            Queue = _warpConfiguration.DefaultQueue ?? "default",
+            Queue = resolvedQueue,
             ParentJobId = parentId,
             JobCount = batchJobMessages.Count,
             ContinuationOptions = options,
@@ -91,7 +100,7 @@ public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
         var metadata = await RunPublishPipeline(batchJobMessages[0], adHocMetadata);
         var serializedMetadata = metadata.Count > 0 ? JsonSerializer.Serialize(metadata) : null;
 
-        var batchChildJobs = batchJobMessages.ConvertAll(x => JobHelper.CreateJob(x, null, _warpConfiguration.DefaultQueue, batchJob.Id, batchJobsState, now, metadata: serializedMetadata, application: _warpConfiguration.ApplicationName));
+        var batchChildJobs = batchJobMessages.ConvertAll(x => JobHelper.CreateJob(x, null, resolvedQueue, batchJob.Id, batchJobsState, now, metadata: serializedMetadata, application: _warpConfiguration.ApplicationName));
 
         // Propagate trace: execution context > parent's trace > self
         var executionContext = JobExecutionContext.Current;
@@ -189,9 +198,7 @@ public sealed class BatchPublisher<TContext> : IBatchPublisher, IDisposable
 
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
     {
-        var pending = NotificationDispatch.CapturePending(_context);
-        await _context.SaveChangesAsync(cancellationToken);
-        await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport, cancellationToken);
+        await EnqueueNotifyingSave.SaveChangesAsync(_context, _signals, _notificationTransport, cancellationToken);
     }
 
     public void Dispose()

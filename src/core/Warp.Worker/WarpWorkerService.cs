@@ -220,9 +220,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             // Commit handler's work (outbox: published jobs + business entities) before disposing.
             // Capture pending push notifications for any child jobs the handler added, fire post-commit.
             var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
-            var handlerPending = NotificationDispatch.CapturePending(handlerContext);
-            await handlerContext.SaveChangesAsync(default);
-            await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, cancellationToken);
+            await SaveHandlerContext(handlerContext, cancellationToken);
 
             // Read metadata and outcome from handler scope before disposing
             JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
@@ -467,6 +465,33 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         PerfTrace.End();
 
         return true;
+    }
+
+    // #322 A/B (see WarpServerConfiguration.EnqueueWakeFromInterceptor). Either way exactly one
+    // wake-up goes out for the jobs the handler staged.
+    private async Task SaveHandlerContext(TContext handlerContext, CancellationToken dispatchToken)
+    {
+        if (_configuration.EnqueueWakeFromInterceptor)
+        {
+            await handlerContext.SaveChangesAsync(default);
+
+            return;
+        }
+
+        var state = EnqueueNotificationState.For(handlerContext);
+        state.Suppressed = true;
+        List<Notification> handlerPending;
+        try
+        {
+            handlerPending = NotificationDispatch.CapturePending(handlerContext);
+            await handlerContext.SaveChangesAsync(default);
+        }
+        finally
+        {
+            state.Suppressed = false;
+        }
+
+        await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, dispatchToken);
     }
 
     private static async Task ExecuteJob(Job job, IServiceProvider provider, CancellationToken cancellationToken)

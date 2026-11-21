@@ -157,9 +157,7 @@ public class RecurringJobService<TContext> : IRecurringJobService
             CreatedAt = now,
         });
 
-        var pending = NotificationDispatch.CapturePending(_context);
-        await _context.SaveChangesAsync();
-        await NotificationDispatch.DispatchAsync(pending, _signals, _notificationTransport);
+        await EnqueueNotifyingSave.SaveChangesAsync(_context, _signals, _notificationTransport, CancellationToken.None);
     }
 
     public async Task DeleteRecurringJob(string name)

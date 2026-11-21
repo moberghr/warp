@@ -292,9 +292,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // Processing. Notifications are fast (in-DB LISTEN/NOTIFY or Service Broker) and
             // idempotent — uncancellable is safer than losing the completion.
             var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
-            var handlerPending = NotificationDispatch.CapturePending(handlerContext);
-            await handlerContext.SaveChangesAsync(default);
-            await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, CancellationToken.None);
+            await SaveHandlerContext(handlerContext, CancellationToken.None);
 
             // Read metadata and outcome from handler scope before disposing
             JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
@@ -587,6 +585,33 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         }
 
         return true;
+    }
+
+    // #322 A/B (see WarpServerConfiguration.EnqueueWakeFromInterceptor). Either way exactly one
+    // wake-up goes out for the jobs the handler staged.
+    private async Task SaveHandlerContext(TContext handlerContext, CancellationToken dispatchToken)
+    {
+        if (_configuration.EnqueueWakeFromInterceptor)
+        {
+            await handlerContext.SaveChangesAsync(default);
+
+            return;
+        }
+
+        var state = EnqueueNotificationState.For(handlerContext);
+        state.Suppressed = true;
+        List<Notification> handlerPending;
+        try
+        {
+            handlerPending = NotificationDispatch.CapturePending(handlerContext);
+            await handlerContext.SaveChangesAsync(default);
+        }
+        finally
+        {
+            state.Suppressed = false;
+        }
+
+        await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, dispatchToken);
     }
 
     private static async Task ExecuteJob(Job job, IServiceProvider provider, CancellationToken cancellationToken)
