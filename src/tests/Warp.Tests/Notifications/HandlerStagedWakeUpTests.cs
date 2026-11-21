@@ -29,20 +29,33 @@ public abstract class HandlerStagedWakeUpTestsBase : IntegrationTestBase
     public async Task WorkerSave_HandlerStagedChild_SendsExactlyOneWakeUp(bool interceptorOwnsWorkerSave)
     {
         var transport = new RecordingTransport();
-        await using var server = await WarpTestServer.StartAsync(
+        var server = await WarpTestServer.StartAsync(
             Fixture,
             opt =>
             {
                 opt.Queues = ["default", ChildQueue];
                 opt.EnqueueWakeFromInterceptor = interceptorOwnsWorkerSave;
             },
-            services => services.AddSingleton<IWarpNotificationTransport>(transport));
-        var publisher = server.CreatePublisher();
+            services =>
+            {
+                // What UseDatabasePush() wires for the send side, with a recording transport.
+                services.AddSingleton<IWarpNotificationTransport>(transport);
+                EnqueueNotificationRelay.Register(services);
+            });
+        try
+        {
+            var publisher = server.CreatePublisher();
+            await publisher.Enqueue(new StageChildOnQueueRequest { Queue = ChildQueue });
+            await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await publisher.Enqueue(new StageChildOnQueueRequest { Queue = ChildQueue });
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        await server.WaitForCompletion();
+            await server.WaitForCompletion();
+        }
+        finally
+        {
+            // Variant B publishes through the relay, off the saving thread. Stopping the host makes the
+            // relay publish everything still queued, so a missing OR a duplicate wake-up shows below.
+            await server.DisposeAsync();
+        }
 
         transport.ForQueue(ChildQueue).ShouldBe(1);
     }

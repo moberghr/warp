@@ -102,6 +102,16 @@ internal static class NotificationDispatch
         CancellationToken ct = default)
         where TContext : DbContext
     {
+        SignalLocally(notifications, signals);
+
+        return FireAsync(transport, notifications, ct);
+    }
+
+    /// <summary>The in-process half of <see cref="DispatchAsync{TContext}"/>: wakes this process's
+    /// subscribers only, publishes nothing cross-process.</summary>
+    public static void SignalLocally<TContext>(IReadOnlyList<Notification> notifications, ServerTaskSignals<TContext> signals)
+        where TContext : DbContext
+    {
         for (var i = 0; i < notifications.Count; i++)
         {
             switch (notifications[i].Kind)
@@ -119,8 +129,6 @@ internal static class NotificationDispatch
                     break;
             }
         }
-
-        return FireAsync(transport, notifications, ct);
     }
 
     private static bool ShouldEmit(EntityEntry<Job> entry)

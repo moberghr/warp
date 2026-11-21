@@ -49,6 +49,11 @@ public static class WarpTelemetry
         unit: "{notification}",
         description: "Total DB-push notifications that failed to publish (transport error). Each failure is also logged at Warning.");
 
+    public static readonly Counter<long> NotificationsDropped = Meter.CreateCounter<long>(
+        "warp.notifications.dropped",
+        unit: "{notification}",
+        description: "Enqueue notifications dropped before publishing because the relay's queue was full. Each costs at most one poll interval of pickup latency on another server.");
+
     public static readonly Histogram<double> MediatorDuration = Meter.CreateHistogram<double>(
         "warp.mediator.duration",
         unit: "ms",

@@ -12,10 +12,17 @@ namespace Warp.Core.Notifications;
 /// without waking anyone, so a worker found them on its next backoff poll: up to
 /// <c>MaxPollingInterval</c>, which <c>UseDatabasePush()</c> raises to 5 minutes.
 /// <para>
-/// Captures in <c>SavingChanges</c> (the Added rows are Unchanged afterwards) and dispatches after
-/// the save. Inside an explicit transaction the dispatch waits for the commit: the PostgreSQL
-/// NOTIFY goes out on a separate connection, so sending it earlier wakes a worker onto rows it
-/// cannot see yet. Rollback, a failed save and a transaction disposed without commit send nothing.
+/// Captures in <c>SavingChanges</c> (the Added rows are Unchanged afterwards) and announces after
+/// the save: this process's workers are woken inline through <see cref="ServerTaskSignals{TContext}"/>,
+/// and other processes are told through <see cref="EnqueueAnnouncements"/>, which
+/// <see cref="EnqueueNotificationRelay"/> publishes off the saving thread. Inside an explicit
+/// transaction both wait for the commit — the cross-process notification goes out on a separate
+/// connection and would otherwise wake a worker onto rows it cannot see yet. Rollback, a failed save
+/// and a transaction disposed without commit announce nothing.
+/// </para>
+/// <para>
+/// Deliberately holds no transport. The push transport's factory reads TContext's connection, and an
+/// interceptor that needed the transport to be built made the two wait on each other at startup.
 /// </para>
 /// <para>
 /// Registered on <typeparamref name="TContext"/> only, never on the server context: server tasks
@@ -26,12 +33,12 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
     where TContext : DbContext
 {
     private readonly ServerTaskSignals<TContext> _signals;
-    private readonly IWarpNotificationTransport _transport;
+    private readonly EnqueueAnnouncements _announcements;
 
-    public EnqueueNotificationInterceptor(ServerTaskSignals<TContext> signals, IWarpNotificationTransport transport)
+    public EnqueueNotificationInterceptor(ServerTaskSignals<TContext> signals, EnqueueAnnouncements announcements)
     {
         _signals = signals;
-        _transport = transport;
+        _announcements = announcements;
     }
 
     public InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
@@ -50,25 +57,16 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
 
     public int SavedChanges(SaveChangesCompletedEventData eventData, int result)
     {
-        var ready = TakeReady(eventData.Context);
-        if (ready != null)
-        {
-            DispatchWithoutWaiting(ready);
-        }
+        Announce(TakeReady(eventData.Context));
 
         return result;
     }
 
-    public async ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+    public ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
     {
-        var ready = TakeReady(eventData.Context);
-        if (ready != null)
-        {
-            // The rows are committed; a cancelled caller must not lose the wake-up.
-            await NotificationDispatch.DispatchAsync(ready, _signals, _transport, CancellationToken.None);
-        }
+        Announce(TakeReady(eventData.Context));
 
-        return result;
+        return ValueTask.FromResult(result);
     }
 
     public void SaveChangesFailed(DbContextErrorEventData eventData) => ClearCaptured(eventData.Context);
@@ -119,22 +117,13 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
         return ValueTask.FromResult(result);
     }
 
-    public void TransactionCommitted(DbTransaction transaction, TransactionEndEventData eventData)
-    {
-        var deferred = TakeDeferred(eventData.Context);
-        if (deferred != null)
-        {
-            DispatchWithoutWaiting(deferred);
-        }
-    }
+    public void TransactionCommitted(DbTransaction transaction, TransactionEndEventData eventData) => Announce(TakeDeferred(eventData.Context));
 
-    public async Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
+    public Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
     {
-        var deferred = TakeDeferred(eventData.Context);
-        if (deferred != null)
-        {
-            await NotificationDispatch.DispatchAsync(deferred, _signals, _transport, CancellationToken.None);
-        }
+        Announce(TakeDeferred(eventData.Context));
+
+        return Task.CompletedTask;
     }
 
     public void TransactionRolledBack(DbTransaction transaction, TransactionEndEventData eventData) => ClearDeferred(eventData.Context);
@@ -176,7 +165,7 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
         state.Captured = pending.Count > 0 ? pending : null;
     }
 
-    // Returns what to send now, or null. Saves inside an explicit transaction are held back.
+    // Returns what to announce now, or null. Saves inside an explicit transaction are held back.
     private static List<Notification>? TakeReady(DbContext? context)
     {
         if (context == null)
@@ -235,11 +224,16 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
         }
     }
 
-    // Synchronous SaveChanges/Commit: the local signals fire inline; the transport publish is not
-    // awaited, since blocking on it here risks a sync-over-async deadlock. FireAsync swallows
-    // transport failures, so the discarded task cannot fault unobserved.
-    private void DispatchWithoutWaiting(List<Notification> notifications)
+    // Both halves are synchronous: the local signal releases waiters, the announcement is a channel
+    // write. Nothing here can block the save on the transport.
+    private void Announce(List<Notification>? notifications)
     {
-        _ = NotificationDispatch.DispatchAsync(notifications, _signals, _transport, CancellationToken.None);
+        if (notifications == null)
+        {
+            return;
+        }
+
+        NotificationDispatch.SignalLocally(notifications, _signals);
+        _announcements.Announce(notifications);
     }
 }

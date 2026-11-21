@@ -189,8 +189,12 @@ public static class PostgreSqlServiceConfiguration
     /// </summary>
     internal static string ResolveLockConnectionString<TContext>(IServiceProvider sp)
         where TContext : DbContext
+        => BuildLockConnectionString(ResolveConnectionString<TContext>(sp));
+
+    /// <summary>The pure half of <see cref="ResolveLockConnectionString{TContext}"/>: derives the lock
+    /// pool's connection string from the DbContext's.</summary>
+    internal static string BuildLockConnectionString(string connectionString)
     {
-        var connectionString = ResolveConnectionString<TContext>(sp);
         var seed = new NpgsqlConnectionStringBuilder(connectionString);
 
         return new NpgsqlConnectionStringBuilder(connectionString)
@@ -232,23 +236,12 @@ public static class PostgreSqlServiceConfiguration
         return host + suffix;
     }
 
+    // Read from the connection AddWarp stores, never by rebuilding TContext's options: those carry
+    // Warp's interceptors, and building them from a singleton factory is how the push transport and
+    // the enqueue interceptor ended up waiting on each other (#322).
     internal static string ResolveConnectionString<TContext>(IServiceProvider sp)
         where TContext : DbContext
-    {
-        using var scope = sp.CreateScope();
-        var dbOptions = scope.ServiceProvider.GetRequiredService<DbContextOptions<TContext>>();
-        var relationalExtension = dbOptions.Extensions.OfType<RelationalOptionsExtension>().FirstOrDefault();
-        var connectionString = relationalExtension?.ConnectionString;
-
-        if (connectionString is null)
-        {
-            var context = scope.ServiceProvider.GetRequiredService<TContext>();
-            connectionString = context.Database.GetConnectionString()
-                ?? throw new InvalidOperationException("Cannot resolve connection string for Warp PostgreSQL provider.");
-        }
-
-        return connectionString;
-    }
+        => sp.GetRequiredService<WarpDatabaseConnection<TContext>>().ConnectionString;
 
     // When the user registered the DbContext with UseNpgsql(NpgsqlDataSource) — e.g. via
     // Aspire's AddAzureNpgsqlDataSource, or any setup that needs Managed Identity tokens
@@ -258,11 +251,8 @@ public static class PostgreSqlServiceConfiguration
     internal static NpgsqlDataSource? ResolveDataSource<TContext>(IServiceProvider sp)
         where TContext : DbContext
     {
-        // AddDbContext registers DbContextOptions<TContext> as Scoped (only AddDbContextPool
-        // makes it Singleton), so we have to resolve it through a scope — otherwise providers
-        // built with ValidateScopes=true reject the resolution from the root provider.
-        using var scope = sp.CreateScope();
-        var dbOptions = scope.ServiceProvider.GetRequiredService<DbContextOptions<TContext>>();
+        // The application's own options, stored once by AddWarp (see ResolveConnectionString).
+        var dbOptions = sp.GetRequiredService<WarpDatabaseConnection<TContext>>().Options;
 
         // EF1001: NpgsqlOptionsExtension is in an Infrastructure.Internal namespace, but it's the
         // documented extension point exposing the DataSource bound to a DbContext — there is no

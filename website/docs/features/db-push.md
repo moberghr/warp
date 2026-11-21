@@ -44,7 +44,7 @@ A cross-process `JobEnqueued` wakes workers in both modes: the listener wakes th
 Any save of your `DbContext` that commits new `Enqueued` jobs sends a `JobEnqueued` notification per queue: `IPublisher.SaveChangesAsync()`, `IBatchPublisher.SaveChangesAsync()`, and a plain `db.SaveChangesAsync()` after `Enqueue`. Warp adds an EF Core interceptor to the context registered with `AddWarp` to do this.
 
 - **Explicit transactions:** a save inside `db.Database.BeginTransactionAsync()` sends its notification when the transaction commits, and nothing on rollback. Sending it earlier would wake a worker onto rows it cannot see yet.
-- **Synchronous `SaveChanges()`:** the in-process wake-up fires immediately and the notification is published without blocking the caller.
+- **How it is sent:** this process's workers are woken immediately, inline. The notification for other processes is published by a background relay right after the save, off the saving thread. Notifications that pile up while one is being published are folded into one per queue. The relay runs as a hosted service, so a process without a running host (a bare `ServiceProvider`) only wakes its own workers. On graceful shutdown the relay sends whatever is still queued.
 - **Not covered:** `System.Transactions.TransactionScope` and a transaction committed outside EF (`Database.UseTransaction`). There the notification goes out at save time or not at all, and the job waits for the next poll.
 
 Up to 7.7.0, only the publishers' `SaveChangesAsync` sent it, so jobs committed with `db.SaveChangesAsync()` waited up to `MaxPollingInterval` (5 minutes with push on). Without push, the in-process wake-up was skipped the same way.
@@ -63,7 +63,7 @@ ALTER DATABASE [YourDb] SET ENABLE_BROKER WITH ROLLBACK IMMEDIATE;
 
 ## Observability
 
-Transport failures are logged at Warning and incremented on `warp.notifications.publish_failures` (OpenTelemetry counter). Successful publishes increment `warp.notifications.published`. Alert on the failure counter if push health matters to your SLOs. Missed notifications caused by transient connection loss are picked up by the drain-on-reconnect signal, so a rare publish failure is not a correctness issue — it costs at most one poll interval of latency.
+Transport failures are logged at Warning and incremented on `warp.notifications.publish_failures` (OpenTelemetry counter). Successful publishes increment `warp.notifications.published`. Notifications dropped because the relay's queue was full increment `warp.notifications.dropped`; each costs at most one poll interval on another server. Alert on the failure counter if push health matters to your SLOs. Missed notifications caused by transient connection loss are picked up by the drain-on-reconnect signal, so a rare publish failure is not a correctness issue — it costs at most one poll interval of latency.
 
 ## Upgrading From &lt;0.9
 

@@ -55,23 +55,10 @@ public static class SqlServerServiceConfiguration
         return builder;
     }
 
+    // Read from the connection AddWarp stores, never by rebuilding TContext's options (#322).
     internal static string ResolveConnectionString<TContext>(IServiceProvider sp)
         where TContext : DbContext
-    {
-        using var scope = sp.CreateScope();
-        var dbOptions = scope.ServiceProvider.GetRequiredService<DbContextOptions<TContext>>();
-        var relationalExtension = dbOptions.Extensions.OfType<RelationalOptionsExtension>().FirstOrDefault();
-        var connectionString = relationalExtension?.ConnectionString;
-
-        if (connectionString is null)
-        {
-            var context = scope.ServiceProvider.GetRequiredService<TContext>();
-            connectionString = context.Database.GetConnectionString()
-                ?? throw new InvalidOperationException("Cannot resolve connection string for Warp SQL Server provider.");
-        }
-
-        return connectionString;
-    }
+        => sp.GetRequiredService<WarpDatabaseConnection<TContext>>().ConnectionString;
 }
 
 internal sealed class SqlServerServerContextConfigurator<TContext> : IWarpServerContextConfigurator

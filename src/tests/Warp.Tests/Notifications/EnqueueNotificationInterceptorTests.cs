@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
@@ -6,15 +5,19 @@ using Warp.Core;
 using Warp.Core.Enums;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
+using Warp.Provider.PostgreSql;
+using Warp.Provider.SqlServer;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
+using Warp.Worker;
 
 namespace Warp.Tests.Notifications;
 
 // Issue #322: jobs committed by a plain DbContext.SaveChangesAsync (not IPublisher.SaveChangesAsync)
 // never woke a worker — neither the cross-process NOTIFY nor the in-process signal. The interceptor
-// AddWarp puts on TContext now announces them, and holds the wake-up until an explicit transaction
-// commits. Resolved through the real AddWarp registration so the options wiring is what ships.
+// AddWarp puts on TContext now signals this process and announces them for the relay, and holds both
+// until an explicit transaction commits. Resolved through the real AddWarp registration so the options
+// wiring is what ships. The relay's own publishing is covered by EnqueueNotificationRelayTests.
 [GenerateDatabaseTests]
 public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
 {
@@ -31,8 +34,7 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task SaveChangesAsync_AfterEnqueue_SendsOneWakeUpAndSignalsLocally()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport);
+        await using var provider = BuildProvider();
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TestContext>();
         var local = CountLocalSignals(provider);
@@ -40,15 +42,14 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         await scope.ServiceProvider.GetRequiredService<IPublisher>().Enqueue(new UnitRequest(), Queue);
         await db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        transport.ForQueue(Queue).ShouldBe(1);
+        Announced(provider, Queue).ShouldBe(1);
         local.Count.ShouldBe(1);
     }
 
     [TimedFact]
     public async Task SaveChanges_Sync_AfterEnqueue_SendsWakeUpAndSignalsLocally()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport);
+        await using var provider = BuildProvider();
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TestContext>();
         var local = CountLocalSignals(provider);
@@ -60,17 +61,14 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         db.SaveChanges();
 #pragma warning restore MA0042, S6966
 
-        // The sync path does not await the transport; this recording transport completes
-        // synchronously, so the publish has already happened when SaveChanges returns.
         local.Count.ShouldBe(1);
-        transport.ForQueue(Queue).ShouldBe(1);
+        Announced(provider, Queue).ShouldBe(1);
     }
 
     [TimedFact]
     public async Task PublisherSaveChangesAsync_SendsExactlyOneWakeUp()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport);
+        await using var provider = BuildProvider();
         await using var scope = provider.CreateAsyncScope();
         var publisher = scope.ServiceProvider.GetRequiredService<IPublisher>();
         var local = CountLocalSignals(provider);
@@ -78,15 +76,14 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         await publisher.Enqueue(new UnitRequest(), Queue);
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        transport.ForQueue(Queue).ShouldBe(1);
+        Announced(provider, Queue).ShouldBe(1);
         local.Count.ShouldBe(1);
     }
 
     [TimedFact]
     public async Task SaveChangesAsync_InsideExplicitTransaction_WaitsForCommit()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport);
+        await using var provider = BuildProvider();
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TestContext>();
         var ct = Xunit.TestContext.Current.CancellationToken;
@@ -95,18 +92,17 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         await scope.ServiceProvider.GetRequiredService<IPublisher>().Enqueue(new UnitRequest(), Queue);
         await db.SaveChangesAsync(ct);
 
-        transport.ForQueue(Queue).ShouldBe(0);
+        Announced(provider, Queue).ShouldBe(0);
 
         await tx.CommitAsync(ct);
 
-        transport.ForQueue(Queue).ShouldBe(1);
+        Announced(provider, Queue).ShouldBe(1);
     }
 
     [TimedFact]
     public async Task SaveChangesAsync_TwoSavesInOneTransaction_SendOneWakeUpOnCommit()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport);
+        await using var provider = BuildProvider();
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TestContext>();
         var publisher = scope.ServiceProvider.GetRequiredService<IPublisher>();
@@ -119,14 +115,13 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
 
-        transport.ForQueue(Queue).ShouldBe(1);
+        Announced(provider, Queue).ShouldBe(1);
     }
 
     [TimedFact]
     public async Task SaveChangesAsync_InsideRolledBackTransaction_SendsNothing()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport);
+        await using var provider = BuildProvider();
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TestContext>();
         var local = CountLocalSignals(provider);
@@ -139,15 +134,14 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
             await tx.RollbackAsync(ct);
         }
 
-        transport.ForQueue(Queue).ShouldBe(0);
+        Announced(provider, Queue).ShouldBe(0);
         local.Count.ShouldBe(0);
     }
 
     [TimedFact]
     public async Task SaveChangesAsync_TransactionDisposedWithoutCommit_DoesNotLeakIntoTheNextOne()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport);
+        await using var provider = BuildProvider();
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TestContext>();
         var ct = Xunit.TestContext.Current.CancellationToken;
@@ -166,14 +160,13 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
             await tx.CommitAsync(ct);
         }
 
-        transport.ForQueue(Queue).ShouldBe(0);
+        Announced(provider, Queue).ShouldBe(0);
     }
 
     [TimedFact]
     public async Task SaveChangesAsync_WithoutStagedJobs_SendsNothing()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport);
+        await using var provider = BuildProvider();
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TestContext>();
         var local = CountLocalSignals(provider);
@@ -181,22 +174,78 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         db.TestLogs.Add(new TestLog { ProcessedTime = DateTime.UtcNow });
         await db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        transport.Published.ShouldBeEmpty();
+        Announced(provider).ShouldBe(0);
         local.Count.ShouldBe(0);
     }
 
     [TimedFact]
     public async Task AddWarp_CalledTwice_RegistersTheInterceptorOnce()
     {
-        var transport = new RecordingTransport();
-        await using var provider = BuildProvider(transport, services => services.AddWarp<TestContext>());
+        await using var provider = BuildProvider(services => services.AddWarp<TestContext>());
         await using var scope = provider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TestContext>();
 
         await scope.ServiceProvider.GetRequiredService<IPublisher>().Enqueue(new UnitRequest(), Queue);
         await db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        transport.ForQueue(Queue).ShouldBe(1);
+        Announced(provider, Queue).ShouldBe(1);
+    }
+
+    // The push transport's factory used to build DbContextOptions<TContext>, whose factory adds the
+    // interceptor; an interceptor that took the transport in its constructor closed that loop and the
+    // container deadlocked building the transport (every push test hung). Both halves are gone now —
+    // the factory reads WarpDatabaseConnection, the interceptor holds no transport — and this pins it.
+    // Bounded so a regression fails here instead of hanging the run.
+    [TimedFact]
+    public async Task UseDatabasePush_ResolvingTransportAndContext_DoesNotDeadlock()
+    {
+        await using var probe = _fixture.CreateContext();
+        var connectionString = probe.Database.GetConnectionString()!;
+        var isPostgres = probe.Database.ProviderName?.Contains("Npgsql", StringComparison.Ordinal) == true;
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddDbContext<TestContext>(options =>
+        {
+            if (isPostgres)
+            {
+                options.UseNpgsql(connectionString).UseSnakeCaseNamingConvention();
+            }
+            else
+            {
+                options.UseSqlServer(connectionString);
+            }
+        });
+        services.AddWarp<TestContext>(opt =>
+        {
+            if (isPostgres)
+            {
+                opt.UsePostgreSql();
+            }
+            else
+            {
+                opt.UseSqlServer();
+            }
+
+            opt.UseDatabasePush();
+        });
+        await using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+
+        var resolve = Task.Run(
+            () =>
+            {
+                using var scope = provider.CreateScope();
+                var transport = scope.ServiceProvider.GetRequiredService<IWarpNotificationTransport>();
+                var db = scope.ServiceProvider.GetRequiredService<TestContext>();
+
+                return (transport, db);
+            },
+            Xunit.TestContext.Current.CancellationToken);
+
+        var (resolvedTransport, resolvedContext) = await resolve.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
+
+        resolvedTransport.ShouldNotBeOfType<NullNotificationTransport>();
+        resolvedContext.ShouldNotBeNull();
     }
 
     private static LocalSignalCounter CountLocalSignals(ServiceProvider provider)
@@ -207,7 +256,9 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         return counter;
     }
 
-    private ServiceProvider BuildProvider(RecordingTransport transport, Action<IServiceCollection>? configure = null)
+    // Announcements are switched on as UseDatabasePush() does, but no host runs the relay, so what the
+    // interceptor announced stays in the channel for the test to read.
+    private ServiceProvider BuildProvider(Action<IServiceCollection>? configure = null)
     {
         using var probe = _fixture.CreateContext();
         var connectionString = probe.Database.GetConnectionString()!;
@@ -226,8 +277,8 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
                 options.UseSqlServer(connectionString);
             }
         });
-        services.AddSingleton<IWarpNotificationTransport>(transport);
         services.AddWarp<TestContext>();
+        EnqueueNotificationRelay.Register(services);
         configure?.Invoke(services);
 
         return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
@@ -242,25 +293,19 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         public void Increment() => Interlocked.Increment(ref _count);
     }
 
-    private sealed class RecordingTransport : IWarpNotificationTransport
+    // Drains what the interceptor announced so far; counts JobEnqueued for one queue, or everything.
+    private static int Announced(ServiceProvider provider, string? queue = null)
     {
-        public ConcurrentQueue<(NotificationKind Kind, string? Queue)> Published { get; } = new();
-
-        public Task ListenerReady { get; } = Task.CompletedTask;
-
-        public int ForQueue(string queue) => Published.Count(x => x.Kind == NotificationKind.JobEnqueued && string.Equals(x.Queue, queue, StringComparison.Ordinal));
-
-        public Task PublishAsync(NotificationKind kind, string? queue, CancellationToken ct)
+        var reader = provider.GetRequiredService<EnqueueAnnouncements>().Reader;
+        var count = 0;
+        while (reader.TryRead(out var notification))
         {
-            Published.Enqueue((kind, queue));
-
-            return Task.CompletedTask;
+            if (queue == null || (notification.Kind == NotificationKind.JobEnqueued && string.Equals(notification.Queue, queue, StringComparison.Ordinal)))
+            {
+                count++;
+            }
         }
 
-        public async IAsyncEnumerable<Notification> ListenAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
-        {
-            await Task.Yield();
-            yield break;
-        }
+        return count;
     }
 }

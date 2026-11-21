@@ -324,7 +324,10 @@ public static class ServiceConfiguration
         services.TryAddSingleton<ServerTaskSignals<TContext>>();
 
         // Wakes workers for jobs committed by ANY save of TContext, not only IPublisher.SaveChangesAsync
-        // (#322). Added to TContext's options in ConfigureDbContextOptions.
+        // (#322). Added to TContext's options in ConfigureDbContextOptions. It depends on no transport:
+        // this process is woken through the signals, other processes through the announcements, which
+        // the relay UseDatabasePush() registers publishes.
+        services.TryAddSingleton<EnqueueAnnouncements>();
         services.TryAddSingleton<EnqueueNotificationInterceptor<TContext>>();
 
         // Operational-event notifier fan-out. Registered by AddWarp (not AddWarpServer) so every dispatch
@@ -430,10 +433,22 @@ public static class ServiceConfiguration
         var descriptor = services.LastOrDefault(d => d.ServiceType == typeof(DbContextOptions<TContext>));
         if (descriptor?.ImplementationFactory == null)
         {
+            // Nothing to wrap: read the registered options as they are.
+            services.TryAddSingleton(sp => new WarpDatabaseConnection<TContext>(
+                sp.GetRequiredService<IServiceScopeFactory>(),
+                x => x.GetRequiredService<DbContextOptions<TContext>>()));
+
             return;
         }
 
         var originalFactory = descriptor.ImplementationFactory;
+
+        // Captured from the application's own factory, before the wrap below. TryAdd: AddWarp runs twice
+        // under AddWarpServer, and the second call would see the first call's wrap as its "original".
+        services.TryAddSingleton(sp => new WarpDatabaseConnection<TContext>(
+            sp.GetRequiredService<IServiceScopeFactory>(),
+            x => (DbContextOptions<TContext>)originalFactory(x)));
+
         services.Remove(descriptor);
         services.Add(ServiceDescriptor.Describe(
             typeof(DbContextOptions<TContext>),
