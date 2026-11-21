@@ -103,17 +103,42 @@ public sealed class Orchestrator<TContext> : IServerTask
         // deliberately-skipped work (a Skip-mode [Mutex]/[RateLimit] rejecting a routed handler job —
         // reachable since the addon policy axis change — or an operator delete), not pending work.
         // Treating it as pending left the parent Awaiting/Processing forever with no path out.
-        var readyParents = await _context.Set<Job>()
-            .Where(p => (p.Kind == JobKind.Message || p.Kind == JobKind.Batch)
-                && (p.CurrentState == State.Awaiting || p.CurrentState == State.Processing))
+        //
+        // The shape is load-bearing, not style (same lesson as the claim, rule 6.9). Each kind is its own
+        // branch with a SCALAR kind and an ORDER BY the (Kind, CurrentState, CreateTime) index supplies,
+        // so the planner takes that index without needing a good row estimate. Written as one
+        // `Kind IN (Message, Batch) AND CurrentState IN (...)` predicate, it estimated one row either way
+        // and picked (CurrentState, ScheduleTime) with Kind as a filter. Every job passes through
+        // Processing, so that index range is full of entries for rows that have since left it until
+        // vacuum catches up, and the query walked all of them to return nothing: measured 10,004 pages
+        // per call against 6, on a table with no batch or message in it, up to ~100 pages per job across
+        // a run since this task ticks on almost every finalization.
+        var batchSize = _configuration.ServerTaskBatchSize;
+        var settledParents = _context.Set<Job>()
+            .Where(p => p.CurrentState == State.Awaiting || p.CurrentState == State.Processing)
             .Where(p => !_context.Set<Job>()
                 .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
                     && c.CurrentState != State.Completed && c.CurrentState != State.Failed
                     && c.CurrentState != State.Deleted && c.CurrentState != State.Awaiting))
             .Where(p => _context.Set<Job>()
                 .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
-                    && (c.CurrentState == State.Completed || c.CurrentState == State.Failed || c.CurrentState == State.Deleted)))
-            .Take(_configuration.ServerTaskBatchSize)
+                    && (c.CurrentState == State.Completed || c.CurrentState == State.Failed || c.CurrentState == State.Deleted)));
+
+        var readyMessages = settledParents
+            .Where(p => p.Kind == JobKind.Message)
+            .OrderBy(p => p.CurrentState)
+            .ThenBy(p => p.CreateTime)
+            .Take(batchSize);
+
+        var readyBatches = settledParents
+            .Where(p => p.Kind == JobKind.Batch)
+            .OrderBy(p => p.CurrentState)
+            .ThenBy(p => p.CreateTime)
+            .Take(batchSize);
+
+        var readyParents = await readyMessages
+            .Concat(readyBatches)
+            .Take(batchSize)
             .ToListAsync(ct);
 
         if (readyParents.Count == 0)
