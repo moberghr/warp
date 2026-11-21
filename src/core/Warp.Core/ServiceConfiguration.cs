@@ -133,7 +133,12 @@ public static class ServiceConfiguration
             x.GetRequiredService<IWarpNotificationTransport>(),
             x.GetRequiredService<ServerTaskSignals<TContext>>()));
 
-        services.AddScoped<IMediator>(x => new Mediator(x));
+        // Decided per resolve from the registered configuration, not at registration: with the two-builder
+        // shape (AddWarp + AddWarpServer) the option may be set on either builder, and they are merged.
+        services.AddScoped<IMediator>(x =>
+            x.GetRequiredService<IOptions<WarpConfiguration>>().Value.Mediator.ScopePerSend
+                ? new ScopePerSendMediator(x, x.GetRequiredService<IServiceScopeFactory>(), x.GetServices<ISendScopeInitializer>())
+                : new Mediator(x));
 
         services.AddScoped<IRecurringJobPublisher>(x =>
             new RecurringJobPublisher<TContext>(x.GetRequiredService<TContext>(), x.GetRequiredService<TimeProvider>(), x.GetRequiredService<IWarpLockProvider>()));

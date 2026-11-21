@@ -281,6 +281,11 @@ public class WarpConfigurationMergeTests
             return (TimeSpan)(current ?? TimeSpan.Zero) + TimeSpan.FromMinutes(7);
         }
 
+        if (type == typeof(Warp.Core.Handlers.WarpMediatorOptions))
+        {
+            return new Warp.Core.Handlers.WarpMediatorOptions { ScopePerSend = true };
+        }
+
         if (type.IsEnum)
         {
             return Enum.GetValues(type).Cast<object>().First(x => !Equals(x, current));
