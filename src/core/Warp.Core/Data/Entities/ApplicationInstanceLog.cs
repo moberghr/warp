@@ -12,7 +12,7 @@ namespace Warp.Core.Data.Entities;
 /// </summary>
 public class ApplicationInstanceLog
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid Id { get; set; } = WarpId.Next();
 
     public required Guid InstanceId { get; set; }
 

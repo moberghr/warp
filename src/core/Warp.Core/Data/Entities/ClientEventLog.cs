@@ -14,7 +14,7 @@ namespace Warp.Core.Data.Entities;
 /// </summary>
 public class ClientEventLog
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid Id { get; set; } = WarpId.Next();
 
     /// <summary>The application this event belongs to — resolved server-side from the ingest key, not client-declared. Null ⇒ legacy/unkeyed.</summary>
     public string? Application { get; set; }

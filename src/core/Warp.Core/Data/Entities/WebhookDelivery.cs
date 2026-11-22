@@ -15,7 +15,7 @@ namespace Warp.Core.Data.Entities;
 /// </summary>
 public class WebhookDelivery
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid Id { get; set; } = WarpId.Next();
 
     /// <summary>Opt-in provenance: the application that SENT this delivery (<c>WarpConfiguration.ApplicationName</c>). Null ⇒ feature off / legacy row.</summary>
     public string? Application { get; set; }

@@ -4,7 +4,7 @@ namespace Warp.Core.Entities;
 
 public class Job
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid Id { get; set; } = Warp.Core.Data.WarpId.Next();
 
     public JobKind Kind { get; set; } = JobKind.Job;
 
