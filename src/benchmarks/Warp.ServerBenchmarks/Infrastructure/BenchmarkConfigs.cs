@@ -55,9 +55,9 @@ public class ServerBenchmarkConfig : ManualConfig
 /// workflow's minutes, where every other scenario but one takes about five. What these benchmarks are run
 /// for is the per-job database cost, which the diagnoser reads the same from one pass as from five.
 /// <para>
-/// So: no JIT pass and no pilot (the Monitoring strategy), no warm-up (the benchmark warms its own
-/// pipeline in GlobalSetup), and three iterations like every other scenario: with two, BenchmarkDotNet
-/// writes a confidence interval the comparison cannot read.
+/// So: no JIT pass and no pilot (the Monitoring strategy), no warm-up (the benchmark warms or settles
+/// itself in GlobalSetup), and ONE iteration. One pass has no spread to report, and the report shows a
+/// dash for it; a second pass would cost the whole clock again to say how much the clock varies.
 /// </para>
 /// </summary>
 public class ClockBoundBenchmarkConfig : ServerBenchmarkConfig
@@ -67,7 +67,7 @@ public class ClockBoundBenchmarkConfig : ServerBenchmarkConfig
             .WithStrategy(RunStrategy.Monitoring)
             .WithLaunchCount(1)
             .WithWarmupCount(0)
-            .WithIterationCount(3)
+            .WithIterationCount(1)
             .WithInvocationCount(1)
             .WithUnrollFactor(1))
     {

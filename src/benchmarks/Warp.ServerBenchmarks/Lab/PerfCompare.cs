@@ -42,7 +42,14 @@ public static partial class PerfCompare
         WriteIndented = true,
     };
 
-    private static readonly JsonSerializerOptions BdnOptions = new() { PropertyNameCaseInsensitive = true };
+    // BenchmarkDotNet writes "NaN" and "Infinity" as strings where a statistic is undefined: the
+    // confidence interval of a case that ran one or two iterations, which is what the clock-bound
+    // scenarios run. Read as numbers, they crashed the comparison after the measurement had succeeded.
+    private static readonly JsonSerializerOptions BdnOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
+    };
 
     /// <summary>
     /// What a regression has to exceed before it FAILS a build rather than merely being reported.
@@ -549,7 +556,7 @@ public static partial class PerfCompare
     private static string Row(BdnResult result) =>
         string.Create(
             CultureInfo.InvariantCulture,
-            $"{Seconds(result.Mean)} | {Seconds(result.Error)} | {Seconds(result.StdDev)}");
+            $"{Seconds(result.Mean)} | {Spread(result.Error)} | {Spread(result.StdDev)}");
 
     private static string Rate(double? jobsPerSecond) =>
         jobsPerSecond is null ? "—" : jobsPerSecond.Value.ToString("N0", CultureInfo.InvariantCulture);
@@ -580,6 +587,15 @@ public static partial class PerfCompare
     }
 
     /// <summary>BenchmarkDotNet reports nanoseconds; its summary shows s or ms to three decimals.</summary>
+    // An undefined spread (too few iterations to have one) is kept as zero: it is written to the
+    // history file as JSON, which has no NaN.
+    private static double FiniteOrZero(double? value) =>
+        value is { } number && double.IsFinite(number) ? number : 0;
+
+    // A spread of exactly zero means there was none to measure, not that the runs agreed to the nanosecond.
+    private static string Spread(double nanoseconds) =>
+        nanoseconds <= 0 ? "—" : Seconds(nanoseconds);
+
     private static string Seconds(double nanoseconds) =>
         nanoseconds >= 1e9
             ? (nanoseconds / 1e9).ToString("N3", CultureInfo.InvariantCulture) + " s"
@@ -645,8 +661,8 @@ public static partial class PerfCompare
                 results[benchmark.FullName] = new BdnResult(
                     benchmark.Memory?.BytesAllocatedPerOperation,
                     benchmark.Statistics?.Mean ?? 0,
-                    benchmark.Statistics?.ConfidenceInterval?.Margin ?? 0,
-                    benchmark.Statistics?.StandardDeviation ?? 0,
+                    FiniteOrZero(benchmark.Statistics?.ConfidenceInterval?.Margin),
+                    FiniteOrZero(benchmark.Statistics?.StandardDeviation),
                     MetricOf(benchmark, "StatementsPerJob") is null && MetricOf(benchmark, "StatementsPerSecond") is not null,
                     MetricOf(benchmark, "StatementsPerJob") ?? MetricOf(benchmark, "StatementsPerSecond"),
                     MetricOf(benchmark, "BuffersPerJob") ?? MetricOf(benchmark, "BuffersPerSecond"),
