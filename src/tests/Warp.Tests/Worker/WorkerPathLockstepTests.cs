@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Data.Entities;
@@ -20,7 +21,7 @@ namespace Warp.Tests.Worker;
 // mapped column of the row, read from the EF model so a column added later is compared without touching
 // this test. Values that differ between any two runs (ids, instants) are reduced to their shape.
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
-public abstract class WorkerPathLockstepTestsBase : IntegrationTestBase
+public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
 {
     protected WorkerPathLockstepTestsBase(IDatabaseFixture fixture)
         : base(fixture)
@@ -59,7 +60,11 @@ public abstract class WorkerPathLockstepTestsBase : IntegrationTestBase
     {
         var ct = Xunit.TestContext.Current.CancellationToken;
         await Fixture.ResetAsync();
-        await using var server = await WarpTestServer.StartAsync(
+        Guid jobId;
+
+        // The host is stopped before anything is read: a graceful stop flushes the in-memory counter
+        // buffer, so the counters below are complete rather than whatever a timer had written so far.
+        await using (var server = await WarpTestServer.StartAsync(
             Fixture,
             cfg =>
             {
@@ -67,8 +72,54 @@ public abstract class WorkerPathLockstepTestsBase : IntegrationTestBase
                 cfg.WorkerCount = 2;
                 cfg.CompletionBatchSize = 10;
                 cfg.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
-            });
+            }))
+        {
+            jobId = await RunScenarioAsync(server, scenario, ct);
+        }
 
+        await using var ctx = Fixture.CreateContext();
+        var job = await ctx.Set<Job>()
+            .AsNoTracking()
+            .Where(x => x.Id == jobId)
+            .SingleAsync(ct);
+
+        var future = DateTime.UtcNow.AddHours(1);
+        var row = ctx.Entry(job).Properties.ToDictionary(
+            x => x.Metadata.Name,
+            x => Shape(x.Metadata.Name, x.CurrentValue, future),
+            StringComparer.Ordinal);
+
+        // The logs each path wrote for the job, as a sorted list of event types.
+        var events = await ctx.Set<JobLog>()
+            .AsNoTracking()
+            .Where(x => x.JobId == jobId)
+            .Select(x => x.EventType)
+            .ToListAsync(ct);
+        row["(job log events)"] = string.Join(", ", events.Order(StringComparer.Ordinal));
+
+        // What each path counted. Pending Counter rows and folded Statistic rows are one total.
+        var counters = await ctx.Set<Counter>()
+            .AsNoTracking()
+            .Select(x => new { x.Key, Value = (long)x.Value })
+            .ToListAsync(ct);
+        var statistics = await ctx.Set<Statistic>()
+            .AsNoTracking()
+            .Select(x => new { x.Key, x.Value })
+            .ToListAsync(ct);
+        var totals = counters
+            .Concat(statistics)
+            .Where(x => IsComparableCounter(x.Key))
+            .GroupBy(x => BucketStamp().Replace(x.Key, "(bucket)"), StringComparer.Ordinal);
+        foreach (var total in totals)
+        {
+            row[$"counter {total.Key}"] = total.Sum(x => x.Value).ToString(CultureInfo.InvariantCulture);
+        }
+
+        return row;
+    }
+
+    private static async Task<Guid> RunScenarioAsync(WarpTestServer server, Scenario scenario, CancellationToken ct)
+    {
         var publisher = server.CreatePublisher();
         Guid jobId;
         switch (scenario)
@@ -103,28 +154,21 @@ public abstract class WorkerPathLockstepTestsBase : IntegrationTestBase
                 throw new ArgumentOutOfRangeException(nameof(scenario), scenario, "Unknown scenario");
         }
 
-        await using var ctx = Fixture.CreateContext();
-        var job = await ctx.Set<Job>()
-            .AsNoTracking()
-            .Where(x => x.Id == jobId)
-            .SingleAsync(ct);
-
-        var future = DateTime.UtcNow.AddHours(1);
-        var row = ctx.Entry(job).Properties.ToDictionary(
-            x => x.Metadata.Name,
-            x => Shape(x.Metadata.Name, x.CurrentValue, future),
-            StringComparer.Ordinal);
-
-        // The logs each path wrote for the job, as a sorted list of event types.
-        var events = await ctx.Set<JobLog>()
-            .AsNoTracking()
-            .Where(x => x.JobId == jobId)
-            .Select(x => x.EventType)
-            .ToListAsync(ct);
-        row["(job log events)"] = string.Join(", ", events.Order(StringComparer.Ordinal));
-
-        return row;
+        return jobId;
     }
+
+    // Latency histogram buckets and summed durations depend on how long this run took (a zero sum writes
+    // no row at all), and the backlog gauge on when the sampler ticked: none is a property of the path.
+    // The count beside each duration is compared.
+    private static bool IsComparableCounter(string key) =>
+        !key.Contains(":pct:", StringComparison.Ordinal)
+        && !key.Contains(":dur", StringComparison.Ordinal)
+        && !key.Contains(":pcth:", StringComparison.Ordinal)
+        && !key.StartsWith("qbacklog", StringComparison.Ordinal)
+        && !key.StartsWith("warpsys", StringComparison.Ordinal);
+
+    [GeneratedRegex(@"\d{4}-\d{2}-\d{2}(-\d{2}){0,2}", RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
+    private static partial Regex BucketStamp();
 
     // What a value looks like once everything that legitimately differs between two runs is taken out:
     // an id is "an id", an instant is "past" or "future", and metadata is its keys with their plain values.
