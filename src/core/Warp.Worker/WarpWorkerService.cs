@@ -744,7 +744,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         // not a miss. Meter is always-on; the DeadlineKeys Counter fold is sink-gated (§8.24), mirroring jobstat.
         if (totalDeadlineUtc is { } deadline && state is State.Completed or State.Failed or State.Deleted)
         {
-            var missed = now >= deadline;
+            // A job the timeout itself ended is a miss whatever the clock reads here. The timeout runs on a
+            // timer and this compares wall-clock instants, so the finalization of a job killed AT its
+            // deadline can land a few milliseconds before it and would otherwise count as met.
+            var missed = now >= deadline || outcome?.Reason == OutcomeReason.Timeout;
             if (missed)
             {
                 WarpTelemetry.RecordDeadlineMiss(job.Type, job.Queue, _configuration.ApplicationName);
