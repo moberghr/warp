@@ -5,6 +5,7 @@ using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
+using Warp.Core.Enums;
 using Warp.Core.Services;
 
 namespace Warp.Worker;
@@ -18,6 +19,12 @@ internal readonly record struct PendingCompletion(
     IReadOnlyList<Counter> Counters,
     IReadOnlyList<JobLog> Logs,
     ErrorOccurrence? Occurrence = null);
+
+/// <summary>
+/// What a flush took, for the wake that follows it (rule 6.11): the distinct parents of the flushed
+/// jobs, and the flushed jobs that reached a terminal state.
+/// </summary>
+internal readonly record struct FlushedJobs(IReadOnlyCollection<Guid> Parents, IReadOnlyCollection<Guid> Settled);
 
 /// <summary>
 /// Per-worker buffer of pending completions for dispatcher mode. Flushes all buffered entries
@@ -39,6 +46,14 @@ internal sealed class CompletionBatch
     private const int MaxDeadlockRetries = 3;
     private const int DeadlockRetryBaseDelayMs = 50;
 
+    // Guards the buffer and its timestamp. One worker owns a batch and is the only caller in normal
+    // running, so this is never contended there. The second caller is WarpDispatcherWorker.StopAsync,
+    // which flushes from the host's shutdown thread and, when the shutdown timeout expires with a
+    // handler still running, can do so while the worker loop is adding to the same buffer. Unguarded,
+    // a completion added between the copy and the clear was dropped (the job then waited for
+    // StaleJobRecovery and ran twice), and List<T> is not safe for that use at all. Held only for the
+    // in-memory swap, never across the database write.
+    private readonly Lock _gate = new();
     private readonly List<PendingCompletion> _buffer;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly TimeProvider _timeProvider;
@@ -78,16 +93,37 @@ internal sealed class CompletionBatch
 
     public void Add(PendingCompletion entry)
     {
-        if (_buffer.Count == 0)
+        lock (_gate)
         {
-            _firstEntryTimestamp = _timeProvider.GetUtcNow();
-        }
+            if (_buffer.Count == 0)
+            {
+                _firstEntryTimestamp = _timeProvider.GetUtcNow();
+            }
 
-        _buffer.Add(entry);
+            _buffer.Add(entry);
+        }
+    }
+
+    // Takes everything buffered so far and leaves the buffer empty, as one step.
+    internal PendingCompletion[] Drain()
+    {
+        lock (_gate)
+        {
+            if (_buffer.Count == 0)
+            {
+                return [];
+            }
+
+            var pending = _buffer.ToArray();
+            _buffer.Clear();
+            _firstEntryTimestamp = null;
+
+            return pending;
+        }
     }
 
     /// <summary>
-    /// Persists the buffered completions. On success (including poison-drops isolated via split)
+    /// Persists the buffered completions and returns what it took. On success (including poison-drops isolated via split)
     /// the buffer is cleared. On transient failure (non-<see cref="DbUpdateException"/>) the buffer
     /// is already drained — the exception propagates and the orphaned <c>Processing</c> rows are
     /// recovered by <c>StaleJobRecovery</c>.
@@ -98,18 +134,46 @@ internal sealed class CompletionBatch
     /// shutdown still commits any in-flight batch.
     /// </para>
     /// </summary>
-    public async Task FlushAsync()
+    public async Task<FlushedJobs> FlushAsync()
     {
-        if (_buffer.Count == 0)
+        var pending = Drain();
+        if (pending.Length == 0)
         {
-            return;
+            return new FlushedJobs([], []);
         }
 
-        var pending = _buffer.ToArray();
-        _buffer.Clear();
-        _firstEntryTimestamp = null;
-
         await FlushRangeAsync(pending, 0, pending.Length, CancellationToken.None);
+
+        return new FlushedJobs((IReadOnlyCollection<Guid>?)ParentsOf(pending) ?? [], SettledOf(pending));
+    }
+
+    // The flushed jobs that reached a terminal state (not the requeued ones): a continuation may wait
+    // on each.
+    private static List<Guid> SettledOf(PendingCompletion[] pending)
+    {
+        var settled = new List<Guid>(pending.Length);
+        settled.AddRange(pending
+            .Where(x => x.Job.CurrentState is State.Completed or State.Failed or State.Deleted)
+            .Select(x => x.Job.Id));
+
+        return settled;
+    }
+
+    // The distinct parents of the flushed jobs, for the wake that follows (rule 6.11). Most jobs have
+    // none, so nothing is allocated for them.
+    private static HashSet<Guid>? ParentsOf(PendingCompletion[] pending)
+    {
+        HashSet<Guid>? parents = null;
+        foreach (var entry in pending)
+        {
+            if (entry.Job.ParentJobId is { } parent)
+            {
+                parents ??= [];
+                parents.Add(parent);
+            }
+        }
+
+        return parents;
     }
 
     private async Task FlushRangeAsync(PendingCompletion[] entries, int start, int count, CancellationToken cancellationToken)

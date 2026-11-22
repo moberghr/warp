@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -322,9 +323,14 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         (await ctx.Set<Job>().AnyAsync(x => x.Id == phantomJob.Id, Xunit.TestContext.Current.CancellationToken)).ShouldBeFalse();
 
-        var counters = await ctx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
-        counters.Count(c => string.Equals(c.Key, "stats:succeeded", StringComparison.Ordinal)).ShouldBe(1);
-        counters.ShouldNotContain(c => c.Value == 1 && c.Key == "stats:succeeded" && c.Id == 0 && string.Equals(c.Key, "phantom", StringComparison.Ordinal));
+        // The summed VALUE, not the row count: the buffer collapses a key to one row per flush, so
+        // a phantom increment that got through would still be one row, with a value of 2.
+        var succeeded = await ctx.Set<Counter>()
+            .Where(x => x.Key == "stats:succeeded")
+            .SumAsync(x => x.Value, Xunit.TestContext.Current.CancellationToken);
+        succeeded.ShouldBe(1);
+
+        (await ctx.Set<JobLog>().AnyAsync(x => x.JobId == phantomJob.Id, Xunit.TestContext.Current.CancellationToken)).ShouldBeFalse();
 
         batch.Count.ShouldBe(0);
     }
@@ -464,34 +470,79 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task FlushAsync_CommitsBufferedCompletions_RegardlessOfCallerCancellation()
+    public async Task FlushAsync_WhenTheDatabaseIsUnreachable_ThrowsAndLeavesTheRowsProcessing()
     {
-        // Regression for PR #127 review finding: under the pre-fix code path, FlushAsync drained
-        // the buffer before observing cancellation. If the token was cancelled (e.g. SIGTERM mid-
-        // flush), BeginTransactionAsync threw OCE, the drained entries were lost, and the caller's
-        // subsequent FlushAsync was a noop on an empty buffer. Jobs stayed Processing and only
-        // StaleJobRecoveryTask would later requeue them.
-        //
-        // The fix removed the CancellationToken parameter entirely from FlushAsync so callers
-        // cannot accidentally abort an in-flight commit. This test documents the new contract:
-        // calling FlushAsync always commits the buffered entries, there's no caller-visible way
-        // to cancel a drained flush mid-commit.
-        var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
-
+        // Not a DbUpdateException, so there is nothing to split or retry: the failure reaches the
+        // caller, the buffer is already drained, and the rows stay Processing for StaleJobRecovery.
+        // A disposed context stands in for a connection that cannot be opened.
         var job = await InsertProcessingJob();
+        var unreachable = _fixture.CreateContext();
+        await unreachable.DisposeAsync();
+
+        var services = new ServiceCollection();
+        services.AddScoped<IWarpServerContext>(_ => new TestServerContext(unreachable));
+        await using var provider = services.BuildServiceProvider();
+
+        var batch = new CompletionBatch(provider.GetRequiredService<IServiceScopeFactory>(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
         batch.Add(MakeEntry(job));
 
-        await batch.FlushAsync();
+        // Act
+        await Should.ThrowAsync<ObjectDisposedException>(batch.FlushAsync);
         await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
 
-        var persisted = await _fixture.CreateContext().Set<Job>().FirstAsync(x => x.Id == job.Id, Xunit.TestContext.Current.CancellationToken);
-        persisted.CurrentState.ShouldBe(State.Completed);
-        persisted.CurrentWorkerId.ShouldBeNull();
-        persisted.LastKeepAlive.ShouldBeNull();
+        // Assert
+        batch.Count.ShouldBe(0);
+
+        var ctx = _fixture.CreateContext();
+        var persisted = await ctx.Set<Job>().FirstAsync(x => x.Id == job.Id, Xunit.TestContext.Current.CancellationToken);
+        persisted.CurrentState.ShouldBe(State.Processing);
+
+        // Nothing committed, so nothing was counted.
+        (await ctx.Set<Counter>().AnyAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBeFalse();
+    }
+
+    [TimedFact]
+    public async Task Add_WhileAnotherThreadDrains_NoCompletionIsLostOrSeenTwice()
+    {
+        // The shutdown flush (WarpDispatcherWorker.StopAsync) can run on the host's thread while the
+        // worker loop is still adding. The interleaving that loses an entry sits between two statements
+        // inside the drain, where no handler can be pinned, so this one test does what the rest of the
+        // suite avoids: it runs the two callers against each other many times and counts. Every added
+        // completion must come out of exactly one drain. Without the lock it loses entries or throws.
+        const int total = 200_000;
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var entries = Enumerable.Range(0, total)
+            .Select(_ => new PendingCompletion(new Job { Id = Guid.NewGuid() }, [], []))
+            .ToArray();
+
+        var drained = new List<PendingCompletion>(total);
+        var adding = Task.Run(
+            () =>
+            {
+                foreach (var entry in entries)
+                {
+                    batch.Add(entry);
+                }
+            },
+            Xunit.TestContext.Current.CancellationToken);
+
+        while (!adding.IsCompleted)
+        {
+            drained.AddRange(batch.Drain());
+        }
+
+        await adding;
+        drained.AddRange(batch.Drain());
+
+        drained.Count.ShouldBe(total);
+        drained.Select(x => x.Job.Id).Distinct().Count().ShouldBe(total);
         batch.Count.ShouldBe(0);
     }
 
+    // FlushAsync takes no CancellationToken on purpose (PR #127): a caller that could cancel a drained
+    // flush mid-commit lost the drained entries and left their jobs Processing for StaleJobRecovery.
+    // The signature is the guard; a test that calls it and checks the commit was a copy of
+    // FlushAsync_PersistsAllBufferedCompletions_WhenSizeReached.
     [TimedFact]
     public async Task Add_WhenBatchSizeIsOne_MarksFullImmediately()
     {

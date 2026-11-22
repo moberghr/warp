@@ -120,13 +120,13 @@ public class AddonsEndpointTests
         }
     }
 
+    // One addon at a time: each flag follows its own registration and no other's. Pairs added nothing
+    // beyond these four rows and the all-off and all-on tests above.
     [TimedTheory]
     [InlineData(true, false, false, false)]
     [InlineData(false, true, false, false)]
     [InlineData(false, false, true, false)]
     [InlineData(false, false, false, true)]
-    [InlineData(true, true, false, false)]
-    [InlineData(false, false, true, true)]
     public async Task GetAddons_PerAddonPermutation_FlagsMatchRegistration(
         bool concurrency,
         bool rateLimits,

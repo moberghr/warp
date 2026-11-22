@@ -47,26 +47,26 @@ public sealed class StreamEdgeCasesTests
     }
 
     [TimedFact]
-    public async Task StreamThrowsMidWay_FirstFrameDelivered_ExceptionPropagates()
+    public async Task StreamThrowsMidWay_ResponseFailsWithTheHandlersException()
     {
+        var ct = Xunit.TestContext.Current.CancellationToken;
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
 
-        // First yield delivers "first", then the handler throws — we expect either an exception
-        // on read or a partial body containing the first frame, depending on TestHost behavior.
-        try
-        {
-            var resp = await app.Client.GetAsync(new Uri("/api/stream/throws", UriKind.Relative));
-            var body = await resp.Content.ReadAsStringAsync();
+        // The handler yields one frame and then throws. Headers are already sent, so the status is 200
+        // and the failure can only show as the body being cut short.
+        using var resp = await app.Client.GetAsync(
+            new Uri("/api/stream/throws", UriKind.Relative),
+            HttpCompletionOption.ResponseHeadersRead,
+            ct);
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            body.ShouldContain("data: \"first\"\n\n");
-        }
-        catch (HttpRequestException)
-        {
-            // Acceptable — TestHost surfaced the handler exception.
-        }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("stream-failure", StringComparison.Ordinal))
-        {
-            // Acceptable — direct exception propagation through TestHost.
-        }
+        await using var body = await resp.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(body);
+
+        // Reading to the end must FAIL with the handler's exception, never finish as if the stream had
+        // simply ended. Whether the frame written before the throw can still be read is up to the
+        // transport (the test host drops buffered bytes when the request aborts), so it is not asserted.
+        var failure = await Should.ThrowAsync<Exception>(async () => await reader.ReadToEndAsync(ct));
+        failure.ToString().ShouldContain("stream-failure");
     }
 }

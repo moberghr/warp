@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Http;
 using Warp.Tests.TestData;
@@ -36,41 +37,31 @@ public sealed class StreamEndpointTests
     }
 
     [TimedFact]
-    public async Task Stream_HonorsRequestAbortedWhenClientCancels()
+    public async Task Stream_ClientAbortsMidStream_HandlerTokenIsCancelled()
     {
-        await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var probe = new StreamCancellationProbe();
+        await using var app = await WarpHttpTestApp.StartAsync(
+            configureServices: s => s.AddSingleton(probe),
+            configureApp: a => a.MapWarpHttp());
 
-        // Count = 1_000_000 ensures the handler is still mid-stream when the client cancels.
-        // If RequestAborted were ignored, the handler would block past the cancellation deadline
-        // and the test would hit the [TimedFact] 10s ceiling.
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        // The handler yields one frame and then waits on its token for ever, so the only way it
+        // ends is RequestAborted reaching it.
+        using var abort = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using (var resp = await app.Client.GetAsync(
+            new Uri("/api/stream/endless", UriKind.Relative),
+            HttpCompletionOption.ResponseHeadersRead,
+            abort.Token))
+        {
+            await using var body = await resp.Content.ReadAsStreamAsync(ct);
+            var buffer = new byte[64];
+            var read = await body.ReadAsync(buffer, ct);
+            System.Text.Encoding.UTF8.GetString(buffer, 0, read).ShouldBe("data: 0\n\n");
 
-        try
-        {
-            using var resp = await app.Client.GetAsync(
-                new Uri("/api/stream/numbers?Count=1000000", UriKind.Relative),
-                HttpCompletionOption.ResponseHeadersRead,
-                cts.Token);
-            await resp.Content.ReadAsStringAsync(cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected — cancellation propagated as cancellation.
-        }
-        catch (HttpRequestException)
-        {
-            // Also expected — when the client aborts mid-body, HttpClient surfaces the
-            // truncated stream as "Error while copying content to a stream." The point
-            // of the test is the timing budget, not the exception shape.
+            await abort.CancelAsync();
         }
 
-        sw.Stop();
-
-        // Cancellation must take effect well within the TimedFact deadline. A handler that
-        // ignored RequestAborted would streaming-write 1M frames and never finish in 5s.
-        // Loose budget tolerates cold-start overhead in TestServer; tight enough to fail
-        // if RequestAborted is silently dropped.
-        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(5));
+        var sawCancellation = await probe.Ended.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+        sawCancellation.ShouldBeTrue("the handler's wait ended without its token being cancelled");
     }
 }

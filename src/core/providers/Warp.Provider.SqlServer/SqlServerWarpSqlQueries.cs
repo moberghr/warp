@@ -538,8 +538,20 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         int limit,
         CancellationToken ct)
     {
-        return await context.Set<Job>()
+        var claimed = await context.Set<Job>()
             .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
             .ToListAsync(ct);
+
+        // The inner SELECT picks the OLDEST rows, but UPDATE ... OUTPUT gives them back in no
+        // particular order (on PostgreSQL, by id). The dispatcher hands a claimed batch to its
+        // workers in list order, so without this a newer job of the batch could start before an older
+        // one. Sorted here, in memory, on the rows already in hand: no statement, and nothing at all
+        // for a single-row claim, which is every claim in single-worker mode.
+        if (claimed.Count > 1)
+        {
+            claimed.Sort(static (x, y) => x.ScheduleTime.CompareTo(y.ScheduleTime));
+        }
+
+        return claimed;
     }
 }

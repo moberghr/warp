@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -113,12 +114,17 @@ internal static class MediatorGeneratorTestHarness
         return MetadataReference.CreateFromImage(stream.ToArray());
     }
 
+    // One MetadataReference per assembly file for the whole test run. A reference holds the metadata it
+    // has parsed, so a fresh one per compilation made every generator test read and parse a few hundred
+    // framework assemblies again. The LIST is still built from the assemblies loaded right now, so a
+    // test that runs after more have loaded sees them.
+    private static readonly ConcurrentDictionary<string, MetadataReference> ReferenceCache = new(StringComparer.OrdinalIgnoreCase);
+
     private static ImmutableArray<MetadataReference> BuildBaseReferences()
     {
         var references = AppDomain.CurrentDomain.GetAssemblies()
             .Where(x => !x.IsDynamic && !string.IsNullOrEmpty(x.Location))
-            .Select(x => MetadataReference.CreateFromFile(x.Location))
-            .Cast<MetadataReference>()
+            .Select(x => ReferenceCache.GetOrAdd(x.Location, static y => MetadataReference.CreateFromFile(y)))
             .ToImmutableArray();
 
         // Be explicit about the Warp.Core assembly, which defines IRequest, IJob, IMessage and the
@@ -126,7 +132,7 @@ internal static class MediatorGeneratorTestHarness
         var coreAssembly = typeof(IRequest<>).Assembly;
         if (!references.Any(x => string.Equals(x.Display, coreAssembly.Location, StringComparison.OrdinalIgnoreCase)))
         {
-            references = references.Add(MetadataReference.CreateFromFile(coreAssembly.Location));
+            references = references.Add(ReferenceCache.GetOrAdd(coreAssembly.Location, static y => MetadataReference.CreateFromFile(y)));
         }
 
         return references;

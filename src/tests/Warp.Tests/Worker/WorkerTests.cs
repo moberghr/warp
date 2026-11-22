@@ -9,6 +9,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Services;
@@ -30,7 +31,6 @@ public abstract class WorkerTestsBase : IAsyncLifetime
     private readonly IDatabaseFixture _fixture;
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
-    private static readonly string[] DefaultQueues = ["default"];
 
     protected WorkerTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
 
@@ -38,71 +38,13 @@ public abstract class WorkerTestsBase : IAsyncLifetime
     {
         await _fixture.ResetAsync();
 
-        // Register test server + worker in DB
-        var ctx = _fixture.CreateContext();
-        ctx.Set<Server>().Add(new Server
-        {
-            Id = ServerId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-            ServiceCount = 1,
-        });
-        ctx.Set<Warp.Core.Data.Entities.Worker>().Add(new Warp.Core.Data.Entities.Worker
-        {
-            Id = WorkerId,
-            ServerId = ServerId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-        });
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await TestWorkerHarness.SeedServerAndWorkerAsync(_fixture, ServerId, WorkerId, Xunit.TestContext.Current.CancellationToken);
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    private (WarpWorkerService<TestContext> Worker, IServiceScopeFactory ScopeFactory) CreateWorker(string[]? queues = null)
-    {
-        var services = new ServiceCollection();
-        services.AddWarpMediator();
-        services.AddLogging();
-        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddTestServerContext<TestContext>();
-        services.AddSingleton<CounterService>();
-        services.AddSingleton<MultiHandlerCounter>();
-        services.AddScoped<Warp.Core.Handlers.JobContext>();
-        services.AddScoped<Warp.Core.Handlers.IJobContext>(x => x.GetRequiredService<Warp.Core.Handlers.JobContext>());
-
-        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
-        {
-            WorkerCount = 1,
-            ServerId = ServerId,
-            Queues = queues ?? DefaultQueues,
-        });
-        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
-        services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
-
-        var provider = services.BuildServiceProvider();
-        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
-
-        var groupConfig = new WorkerGroupConfiguration
-        {
-            WorkerCount = 1,
-            Queues = queues ?? DefaultQueues,
-        };
-
-        var worker = new WarpWorkerService<TestContext>(
-            WorkerId,
-            scopeFactory,
-            new NullLogger<WarpWorkerService<TestContext>>(),
-            workerConfig,
-            groupConfig,
-            TimeProvider.System,
-            Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
-            Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.NullSignals,
-            _counterBuffer);
-
-        return (worker, scopeFactory);
-    }
+    private (WarpWorkerService<TestContext> Worker, IServiceScopeFactory ScopeFactory) CreateWorker(string[]? queues = null, ServerTaskSignals<TestContext>? signals = null) =>
+        TestWorkerHarness.Create(_fixture, _counterBuffer, ServerId, WorkerId, queues, signals);
 
     [TimedFact]
     public async Task GetAndProcessJob_EmptyQueue_ReturnsFalse()
@@ -148,6 +90,12 @@ public abstract class WorkerTestsBase : IAsyncLifetime
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Completed);
         job.HandlerType.ShouldNotBeNull();
+
+        // The worker let go of the row, and a completed job expires.
+        job.CurrentWorkerId.ShouldBeNull();
+        job.LastKeepAlive.ShouldBeNull();
+        job.CancellationMode.ShouldBe(CancellationMode.None);
+        job.ExpireAt.ShouldNotBeNull();
     }
 
     [TimedFact]
@@ -180,6 +128,133 @@ public abstract class WorkerTestsBase : IAsyncLifetime
         var job = await readCtx.Set<Job>().FirstOrDefaultAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Failed);
+
+        // The worker let go of the row, and a failed job never expires (it waits for an operator).
+        job.CurrentWorkerId.ShouldBeNull();
+        job.LastKeepAlive.ShouldBeNull();
+        job.CancellationMode.ShouldBe(CancellationMode.None);
+        job.ExpireAt.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task GetAndProcessJob_AfterTheJobIsFinalized_SignalsJobFinalized()
+    {
+        // The Orchestrator waits on this signal to finalize a batch or message as soon as its last
+        // child settles. Without it a parent waits out the Orchestrator's own interval.
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new UnitRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var signals = new ServerTaskSignals<TestContext>();
+        var finalized = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobFinalized, () => Interlocked.Increment(ref finalized));
+        var (worker, _) = CreateWorker(signals: signals);
+
+        // Act
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert
+        Volatile.Read(ref finalized).ShouldBe(1);
+    }
+
+    [TimedFact]
+    public async Task GetAndProcessJob_HandlerThrowsItsOwnCancellation_MarksFailedNotCancelled()
+    {
+        // Nobody cancelled the job: the handler threw OperationCanceledException by itself, the way an
+        // inner timeout or a cancelled HTTP call does. That is a failure. Only a cancellation the
+        // worker itself requested (a delete while running) ends a job as Deleted.
+        var ctx = _fixture.CreateContext();
+        var jobId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(ThrowsOwnCancellationRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new ThrowsOwnCancellationRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var (worker, _) = CreateWorker();
+
+        // Act
+        var result = await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert
+        result.ShouldBeTrue();
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Failed);
+        job.CurrentWorkerId.ShouldBeNull();
+        job.ExpireAt.ShouldBeNull();
+
+        var logs = await readCtx.Set<JobLog>()
+            .Where(x => x.JobId == jobId)
+            .Select(x => x.EventType)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        logs.ShouldContain("Failed");
+        logs.ShouldNotContain("Cancelled");
+    }
+
+    // Rows a worker can claim but cannot run. Each must end Failed with the worker's hold released and
+    // a Failed log saying why: a row left Processing would only be found by StaleJobRecovery, which
+    // would requeue it to fail the same way again.
+    [TimedTheory]
+    [InlineData("Not.A.Real.Type, Not.A.Real.Assembly", "{}", null)]
+    [InlineData(null, "{}", null)]
+    [InlineData("unit", "this is not json", null)]
+    [InlineData("unit", "{}", "{ this is not json")]
+    public async Task GetAndProcessJob_RowThatCannotRun_IsFailedAndReleased(string? type, string message, string? metadata)
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var jobId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = string.Equals(type, "unit", StringComparison.Ordinal) ? typeof(UnitRequest).AssemblyQualifiedName : type,
+            Message = message,
+            Metadata = metadata,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var (worker, _) = CreateWorker();
+
+        // Act
+        var result = await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert
+        result.ShouldBeTrue();
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Failed);
+        job.CurrentWorkerId.ShouldBeNull();
+        job.LastKeepAlive.ShouldBeNull();
+        job.ExpireAt.ShouldBeNull();
+
+        var logs = await readCtx.Set<JobLog>()
+            .Where(x => x.JobId == jobId)
+            .Select(x => x.EventType)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        logs.ShouldContain("Failed");
     }
 
     [TimedFact]

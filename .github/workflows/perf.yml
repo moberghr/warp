@@ -100,9 +100,11 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   # BenchmarkDotNet, gating what was calibrated to survive a shared runner: statements per job at 5%,
   # WAL bytes per job at 10% (PostgreSQL), and throughput only on a collapse to a third. Each line is
-  # three to four times the worst noise from comparing main with itself over three runs. Buffers and
-  # allocations are reported: they moved up to 55% and 4.9% between identical builds. A benchmark that
-  # produced no measurement on either side fails the job instead of passing silently.
+  # three to four times the worst noise from comparing main with itself over three runs. Allocations
+  # are reported (4.9% between identical builds). Buffers per job move up to 55% between identical
+  # builds, so they fail only on a blow-up of five times or more: every jump that size so far was a
+  # query plan gone wrong, which the other three gates let through. A benchmark that produced no
+  # measurement on either side fails the job instead of passing silently.
   #
   # PostgreSQL is shared between the two runs and named in the environment rather than started per
   # process. That is not a convenience: BenchmarkDotNet runs benchmarks in a child process while
@@ -124,7 +126,9 @@ jobs:
     # job took 69 minutes against the lab's 12 - and a migration that trades a twelve-minute gate for a
     # sixty-nine-minute one is not an improvement whatever it measures. Split across jobs they run in
     # parallel and the wall clock is the slowest single benchmark rather than the sum.
-    timeout-minutes: 45
+    # The slowest is now about 16 minutes (idle) and the rest take 4 to 10, so 30 is a hang, not a
+    # slow run. It was 45 while the rate-limit scenario took 41 of them waiting out real windows.
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -183,20 +187,7 @@ jobs:
       # matrix dimension: one BenchmarkDotNet process runs both sides, so both servers must be up.
       - name: Start SQL Server
         if: matrix.benchmark.sqlserver
-        run: |
-          docker run -d --name warpbench-mssql -p 1433:1433             -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=Warp!Bench1'             mcr.microsoft.com/mssql/server:2022-latest
-
-          for i in $(seq 1 90); do
-            if docker exec warpbench-mssql /opt/mssql-tools18/bin/sqlcmd                  -S localhost -U sa -P 'Warp!Bench1' -C -Q "SELECT 1" > /dev/null 2>&1; then
-              echo "sql server ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-
-          echo "::error::SQL Server did not become ready"
-          docker logs warpbench-mssql
-          exit 1
+        run: bash .github/scripts/start-bench-sqlserver.sh
 
       # Only src/core is ever swapped, so the HARNESS is identical on both sides and the two numbers
       # differ by the library alone. That is what makes an arbitrary pair comparable: building each
@@ -226,6 +217,10 @@ jobs:
       - name: Start a fresh PostgreSQL for the base commit
         if: needs.refs.outputs.record == ''
         run: bash .github/scripts/start-bench-postgres.sh
+
+      - name: Start a fresh SQL Server for the base commit
+        if: needs.refs.outputs.record == '' && matrix.benchmark.sqlserver
+        run: bash .github/scripts/start-bench-sqlserver.sh
 
       - name: Run benchmarks on the base commit
         id: basebench
@@ -286,6 +281,9 @@ jobs:
         run: |
           # A multimodal benchmark means the median describes nothing. This is the check that would
           # have caught the bimodal claim plan found by hand during the 7.1.0 revalidation.
+          # It has not fired in any run so far, including one where a plan did flip between base and
+          # head (2,948 buffers per job against 165); with three iterations per case there is little
+          # for it to work with. A flipping plan is caught by the buffers blow-up gate in compare-bdn.
           if grep -rqi "multimodal" "${{ github.workspace }}/bench/head"; then
             echo "::error::BenchmarkDotNet reported a multimodal distribution - investigate before"
             echo "::error::reading any comparison from this run."
@@ -395,7 +393,7 @@ jobs:
           fi
 
           # Matrix order, so the page reads the same way every run.
-          scenarios="dispatcher completion-batch payload concurrency failure-path retries publish message-routing scheduled-activation large-table batches fan-out idle"
+          scenarios="dispatcher completion-batch payload concurrency rate-limit failure-path retries publish message-routing scheduled-activation large-table batches fan-out idle"
 
           passed=0; failed=0; missing=0
           for name in $scenarios; do
@@ -446,8 +444,8 @@ jobs:
             echo
             echo "- Tables follow BenchmarkDotNet's summary. Each case has two rows, **base** then **head**, the way BDN shows a benchmark beside its baseline."
             echo "- **Ratio** is head time ÷ base time: below 1.00 is faster. **Alloc Ratio** is the same for memory. **Error** is half the 99.9% confidence interval and **StdDev** the standard deviation, both over the iterations BDN ran."
-            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, or **Jobs/s** collapses to a third. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
-            echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. Reported, not gated: it moves up to 55% between identical builds, with cache state and vacuum timing."
+            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, **Jobs/s** collapses to a third, or **Buffers/job** rises to five times. The idle scenario, measured per second, fails on **Statements/s** rising more than 5% on PostgreSQL; its SQL Server row is reported only. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
+            echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. It moves up to 55% between identical builds, with cache state and vacuum timing, so only a rise to five times fails: every jump that size so far was a query whose plan had changed."
             echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
             echo "- ⚠️ in a Gate cell means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
             echo "- **Since** the latest release: the head's statements per job against the numbers recorded on that release. ⚠️ above +10% is reported and never fails, because it measures everything merged since the release, not this change."

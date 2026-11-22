@@ -16,7 +16,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ThreeMessageFlow_InOrder_SagaCompletesAndRowRemoved()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -49,7 +49,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         }
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ThreeMessageFlow_OutOfOrder_SagaCompletes()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -71,7 +71,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await WaitForSagaRemoved(server, "O-2");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task NonStartsSagaMessageForUnknownKey_FailsTheJob_DefaultNotFound()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -83,21 +83,15 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         var msgId = await publisher.Publish(new PaymentCaptured { OrderId = "never-started" });
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Wait until at least one child handler-job is in Failed state.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            var failed = await server.CreateContext().Set<Warp.Core.Entities.Job>()
+        // The handler job fails (after its retry). WaitUntil throws on timeout, where the loop this
+        // replaced fell through and let the test pass with the job still running.
+        await WarpTestServer.WaitUntil(
+            async () => await server.CreateContext().Set<Warp.Core.Entities.Job>()
                 .Where(x => x.ParentJobId == msgId)
                 .Where(x => x.CurrentState == Warp.Core.Enums.State.Failed)
-                .AnyAsync(Xunit.TestContext.Current.CancellationToken);
-            if (failed)
-            {
-                break;
-            }
-
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
+                .AnyAsync(Xunit.TestContext.Current.CancellationToken),
+            TimeSpan.FromSeconds(10),
+            Xunit.TestContext.Current.CancellationToken);
 
         var sagaExists = await server.CreateContext().Set<SagaState>()
             .Where(x => x.CorrelationKey == "never-started")
@@ -105,7 +99,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         sagaExists.ShouldBeFalse();
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task CompletedSaga_NewMessageForSameCorrelation_StartsFreshSaga()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -131,7 +125,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await WaitForSagaState(server, "O-reuse", paymentCaptured: false, inventoryReserved: false);
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task TwoConcurrentMessagesSameSaga_OneRequeuesWithBusyOutcome()
     {
         // Per memory feedback_no_spray_n_tests: pin a worker in the handler with a BarrierSignal
@@ -147,62 +141,80 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
                 services.AddSagaHandler<Warp.Tests.TestData.Sagas.BarrierSagaHandler>();
             });
 
-        var publisher = server.CreatePublisher();
-        await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartsMessage { CorrelationKey = "contended" });
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Wait for the first handler to be pinned at the barrier. Assert the wait actually
-        // succeeded — SemaphoreSlim.WaitAsync returns false on timeout, and silently proceeding
-        // would run every downstream assertion on the false premise that the mutex is held,
-        // masking the real failure (starved worker / handler never picked up) behind a generic
-        // 20s hang. Fail fast and descriptively instead.
-        var pinned = await signal.Running.WaitAsync(TimeSpan.FromSeconds(10), Xunit.TestContext.Current.CancellationToken);
-        pinned.ShouldBeTrue("first saga handler was not picked up and pinned at the barrier within 10s");
-
-        // Now publish a second message for the same correlation key. The proxy will fail to
-        // acquire the mutex (held by the first handler) and set Outcome = Enqueued requeue.
-        await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartMessage { CorrelationKey = "contended" });
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Wait until at least one routed handler-job has a JobLog with the "busy" message.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        var sawBusy = false;
-        while (DateTime.UtcNow < deadline)
+        try
         {
-            sawBusy = await server.CreateContext().Set<Warp.Core.Data.Entities.JobLog>()
-                .Where(x => x.Message != null && x.Message.Contains("busy for 'contended'"))
-                .AnyAsync(Xunit.TestContext.Current.CancellationToken);
-            if (sawBusy)
-            {
-                break;
-            }
+            var ct = Xunit.TestContext.Current.CancellationToken;
+            var publisher = server.CreatePublisher();
+            await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartsMessage { CorrelationKey = "contended" });
+            await publisher.SaveChangesAsync(ct);
 
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
+            // Wait for the first handler to be pinned at the barrier, and assert it: WaitAsync returns
+            // false on timeout, and proceeding would run everything below on the false premise that the
+            // mutex is held.
+            var pinned = await signal.Running.WaitAsync(TimeSpan.FromSeconds(8), ct);
+            pinned.ShouldBeTrue("first saga handler was not picked up and pinned at the barrier within 8s");
+
+            // A second message for the same correlation key: the proxy fails to acquire the mutex the
+            // first handler holds and requeues with a jittered ScheduleTime.
+            await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartMessage { CorrelationKey = "contended" });
+            await publisher.SaveChangesAsync(ct);
+
+            // While the first handler stays pinned, the second job keeps cycling: busy, Scheduled a
+            // jittered 50-250 ms ahead, activated, busy again. So neither its state nor its ScheduleTime
+            // holds still, and a single read of the row can land between two cycles (this test used to
+            // do that, and also compared ScheduleTime with the job's CreateTime, which every requeue
+            // pushes further apart). Instead wait for one observation of the property itself: the job
+            // parked in Scheduled, a short jitter after the busy requeue that put it there. Without
+            // jitter it would be Enqueued at now and N workers would lock-step into a tight
+            // fetch, busy, fetch loop on the same mutex.
+            var sawBusy = false;
+            await WarpTestServer.WaitUntil(
+                async () =>
+                {
+                    await using var ctx = server.CreateContext();
+                    var job = await ctx.Set<Warp.Core.Entities.Job>()
+                        .AsNoTracking()
+                        .Where(x => x.Type != null && x.Type.Contains("BarrierStartMessage"))
+                        .Where(x => x.CurrentState == Warp.Core.Enums.State.Scheduled)
+                        .Select(x => new { x.Id, x.ScheduleTime })
+                        .FirstOrDefaultAsync(ct);
+                    if (job == null)
+                    {
+                        return false;
+                    }
+
+                    var busyAt = await ctx.Set<Warp.Core.Data.Entities.JobLog>()
+                        .AsNoTracking()
+                        .Where(x => x.JobId == job.Id)
+                        .Where(x => x.Message != null && x.Message.Contains("busy for 'contended'"))
+                        .OrderByDescending(x => x.Timestamp)
+                        .Select(x => (DateTime?)x.Timestamp)
+                        .FirstOrDefaultAsync(ct);
+                    if (busyAt == null)
+                    {
+                        return false;
+                    }
+
+                    sawBusy = true;
+                    var jitter = job.ScheduleTime - busyAt.Value;
+
+                    return jitter > TimeSpan.Zero && jitter < TimeSpan.FromSeconds(1);
+                },
+                TimeSpan.FromSeconds(8),
+                ct);
+
+            sawBusy.ShouldBeTrue();
         }
-
-        sawBusy.ShouldBeTrue("expected a 'busy for contended' requeue log within 10s");
-
-        // Verify jitter survives to the DB: the requeued routed-message job sits in Scheduled
-        // with ScheduleTime in the near future, not Enqueued at now. Without jitter, N workers
-        // hitting the same busy mutex would lock-step into a tight fetch→busy→fetch loop. The
-        // 50–250ms jitter prevents sympathy.
-        var jitteredJob = await server.CreateContext().Set<Warp.Core.Entities.Job>()
-            .AsNoTracking()
-            .Where(j => j.CurrentState == Warp.Core.Enums.State.Scheduled)
-            .Where(j => j.Type != null && j.Type.Contains("BarrierStartMessage"))
-            .OrderByDescending(j => j.CreateTime)
-            .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
-
-        jitteredJob.ShouldNotBeNull("expected the requeued message-job to sit in Scheduled state");
-        var delay = jitteredJob.ScheduleTime - jitteredJob.CreateTime;
-        delay.TotalMilliseconds.ShouldBeGreaterThan(0, "ScheduleTime must be in the future relative to CreateTime (jitter applied)");
-        delay.TotalMilliseconds.ShouldBeLessThan(1000, "jitter should be capped well under 1s");
-
-        // Release the barrier so the first handler completes and the test doesn't hang in cleanup.
-        signal.CanFinish.Release(10);
+        finally
+        {
+            // Always, not only on the passing path: with the handler still pinned, stopping the server
+            // waits on it, and an assertion that failed above would surface as a bare 20 s test timeout
+            // instead of its own message (#215).
+            signal.CanFinish.Release(10);
+        }
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task SagaHandlerPublishesChildJob_ChildReachesEnqueuedAndCompletes()
     {
         // Validates the S1 contract end-to-end: a saga handler that calls IPublisher.Enqueue
@@ -223,25 +235,23 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await WaitForSagaState(server, "child-test", paymentCaptured: false, inventoryReserved: false);
 
         // The saga handler published a FollowUpJob. Wait for it to reach Completed via the worker.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            var followUp = await server.CreateContext().Set<Warp.Core.Entities.Job>()
-                .Where(x => x.Type != null && x.Type.Contains("FollowUpJob"))
-                .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
-            if (followUp != null && followUp.CurrentState == Warp.Core.Enums.State.Completed)
+        Warp.Core.Entities.Job? followUp = null;
+        await WarpTestServer.WaitUntil(
+            "FollowUpJob published from the saga handler reaching Completed",
+            async () =>
             {
-                followUp.Kind.ShouldBe(Warp.Core.Enums.JobKind.Job);
-                return;
-            }
+                followUp = await server.CreateContext().Set<Warp.Core.Entities.Job>()
+                    .Where(x => x.Type != null && x.Type.Contains("FollowUpJob"))
+                    .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
 
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
+                return followUp?.CurrentState == Warp.Core.Enums.State.Completed;
+            },
+            ct: Xunit.TestContext.Current.CancellationToken);
 
-        throw new TimeoutException("FollowUpJob published from saga handler did not reach Completed within 10s");
+        followUp!.Kind.ShouldBe(Warp.Core.Enums.JobKind.Job);
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task TimeoutMessage_FiresAfterDelay_WhenSagaStillLive()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -258,7 +268,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await WaitForSagaRemoved(server, "O-timeout");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task TimeoutMessage_FiresAfterSagaCompleted_SilentlyDeletesJob()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -295,93 +305,72 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // After the timeout fires (delay 500ms), its routed handler-job should be Deleted, not Failed.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            var ctx = server.CreateContext();
-            var children = await ctx.Set<Warp.Core.Entities.Job>()
-                .Where(x => x.ParentJobId == timeoutMsgId)
-                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
-            if (children.Count > 0 && children.All(c => c.CurrentState == Warp.Core.Enums.State.Deleted))
+        await WarpTestServer.WaitUntil(
+            "The timeout message's handler job moving to Deleted after the saga completed",
+            async () =>
             {
-                return;
-            }
+                var children = await server.CreateContext().Set<Warp.Core.Entities.Job>()
+                    .Where(x => x.ParentJobId == timeoutMsgId)
+                    .ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
-
-        throw new TimeoutException("Timeout-message handler-job was not transitioned to Deleted after the saga completed");
+                return children.Count > 0 && children.All(c => c.CurrentState == Warp.Core.Enums.State.Deleted);
+            },
+            ct: Xunit.TestContext.Current.CancellationToken);
     }
 
     private static async Task WaitForSagaState(WarpTestServer server, string correlationKey, bool paymentCaptured, bool inventoryReserved)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         var typeName = typeof(OrderSaga).FullName!;
-        while (DateTime.UtcNow < deadline)
-        {
-            var json = await server.CreateContext().Set<SagaState>()
-                .Where(x => x.Type == typeName && x.CorrelationKey == correlationKey)
-                .Select(x => x.StateJson)
-                .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
-
-            if (json != null)
+        await WarpTestServer.WaitUntil(
+            $"Saga '{correlationKey}' reaching paymentCaptured={paymentCaptured}, inventoryReserved={inventoryReserved}",
+            async () =>
             {
-                var saga = System.Text.Json.JsonSerializer.Deserialize<OrderSaga>(json);
-                if (saga != null && saga.PaymentCaptured == paymentCaptured && saga.InventoryReserved == inventoryReserved)
-                {
-                    return;
-                }
-            }
+                var json = await server.CreateContext().Set<SagaState>()
+                    .Where(x => x.Type == typeName && x.CorrelationKey == correlationKey)
+                    .Select(x => x.StateJson)
+                    .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
+                var saga = json == null ? null : System.Text.Json.JsonSerializer.Deserialize<OrderSaga>(json);
 
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
-
-        throw new TimeoutException($"Saga '{correlationKey}' did not reach expected state (paymentCaptured={paymentCaptured}, inventoryReserved={inventoryReserved})");
+                return saga != null && saga.PaymentCaptured == paymentCaptured && saga.InventoryReserved == inventoryReserved;
+            },
+            ct: Xunit.TestContext.Current.CancellationToken);
     }
 
     private static async Task WaitForChildrenCompleted(WarpTestServer server, Guid parentJobId)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         List<Warp.Core.Entities.Job> children = [];
-        while (DateTime.UtcNow < deadline)
+        try
         {
-            children = await server.CreateContext().Set<Warp.Core.Entities.Job>()
-                .AsNoTracking()
-                .Where(x => x.ParentJobId == parentJobId)
-                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+            await WarpTestServer.WaitUntil(
+                async () =>
+                {
+                    children = await server.CreateContext().Set<Warp.Core.Entities.Job>()
+                        .AsNoTracking()
+                        .Where(x => x.ParentJobId == parentJobId)
+                        .ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
-            if (children.Count > 0 && children.All(c => c.CurrentState == Warp.Core.Enums.State.Completed))
-            {
-                return;
-            }
-
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
+                    return children.Count > 0 && children.All(c => c.CurrentState == Warp.Core.Enums.State.Completed);
+                },
+                ct: Xunit.TestContext.Current.CancellationToken);
         }
+        catch (TimeoutException)
+        {
+            var snapshot = children.Count == 0
+                ? "<no children>"
+                : string.Join(", ", children.Select(c => $"{c.Id}={c.CurrentState}"));
 
-        var snapshot = children.Count == 0
-            ? "<no children>"
-            : string.Join(", ", children.Select(c => $"{c.Id}={c.CurrentState}"));
-        throw new TimeoutException($"Children of {parentJobId} did not all reach Completed within 10s. States: {snapshot}");
+            throw new TimeoutException($"Children of {parentJobId} did not all reach Completed within 10s. States: {snapshot}");
+        }
     }
 
     private static async Task WaitForSagaRemoved(WarpTestServer server, string correlationKey)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         var typeName = typeof(OrderSaga).FullName!;
-        while (DateTime.UtcNow < deadline)
-        {
-            var exists = await server.CreateContext().Set<SagaState>()
+        await WarpTestServer.WaitUntil(
+            $"Saga '{correlationKey}' being removed",
+            async () => !await server.CreateContext().Set<SagaState>()
                 .Where(x => x.Type == typeName && x.CorrelationKey == correlationKey)
-                .AnyAsync(Xunit.TestContext.Current.CancellationToken);
-
-            if (!exists)
-            {
-                return;
-            }
-
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
-
-        throw new TimeoutException($"Saga '{correlationKey}' was not removed within 10s");
+                .AnyAsync(Xunit.TestContext.Current.CancellationToken),
+            ct: Xunit.TestContext.Current.CancellationToken);
     }
 }

@@ -39,7 +39,7 @@ public abstract class ErrorGroupDispatcherIntegrationTestsBase : IntegrationTest
         config.ErrorGroupingInterval = TimeSpan.FromMinutes(5);
     }
 
-    [TimedFact(timeout: 30_000)]
+    [TimedFact]
     public async Task GivenDispatcherMode_WhenJobFails_ThenErrorGroupIsCreatedAndInboxDrained()
     {
         // Arrange — dispatcher-mode server; enqueue a handler that throws deterministically.

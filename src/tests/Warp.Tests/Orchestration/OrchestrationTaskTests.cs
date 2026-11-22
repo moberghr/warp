@@ -4,6 +4,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Events;
+using Warp.Core.Notifications;
 using Warp.Tests.Fixtures;
 using Warp.Worker.Services;
 
@@ -450,6 +451,158 @@ public abstract class OrchestrationTaskTestsBase : IAsyncLifetime
         await Warp.Tests.Helpers.TestTasks.CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), signals: signals).RunOrchestrationCoreAsync(CancellationToken.None);
 
         wakes.ShouldBe(1, "one continuation released, one queue: exactly one wake");
+    }
+
+    // Rule 6.11. Two messages are ready; a finished job named only the first. The pass finalizes that
+    // one and leaves the other for the sweep, which is the point: it did not read every parent.
+    [TimedFact]
+    public async Task RunOrchestration_ParentNamedByAFinishedJob_OnlyThatParentIsFinalized()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var (named, other) = await SeedTwoReadyMessagesAsync(ct);
+        var signals = new ServerTaskSignals<TestContext>();
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        signals.SignalJobFinalized(named);
+
+        await Warp.Tests.Helpers.TestTasks
+            .CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), signals: signals, orchestrationInterval: TimeSpan.FromDays(1))
+            .RunOrchestrationCoreAsync(ct);
+
+        await using var assert = _fixture.CreateContext();
+        (await assert.Set<Job>().Where(x => x.Id == named).Select(x => x.CurrentState).SingleAsync(ct)).ShouldBe(State.Completed);
+        (await assert.Set<Job>().Where(x => x.Id == other).Select(x => x.CurrentState).SingleAsync(ct)).ShouldBe(State.Processing);
+    }
+
+    // The other half: a wake that names no parent (a server from before 8.0, a reconnect) still finds
+    // every ready parent, and so does the timed sweep, which is what catches a child finished by
+    // something other than a worker.
+    [TimedTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RunOrchestration_SweepRequestedOrDue_EveryReadyParentIsFinalized(bool requested)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var (first, second) = await SeedTwoReadyMessagesAsync(ct);
+        var signals = new ServerTaskSignals<TestContext>();
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        if (requested)
+        {
+            signals.SignalJobFinalized();
+        }
+
+        await Warp.Tests.Helpers.TestTasks
+            .CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), signals: signals, orchestrationInterval: requested ? TimeSpan.FromDays(1) : TimeSpan.Zero)
+            .RunOrchestrationCoreAsync(ct);
+
+        await using var assert = _fixture.CreateContext();
+        var states = await assert.Set<Job>().Where(x => x.Id == first || x.Id == second).Select(x => x.CurrentState).ToListAsync(ct);
+        states.ShouldBe([State.Completed, State.Completed]);
+    }
+
+    // Rule 6.11, the awaited half. Past 1,000 awaited parents a pass no longer reads them all: it asks
+    // about the jobs a wake named, and leaves the rest for the sweep.
+    [TimedFact]
+    public async Task RunOrchestration_MoreAwaitedParentsThanOnePassReads_ChecksNamedJobsAndSweepsTheRest()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        Job Row(State state, Guid? parent) =>
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Kind = JobKind.Job,
+                CurrentState = state,
+                ParentJobId = parent,
+                CreateTime = now,
+                ScheduleTime = now,
+                Queue = "default",
+            };
+
+        var parents = Enumerable.Range(0, 1001).Select(_ => Row(State.Processing, null)).ToList();
+        var continuations = parents.ConvertAll(x => Row(State.Awaiting, x.Id));
+        await using (var seed = _fixture.CreateContext())
+        {
+            seed.Set<Job>().AddRange(parents);
+            seed.Set<Job>().AddRange(continuations);
+            await seed.SaveChangesAsync(ct);
+        }
+
+        var signals = new ServerTaskSignals<TestContext>();
+        Task PassAsync() => Warp.Tests.Helpers.TestTasks
+            .CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), signals: signals, orchestrationInterval: TimeSpan.FromDays(1))
+            .RunOrchestrationCoreAsync(ct);
+        async Task<State> StateOfAsync(Job job)
+        {
+            await using var read = _fixture.CreateContext();
+
+            return await read.Set<Job>().Where(x => x.Id == job.Id).Select(x => x.CurrentState).SingleAsync(ct);
+        }
+
+        // The first pass of the process sweeps, and finds more awaited parents than a pass reads.
+        await PassAsync();
+        signals.ManyAwaitedParents.ShouldBeTrue();
+
+        await using (var finish = _fixture.CreateContext())
+        {
+            await finish.Set<Job>()
+                .Where(x => x.Id == parents[0].Id || x.Id == parents[1].Id)
+                .ExecuteUpdateAsync(x => x.SetProperty(y => y.CurrentState, State.Completed), ct);
+        }
+
+        // Both finished; a wake named only the first.
+        signals.SignalJobFinalized(parentJobId: null, settledJobId: parents[0].Id);
+        await PassAsync();
+
+        (await StateOfAsync(continuations[0])).ShouldBe(State.Enqueued);
+        (await StateOfAsync(continuations[1])).ShouldBe(State.Awaiting, "not named, and no sweep was due: the pass did not read every awaited parent");
+
+        // The sweep is what finds the one nothing named.
+        signals.SignalJobFinalized();
+        await PassAsync();
+
+        (await StateOfAsync(continuations[1])).ShouldBe(State.Enqueued);
+    }
+
+    // A continuation published after its parent finished: nothing will finish that parent again, so the
+    // publish itself names it.
+    [TimedFact]
+    public async Task CapturePending_ContinuationAdded_NamesItsParent()
+    {
+        var parent = Guid.NewGuid();
+        await using var context = _fixture.CreateContext();
+        context.Set<Job>().Add(new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Awaiting, ParentJobId = parent, CreateTime = DateTime.UtcNow, ScheduleTime = DateTime.UtcNow, Queue = "default" });
+
+        var notifications = NotificationDispatch.CapturePending(context);
+
+        var signals = new ServerTaskSignals<TestContext>();
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        NotificationDispatch.SignalLocally(notifications, signals);
+        signals.TakeSettledJobs().ShouldBe([parent]);
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1)).Sweep.ShouldBeFalse();
+    }
+
+    private async Task<(Guid First, Guid Second)> SeedTwoReadyMessagesAsync(CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        Job Row(JobKind kind, State state, Guid? parent) =>
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Kind = kind,
+                CurrentState = state,
+                ParentJobId = parent,
+                CreateTime = now,
+                ScheduleTime = now,
+                Queue = "default",
+            };
+
+        var first = Row(JobKind.Message, State.Processing, null);
+        var second = Row(JobKind.Message, State.Processing, null);
+        await using var seed = _fixture.CreateContext();
+        seed.Set<Job>().AddRange(first, second, Row(JobKind.Job, State.Completed, first.Id), Row(JobKind.Job, State.Completed, second.Id));
+        await seed.SaveChangesAsync(ct);
+
+        return (first.Id, second.Id);
     }
 
     [TimedFact]

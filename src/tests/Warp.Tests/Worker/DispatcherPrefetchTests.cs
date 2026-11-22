@@ -109,6 +109,13 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
         }
 
         counter.Counter.ShouldBe(1);
+
+        // The copy the guard dropped left nothing behind: one Processing and one Completed log, both from
+        // the execution that ran, and the group still has its capacity (the pinned job finished too).
+        var logs = await server.GetJobLogs(prefetchedId);
+        logs.Count(x => string.Equals(x.EventType, "Processing", StringComparison.Ordinal)).ShouldBe(1);
+        logs.Count(x => string.Equals(x.EventType, "Completed", StringComparison.Ordinal)).ShouldBe(1);
+        (await server.GetJob(prefetchedId)).CurrentState.ShouldBe(State.Completed);
     }
 
     // Pins that MarkWorkerOwnership RENEWS LastKeepAlive as well as checking it. Checking alone only

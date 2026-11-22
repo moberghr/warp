@@ -29,7 +29,6 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
     private readonly IDatabaseFixture _fixture;
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
-    private static readonly string[] DefaultQueues = ["default"];
 
     protected HourlyStatsTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
 
@@ -37,107 +36,16 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
     {
         await _fixture.ResetAsync();
 
-        var ctx = _fixture.CreateContext();
-        ctx.Set<Server>().Add(new Server
-        {
-            Id = ServerId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-            ServiceCount = 1,
-        });
-        ctx.Set<Warp.Core.Data.Entities.Worker>().Add(new Warp.Core.Data.Entities.Worker
-        {
-            Id = WorkerId,
-            ServerId = ServerId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-        });
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await TestWorkerHarness.SeedServerAndWorkerAsync(_fixture, ServerId, WorkerId, Xunit.TestContext.Current.CancellationToken);
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    private WarpWorkerService<TestContext> CreateWorker()
-    {
-        var services = new ServiceCollection();
-        services.AddWarpMediator();
-        services.AddLogging();
-        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddTestServerContext<TestContext>();
-        services.AddSingleton<CounterService>();
-        services.AddSingleton<MultiHandlerCounter>();
-        services.AddScoped<Warp.Core.Handlers.JobContext>();
-        services.AddScoped<Warp.Core.Handlers.IJobContext>(x => x.GetRequiredService<Warp.Core.Handlers.JobContext>());
-
-        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
-        {
-            WorkerCount = 1,
-            ServerId = ServerId,
-            Queues = DefaultQueues,
-        });
-        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
-        services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
-
-        var provider = services.BuildServiceProvider();
-        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
-
-        var groupConfig = new WorkerGroupConfiguration
-        {
-            WorkerCount = 1,
-            Queues = DefaultQueues,
-        };
-
-        return new WarpWorkerService<TestContext>(
-            WorkerId,
-            scopeFactory,
-            new NullLogger<WarpWorkerService<TestContext>>(),
-            workerConfig,
-            groupConfig,
-            TimeProvider.System,
-            Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
-            Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.NullSignals,
-            _counterBuffer);
-    }
+    private WarpWorkerService<TestContext> CreateWorker() =>
+        TestWorkerHarness.Create(_fixture, _counterBuffer, ServerId, WorkerId).Worker;
 
     [TimedFact]
-    public async Task GetAndProcessJob_CompletedJob_IncrementsHourlySucceededStat()
-    {
-        // Arrange
-        var ctx = _fixture.CreateContext();
-        var jobId = Guid.NewGuid();
-        ctx.Set<Job>().Add(new Job
-        {
-            Id = jobId,
-            Kind = JobKind.Job,
-            CurrentState = State.Enqueued,
-            Type = typeof(UnitRequest).AssemblyQualifiedName,
-            Message = JsonSerializer.Serialize(new UnitRequest()),
-            CreateTime = DateTime.UtcNow,
-            ScheduleTime = DateTime.UtcNow,
-            Queue = "default",
-        });
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var worker = CreateWorker();
-
-        // Act
-        await worker.GetAndProcessJob(CancellationToken.None);
-        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
-
-        await Warp.Tests.Helpers.TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(CancellationToken.None);
-
-        // Assert
-        var hourKey = $"stats:succeeded:{DateTime.UtcNow:yyyy-MM-dd-HH}";
-        var stat = await _fixture.CreateContext().Set<Statistic>()
-            .FindAsync([hourKey], Xunit.TestContext.Current.CancellationToken);
-
-        stat.ShouldNotBeNull();
-        stat.Value.ShouldBeGreaterThanOrEqualTo(1);
-    }
-
-    [TimedFact]
-    public async Task GetAndProcessJob_FailedJob_IncrementsHourlyFailedStat()
+    public async Task GetAndProcessJob_FailedJob_IncrementsFailedStatAndItsHourlyBucket()
     {
         // Arrange
         var ctx = _fixture.CreateContext();
@@ -169,11 +77,17 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
             .FindAsync([hourKey], Xunit.TestContext.Current.CancellationToken);
 
         stat.ShouldNotBeNull();
-        stat.Value.ShouldBeGreaterThanOrEqualTo(1);
+        stat.Value.ShouldBe(1);
+
+        // The lifetime total moves with its hourly bucket.
+        var lifetime = await _fixture.CreateContext().Set<Statistic>()
+            .FindAsync(["stats:failed"], Xunit.TestContext.Current.CancellationToken);
+        lifetime.ShouldNotBeNull();
+        lifetime.Value.ShouldBe(1);
     }
 
     [TimedFact]
-    public async Task GetAndProcessJob_MultipleJobs_HourlyStatsAccumulate()
+    public async Task GetAndProcessJob_MultipleJobs_SucceededStatAndItsHourlyBucketAccumulate()
     {
         // Arrange — create 3 jobs
         var ctx = _fixture.CreateContext();
@@ -213,6 +127,12 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
 
         stat.ShouldNotBeNull();
         stat.Value.ShouldBe(3);
+
+        // The lifetime total moves with its hourly bucket.
+        var lifetime = await _fixture.CreateContext().Set<Statistic>()
+            .FindAsync(["stats:succeeded"], Xunit.TestContext.Current.CancellationToken);
+        lifetime.ShouldNotBeNull();
+        lifetime.Value.ShouldBe(3);
     }
 
     [TimedFact]

@@ -28,10 +28,22 @@ internal static class NotificationDispatch
 
         var result = new List<Notification>();
         HashSet<string>? seenQueues = null;
+        HashSet<Guid>? awaitedParents = null;
         var sawMessage = false;
 
         foreach (var entry in entries)
         {
+            // A continuation published after its parent finished would otherwise wait for the
+            // Orchestrator's next sweep: nothing else is going to finish that parent again. Naming the
+            // parent has the Orchestrator look at its awaiting rows now (rule 6.11).
+            if (entry.State == EntityState.Added && entry.Entity.CurrentState == State.Awaiting && entry.Entity.ParentJobId is { } awaited)
+            {
+                awaitedParents ??= [];
+                awaitedParents.Add(awaited);
+
+                continue;
+            }
+
             if (!ShouldEmit(entry))
             {
                 continue;
@@ -52,6 +64,11 @@ internal static class NotificationDispatch
                 result.Add(new Notification(NotificationKind.MessageEnqueued, null));
                 sawMessage = true;
             }
+        }
+
+        if (awaitedParents != null)
+        {
+            result.Add(new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode([], awaitedParents)));
         }
 
         return result;
@@ -123,7 +140,7 @@ internal static class NotificationDispatch
                     signals.SignalMessageEnqueued();
                     break;
                 case NotificationKind.JobFinalized:
-                    signals.SignalJobFinalized();
+                    FinalizedParentsPayload.Signal(signals, notifications[i].Queue);
                     break;
                 default:
                     break;

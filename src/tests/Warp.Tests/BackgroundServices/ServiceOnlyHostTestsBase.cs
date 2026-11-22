@@ -30,7 +30,7 @@ public abstract class ServiceOnlyHostTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ServiceOnly_PerServerService_ReachesUserCode()
     {
         var barrier = new BackgroundServiceBarrierSignal();
@@ -53,7 +53,7 @@ public abstract class ServiceOnlyHostTestsBase : IntegrationTestBase
         barrier.CanFinish.Release();
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ServiceOnly_CreatesServerRow_NoWorkerRows()
     {
         var barrier = new BackgroundServiceBarrierSignal();
@@ -90,7 +90,7 @@ public abstract class ServiceOnlyHostTestsBase : IntegrationTestBase
         barrier.CanFinish.Release();
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ServiceOnly_GracefulShutdown_DeletesInstanceRow()
     {
         var barrier = new BackgroundServiceBarrierSignal();
@@ -121,7 +121,7 @@ public abstract class ServiceOnlyHostTestsBase : IntegrationTestBase
         instance.ShouldBeNull("instance row should be deleted on graceful shutdown");
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ServiceOnly_SingletonService_AcquiresLease()
     {
         var barrier = new SingletonBarrierSignal();
@@ -154,7 +154,7 @@ public abstract class ServiceOnlyHostTestsBase : IntegrationTestBase
         barrier.CanFinish.Release();
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ServiceOnly_ExpirationCleanup_RemovesOrphanedDefinition()
     {
         var barrier = new BackgroundServiceBarrierSignal();

@@ -14,6 +14,7 @@ using Shouldly;
 using Warp.Dashboard;
 using Warp.Dashboard.Extensions;
 using Warp.Dashboard.Extensions.Retry;
+using Warp.Tests.Helpers;
 using XunitTestContext = Xunit.TestContext;
 
 namespace Warp.Tests.Admin;
@@ -28,7 +29,7 @@ namespace Warp.Tests.Admin;
 /// sign-in page forever.
 /// </summary>
 [Trait("Category", "NoDb")]
-public class DashboardAuthTests
+public class DashboardAuthTests : IClassFixture<SharedTestHosts>
 {
     // Mapped from a list captured at map time, so it needs no Warp services — the cheapest honest probe
     // of whether the API group carries the host's conventions.
@@ -36,6 +37,10 @@ public class DashboardAuthTests
     private const string HostPolicy = "WarpDashboard";
     private const string AdminClaim = "warp-admin";
     private const string PermissiveScheme = "Permissive";
+
+    private readonly SharedTestHosts _hosts;
+
+    public DashboardAuthTests(SharedTestHosts hosts) => _hosts = hosts;
 
     [TimedFact]
     public async Task NoGate_ApiReturnsOk()
@@ -90,7 +95,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task BuiltInLogin_ApiReturns401WithoutCookie()
     {
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
@@ -106,7 +111,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task BuiltInLogin_ShellStaysAnonymousSoTheSpaCanRenderItsLoginPage()
     {
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var response = await client.GetAsync("/warp", XunitTestContext.Current.CancellationToken);
@@ -124,7 +129,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task BuiltInLogin_ValidCredentials_Returns200AndSetsCookie()
     {
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var response = await LoginAsync(client, "admin", "admin");
@@ -177,7 +182,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task BuiltInLogin_InvalidCredentials_Returns401()
     {
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var response = await LoginAsync(client, "admin", "wrong");
@@ -193,7 +198,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task BuiltInLogin_WithCookie_ApiReturnsOk()
     {
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var login = await LoginAsync(client, "admin", "admin");
@@ -213,7 +218,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task BuiltInLogin_AfterLogout_ApiReturns401()
     {
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var login = await LoginAsync(client, "admin", "admin");
@@ -256,7 +261,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task AuthStatus_LocalRequestsOnly_IsNotReachableRemotely()
     {
-        var (app, client) = await StartAsync(x => x.AddWarpDashboard(), x => x.RequireLocalRequests());
+        var (app, client) = await StartAsync(AddDashboard, RequireLocal);
         try
         {
             var response = await client.GetAsync("/warp/api/auth/status", XunitTestContext.Current.CancellationToken);
@@ -272,7 +277,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task AuthStatus_BuiltInLogin_NoCookie_ReturnsAuthenticatedFalse()
     {
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var body = await GetAuthStatusAsync(client);
@@ -288,7 +293,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task AuthStatus_BuiltInLogin_WithCookie_ReturnsAuthenticatedTrue()
     {
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var login = await LoginAsync(client, "admin", "admin");
@@ -307,7 +312,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task HostPolicy_AnonymousBrowserRequest_ChallengesToSignIn()
     {
-        var (app, client) = await StartAsync(AddHostIdentity, x => x.RequireAuthorization(HostPolicy), MapSignIn);
+        var (app, client) = await StartAsync(AddHostIdentity, RequireHostPolicy, MapSignIn);
         try
         {
             var response = await client.GetAsync("/warp", XunitTestContext.Current.CancellationToken);
@@ -326,7 +331,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task HostPolicy_AuthenticatedWithoutPermission_ForbidsInsteadOfBouncingToSignIn()
     {
-        var (app, client) = await StartAsync(AddHostIdentity, x => x.RequireAuthorization(HostPolicy), MapSignIn);
+        var (app, client) = await StartAsync(AddHostIdentity, RequireHostPolicy, MapSignIn);
         try
         {
             var signIn = await client.GetAsync("/signin?admin=false", XunitTestContext.Current.CancellationToken);
@@ -348,7 +353,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task HostPolicy_AuthenticatedWithPermission_ReturnsShell()
     {
-        var (app, client) = await StartAsync(AddHostIdentity, x => x.RequireAuthorization(HostPolicy), MapSignIn);
+        var (app, client) = await StartAsync(AddHostIdentity, RequireHostPolicy, MapSignIn);
         try
         {
             var signIn = await client.GetAsync("/signin?admin=true", XunitTestContext.Current.CancellationToken);
@@ -367,7 +372,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task HostPolicy_AnonymousApiRequest_IsGated()
     {
-        var (app, client) = await StartAsync(AddHostIdentity, x => x.RequireAuthorization(HostPolicy), MapSignIn);
+        var (app, client) = await StartAsync(AddHostIdentity, RequireHostPolicy, MapSignIn);
         try
         {
             var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
@@ -476,7 +481,7 @@ public class DashboardAuthTests
     {
         // Uniform gating is the upside of the endpoint owning its assets: one convention covers the shell,
         // its bundle, the API and the hub.
-        var (app, client) = await StartAsync(x => x.AddWarpDashboard(), x => x.RequireLocalRequests());
+        var (app, client) = await StartAsync(AddDashboard, RequireLocal);
         try
         {
             var response = await client.GetAsync("/warp/favicon.svg", XunitTestContext.Current.CancellationToken);
@@ -502,7 +507,7 @@ public class DashboardAuthTests
                 x.AddAuthentication(PermissiveScheme)
                     .AddScheme<AuthenticationSchemeOptions, PermissiveAuthHandler>(PermissiveScheme, _ => { });
             },
-            x => x.RequireWarpDashboardLogin());
+            RequireLogin);
         try
         {
             var response = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
@@ -519,7 +524,7 @@ public class DashboardAuthTests
     public async Task LocalRequests_NonLoopbackCaller_Forbidden()
     {
         // TestServer leaves RemoteIpAddress null, which the policy treats as "cannot prove loopback".
-        var (app, client) = await StartAsync(x => x.AddWarpDashboard(), x => x.RequireLocalRequests());
+        var (app, client) = await StartAsync(AddDashboard, RequireLocal);
         try
         {
             var response = await client.GetAsync("/warp", XunitTestContext.Current.CancellationToken);
@@ -535,7 +540,7 @@ public class DashboardAuthTests
     [TimedFact]
     public async Task LocalRequests_LoopbackCaller_ReturnsOk()
     {
-        var (app, client) = await StartAsync(x => x.AddWarpDashboard(), x => x.RequireLocalRequests(), StampLoopback);
+        var (app, client) = await StartAsync(AddDashboard, RequireLocal, StampLoopback);
         try
         {
             var response = await client.GetAsync("/warp", XunitTestContext.Current.CancellationToken);
@@ -636,7 +641,7 @@ public class DashboardAuthTests
         // An anonymous 404 for unregistered routes next to a 401 for registered ones is an enumeration
         // oracle: it tells an unauthenticated prober which addons are live. Unmatched API paths must
         // inherit the group's authorization and answer like every other API route.
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var registered = await client.GetAsync(ApiProbe, XunitTestContext.Current.CancellationToken);
@@ -726,7 +731,7 @@ public class DashboardAuthTests
     {
         // Applying the convention on top of the automatic one must not double-gate into something a valid
         // cookie can no longer satisfy.
-        var (app, client) = await StartAsync(AddBuiltInLogin, x => x.RequireWarpDashboardLogin());
+        var (app, client) = await StartAsync(AddBuiltInLogin, RequireLogin);
         try
         {
             var login = await LoginAsync(client, "admin", "admin");
@@ -770,7 +775,7 @@ public class DashboardAuthTests
                 x.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
                 AddHostIdentity(x);
             },
-            x => x.RequireAuthorization(HostPolicy),
+            RequireHostPolicy,
             MapSignIn);
         try
         {
@@ -798,7 +803,7 @@ public class DashboardAuthTests
                 x.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
                 AddHostIdentity(x);
             },
-            x => x.RequireAuthorization(HostPolicy),
+            RequireHostPolicy,
             MapSignIn);
         try
         {
@@ -827,7 +832,7 @@ public class DashboardAuthTests
                 x.AddWarpDashboard().AddBuiltInLogin<TestCredentialValidator>();
                 AddHostIdentity(x);
             },
-            x => x.RequireAuthorization(HostPolicy),
+            RequireHostPolicy,
             MapSignIn);
         try
         {
@@ -878,11 +883,37 @@ public class DashboardAuthTests
             await next(context);
         });
 
-    private static async Task<(WebApplication App, HttpClient Client)> StartAsync(
+    private static void AddDashboard(IServiceCollection services) => services.AddWarpDashboard();
+
+    private static void RequireLogin(WarpDashboardEndpointConventionBuilder dashboard) => dashboard.RequireWarpDashboardLogin();
+
+    private static void RequireLocal(WarpDashboardEndpointConventionBuilder dashboard) => dashboard.RequireLocalRequests();
+
+    private static void RequireHostPolicy(WarpDashboardEndpointConventionBuilder dashboard) => dashboard.RequireAuthorization(HostPolicy);
+
+    // One host per distinct configuration for the whole class (see SharedTestHosts): the tests differ
+    // in what they send, which is on the client each one gets for itself.
+    private async Task<(WebApplication App, HttpClient Client)> StartAsync(
         Action<IServiceCollection>? services = null,
         Action<WarpDashboardEndpointConventionBuilder>? gate = null,
         Action<WebApplication>? pipeline = null,
         string routePrefix = "/warp")
+    {
+        var app = await _hosts.GetOrStartAsync([services, gate, pipeline], routePrefix, () => StartHostAsync(services, gate, pipeline, routePrefix));
+
+        // Deliberately not TestServer.CreateClient(): that wraps the handler in a redirect-following one,
+        // and a challenge redirect is exactly what several of these assert on.
+        var server = app.GetTestServer();
+        var client = new HttpClient(server.CreateHandler()) { BaseAddress = server.BaseAddress };
+
+        return (app, client);
+    }
+
+    private static async Task<WebApplication> StartHostAsync(
+        Action<IServiceCollection>? services,
+        Action<WarpDashboardEndpointConventionBuilder>? gate,
+        Action<WebApplication>? pipeline,
+        string routePrefix)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -905,18 +936,16 @@ public class DashboardAuthTests
 
         await app.StartAsync(XunitTestContext.Current.CancellationToken);
 
-        // Deliberately not TestServer.CreateClient(): that wraps the handler in a redirect-following one,
-        // and a challenge redirect is exactly what several of these assert on.
-        var server = app.GetTestServer();
-        var client = new HttpClient(server.CreateHandler()) { BaseAddress = server.BaseAddress };
-
-        return (app, client);
+        return app;
     }
 
-    private static async Task StopAsync(WebApplication app, HttpClient client)
+    // The host belongs to the class fixture, which disposes it after the last test.
+    private static Task StopAsync(WebApplication app, HttpClient client)
     {
+        _ = app;
         client.Dispose();
-        await app.DisposeAsync();
+
+        return Task.CompletedTask;
     }
 
     private static async Task<HttpResponseMessage> LoginAsync(HttpClient client, string username, string password)

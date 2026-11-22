@@ -163,6 +163,50 @@ public abstract class ConcurrentClaimTestsBase : IAsyncLifetime
         await AssertAllProcessingWithDistinctWorkers(jobCount);
     }
 
+    [TimedFact]
+    public async Task ClaimEnqueuedJobs_BatchClaim_ReturnsTheOldestJobsOldestFirst()
+    {
+        // Eight jobs a second apart, with ids that sort in the OPPOSITE order to their schedule
+        // times, since id order is what PostgreSQL's UPDATE ... RETURNING gave back. A claim of five
+        // must be the five oldest, and in schedule order: the dispatcher starts them in list order.
+        var oldest = DateTime.UtcNow.AddMinutes(-1);
+        var jobs = Enumerable.Range(0, 8)
+            .Select(_ => Guid.NewGuid())
+            .OrderDescending()
+            .Select((id, i) =>
+                new Job
+                {
+                    Id = id,
+                    Kind = JobKind.Job,
+                    CurrentState = State.Enqueued,
+                    Type = typeof(UnitRequest).AssemblyQualifiedName,
+                    Message = "{}",
+                    CreateTime = oldest.AddSeconds(i),
+                    ScheduleTime = oldest.AddSeconds(i),
+                    Queue = "default",
+                })
+            .ToList();
+
+        await using (var arrange = _fixture.CreateContext())
+        {
+            arrange.Set<Job>().AddRange(jobs);
+            await arrange.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        }
+
+        // Act
+        await using var ctx = _fixture.CreateContext();
+        var claimed = await Warp.Tests.Helpers.TestTasks.QueriesFor(ctx).ClaimEnqueuedJobsAsync(
+            ctx,
+            ["default"],
+            Guid.NewGuid(),
+            DateTime.UtcNow,
+            5,
+            Xunit.TestContext.Current.CancellationToken);
+
+        // Assert
+        claimed.Select(x => x.Id).ShouldBe(jobs.Take(5).Select(x => x.Id));
+    }
+
     private async Task<List<Guid>> SeedJobs(int count, string queue)
     {
         var now = DateTime.UtcNow;

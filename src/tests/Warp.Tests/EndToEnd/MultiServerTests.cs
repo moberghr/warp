@@ -80,7 +80,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         workerIds.Distinct().Count().ShouldBe(2, "Two jobs must be processed by two distinct workers");
 
         barrier.CanFinish.Release(2);
-        await server1.WaitForCompletion();
+        await server1.WaitForCompletion(TimeSpan.FromSeconds(30));
 
         var readCtx = Fixture.CreateContext();
         foreach (var jobId in new[] { job1Id, job2Id })
@@ -112,7 +112,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         var messageId = await publisher.Publish(new SingleHandlerMessage());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await server1.WaitForCompletion();
+        await server1.WaitForCompletion(TimeSpan.FromSeconds(30));
 
         var ctx = Fixture.CreateContext();
 
@@ -140,7 +140,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         var messageId = await publisher.Publish(new MultiRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await server1.WaitForCompletion();
+        await server1.WaitForCompletion(TimeSpan.FromSeconds(30));
 
         var ctx = Fixture.CreateContext();
         var childCount = await ctx.Set<Job>()
@@ -227,7 +227,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
 
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await server1.WaitForCompletion();
+        await server1.WaitForCompletion(TimeSpan.FromSeconds(30));
 
         var ctx = Fixture.CreateContext();
 
@@ -290,7 +290,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
 
         // Release barrier and let job1 complete naturally before disposal
         barrier.CanFinish.Release();
-        await server1.WaitForCompletion();
+        await server1.WaitForCompletion(TimeSpan.FromSeconds(30));
     }
 
     // Multi-server complex workload (50+ jobs: simple + messages + failing + retries +
@@ -462,7 +462,7 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Jobs should be processed by server2
-        await server2.WaitForCompletion();
+        await server2.WaitForCompletion(TimeSpan.FromSeconds(30));
 
         ctx = Fixture.CreateContext();
 

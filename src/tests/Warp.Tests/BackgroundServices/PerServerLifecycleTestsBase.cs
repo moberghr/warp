@@ -16,7 +16,7 @@ public abstract class PerServerLifecycleTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task Start_PerServerService_InsertsInstanceWithStatusRunning()
     {
         var barrier = new BackgroundServiceBarrierSignal();
@@ -41,7 +41,7 @@ public abstract class PerServerLifecycleTestsBase : IntegrationTestBase
         barrier.CanFinish.Release();
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task Start_PerServerService_ReachesUserCodeBarrier()
     {
         var barrier = new BackgroundServiceBarrierSignal();
@@ -61,7 +61,7 @@ public abstract class PerServerLifecycleTestsBase : IntegrationTestBase
         barrier.CanFinish.Release();
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task GracefulShutdown_DeletesInstanceRow()
     {
         var barrier = new BackgroundServiceBarrierSignal();

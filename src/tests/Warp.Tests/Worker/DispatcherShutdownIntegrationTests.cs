@@ -23,7 +23,7 @@ public abstract class DispatcherShutdownIntegrationTestsBase : IntegrationTestBa
     {
     }
 
-    [TimedFact(30_000)]
+    [TimedFact]
     public async Task GivenWorkInProgress_WhenServerReplaced_ThenAllJobsEventuallyComplete()
     {
         // Server A takes work, gets disposed mid-flight. Server B starts on the same queue.

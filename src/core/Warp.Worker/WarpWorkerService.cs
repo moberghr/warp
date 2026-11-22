@@ -48,6 +48,13 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     // state: one WarpWorkerService belongs to one worker and processes one job at a time.
     private readonly List<(string Key, int Value)> _stagedCounters = [];
 
+    // The terminal log rows the current job's latest finalizing attempt added to the worker context, and
+    // whether such an attempt was made. Both exist for one rare case: a finalizing write that fails after
+    // the handler ran, where the failure arm finalizes the SAME tracked job again
+    // (see BeginFinalizingTransactionAsync).
+    private readonly List<JobLog> _finalizationLogs = [];
+    private bool _finalizationAttempted;
+
     public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals, WarpCounterBuffer counterBuffer)
     {
         _workerId = workerId;
@@ -136,6 +143,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             PerfTrace.Mark(PerfTrace.CommitTransaction1);
             CommitStagedCounters();
         }
+
+        // A new job: nothing of the previous job's finalization applies to it.
+        _finalizationAttempted = false;
+        _finalizationLogs.Clear();
 
         var logCollector = new JobLogCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
         var progressCollector = new JobProgressCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
@@ -265,7 +276,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await monitorTask;
 
             PerfTrace.Mark(PerfTrace.BeginTransaction2);
-            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
 
             if (successOutcome != null)
             {
@@ -316,10 +327,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await monitorTask;
 
             var cancelNow = _timeProvider.GetUtcNow().UtcDateTime;
-            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
             job.CurrentState = State.Deleted;
             job.ExpireAt = cancelNow.Add(_configuration.JobExpirationTimeout);
-            job.CancellationMode = CancellationMode.None;
+            ClearCancellationMode(workerContext, job);
             job.CurrentWorkerId = null;
             job.LastKeepAlive = null;
 
@@ -430,7 +441,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await jobCts.CancelAsync();
             await monitorTask;
 
-            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext);
+            await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
             FinalizeJobState(workerContext, job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
             if (_configuration.EnableHandlerLogging)
             {
@@ -456,10 +467,14 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         // SignalJobFinalized fires the in-process signal; the transport publish covers
         // cross-process subscribers (other servers' Orchestrator instances, dashboard hub).
         // DispatchAsync would double-fire the local signal — handled here separately.
-        _signals.SignalJobFinalized();
+        // Both carry the job's parent, so the Orchestrator checks that one parent and not every parent
+        // in flight, and the job itself once it is at rest, since a continuation may wait on it (rule
+        // 6.11). Both ids are on the claimed row: no query, no extra statement.
+        Guid? settled = job.CurrentState is State.Completed or State.Failed or State.Deleted ? job.Id : null;
+        _signals.SignalJobFinalized(job.ParentJobId, settled);
         await NotificationDispatch.FireAsync(
             _notificationTransport,
-            [new Notification(NotificationKind.JobFinalized, null)],
+            [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(job.ParentJobId, settled))],
             cancellationToken);
 
         PerfTrace.Mark(PerfTrace.Done);
@@ -590,6 +605,17 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
     }
 
+    // DeleteJob sets CancellationMode on the ROW while this worker holds the entity it claimed, which
+    // still reads None. Assigning None is then no change to EF and the column would be left out of the
+    // finalizing UPDATE, leaving a finished job marked Graceful ("Cancelling..." on the dashboard for
+    // ever). Marking the property modified puts it in the UPDATE the worker issues anyway; the
+    // dispatcher path already writes it (CompletionBatch.MarkFinalizedColumns).
+    private static void ClearCancellationMode(DbContext context, Job job)
+    {
+        job.CancellationMode = CancellationMode.None;
+        context.Entry(job).Property(x => x.CancellationMode).IsModified = true;
+    }
+
     /// <summary>
     /// Finalizes job state: clears worker fields, adds counters and log entry.
     /// State must be set on the job before calling this method.
@@ -597,9 +623,15 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     private void FinalizeJobState(DbContext context, Job job, Exception? error, double? durationMs, JobOutcome? outcome = null, DateTime? totalDeadlineUtc = null, long incomingAttempts = 0)
     {
         var state = job.CurrentState;
-        job.CancellationMode = CancellationMode.None;
+        ClearCancellationMode(context, job);
         job.CurrentWorkerId = null;
         job.LastKeepAlive = null;
+
+        // Cleared here and set again only by the states that expire (Completed, Deleted). A job that is
+        // re-finalized after a failed completion write was already given an expiry by the Completed
+        // branch; left in place, a Failed job would be deleted by ExpirationCleanup, which never happens
+        // to a failed job (rule 8.2).
+        job.ExpireAt = null;
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var hourSuffix = now.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
@@ -716,7 +748,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         // not a miss. Meter is always-on; the DeadlineKeys Counter fold is sink-gated (§8.24), mirroring jobstat.
         if (totalDeadlineUtc is { } deadline && state is State.Completed or State.Failed or State.Deleted)
         {
-            var missed = now >= deadline;
+            // A job the timeout itself ended is a miss whatever the clock reads here. The timeout runs on a
+            // timer and this compares wall-clock instants, so the finalization of a job killed AT its
+            // deadline can land a few milliseconds before it and would otherwise count as met.
+            var missed = now >= deadline || outcome?.Reason == OutcomeReason.Timeout;
             if (missed)
             {
                 WarpTelemetry.RecordDeadlineMiss(job.Type, job.Queue, _configuration.ApplicationName);
@@ -737,6 +772,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         foreach (var log in FinalizationLogs.Build(job, error, durationMs, _workerId, now, outcome))
         {
             context.Set<JobLog>().Add(log);
+            _finalizationLogs.Add(log);
         }
     }
 
@@ -803,9 +839,35 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     /// transaction without it.
     /// </para>
     /// </summary>
-    private async Task<IDbContextTransaction> BeginFinalizingTransactionAsync(DbContext workerContext)
+    private async Task<IDbContextTransaction> BeginFinalizingTransactionAsync(DbContext workerContext, Job job)
     {
         _stagedCounters.Clear();
+
+        if (_finalizationAttempted)
+        {
+            // An earlier finalizing attempt on this job did not commit, and this one finalizes the same
+            // tracked job to a different outcome. Two things of the abandoned attempt would otherwise
+            // leak into this write. First, its terminal log row, which is still Added when the save threw,
+            // so the job would get a Completed log beside its Failed one. Second, what EF believes the
+            // row holds: when the save went through and the COMMIT threw, the change tracker has accepted
+            // the abandoned values while the database rolled them back, so a column this attempt sets to
+            // the same value (the cleared worker id and keep-alive) would not be written and the Failed
+            // row would keep them. Marking the whole row modified writes every column from the entity,
+            // payload included, and that cost is paid only on this path.
+            foreach (var log in _finalizationLogs)
+            {
+                var entry = workerContext.Entry(log);
+                if (entry.State == EntityState.Added)
+                {
+                    entry.State = EntityState.Detached;
+                }
+            }
+
+            workerContext.Entry(job).State = EntityState.Modified;
+        }
+
+        _finalizationLogs.Clear();
+        _finalizationAttempted = true;
 
         return await workerContext.Database.BeginTransactionAsync(default);
     }

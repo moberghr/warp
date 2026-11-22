@@ -42,7 +42,15 @@ public static partial class PerfCompare
         WriteIndented = true,
     };
 
-    private static readonly JsonSerializerOptions BdnOptions = new() { PropertyNameCaseInsensitive = true };
+    // BenchmarkDotNet writes a STRING where a statistic is undefined: the confidence interval of a case
+    // that ran one or two iterations, which is what a single-window scenario runs. Read as a number it
+    // crashed the comparison after the measurement had succeeded, so a spread that is not a number is
+    // read as "none" (UndefinedAsNullConverter).
+    private static readonly JsonSerializerOptions BdnOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        Converters = { new UndefinedAsNullConverter() },
+    };
 
     /// <summary>
     /// What a regression has to exceed before it FAILS a build rather than merely being reported.
@@ -70,6 +78,17 @@ public static partial class PerfCompare
     // to noise. Both real regressions found so far were far past 3x: the dispatcher sat out its backoff
     // at 10x, and the over-claiming claim walked the table.
     private const double ThroughputCollapseFactor = 3.0;
+
+    // Pages read per job. Not gated on a percentage: between identical builds it moves by half again
+    // with cache state and vacuum timing. But every large jump seen so far was a real defect and none
+    // was noise: a query the planner could serve from the wrong index (10,004 pages a call against 6,
+    // rule 6.11) and a per-row check that should have been per-parent (2,948 buffers a job against
+    // 165), both of which statements, WAL and throughput let through. So a blow-up fails, like a
+    // throughput collapse does. Those two were 18x and more; 5x is far from both them and the noise.
+    //
+    // A plan flip can be intermittent. If this fires on a change that cannot have caused it, the
+    // finding is still real: some query in that scenario has a plan that depends on statistics.
+    private const double BuffersBlowUpFactor = 5.0;
 
     private static readonly MetricPolicy[] Policies =
     [
@@ -306,7 +325,10 @@ public static partial class PerfCompare
         columns.AddRange(varying);
         // An idle scenario runs no jobs, so the diagnoser reports its counters per second instead, into
         // the same columns. The headers say which.
-        var perSecond = cases.All(x => JobCountOf(x) is null);
+        // Decided by what the diagnoser measured, not by whether the benchmark declares a JobCount
+        // parameter. The rate-limit scenario has none (its job count follows its Shape), and going by
+        // the parameter labelled its per-job numbers "per second" and exempted it from every gate.
+        var perSecond = cases.All(x => headRun.TryGetValue(x.FullName, out var measured) ? measured.PerSecond : JobCountOf(x) is null);
         var per = perSecond ? "s" : "job";
         var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | Allocated | Alloc Ratio | Gate";
         var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
@@ -391,11 +413,15 @@ public static partial class PerfCompare
 
             // Statements and WAL per job are the gates; see StatementTolerancePct and WalTolerancePct
             // for where the lines sit. Allocations are REPORTED, not gated: across the same no-op runs
-            // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%,
-            // with cache state and vacuum timing, and are reported for a human to read.
-            // Per-second counters (an idle server) have not had their noise measured: a background tick
-            // landing just inside or outside the window moves them. Reported until calibrated.
-            if (perSecond)
+            // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%
+            // with cache state and vacuum timing, so only a blow-up fails (BuffersBlowUpFactor, below).
+            // Per-second counters (an idle server) are gated on statements too, on PostgreSQL: comparing
+            // a commit with itself they moved 0.0%, 0.0%, 0.8% and 1.5% once the window was 60 s after a
+            // 60 s settle (before that a once-a-minute task, and start-up work on whichever side ran
+            // first, moved them 14%). SQL Server's still move about 4% between identical builds, by a
+            // cause not found, and stay reported. Pages and WAL per second are reported on both: a
+            // single background tick is a large share of an idle second.
+            if (perSecond && IsSqlServer(benchmark))
             {
                 stmtChange = null;
             }
@@ -433,6 +459,16 @@ public static partial class PerfCompare
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
+            }
+
+            // Pages read are too noisy to gate a small change, but a blow-up is a query plan gone wrong.
+            // See BuffersBlowUpFactor.
+            if (!perSecond && b.BuffersPerJob is > 0 && h.BuffersPerJob is not null && h.BuffersPerJob.Value > b.BuffersPerJob.Value * BuffersBlowUpFactor)
+            {
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ buffers {h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}× more (limit {BuffersBlowUpFactor:0}×)");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: buffers/job {b.BuffersPerJob:N1} -> {h.BuffersPerJob:N1} ({h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}x); a query in this scenario changed plan"));
             }
 
             var ratio = b.Mean <= 0 ? "?" : (h.Mean / b.Mean).ToString("N2", CultureInfo.InvariantCulture);
@@ -528,7 +564,7 @@ public static partial class PerfCompare
     private static string Row(BdnResult result) =>
         string.Create(
             CultureInfo.InvariantCulture,
-            $"{Seconds(result.Mean)} | {Seconds(result.Error)} | {Seconds(result.StdDev)}");
+            $"{Seconds(result.Mean)} | {Spread(result.Error)} | {Spread(result.StdDev)}");
 
     private static string Rate(double? jobsPerSecond) =>
         jobsPerSecond is null ? "—" : jobsPerSecond.Value.ToString("N0", CultureInfo.InvariantCulture);
@@ -559,6 +595,15 @@ public static partial class PerfCompare
     }
 
     /// <summary>BenchmarkDotNet reports nanoseconds; its summary shows s or ms to three decimals.</summary>
+    // An undefined spread (too few iterations to have one) is kept as zero: it is written to the
+    // history file as JSON, which has no NaN.
+    private static double FiniteOrZero(double? value) =>
+        value is { } number && double.IsFinite(number) ? number : 0;
+
+    // A spread of exactly zero means there was none to measure, not that the runs agreed to the nanosecond.
+    private static string Spread(double nanoseconds) =>
+        nanoseconds <= 0 ? "—" : Seconds(nanoseconds);
+
     private static string Seconds(double nanoseconds) =>
         nanoseconds >= 1e9
             ? (nanoseconds / 1e9).ToString("N3", CultureInfo.InvariantCulture) + " s"
@@ -577,6 +622,11 @@ public static partial class PerfCompare
             .Select(x => x.Label)
             .FirstOrDefault() ?? value;
     }
+
+    private static bool IsSqlServer(BdnCase benchmark) =>
+        benchmark.Parameters.Any(x =>
+            string.Equals(x.Name, "Provider", StringComparison.Ordinal)
+            && string.Equals(x.Value, "SqlServer", StringComparison.OrdinalIgnoreCase));
 
     private static int? JobCountOf(BdnCase benchmark) =>
         benchmark.Parameters
@@ -624,8 +674,8 @@ public static partial class PerfCompare
                 results[benchmark.FullName] = new BdnResult(
                     benchmark.Memory?.BytesAllocatedPerOperation,
                     benchmark.Statistics?.Mean ?? 0,
-                    benchmark.Statistics?.ConfidenceInterval?.Margin ?? 0,
-                    benchmark.Statistics?.StandardDeviation ?? 0,
+                    FiniteOrZero(benchmark.Statistics?.ConfidenceInterval?.Margin),
+                    FiniteOrZero(benchmark.Statistics?.StandardDeviation),
                     MetricOf(benchmark, "StatementsPerJob") is null && MetricOf(benchmark, "StatementsPerSecond") is not null,
                     MetricOf(benchmark, "StatementsPerJob") ?? MetricOf(benchmark, "StatementsPerSecond"),
                     MetricOf(benchmark, "BuffersPerJob") ?? MetricOf(benchmark, "BuffersPerSecond"),

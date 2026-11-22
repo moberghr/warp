@@ -41,7 +41,9 @@ public abstract class AggregatorDrainBoundTestsBase : IAsyncLifetime
 
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
-    [TimedFact(120_000)]
+    // Seeds 20,500 rows and folds 20,000 of them: 2s on an idle CI runner, past 10s on SQL Server when
+    // other heavy classes share the container.
+    [TimedFact(30_000)]
     public async Task AggregateCounters_WithBacklogPastOneTick_StopsAtTheCapAndLeavesTheRest()
     {
         await SeedCountersAsync(Seeded);

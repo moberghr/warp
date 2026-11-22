@@ -19,7 +19,7 @@ public abstract class FaultyObserverTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task FaultyObserver_ThrowsOnStatusChanged_SupervisorContinuesNormally()
     {
         var barrier = new BackgroundServiceBarrierSignal();

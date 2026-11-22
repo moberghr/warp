@@ -52,7 +52,7 @@ public abstract class ConfigurationMismatchTestsBase : IntegrationTestBase
         state.Count.ShouldBe(0);
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ScopeMismatch_DefinitionSingleton_HostDeclaresPerServer_StatusConfigurationMismatch()
     {
         var state = new CountingServiceState();
@@ -81,7 +81,7 @@ public abstract class ConfigurationMismatchTestsBase : IntegrationTestBase
         state.Count.ShouldBe(0);
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ScopeMismatch_DefinitionPerServer_HostDeclaresSingleton_LifecycleLogErrorWritten()
     {
         var state = new CountingServiceState();
@@ -139,7 +139,7 @@ public abstract class ConfigurationMismatchTestsBase : IntegrationTestBase
         mismatchLog.Message.ShouldContain("PerServer");
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ScopeMismatch_SupervisorRefusesToStart_UserCodeCounterStaysZero()
     {
         var state = new CountingServiceState();

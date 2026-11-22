@@ -66,22 +66,21 @@ public abstract class RateLimitIntegrationTestsBase : IntegrationTestBase
         // Wait for both jobs to settle (Completed or Scheduled). WaitForCompletion treats
         // Scheduled as still active, which is wrong here — the throttled job is supposed
         // to land in Scheduled and stay there.
-        var deadline = DateTime.UtcNow.AddSeconds(5);
         Warp.Core.Entities.Job? job1 = null;
         Warp.Core.Entities.Job? job2 = null;
-        while (DateTime.UtcNow < deadline)
-        {
-            job1 = await server.GetJob(job1Id);
-            job2 = await server.GetJob(job2Id);
-            var settled1 = job1.CurrentState is State.Completed or State.Scheduled or State.Deleted or State.Failed;
-            var settled2 = job2.CurrentState is State.Completed or State.Scheduled or State.Deleted or State.Failed;
-            if (settled1 && settled2)
+        await WarpTestServer.WaitUntil(
+            "Both rate-limited jobs coming to rest",
+            async () =>
             {
-                break;
-            }
+                job1 = await server.GetJob(job1Id);
+                job2 = await server.GetJob(job2Id);
+                var settled1 = job1.CurrentState is State.Completed or State.Scheduled or State.Deleted or State.Failed;
+                var settled2 = job2.CurrentState is State.Completed or State.Scheduled or State.Deleted or State.Failed;
 
-            await Task.Delay(50, Xunit.TestContext.Current.CancellationToken);
-        }
+                return settled1 && settled2;
+            },
+            TimeSpan.FromSeconds(5),
+            Xunit.TestContext.Current.CancellationToken);
 
         job1.ShouldNotBeNull();
         job2.ShouldNotBeNull();

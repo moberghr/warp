@@ -6,6 +6,7 @@ using Warp.Core;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Observability;
@@ -37,7 +38,7 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(30_000)]
+    [TimedFact]
     public async Task StagedCounters_OfAnAttemptWhoseFinalizationFailed_DoNotRideTheFailureArmsCommit()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -58,49 +59,88 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
         // The handler succeeds; the write that records it does not, so the worker re-finalizes as Failed.
         await server.WaitForJobState(jobId, State.Failed);
 
-        var keys = server.CounterBuffer.Drain().Select(x => x.Key).ToList();
+        // The arm that committed hands its increments to the buffer just AFTER its commit, so the row
+        // can read Failed a moment before they arrive. Draining is destructive, so collect until the
+        // failure arm's own counter shows up (WaitUntil throws if it never does).
+        var keys = new List<string>();
+        await WarpTestServer.WaitUntil(
+            () =>
+            {
+                keys.AddRange(server.CounterBuffer.Drain().Select(x => x.Key));
 
-        keys.ShouldContain(
-            "stats:failed",
-            "the arm that actually committed must still hand its own increments to the buffer");
+                return Task.FromResult(keys.Contains("stats:failed", StringComparer.Ordinal));
+            },
+            TimeSpan.FromSeconds(5),
+            Xunit.TestContext.Current.CancellationToken);
 
         keys.ShouldNotContain(
             "stats:succeeded",
             "the attempt that rolled back must contribute nothing — one job cannot be both");
     }
 
+    // The counters above are only half of it: the job row and its logs must also be those of a clean
+    // Failed job. The success arm had already set ExpireAt (a Completed job expires) and added its
+    // "Completed" log to the context before the write failed, and the failure arm then finalized the same
+    // tracked job. A Failed job left with ExpireAt set is deleted by ExpirationCleanup a day later, which
+    // rule 8.2 says never happens to a failed job.
+    [TimedFact]
+    public async Task CompletionSaveFails_ReFinalizedAsFailed_IsACleanFailedRow()
+    {
+        await using var server = await WarpTestServer.StartAsync(Fixture, config => config.WorkerCount = 1, FailTheFirstCompletion);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new UnitRequest());
+        await publisher.SaveChangesAsync();
+
+        await server.WaitForJobState(jobId, State.Failed);
+
+        await AssertCleanFailedRow(jobId);
+    }
+
+    // The other way the success arm's write can fail: the save goes through and the COMMIT throws. EF has
+    // by then marked the job's changes as saved, so the failure arm sees nothing to write for the worker
+    // fields it believes are already cleared, while the database rolled them back.
+    [TimedFact]
+    public async Task CompletionCommitFails_ReFinalizedAsFailed_IsACleanFailedRow()
+    {
+        await using var server = await WarpTestServer.StartAsync(Fixture, config => config.WorkerCount = 1, FailTheFirstCompletionCommit);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new UnitRequest());
+        await publisher.SaveChangesAsync();
+
+        await server.WaitForJobState(jobId, State.Failed);
+
+        await AssertCleanFailedRow(jobId);
+    }
+
+    private async Task AssertCleanFailedRow(Guid jobId)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        await using var ctx = Fixture.CreateContext();
+        var job = await ctx.Set<Job>().AsNoTracking().SingleAsync(x => x.Id == jobId, ct);
+        var terminalLogs = await ctx.Set<Warp.Core.Data.Entities.JobLog>()
+            .AsNoTracking()
+            .Where(x => x.JobId == jobId)
+            .Where(x => x.EventType == "Completed" || x.EventType == "Failed")
+            .Select(x => x.EventType)
+            .ToListAsync(ct);
+
+        job.CurrentState.ShouldBe(State.Failed);
+        job.ExpireAt.ShouldBeNull("a failed job never expires (rule 8.2)");
+        job.CurrentWorkerId.ShouldBeNull();
+        job.LastKeepAlive.ShouldBeNull();
+        terminalLogs.ShouldBe(["Failed"], "the abandoned attempt's Completed log must not be written");
+    }
+
+    private static void FailTheFirstCompletionCommit(IServiceCollection services) =>
+        services.AddServerContextInterceptor(new FailFirstCompletionCommitInterceptor());
+
     /// <summary>
     /// Replaces the provider's server-context configurator with one that delegates to it and adds the
     /// interceptor. Registered last so <c>GetService</c> returns it; the provider's own instance is taken
     /// from the descriptor so none of its connection wiring is reimplemented here.
     /// </summary>
-    private static void FailTheFirstCompletion(IServiceCollection services)
-    {
-        var inner = (IWarpServerContextConfigurator)services
-            .Last(x => x.ServiceType == typeof(IWarpServerContextConfigurator))
-            .ImplementationInstance!;
-
-        services.AddSingleton<IWarpServerContextConfigurator>(
-            new InterceptingConfigurator(inner, new FailFirstCompletionInterceptor()));
-    }
-
-    private sealed class InterceptingConfigurator : IWarpServerContextConfigurator
-    {
-        private readonly IWarpServerContextConfigurator _inner;
-        private readonly ISaveChangesInterceptor _interceptor;
-
-        public InterceptingConfigurator(IWarpServerContextConfigurator inner, ISaveChangesInterceptor interceptor)
-        {
-            _inner = inner;
-            _interceptor = interceptor;
-        }
-
-        public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
-        {
-            _inner.Configure(optionsBuilder, applicationServices);
-            optionsBuilder.AddInterceptors(_interceptor);
-        }
-    }
+    private static void FailTheFirstCompletion(IServiceCollection services) =>
+        services.AddServerContextInterceptor(new FailFirstCompletionInterceptor());
 
     /// <summary>
     /// Throws once, on the write that records a job as Completed. Everything after it — including the
@@ -126,6 +166,33 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
             }
 
             return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Throws once, on the COMMIT of the transaction that records a job as Completed: the save before it
+    /// succeeded, so EF considers the job's changes written.
+    /// </summary>
+    private sealed class FailFirstCompletionCommitInterceptor : DbTransactionInterceptor
+    {
+        private int _fired;
+
+        public override ValueTask<InterceptionResult> TransactionCommittingAsync(
+            System.Data.Common.DbTransaction transaction,
+            TransactionEventData eventData,
+            InterceptionResult result,
+            CancellationToken cancellationToken = default)
+        {
+            var completed = eventData.Context?.ChangeTracker
+                .Entries<Job>()
+                .Any(x => x.Entity.CurrentState == State.Completed) == true;
+
+            if (completed && Interlocked.Exchange(ref _fired, 1) == 0)
+            {
+                throw new InvalidOperationException("Injected: the completion commit failed.");
+            }
+
+            return base.TransactionCommittingAsync(transaction, eventData, result, cancellationToken);
         }
     }
 }

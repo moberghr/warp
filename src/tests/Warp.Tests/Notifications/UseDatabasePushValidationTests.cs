@@ -45,7 +45,7 @@ public class UseDatabasePushValidationTests
         });
 
         // Pin: both services are registered. The actual transport resolution is tested
-        // end-to-end by the PostgresDatabasePushIntegrationTests — here we just confirm the
+        // end-to-end by DatabasePushIntegrationTests — here we just confirm the
         // correct ordering completes setup without the eager-validation throw.
         services.Any(x => x.ServiceType == typeof(IWarpNotificationTransportFactory)).ShouldBeTrue();
         services.Any(x => x.ServiceType == typeof(IWarpNotificationTransport)).ShouldBeTrue();

@@ -630,14 +630,22 @@ public class TimeoutPipelineBehaviorTests
         ctx.Metadata["TimeoutMode"] = (int)TimeoutMode.Delete;
         var behavior = Build(time, ctx);
 
+        // The handler is held until BOTH cancellations have been issued, and only then throws on its
+        // token. Waiting on the token itself let the timer's cancellation resume the handler on a pool
+        // thread, which could evaluate the filter before this thread reached workerCts.CancelAsync():
+        // the worker token was then still live, the filter was true, and the behaviour returned a
+        // Deleted outcome instead of propagating (#287).
         using var workerCts = new CancellationTokenSource();
-        var handlerStarted = new TaskCompletionSource();
+        var handlerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bothCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var handlerTask = behavior.HandleAsync(
             new UnitRequest(),
             async (req, ct) =>
             {
                 handlerStarted.SetResult();
-                await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, ct);
+                await bothCancelled.Task;
+                ct.ThrowIfCancellationRequested();
+
                 return Unit.Value;
             },
             workerCts.Token);
@@ -649,6 +657,7 @@ public class TimeoutPipelineBehaviorTests
         // its guard fails — OCE propagates up. No timeout outcome is set.
         time.Advance(TimeSpan.FromSeconds(2));
         await workerCts.CancelAsync();
+        bothCancelled.SetResult();
 
         await Should.ThrowAsync<OperationCanceledException>(handlerTask);
         ctx.Outcome.ShouldBeNull();

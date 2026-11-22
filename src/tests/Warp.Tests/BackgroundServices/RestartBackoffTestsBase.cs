@@ -16,6 +16,8 @@ public abstract class RestartBackoffTestsBase : IntegrationTestBase
     {
     }
 
+    // Waits out a real restart backoff between the failing start and the successful one: about 5s on CI,
+    // half the default budget before any contention.
     [TimedFact(20_000)]
     public async Task ThrowingService_FirstCallFailsSecondSucceeds_StatusWalksFaultedRestartingRunning()
     {
@@ -54,7 +56,7 @@ public abstract class RestartBackoffTestsBase : IntegrationTestBase
         state.CanFinish.Release();
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ThrowingService_RestartCountIncrementsOnFault()
     {
         var state = new ThrowingServiceState();

@@ -41,6 +41,28 @@ public abstract class MessageIntegrationTestsBase : IntegrationTestBase
         handlerJobs[0].CurrentState.ShouldBe(State.Completed);
     }
 
+    // Rule 6.11, end to end in both worker modes. With the sweep an hour away, the only thing that can
+    // finalize the message is the worker naming it when its handler jobs finish.
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenNoParentSweepDue_WhenHandlersFinish_ThenWorkerNamesTheMessageAndItCompletes(bool useDispatcher)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            cfg =>
+            {
+                cfg.OrchestrationInterval = TimeSpan.FromHours(1);
+                cfg.UseDispatcher = useDispatcher;
+            });
+        var publisher = server.CreatePublisher();
+        var messageId = await publisher.Publish(new MultiRequest());
+        await publisher.SaveChangesAsync(ct);
+
+        await server.WaitForJobState(messageId, State.Completed);
+    }
+
     [TimedFact]
     public async Task GivenMultiHandlerMessage_WhenPublished_ThenBothHandlersExecuteAndMessageCompletes()
     {

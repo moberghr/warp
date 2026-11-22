@@ -103,7 +103,7 @@ public static class TestTasks
         return QueriesFor(context);
     }
 
-    public static JobCommandService<TContext> CreateJobCommandService<TContext>(TContext context, TimeProvider? timeProvider = null)
+    public static JobCommandService<TContext> CreateJobCommandService<TContext>(TContext context, TimeProvider? timeProvider = null, ServerTaskSignals<TContext>? signals = null)
         where TContext : DbContext
     {
         return new JobCommandService<TContext>(
@@ -112,7 +112,7 @@ public static class TestTasks
             Options.Create(new WarpConfiguration()),
             NullTransport,
             Warp.Tests.Helpers.TestTasks.QueriesFor(context),
-            new ServerTaskSignals<TContext>());
+            signals ?? new ServerTaskSignals<TContext>());
     }
 
     public static MessageRouter<TContext> CreateMessageRouter<TContext>(
@@ -185,13 +185,19 @@ public static class TestTasks
         TimeSpan jobExpirationTimeout,
         int? serverTaskBatchSize = null,
         IWarpNotificationTransport? transport = null,
-        ServerTaskSignals<TContext>? signals = null)
+        ServerTaskSignals<TContext>? signals = null,
+        TimeSpan? orchestrationInterval = null)
         where TContext : DbContext
     {
         var configuration = new WarpServerConfiguration
         {
             JobExpirationTimeout = jobExpirationTimeout,
         };
+
+        if (orchestrationInterval.HasValue)
+        {
+            configuration.OrchestrationInterval = orchestrationInterval;
+        }
 
         if (serverTaskBatchSize.HasValue)
         {

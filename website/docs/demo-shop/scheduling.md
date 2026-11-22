@@ -283,7 +283,7 @@ Pitfalls:
   `Enqueued` means the job went back to the queue: a scheduled job was activated, or a worker requeued it
   for immediate pickup (a retry or wait with no delay; a delayed one logs `Scheduled`).
 
-Covered by: `PostgresDatabasePushIntegrationTests`, `SqlServerDatabasePushIntegrationTests`,
+Covered by: `DatabasePushIntegrationTests` (both databases),
 `UseDatabasePushValidationTests`, `NonServerListenerPushTestsBase`, `ListenerReconnectDrainTestsBase`,
 `PushFailurePollingBackstopTestsBase`.
 

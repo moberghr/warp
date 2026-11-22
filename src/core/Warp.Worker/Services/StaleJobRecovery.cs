@@ -155,6 +155,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                     Message = "Cancelled by crash recovery — cancellation was pending when worker stopped",
                 });
                 deleted++;
+                AnnounceFinalized(job);
 
                 continue;
             }
@@ -202,6 +203,7 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
                     Message = "Failed by crash recovery — job opted out of restart",
                 });
                 failed++;
+                AnnounceFinalized(job);
             }
         }
 
@@ -404,6 +406,13 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
             Message = $"Job {job.Id} created by crash recovery for stuck webhook delivery {deliveryId}",
         });
     }
+
+    // A job recovery ends (deleted or failed) is settled work: it can be what completes its batch or
+    // message, and a continuation may be waiting on it. The Orchestrator checks what a wake names and
+    // sweeps the rest only once per OrchestrationInterval (rule 6.11), so recovery names the job and its
+    // parent like a worker does. Buffered with the other wakes and sent after the commit.
+    private void AnnounceFinalized(Job job) =>
+        _pendingNotifications.Add(new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(job.ParentJobId, job.Id)));
 
     private async Task DispatchPendingNotificationsAsync()
     {

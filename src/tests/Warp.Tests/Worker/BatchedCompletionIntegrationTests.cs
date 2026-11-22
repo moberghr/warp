@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -27,7 +28,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         config.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenManyShortJobs_WhenProcessed_ThenAllReachCompletedState()
     {
         // Arrange
@@ -68,7 +69,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         completedLogs.ShouldBe(jobCount);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenMixedOutcomes_WhenProcessed_ThenStatesMatch()
     {
         // Arrange
@@ -101,16 +102,30 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         completed.ShouldBe(successCount);
 
         var failed = await ctx.Set<Job>()
-            .CountAsync(j => j.Type == failType && j.CurrentState == State.Failed, Xunit.TestContext.Current.CancellationToken);
-        failed.ShouldBe(failCount);
+            .Where(j => j.Type == failType)
+            .AsNoTracking()
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        failed.Count.ShouldBe(failCount);
+        failed.ShouldAllBe(j => j.CurrentState == State.Failed);
+
+        // The batched write releases a failed row the way the single worker does, and leaves it
+        // without an expiry: a failed job waits for an operator.
+        failed.ShouldAllBe(j => j.CurrentWorkerId == null);
+        failed.ShouldAllBe(j => j.LastKeepAlive == null);
+        failed.ShouldAllBe(j => j.ExpireAt == null);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenIdleWorker_WhenFewJobsBelowBatchSize_ThenBufferIsDrainedByIdleTrigger()
     {
-        // Arrange — CompletionBatchSize is 10; publishing 3 jobs never hits the size threshold.
-        // Idle drain should flush them before workers suspend on the channel.
-        await using var server = await WarpTestServer.StartAsync(Fixture, ConfigureBatchedServer);
+        // Arrange — CompletionBatchSize is 10, so 3 jobs never hit the size threshold, and the
+        // flush interval is far beyond this test's wait, so the time trigger cannot fire either.
+        // Only the idle drain, run before a worker suspends on the channel, can commit them.
+        await using var server = await WarpTestServer.StartAsync(Fixture, config =>
+        {
+            ConfigureBatchedServer(config);
+            config.CompletionFlushInterval = TimeSpan.FromMinutes(5);
+        });
         var publisher = server.CreatePublisher();
         for (var i = 0; i < 3; i++)
         {
@@ -129,7 +144,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         completed.ShouldBe(3);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenShutdown_WhenServerStops_ThenPendingCompletionsAreFlushed()
     {
         // Arrange — single-worker, isolated queue, with a barrier handler queued behind 4 short
@@ -162,14 +177,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
 
         try
         {
-            var publisher = server.CreatePublisher();
-            for (var i = 0; i < 4; i++)
-            {
-                await publisher.Enqueue(new UnitRequest(), queue: isolatedQueue);
-            }
-
-            await publisher.Enqueue(new BarrierRequest(), queue: isolatedQueue);
-            await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+            await InsertInOrderAsync(isolatedQueue, new UnitRequest(), new UnitRequest(), new UnitRequest(), new UnitRequest(), new BarrierRequest());
 
             // Wait for the barrier handler to enter. Single-worker FIFO guarantees the 4 short
             // jobs ran first and each added to _batch. No idle-drain has fired because the inner
@@ -201,7 +209,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         jobs[4].CurrentState.ShouldBe(State.Processing);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenProcessingJob_WhenCancelledInDispatcherMode_ThenFlushesAsDeletedWithHourlyCounter()
     {
         // Arrange — dispatcher-mode server. Enqueue a handler that blocks on cancellation.
@@ -237,44 +245,124 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         var aggregateSum = await ctx.Set<Counter>()
             .Where(c => c.Key == "stats:deleted")
             .SumAsync(c => c.Value, Xunit.TestContext.Current.CancellationToken);
-        aggregateSum.ShouldBeGreaterThanOrEqualTo(1);
+        aggregateSum.ShouldBe(1);
 
         var hourlySum = await ctx.Set<Counter>()
             .Where(c => c.Key == $"stats:deleted:{hourSuffix}")
             .SumAsync(c => c.Value, Xunit.TestContext.Current.CancellationToken);
-        hourlySum.ShouldBeGreaterThanOrEqualTo(1);
+        hourlySum.ShouldBe(1);
     }
 
-    [TimedFact(timeout: 60_000)]
-    public async Task GivenCompletionBatchSizeOne_WhenProcessed_ThenEachJobCommitsIndividually()
+    [TimedFact]
+    public async Task GivenBusyWorker_WhenFlushIntervalElapses_ThenBufferIsFlushedByTimeTrigger()
     {
-        // Arrange — isolated server with batching disabled (opt-out path).
-        const string isolatedQueue = "batch-size-one";
-        await using var server = await WarpTestServer.StartAsync(Fixture, config =>
-        {
-            config.UseDispatcher = true;
-            config.WorkerCount = 2;
-            config.Queues = [isolatedQueue];
-            config.CompletionBatchSize = 1;
-            config.CompletionFlushInterval = TimeSpan.FromSeconds(30);
-        });
+        // Arrange — one worker with a batch far larger than the workload, so the size trigger cannot
+        // fire. A short job, a 200ms job and a handler that parks on a barrier are queued in that
+        // order. When the 200ms job finishes, the first completion has been buffered for longer than
+        // the 100ms flush interval; the worker then goes straight into the parked handler, so it never
+        // reaches its idle drain. Only the time trigger can have committed the first two.
+        const string isolatedQueue = "batch-time-trigger";
+        var barrier = new BarrierSignal();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            config =>
+            {
+                config.UseDispatcher = true;
+                config.WorkerCount = 1;
+                config.Queues = [isolatedQueue];
+                config.CompletionBatchSize = 50;
+                config.CompletionFlushInterval = TimeSpan.FromMilliseconds(100);
+            },
+            services => services.AddSingleton(barrier));
 
-        var publisher = server.CreatePublisher();
-        for (var i = 0; i < 8; i++)
+        var ids = await InsertInOrderAsync(isolatedQueue, new UnitRequest(), new ShortDelayRequest(), new BarrierRequest());
+        var (shortJobId, delayJobId, barrierJobId) = (ids[0], ids[1], ids[2]);
+
+        try
         {
-            await publisher.Enqueue(new UnitRequest(), queue: isolatedQueue);
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeTrue("the barrier handler never started");
+
+            // Act + Assert — both committed while the worker is still inside the parked handler.
+            await server.WaitForJobState(shortJobId, State.Completed, TimeSpan.FromSeconds(3));
+            await server.WaitForJobState(delayJobId, State.Completed, TimeSpan.FromSeconds(3));
+            (await server.GetJob(barrierJobId)).CurrentState.ShouldBe(State.Processing);
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
         }
 
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await server.WaitForJobState(barrierJobId, State.Completed, TimeSpan.FromSeconds(5));
+    }
 
-        // Act
-        await server.WaitForCompletion(TimeSpan.FromSeconds(30));
+    [TimedFact]
+    public async Task GivenCompletionBatchSizeOne_WhenProcessed_ThenEachJobCommitsIndividually()
+    {
+        // Arrange — one worker, batch size 1, and a flush interval far beyond the test. A short
+        // job is queued ahead of a handler that parks on a barrier: while that handler is parked
+        // the worker cannot reach its idle drain, so the short job can only be Completed in the
+        // database if its completion was committed on its own, when the batch of one filled.
+        const string isolatedQueue = "batch-size-one";
+        var barrier = new BarrierSignal();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            config =>
+            {
+                config.UseDispatcher = true;
+                config.WorkerCount = 1;
+                config.Queues = [isolatedQueue];
+                config.CompletionBatchSize = 1;
+                config.CompletionFlushInterval = TimeSpan.FromMinutes(5);
+            },
+            services => services.AddSingleton(barrier));
 
-        // Assert
-        var ctx = Fixture.CreateContext();
-        var jobs = await ctx.Set<Job>()
-            .Where(j => j.Queue == isolatedQueue)
-            .CountAsync(j => j.CurrentState == State.Completed, Xunit.TestContext.Current.CancellationToken);
-        jobs.ShouldBe(8);
+        var ids = await InsertInOrderAsync(isolatedQueue, new UnitRequest(), new BarrierRequest());
+        var (shortJobId, barrierJobId) = (ids[0], ids[1]);
+
+        try
+        {
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeTrue("the barrier handler never started");
+
+            // Act + Assert — committed while the worker is still inside the next handler.
+            await server.WaitForJobState(shortJobId, State.Completed, TimeSpan.FromSeconds(3));
+            (await server.GetJob(barrierJobId)).CurrentState.ShouldBe(State.Processing);
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+        }
+
+        await server.WaitForJobState(barrierJobId, State.Completed, TimeSpan.FromSeconds(5));
+    }
+
+    // Enqueued rows with explicit, ascending schedule times, inserted in one save. The claim orders by
+    // ScheduleTime, and jobs PUBLISHED in one save can share an instant, in which case "the first one
+    // runs first" is up to the database. Every test here that parks a handler behind earlier jobs
+    // depends on that order.
+    private async Task<Guid[]> InsertInOrderAsync(string queue, params object[] requests)
+    {
+        var start = DateTime.UtcNow.AddSeconds(-requests.Length);
+        var jobs = requests
+            .Select((x, i) =>
+                new Job
+                {
+                    Id = Guid.NewGuid(),
+                    Kind = JobKind.Job,
+                    CurrentState = State.Enqueued,
+                    Type = x.GetType().AssemblyQualifiedName,
+                    Message = JsonSerializer.Serialize(x, x.GetType()),
+                    CreateTime = start.AddSeconds(i),
+                    ScheduleTime = start.AddSeconds(i),
+                    Queue = queue,
+                })
+            .ToList();
+
+        await using var ctx = Fixture.CreateContext();
+        ctx.Set<Job>().AddRange(jobs);
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        return [.. jobs.Select(x => x.Id)];
     }
 }

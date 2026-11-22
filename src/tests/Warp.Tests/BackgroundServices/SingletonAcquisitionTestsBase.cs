@@ -56,7 +56,7 @@ public abstract class SingletonAcquisitionTestsBase : IntegrationTestBase
         barrier.CanFinish.Release();
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task TwoServers_HolderHasStatusRunningAndLeaseRow()
     {
         var barrier = new SingletonBarrierSignal();
@@ -97,7 +97,7 @@ public abstract class SingletonAcquisitionTestsBase : IntegrationTestBase
         barrier.CanFinish.Release();
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task TwoServers_WaiterHasStatusWaiting()
     {
         var barrier = new SingletonBarrierSignal();

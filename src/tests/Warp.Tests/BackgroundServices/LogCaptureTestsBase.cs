@@ -67,7 +67,7 @@ public abstract class LogCaptureTestsBase : IntegrationTestBase
             $"Rows found: {allRows.Count}. Messages: {string.Join(", ", allRows.Select(r => $"[{r.Level}/{r.Source}] {r.Message}"))}");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task UserLogAtInformation_CapturedToDb()
     {
         var signal = new LoggingServiceSignal();
@@ -97,7 +97,7 @@ public abstract class LogCaptureTestsBase : IntegrationTestBase
         signal.CanFinish.Release();
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task UserLogAtWarning_CapturedToDb()
     {
         var signal = new LoggingServiceSignal();
@@ -123,7 +123,7 @@ public abstract class LogCaptureTestsBase : IntegrationTestBase
         signal.CanFinish.Release();
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task UserLogAtDebug_NotCaptured_DefaultThreshold()
     {
         var signal = new LoggingServiceSignal();
@@ -154,7 +154,7 @@ public abstract class LogCaptureTestsBase : IntegrationTestBase
         signal.CanFinish.Release();
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task LifecycleEventsCaptured_WithSourceLifecycle()
     {
         var signal = new LoggingServiceSignal();

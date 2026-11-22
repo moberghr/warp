@@ -325,7 +325,7 @@ Failed jobs have `ExpireAt = null` and are never automatically deleted. They mus
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `OrchestrationInterval` | `TimeSpan` | `10 seconds` | Fallback sweep interval for parent finalization |
+| `OrchestrationInterval` | `TimeSpan` | `10 seconds` | How often every batch and message in flight is checked for completion. A finished, deleted or recovered job has its parent checked at once; this sweep is the backstop for a wake that never arrived |
 | `MessageRoutingInterval` | `TimeSpan` | `10 seconds` | Message routing poll interval |
 | `ScheduledActivationInterval` | `TimeSpan` | `10 seconds` | How often `ScheduledJobActivation` flips `State.Scheduled` jobs to `Enqueued`. Controls worst-case latency between a job's `ScheduleTime` and when it becomes eligible for pickup |
 | `CounterAggregationInterval` | `TimeSpan?` | `1 minute` | How often `CounterAggregator` folds pending `Counter` rows into `Statistic` totals. Dashboard counter graphs refresh at this cadence. `null` disables the scheduled run |

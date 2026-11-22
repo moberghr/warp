@@ -36,21 +36,15 @@ public abstract class ServerTaskSpanTestsBase : IntegrationTestBase
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
         await server.WaitForCompletion();
 
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        List<Activity> serverTaskSpans;
-        do
-        {
-            serverTaskSpans = [.. harness.Captured.Where(a => a.OperationName.StartsWith("warp.server_task ", StringComparison.Ordinal))];
-            if (serverTaskSpans.Count > 0)
+        List<Activity> serverTaskSpans = [];
+        await WarpTestServer.WaitUntil(
+            "A server-task span being captured",
+            () =>
             {
-                break;
-            }
+                serverTaskSpans = [.. harness.Captured.Where(a => a.OperationName.StartsWith("warp.server_task ", StringComparison.Ordinal))];
 
-            await Task.Delay(50);
-        }
-        while (DateTime.UtcNow < deadline);
-
-        serverTaskSpans.ShouldNotBeEmpty();
+                return Task.FromResult(serverTaskSpans.Count > 0);
+            });
 
         foreach (var span in serverTaskSpans)
         {
@@ -80,18 +74,16 @@ public abstract class ServerTaskSpanTestsBase : IntegrationTestBase
         await throwingTask.WaitForFirstThrowAsync(TimeSpan.FromSeconds(10));
 
         // Activity is captured on stop; allow a tick for the loop's catch/finally to dispose it.
-        var deadline = DateTime.UtcNow.AddSeconds(5);
         Activity? errorSpan = null;
-        while (DateTime.UtcNow < deadline)
-        {
-            errorSpan = harness.FirstByName($"warp.server_task {ThrowingServerTask.TaskName}");
-            if (errorSpan != null)
+        await WarpTestServer.WaitUntil(
+            "The throwing server task's span being captured",
+            () =>
             {
-                break;
-            }
+                errorSpan = harness.FirstByName($"warp.server_task {ThrowingServerTask.TaskName}");
 
-            await Task.Delay(50);
-        }
+                return Task.FromResult(errorSpan != null);
+            },
+            TimeSpan.FromSeconds(5));
 
         errorSpan.ShouldNotBeNull();
         errorSpan.Status.ShouldBe(ActivityStatusCode.Error);

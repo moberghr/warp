@@ -3,6 +3,7 @@ using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.NoRestart;
 using Warp.Tests.Fixtures;
@@ -94,6 +95,33 @@ public abstract class NoRestartCrashRecoveryTestsBase : IAsyncLifetime
         log.ShouldNotBeNull();
         log.Level.ShouldBe("Error");
         log.Message.ShouldContain("opted out of restart");
+    }
+
+    // Rule 6.11: a job recovery fails can be what completes its message, and the Orchestrator only
+    // checks the parents a wake names, so recovery has to name them.
+    [TimedFact]
+    public async Task RequeueStaleJobs_FailedChildOfAMessage_NamesTheParentForTheOrchestrator()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var messageId = Guid.NewGuid();
+        var jobId = await InsertStaleJob(_fixture, metadata: SerializeCanBeRestarted(false));
+        await using (var seed = _fixture.CreateContext())
+        {
+            seed.Set<Job>().Add(new Job { Id = messageId, Kind = JobKind.Message, CurrentState = State.Processing, CreateTime = DateTime.UtcNow, ScheduleTime = DateTime.UtcNow, Queue = "default" });
+            await seed.SaveChangesAsync(ct);
+            await seed.Set<Job>().Where(x => x.Id == jobId).ExecuteUpdateAsync(x => x.SetProperty(y => y.ParentJobId, messageId), ct);
+        }
+
+        var signals = new ServerTaskSignals<TestContext>();
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+
+        await TestTasks
+            .CreateStaleJobRecovery(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromMinutes(5), restartByDefault: true, signals: signals)
+            .RecoverStaleJobsAsync(ct);
+
+        var (parents, sweep) = signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        parents.ShouldBe([messageId]);
+        sweep.ShouldBeFalse();
     }
 
     [TimedFact]

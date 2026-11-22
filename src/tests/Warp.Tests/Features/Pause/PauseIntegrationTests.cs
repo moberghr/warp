@@ -108,11 +108,18 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Resume — job should complete
+        var resumedAt = DateTime.UtcNow;
         await svc.ResumeServer(server.ServerId);
         await server.WaitForCompletion();
 
         var job = await server.GetJob(jobId);
         job.CurrentState.ShouldBe(State.Completed);
+
+        // It was claimed AFTER the resume. Without this the test passes just the same when the
+        // pause never held and the job ran straight away.
+        var logs = await server.GetJobLogs(jobId);
+        var processing = logs.Single(x => string.Equals(x.EventType, "Processing", StringComparison.Ordinal));
+        processing.Timestamp.ShouldBeGreaterThanOrEqualTo(resumedAt);
     }
 
     [TimedFact]

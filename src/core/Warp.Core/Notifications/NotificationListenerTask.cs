@@ -124,7 +124,7 @@ public class NotificationListenerTask<TContext> : BackgroundService
                 _signals.SignalMessageEnqueued();
                 break;
             case NotificationKind.JobFinalized:
-                _signals.SignalJobFinalized();
+                FinalizedParentsPayload.Signal(_signals, notification.Queue);
                 break;
             default:
                 break;
