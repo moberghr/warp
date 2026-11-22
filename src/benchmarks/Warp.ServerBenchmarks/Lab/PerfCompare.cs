@@ -324,7 +324,10 @@ public static partial class PerfCompare
         columns.AddRange(varying);
         // An idle scenario runs no jobs, so the diagnoser reports its counters per second instead, into
         // the same columns. The headers say which.
-        var perSecond = cases.All(x => JobCountOf(x) is null);
+        // Decided by what the diagnoser measured, not by whether the benchmark declares a JobCount
+        // parameter. The rate-limit scenario has none (its job count follows its Shape), and going by
+        // the parameter labelled its per-job numbers "per second" and exempted it from every gate.
+        var perSecond = cases.All(x => headRun.TryGetValue(x.FullName, out var measured) ? measured.PerSecond : JobCountOf(x) is null);
         var per = perSecond ? "s" : "job";
         var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | Allocated | Alloc Ratio | Gate";
         var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";

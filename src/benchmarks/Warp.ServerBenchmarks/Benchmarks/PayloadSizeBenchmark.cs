@@ -40,9 +40,10 @@ public class PayloadSizeBenchmark
     // 4 KB, and it is the ALLOCATIONS this size is chosen for, not the statement count. Payload does
     // not move statements per job at all (9.58 against 9.83 across a zero-byte control — noise), so an
     // arm justified on that basis would be dead weight. It moves allocations from 3.02 GB to 3.24 GB,
-    // a 7.3% difference, which clears the 2% allocation gate with room to spare. That is what lets
-    // this arm catch a change that starts writing the payload column needlessly — the regression class
-    // #301 fixed, and one an empty-payload benchmark cannot see.
+    // a 7.3% difference. Allocations are no longer gated (they are reported, and marked when they rise
+    // over 5%), so what FAILS a change that starts writing the payload column needlessly — the
+    // regression class #301 fixed, and one an empty-payload benchmark cannot see — is WAL per job: a
+    // 4 KB column written once more per job is far past that gate's 10%.
     //
     // The size itself is inherited from that measurement rather than derived from a real workload. The
     // requirement it has to meet is only that payload handling clears the gate, and 4 KB does; a much
