@@ -7,7 +7,7 @@ namespace Warp.Tests.Fixtures;
 
 /// <summary>
 /// Per-test-class PostgreSQL fixture. Each test class gets its own database inside the
-/// shared PostgreSQL container, so test classes run fully in parallel up to xunit's
+/// shared PostgreSQL container, cloned from a template that already has the schema, so test classes run fully in parallel up to xunit's
 /// MaxParallelThreads. Tests within a class share the database and rely on Respawn between
 /// tests for isolation.
 /// </summary>
@@ -40,11 +40,8 @@ public class PostgreSqlClassFixture : IAsyncLifetime, IDatabaseFixture
             MaxPoolSize = 50,
         }.ConnectionString;
 
-        TestLifecycleTrace.Record("EnsureCreatedAsync starting");
-        await using var context = CreateContext();
-        await context.Database.EnsureCreatedAsync(Xunit.TestContext.Current.CancellationToken);
-        TestLifecycleTrace.Record("EnsureCreatedAsync returned");
-
+        // No EnsureCreated here: the database is a clone of the shared container's template, which
+        // already has the schema (see SharedPostgreSqlContainer).
         TestLifecycleTrace.Record("Respawner.CreateAsync starting");
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(Xunit.TestContext.Current.CancellationToken);
