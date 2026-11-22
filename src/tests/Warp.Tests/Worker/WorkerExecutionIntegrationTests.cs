@@ -59,6 +59,71 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
         await server.WaitForJobState(jobId, State.Completed, TimeSpan.FromSeconds(5));
     }
 
+    // Rule 6.12. Nothing is written for a job before its handler starts: its "Processing" log row and,
+    // in dispatcher mode, the worker's id on the row arrive with the monitor's first flush and first
+    // keep-alive. A job that is still running must get both without waiting for it to finish.
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenLongRunningHandler_WhileItRuns_ThenItsProcessingLogAndItsWorkerAppear(bool useDispatcher)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var barrier = new BarrierSignal();
+        await using var server = await StartAsync(useDispatcher, barrier);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new BarrierRequest());
+        await publisher.SaveChangesAsync(ct);
+
+        try
+        {
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), ct)).ShouldBeTrue("the handler never started");
+
+            await server.WaitForJobLog(jobId, "Processing");
+            await WarpTestServer.WaitUntil(
+                "The running job's row naming one of the server's workers",
+                async () =>
+                {
+                    await using var ctx = Fixture.CreateContext();
+                    var workerId = await ctx.Set<Job>().Where(x => x.Id == jobId).Select(x => x.CurrentWorkerId).SingleAsync(ct);
+
+                    return workerId != null && await ctx.Set<Warp.Core.Data.Entities.Worker>().AnyAsync(x => x.Id == workerId, ct);
+                },
+                TimeSpan.FromSeconds(5),
+                ct);
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+        }
+
+        await server.WaitForJobState(jobId, State.Completed, TimeSpan.FromSeconds(5));
+
+        var logs = await server.GetJobLogs(jobId);
+        logs.Count(x => string.Equals(x.EventType, "Processing", StringComparison.Ordinal)).ShouldBe(1, "the monitor wrote it, so the completion must not write it again");
+    }
+
+    // The other half: a job that finishes before the monitor's first flush still gets its "Processing"
+    // row, with the completion, stamped with the instant the worker took it.
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenShortHandler_WhenItCompletes_ThenItsProcessingLogIsWrittenWithTheCompletion(bool useDispatcher)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        await using var server = await StartAsync(useDispatcher, new BarrierSignal());
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new UnitRequest());
+        await publisher.SaveChangesAsync(ct);
+
+        await server.WaitForJobState(jobId, State.Completed, TimeSpan.FromSeconds(5));
+
+        var logs = await server.GetJobLogs(jobId);
+        var processing = logs.Single(x => string.Equals(x.EventType, "Processing", StringComparison.Ordinal));
+        var completed = logs.Single(x => string.Equals(x.EventType, "Completed", StringComparison.Ordinal));
+        processing.WorkerId.ShouldNotBeNull();
+        processing.Timestamp.ShouldBeLessThanOrEqualTo(completed.Timestamp);
+    }
+
     [TimedTheory]
     [InlineData(false)]
     [InlineData(true)]
@@ -236,9 +301,9 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
                 configureServices?.Invoke(services);
             });
 
-    // Throws once, on the statement the job monitor uses to renew a running job's keep-alive: an UPDATE
-    // of LastKeepAlive alone. The claim and the dispatcher's ownership mark also write that column, but
-    // together with the state or the worker id, so they are left alone.
+    // Throws once, on the statement the job monitor uses to renew a running job's keep-alive. The claim
+    // and the dispatcher's guarded renewal also write that column, but they name the state as well, so
+    // they are left alone.
     private sealed class FailFirstKeepAliveInterceptor : DbCommandInterceptor
     {
         private int _failures;
@@ -252,10 +317,13 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
             CancellationToken cancellationToken = default)
         {
             var sql = command.CommandText.Replace("_", string.Empty, StringComparison.Ordinal);
+
+            // The monitor's renewal is the one update of the keep-alive that never mentions the state: the
+            // claim, the dispatcher's guarded renewal and the finalizing write all do. (In dispatcher mode
+            // it also stamps the worker's id, so that column cannot tell them apart.)
             var renewsKeepAliveOnly = sql.Contains("UPDATE", StringComparison.OrdinalIgnoreCase)
                 && sql.Contains("lastkeepalive", StringComparison.OrdinalIgnoreCase)
-                && !sql.Contains("currentstate", StringComparison.OrdinalIgnoreCase)
-                && !sql.Contains("currentworkerid", StringComparison.OrdinalIgnoreCase);
+                && !sql.Contains("currentstate", StringComparison.OrdinalIgnoreCase);
 
             if (renewsKeepAliveOnly && Interlocked.CompareExchange(ref _failures, 1, 0) == 0)
             {

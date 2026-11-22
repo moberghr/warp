@@ -53,6 +53,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     // the handler ran, where the failure arm finalizes the SAME tracked job again
     // (see BeginFinalizingTransactionAsync).
     private readonly List<JobLog> _finalizationLogs = [];
+    private readonly DeferredJobLog _processingLog = new();
     private bool _finalizationAttempted;
 
     public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals, WarpCounterBuffer counterBuffer)
@@ -112,10 +113,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             receiveSpan?.SetTag(WarpTelemetryAttributes.MessagingMessageId, job.Id.ToString());
             receiveSpan?.SetTag(WarpTelemetryAttributes.WarpWorkerId, _workerId.ToString());
 
-            // The claim itself is committed atomically via UPDATE RETURNING. Persist the Processing
-            // log entry in a separate round-trip; failure here leaves the job Processing with
-            // LastKeepAlive set, which is fine — the worker carries on and the log is cosmetic.
-            workerContext.Set<JobLog>().Add(new JobLog
+            // The claim itself is committed atomically via UPDATE RETURNING. The "Processing" log row is
+            // not written here on its own, which cost every job a statement and a commit before its
+            // handler started: it goes with the monitor's first flush or the finalizing write (rule 6.12).
+            _processingLog.Set(new JobLog
             {
                 JobId = job.Id,
                 EventType = "Processing",
@@ -138,9 +139,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 }
             }
 
-            PerfTrace.Mark(PerfTrace.SaveProcessing);
-            await workerContext.SaveChangesAsync(cancellationToken);
-            PerfTrace.Mark(PerfTrace.CommitTransaction1);
+            // The claim is committed, so the queue-wait increments staged above are real.
             CommitStagedCounters();
         }
 
@@ -530,6 +529,13 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             {
                 var pendingLogs = logCollector.Drain();
                 var pendingProgress = progressCollector.Drain();
+
+                // The first flush of a job that has run this long carries its "Processing" row.
+                if (_processingLog.Take() is { } processing)
+                {
+                    pendingLogs.Insert(0, processing);
+                }
+
                 var doCancellationCheck = timeSinceLastCheck >= cancellationCheckInterval;
 
                 if (pendingLogs.Count == 0 && pendingProgress.Count == 0 && !doCancellationCheck)
@@ -868,6 +874,13 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
         _finalizationLogs.Clear();
         _finalizationAttempted = true;
+
+        // Still here when the job finished before the monitor's first flush: it goes with this write.
+        // Not one of _finalizationLogs, so an attempt that fails leaves it in place for the next.
+        if (_processingLog.Take() is { } processing)
+        {
+            workerContext.Set<JobLog>().Add(processing);
+        }
 
         return await workerContext.Database.BeginTransactionAsync(default);
     }
