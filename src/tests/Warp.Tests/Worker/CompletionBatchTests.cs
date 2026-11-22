@@ -501,6 +501,44 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         (await ctx.Set<Counter>().AnyAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBeFalse();
     }
 
+    [TimedFact]
+    public async Task Add_WhileAnotherThreadDrains_NoCompletionIsLostOrSeenTwice()
+    {
+        // The shutdown flush (WarpDispatcherWorker.StopAsync) can run on the host's thread while the
+        // worker loop is still adding. The interleaving that loses an entry sits between two statements
+        // inside the drain, where no handler can be pinned, so this one test does what the rest of the
+        // suite avoids: it runs the two callers against each other many times and counts. Every added
+        // completion must come out of exactly one drain. Without the lock it loses entries or throws.
+        const int total = 200_000;
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var entries = Enumerable.Range(0, total)
+            .Select(_ => new PendingCompletion(new Job { Id = Guid.NewGuid() }, [], []))
+            .ToArray();
+
+        var drained = new List<PendingCompletion>(total);
+        var adding = Task.Run(
+            () =>
+            {
+                foreach (var entry in entries)
+                {
+                    batch.Add(entry);
+                }
+            },
+            Xunit.TestContext.Current.CancellationToken);
+
+        while (!adding.IsCompleted)
+        {
+            drained.AddRange(batch.Drain());
+        }
+
+        await adding;
+        drained.AddRange(batch.Drain());
+
+        drained.Count.ShouldBe(total);
+        drained.Select(x => x.Job.Id).Distinct().Count().ShouldBe(total);
+        batch.Count.ShouldBe(0);
+    }
+
     // FlushAsync takes no CancellationToken on purpose (PR #127): a caller that could cancel a drained
     // flush mid-commit lost the drained entries and left their jobs Processing for StaleJobRecovery.
     // The signature is the guard; a test that calls it and checks the commit was a copy of

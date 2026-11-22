@@ -39,6 +39,14 @@ internal sealed class CompletionBatch
     private const int MaxDeadlockRetries = 3;
     private const int DeadlockRetryBaseDelayMs = 50;
 
+    // Guards the buffer and its timestamp. One worker owns a batch and is the only caller in normal
+    // running, so this is never contended there. The second caller is WarpDispatcherWorker.StopAsync,
+    // which flushes from the host's shutdown thread and, when the shutdown timeout expires with a
+    // handler still running, can do so while the worker loop is adding to the same buffer. Unguarded,
+    // a completion added between the copy and the clear was dropped (the job then waited for
+    // StaleJobRecovery and ran twice), and List<T> is not safe for that use at all. Held only for the
+    // in-memory swap, never across the database write.
+    private readonly Lock _gate = new();
     private readonly List<PendingCompletion> _buffer;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly TimeProvider _timeProvider;
@@ -78,12 +86,33 @@ internal sealed class CompletionBatch
 
     public void Add(PendingCompletion entry)
     {
-        if (_buffer.Count == 0)
+        lock (_gate)
         {
-            _firstEntryTimestamp = _timeProvider.GetUtcNow();
-        }
+            if (_buffer.Count == 0)
+            {
+                _firstEntryTimestamp = _timeProvider.GetUtcNow();
+            }
 
-        _buffer.Add(entry);
+            _buffer.Add(entry);
+        }
+    }
+
+    // Takes everything buffered so far and leaves the buffer empty, as one step.
+    internal PendingCompletion[] Drain()
+    {
+        lock (_gate)
+        {
+            if (_buffer.Count == 0)
+            {
+                return [];
+            }
+
+            var pending = _buffer.ToArray();
+            _buffer.Clear();
+            _firstEntryTimestamp = null;
+
+            return pending;
+        }
     }
 
     /// <summary>
@@ -100,14 +129,11 @@ internal sealed class CompletionBatch
     /// </summary>
     public async Task FlushAsync()
     {
-        if (_buffer.Count == 0)
+        var pending = Drain();
+        if (pending.Length == 0)
         {
             return;
         }
-
-        var pending = _buffer.ToArray();
-        _buffer.Clear();
-        _firstEntryTimestamp = null;
 
         await FlushRangeAsync(pending, 0, pending.Length, CancellationToken.None);
     }
