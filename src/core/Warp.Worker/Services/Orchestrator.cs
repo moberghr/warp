@@ -18,8 +18,8 @@ namespace Warp.Worker.Services;
 /// <para>
 /// A wake names the parents of the jobs that finished, and a pass checks those. Every parent in flight
 /// is checked only on a sweep: once per <c>OrchestrationInterval</c>, and whenever a wake could not
-/// name its parents. The sweep is what finds a parent whose last child was finished by something other
-/// than a worker (a dashboard delete, crash recovery).
+/// name its parents. The sweep is the backstop for a wake that never arrived (a crashed process, a
+/// delete from a process with no server while database push is off).
 /// </para>
 /// <para>
 /// Activating a continuation is an enqueue site (rule 6.3): it flips rows from Awaiting to Enqueued, so it

@@ -240,10 +240,10 @@ public class WarpServerConfiguration : WarpConfiguration
     /// orchestration is then driven entirely by <c>JobFinalized</c> push signals plus any
     /// explicit ticks (e.g. <c>WarpTestServer.RunOrchestratorOnceAsync</c> in tests).
     /// <para>
-    /// It is also how often every parent in flight is checked. A worker that finishes a job names that
-    /// job's parent and only that parent is checked, at once. A parent whose last child was finished by
-    /// something else (a dashboard delete, crash recovery) is found by the next sweep, so within this
-    /// interval.
+    /// It is also how often every parent in flight is checked. Whatever finishes a job (a worker, a
+    /// delete, crash recovery) names that job's parent, and only that parent is checked, at once. The
+    /// sweep is the backstop for a wake that never arrived: a process that crashed before sending it, or
+    /// a delete made in a process without a server while database push is off.
     /// </para>
     /// </summary>
     public TimeSpan? OrchestrationInterval { get; set; } = TimeSpan.FromSeconds(10);

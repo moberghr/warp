@@ -5,6 +5,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 
@@ -47,6 +48,44 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         var job = await readCtx.Set<Job>().FirstOrDefaultAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Deleted);
+    }
+
+    // Rule 6.11: a deleted child can be what completes its message, and the Orchestrator only checks
+    // the parents a wake names, so a delete has to name them.
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DeleteJob_ChildOfAMessage_NamesTheParentForTheOrchestrator(bool bulk)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        var message = new Job { Id = Guid.NewGuid(), Kind = JobKind.Message, CurrentState = State.Processing, CreateTime = now, ScheduleTime = now, Queue = "default" };
+        var child = new Job { Id = Guid.NewGuid(), Kind = JobKind.Job, CurrentState = State.Enqueued, ParentJobId = message.Id, CreateTime = now, ScheduleTime = now, Queue = "default" };
+        await using (var seed = _fixture.CreateContext())
+        {
+            seed.Set<Job>().AddRange(message, child);
+            await seed.SaveChangesAsync(ct);
+        }
+
+        var signals = new ServerTaskSignals<TestContext>();
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        var wakes = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobFinalized, () => wakes++);
+        var svc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext(), signals: signals);
+
+        if (bulk)
+        {
+            await svc.BulkDeleteJobs([child.Id]);
+        }
+        else
+        {
+            await svc.DeleteJob(child.Id);
+        }
+
+        wakes.ShouldBe(1);
+        var (parents, sweep) = signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        parents.ShouldBe([message.Id]);
+        sweep.ShouldBeFalse();
     }
 
     [TimedFact]

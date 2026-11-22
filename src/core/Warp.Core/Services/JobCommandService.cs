@@ -106,7 +106,21 @@ public class JobCommandService<TContext> : IJobCommandService
         });
         await _context.SaveChangesAsync();
         await transaction.CommitAsync();
+
+        if (job.ParentJobId is { } parent)
+        {
+            await AnnounceFinalizedAsync([parent]);
+        }
     }
+
+    // A deleted child is settled work, so it can be what completes its batch or message. The Orchestrator
+    // checks the parents a wake names and sweeps the rest only once per OrchestrationInterval (rule 6.11),
+    // so a delete names its parents like a worker does. After the commit, never inside the transaction.
+    private Task AnnounceFinalizedAsync(IReadOnlyCollection<Guid> parents) =>
+        NotificationDispatch.DispatchAsync(
+            [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(parents))],
+            _signals,
+            _notificationTransport);
 
     public async Task RequeueJob(Guid jobId)
     {
@@ -243,6 +257,7 @@ public class JobCommandService<TContext> : IJobCommandService
             }
 
             await using var transaction = await _context.Database.BeginTransactionAsync();
+            var parentsOfDeleted = new HashSet<Guid>();
 
             foreach (var group in groups)
             {
@@ -327,6 +342,14 @@ public class JobCommandService<TContext> : IJobCommandService
                         });
                     }
 
+                    parentsOfDeleted.UnionWith(await _context.Set<Job>()
+                        .AsNoTracking()
+                        .Where(x => changedIds.Contains(x.Id))
+                        .Where(x => x.ParentJobId != null)
+                        .Select(x => x.ParentJobId!.Value)
+                        .Distinct()
+                        .ToListAsync());
+
                     // Only the delete is counted. The source state's counter is NOT rewritten — those jobs
                     // really did succeed / fail, and deleting them afterwards does not un-happen it.
                     AddStatCounters(StatsDeleted, affected);
@@ -338,6 +361,11 @@ public class JobCommandService<TContext> : IJobCommandService
 
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
+
+            if (parentsOfDeleted.Count > 0)
+            {
+                await AnnounceFinalizedAsync(parentsOfDeleted);
+            }
         }
 
         return result;
