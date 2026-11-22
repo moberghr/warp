@@ -44,7 +44,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
     private readonly ConcurrentDictionary<BenchmarkCase, Counters> _deltas = new();
     private readonly ConcurrentDictionary<BenchmarkCase, TimeSpan> _elapsed = new();
-    private Counters? _before;
+    private Reading? _before;
     private long _beforeTimestamp;
 
     public IEnumerable<string> Ids => ["DatabaseStatements"];
@@ -82,7 +82,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                     break;
                 }
 
-                var delta = after - before;
+                var delta = Delta(before, after);
                 var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(_beforeTimestamp);
                 _deltas.AddOrUpdate(parameters.BenchmarkCase, delta, (_, existing) => existing + delta);
                 _elapsed.AddOrUpdate(parameters.BenchmarkCase, elapsed, (_, existing) => existing + elapsed);
@@ -159,8 +159,45 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     private static string? ConnectionStringFor(BenchmarkProvider provider) =>
         provider == BenchmarkProvider.SqlServer ? SqlServerConnectionString : PostgresConnectionString;
 
-    private static Counters? ReadCounters(BenchmarkProvider provider) =>
+    private static Reading? ReadCounters(BenchmarkProvider provider) =>
         provider == BenchmarkProvider.SqlServer ? ReadSqlServerCounters() : ReadPostgresCounters();
+
+    /// <summary>
+    /// What happened between two readings.
+    /// <para>
+    /// PostgreSQL's counters only grow, so its totals subtract. SQL Server's do not: a plan that is
+    /// recompiled or evicted takes its whole count out of <c>dm_exec_query_stats</c>, so subtracting two
+    /// totals subtracted everything that plan had done BEFORE the window as well. On an idle server,
+    /// where a window holds a few hundred statements and a plan may have run a few dozen times during
+    /// start-up and the settle, one recompile moved the result by several percent: identical builds
+    /// read about 4% apart, which is why that row could not be gated. So SQL Server is compared plan by
+    /// plan. A plan present in both readings with the same compile time contributes its difference; a
+    /// plan compiled inside the window contributes all of its executions, which all happened inside it;
+    /// a plan gone from the second reading contributes nothing, losing only its share of the window.
+    /// </para>
+    /// </summary>
+    private static Counters Delta(Reading before, Reading after)
+    {
+        var totals = after.Totals - before.Totals;
+        if (before.Plans is not { } beforePlans || after.Plans is not { } afterPlans)
+        {
+            return totals;
+        }
+
+        long statements = 0;
+        long buffers = 0;
+        foreach (var (id, plan) in afterPlans)
+        {
+            var sameCompile = beforePlans.TryGetValue(id, out var earlier)
+                && earlier.Compiled == plan.Compiled
+                && earlier.Executions <= plan.Executions;
+
+            statements += sameCompile ? plan.Executions - earlier.Executions : plan.Executions;
+            buffers += sameCompile ? plan.LogicalReads - earlier.LogicalReads : plan.LogicalReads;
+        }
+
+        return totals with { Statements = statements, Buffers = buffers };
+    }
 
     /// <summary>
     /// Numerator AND denominator from the same view over the same window, which is what makes this
@@ -170,7 +207,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// Counting the job rows actually written inside the window answers it directly, and is checkable
     /// against the lab, which measures the same thing.
     /// </summary>
-    private static Counters? ReadPostgresCounters()
+    private static Reading? ReadPostgresCounters()
     {
         try
         {
@@ -197,7 +234,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             using var reader = command.ExecuteReader();
 
             return reader.Read()
-                ? new Counters(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), Convert.ToInt64(reader.GetValue(3)))
+                ? new Reading(new Counters(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), Convert.ToInt64(reader.GetValue(3))), null)
                 : null;
         }
         catch (NpgsqlException)
@@ -219,14 +256,13 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// </para>
     /// <para>
     /// <c>dm_exec_query_stats</c> is a weaker instrument than <c>pg_stat_statements</c>: it sees only
-    /// plans still in cache, so an eviction mid-window loses those executions and the count reads low.
-    /// On an otherwise idle instance over a short window that is rare, and both sides of a comparison
-    /// are exposed to it equally — but it is why the SQL Server number should not be read as directly
-    /// comparable to the PostgreSQL one. <c>leaf_insert_count</c> for the job table is the denominator:
+    /// plans still in cache, so a plan evicted mid-window loses its executions inside the window and the
+    /// count reads low by that much (<see cref="Delta"/> keeps it from losing more). It is why the SQL
+    /// Server number should not be read as directly comparable to the PostgreSQL one. <c>leaf_insert_count</c> for the job table is the denominator:
     /// rows written, measured at the storage engine rather than reconstructed from statement text.
     /// </para>
     /// </summary>
-    private static Counters? ReadSqlServerCounters()
+    private static Reading? ReadSqlServerCounters()
     {
         try
         {
@@ -235,39 +271,71 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
             using var command = connection.CreateCommand();
 
-            // Every database on the instance, resolved by name per database: the connection is to
-            // master while the fixture writes to a warpbench_* database whose name the host never
-            // learns, so DB_ID()/OBJECT_ID() here resolved in master and counted master's inserts.
-            // index_id 0/1 is the heap or clustered index only — leaf_insert_count is per index, so
-            // summing every index multiplied each job row by the table's index count.
+            // One batch, two result sets. Sent as one batch so its text contains dm_exec_query_stats
+            // throughout, which is how the read keeps itself out of the count.
+            //
+            // First, one row per cached plan statement (see Delta for why not a total).
+            //
+            // Second, the job rows written. Every database on the instance, resolved by name per
+            // database: the connection is to master while the fixture writes to a warpbench_* database
+            // whose name the host never learns, so DB_ID()/OBJECT_ID() here resolved in master and
+            // counted master's inserts. index_id 0/1 is the heap or clustered index only:
+            // leaf_insert_count is per index, so summing every index multiplied each job row by the
+            // table's index count.
             command.CommandText = @"
                 SELECT
-                    (SELECT COALESCE(SUM(qs.execution_count), 0)
-                     FROM sys.dm_exec_query_stats qs
-                     CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
-                     WHERE st.text NOT LIKE '%dm_exec_query_stats%') AS statements,
-                    (SELECT COALESCE(SUM(qs.total_logical_reads), 0)
-                     FROM sys.dm_exec_query_stats qs
-                     CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
-                     WHERE st.text NOT LIKE '%dm_exec_query_stats%') AS buffers,
-                    (SELECT COALESCE(SUM(os.leaf_insert_count), 0)
-                     FROM sys.dm_db_index_operational_stats(NULL, NULL, NULL, NULL) os
-                     WHERE os.index_id IN (0, 1)
-                       AND os.database_id > 4
-                       AND OBJECT_SCHEMA_NAME(os.object_id, os.database_id) = 'warp'
-                       AND OBJECT_NAME(os.object_id, os.database_id) = 'Job') AS jobs";
+                    CONVERT(varchar(130), qs.plan_handle, 1) + ':' + CAST(qs.statement_start_offset AS varchar(12)) AS id,
+                    qs.creation_time,
+                    qs.execution_count,
+                    qs.total_logical_reads
+                FROM sys.dm_exec_query_stats qs
+                CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+                WHERE st.text NOT LIKE '%dm_exec_query_stats%';
+
+                SELECT COALESCE(SUM(os.leaf_insert_count), 0)
+                FROM sys.dm_db_index_operational_stats(NULL, NULL, NULL, NULL) os
+                WHERE os.index_id IN (0, 1)
+                  AND os.database_id > 4
+                  AND OBJECT_SCHEMA_NAME(os.object_id, os.database_id) = 'warp'
+                  AND OBJECT_NAME(os.object_id, os.database_id) = 'Job';";
 
             using var reader = command.ExecuteReader();
 
-            return reader.Read()
-                ? new Counters(Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(2)), Convert.ToInt64(reader.GetValue(1)), 0)
-                : null;
+            var plans = new Dictionary<string, PlanStats>(StringComparer.Ordinal);
+            long statements = 0;
+            long buffers = 0;
+            while (reader.Read())
+            {
+                var plan = new PlanStats(reader.GetDateTime(1), Convert.ToInt64(reader.GetValue(2)), Convert.ToInt64(reader.GetValue(3)));
+
+                // A repeated key would be the view repeating a row. Added together, so the count stays
+                // whole if it ever does.
+                plans[reader.GetString(0)] = plans.TryGetValue(reader.GetString(0), out var same)
+                    ? same with { Executions = same.Executions + plan.Executions, LogicalReads = same.LogicalReads + plan.LogicalReads }
+                    : plan;
+                statements += plan.Executions;
+                buffers += plan.LogicalReads;
+            }
+
+            if (!reader.NextResult() || !reader.Read())
+            {
+                return null;
+            }
+
+            return new Reading(new Counters(statements, Convert.ToInt64(reader.GetValue(0)), buffers, 0), plans);
         }
         catch (SqlException)
         {
             return null;
         }
     }
+
+    /// <summary>One cached plan statement: when it was compiled and what it has done since.</summary>
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct PlanStats(DateTime Compiled, long Executions, long LogicalReads);
+
+    /// <summary>One reading of a server: its totals, and on SQL Server the plans behind them.</summary>
+    private sealed record Reading(Counters Totals, Dictionary<string, PlanStats>? Plans);
 
     /// <summary>A server-wide counter reading, and the difference between two.</summary>
     [StructLayout(LayoutKind.Auto)]
