@@ -147,59 +147,77 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
                 services.AddSagaHandler<Warp.Tests.TestData.Sagas.BarrierSagaHandler>();
             });
 
-        var publisher = server.CreatePublisher();
-        await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartsMessage { CorrelationKey = "contended" });
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Wait for the first handler to be pinned at the barrier. Assert the wait actually
-        // succeeded — SemaphoreSlim.WaitAsync returns false on timeout, and silently proceeding
-        // would run every downstream assertion on the false premise that the mutex is held,
-        // masking the real failure (starved worker / handler never picked up) behind a generic
-        // 20s hang. Fail fast and descriptively instead.
-        var pinned = await signal.Running.WaitAsync(TimeSpan.FromSeconds(10), Xunit.TestContext.Current.CancellationToken);
-        pinned.ShouldBeTrue("first saga handler was not picked up and pinned at the barrier within 10s");
-
-        // Now publish a second message for the same correlation key. The proxy will fail to
-        // acquire the mutex (held by the first handler) and set Outcome = Enqueued requeue.
-        await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartMessage { CorrelationKey = "contended" });
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Wait until at least one routed handler-job has a JobLog with the "busy" message.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        var sawBusy = false;
-        while (DateTime.UtcNow < deadline)
+        try
         {
-            sawBusy = await server.CreateContext().Set<Warp.Core.Data.Entities.JobLog>()
-                .Where(x => x.Message != null && x.Message.Contains("busy for 'contended'"))
-                .AnyAsync(Xunit.TestContext.Current.CancellationToken);
-            if (sawBusy)
-            {
-                break;
-            }
+            var ct = Xunit.TestContext.Current.CancellationToken;
+            var publisher = server.CreatePublisher();
+            await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartsMessage { CorrelationKey = "contended" });
+            await publisher.SaveChangesAsync(ct);
 
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
+            // Wait for the first handler to be pinned at the barrier, and assert it: WaitAsync returns
+            // false on timeout, and proceeding would run everything below on the false premise that the
+            // mutex is held.
+            var pinned = await signal.Running.WaitAsync(TimeSpan.FromSeconds(8), ct);
+            pinned.ShouldBeTrue("first saga handler was not picked up and pinned at the barrier within 8s");
+
+            // A second message for the same correlation key: the proxy fails to acquire the mutex the
+            // first handler holds and requeues with a jittered ScheduleTime.
+            await publisher.Publish(new Warp.Tests.TestData.Sagas.BarrierStartMessage { CorrelationKey = "contended" });
+            await publisher.SaveChangesAsync(ct);
+
+            // While the first handler stays pinned, the second job keeps cycling: busy, Scheduled a
+            // jittered 50-250 ms ahead, activated, busy again. So neither its state nor its ScheduleTime
+            // holds still, and a single read of the row can land between two cycles (this test used to
+            // do that, and also compared ScheduleTime with the job's CreateTime, which every requeue
+            // pushes further apart). Instead wait for one observation of the property itself: the job
+            // parked in Scheduled, a short jitter after the busy requeue that put it there. Without
+            // jitter it would be Enqueued at now and N workers would lock-step into a tight
+            // fetch, busy, fetch loop on the same mutex.
+            var sawBusy = false;
+            await WarpTestServer.WaitUntil(
+                async () =>
+                {
+                    await using var ctx = server.CreateContext();
+                    var job = await ctx.Set<Warp.Core.Entities.Job>()
+                        .AsNoTracking()
+                        .Where(x => x.Type != null && x.Type.Contains("BarrierStartMessage"))
+                        .Where(x => x.CurrentState == Warp.Core.Enums.State.Scheduled)
+                        .Select(x => new { x.Id, x.ScheduleTime })
+                        .FirstOrDefaultAsync(ct);
+                    if (job == null)
+                    {
+                        return false;
+                    }
+
+                    var busyAt = await ctx.Set<Warp.Core.Data.Entities.JobLog>()
+                        .AsNoTracking()
+                        .Where(x => x.JobId == job.Id)
+                        .Where(x => x.Message != null && x.Message.Contains("busy for 'contended'"))
+                        .OrderByDescending(x => x.Timestamp)
+                        .Select(x => (DateTime?)x.Timestamp)
+                        .FirstOrDefaultAsync(ct);
+                    if (busyAt == null)
+                    {
+                        return false;
+                    }
+
+                    sawBusy = true;
+                    var jitter = job.ScheduleTime - busyAt.Value;
+
+                    return jitter > TimeSpan.Zero && jitter < TimeSpan.FromSeconds(1);
+                },
+                TimeSpan.FromSeconds(8),
+                ct);
+
+            sawBusy.ShouldBeTrue();
         }
-
-        sawBusy.ShouldBeTrue("expected a 'busy for contended' requeue log within 10s");
-
-        // Verify jitter survives to the DB: the requeued routed-message job sits in Scheduled
-        // with ScheduleTime in the near future, not Enqueued at now. Without jitter, N workers
-        // hitting the same busy mutex would lock-step into a tight fetch→busy→fetch loop. The
-        // 50–250ms jitter prevents sympathy.
-        var jitteredJob = await server.CreateContext().Set<Warp.Core.Entities.Job>()
-            .AsNoTracking()
-            .Where(j => j.CurrentState == Warp.Core.Enums.State.Scheduled)
-            .Where(j => j.Type != null && j.Type.Contains("BarrierStartMessage"))
-            .OrderByDescending(j => j.CreateTime)
-            .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
-
-        jitteredJob.ShouldNotBeNull("expected the requeued message-job to sit in Scheduled state");
-        var delay = jitteredJob.ScheduleTime - jitteredJob.CreateTime;
-        delay.TotalMilliseconds.ShouldBeGreaterThan(0, "ScheduleTime must be in the future relative to CreateTime (jitter applied)");
-        delay.TotalMilliseconds.ShouldBeLessThan(1000, "jitter should be capped well under 1s");
-
-        // Release the barrier so the first handler completes and the test doesn't hang in cleanup.
-        signal.CanFinish.Release(10);
+        finally
+        {
+            // Always, not only on the passing path: with the handler still pinned, stopping the server
+            // waits on it, and an assertion that failed above would surface as a bare 20 s test timeout
+            // instead of its own message (#215).
+            signal.CanFinish.Release(10);
+        }
     }
 
     [TimedFact(20_000)]
