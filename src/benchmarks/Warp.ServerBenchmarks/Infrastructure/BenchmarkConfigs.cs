@@ -55,21 +55,39 @@ public class ServerBenchmarkConfig : ManualConfig
 /// workflow's minutes, where every other scenario but one takes about five. What these benchmarks are run
 /// for is the per-job database cost, which the diagnoser reads the same from one pass as from five.
 /// <para>
-/// So: no JIT pass and no pilot (the Monitoring strategy), no warm-up (the benchmark warms or settles
-/// itself in GlobalSetup), and ONE iteration. One pass has no spread to report, and the report shows a
-/// dash for it; a second pass would cost the whole clock again to say how much the clock varies.
+/// So: no JIT pass and no pilot (the Monitoring strategy) and no warm-up (the benchmark warms or settles
+/// itself in GlobalSetup). Three iterations all the same: comparing a commit with itself, statements per
+/// job moved 3.4% on one iteration and 0.5% on three, and the gate sits at 5%.
 /// </para>
 /// </summary>
 public class ClockBoundBenchmarkConfig : ServerBenchmarkConfig
 {
     public ClockBoundBenchmarkConfig()
+        : this(iterations: 3)
+    {
+    }
+
+    protected ClockBoundBenchmarkConfig(int iterations)
         : base(Job.Default
             .WithStrategy(RunStrategy.Monitoring)
             .WithLaunchCount(1)
             .WithWarmupCount(0)
-            .WithIterationCount(1)
+            .WithIterationCount(iterations)
             .WithInvocationCount(1)
             .WithUnrollFactor(1))
+    {
+    }
+}
+
+/// <summary>
+/// One measured window and nothing else, for a benchmark whose single operation IS the observation
+/// period (the idle server's 60 seconds). It has no spread to report, and the report shows a dash for
+/// it; a second window would cost the whole period again to say how much the period varies.
+/// </summary>
+public class SingleWindowBenchmarkConfig : ClockBoundBenchmarkConfig
+{
+    public SingleWindowBenchmarkConfig()
+        : base(iterations: 1)
     {
     }
 }

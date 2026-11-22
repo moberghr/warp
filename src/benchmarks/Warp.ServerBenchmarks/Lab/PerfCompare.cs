@@ -42,13 +42,14 @@ public static partial class PerfCompare
         WriteIndented = true,
     };
 
-    // BenchmarkDotNet writes "NaN" and "Infinity" as strings where a statistic is undefined: the
-    // confidence interval of a case that ran one or two iterations, which is what the clock-bound
-    // scenarios run. Read as numbers, they crashed the comparison after the measurement had succeeded.
+    // BenchmarkDotNet writes a STRING where a statistic is undefined: the confidence interval of a case
+    // that ran one or two iterations, which is what a single-window scenario runs. Read as a number it
+    // crashed the comparison after the measurement had succeeded, so a spread that is not a number is
+    // read as "none" (UndefinedAsNullConverter).
     private static readonly JsonSerializerOptions BdnOptions = new()
     {
         PropertyNameCaseInsensitive = true,
-        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
+        Converters = { new UndefinedAsNullConverter() },
     };
 
     /// <summary>

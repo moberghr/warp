@@ -33,7 +33,7 @@ namespace Warp.ServerBenchmarks.Benchmarks;
     Order = 100)]
 [CaseLabel(nameof(Provider), "PostgreSql", "PostgreSQL")]
 [CaseLabel(nameof(Provider), "SqlServer", "SQL Server")]
-[Config(typeof(ClockBoundBenchmarkConfig))]
+[Config(typeof(SingleWindowBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class IdleServerBenchmark
 {
