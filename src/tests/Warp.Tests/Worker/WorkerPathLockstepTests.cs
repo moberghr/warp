@@ -6,6 +6,9 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Helper;
+using Warp.Core.Observability;
+using Warp.Core.Timeout;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
 
@@ -34,6 +37,9 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
         FailedAfterRetry = 2,
         Cancelled = 3,
         ParkedByOutcome = 4,
+        CompletedWithOtelMetricsSink = 5,
+        DeadlineMet = 6,
+        DeadlineMissed = 7,
     }
 
     // Two full hosts run one after the other, and the failing case waits out a retry delay in each.
@@ -42,6 +48,9 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
     [InlineData(Scenario.FailedAfterRetry)]
     [InlineData(Scenario.Cancelled)]
     [InlineData(Scenario.ParkedByOutcome)]
+    [InlineData(Scenario.CompletedWithOtelMetricsSink)]
+    [InlineData(Scenario.DeadlineMet)]
+    [InlineData(Scenario.DeadlineMissed)]
     public async Task FinalizedRow_IsTheSameInSingleWorkerAndDispatcherMode(Scenario scenario)
     {
         var single = await RunToRestAsync(scenario, useDispatcher: false);
@@ -54,6 +63,30 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
             .ToList();
 
         differences.ShouldBeEmpty();
+
+        // Two rows that agree because neither path wrote anything would pass the comparison, so the
+        // cases that exist for a counter also check that it is there.
+        var counted = single.Keys.Where(x => x.StartsWith("counter ", StringComparison.Ordinal)).ToList();
+        switch (scenario)
+        {
+            case Scenario.CompletedWithOtelMetricsSink:
+                counted.ShouldNotContain(x => x.StartsWith("counter jobstat", StringComparison.Ordinal));
+                counted.ShouldNotContain(x => x.StartsWith("counter qwait", StringComparison.Ordinal));
+                break;
+
+            case Scenario.DeadlineMet:
+                counted.ShouldContain(x => x.StartsWith("counter deadline:", StringComparison.Ordinal) && x.EndsWith(":count", StringComparison.Ordinal));
+                counted.ShouldNotContain(x => x.StartsWith("counter deadline:", StringComparison.Ordinal) && x.EndsWith(":miss", StringComparison.Ordinal));
+                break;
+
+            case Scenario.DeadlineMissed:
+                counted.ShouldContain(x => x.StartsWith("counter deadline:", StringComparison.Ordinal) && x.EndsWith(":miss", StringComparison.Ordinal));
+                break;
+
+            default:
+                counted.ShouldContain(x => x.StartsWith("counter stats:", StringComparison.Ordinal));
+                break;
+        }
     }
 
     private async Task<Dictionary<string, string>> RunToRestAsync(Scenario scenario, bool useDispatcher)
@@ -72,6 +105,11 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
                 cfg.WorkerCount = 2;
                 cfg.CompletionBatchSize = 10;
                 cfg.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
+                cfg.AddTimeout();
+                if (scenario == Scenario.CompletedWithOtelMetricsSink)
+                {
+                    cfg.JobMetricsSink = RecordingSink.Otel;
+                }
             }))
         {
             jobId = await RunScenarioAsync(server, scenario, ct);
@@ -148,6 +186,28 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
                 jobId = await publisher.Enqueue(new ParkInFutureRequest());
                 await publisher.SaveChangesAsync(ct);
                 await server.WaitForJobState(jobId, State.Scheduled);
+                break;
+
+            case Scenario.CompletedWithOtelMetricsSink:
+                jobId = await publisher.Enqueue(new UnitRequest());
+                await publisher.SaveChangesAsync(ct);
+                await server.WaitForJobState(jobId, State.Completed);
+                break;
+
+            case Scenario.DeadlineMet:
+                jobId = await publisher.Enqueue(new TimeoutTotalScopeRequest());
+                await publisher.SaveChangesAsync(ct);
+                await server.WaitForJobState(jobId, State.Completed);
+                break;
+
+            case Scenario.DeadlineMissed:
+                // One second is the shortest budget there is (it is stored in whole seconds). The handler
+                // runs for thirty, so the timeout ends it at the deadline and the job is finalized as
+                // Deleted at or past it: a miss.
+                var budget = new JobParameters().WithTimeout(TimeSpan.FromSeconds(1), TimeoutMode.Delete, TimeoutScope.Total);
+                jobId = await publisher.Enqueue(new CancellableRequest(), budget);
+                await publisher.SaveChangesAsync(ct);
+                await server.WaitForJobState(jobId, State.Deleted);
                 break;
 
             default:
