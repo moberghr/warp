@@ -38,7 +38,7 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 public class IdleServerBenchmark
 {
     private static readonly TimeSpan Window = TimeSpan.FromSeconds(60);
-    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(60);
 
     private PostgresServerFixture _fixture = null!;
 
