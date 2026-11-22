@@ -86,9 +86,13 @@ public sealed class Orchestrator<TContext> : IServerTask
 
         var finalized = await FinalizeParentsAsync(jobExpirationTimeout, ct);
         _context.ChangeTracker.Clear();
-        var activated = await ActivateContinuationsAsync(ct);
+
+        // After the finalization above, so a parent it has just completed releases its continuation in
+        // this same pass.
+        var (readyParents, deletedParents) = await LoadAwaitedParentsAsync(ct);
+        var activated = await ActivateContinuationsAsync(readyParents, ct);
         _context.ChangeTracker.Clear();
-        var cleaned = await FailChildrenOfDeletedParentsAsync(jobExpirationTimeout, ct);
+        var cleaned = await FailChildrenOfDeletedParentsAsync(deletedParents, jobExpirationTimeout, ct);
         _context.ChangeTracker.Clear();
 
         return finalized > 0 || activated > 0 || cleaned > 0;
@@ -123,6 +127,77 @@ public sealed class Orchestrator<TContext> : IServerTask
         return readyMessages
             .Concat(readyBatches)
             .Take(batchSize);
+    }
+
+    // How many parent ids go into one statement. Bounds the parameter list, not the work: every awaited
+    // parent is looked at each pass, in as many statements as that takes.
+    private const int ParentIdsPerStatement = 1000;
+
+    // "Which awaiting rows can move?" is answered in three steps, each of which can only be served one
+    // way, and that is the point (rule 6.11, a third query). It used to be one statement per question:
+    // awaiting rows WHERE EXISTS(parent WHERE id = the row's parent AND state = Completed). PostgreSQL
+    // was free to find that parent through the state index and check the id afterwards, and with stale
+    // statistics it did: for EACH awaiting row it read EVERY Completed row in the table and discarded
+    // all but one (126,250 rows discarded for 505 awaiting rows and 250 completed ones, 5,063 pages per
+    // call, on almost every job completion). The cost was awaiting rows times completed rows.
+    //
+    // 1. the DISTINCT parents that awaiting rows wait on: one pass over the Awaiting range
+    // 2. those parents' states, by primary key: a batch of 100 jobs waits on ONE parent, so this is one
+    //    lookup where a per-row check made a hundred
+    // 3. the awaiting children of the parents that turned out ready (or deleted), by parent id
+    //
+    // Internal and static so OrchestratorReadyParentsPlanTests measures the pages THESE read, not a copy.
+    internal static IQueryable<Guid> AwaitedParentIdsQuery(DbContext context) =>
+        context.Set<Job>()
+            .Where(c => c.CurrentState == State.Awaiting && c.ParentJobId != null)
+            .Select(c => c.ParentJobId!.Value)
+            .Distinct();
+
+    internal static IQueryable<AwaitedParent> AwaitedParentStatesQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
+        context.Set<Job>()
+            .Where(p => parentIds.Contains(p.Id))
+            .Select(p =>
+                new AwaitedParent
+                {
+                    Id = p.Id,
+                    CurrentState = p.CurrentState,
+                    ContinuationOptions = p.ContinuationOptions,
+                });
+
+    internal static IQueryable<Job> AwaitingChildrenOfQuery(DbContext context, IReadOnlyCollection<Guid> parentIds, int batchSize) =>
+        context.Set<Job>()
+            .Where(c => c.CurrentState == State.Awaiting && c.ParentJobId != null)
+            .Where(c => parentIds.Contains(c.ParentJobId!.Value))
+            .Take(batchSize);
+
+    // Steps 1 and 2, once per pass, for both the activation and the deleted-parent sweep.
+    private async Task<(List<Guid> Ready, List<Guid> Deleted)> LoadAwaitedParentsAsync(CancellationToken ct)
+    {
+        var ready = new List<Guid>();
+        var deleted = new List<Guid>();
+
+        var parentIds = await AwaitedParentIdsQuery(_context).ToListAsync(ct);
+        foreach (var chunk in parentIds.Chunk(ParentIdsPerStatement))
+        {
+            var parents = await AwaitedParentStatesQuery(_context, chunk)
+                .AsNoTracking()
+                .ToListAsync(ct);
+
+            foreach (var parent in parents)
+            {
+                if (parent.CurrentState == State.Completed
+                    || (parent.CurrentState == State.Failed && parent.ContinuationOptions == ContinuationOptions.OnAnyFinishedState))
+                {
+                    ready.Add(parent.Id);
+                }
+                else if (parent.CurrentState == State.Deleted)
+                {
+                    deleted.Add(parent.Id);
+                }
+            }
+        }
+
+        return (ready, deleted);
     }
 
     private async Task<int> FinalizeParentsAsync(TimeSpan jobExpirationTimeout, CancellationToken ct)
@@ -220,16 +295,16 @@ public sealed class Orchestrator<TContext> : IServerTask
         return readyParents.Count;
     }
 
-    private async Task<int> ActivateContinuationsAsync(CancellationToken ct)
+    private async Task<int> ActivateContinuationsAsync(List<Guid> readyParents, CancellationToken ct)
     {
-        var awaitingChildren = await _context.Set<Job>()
+        if (readyParents.Count == 0)
+        {
+            return 0;
+        }
+
+        // Every id here is ready, so taking the first slice starves nothing: the rest go next pass.
+        var awaitingChildren = await AwaitingChildrenOfQuery(_context, [.. readyParents.Take(ParentIdsPerStatement)], _configuration.ServerTaskBatchSize)
             .AsNoTracking()
-            .Where(c => c.CurrentState == State.Awaiting && c.ParentJobId != null)
-            .Where(c => _context.Set<Job>().Any(p =>
-                p.Id == c.ParentJobId
-                && (p.CurrentState == State.Completed
-                    || (p.CurrentState == State.Failed && p.ContinuationOptions == ContinuationOptions.OnAnyFinishedState))))
-            .Take(_configuration.ServerTaskBatchSize)
             .ToListAsync(ct);
 
         if (awaitingChildren.Count == 0)
@@ -310,15 +385,16 @@ public sealed class Orchestrator<TContext> : IServerTask
         await NotificationDispatch.DispatchAsync(notifications, _signals, _transport, ct);
     }
 
-    private async Task<int> FailChildrenOfDeletedParentsAsync(TimeSpan jobExpirationTimeout, CancellationToken ct)
+    private async Task<int> FailChildrenOfDeletedParentsAsync(List<Guid> deletedParents, TimeSpan jobExpirationTimeout, CancellationToken ct)
     {
+        if (deletedParents.Count == 0)
+        {
+            return 0;
+        }
+
         var now = _time.GetUtcNow().UtcDateTime;
 
-        var orphaned = await _context.Set<Job>()
-            .Where(c => c.CurrentState == State.Awaiting && c.ParentJobId != null)
-            .Where(c => _context.Set<Job>().Any(p =>
-                p.Id == c.ParentJobId && p.CurrentState == State.Deleted))
-            .Take(_configuration.ServerTaskBatchSize)
+        var orphaned = await AwaitingChildrenOfQuery(_context, [.. deletedParents.Take(ParentIdsPerStatement)], _configuration.ServerTaskBatchSize)
             .ToListAsync(ct);
 
         if (orphaned.Count == 0)
@@ -372,5 +448,15 @@ public sealed class Orchestrator<TContext> : IServerTask
         await _context.SaveChangesAsync(ct);
 
         return orphaned.Count;
+    }
+
+    // A parent some awaiting row is waiting on: what decides whether that row may move.
+    internal sealed class AwaitedParent
+    {
+        public Guid Id { get; init; }
+
+        public State CurrentState { get; init; }
+
+        public ContinuationOptions? ContinuationOptions { get; init; }
     }
 }

@@ -17,6 +17,8 @@ namespace Warp.Tests.Orchestration;
 // (10,004 pages to return nothing). The behaviour tests cannot see that: the rows returned were always
 // right. This test measures the pages the real query reads, with thousands of rows that have just left
 // Processing and no batch or message in the table, so it must read next to nothing.
+//
+// The second test does the same for the queries that decide which AWAITING rows can move.
 [GenerateDatabaseTests]
 public abstract partial class OrchestratorReadyParentsPlanTestsBase : IAsyncLifetime
 {
@@ -67,7 +69,71 @@ public abstract partial class OrchestratorReadyParentsPlanTestsBase : IAsyncLife
         pages.ShouldBeLessThan(MaxPages, detail);
     }
 
-    private static async Task<(long Pages, string Detail)> MeasurePagesReadAsync(TestContext context, IQueryable<Job> query, CancellationToken ct)
+    // The other half of the Orchestrator's pass: "which awaiting rows can move?". A batch workload half
+    // way through, five running batches each with a continuation batch of 100 awaiting jobs, in a table
+    // that also holds thousands of completed jobs. As one EXISTS query per question this read 5,063
+    // pages on PostgreSQL with only 250 completed rows, because each of the 505 awaiting rows had every
+    // Completed row read for it; the three steps it is now read 13, 15 and 46.
+    [TimedFact]
+    public async Task AwaitingRowQueries_BatchWorkloadAmongManyCompletedJobs_EachReadAHandfulOfPages()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        Job Row(JobKind kind, State state, Guid? parent) =>
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Kind = kind,
+                CurrentState = state,
+                ParentJobId = parent,
+                CreateTime = now,
+                ScheduleTime = now,
+                Queue = "default",
+            };
+
+        await using (var seed = _fixture.CreateContext())
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                var parent = Row(JobKind.Batch, State.Processing, null);
+                var continuation = Row(JobKind.Batch, State.Awaiting, parent.Id);
+                seed.Set<Job>().Add(parent);
+                seed.Set<Job>().Add(continuation);
+                seed.Set<Job>().AddRange(Enumerable.Range(0, 100).Select(x => Row(JobKind.Job, x < 50 ? State.Completed : State.Enqueued, parent.Id)));
+                seed.Set<Job>().AddRange(Enumerable.Range(0, 100).Select(_ => Row(JobKind.Job, State.Awaiting, continuation.Id)));
+            }
+
+            // What the old shape's cost multiplied by.
+            seed.Set<Job>().AddRange(Enumerable.Range(0, RowsThatLeftProcessing).Select(_ => Row(JobKind.Job, State.Completed, null)));
+            await seed.SaveChangesAsync(ct);
+        }
+
+        List<Guid> parentIds;
+        await using (var context = _fixture.CreateContext())
+        {
+            parentIds = await Orchestrator<TestContext>.AwaitedParentIdsQuery(context).ToListAsync(ct);
+
+            // 500 jobs wait on 5 continuation batches, which wait on 5 batches: ten parents, not 505.
+            parentIds.Count.ShouldBe(10);
+
+            var (pages, detail) = await MeasurePagesReadAsync(context, Orchestrator<TestContext>.AwaitedParentIdsQuery(context), ct);
+            pages.ShouldBeLessThan(MaxPages, detail);
+        }
+
+        await using (var context = _fixture.CreateContext())
+        {
+            var (pages, detail) = await MeasurePagesReadAsync(context, Orchestrator<TestContext>.AwaitedParentStatesQuery(context, parentIds), ct);
+            pages.ShouldBeLessThan(MaxPages, detail);
+        }
+
+        await using (var context = _fixture.CreateContext())
+        {
+            var (pages, detail) = await MeasurePagesReadAsync(context, Orchestrator<TestContext>.AwaitingChildrenOfQuery(context, parentIds, 1000), ct);
+            pages.ShouldBeLessThan(MaxPages, detail);
+        }
+    }
+
+    private static async Task<(long Pages, string Detail)> MeasurePagesReadAsync(TestContext context, IQueryable query, CancellationToken ct)
     {
         await context.Database.OpenConnectionAsync(ct);
         await using var command = query.CreateDbCommand();
