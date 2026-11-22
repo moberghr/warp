@@ -25,7 +25,7 @@ public abstract class LeaseLossCtsCancellationTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task LeaseManuallyStolen_StatusTransitionsFaultedThenWaiting()
     {
         var signal = new CancellationObserverSignal();
@@ -74,7 +74,7 @@ public abstract class LeaseLossCtsCancellationTestsBase : IntegrationTestBase
             timeout: TimeSpan.FromSeconds(8));
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task LeaseManuallyStolen_HeartbeatPublishesLost_UserCodeObservesCancellation()
     {
         var signal = new CancellationObserverSignal();

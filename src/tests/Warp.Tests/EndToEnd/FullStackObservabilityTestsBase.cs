@@ -63,7 +63,7 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
 
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
-    [TimedFact(30_000)]
+    [TimedFact]
     public async Task FullStack_EveryFieldOfEverySurface_IsCorrectAndVisibleInDashboard()
     {
         var startedAt = DateTime.UtcNow.AddSeconds(-1);

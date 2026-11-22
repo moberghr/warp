@@ -39,7 +39,7 @@ public abstract class StagedCounterCommitTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(30_000)]
+    [TimedFact]
     public async Task FinalizationCounters_OfACompletedJob_AreHandedToTheBuffer()
     {
         var barrier = new BarrierSignal();

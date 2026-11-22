@@ -28,7 +28,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         config.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenManyShortJobs_WhenProcessed_ThenAllReachCompletedState()
     {
         // Arrange
@@ -69,7 +69,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         completedLogs.ShouldBe(jobCount);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenMixedOutcomes_WhenProcessed_ThenStatesMatch()
     {
         // Arrange
@@ -115,7 +115,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         failed.ShouldAllBe(j => j.ExpireAt == null);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenIdleWorker_WhenFewJobsBelowBatchSize_ThenBufferIsDrainedByIdleTrigger()
     {
         // Arrange — CompletionBatchSize is 10, so 3 jobs never hit the size threshold, and the
@@ -144,7 +144,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         completed.ShouldBe(3);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenShutdown_WhenServerStops_ThenPendingCompletionsAreFlushed()
     {
         // Arrange — single-worker, isolated queue, with a barrier handler queued behind 4 short
@@ -209,7 +209,7 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         jobs[4].CurrentState.ShouldBe(State.Processing);
     }
 
-    [TimedFact(timeout: 60_000)]
+    [TimedFact]
     public async Task GivenProcessingJob_WhenCancelledInDispatcherMode_ThenFlushesAsDeletedWithHourlyCounter()
     {
         // Arrange — dispatcher-mode server. Enqueue a handler that blocks on cancellation.

@@ -16,7 +16,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ThreeMessageFlow_InOrder_SagaCompletesAndRowRemoved()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -49,7 +49,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         }
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ThreeMessageFlow_OutOfOrder_SagaCompletes()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -71,7 +71,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await WaitForSagaRemoved(server, "O-2");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task NonStartsSagaMessageForUnknownKey_FailsTheJob_DefaultNotFound()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -99,7 +99,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         sagaExists.ShouldBeFalse();
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task CompletedSaga_NewMessageForSameCorrelation_StartsFreshSaga()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -125,7 +125,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await WaitForSagaState(server, "O-reuse", paymentCaptured: false, inventoryReserved: false);
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task TwoConcurrentMessagesSameSaga_OneRequeuesWithBusyOutcome()
     {
         // Per memory feedback_no_spray_n_tests: pin a worker in the handler with a BarrierSignal
@@ -214,7 +214,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         }
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task SagaHandlerPublishesChildJob_ChildReachesEnqueuedAndCompletes()
     {
         // Validates the S1 contract end-to-end: a saga handler that calls IPublisher.Enqueue
@@ -253,7 +253,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         throw new TimeoutException("FollowUpJob published from saga handler did not reach Completed within 10s");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task TimeoutMessage_FiresAfterDelay_WhenSagaStillLive()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -270,7 +270,7 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await WaitForSagaRemoved(server, "O-timeout");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task TimeoutMessage_FiresAfterSagaCompleted_SilentlyDeletesJob()
     {
         await using var server = await WarpTestServer.StartAsync(

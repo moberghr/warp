@@ -37,7 +37,7 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(30_000)]
+    [TimedFact]
     public async Task StagedCounters_OfAnAttemptWhoseFinalizationFailed_DoNotRideTheFailureArmsCommit()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -58,11 +58,19 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
         // The handler succeeds; the write that records it does not, so the worker re-finalizes as Failed.
         await server.WaitForJobState(jobId, State.Failed);
 
-        var keys = server.CounterBuffer.Drain().Select(x => x.Key).ToList();
+        // The arm that committed hands its increments to the buffer just AFTER its commit, so the row
+        // can read Failed a moment before they arrive. Draining is destructive, so collect until the
+        // failure arm's own counter shows up (WaitUntil throws if it never does).
+        var keys = new List<string>();
+        await WarpTestServer.WaitUntil(
+            () =>
+            {
+                keys.AddRange(server.CounterBuffer.Drain().Select(x => x.Key));
 
-        keys.ShouldContain(
-            "stats:failed",
-            "the arm that actually committed must still hand its own increments to the buffer");
+                return Task.FromResult(keys.Contains("stats:failed", StringComparer.Ordinal));
+            },
+            TimeSpan.FromSeconds(5),
+            Xunit.TestContext.Current.CancellationToken);
 
         keys.ShouldNotContain(
             "stats:succeeded",
@@ -74,7 +82,7 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
     // "Completed" log to the context before the write failed, and the failure arm then finalized the same
     // tracked job. A Failed job left with ExpireAt set is deleted by ExpirationCleanup a day later, which
     // rule 8.2 says never happens to a failed job.
-    [TimedFact(30_000)]
+    [TimedFact]
     public async Task CompletionSaveFails_ReFinalizedAsFailed_IsACleanFailedRow()
     {
         await using var server = await WarpTestServer.StartAsync(Fixture, config => config.WorkerCount = 1, FailTheFirstCompletion);
@@ -90,7 +98,7 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
     // The other way the success arm's write can fail: the save goes through and the COMMIT throws. EF has
     // by then marked the job's changes as saved, so the failure arm sees nothing to write for the worker
     // fields it believes are already cleared, while the database rolled them back.
-    [TimedFact(30_000)]
+    [TimedFact]
     public async Task CompletionCommitFails_ReFinalizedAsFailed_IsACleanFailedRow()
     {
         await using var server = await WarpTestServer.StartAsync(Fixture, config => config.WorkerCount = 1, FailTheFirstCompletionCommit);

@@ -26,7 +26,7 @@ public sealed class ConcurrencyIsolationTests
     private const int RequestCount = 200;
     private const int StreamRequestCount = 50;
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ParallelRequests_EachReceiveItsOwnRequestPayload()
     {
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
@@ -48,7 +48,7 @@ public sealed class ConcurrencyIsolationTests
         }
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ParallelRequests_EachGetTheirOwnDIScope()
     {
         var counter = new ScopeConstructionCounter();
@@ -75,7 +75,7 @@ public sealed class ConcurrencyIsolationTests
         counter.Count.ShouldBe(RequestCount);
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ParallelRequests_DoNotShareAsyncLocalState()
     {
         // AsyncLocalProbe.Value is a static AsyncLocal<Guid?>. Each handler asserts the
@@ -97,7 +97,7 @@ public sealed class ConcurrencyIsolationTests
             "Some request observed a non-null AsyncLocal<Guid?> on handler entry — execution context is leaking between requests.");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task ParallelRequests_PipelineBehaviorSeesPerRequestInputs()
     {
         // The pipeline behavior records (request-marker, current scope-id) for every invocation.
@@ -131,7 +131,7 @@ public sealed class ConcurrencyIsolationTests
         }
     }
 
-    [TimedFact(30_000)]
+    [TimedFact]
     public async Task ParallelStreams_DoNotCrossoverItems()
     {
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());

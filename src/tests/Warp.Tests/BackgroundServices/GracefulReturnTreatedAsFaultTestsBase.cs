@@ -16,7 +16,7 @@ public abstract class GracefulReturnTreatedAsFaultTestsBase : IntegrationTestBas
     {
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task ServiceReturnsWithoutCancellation_StatusGoesFaulted_LifecycleLogRecordsGracefulExit()
     {
         var state = new ImmediateReturnServiceState();

@@ -36,7 +36,7 @@ public abstract class ErrorGroupSingleWorkerIntegrationTestsBase : IntegrationTe
         config.ErrorGroupingInterval = TimeSpan.FromMinutes(5);
     }
 
-    [TimedFact(timeout: 30_000)]
+    [TimedFact]
     public async Task GivenSingleWorkerMode_WhenJobFails_ThenErrorGroupIsCreatedAndInboxDrained()
     {
         // Arrange — single-worker-mode server; enqueue a handler that throws deterministically.

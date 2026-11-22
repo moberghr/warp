@@ -27,7 +27,7 @@ public class SqlServerDatabasePushIntegrationTests : IAsyncLifetime, IClassFixtu
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task JobEnqueued_WithDispatcherPlusPush_DispatcherPicksUpWithoutPolling()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -52,7 +52,7 @@ public class SqlServerDatabasePushIntegrationTests : IAsyncLifetime, IClassFixtu
         sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(3), "Push should wake the dispatcher in <3s even though PollingInterval=10s");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task MessageEnqueued_WithPush_MessageRoutingWakesImmediately()
     {
         await using var server = await WarpTestServer.StartAsync(
@@ -82,7 +82,7 @@ public class SqlServerDatabasePushIntegrationTests : IAsyncLifetime, IClassFixtu
         sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(5), "Push should wake MessageRoutingTask AND the dispatcher within 5s even though both intervals are 10s");
     }
 
-    [TimedFact(20_000)]
+    [TimedFact]
     public async Task PushEnabled_WithoutDispatcher_ProcessesWork()
     {
         // UseDispatcher=false + push: there is no dispatcher to wake, but the listener still signals

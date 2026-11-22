@@ -26,7 +26,7 @@ public abstract class NoRestartIntegrationTestsBase : IntegrationTestBase
         return MetadataSerializer.Serialize((Dictionary<string, object>)(object)meta)!;
     }
 
-    [TimedFact(60_000)]
+    [TimedFact]
     public async Task GivenStaleNoRestartJob_WhenRecovered_ThenMarkedFailed()
     {
         await using var server = await WarpTestServer.StartAsync(Fixture);
@@ -63,7 +63,7 @@ public abstract class NoRestartIntegrationTestsBase : IntegrationTestBase
         logs.ShouldContain(l => l.EventType == "Failed" && l.Message.Contains("opted out of restart"));
     }
 
-    [TimedFact(60_000)]
+    [TimedFact]
     public async Task GivenNoRestartAttributeJob_WhenPublishedAndStale_ThenMarkedFailed()
     {
         await using var server = await WarpTestServer.StartAsync(Fixture);

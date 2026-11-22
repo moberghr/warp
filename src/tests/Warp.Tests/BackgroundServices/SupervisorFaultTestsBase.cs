@@ -18,7 +18,7 @@ public abstract class SupervisorFaultTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task SetStatusRunningThrowsOnce_SupervisorFaultLogged_ServiceRunsOnNextIteration()
     {
         var injector = new StateServiceFaultInjector { ThrowsRemaining = 1 };

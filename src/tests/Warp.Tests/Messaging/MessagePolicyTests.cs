@@ -142,7 +142,7 @@ public abstract class MessagePolicyTestsBase : IntegrationTestBase
         child1.CurrentState.ShouldBe(State.Completed);
     }
 
-    [TimedFact(15_000)]
+    [TimedFact]
     public async Task HandlerDeclaredRetry_MessageChildRetriesPerChild_SiblingUnaffected()
     {
         // SC14: [Retry(2, Delays = [1])] on the failing handler must win over the test server's
