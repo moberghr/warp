@@ -415,9 +415,13 @@ public static partial class PerfCompare
             // for where the lines sit. Allocations are REPORTED, not gated: across the same no-op runs
             // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%
             // with cache state and vacuum timing, so only a blow-up fails (BuffersBlowUpFactor, below).
-            // Per-second counters (an idle server) have not had their noise measured: a background tick
-            // landing just inside or outside the window moves them. Reported until calibrated.
-            if (perSecond)
+            // Per-second counters (an idle server) are gated on statements too, on PostgreSQL: comparing
+            // a commit with itself they moved 0.0%, 0.0%, 0.8% and 1.5% once the window was 60 s after a
+            // 60 s settle (before that a once-a-minute task, and start-up work on whichever side ran
+            // first, moved them 14%). SQL Server's still move about 4% between identical builds, by a
+            // cause not found, and stay reported. Pages and WAL per second are reported on both: a
+            // single background tick is a large share of an idle second.
+            if (perSecond && IsSqlServer(benchmark))
             {
                 stmtChange = null;
             }
@@ -618,6 +622,11 @@ public static partial class PerfCompare
             .Select(x => x.Label)
             .FirstOrDefault() ?? value;
     }
+
+    private static bool IsSqlServer(BdnCase benchmark) =>
+        benchmark.Parameters.Any(x =>
+            string.Equals(x.Name, "Provider", StringComparison.Ordinal)
+            && string.Equals(x.Value, "SqlServer", StringComparison.OrdinalIgnoreCase));
 
     private static int? JobCountOf(BdnCase benchmark) =>
         benchmark.Parameters

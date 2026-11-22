@@ -126,7 +126,9 @@ jobs:
     # job took 69 minutes against the lab's 12 - and a migration that trades a twelve-minute gate for a
     # sixty-nine-minute one is not an improvement whatever it measures. Split across jobs they run in
     # parallel and the wall clock is the slowest single benchmark rather than the sum.
-    timeout-minutes: 45
+    # The slowest is now about 16 minutes (idle) and the rest take 4 to 10, so 30 is a hang, not a
+    # slow run. It was 45 while the rate-limit scenario took 41 of them waiting out real windows.
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -442,7 +444,7 @@ jobs:
             echo
             echo "- Tables follow BenchmarkDotNet's summary. Each case has two rows, **base** then **head**, the way BDN shows a benchmark beside its baseline."
             echo "- **Ratio** is head time ÷ base time: below 1.00 is faster. **Alloc Ratio** is the same for memory. **Error** is half the 99.9% confidence interval and **StdDev** the standard deviation, both over the iterations BDN ran."
-            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, **Jobs/s** collapses to a third, or **Buffers/job** rises to five times. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
+            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, **Jobs/s** collapses to a third, or **Buffers/job** rises to five times. The idle scenario, measured per second, fails on **Statements/s** rising more than 5% on PostgreSQL; its SQL Server row is reported only. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
             echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. It moves up to 55% between identical builds, with cache state and vacuum timing, so only a rise to five times fails: every jump that size so far was a query whose plan had changed."
             echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
             echo "- ⚠️ in a Gate cell means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."

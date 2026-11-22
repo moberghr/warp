@@ -14,8 +14,10 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// and a server's background work is a small share of that.
 /// </para>
 /// <para>
-/// One operation is 60 seconds of idle, after a settle period so the start-up registration and first
-/// ticks are not counted. With no job written in the window, the diagnoser reports its counters per
+/// One operation is 60 seconds of idle, after a 60 second settle period so the start-up registration and
+/// first ticks are not counted. Twenty seconds was not enough: on whichever commit was measured first
+/// on a cold runner, start-up work was still arriving inside the window, which read as 11 to 17% more
+/// statements per second for identical code on SQL Server, the same way round every time. With no job written in the window, the diagnoser reports its counters per
 /// second instead of per job.
 /// </para>
 /// <para>
