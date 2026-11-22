@@ -1,8 +1,4 @@
-using System.Diagnostics;
-using Microsoft.EntityFrameworkCore;
 using Shouldly;
-using Warp.Core.Data.Entities;
-using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
@@ -10,30 +6,26 @@ using Warp.Worker;
 
 namespace Warp.Tests.Notifications;
 
-/// <summary>
-/// End-to-end integration tests for UseDatabasePush on PostgreSQL. Each test starts a
-/// fresh WarpTestServer with UseDispatcher=true, long PollingInterval, and DB push enabled,
-/// then asserts that jobs are picked up quickly via push (not via the long poll).
-/// </summary>
-[Trait("Category", "PostgreSql")]
-public class PostgresDatabasePushIntegrationTests : IAsyncLifetime, IClassFixture<PostgreSqlClassFixture>
+// UseDatabasePush end to end, on PostgreSQL (LISTEN/NOTIFY) and SQL Server (Service Broker). Each test
+// starts a server whose poll interval is 10s, so work that completes within the waits below (all well
+// under 10s) was woken by push, not found by a poll. The wait IS the assertion: it throws on timeout.
+[GenerateDatabaseTests(WithPush = true)]
+public abstract class DatabasePushIntegrationTestsBase : IntegrationTestBase
 {
-    private readonly PostgreSqlClassFixture _fixture;
+    // Service Broker delivers more slowly than NOTIFY; one limit that both meet, half the poll interval.
+    private static readonly TimeSpan PushDeadline = TimeSpan.FromSeconds(5);
 
-    public PostgresDatabasePushIntegrationTests(PostgreSqlClassFixture fixture) => _fixture = fixture;
-
-    public async ValueTask InitializeAsync() => await _fixture.ResetAsync();
-
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    protected DatabasePushIntegrationTestsBase(IDatabaseFixture fixture)
+        : base(fixture)
+    {
+    }
 
     [TimedFact]
     public async Task JobEnqueued_WithDispatcherPlusPush_DispatcherPicksUpWithoutPolling()
     {
-        // PollingInterval is deliberately long — if the job is picked up fast, it's because
-        // push woke the dispatcher, not because the poll cycle fired.
         await using var server = await WarpTestServer.StartAsync(
-            fixture: _fixture,
-            configure: cfg =>
+            Fixture,
+            cfg =>
             {
                 cfg.UseDispatcher = true;
                 cfg.PollingInterval = TimeSpan.FromSeconds(10);
@@ -45,19 +37,17 @@ public class PostgresDatabasePushIntegrationTests : IAsyncLifetime, IClassFixtur
         var jobId = await publisher.Enqueue(new CounterRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var sw = Stopwatch.StartNew();
-        await server.WaitForJobState(jobId, State.Completed, TimeSpan.FromSeconds(3));
-        sw.Stop();
-
-        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(2), "Push should wake the dispatcher in <2s even though PollingInterval=10s");
+        await server.WaitForJobState(jobId, State.Completed, PushDeadline);
     }
 
     [TimedFact]
     public async Task MessageEnqueued_WithPush_MessageRoutingWakesImmediately()
     {
+        // Both the router and the dispatcher have to be woken: the message is routed into a child job,
+        // which then has to be picked up, and each of the two would otherwise wait 10s.
         await using var server = await WarpTestServer.StartAsync(
-            fixture: _fixture,
-            configure: cfg =>
+            Fixture,
+            cfg =>
             {
                 cfg.UseDispatcher = true;
                 cfg.PollingInterval = TimeSpan.FromSeconds(10);
@@ -70,26 +60,19 @@ public class PostgresDatabasePushIntegrationTests : IAsyncLifetime, IClassFixtur
         var messageId = await publisher.Publish(new SingleHandlerMessage());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        var sw = Stopwatch.StartNew();
-        await server.WaitForCompletion(TimeSpan.FromSeconds(5));
-        sw.Stop();
+        await server.WaitForCompletion(PushDeadline);
 
-        var ctx = server.CreateContext();
-        var message = await ctx.Set<Job>().FirstAsync(j => j.Id == messageId, Xunit.TestContext.Current.CancellationToken);
-        message.CurrentState.ShouldBe(State.Completed);
-
-        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(3), "Push should wake MessageRoutingTask AND the dispatcher within 3s even though both intervals are 10s");
+        (await server.GetJob(messageId)).CurrentState.ShouldBe(State.Completed);
     }
 
     [TimedFact]
     public async Task PushEnabled_WithoutDispatcher_ProcessesWork()
     {
         // UseDispatcher=false + push: there is no dispatcher to wake, but the listener still signals
-        // ServerTaskSignals.JobEnqueued, which every bare worker subscribes to (§2.9), and MessageRoutingTask
-        // and OrchestrationTask wake as usual. The system processes work in single-worker mode.
+        // ServerTaskSignals.JobEnqueued, which every bare worker subscribes to (rule 2.9).
         await using var server = await WarpTestServer.StartAsync(
-            fixture: _fixture,
-            configure: cfg =>
+            Fixture,
+            cfg =>
             {
                 cfg.UseDispatcher = false;
                 cfg.PollingInterval = TimeSpan.FromMilliseconds(200);
@@ -99,6 +82,6 @@ public class PostgresDatabasePushIntegrationTests : IAsyncLifetime, IClassFixtur
         var jobId = await publisher.Enqueue(new CounterRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        await server.WaitForJobState(jobId, State.Completed, TimeSpan.FromSeconds(5));
+        await server.WaitForJobState(jobId, State.Completed, PushDeadline);
     }
 }
