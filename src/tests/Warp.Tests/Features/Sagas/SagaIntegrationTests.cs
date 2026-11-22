@@ -235,22 +235,20 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await WaitForSagaState(server, "child-test", paymentCaptured: false, inventoryReserved: false);
 
         // The saga handler published a FollowUpJob. Wait for it to reach Completed via the worker.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            var followUp = await server.CreateContext().Set<Warp.Core.Entities.Job>()
-                .Where(x => x.Type != null && x.Type.Contains("FollowUpJob"))
-                .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
-            if (followUp != null && followUp.CurrentState == Warp.Core.Enums.State.Completed)
+        Warp.Core.Entities.Job? followUp = null;
+        await WarpTestServer.WaitUntil(
+            "FollowUpJob published from the saga handler reaching Completed",
+            async () =>
             {
-                followUp.Kind.ShouldBe(Warp.Core.Enums.JobKind.Job);
-                return;
-            }
+                followUp = await server.CreateContext().Set<Warp.Core.Entities.Job>()
+                    .Where(x => x.Type != null && x.Type.Contains("FollowUpJob"))
+                    .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
 
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
+                return followUp?.CurrentState == Warp.Core.Enums.State.Completed;
+            },
+            ct: Xunit.TestContext.Current.CancellationToken);
 
-        throw new TimeoutException("FollowUpJob published from saga handler did not reach Completed within 10s");
+        followUp!.Kind.ShouldBe(Warp.Core.Enums.JobKind.Job);
     }
 
     [TimedFact]
@@ -307,93 +305,72 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // After the timeout fires (delay 500ms), its routed handler-job should be Deleted, not Failed.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            var ctx = server.CreateContext();
-            var children = await ctx.Set<Warp.Core.Entities.Job>()
-                .Where(x => x.ParentJobId == timeoutMsgId)
-                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
-            if (children.Count > 0 && children.All(c => c.CurrentState == Warp.Core.Enums.State.Deleted))
+        await WarpTestServer.WaitUntil(
+            "The timeout message's handler job moving to Deleted after the saga completed",
+            async () =>
             {
-                return;
-            }
+                var children = await server.CreateContext().Set<Warp.Core.Entities.Job>()
+                    .Where(x => x.ParentJobId == timeoutMsgId)
+                    .ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
-
-        throw new TimeoutException("Timeout-message handler-job was not transitioned to Deleted after the saga completed");
+                return children.Count > 0 && children.All(c => c.CurrentState == Warp.Core.Enums.State.Deleted);
+            },
+            ct: Xunit.TestContext.Current.CancellationToken);
     }
 
     private static async Task WaitForSagaState(WarpTestServer server, string correlationKey, bool paymentCaptured, bool inventoryReserved)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         var typeName = typeof(OrderSaga).FullName!;
-        while (DateTime.UtcNow < deadline)
-        {
-            var json = await server.CreateContext().Set<SagaState>()
-                .Where(x => x.Type == typeName && x.CorrelationKey == correlationKey)
-                .Select(x => x.StateJson)
-                .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
-
-            if (json != null)
+        await WarpTestServer.WaitUntil(
+            $"Saga '{correlationKey}' reaching paymentCaptured={paymentCaptured}, inventoryReserved={inventoryReserved}",
+            async () =>
             {
-                var saga = System.Text.Json.JsonSerializer.Deserialize<OrderSaga>(json);
-                if (saga != null && saga.PaymentCaptured == paymentCaptured && saga.InventoryReserved == inventoryReserved)
-                {
-                    return;
-                }
-            }
+                var json = await server.CreateContext().Set<SagaState>()
+                    .Where(x => x.Type == typeName && x.CorrelationKey == correlationKey)
+                    .Select(x => x.StateJson)
+                    .FirstOrDefaultAsync(Xunit.TestContext.Current.CancellationToken);
+                var saga = json == null ? null : System.Text.Json.JsonSerializer.Deserialize<OrderSaga>(json);
 
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
-
-        throw new TimeoutException($"Saga '{correlationKey}' did not reach expected state (paymentCaptured={paymentCaptured}, inventoryReserved={inventoryReserved})");
+                return saga != null && saga.PaymentCaptured == paymentCaptured && saga.InventoryReserved == inventoryReserved;
+            },
+            ct: Xunit.TestContext.Current.CancellationToken);
     }
 
     private static async Task WaitForChildrenCompleted(WarpTestServer server, Guid parentJobId)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         List<Warp.Core.Entities.Job> children = [];
-        while (DateTime.UtcNow < deadline)
+        try
         {
-            children = await server.CreateContext().Set<Warp.Core.Entities.Job>()
-                .AsNoTracking()
-                .Where(x => x.ParentJobId == parentJobId)
-                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+            await WarpTestServer.WaitUntil(
+                async () =>
+                {
+                    children = await server.CreateContext().Set<Warp.Core.Entities.Job>()
+                        .AsNoTracking()
+                        .Where(x => x.ParentJobId == parentJobId)
+                        .ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
-            if (children.Count > 0 && children.All(c => c.CurrentState == Warp.Core.Enums.State.Completed))
-            {
-                return;
-            }
-
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
+                    return children.Count > 0 && children.All(c => c.CurrentState == Warp.Core.Enums.State.Completed);
+                },
+                ct: Xunit.TestContext.Current.CancellationToken);
         }
+        catch (TimeoutException)
+        {
+            var snapshot = children.Count == 0
+                ? "<no children>"
+                : string.Join(", ", children.Select(c => $"{c.Id}={c.CurrentState}"));
 
-        var snapshot = children.Count == 0
-            ? "<no children>"
-            : string.Join(", ", children.Select(c => $"{c.Id}={c.CurrentState}"));
-        throw new TimeoutException($"Children of {parentJobId} did not all reach Completed within 10s. States: {snapshot}");
+            throw new TimeoutException($"Children of {parentJobId} did not all reach Completed within 10s. States: {snapshot}");
+        }
     }
 
     private static async Task WaitForSagaRemoved(WarpTestServer server, string correlationKey)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         var typeName = typeof(OrderSaga).FullName!;
-        while (DateTime.UtcNow < deadline)
-        {
-            var exists = await server.CreateContext().Set<SagaState>()
+        await WarpTestServer.WaitUntil(
+            $"Saga '{correlationKey}' being removed",
+            async () => !await server.CreateContext().Set<SagaState>()
                 .Where(x => x.Type == typeName && x.CorrelationKey == correlationKey)
-                .AnyAsync(Xunit.TestContext.Current.CancellationToken);
-
-            if (!exists)
-            {
-                return;
-            }
-
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
-
-        throw new TimeoutException($"Saga '{correlationKey}' was not removed within 10s");
+                .AnyAsync(Xunit.TestContext.Current.CancellationToken),
+            ct: Xunit.TestContext.Current.CancellationToken);
     }
 }

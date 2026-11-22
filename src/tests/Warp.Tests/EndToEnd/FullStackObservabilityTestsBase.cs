@@ -63,7 +63,10 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
 
     private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
-    [TimedFact]
+    // 30 s, not the default 10: this starts a real web host and waits on four flush intervals in turn
+    // (job, webhook delivery, adapter log, endpoint log). Measured 3.5 to 7.1 s alone over ten runs,
+    // and over 10 s whenever the machine was busy, which the default budget read as a hang.
+    [TimedFact(30_000)]
     public async Task FullStack_EveryFieldOfEverySurface_IsCorrectAndVisibleInDashboard()
     {
         var startedAt = DateTime.UtcNow.AddSeconds(-1);
@@ -438,22 +441,16 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
         await app.StopAsync(Ct);
     }
 
-    private async Task WaitUntil(Func<TestContext, Task<bool>> predicate)
-    {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        while (DateTime.UtcNow < deadline)
-        {
-            await using var ctx = _fixture.CreateContext();
-            if (await predicate(ctx))
+    private Task WaitUntil(Func<TestContext, Task<bool>> predicate) =>
+        WarpTestServer.WaitUntil(
+            async () =>
             {
-                return;
-            }
+                await using var ctx = _fixture.CreateContext();
 
-            await Task.Delay(100, Ct);
-        }
-
-        throw new TimeoutException("Condition not met within 20s.");
-    }
+                return await predicate(ctx);
+            },
+            TimeSpan.FromSeconds(20),
+            Ct);
 
     // Full field assertion for a looped-back inbound endpoint row (the adapter /vendor and webhook /hook
     // calls). These callers send no X-Client / X-Forwarded-For / User-Agent, so group/IP/UA are null.

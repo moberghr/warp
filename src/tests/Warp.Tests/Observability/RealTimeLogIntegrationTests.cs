@@ -22,24 +22,22 @@ public abstract class RealTimeLogIntegrationTestsBase : IntegrationTestBase
     // happy path return in tens of ms and surfaces a clear failure if logs never appear.
     private async Task<List<JobLog>> WaitForHandlerLogs(Guid jobId, int expectedCount, TimeSpan? timeout = null)
     {
-        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
-        while (DateTime.UtcNow < deadline)
-        {
-            var ctx = Fixture.CreateContext();
-            var logs = await ctx.Set<JobLog>()
-                .Where(x => x.JobId == jobId && x.EventType == "Log")
-                .OrderBy(x => x.Timestamp)
-                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
-
-            if (logs.Count >= expectedCount)
+        List<JobLog> logs = [];
+        await WarpTestServer.WaitUntil(
+            $"Job {jobId} accumulating {expectedCount} handler-log rows",
+            async () =>
             {
-                return logs;
-            }
+                logs = await Fixture.CreateContext().Set<JobLog>()
+                    .Where(x => x.JobId == jobId && x.EventType == "Log")
+                    .OrderBy(x => x.Timestamp)
+                    .ToListAsync(Xunit.TestContext.Current.CancellationToken);
 
-            await Task.Delay(50, Xunit.TestContext.Current.CancellationToken);
-        }
+                return logs.Count >= expectedCount;
+            },
+            timeout ?? TimeSpan.FromSeconds(5),
+            Xunit.TestContext.Current.CancellationToken);
 
-        throw new TimeoutException($"Job {jobId} did not accumulate {expectedCount} handler-log rows within {timeout ?? TimeSpan.FromSeconds(5)}");
+        return logs;
     }
 
     [TimedFact]

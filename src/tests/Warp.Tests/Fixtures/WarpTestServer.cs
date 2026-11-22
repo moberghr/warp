@@ -655,7 +655,15 @@ public class WarpTestServer : IAsyncDisposable
     /// Note: a signal-driven approach is preferred where available — this is a fallback for
     /// cases where the collector flush completes asynchronously without a test-visible signal.
     /// </summary>
+    public static Task WaitUntil(
+        Func<Task<bool>> condition,
+        TimeSpan? timeout = null,
+        CancellationToken ct = default) =>
+        WaitUntil("Condition", condition, timeout, ct);
+
+    /// <summary>The same wait, naming what was waited for in the timeout it throws.</summary>
     public static async Task WaitUntil(
+        string description,
         Func<Task<bool>> condition,
         TimeSpan? timeout = null,
         CancellationToken ct = default)
@@ -672,7 +680,7 @@ public class WarpTestServer : IAsyncDisposable
             await Task.Delay(50, ct);
         }
 
-        throw new TimeoutException($"Condition was not satisfied within {effectiveTimeout}");
+        throw new TimeoutException($"{description} was not satisfied within {effectiveTimeout}");
     }
 
     public async ValueTask DisposeAsync()
