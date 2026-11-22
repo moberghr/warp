@@ -47,12 +47,13 @@ public sealed class StreamEdgeCasesTests
     }
 
     [TimedFact]
-    public async Task StreamThrowsMidWay_FirstFrameDelivered_ThenTheResponseFails()
+    public async Task StreamThrowsMidWay_ResponseFailsWithTheHandlersException()
     {
         var ct = Xunit.TestContext.Current.CancellationToken;
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
 
-        // Headers first, so the frame written before the throw can be read on its own.
+        // The handler yields one frame and then throws. Headers are already sent, so the status is 200
+        // and the failure can only show as the body being cut short.
         using var resp = await app.Client.GetAsync(
             new Uri("/api/stream/throws", UriKind.Relative),
             HttpCompletionOption.ResponseHeadersRead,
@@ -61,10 +62,10 @@ public sealed class StreamEdgeCasesTests
 
         await using var body = await resp.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(body);
-        (await reader.ReadLineAsync(ct)).ShouldBe("data: \"first\"");
 
-        // The handler then throws: the response is cut short with the handler's exception rather
-        // than ending as if the stream had finished.
+        // Reading to the end must FAIL with the handler's exception, never finish as if the stream had
+        // simply ended. Whether the frame written before the throw can still be read is up to the
+        // transport (the test host drops buffered bytes when the request aborts), so it is not asserted.
         var failure = await Should.ThrowAsync<Exception>(async () => await reader.ReadToEndAsync(ct));
         failure.ToString().ShouldContain("stream-failure");
     }
