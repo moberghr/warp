@@ -31,7 +31,6 @@ public abstract class WorkerTestsBase : IAsyncLifetime
     private readonly IDatabaseFixture _fixture;
     private static readonly Guid ServerId = Guid.NewGuid();
     private static readonly Guid WorkerId = Guid.NewGuid();
-    private static readonly string[] DefaultQueues = ["default"];
 
     protected WorkerTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
 
@@ -39,71 +38,13 @@ public abstract class WorkerTestsBase : IAsyncLifetime
     {
         await _fixture.ResetAsync();
 
-        // Register test server + worker in DB
-        var ctx = _fixture.CreateContext();
-        ctx.Set<Server>().Add(new Server
-        {
-            Id = ServerId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-            ServiceCount = 1,
-        });
-        ctx.Set<Warp.Core.Data.Entities.Worker>().Add(new Warp.Core.Data.Entities.Worker
-        {
-            Id = WorkerId,
-            ServerId = ServerId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-        });
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        await TestWorkerHarness.SeedServerAndWorkerAsync(_fixture, ServerId, WorkerId, Xunit.TestContext.Current.CancellationToken);
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    private (WarpWorkerService<TestContext> Worker, IServiceScopeFactory ScopeFactory) CreateWorker(string[]? queues = null, ServerTaskSignals<TestContext>? signals = null)
-    {
-        var services = new ServiceCollection();
-        services.AddWarpMediator();
-        services.AddLogging();
-        services.AddScoped<TestContext>(_ => _fixture.CreateContext());
-        services.AddTestServerContext<TestContext>();
-        services.AddSingleton<CounterService>();
-        services.AddSingleton<MultiHandlerCounter>();
-        services.AddScoped<Warp.Core.Handlers.JobContext>();
-        services.AddScoped<Warp.Core.Handlers.IJobContext>(x => x.GetRequiredService<Warp.Core.Handlers.JobContext>());
-
-        var workerConfig = new OptionsWrapper<WarpServerConfiguration>(new WarpServerConfiguration
-        {
-            WorkerCount = 1,
-            ServerId = ServerId,
-            Queues = queues ?? DefaultQueues,
-        });
-        services.AddSingleton<IOptions<WarpServerConfiguration>>(workerConfig);
-        services.AddSingleton<IOptions<WarpConfiguration>>(workerConfig);
-
-        var provider = services.BuildServiceProvider();
-        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
-
-        var groupConfig = new WorkerGroupConfiguration
-        {
-            WorkerCount = 1,
-            Queues = queues ?? DefaultQueues,
-        };
-
-        var worker = new WarpWorkerService<TestContext>(
-            WorkerId,
-            scopeFactory,
-            new NullLogger<WarpWorkerService<TestContext>>(),
-            workerConfig,
-            groupConfig,
-            TimeProvider.System,
-            Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
-            Warp.Tests.Helpers.TestTasks.NullTransport,
-            signals ?? Warp.Tests.Helpers.TestTasks.NullSignals,
-            _counterBuffer);
-
-        return (worker, scopeFactory);
-    }
+    private (WarpWorkerService<TestContext> Worker, IServiceScopeFactory ScopeFactory) CreateWorker(string[]? queues = null, ServerTaskSignals<TestContext>? signals = null) =>
+        TestWorkerHarness.Create(_fixture, _counterBuffer, ServerId, WorkerId, queues, signals);
 
     [TimedFact]
     public async Task GetAndProcessJob_EmptyQueue_ReturnsFalse()
