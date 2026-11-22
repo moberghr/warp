@@ -116,7 +116,7 @@ internal sealed class CompletionBatch
     }
 
     /// <summary>
-    /// Persists the buffered completions. On success (including poison-drops isolated via split)
+    /// Persists the buffered completions and returns the distinct parents of the jobs it took. On success (including poison-drops isolated via split)
     /// the buffer is cleared. On transient failure (non-<see cref="DbUpdateException"/>) the buffer
     /// is already drained — the exception propagates and the orphaned <c>Processing</c> rows are
     /// recovered by <c>StaleJobRecovery</c>.
@@ -127,15 +127,34 @@ internal sealed class CompletionBatch
     /// shutdown still commits any in-flight batch.
     /// </para>
     /// </summary>
-    public async Task FlushAsync()
+    public async Task<IReadOnlyCollection<Guid>> FlushAsync()
     {
         var pending = Drain();
         if (pending.Length == 0)
         {
-            return;
+            return [];
         }
 
         await FlushRangeAsync(pending, 0, pending.Length, CancellationToken.None);
+
+        return (IReadOnlyCollection<Guid>?)ParentsOf(pending) ?? [];
+    }
+
+    // The distinct parents of the flushed jobs, for the wake that follows (rule 6.11). Most jobs have
+    // none, so nothing is allocated for them.
+    private static HashSet<Guid>? ParentsOf(PendingCompletion[] pending)
+    {
+        HashSet<Guid>? parents = null;
+        foreach (var entry in pending)
+        {
+            if (entry.Job.ParentJobId is { } parent)
+            {
+                parents ??= [];
+                parents.Add(parent);
+            }
+        }
+
+        return parents;
     }
 
     private async Task FlushRangeAsync(PendingCompletion[] entries, int start, int count, CancellationToken cancellationToken)

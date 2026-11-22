@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 
 namespace Warp.Core.Events;
@@ -23,13 +24,134 @@ public sealed class ServerTaskSignals<TContext>
     private readonly List<Action> _messageEnqueuedWakers = [];
     private readonly List<Action> _jobEnqueuedWakers = [];
     private readonly List<Action<string>> _backgroundServiceLeaseLostWakers = [];
+    private const int MaxFinalizedParents = 10_000;
+
     private readonly Lock _gate = new();
 
+    // What the Orchestrator has to look at on its next pass (rule 6.11): the parents whose child just
+    // finished, or everything. Kept here, beside the wake, because the wake alone made every pass check
+    // every in-flight parent: measured 10,924 pages per pass on PostgreSQL with 1,000 messages in
+    // flight, once per job completion.
+    private readonly HashSet<Guid> _finalizedParents = [];
+    private bool _parentSweepRequested;
+    private long _lastParentSweep;
+
     /// <summary>
-    /// Called when a job reaches a terminal state — wakes all subscribers to
-    /// <see cref="ServerTaskSignal.JobFinalized"/>.
+    /// Called when a job reaches a terminal state and the caller cannot say which parent it belonged to
+    /// (a reconnect drain, a notification from a server that sent no ids). Wakes all subscribers to
+    /// <see cref="ServerTaskSignal.JobFinalized"/>, and the Orchestrator's next pass checks every parent.
     /// </summary>
-    public void SignalJobFinalized() => Fire(_jobFinalizedWakers);
+    public void SignalJobFinalized()
+    {
+        lock (_gate)
+        {
+            _parentSweepRequested = true;
+        }
+
+        Fire(_jobFinalizedWakers);
+    }
+
+    // The worker's form: it holds the finished job's row, so it names the one parent worth checking
+    // (none for a job with no parent, which still wakes the Orchestrator for its continuations).
+    internal void SignalJobFinalized(Guid? parentJobId)
+    {
+        if (parentJobId is { } parent)
+        {
+            lock (_gate)
+            {
+                AddFinalizedParent(parent);
+            }
+        }
+
+        Fire(_jobFinalizedWakers);
+    }
+
+    internal void SignalJobsFinalized(IReadOnlyCollection<Guid> parentJobIds)
+    {
+        if (parentJobIds.Count > 0)
+        {
+            lock (_gate)
+            {
+                foreach (var parent in parentJobIds)
+                {
+                    AddFinalizedParent(parent);
+                }
+            }
+        }
+
+        Fire(_jobFinalizedWakers);
+    }
+
+    // Asks for a check of every parent on the next pass, without waking anything: for the Orchestrator
+    // itself, when one pass could not take everything that was ready.
+    internal void RequestParentSweep()
+    {
+        lock (_gate)
+        {
+            _parentSweepRequested = true;
+        }
+    }
+
+    // Hands the Orchestrator its work and forgets it. A sweep of every parent is due when one was asked
+    // for, on the first pass of the process, and once every sweepEvery: that last one is what finds a
+    // parent whose child was finished by something that names no parent (a dashboard delete, crash
+    // recovery, a worker of a server that could not take the lock). Measured on the stopwatch, not the
+    // TimeProvider: this is a cadence, and a test's frozen clock must not switch it off.
+    internal (Guid[] Parents, bool Sweep) TakeFinalizedParents(TimeSpan? sweepEvery)
+    {
+        lock (_gate)
+        {
+            var now = Stopwatch.GetTimestamp();
+            var sweep = _parentSweepRequested
+                || _lastParentSweep == 0
+                || sweepEvery is not { } every
+                || Stopwatch.GetElapsedTime(_lastParentSweep, now) >= every;
+
+            if (sweep)
+            {
+                _parentSweepRequested = false;
+                _lastParentSweep = now;
+            }
+
+            if (_finalizedParents.Count == 0)
+            {
+                return ([], sweep);
+            }
+
+            Guid[] parents = [.. _finalizedParents];
+            _finalizedParents.Clear();
+
+            return (parents, sweep);
+        }
+    }
+
+    // A pass that failed gives its work back, so the next one repeats it.
+    internal void ReturnFinalizedParents(Guid[] parents, bool sweep)
+    {
+        lock (_gate)
+        {
+            _parentSweepRequested |= sweep;
+            foreach (var parent in parents)
+            {
+                AddFinalizedParent(parent);
+            }
+        }
+    }
+
+    // Caller holds _gate. Nothing drains the set in a process whose Orchestrator never gets the lock,
+    // so it is bounded: past the cap the ids are dropped for one sweep, which finds the same parents.
+    private void AddFinalizedParent(Guid parent)
+    {
+        if (_finalizedParents.Count >= MaxFinalizedParents)
+        {
+            _finalizedParents.Clear();
+            _parentSweepRequested = true;
+
+            return;
+        }
+
+        _finalizedParents.Add(parent);
+    }
 
     /// <summary>
     /// Called when a <c>Kind=Message</c> job is enqueued — wakes all subscribers to

@@ -452,6 +452,76 @@ public abstract class OrchestrationTaskTestsBase : IAsyncLifetime
         wakes.ShouldBe(1, "one continuation released, one queue: exactly one wake");
     }
 
+    // Rule 6.11. Two messages are ready; a finished job named only the first. The pass finalizes that
+    // one and leaves the other for the sweep, which is the point: it did not read every parent.
+    [TimedFact]
+    public async Task RunOrchestration_ParentNamedByAFinishedJob_OnlyThatParentIsFinalized()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var (named, other) = await SeedTwoReadyMessagesAsync(ct);
+        var signals = new ServerTaskSignals<TestContext>();
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        signals.SignalJobFinalized(named);
+
+        await Warp.Tests.Helpers.TestTasks
+            .CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), signals: signals, orchestrationInterval: TimeSpan.FromDays(1))
+            .RunOrchestrationCoreAsync(ct);
+
+        await using var assert = _fixture.CreateContext();
+        (await assert.Set<Job>().Where(x => x.Id == named).Select(x => x.CurrentState).SingleAsync(ct)).ShouldBe(State.Completed);
+        (await assert.Set<Job>().Where(x => x.Id == other).Select(x => x.CurrentState).SingleAsync(ct)).ShouldBe(State.Processing);
+    }
+
+    // The other half: a wake that names no parent (a server from before 8.0, a reconnect) still finds
+    // every ready parent, and so does the timed sweep, which is what catches a child finished by
+    // something other than a worker.
+    [TimedTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RunOrchestration_SweepRequestedOrDue_EveryReadyParentIsFinalized(bool requested)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var (first, second) = await SeedTwoReadyMessagesAsync(ct);
+        var signals = new ServerTaskSignals<TestContext>();
+        signals.TakeFinalizedParents(TimeSpan.FromDays(1));
+        if (requested)
+        {
+            signals.SignalJobFinalized();
+        }
+
+        await Warp.Tests.Helpers.TestTasks
+            .CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), signals: signals, orchestrationInterval: requested ? TimeSpan.FromDays(1) : TimeSpan.Zero)
+            .RunOrchestrationCoreAsync(ct);
+
+        await using var assert = _fixture.CreateContext();
+        var states = await assert.Set<Job>().Where(x => x.Id == first || x.Id == second).Select(x => x.CurrentState).ToListAsync(ct);
+        states.ShouldBe([State.Completed, State.Completed]);
+    }
+
+    private async Task<(Guid First, Guid Second)> SeedTwoReadyMessagesAsync(CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        Job Row(JobKind kind, State state, Guid? parent) =>
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Kind = kind,
+                CurrentState = state,
+                ParentJobId = parent,
+                CreateTime = now,
+                ScheduleTime = now,
+                Queue = "default",
+            };
+
+        var first = Row(JobKind.Message, State.Processing, null);
+        var second = Row(JobKind.Message, State.Processing, null);
+        await using var seed = _fixture.CreateContext();
+        seed.Set<Job>().AddRange(first, second, Row(JobKind.Job, State.Completed, first.Id), Row(JobKind.Job, State.Completed, second.Id));
+        await seed.SaveChangesAsync(ct);
+
+        return (first.Id, second.Id);
+    }
+
     [TimedFact]
     public async Task RunOrchestration_FailedParentOnlyOnSucceeded_ContinuationStaysAwaiting()
     {

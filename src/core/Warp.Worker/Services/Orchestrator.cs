@@ -14,7 +14,13 @@ namespace Warp.Worker.Services;
 /// reached terminal state, activate continuations whose parent is now terminal, and fail
 /// children of deleted parents. Wake-up on <c>JobFinalized</c> events (worker completions
 /// and push notifications) is routed through
-/// <see cref="ServerTaskSignals{TContext}.SignalJobFinalized"/>.
+/// <see cref="ServerTaskSignals{TContext}.SignalJobFinalized()"/>.
+/// <para>
+/// A wake names the parents of the jobs that finished, and a pass checks those. Every parent in flight
+/// is checked only on a sweep: once per <c>OrchestrationInterval</c>, and whenever a wake could not
+/// name its parents. The sweep is what finds a parent whose last child was finished by something other
+/// than a worker (a dashboard delete, crash recovery).
+/// </para>
 /// <para>
 /// Activating a continuation is an enqueue site (rule 6.3): it flips rows from Awaiting to Enqueued, so it
 /// announces them, built from the flip itself because <c>NotificationDispatch.CapturePending</c> sees only
@@ -82,10 +88,48 @@ public sealed class Orchestrator<TContext> : IServerTask
 
     internal async Task<bool> RunOrchestrationCoreAsync(CancellationToken ct)
     {
+        // Which parents to look at: the ones a finished job named, and all of them when a sweep is due.
+        // A pass that throws gives the work back, since the signal that brought it will not come again.
+        var (hintedParents, sweep) = _signals.TakeFinalizedParents(_configuration.OrchestrationInterval);
+        try
+        {
+            return await RunOrchestrationCoreAsync(hintedParents, sweep, ct);
+        }
+        catch
+        {
+            _signals.ReturnFinalizedParents(hintedParents, sweep);
+
+            throw;
+        }
+    }
+
+    private async Task<bool> RunOrchestrationCoreAsync(Guid[] hintedParents, bool sweep, CancellationToken ct)
+    {
         var jobExpirationTimeout = _configuration.JobExpirationTimeout;
 
-        var finalized = await FinalizeParentsAsync(jobExpirationTimeout, ct);
-        _context.ChangeTracker.Clear();
+        var finalized = 0;
+        foreach (var chunk in hintedParents.Chunk(ParentIdsPerStatement))
+        {
+            var readyHinted = await HintedReadyParentsQuery(_context, chunk).ToListAsync(ct);
+            finalized += await FinalizeParentsAsync(readyHinted, jobExpirationTimeout, ct);
+            _context.ChangeTracker.Clear();
+        }
+
+        if (sweep)
+        {
+            // Bound the candidate set so one iteration can't churn through tens of thousands of
+            // parents while holding the orchestration lock. A full slice means more may be waiting, and
+            // the re-run that follows a pass that did work (RerunImmediately) has to sweep again to
+            // find them.
+            var readySwept = await ReadyParentsQuery(_context, _configuration.ServerTaskBatchSize).ToListAsync(ct);
+            if (readySwept.Count >= _configuration.ServerTaskBatchSize)
+            {
+                _signals.RequestParentSweep();
+            }
+
+            finalized += await FinalizeParentsAsync(readySwept, jobExpirationTimeout, ct);
+            _context.ChangeTracker.Clear();
+        }
 
         // After the finalization above, so a parent it has just completed releases its continuation in
         // this same pass.
@@ -100,17 +144,20 @@ public sealed class Orchestrator<TContext> : IServerTask
 
     // Internal and static so OrchestratorReadyParentsPlanTests can measure the pages THIS query reads
     // (rule 6.11), not a copy of it.
+    //
+    // The shape is load-bearing, not style (same lesson as the claim, rule 6.9). Each kind is its own
+    // branch with a SCALAR kind and an ORDER BY the (Kind, CurrentState, CreateTime) index supplies,
+    // so the planner takes that index without needing a good row estimate. Written as one
+    // Kind IN (Message, Batch) AND CurrentState IN (...) predicate, it estimated one row either way
+    // and picked (CurrentState, ScheduleTime) with Kind as a Filter. Every job passes through
+    // Processing, so that index range is full of entries for rows that have since left it until
+    // vacuum catches up, and the query walked all of them to return nothing: measured 10,004 pages
+    // per call against 6, on a table with no batch or message in it.
     internal static IQueryable<Job> ReadyParentsQuery(DbContext context, int batchSize)
     {
-        var settledParents = context.Set<Job>()
-            .Where(p => p.CurrentState == State.Awaiting || p.CurrentState == State.Processing)
-            .Where(p => !context.Set<Job>()
-                .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
-                    && c.CurrentState != State.Completed && c.CurrentState != State.Failed
-                    && c.CurrentState != State.Deleted && c.CurrentState != State.Awaiting))
-            .Where(p => context.Set<Job>()
-                .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
-                    && (c.CurrentState == State.Completed || c.CurrentState == State.Failed || c.CurrentState == State.Deleted)));
+        var settledParents = WhereChildrenSettled(
+            context,
+            context.Set<Job>().Where(p => p.CurrentState == State.Awaiting || p.CurrentState == State.Processing));
 
         var readyMessages = settledParents
             .Where(p => p.Kind == JobKind.Message)
@@ -128,6 +175,32 @@ public sealed class Orchestrator<TContext> : IServerTask
             .Concat(readyBatches)
             .Take(batchSize);
     }
+
+    // The same readiness check for the parents a finished job named (rule 6.11), found by primary key.
+    // The sweep above reads every parent in flight to find the ready ones, about 11 pages each on
+    // PostgreSQL, and it ran on every job completion: 10,924 pages per pass with 1,000 messages in
+    // flight and none ready. This reads the named parents only, whatever else is in flight.
+    internal static IQueryable<Job> HintedReadyParentsQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
+        WhereChildrenSettled(
+            context,
+            context.Set<Job>()
+                .Where(p => parentIds.Contains(p.Id))
+                .Where(p => p.Kind == JobKind.Message || p.Kind == JobKind.Batch)
+                .Where(p => p.CurrentState == State.Awaiting || p.CurrentState == State.Processing));
+
+    // Deleted counts as SETTLED on both sides of the readiness check: a deleted child is
+    // deliberately-skipped work (a Skip-mode [Mutex]/[RateLimit] rejecting a routed handler job, or an
+    // operator delete), not pending work. Treating it as pending left the parent Awaiting/Processing
+    // forever with no path out.
+    private static IQueryable<Job> WhereChildrenSettled(DbContext context, IQueryable<Job> parents) =>
+        parents
+            .Where(p => !context.Set<Job>()
+                .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
+                    && c.CurrentState != State.Completed && c.CurrentState != State.Failed
+                    && c.CurrentState != State.Deleted && c.CurrentState != State.Awaiting))
+            .Where(p => context.Set<Job>()
+                .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
+                    && (c.CurrentState == State.Completed || c.CurrentState == State.Failed || c.CurrentState == State.Deleted)));
 
     // How many parent ids go into one statement. Bounds the parameter list, not the work: every awaited
     // parent is looked at each pass, in as many statements as that takes.
@@ -200,27 +273,8 @@ public sealed class Orchestrator<TContext> : IServerTask
         return (ready, deleted);
     }
 
-    private async Task<int> FinalizeParentsAsync(TimeSpan jobExpirationTimeout, CancellationToken ct)
+    private async Task<int> FinalizeParentsAsync(List<Job> readyParents, TimeSpan jobExpirationTimeout, CancellationToken ct)
     {
-        // Bound the candidate set so one iteration can't churn through tens of thousands of
-        // parents while holding the orchestration lock. RerunImmediately = true means the
-        // outer loop re-ticks instantly, and the next iteration sees the remaining rows.
-        // Deleted counts as SETTLED on both sides of the readiness check: a deleted child is
-        // deliberately-skipped work (a Skip-mode [Mutex]/[RateLimit] rejecting a routed handler job —
-        // reachable since the addon policy axis change — or an operator delete), not pending work.
-        // Treating it as pending left the parent Awaiting/Processing forever with no path out.
-        //
-        // The shape is load-bearing, not style (same lesson as the claim, rule 6.9). Each kind is its own
-        // branch with a SCALAR kind and an ORDER BY the (Kind, CurrentState, CreateTime) index supplies,
-        // so the planner takes that index without needing a good row estimate. Written as one
-        // `Kind IN (Message, Batch) AND CurrentState IN (...)` predicate, it estimated one row either way
-        // and picked (CurrentState, ScheduleTime) with Kind as a filter. Every job passes through
-        // Processing, so that index range is full of entries for rows that have since left it until
-        // vacuum catches up, and the query walked all of them to return nothing: measured 10,004 pages
-        // per call against 6, on a table with no batch or message in it, up to ~100 pages per job across
-        // a run since this task ticks on almost every finalization.
-        var readyParents = await ReadyParentsQuery(_context, _configuration.ServerTaskBatchSize).ToListAsync(ct);
-
         if (readyParents.Count == 0)
         {
             return 0;

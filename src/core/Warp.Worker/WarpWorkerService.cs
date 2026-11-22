@@ -467,10 +467,12 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         // SignalJobFinalized fires the in-process signal; the transport publish covers
         // cross-process subscribers (other servers' Orchestrator instances, dashboard hub).
         // DispatchAsync would double-fire the local signal — handled here separately.
-        _signals.SignalJobFinalized();
+        // Both carry the job's parent, so the Orchestrator checks that one parent and not every parent
+        // in flight (rule 6.11). The id is already on the claimed row: no query, no extra statement.
+        _signals.SignalJobFinalized(job.ParentJobId);
         await NotificationDispatch.FireAsync(
             _notificationTransport,
-            [new Notification(NotificationKind.JobFinalized, null)],
+            [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(job.ParentJobId))],
             cancellationToken);
 
         PerfTrace.Mark(PerfTrace.Done);

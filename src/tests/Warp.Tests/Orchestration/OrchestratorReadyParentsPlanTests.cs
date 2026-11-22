@@ -133,6 +133,49 @@ public abstract partial class OrchestratorReadyParentsPlanTestsBase : IAsyncLife
         }
     }
 
+    // The check for the parents a finished job named. Its cost must not depend on how many other parents
+    // are in flight: the sweep reads all 1,000 of these to find none ready (10,924 pages on PostgreSQL),
+    // and it used to run on every job completion.
+    [TimedFact]
+    public async Task HintedReadyParentsQuery_ThousandMessagesInFlight_ReadsOnlyTheNamedParents()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        Job Row(JobKind kind, State state, Guid? parent) =>
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Kind = kind,
+                CurrentState = state,
+                ParentJobId = parent,
+                CreateTime = now,
+                ScheduleTime = now,
+                Queue = "default",
+            };
+
+        var messages = Enumerable.Range(0, 1000).Select(_ => Row(JobKind.Message, State.Processing, null)).ToList();
+        await using (var seed = _fixture.CreateContext())
+        {
+            seed.Set<Job>().AddRange(messages);
+            seed.Set<Job>().AddRange(messages.Skip(1).Select(x => Row(JobKind.Job, State.Processing, x.Id)));
+            seed.Set<Job>().Add(Row(JobKind.Job, State.Processing, messages[0].Id));
+            await seed.SaveChangesAsync(ct);
+
+            // The first message's only child finishes: the row leaves Processing, as in a running system.
+            await seed.Set<Job>()
+                .Where(x => x.ParentJobId == messages[0].Id)
+                .ExecuteUpdateAsync(x => x.SetProperty(y => y.CurrentState, State.Completed), ct);
+        }
+
+        Guid[] named = [messages[0].Id, messages[1].Id];
+        await using var context = _fixture.CreateContext();
+        var query = Orchestrator<TestContext>.HintedReadyParentsQuery(context, named);
+
+        (await query.Select(x => x.Id).ToListAsync(ct)).ShouldBe([messages[0].Id], "one named parent is ready, the other still has a running child");
+        var (pages, detail) = await MeasurePagesReadAsync(context, query, ct);
+        pages.ShouldBeLessThan(MaxPages, detail);
+    }
+
     private static async Task<(long Pages, string Detail)> MeasurePagesReadAsync(TestContext context, IQueryable query, CancellationToken ct)
     {
         await context.Database.OpenConnectionAsync(ct);

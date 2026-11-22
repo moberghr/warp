@@ -123,7 +123,7 @@ internal static class NotificationDispatch
                     signals.SignalMessageEnqueued();
                     break;
                 case NotificationKind.JobFinalized:
-                    signals.SignalJobFinalized();
+                    FinalizedParentsPayload.Signal(signals, notifications[i].Queue);
                     break;
                 default:
                     break;

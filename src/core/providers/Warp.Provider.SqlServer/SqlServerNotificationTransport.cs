@@ -251,13 +251,15 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
     }
 
     // Payload grammar identical to Postgres: "<kind>:<queue>?". Kept in sync for test reuse.
+    // After "F:" come the parents worth checking (FinalizedParentsPayload). A server from before 8.0 sends
+    // and reads a bare "F:", which is still valid: it asks for a check of every parent.
     internal static string Encode(NotificationKind kind, string? queue)
     {
         return kind switch
         {
             NotificationKind.JobEnqueued => "J:" + (queue ?? "default"),
             NotificationKind.MessageEnqueued => "M:",
-            NotificationKind.JobFinalized => "F:",
+            NotificationKind.JobFinalized => "F:" + queue,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown notification kind"),
         };
     }
@@ -280,7 +282,7 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
                 notification = new Notification(NotificationKind.MessageEnqueued, null);
                 return true;
             case 'F':
-                notification = new Notification(NotificationKind.JobFinalized, null);
+                notification = new Notification(NotificationKind.JobFinalized, raw.Length > 2 ? raw.Substring(2) : null);
                 return true;
             default:
                 return false;

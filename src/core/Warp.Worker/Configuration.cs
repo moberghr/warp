@@ -239,6 +239,12 @@ public class WarpServerConfiguration : WarpConfiguration
     /// children of deleted parents. Set to <c>null</c> to disable the periodic auto-loop —
     /// orchestration is then driven entirely by <c>JobFinalized</c> push signals plus any
     /// explicit ticks (e.g. <c>WarpTestServer.RunOrchestratorOnceAsync</c> in tests).
+    /// <para>
+    /// It is also how often every parent in flight is checked. A worker that finishes a job names that
+    /// job's parent and only that parent is checked, at once. A parent whose last child was finished by
+    /// something else (a dashboard delete, crash recovery) is found by the next sweep, so within this
+    /// interval.
+    /// </para>
     /// </summary>
     public TimeSpan? OrchestrationInterval { get; set; } = TimeSpan.FromSeconds(10);
 

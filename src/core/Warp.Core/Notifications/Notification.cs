@@ -17,7 +17,9 @@ public enum NotificationKind : byte
 }
 
 /// <summary>
-/// Event payload carried over the notification transport. <paramref name="Queue"/> is set
-/// only for <see cref="NotificationKind.JobEnqueued"/>; null for the others.
+/// Event payload carried over the notification transport. <paramref name="Queue"/> is the queue for
+/// <see cref="NotificationKind.JobEnqueued"/>. For <see cref="NotificationKind.JobFinalized"/> it carries
+/// the parents of the finished jobs (written and read by <c>FinalizedParentsPayload</c>), or null when
+/// the sender cannot name them. Null for <see cref="NotificationKind.MessageEnqueued"/>.
 /// </summary>
 public readonly record struct Notification(NotificationKind Kind, string? Queue);

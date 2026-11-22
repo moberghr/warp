@@ -185,13 +185,19 @@ public static class TestTasks
         TimeSpan jobExpirationTimeout,
         int? serverTaskBatchSize = null,
         IWarpNotificationTransport? transport = null,
-        ServerTaskSignals<TContext>? signals = null)
+        ServerTaskSignals<TContext>? signals = null,
+        TimeSpan? orchestrationInterval = null)
         where TContext : DbContext
     {
         var configuration = new WarpServerConfiguration
         {
             JobExpirationTimeout = jobExpirationTimeout,
         };
+
+        if (orchestrationInterval.HasValue)
+        {
+            configuration.OrchestrationInterval = orchestrationInterval;
+        }
 
         if (serverTaskBatchSize.HasValue)
         {
