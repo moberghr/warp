@@ -248,9 +248,12 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
 
     // Latency histogram buckets and summed durations depend on how long this run took (a zero sum writes
     // no row at all), and the backlog gauge on when the sampler ticked: none is a property of the path.
-    // The count beside each duration is compared.
+    // The count beside each duration is compared. The errorgroup trend counter is written by the
+    // error-grouping server task on its own timer, not by a worker, so whether it exists yet depends on
+    // whether that task happened to tick before the host stopped.
     private static bool IsComparableCounter(string key) =>
         !key.Contains(":pct:", StringComparison.Ordinal)
+        && !key.StartsWith("errorgroup", StringComparison.Ordinal)
         && !key.Contains(":dur", StringComparison.Ordinal)
         && !key.Contains(":pcth:", StringComparison.Ordinal)
         && !key.StartsWith("qbacklog", StringComparison.Ordinal)
