@@ -1,5 +1,9 @@
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Rendering;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Entities;
@@ -10,8 +14,8 @@ using Warp.Tests.TestData.Handlers;
 namespace Warp.Tests.Core;
 
 // Issue #321 end to end, through the real AddWarp registration and a real database. One long-lived
-// scope stands in for a Blazor Server circuit (this is the DI shape of a circuit, not a Blazor host:
-// the circuit's scope is an ordinary IServiceScope that lives as long as the browser tab). Two sends
+// scope stands in for a Blazor Server circuit (the circuit's scope is an ordinary IServiceScope that
+// lives as long as the browser tab); the second test drives it from a real Blazor component. Two sends
 // are in flight from it at the same time, pinned inside their handlers. Without ScopePerSend they would
 // share the circuit's one DbContext and EF would throw "A second operation was started on this context
 // instance"; with it each handler has its own context, and its IPublisher stages onto that same
@@ -60,6 +64,42 @@ public abstract class ScopePerSendCircuitTestsBase : IAsyncLifetime
         circuitContext.ChangeTracker.Entries().ShouldBeEmpty();
     }
 
+    // The same thing from a real Blazor component: Blazor's own renderer runs the component's lifecycle
+    // and fills its [Inject] properties from one long-lived scope, as a circuit does, and the component
+    // fires two sends at once from OnInitializedAsync, as a page loading two things does. No browser and
+    // no SignalR transport are involved; Warp touches neither.
+    [TimedFact]
+    public async Task BlazorComponent_TwoConcurrentSendsWhileInitializing_EachCommitsOnItsOwnContext()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var barrier = new BarrierSignal();
+        await using var provider = BuildProvider(barrier);
+        await using var circuit = provider.CreateAsyncScope();
+        var circuitContext = circuit.ServiceProvider.GetRequiredService<TestContext>();
+        await using var renderer = new HtmlRenderer(circuit.ServiceProvider, circuit.ServiceProvider.GetRequiredService<ILoggerFactory>());
+
+        var rendering = renderer.Dispatcher.InvokeAsync(async () =>
+        {
+            var root = renderer.BeginRenderingComponent<TwoSendsPage>();
+            await root.QuiescenceTask;
+
+            return root.ToHtmlString();
+        });
+
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), ct)).ShouldBeTrue("the first handler never started");
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), ct)).ShouldBeTrue("the second handler never started");
+        barrier.CanFinish.Release(2);
+
+        var html = await rendering.WaitAsync(TimeSpan.FromSeconds(5), ct);
+
+        // The component renders how many distinct contexts its two sends ran on.
+        html.ShouldContain("contexts:2");
+
+        await using var assertCtx = _fixture.CreateContext();
+        (await assertCtx.TestLogs.CountAsync(ct)).ShouldBe(2);
+        circuitContext.ChangeTracker.Entries().ShouldBeEmpty();
+    }
+
     private ServiceProvider BuildProvider(BarrierSignal barrier)
     {
         using var probe = _fixture.CreateContext();
@@ -83,6 +123,27 @@ public abstract class ScopePerSendCircuitTestsBase : IAsyncLifetime
         services.AddWarp<TestContext>(opt => opt.Mediator.ScopePerSend = true);
 
         return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+    }
+
+    // Written in C# rather than .razor so the test project needs no Razor compilation.
+    public sealed class TwoSendsPage : ComponentBase
+    {
+        private int _distinctContexts;
+
+        [Inject]
+        public IMediator Mediator { get; set; } = null!;
+
+        protected override async Task OnInitializedAsync()
+        {
+            var results = await Task.WhenAll(
+                Mediator.Send(new CircuitWriteRequest()),
+                Mediator.Send(new CircuitWriteRequest()));
+
+            _distinctContexts = results.Select(x => x.Context).Distinct(ReferenceEqualityComparer.Instance).Count();
+        }
+
+        protected override void BuildRenderTree(RenderTreeBuilder builder) =>
+            builder.AddContent(0, $"contexts:{_distinctContexts}");
     }
 
     public sealed record CircuitWriteResult(object Context, Guid JobId);
