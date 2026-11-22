@@ -330,7 +330,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
             job.CurrentState = State.Deleted;
             job.ExpireAt = cancelNow.Add(_configuration.JobExpirationTimeout);
-            job.CancellationMode = CancellationMode.None;
+            ClearCancellationMode(workerContext, job);
             job.CurrentWorkerId = null;
             job.LastKeepAlive = null;
 
@@ -601,6 +601,17 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
     }
 
+    // DeleteJob sets CancellationMode on the ROW while this worker holds the entity it claimed, which
+    // still reads None. Assigning None is then no change to EF and the column would be left out of the
+    // finalizing UPDATE, leaving a finished job marked Graceful ("Cancelling..." on the dashboard for
+    // ever). Marking the property modified puts it in the UPDATE the worker issues anyway; the
+    // dispatcher path already writes it (CompletionBatch.MarkFinalizedColumns).
+    private static void ClearCancellationMode(DbContext context, Job job)
+    {
+        job.CancellationMode = CancellationMode.None;
+        context.Entry(job).Property(x => x.CancellationMode).IsModified = true;
+    }
+
     /// <summary>
     /// Finalizes job state: clears worker fields, adds counters and log entry.
     /// State must be set on the job before calling this method.
@@ -608,7 +619,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     private void FinalizeJobState(DbContext context, Job job, Exception? error, double? durationMs, JobOutcome? outcome = null, DateTime? totalDeadlineUtc = null, long incomingAttempts = 0)
     {
         var state = job.CurrentState;
-        job.CancellationMode = CancellationMode.None;
+        ClearCancellationMode(context, job);
         job.CurrentWorkerId = null;
         job.LastKeepAlive = null;
 
