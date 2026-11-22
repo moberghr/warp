@@ -40,6 +40,8 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
         CompletedWithOtelMetricsSink = 5,
         DeadlineMet = 6,
         DeadlineMissed = 7,
+        RequeuedOnceByOutcome = 8,
+        DeletedByOutcome = 9,
     }
 
     // Two full hosts run one after the other, and the failing case waits out a retry delay in each.
@@ -51,6 +53,8 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
     [InlineData(Scenario.CompletedWithOtelMetricsSink)]
     [InlineData(Scenario.DeadlineMet)]
     [InlineData(Scenario.DeadlineMissed)]
+    [InlineData(Scenario.RequeuedOnceByOutcome)]
+    [InlineData(Scenario.DeletedByOutcome)]
     public async Task FinalizedRow_IsTheSameInSingleWorkerAndDispatcherMode(Scenario scenario)
     {
         var single = await RunToRestAsync(scenario, useDispatcher: false);
@@ -81,6 +85,17 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
 
             case Scenario.DeadlineMissed:
                 counted.ShouldContain(x => x.StartsWith("counter deadline:", StringComparison.Ordinal) && x.EndsWith(":miss", StringComparison.Ordinal));
+                break;
+
+            case Scenario.RequeuedOnceByOutcome:
+                single["counter stats:requeued"].ShouldBe("1");
+                single["counter stats:requeued-concurrency"].ShouldBe("1");
+                single["counter stats:succeeded"].ShouldBe("1");
+                break;
+
+            case Scenario.DeletedByOutcome:
+                single["counter stats:deleted"].ShouldBe("1");
+                single["counter stats:deleted-ratelimit"].ShouldBe("1");
                 break;
 
             default:
@@ -206,6 +221,20 @@ public abstract partial class WorkerPathLockstepTestsBase : IntegrationTestBase
                 // Deleted at or past it: a miss.
                 var budget = new JobParameters().WithTimeout(TimeSpan.FromSeconds(1), TimeoutMode.Delete, TimeoutScope.Total);
                 jobId = await publisher.Enqueue(new CancellableRequest(), budget);
+                await publisher.SaveChangesAsync(ct);
+                await server.WaitForJobState(jobId, State.Deleted);
+                break;
+
+            case Scenario.RequeuedOnceByOutcome:
+                // The requeue a Wait-mode mutex, semaphore or rate limit asks for, then a normal run.
+                jobId = await publisher.Enqueue(new RequeueOnceWithReasonRequest());
+                await publisher.SaveChangesAsync(ct);
+                await server.WaitForJobState(jobId, State.Completed);
+                break;
+
+            case Scenario.DeletedByOutcome:
+                // The deletion a Skip-mode limit or a Delete-mode timeout asks for.
+                jobId = await publisher.Enqueue(new DeleteByOutcomeRequest());
                 await publisher.SaveChangesAsync(ct);
                 await server.WaitForJobState(jobId, State.Deleted);
                 break;

@@ -6,6 +6,7 @@ using Warp.Core;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
+using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
 
 namespace Warp.Tests.Observability;
@@ -130,48 +131,16 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
         terminalLogs.ShouldBe(["Failed"], "the abandoned attempt's Completed log must not be written");
     }
 
-    private static void FailTheFirstCompletionCommit(IServiceCollection services)
-    {
-        var inner = (IWarpServerContextConfigurator)services
-            .Last(x => x.ServiceType == typeof(IWarpServerContextConfigurator))
-            .ImplementationInstance!;
-
-        services.AddSingleton<IWarpServerContextConfigurator>(
-            new InterceptingConfigurator(inner, new FailFirstCompletionCommitInterceptor()));
-    }
+    private static void FailTheFirstCompletionCommit(IServiceCollection services) =>
+        services.AddServerContextInterceptor(new FailFirstCompletionCommitInterceptor());
 
     /// <summary>
     /// Replaces the provider's server-context configurator with one that delegates to it and adds the
     /// interceptor. Registered last so <c>GetService</c> returns it; the provider's own instance is taken
     /// from the descriptor so none of its connection wiring is reimplemented here.
     /// </summary>
-    private static void FailTheFirstCompletion(IServiceCollection services)
-    {
-        var inner = (IWarpServerContextConfigurator)services
-            .Last(x => x.ServiceType == typeof(IWarpServerContextConfigurator))
-            .ImplementationInstance!;
-
-        services.AddSingleton<IWarpServerContextConfigurator>(
-            new InterceptingConfigurator(inner, new FailFirstCompletionInterceptor()));
-    }
-
-    private sealed class InterceptingConfigurator : IWarpServerContextConfigurator
-    {
-        private readonly IWarpServerContextConfigurator _inner;
-        private readonly IInterceptor _interceptor;
-
-        public InterceptingConfigurator(IWarpServerContextConfigurator inner, IInterceptor interceptor)
-        {
-            _inner = inner;
-            _interceptor = interceptor;
-        }
-
-        public void Configure(DbContextOptionsBuilder optionsBuilder, IServiceProvider applicationServices)
-        {
-            _inner.Configure(optionsBuilder, applicationServices);
-            optionsBuilder.AddInterceptors(_interceptor);
-        }
-    }
+    private static void FailTheFirstCompletion(IServiceCollection services) =>
+        services.AddServerContextInterceptor(new FailFirstCompletionInterceptor());
 
     /// <summary>
     /// Throws once, on the write that records a job as Completed. Everything after it — including the

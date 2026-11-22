@@ -9,6 +9,7 @@ using Warp.Core;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Events;
 using Warp.Core.Handlers;
 using Warp.Core.Handlers.Generated;
 using Warp.Core.Services;
@@ -59,7 +60,7 @@ public abstract class WorkerTestsBase : IAsyncLifetime
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    private (WarpWorkerService<TestContext> Worker, IServiceScopeFactory ScopeFactory) CreateWorker(string[]? queues = null)
+    private (WarpWorkerService<TestContext> Worker, IServiceScopeFactory ScopeFactory) CreateWorker(string[]? queues = null, ServerTaskSignals<TestContext>? signals = null)
     {
         var services = new ServiceCollection();
         services.AddWarpMediator();
@@ -98,7 +99,7 @@ public abstract class WorkerTestsBase : IAsyncLifetime
             TimeProvider.System,
             Warp.Tests.Helpers.TestTasks.QueriesFromScope<TestContext>(scopeFactory),
             Warp.Tests.Helpers.TestTasks.NullTransport,
-            Warp.Tests.Helpers.TestTasks.NullSignals,
+            signals ?? Warp.Tests.Helpers.TestTasks.NullSignals,
             _counterBuffer);
 
         return (worker, scopeFactory);
@@ -192,6 +193,37 @@ public abstract class WorkerTestsBase : IAsyncLifetime
         job.LastKeepAlive.ShouldBeNull();
         job.CancellationMode.ShouldBe(CancellationMode.None);
         job.ExpireAt.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task GetAndProcessJob_AfterTheJobIsFinalized_SignalsJobFinalized()
+    {
+        // The Orchestrator waits on this signal to finalize a batch or message as soon as its last
+        // child settles. Without it a parent waits out the Orchestrator's own interval.
+        var ctx = _fixture.CreateContext();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = Guid.NewGuid(),
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(UnitRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new UnitRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var signals = new ServerTaskSignals<TestContext>();
+        var finalized = 0;
+        using var subscription = signals.Subscribe(ServerTaskSignal.JobFinalized, () => Interlocked.Increment(ref finalized));
+        var (worker, _) = CreateWorker(signals: signals);
+
+        // Act
+        await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert
+        Volatile.Read(ref finalized).ShouldBe(1);
     }
 
     [TimedFact]
