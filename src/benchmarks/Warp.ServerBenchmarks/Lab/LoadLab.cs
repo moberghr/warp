@@ -418,7 +418,7 @@ public static class LoadLab
 
         var known = new[]
         {
-            "none", "explainclaim", "extstats", "dropidx", "customplan", "analyze", "vacuum", "index", "both",
+            "none", "explainclaim", "extstats", "dropidx", "customplan", "analyze", "vacuum", "index", "both", "partial",
         };
 
         if (!known.Contains(tune, StringComparer.Ordinal))
@@ -499,6 +499,29 @@ public static class LoadLab
             statements.Add(
                 "CREATE INDEX ix_job_claim_partial ON warp.job (queue, schedule_time) "
                 + "WHERE kind = 1 AND current_state = 1;");
+        }
+
+        if (tune is "partial")
+        {
+            // How much of an update's cost is index entries no reader needs. A non-HOT update writes a
+            // new entry into EVERY index of the table; a partial index takes one only when the new row
+            // matches its predicate. Replaces the state indexes with partial ones covering just the rows
+            // each reader looks for: the claim (Enqueued jobs), scheduled activation (Scheduled rows)
+            // and the parent lookups (rows that have a parent). The listing index stays whole.
+            statements.Add("DROP INDEX warp.ix_job_kind_current_state_queue_schedule_time;");
+            statements.Add(
+                "CREATE INDEX ix_job_kind_current_state_queue_schedule_time ON warp.job (kind, current_state, queue, schedule_time) "
+                + "WHERE current_state = 1;");
+            statements.Add("DROP INDEX warp.ix_job_current_state_schedule_time;");
+            statements.Add(
+                "CREATE INDEX ix_job_current_state_schedule_time ON warp.job (current_state, schedule_time) "
+                + "WHERE current_state = 7;");
+            statements.Add("DROP INDEX warp.ix_job_parent_job_id_current_state;");
+            statements.Add(
+                "CREATE INDEX ix_job_parent_job_id_current_state ON warp.job (parent_job_id, current_state) "
+                + "WHERE parent_job_id IS NOT NULL;");
+            statements.Add("DROP INDEX warp.ix_job_expire_at;");
+            statements.Add("CREATE INDEX ix_job_expire_at ON warp.job (expire_at) WHERE expire_at IS NOT NULL;");
         }
 
         await using var connection = new NpgsqlConnection(connectionString);
@@ -1261,6 +1284,7 @@ public static class LoadLab
         WriteRow("rows fetched", db.TupFetched, seconds, processed);
         WriteRow("buffer hits", db.BlksHit, seconds, processed);
         WriteRow("buffer reads (disk)", db.BlksRead, seconds, processed);
+        WriteRow("WAL bytes", delta.TotalWalBytes, seconds, processed);
 
         if (churn is { } counts)
         {
@@ -1275,12 +1299,12 @@ public static class LoadLab
                 + (processed > 0 ? $", {delta.TotalExecMs / processed:N3} ms/job" : string.Empty));
 
             Console.WriteLine();
-            Console.WriteLine($"{"top statements by DB time",-46}{"calls",10}{"exec ms",11}{"share",7}{"blocks",14}");
+            Console.WriteLine($"{"top statements by DB time",-46}{"calls",10}{"exec ms",11}{"share",7}{"blocks",14}{"WAL bytes",14}");
             foreach (var statement in delta.Statements.Take(12))
             {
                 Console.WriteLine(
                     $"{Shorten(statement.Query),-46}{statement.Calls,10:N0}{statement.TotalExecMs,11:N1}"
-                    + $"{statement.TotalExecMs / Math.Max(delta.TotalExecMs, 0.001),7:P1}{statement.Blocks,14:N0}");
+                    + $"{statement.TotalExecMs / Math.Max(delta.TotalExecMs, 0.001),7:P1}{statement.Blocks,14:N0}{statement.WalBytes,14:N0}");
             }
         }
 
