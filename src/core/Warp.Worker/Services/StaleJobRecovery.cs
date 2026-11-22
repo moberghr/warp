@@ -407,17 +407,12 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         });
     }
 
-    // A job recovery ends (deleted or failed) is settled work, so it can be what completes its batch or
-    // message. The Orchestrator checks the parents a wake names and sweeps the rest only once per
-    // OrchestrationInterval (rule 6.11), so recovery names the parent like a worker does. Buffered with
-    // the other wakes and sent after the commit.
-    private void AnnounceFinalized(Job job)
-    {
-        if (job.ParentJobId is { } parent)
-        {
-            _pendingNotifications.Add(new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(parent)));
-        }
-    }
+    // A job recovery ends (deleted or failed) is settled work: it can be what completes its batch or
+    // message, and a continuation may be waiting on it. The Orchestrator checks what a wake names and
+    // sweeps the rest only once per OrchestrationInterval (rule 6.11), so recovery names the job and its
+    // parent like a worker does. Buffered with the other wakes and sent after the commit.
+    private void AnnounceFinalized(Job job) =>
+        _pendingNotifications.Add(new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(job.ParentJobId, job.Id)));
 
     private async Task DispatchPendingNotificationsAsync()
     {

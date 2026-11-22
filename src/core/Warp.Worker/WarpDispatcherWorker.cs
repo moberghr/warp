@@ -138,11 +138,11 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
         try
         {
-            var parents = await _batch.FlushAsync();
-            _signals.SignalJobsFinalized(parents);
+            var flushed = await _batch.FlushAsync();
+            _signals.SignalJobsFinalized(flushed.Parents, flushed.Settled);
             await NotificationDispatch.FireAsync(
                 _notificationTransport,
-                [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(parents))],
+                [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(flushed.Parents, flushed.Settled))],
                 cancellationToken);
         }
         catch (Exception ex)
@@ -160,12 +160,12 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
         try
         {
-            // The parents of the jobs just flushed go with the wake, as in WarpWorkerService (rule 6.11).
-            var parents = await _batch.FlushAsync();
-            _signals.SignalJobsFinalized(parents);
+            // What the flush took goes with the wake, as in WarpWorkerService (rule 6.11).
+            var flushed = await _batch.FlushAsync();
+            _signals.SignalJobsFinalized(flushed.Parents, flushed.Settled);
             await NotificationDispatch.FireAsync(
                 _notificationTransport,
-                [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(parents))]);
+                [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(flushed.Parents, flushed.Settled))]);
         }
         catch (OperationCanceledException)
         {

@@ -33,6 +33,10 @@ public sealed class ServerTaskSignals<TContext>
     // every in-flight parent: measured 10,924 pages per pass on PostgreSQL with 1,000 messages in
     // flight, once per job completion.
     private readonly HashSet<Guid> _finalizedParents = [];
+
+    // The jobs that reached a terminal state: each may be the parent some awaiting continuation waits on.
+    // Read only while more parents are awaited than one pass looks at (ManyAwaitedParents).
+    private readonly HashSet<Guid> _settledJobs = [];
     private bool _parentSweepRequested;
     private long _lastParentSweep;
 
@@ -53,33 +57,81 @@ public sealed class ServerTaskSignals<TContext>
 
     // The worker's form: it holds the finished job's row, so it names the one parent worth checking
     // (none for a job with no parent, which still wakes the Orchestrator for its continuations).
-    internal void SignalJobFinalized(Guid? parentJobId)
+    // settledJobId is the job itself when it reached a terminal state (not when it was requeued): a
+    // continuation may be waiting on it.
+    internal void SignalJobFinalized(Guid? parentJobId, Guid? settledJobId = null)
     {
-        if (parentJobId is { } parent)
+        if (parentJobId != null || settledJobId != null)
         {
             lock (_gate)
             {
-                AddFinalizedParent(parent);
+                if (parentJobId is { } parent)
+                {
+                    AddHint(_finalizedParents, parent);
+                }
+
+                if (settledJobId is { } settled)
+                {
+                    AddHint(_settledJobs, settled);
+                }
             }
         }
 
         Fire(_jobFinalizedWakers);
     }
 
-    internal void SignalJobsFinalized(IReadOnlyCollection<Guid> parentJobIds)
+    internal void SignalJobsFinalized(IReadOnlyCollection<Guid> parentJobIds, IReadOnlyCollection<Guid>? settledJobIds = null)
     {
-        if (parentJobIds.Count > 0)
-        {
-            lock (_gate)
-            {
-                foreach (var parent in parentJobIds)
-                {
-                    AddFinalizedParent(parent);
-                }
-            }
-        }
+        NoteFinalized(parentJobIds, settledJobIds ?? []);
 
         Fire(_jobFinalizedWakers);
+    }
+
+    // The same bookkeeping without the wake: for the Orchestrator's own findings (a job it failed, a
+    // parent it could not finish in one pass), which the re-run that follows its pass picks up.
+    internal void NoteFinalized(IReadOnlyCollection<Guid> parentJobIds, IReadOnlyCollection<Guid> settledJobIds)
+    {
+        if (parentJobIds.Count == 0 && settledJobIds.Count == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            foreach (var parent in parentJobIds)
+            {
+                AddHint(_finalizedParents, parent);
+            }
+
+            foreach (var settled in settledJobIds)
+            {
+                AddHint(_settledJobs, settled);
+            }
+        }
+    }
+
+    // More parents are awaited than one pass looks at (rule 6.11). While this is set the Orchestrator
+    // checks the awaiting children of the jobs it was told about, and reads the whole awaited set only
+    // on a sweep. Written and read by the Orchestrator alone, one pass at a time.
+    internal bool ManyAwaitedParents { get; set; }
+
+    // Where the last sweep of a large awaited set stopped, so the next one carries on from there.
+    internal Guid AwaitedSweepCursor { get; set; }
+
+    internal Guid[] TakeSettledJobs()
+    {
+        lock (_gate)
+        {
+            if (_settledJobs.Count == 0)
+            {
+                return [];
+            }
+
+            Guid[] settled = [.. _settledJobs];
+            _settledJobs.Clear();
+
+            return settled;
+        }
     }
 
     // Asks for a check of every parent on the next pass, without waking anything: for the Orchestrator
@@ -133,24 +185,24 @@ public sealed class ServerTaskSignals<TContext>
             _parentSweepRequested |= sweep;
             foreach (var parent in parents)
             {
-                AddFinalizedParent(parent);
+                AddHint(_finalizedParents, parent);
             }
         }
     }
 
-    // Caller holds _gate. Nothing drains the set in a process whose Orchestrator never gets the lock,
-    // so it is bounded: past the cap the ids are dropped for one sweep, which finds the same parents.
-    private void AddFinalizedParent(Guid parent)
+    // Caller holds _gate. Nothing drains a set in a process whose Orchestrator never gets the lock,
+    // so each is bounded: past the cap the ids are dropped for one sweep, which finds the same jobs.
+    private void AddHint(HashSet<Guid> hints, Guid id)
     {
-        if (_finalizedParents.Count >= MaxFinalizedParents)
+        if (hints.Count >= MaxFinalizedParents)
         {
-            _finalizedParents.Clear();
+            hints.Clear();
             _parentSweepRequested = true;
 
             return;
         }
 
-        _finalizedParents.Add(parent);
+        hints.Add(id);
     }
 
     /// <summary>

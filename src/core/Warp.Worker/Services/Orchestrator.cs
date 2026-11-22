@@ -91,27 +91,33 @@ public sealed class Orchestrator<TContext> : IServerTask
         // Which parents to look at: the ones a finished job named, and all of them when a sweep is due.
         // A pass that throws gives the work back, since the signal that brought it will not come again.
         var (hintedParents, sweep) = _signals.TakeFinalizedParents(_configuration.OrchestrationInterval);
+        var settledJobs = _signals.TakeSettledJobs();
         try
         {
-            return await RunOrchestrationCoreAsync(hintedParents, sweep, ct);
+            return await RunOrchestrationCoreAsync(hintedParents, settledJobs, sweep, ct);
         }
         catch
         {
             _signals.ReturnFinalizedParents(hintedParents, sweep);
+            _signals.NoteFinalized([], settledJobs);
 
             throw;
         }
     }
 
-    private async Task<bool> RunOrchestrationCoreAsync(Guid[] hintedParents, bool sweep, CancellationToken ct)
+    private async Task<bool> RunOrchestrationCoreAsync(Guid[] hintedParents, Guid[] settledJobs, bool sweep, CancellationToken ct)
     {
         var jobExpirationTimeout = _configuration.JobExpirationTimeout;
+
+        // The jobs that reached a terminal state: the ones the wakes named, plus every parent this pass
+        // finalizes. Each may be what an awaiting continuation waits on.
+        var settled = new List<Guid>(settledJobs);
 
         var finalized = 0;
         foreach (var chunk in hintedParents.Chunk(ParentIdsPerStatement))
         {
             var readyHinted = await HintedReadyParentsQuery(_context, chunk).ToListAsync(ct);
-            finalized += await FinalizeParentsAsync(readyHinted, jobExpirationTimeout, ct);
+            finalized += await FinalizeParentsAsync(readyHinted, settled, jobExpirationTimeout, ct);
             _context.ChangeTracker.Clear();
         }
 
@@ -127,13 +133,13 @@ public sealed class Orchestrator<TContext> : IServerTask
                 _signals.RequestParentSweep();
             }
 
-            finalized += await FinalizeParentsAsync(readySwept, jobExpirationTimeout, ct);
+            finalized += await FinalizeParentsAsync(readySwept, settled, jobExpirationTimeout, ct);
             _context.ChangeTracker.Clear();
         }
 
         // After the finalization above, so a parent it has just completed releases its continuation in
         // this same pass.
-        var (readyParents, deletedParents) = await LoadAwaitedParentsAsync(ct);
+        var (readyParents, deletedParents) = await LoadAwaitedParentsAsync(settled, sweep, ct);
         var activated = await ActivateContinuationsAsync(readyParents, ct);
         _context.ChangeTracker.Clear();
         var cleaned = await FailChildrenOfDeletedParentsAsync(deletedParents, jobExpirationTimeout, ct);
@@ -202,9 +208,11 @@ public sealed class Orchestrator<TContext> : IServerTask
                 .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
                     && (c.CurrentState == State.Completed || c.CurrentState == State.Failed || c.CurrentState == State.Deleted)));
 
-    // How many parent ids go into one statement. Bounds the parameter list, not the work: every awaited
-    // parent is looked at each pass, in as many statements as that takes.
+    // How many parent ids go into one statement, and how many awaited parents one pass looks at in full.
     private const int ParentIdsPerStatement = 1000;
+
+    // How many awaited parents one sweep looks at when there are more than a pass takes in full.
+    private const int AwaitedParentsPerSweep = 5 * ParentIdsPerStatement;
 
     // "Which awaiting rows can move?" is answered in three steps, each of which can only be served one
     // way, and that is the point (rule 6.11, a third query). It used to be one statement per question:
@@ -226,6 +234,16 @@ public sealed class Orchestrator<TContext> : IServerTask
             .Select(c => c.ParentJobId!.Value)
             .Distinct();
 
+    // Step 1 for a known set of jobs: which of them does an awaiting row wait on? Served by the
+    // (ParentJobId, CurrentState) index with both columns bound, so its cost follows the jobs asked
+    // about and not the number of awaiting rows.
+    internal static IQueryable<Guid> AwaitedParentIdsAmongQuery(DbContext context, IReadOnlyCollection<Guid> jobIds) =>
+        context.Set<Job>()
+            .Where(c => c.CurrentState == State.Awaiting && c.ParentJobId != null)
+            .Where(c => jobIds.Contains(c.ParentJobId!.Value))
+            .Select(c => c.ParentJobId!.Value)
+            .Distinct();
+
     internal static IQueryable<AwaitedParent> AwaitedParentStatesQuery(DbContext context, IReadOnlyCollection<Guid> parentIds) =>
         context.Set<Job>()
             .Where(p => parentIds.Contains(p.Id))
@@ -244,12 +262,42 @@ public sealed class Orchestrator<TContext> : IServerTask
             .Take(batchSize);
 
     // Steps 1 and 2, once per pass, for both the activation and the deleted-parent sweep.
-    private async Task<(List<Guid> Ready, List<Guid> Deleted)> LoadAwaitedParentsAsync(CancellationToken ct)
+    //
+    // Up to ParentIdsPerStatement awaited parents, every pass reads all of them: one scan of the
+    // awaiting rows and one lookup statement, a handful of pages. Past that the same pass would cost a
+    // scan of every awaiting row and a statement per thousand parents on every job completion (100,000
+    // continuations on 100,000 parents: 100 statements a pass), so the Orchestrator changes how it
+    // works: it asks only about the jobs it was told reached a terminal state, and reads the whole
+    // awaited set on a sweep alone, AwaitedParentsPerSweep parents at a time, carrying on each sweep
+    // from where the last one stopped.
+    private async Task<(List<Guid> Ready, List<Guid> Deleted)> LoadAwaitedParentsAsync(List<Guid> settled, bool sweep, CancellationToken ct)
     {
         var ready = new List<Guid>();
         var deleted = new List<Guid>();
 
-        var parentIds = await AwaitedParentIdsQuery(_context).ToListAsync(ct);
+        List<Guid> parentIds;
+        if (_signals.ManyAwaitedParents && !sweep)
+        {
+            parentIds = [];
+            foreach (var chunk in settled.Chunk(ParentIdsPerStatement))
+            {
+                parentIds.AddRange(await AwaitedParentIdsAmongQuery(_context, chunk).ToListAsync(ct));
+            }
+        }
+        else
+        {
+            var allAwaited = await AwaitedParentIdsQuery(_context).ToListAsync(ct);
+            _signals.ManyAwaitedParents = allAwaited.Count > ParentIdsPerStatement;
+            if (_signals.ManyAwaitedParents)
+            {
+                (parentIds, _signals.AwaitedSweepCursor) = NextSweepSlice(allAwaited, _signals.AwaitedSweepCursor, settled, AwaitedParentsPerSweep);
+            }
+            else
+            {
+                parentIds = allAwaited;
+            }
+        }
+
         foreach (var chunk in parentIds.Chunk(ParentIdsPerStatement))
         {
             var parents = await AwaitedParentStatesQuery(_context, chunk)
@@ -273,12 +321,38 @@ public sealed class Orchestrator<TContext> : IServerTask
         return (ready, deleted);
     }
 
-    private async Task<int> FinalizeParentsAsync(List<Job> readyParents, TimeSpan jobExpirationTimeout, CancellationToken ct)
+    // The next slice of a large awaited set, in id order from where the last sweep stopped and round
+    // again, plus the awaited parents this pass was told about, which must not wait for their turn.
+    internal static (List<Guid> Slice, Guid Cursor) NextSweepSlice(List<Guid> allAwaited, Guid cursor, IReadOnlyCollection<Guid> settled, int take)
+    {
+        allAwaited.Sort();
+        var start = allAwaited.BinarySearch(cursor);
+        start = start >= 0 ? start + 1 : ~start;
+
+        var slice = new HashSet<Guid>();
+        for (var i = 0; i < take && i < allAwaited.Count; i++)
+        {
+            cursor = allAwaited[(start + i) % allAwaited.Count];
+            slice.Add(cursor);
+        }
+
+        if (settled.Count > 0)
+        {
+            var awaited = allAwaited.ToHashSet();
+            slice.UnionWith(settled.Where(awaited.Contains));
+        }
+
+        return ([.. slice], cursor);
+    }
+
+    private async Task<int> FinalizeParentsAsync(List<Job> readyParents, List<Guid> settled, TimeSpan jobExpirationTimeout, CancellationToken ct)
     {
         if (readyParents.Count == 0)
         {
             return 0;
         }
+
+        settled.AddRange(readyParents.Select(x => x.Id));
 
         // Two-step fetch (§5.2): one follow-up query collects the distinct (parent, settled state) pairs
         // instead of an `_context.Set<Job>().Any(...)` subquery inside the Select projection (which EF
@@ -364,6 +438,13 @@ public sealed class Orchestrator<TContext> : IServerTask
         if (awaitingChildren.Count == 0)
         {
             return 0;
+        }
+
+        // More was ready than this pass takes. The re-run that follows finds the rest by looking, unless
+        // the awaited set is too large to look through, so name them for it.
+        if (readyParents.Count > ParentIdsPerStatement || awaitingChildren.Count >= _configuration.ServerTaskBatchSize)
+        {
+            _signals.NoteFinalized([], readyParents);
         }
 
         var activated = 0;
@@ -456,6 +537,14 @@ public sealed class Orchestrator<TContext> : IServerTask
             return 0;
         }
 
+        if (deletedParents.Count > ParentIdsPerStatement || orphaned.Count >= _configuration.ServerTaskBatchSize)
+        {
+            _signals.NoteFinalized([], deletedParents);
+        }
+
+        // A row failed here reached a terminal state, and a continuation of its own may wait on it.
+        var failed = orphaned.ConvertAll(x => x.Id);
+
         foreach (var child in orphaned)
         {
             child.CurrentState = State.Failed;
@@ -485,6 +574,8 @@ public sealed class Orchestrator<TContext> : IServerTask
                             .SetProperty(p => p.ExpireAt, now.Add(jobExpirationTimeout)),
                         ct);
 
+                failed.AddRange(batchChildIds);
+
                 foreach (var batchChildId in batchChildIds)
                 {
                     _context.Set<JobLog>().Add(new JobLog
@@ -500,6 +591,7 @@ public sealed class Orchestrator<TContext> : IServerTask
         }
 
         await _context.SaveChangesAsync(ct);
+        _signals.NoteFinalized([], failed);
 
         return orphaned.Count;
     }

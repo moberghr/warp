@@ -107,18 +107,17 @@ public class JobCommandService<TContext> : IJobCommandService
         await _context.SaveChangesAsync();
         await transaction.CommitAsync();
 
-        if (job.ParentJobId is { } parent)
-        {
-            await AnnounceFinalizedAsync([parent]);
-        }
+        Guid[] parents = job.ParentJobId is { } parent ? [parent] : [];
+        await AnnounceFinalizedAsync(parents, [job.Id]);
     }
 
-    // A deleted child is settled work, so it can be what completes its batch or message. The Orchestrator
-    // checks the parents a wake names and sweeps the rest only once per OrchestrationInterval (rule 6.11),
-    // so a delete names its parents like a worker does. After the commit, never inside the transaction.
-    private Task AnnounceFinalizedAsync(IReadOnlyCollection<Guid> parents) =>
+    // A deleted job is settled work: it can be what completes its batch or message, and a continuation
+    // may be waiting on it. The Orchestrator checks what a wake names and sweeps the rest only once per
+    // OrchestrationInterval (rule 6.11), so a delete names its jobs and their parents like a worker
+    // does. After the commit, never inside the transaction.
+    private Task AnnounceFinalizedAsync(IReadOnlyCollection<Guid> parents, IReadOnlyCollection<Guid> deleted) =>
         NotificationDispatch.DispatchAsync(
-            [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(parents))],
+            [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(parents, deleted))],
             _signals,
             _notificationTransport);
 
@@ -258,6 +257,7 @@ public class JobCommandService<TContext> : IJobCommandService
 
             await using var transaction = await _context.Database.BeginTransactionAsync();
             var parentsOfDeleted = new HashSet<Guid>();
+            var deletedIds = new List<Guid>();
 
             foreach (var group in groups)
             {
@@ -342,6 +342,7 @@ public class JobCommandService<TContext> : IJobCommandService
                         });
                     }
 
+                    deletedIds.AddRange(changedIds);
                     parentsOfDeleted.UnionWith(await _context.Set<Job>()
                         .AsNoTracking()
                         .Where(x => changedIds.Contains(x.Id))
@@ -362,9 +363,9 @@ public class JobCommandService<TContext> : IJobCommandService
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
-            if (parentsOfDeleted.Count > 0)
+            if (deletedIds.Count > 0)
             {
-                await AnnounceFinalizedAsync(parentsOfDeleted);
+                await AnnounceFinalizedAsync(parentsOfDeleted, deletedIds);
             }
         }
 

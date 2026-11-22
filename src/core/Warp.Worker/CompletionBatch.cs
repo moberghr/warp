@@ -5,6 +5,7 @@ using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
+using Warp.Core.Enums;
 using Warp.Core.Services;
 
 namespace Warp.Worker;
@@ -18,6 +19,12 @@ internal readonly record struct PendingCompletion(
     IReadOnlyList<Counter> Counters,
     IReadOnlyList<JobLog> Logs,
     ErrorOccurrence? Occurrence = null);
+
+/// <summary>
+/// What a flush took, for the wake that follows it (rule 6.11): the distinct parents of the flushed
+/// jobs, and the flushed jobs that reached a terminal state.
+/// </summary>
+internal readonly record struct FlushedJobs(IReadOnlyCollection<Guid> Parents, IReadOnlyCollection<Guid> Settled);
 
 /// <summary>
 /// Per-worker buffer of pending completions for dispatcher mode. Flushes all buffered entries
@@ -116,7 +123,7 @@ internal sealed class CompletionBatch
     }
 
     /// <summary>
-    /// Persists the buffered completions and returns the distinct parents of the jobs it took. On success (including poison-drops isolated via split)
+    /// Persists the buffered completions and returns what it took. On success (including poison-drops isolated via split)
     /// the buffer is cleared. On transient failure (non-<see cref="DbUpdateException"/>) the buffer
     /// is already drained — the exception propagates and the orphaned <c>Processing</c> rows are
     /// recovered by <c>StaleJobRecovery</c>.
@@ -127,17 +134,29 @@ internal sealed class CompletionBatch
     /// shutdown still commits any in-flight batch.
     /// </para>
     /// </summary>
-    public async Task<IReadOnlyCollection<Guid>> FlushAsync()
+    public async Task<FlushedJobs> FlushAsync()
     {
         var pending = Drain();
         if (pending.Length == 0)
         {
-            return [];
+            return new FlushedJobs([], []);
         }
 
         await FlushRangeAsync(pending, 0, pending.Length, CancellationToken.None);
 
-        return (IReadOnlyCollection<Guid>?)ParentsOf(pending) ?? [];
+        return new FlushedJobs((IReadOnlyCollection<Guid>?)ParentsOf(pending) ?? [], SettledOf(pending));
+    }
+
+    // The flushed jobs that reached a terminal state (not the requeued ones): a continuation may wait
+    // on each.
+    private static List<Guid> SettledOf(PendingCompletion[] pending)
+    {
+        var settled = new List<Guid>(pending.Length);
+        settled.AddRange(pending
+            .Where(x => x.Job.CurrentState is State.Completed or State.Failed or State.Deleted)
+            .Select(x => x.Job.Id));
+
+        return settled;
     }
 
     // The distinct parents of the flushed jobs, for the wake that follows (rule 6.11). Most jobs have

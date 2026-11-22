@@ -5,75 +5,84 @@ using Warp.Core.Events;
 namespace Warp.Core.Notifications;
 
 /// <summary>
-/// What a <see cref="NotificationKind.JobFinalized"/> notification says about the jobs that finished:
-/// the parents worth checking, so the Orchestrator on the receiving side looks at those and not at
-/// every parent in flight (rule 6.11). Three forms: a comma-separated list of parent ids, <c>-</c> for
-/// "these jobs had no parent", and nothing at all for "unknown", which is what a server from before 8.0
-/// sends and what asks the receiver to check every parent.
+/// What a <see cref="NotificationKind.JobFinalized"/> notification says about the jobs that finished, so
+/// the Orchestrator on the receiving side looks at those and not at everything in flight (rule 6.11).
+/// The grammar is <c>parents[;settled]</c>: the parents to check for completion (a comma-separated list
+/// of ids, or <c>-</c> for none), then the jobs that reached a terminal state themselves, which a
+/// continuation may be waiting on. Nothing at all means "unknown": it is what a server from before 8.0
+/// sends, and it asks the receiver to check everything.
 /// </summary>
 internal static class FinalizedParentsPayload
 {
-    // A PostgreSQL NOTIFY payload holds 8,000 bytes; 64 ids are 2,111. A flush with more parents than
+    // A PostgreSQL NOTIFY payload holds 8,000 bytes; 128 ids are 4,225. A flush that names more than
     // that sends "unknown".
-    internal const int MaxParents = 64;
+    internal const int MaxIds = 128;
 
-    private const string NoParent = "-";
+    private const string None = "-";
     private const string IdFormat = "N";
 
-    internal static string Encode(Guid? parentJobId) =>
-        parentJobId is { } parent ? parent.ToString(IdFormat, CultureInfo.InvariantCulture) : NoParent;
-
-    internal static string? Encode(IReadOnlyCollection<Guid> parentJobIds)
+    internal static string Encode(Guid? parentJobId, Guid? settledJobId = null)
     {
-        if (parentJobIds.Count == 0)
-        {
-            return NoParent;
-        }
+        var parents = parentJobId is { } parent ? Format(parent) : None;
 
-        if (parentJobIds.Count > MaxParents)
+        return settledJobId is { } settled ? parents + ";" + Format(settled) : parents;
+    }
+
+    internal static string? Encode(IReadOnlyCollection<Guid> parentJobIds, IReadOnlyCollection<Guid>? settledJobIds = null)
+    {
+        settledJobIds ??= [];
+        if (parentJobIds.Count + settledJobIds.Count > MaxIds)
         {
             return null;
         }
 
-        return string.Join(',', parentJobIds.Select(x => x.ToString(IdFormat, CultureInfo.InvariantCulture)));
+        var parents = parentJobIds.Count == 0 ? None : string.Join(',', parentJobIds.Select(Format));
+
+        return settledJobIds.Count == 0 ? parents : parents + ";" + string.Join(',', settledJobIds.Select(Format));
     }
 
     internal static void Signal<TContext>(ServerTaskSignals<TContext> signals, string? payload)
         where TContext : DbContext
     {
-        if (string.Equals(payload, NoParent, StringComparison.Ordinal))
-        {
-            signals.SignalJobFinalized(parentJobId: null);
-
-            return;
-        }
-
-        if (!TryDecode(payload, out var parents))
+        if (string.IsNullOrEmpty(payload))
         {
             signals.SignalJobFinalized();
 
             return;
         }
 
-        signals.SignalJobsFinalized(parents);
-    }
+        var separator = payload.IndexOf(';', StringComparison.Ordinal);
+        var parentsPart = separator < 0 ? payload : payload[..separator];
+        var settledPart = separator < 0 ? None : payload[(separator + 1)..];
 
-    private static bool TryDecode(string? payload, out List<Guid> parents)
-    {
-        parents = [];
-        if (string.IsNullOrEmpty(payload))
+        if (!TryDecode(parentsPart, out var parents) || !TryDecode(settledPart, out var settled))
         {
-            return false;
+            signals.SignalJobFinalized();
+
+            return;
         }
 
-        foreach (var part in payload.Split(','))
+        signals.SignalJobsFinalized(parents, settled);
+    }
+
+    private static string Format(Guid id) => id.ToString(IdFormat, CultureInfo.InvariantCulture);
+
+    private static bool TryDecode(string part, out List<Guid> ids)
+    {
+        ids = [];
+        if (string.Equals(part, None, StringComparison.Ordinal))
         {
-            if (!Guid.TryParseExact(part, IdFormat, out var parent))
+            return true;
+        }
+
+        foreach (var item in part.Split(','))
+        {
+            if (!Guid.TryParseExact(item, IdFormat, out var id))
             {
                 return false;
             }
 
-            parents.Add(parent);
+            ids.Add(id);
         }
 
         return true;

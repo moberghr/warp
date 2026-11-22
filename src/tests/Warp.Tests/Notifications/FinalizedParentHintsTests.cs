@@ -158,10 +158,86 @@ public class FinalizedParentHintsTests
     [Fact]
     public void Payload_MoreParentsThanOneNotificationCarries_IsSentAsUnknown()
     {
-        Guid[] tooMany = [.. Enumerable.Range(0, FinalizedParentsPayload.MaxParents + 1).Select(_ => Guid.NewGuid())];
+        Guid[] tooMany = [.. Enumerable.Range(0, FinalizedParentsPayload.MaxIds + 1).Select(_ => Guid.NewGuid())];
 
         FinalizedParentsPayload.Encode(tooMany).ShouldBeNull();
-        FinalizedParentsPayload.Encode(tooMany[..FinalizedParentsPayload.MaxParents])!.Length.ShouldBeLessThan(8000);
+        FinalizedParentsPayload.Encode(tooMany[..1], tooMany[1..]).ShouldBeNull();
+        FinalizedParentsPayload.Encode(tooMany[..1], tooMany[2..])!.Length.ShouldBeLessThan(8000);
+    }
+
+    // The second half of a wake: the job itself, once at rest, since a continuation may wait on it.
+    [Fact]
+    public void TakeSettledJobs_AfterAWorkerNamedTheFinishedJob_HandsItOverOnce()
+    {
+        var signals = SignalsPastTheirFirstSweep();
+        var job = Guid.NewGuid();
+        signals.SignalJobFinalized(parentJobId: null, settledJobId: job);
+        signals.SignalJobFinalized(parentJobId: null, settledJobId: job);
+
+        signals.TakeSettledJobs().ShouldBe([job]);
+        signals.TakeSettledJobs().ShouldBeEmpty();
+        signals.TakeFinalizedParents(Never).Sweep.ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Payload_FinishedJobsWithOrWithoutParents_ArriveAsSent(bool withParent)
+    {
+        var signals = SignalsPastTheirFirstSweep();
+        Guid[] sentParents = withParent ? [Guid.NewGuid()] : [];
+        Guid[] sentSettled = [Guid.NewGuid(), Guid.NewGuid()];
+
+        FinalizedParentsPayload.Signal(signals, FinalizedParentsPayload.Encode(sentParents, sentSettled));
+
+        signals.TakeSettledJobs().ShouldBe(sentSettled, ignoreOrder: true);
+        var (parents, sweep) = signals.TakeFinalizedParents(Never);
+        parents.ShouldBe(sentParents);
+        sweep.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Payload_OneJobAndItsParent_ArrivesAsSent()
+    {
+        var signals = SignalsPastTheirFirstSweep();
+        var parent = Guid.NewGuid();
+        var job = Guid.NewGuid();
+
+        FinalizedParentsPayload.Signal(signals, FinalizedParentsPayload.Encode(parent, job));
+
+        signals.TakeSettledJobs().ShouldBe([job]);
+        signals.TakeFinalizedParents(Never).Parents.ShouldBe([parent]);
+    }
+
+    // A large awaited set is swept a slice at a time, each sweep carrying on where the last stopped, so
+    // no parent is starved behind the ones before it. Parents this pass was told about jump the queue.
+    [Fact]
+    public void NextSweepSlice_ThreeSweepsOfTwo_VisitEveryParentAndWrapAround()
+    {
+        List<Guid> all = [.. Enumerable.Range(0, 5).Select(_ => Guid.NewGuid())];
+        var cursor = Guid.Empty;
+        var seen = new List<Guid>();
+
+        for (var sweep = 0; sweep < 3; sweep++)
+        {
+            (var slice, cursor) = Warp.Worker.Services.Orchestrator<TestContext>.NextSweepSlice(all, cursor, [], take: 2);
+            slice.Count.ShouldBe(2);
+            seen.AddRange(slice);
+        }
+
+        seen.Distinct().Count().ShouldBe(5, "six visits over five parents: all of them, one twice");
+    }
+
+    [Fact]
+    public void NextSweepSlice_ParentNamedThisPass_IsIncludedOutOfTurn()
+    {
+        List<Guid> all = [.. Enumerable.Range(0, 5).Select(_ => Guid.NewGuid())];
+        all.Sort();
+        var notAwaited = Guid.NewGuid();
+
+        var (slice, _) = Warp.Worker.Services.Orchestrator<TestContext>.NextSweepSlice(all, Guid.Empty, [all[4], notAwaited], take: 2);
+
+        slice.ShouldBe([all[0], all[1], all[4]], ignoreOrder: true);
     }
 
     [Fact]

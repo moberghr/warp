@@ -176,6 +176,44 @@ public abstract partial class OrchestratorReadyParentsPlanTestsBase : IAsyncLife
         pages.ShouldBeLessThan(MaxPages, detail);
     }
 
+    // "Which of these jobs is awaited?", asked while thousands of rows are awaiting: the cost follows the
+    // two jobs asked about, not the awaiting rows.
+    [TimedFact]
+    public async Task AwaitedParentIdsAmongQuery_ThousandsOfAwaitingRows_ReadsOnlyTheNamedJobs()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        Job Row(State state, Guid? parent) =>
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Kind = JobKind.Job,
+                CurrentState = state,
+                ParentJobId = parent,
+                CreateTime = now,
+                ScheduleTime = now,
+                Queue = "default",
+            };
+
+        var parents = Enumerable.Range(0, RowsThatLeftProcessing).Select(_ => Row(State.Processing, null)).ToList();
+        var notAwaited = Row(State.Completed, null);
+        await using (var seed = _fixture.CreateContext())
+        {
+            seed.Set<Job>().AddRange(parents);
+            seed.Set<Job>().Add(notAwaited);
+            seed.Set<Job>().AddRange(parents.Select(x => Row(State.Awaiting, x.Id)));
+            await seed.SaveChangesAsync(ct);
+        }
+
+        Guid[] named = [parents[0].Id, notAwaited.Id];
+        await using var context = _fixture.CreateContext();
+        var query = Orchestrator<TestContext>.AwaitedParentIdsAmongQuery(context, named);
+
+        (await query.ToListAsync(ct)).ShouldBe([parents[0].Id]);
+        var (pages, detail) = await MeasurePagesReadAsync(context, query, ct);
+        pages.ShouldBeLessThan(MaxPages, detail);
+    }
+
     private static async Task<(long Pages, string Detail)> MeasurePagesReadAsync(TestContext context, IQueryable query, CancellationToken ct)
     {
         await context.Database.OpenConnectionAsync(ct);
