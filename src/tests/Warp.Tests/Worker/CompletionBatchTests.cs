@@ -322,9 +322,14 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         (await ctx.Set<Job>().AnyAsync(x => x.Id == phantomJob.Id, Xunit.TestContext.Current.CancellationToken)).ShouldBeFalse();
 
-        var counters = await ctx.Set<Counter>().ToListAsync(Xunit.TestContext.Current.CancellationToken);
-        counters.Count(c => string.Equals(c.Key, "stats:succeeded", StringComparison.Ordinal)).ShouldBe(1);
-        counters.ShouldNotContain(c => c.Value == 1 && c.Key == "stats:succeeded" && c.Id == 0 && string.Equals(c.Key, "phantom", StringComparison.Ordinal));
+        // The summed VALUE, not the row count: the buffer collapses a key to one row per flush, so
+        // a phantom increment that got through would still be one row, with a value of 2.
+        var succeeded = await ctx.Set<Counter>()
+            .Where(x => x.Key == "stats:succeeded")
+            .SumAsync(x => x.Value, Xunit.TestContext.Current.CancellationToken);
+        succeeded.ShouldBe(1);
+
+        (await ctx.Set<JobLog>().AnyAsync(x => x.JobId == phantomJob.Id, Xunit.TestContext.Current.CancellationToken)).ShouldBeFalse();
 
         batch.Count.ShouldBe(0);
     }
@@ -463,35 +468,10 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         batch.Count.ShouldBe(0);
     }
 
-    [TimedFact]
-    public async Task FlushAsync_CommitsBufferedCompletions_RegardlessOfCallerCancellation()
-    {
-        // Regression for PR #127 review finding: under the pre-fix code path, FlushAsync drained
-        // the buffer before observing cancellation. If the token was cancelled (e.g. SIGTERM mid-
-        // flush), BeginTransactionAsync threw OCE, the drained entries were lost, and the caller's
-        // subsequent FlushAsync was a noop on an empty buffer. Jobs stayed Processing and only
-        // StaleJobRecoveryTask would later requeue them.
-        //
-        // The fix removed the CancellationToken parameter entirely from FlushAsync so callers
-        // cannot accidentally abort an in-flight commit. This test documents the new contract:
-        // calling FlushAsync always commits the buffered entries, there's no caller-visible way
-        // to cancel a drained flush mid-commit.
-        var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
-
-        var job = await InsertProcessingJob();
-        batch.Add(MakeEntry(job));
-
-        await batch.FlushAsync();
-        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
-
-        var persisted = await _fixture.CreateContext().Set<Job>().FirstAsync(x => x.Id == job.Id, Xunit.TestContext.Current.CancellationToken);
-        persisted.CurrentState.ShouldBe(State.Completed);
-        persisted.CurrentWorkerId.ShouldBeNull();
-        persisted.LastKeepAlive.ShouldBeNull();
-        batch.Count.ShouldBe(0);
-    }
-
+    // FlushAsync takes no CancellationToken on purpose (PR #127): a caller that could cancel a drained
+    // flush mid-commit lost the drained entries and left their jobs Processing for StaleJobRecovery.
+    // The signature is the guard; a test that calls it and checks the commit was a copy of
+    // FlushAsync_PersistsAllBufferedCompletions_WhenSizeReached.
     [TimedFact]
     public async Task Add_WhenBatchSizeIsOne_MarksFullImmediately()
     {

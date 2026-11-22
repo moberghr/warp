@@ -148,6 +148,12 @@ public abstract class WorkerTestsBase : IAsyncLifetime
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Completed);
         job.HandlerType.ShouldNotBeNull();
+
+        // The worker let go of the row, and a completed job expires.
+        job.CurrentWorkerId.ShouldBeNull();
+        job.LastKeepAlive.ShouldBeNull();
+        job.CancellationMode.ShouldBe(CancellationMode.None);
+        job.ExpireAt.ShouldNotBeNull();
     }
 
     [TimedFact]
@@ -180,6 +186,12 @@ public abstract class WorkerTestsBase : IAsyncLifetime
         var job = await readCtx.Set<Job>().FirstOrDefaultAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
         job.ShouldNotBeNull();
         job.CurrentState.ShouldBe(State.Failed);
+
+        // The worker let go of the row, and a failed job never expires (it waits for an operator).
+        job.CurrentWorkerId.ShouldBeNull();
+        job.LastKeepAlive.ShouldBeNull();
+        job.CancellationMode.ShouldBe(CancellationMode.None);
+        job.ExpireAt.ShouldBeNull();
     }
 
     [TimedFact]

@@ -551,15 +551,10 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         var requeueTasks = ids.Select(id => Task.Run(async () =>
         {
             // Fresh service per task — DbContext is not thread-safe.
+            // No catch: a requeue that loses the race finds the row Deleted and is a no-op, it does
+            // not throw. An exception here (a deadlock, a torn update) is the failure under test.
             var requeueSvc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext());
-            try
-            {
-                await requeueSvc.RequeueJob(id);
-            }
-            catch
-            {
-                // Requeue may legitimately fail if the row was just deleted between read and lock.
-            }
+            await requeueSvc.RequeueJob(id);
         }));
 
         await Task.WhenAll([deleteTask, .. requeueTasks]);
@@ -908,15 +903,9 @@ public abstract class JobCommandServiceTestsBase : IAsyncLifetime
         var deleteTasks = childIds.Select(id => Task.Run(async () =>
         {
             // Fresh service per task — DbContext is not thread-safe.
+            // No catch: a delete that loses the race is a no-op, it does not throw.
             var deleteSvc = Warp.Tests.Helpers.TestTasks.CreateJobCommandService(_fixture.CreateContext());
-            try
-            {
-                await deleteSvc.DeleteJob(id);
-            }
-            catch
-            {
-                // Delete may fail if the row state moved during the race.
-            }
+            await deleteSvc.DeleteJob(id);
         }));
 
         await Task.WhenAll([requeueTask, .. deleteTasks]);

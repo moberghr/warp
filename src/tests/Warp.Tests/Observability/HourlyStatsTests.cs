@@ -101,42 +101,6 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task GetAndProcessJob_CompletedJob_IncrementsHourlySucceededStat()
-    {
-        // Arrange
-        var ctx = _fixture.CreateContext();
-        var jobId = Guid.NewGuid();
-        ctx.Set<Job>().Add(new Job
-        {
-            Id = jobId,
-            Kind = JobKind.Job,
-            CurrentState = State.Enqueued,
-            Type = typeof(UnitRequest).AssemblyQualifiedName,
-            Message = JsonSerializer.Serialize(new UnitRequest()),
-            CreateTime = DateTime.UtcNow,
-            ScheduleTime = DateTime.UtcNow,
-            Queue = "default",
-        });
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        var worker = CreateWorker();
-
-        // Act
-        await worker.GetAndProcessJob(CancellationToken.None);
-        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
-
-        await Warp.Tests.Helpers.TestTasks.CreateCounterAggregator(_fixture.CreateContext()).AggregateCountersAsync(CancellationToken.None);
-
-        // Assert
-        var hourKey = $"stats:succeeded:{DateTime.UtcNow:yyyy-MM-dd-HH}";
-        var stat = await _fixture.CreateContext().Set<Statistic>()
-            .FindAsync([hourKey], Xunit.TestContext.Current.CancellationToken);
-
-        stat.ShouldNotBeNull();
-        stat.Value.ShouldBeGreaterThanOrEqualTo(1);
-    }
-
-    [TimedFact]
     public async Task GetAndProcessJob_FailedJob_IncrementsHourlyFailedStat()
     {
         // Arrange
@@ -169,7 +133,7 @@ public abstract class HourlyStatsTestsBase : IAsyncLifetime
             .FindAsync([hourKey], Xunit.TestContext.Current.CancellationToken);
 
         stat.ShouldNotBeNull();
-        stat.Value.ShouldBeGreaterThanOrEqualTo(1);
+        stat.Value.ShouldBe(1);
     }
 
     [TimedFact]

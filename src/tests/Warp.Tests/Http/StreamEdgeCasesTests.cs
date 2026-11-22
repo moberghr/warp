@@ -47,26 +47,25 @@ public sealed class StreamEdgeCasesTests
     }
 
     [TimedFact]
-    public async Task StreamThrowsMidWay_FirstFrameDelivered_ExceptionPropagates()
+    public async Task StreamThrowsMidWay_FirstFrameDelivered_ThenTheResponseFails()
     {
+        var ct = Xunit.TestContext.Current.CancellationToken;
         await using var app = await WarpHttpTestApp.StartAsync(configureApp: a => a.MapWarpHttp());
 
-        // First yield delivers "first", then the handler throws — we expect either an exception
-        // on read or a partial body containing the first frame, depending on TestHost behavior.
-        try
-        {
-            var resp = await app.Client.GetAsync(new Uri("/api/stream/throws", UriKind.Relative));
-            var body = await resp.Content.ReadAsStringAsync();
+        // Headers first, so the frame written before the throw can be read on its own.
+        using var resp = await app.Client.GetAsync(
+            new Uri("/api/stream/throws", UriKind.Relative),
+            HttpCompletionOption.ResponseHeadersRead,
+            ct);
+        resp.StatusCode.ShouldBe(HttpStatusCode.OK);
 
-            body.ShouldContain("data: \"first\"\n\n");
-        }
-        catch (HttpRequestException)
-        {
-            // Acceptable — TestHost surfaced the handler exception.
-        }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("stream-failure", StringComparison.Ordinal))
-        {
-            // Acceptable — direct exception propagation through TestHost.
-        }
+        await using var body = await resp.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(body);
+        (await reader.ReadLineAsync(ct)).ShouldBe("data: \"first\"");
+
+        // The handler then throws: the response is cut short with the handler's exception rather
+        // than ending as if the stream had finished.
+        var failure = await Should.ThrowAsync<Exception>(async () => await reader.ReadToEndAsync(ct));
+        failure.ToString().ShouldContain("stream-failure");
     }
 }

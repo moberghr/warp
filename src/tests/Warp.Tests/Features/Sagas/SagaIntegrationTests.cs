@@ -83,21 +83,15 @@ public abstract class SagaIntegrationTestsBase : IntegrationTestBase
         var msgId = await publisher.Publish(new PaymentCaptured { OrderId = "never-started" });
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Wait until at least one child handler-job is in Failed state.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            var failed = await server.CreateContext().Set<Warp.Core.Entities.Job>()
+        // The handler job fails (after its retry). WaitUntil throws on timeout, where the loop this
+        // replaced fell through and let the test pass with the job still running.
+        await WarpTestServer.WaitUntil(
+            async () => await server.CreateContext().Set<Warp.Core.Entities.Job>()
                 .Where(x => x.ParentJobId == msgId)
                 .Where(x => x.CurrentState == Warp.Core.Enums.State.Failed)
-                .AnyAsync(Xunit.TestContext.Current.CancellationToken);
-            if (failed)
-            {
-                break;
-            }
-
-            await Task.Delay(100, Xunit.TestContext.Current.CancellationToken);
-        }
+                .AnyAsync(Xunit.TestContext.Current.CancellationToken),
+            TimeSpan.FromSeconds(10),
+            Xunit.TestContext.Current.CancellationToken);
 
         var sagaExists = await server.CreateContext().Set<SagaState>()
             .Where(x => x.CorrelationKey == "never-started")

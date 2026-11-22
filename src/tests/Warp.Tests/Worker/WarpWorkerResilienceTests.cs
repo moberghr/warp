@@ -73,15 +73,15 @@ public class WarpWorkerResilienceTests
         //
         // The wait inside WarpWorker uses SemaphoreSlim.WaitAsync(delay, ct) which is
         // wall-clock and does not honour a custom TimeProvider, so this test runs on real
-        // time. To stay deterministic on CI: use a very small floor (10ms), assert by call
-        // timing (post-success call comes back within floor*5 = 50ms, not max=200ms).
+        // time. To stay deterministic on CI: use a very small floor (10ms) and assert by call
+        // timing (the first wait after the success is 20ms, not max=200ms).
         var floor = TimeSpan.FromMilliseconds(10);
         var max = TimeSpan.FromMilliseconds(200);
 
         var callTimestamps = new List<DateTime>();
         var callLock = new Lock();
         var callCount = 0;
-        using var sawCall7 = new SemaphoreSlim(0, 1);
+        using var sawCall8 = new SemaphoreSlim(0, 1);
 
         var mockService = new Mock<IWarpWorkerService>();
         mockService.Setup(x => x.GetAndProcessJob(It.IsAny<CancellationToken>()))
@@ -93,13 +93,14 @@ public class WarpWorkerResilienceTests
                 }
 
                 var n = Interlocked.Increment(ref callCount);
-                if (n == 7)
+                if (n == 8)
                 {
-                    sawCall7.Release();
+                    sawCall8.Release();
                 }
 
-                // Calls 1..5 empty (backoff ramps to cap). Call 6 success → reset hook fires.
-                // Call 7 empty: its arrival time relative to call 6 is what we assert on.
+                // Calls 1 to 5 are empty and ramp the backoff to the cap. Call 6 succeeds, which is
+                // where the reset happens. Call 7 follows at once either way, because a success
+                // never waits, and is empty. The wait before call 8 shows whether the delay was reset.
                 return Task.FromResult(n == 6);
             });
 
@@ -122,8 +123,8 @@ public class WarpWorkerResilienceTests
         await worker.StartAsync(CancellationToken.None);
         try
         {
-            var saw = await sawCall7.WaitAsync(TimeSpan.FromSeconds(2), Xunit.TestContext.Current.CancellationToken);
-            saw.ShouldBeTrue("worker should reach call #7 within 2s");
+            var saw = await sawCall8.WaitAsync(TimeSpan.FromSeconds(2), Xunit.TestContext.Current.CancellationToken);
+            saw.ShouldBeTrue("worker should reach call #8 within 2s");
         }
         finally
         {
@@ -136,21 +137,18 @@ public class WarpWorkerResilienceTests
             timestamps = [.. callTimestamps];
         }
 
-        timestamps.Length.ShouldBeGreaterThanOrEqualTo(7, "worker did not progress through enough iterations");
+        timestamps.Length.ShouldBeGreaterThanOrEqualTo(8, "worker did not progress through enough iterations");
 
-        // The gap between call 6 (success) and call 7 (next poll) is the assertion target.
-        // After call 6 returns true, currentDelay is reset to floor and the loop `continue`s
-        // — no wait. Call 7 then comes back empty, schedules the next wait at Next(floor)=20ms.
-        // What we observe is call 7's timestamp vs call 6: that gap should be near-zero
-        // (just the loop overhead), because there's no Task.Delay between them. Without
-        // the reset, currentDelay would still be at max from prior calls and the worker
-        // would wait Next(max)=200ms (clamped to max) before call 7.
+        // The gap between call 7 (the first empty poll after the success) and call 8 is the
+        // assertion target. With the reset, call 7 schedules Next(floor) = 20ms. Without it the
+        // delay is still at the cap from calls 1..5 and call 7 schedules Next(max) = 200ms.
+        // The 6 -> 7 gap cannot tell the two apart: a successful poll never waits, reset or not.
         //
-        // We accept up to floor*3=30ms slack for CI scheduling. Without the reset hook the
-        // expected gap is max=200ms+, so the threshold is well-separated either way.
-        var gap6to7 = timestamps[6] - timestamps[5];
-        gap6to7.ShouldBeLessThan(
-            TimeSpan.FromMilliseconds(30),
-            "post-success poll must follow immediately; observing a long gap means currentDelay was not reset to floor");
+        // 100ms sits between the two outcomes with 80ms of CI scheduling slack on the passing
+        // side and 100ms on the failing one.
+        var gap7to8 = timestamps[7] - timestamps[6];
+        gap7to8.ShouldBeLessThan(
+            TimeSpan.FromMilliseconds(100),
+            "the first empty poll after a success must wait from the floor; a gap near the cap means currentDelay was not reset");
     }
 }

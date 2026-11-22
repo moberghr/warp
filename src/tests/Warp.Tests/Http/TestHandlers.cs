@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.DependencyInjection;
 using Warp.Core;
 using Warp.Core.Handlers;
 using Warp.Http;
@@ -304,6 +305,34 @@ public sealed class ThrowingStreamHandler : IStreamRequestHandler<ThrowingStream
     {
         yield return await Task.FromResult("first").ConfigureAwait(false);
         throw new InvalidOperationException("stream-failure");
+    }
+}
+
+public sealed record EndlessStream : IStreamRequest<int>;
+
+// Set by EndlessStreamHandler when its wait ends: true when the token it was given was cancelled.
+public sealed class StreamCancellationProbe
+{
+    public TaskCompletionSource<bool> Ended { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+// Yields one frame, then waits until the request is aborted. The probe is resolved when the handler
+// runs, not in the constructor, so only the test that registers one needs it.
+[WarpHttpGet("/api/stream/endless")]
+public sealed class EndlessStreamHandler(IServiceProvider services) : IStreamRequestHandler<EndlessStream, int>
+{
+    public async IAsyncEnumerable<int> HandleAsync(EndlessStream request, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        yield return 0;
+
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            services.GetService<StreamCancellationProbe>()?.Ended.TrySetResult(cancellationToken.IsCancellationRequested);
+        }
     }
 }
 

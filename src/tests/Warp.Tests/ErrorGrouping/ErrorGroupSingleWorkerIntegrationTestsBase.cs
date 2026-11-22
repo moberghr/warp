@@ -61,7 +61,9 @@ public abstract class ErrorGroupSingleWorkerIntegrationTestsBase : IntegrationTe
                 .Where(x => x.Source == ErrorSource.Job)
                 .ToListAsync(Xunit.TestContext.Current.CancellationToken))
             .ShouldHaveSingleItem();
-        group.Count.ShouldBeGreaterThanOrEqualTo(1);
+
+        // Both attempts, the first failure and the failed retry: every caught exception is an occurrence.
+        group.Count.ShouldBe(2);
         group.ExceptionType.ShouldBe("System.NotImplementedException");   // real, unwrapped type
 
         var inboxRemaining = await ctx.Set<ErrorOccurrence>()

@@ -175,7 +175,9 @@ public abstract class OTelMetricsTestsBase : IAsyncLifetime
         await worker.GetAndProcessJob(CancellationToken.None);
 
         // Assert
-        recordedDuration.ShouldBeGreaterThanOrEqualTo(0);
+        // A measurement was taken for THIS queue (the sentinel is -1), and it is a real elapsed time.
+        recordedDuration.ShouldBeGreaterThan(0);
+        recordedDuration.ShouldBeLessThan(10_000);
     }
 
     [TimedFact]
