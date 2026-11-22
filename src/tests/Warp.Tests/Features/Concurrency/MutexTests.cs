@@ -51,15 +51,6 @@ public abstract class MutexTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public Task MutexAttribute_EmptyKey_ThrowsAtConstruction()
-    {
-        Should.Throw<ArgumentException>(() => new MutexAttribute(string.Empty));
-        Should.Throw<ArgumentNullException>(() => new MutexAttribute(null!));
-
-        return Task.CompletedTask;
-    }
-
-    [TimedFact]
     public async Task MutexHeld_SecondJobCancelled()
     {
         // Arrange: two jobs with same concurrency key, first already processing

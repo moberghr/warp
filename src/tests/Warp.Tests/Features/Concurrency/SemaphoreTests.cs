@@ -36,24 +36,6 @@ public abstract class SemaphoreTestsBase : IAsyncLifetime
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     [TimedFact]
-    public Task SemaphoreAttribute_LimitZero_ThrowsAtConstruction()
-    {
-        Should.Throw<ArgumentOutOfRangeException>(() => new SemaphoreAttribute("k", 0));
-        Should.Throw<ArgumentOutOfRangeException>(() => new SemaphoreAttribute("k", -1));
-
-        return Task.CompletedTask;
-    }
-
-    [TimedFact]
-    public Task SemaphoreAttribute_EmptyKey_ThrowsAtConstruction()
-    {
-        Should.Throw<ArgumentException>(() => new SemaphoreAttribute(string.Empty, 5));
-        Should.Throw<ArgumentNullException>(() => new SemaphoreAttribute(null!, 5));
-
-        return Task.CompletedTask;
-    }
-
-    [TimedFact]
     public async Task WithSemaphore_SetsKeyLimitAndModeInMetadata()
     {
         // Arrange

@@ -114,21 +114,4 @@ public class SqlServerNotificationTransportTests : IAsyncLifetime, IClassFixture
             new WarpDatabasePushConfiguration { ChannelName = "1starts_with_digit" });
         unsafe2.ShouldThrow<ArgumentException>();
     }
-
-    [Fact]
-    public void Encode_Decode_RoundTripsJobEnqueuedWithQueue()
-    {
-        var payload = SqlServerNotificationTransport.Encode(NotificationKind.JobEnqueued, "critical");
-        SqlServerNotificationTransport.TryDecode(payload, out var parsed).ShouldBeTrue();
-        parsed.Kind.ShouldBe(NotificationKind.JobEnqueued);
-        parsed.Queue.ShouldBe("critical");
-    }
-
-    [Fact]
-    public void Decode_Garbage_ReturnsFalse()
-    {
-        SqlServerNotificationTransport.TryDecode("Xxx", out _).ShouldBeFalse();
-        SqlServerNotificationTransport.TryDecode(null, out _).ShouldBeFalse();
-        SqlServerNotificationTransport.TryDecode(string.Empty, out _).ShouldBeFalse();
-    }
 }

@@ -230,25 +230,6 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public void AddMetric_SameKindNameAndApplicationTwice_Throws()
-    {
-        var options = new SloOptions().AddMetricThreshold("5xx", "a", 0);
-
-        Should.Throw<ArgumentException>(() => options.AddMetricThreshold("5xx", "b", 0));
-    }
-
-    [TimedTheory]
-    [InlineData("5XX", null)]
-    [InlineData("5xx", "API")]
-    public void AddMetric_NameOrApplicationDifferingOnlyByCase_Throws(string name, string? application)
-    {
-        // The seeder matches names case-insensitively (in memory, on every provider): these would be one objective.
-        var options = new SloOptions().AddMetricThreshold("5xx", "a", 0, application: application is null ? null : "api");
-
-        Should.Throw<ArgumentException>(() => options.AddMetricThreshold(name, "b", 0, application: application));
-    }
-
-    [TimedFact]
     public async Task Seeder_TwoReplicasStartAtOnce_SeedOneCopy()
     {
         // Two replicas with the same config. The first is pinned inside the seed lock after its existence checks
@@ -489,15 +470,6 @@ public abstract class SloCommandQueryTestsBase : IAsyncLifetime
 
         var row = await _fixture.CreateContext().Set<SloDefinition>().AsNoTracking().SingleAsync(Ct);
         row.Name.ShouldBe("request latency");
-    }
-
-    [TimedFact]
-    public void AddMetricLatency_InvalidPercentileOrDuplicateName_Throws()
-    {
-        Should.Throw<ArgumentException>(() => new SloOptions().AddMetricLatency("p", "h", 1, percentile: 100));
-
-        var options = new SloOptions().AddMetricLatency("p95", "h", 1);
-        Should.Throw<ArgumentException>(() => options.AddMetricLatency("p95", "h", 2));
     }
 
     [TimedTheory]

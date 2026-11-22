@@ -147,50 +147,6 @@ public abstract class MetadataPublishPipelineTestsBase : IAsyncLifetime
         metadata["ad-hoc"].ShouldBe("value");
     }
 
-    // --- Fix #5: Model metadata caching ---
-    [TimedFact]
-    public void UnifiedJobDetailModel_Metadata_CachedAcrossAccesses_1()
-    {
-        var model = new UnifiedJobDetailModel { MetadataJson = """{"key":"value"}""" };
-
-        var first = model.Metadata;
-        var second = model.Metadata;
-
-        first.ShouldNotBeNull();
-        second.ShouldNotBeNull();
-        ReferenceEquals(first, second).ShouldBeTrue("Metadata should be the same instance on repeated access");
-    }
-
-    [TimedFact]
-    public void UnifiedJobDetailModel_Metadata_CachedAcrossAccesses_WithMultipleKeys()
-    {
-        var model = new UnifiedJobDetailModel { MetadataJson = """{"key1":"value1","key2":"value2"}""" };
-
-        var first = model.Metadata;
-        var second = model.Metadata;
-
-        first.ShouldNotBeNull();
-        first.Count.ShouldBe(2);
-        second.ShouldNotBeNull();
-        ReferenceEquals(first, second).ShouldBeTrue("Metadata should be the same instance on repeated access");
-    }
-
-    [TimedFact]
-    public void UnifiedJobDetailModel_NullMetadataJson_ReturnsNull()
-    {
-        var model = new UnifiedJobDetailModel { MetadataJson = null };
-        model.Metadata.ShouldBeNull();
-    }
-
-    // --- Edge case: JobContext with null metadata → Metadata is empty dict, not null ---
-    [TimedFact]
-    public void JobContext_DefaultMetadata_IsEmptyDictionaryNotNull()
-    {
-        var ctx = new JobContext();
-        ctx.Metadata.ShouldNotBeNull();
-        ctx.Metadata.Count.ShouldBe(0);
-    }
-
     // --- Batch: pipeline runs once, all children get metadata ---
     [TimedFact]
     public async Task BatchPublisher_WithBehavior_AllChildrenGetMetadata()

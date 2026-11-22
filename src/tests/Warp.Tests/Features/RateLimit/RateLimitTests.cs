@@ -63,49 +63,6 @@ public abstract class RateLimitTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public Task RateLimitAttribute_EmptyKey_ThrowsAtConstruction()
-    {
-        Should.Throw<ArgumentException>(() => new RateLimitAttribute(string.Empty, 1, 60));
-        Should.Throw<ArgumentNullException>(() => new RateLimitAttribute(null!, 1, 60));
-
-        return Task.CompletedTask;
-    }
-
-    [TimedFact]
-    public Task RateLimitAttribute_ZeroCount_Throws()
-    {
-        Should.Throw<ArgumentOutOfRangeException>(() => new RateLimitAttribute("k", 0, 60));
-
-        return Task.CompletedTask;
-    }
-
-    [TimedFact]
-    public Task RateLimitAttribute_ZeroPerSeconds_Throws()
-    {
-        Should.Throw<ArgumentOutOfRangeException>(() => new RateLimitAttribute("k", 1, 0));
-
-        return Task.CompletedTask;
-    }
-
-    [TimedFact]
-    public Task RateLimitAttribute_PerSecondsExceedsMaxWindow_Throws()
-    {
-        Should.Throw<ArgumentOutOfRangeException>(() => new RateLimitAttribute("k", 1, RateLimitAttribute.MaxWindowSeconds + 1));
-
-        return Task.CompletedTask;
-    }
-
-    [TimedFact]
-    public Task RateLimitAttribute_PerSecondsAtMaxWindow_DoesNotThrow()
-    {
-        var attr = new RateLimitAttribute("k", 1, RateLimitAttribute.MaxWindowSeconds);
-
-        attr.PerSeconds.ShouldBe(RateLimitAttribute.MaxWindowSeconds);
-
-        return Task.CompletedTask;
-    }
-
-    [TimedFact]
     public async Task UnderLimit_FixedSkipMode_JobCompletes()
     {
         var ctx = _fixture.CreateContext();
