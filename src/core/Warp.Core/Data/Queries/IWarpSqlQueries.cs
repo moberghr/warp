@@ -169,4 +169,18 @@ public interface IWarpSqlQueries<TContext>
     /// transaction before calling this method.
     /// </summary>
     Task<RateLimitBucket?> LockRateLimitBucketByKeyAsync(DbContext context, string key, CancellationToken ct);
+
+    /// <summary>
+    /// Writes a batch of finished jobs in one set-based statement (rule 6.13): the columns finalization
+    /// assigns (<c>CurrentState</c>, <c>CancellationMode</c>, <c>CurrentWorkerId</c>,
+    /// <c>LastKeepAlive</c>, <c>ExpireAt</c>, <c>HandlerType</c>, <c>ScheduleTime</c>, <c>Metadata</c>),
+    /// taken from each <paramref name="jobs"/> entry, and the <paramref name="logs"/> rows of the jobs
+    /// that were updated. A job whose row no longer exists is skipped together with its log rows.
+    /// Returns the ids of the jobs it wrote, so the caller can tell which were skipped.
+    /// <para>
+    /// Through the change tracker the same flush is one UPDATE and one INSERT per row. Runs on the
+    /// context's connection and joins its current transaction; the caller owns the transaction.
+    /// </para>
+    /// </summary>
+    Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct);
 }

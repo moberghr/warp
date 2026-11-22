@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Npgsql;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
@@ -19,6 +20,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
 
     private readonly string _claimEnqueuedJobsSql;
     private readonly string _claimEnqueuedMessagesSql;
+    private readonly string _completeJobsSql;
     private readonly string _lockStaleProcessingJobsSql;
     private readonly string _lockJobByIdWaitSql;
     private readonly string _lockAllServersSql;
@@ -117,6 +119,41 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 LIMIT {{0}}
                 FOR NO KEY UPDATE SKIP LOCKED))
             RETURNING t.*";
+
+        // The batched completion (rule 6.13): every finished job of a flush and its log rows in ONE
+        // statement. The arrays are unnested back into rows; the log rows are inserted only for jobs
+        // the update found, so a job whose row was deleted while it ran takes its log rows with it
+        // and cannot fail the insert on the foreign key.
+        var log = _n.JobLog ?? throw new InvalidOperationException("The JobLog table names were not resolved from the model.");
+        var logTable = string.IsNullOrEmpty(log.Schema) ? $"\"{log.Table}\"" : $"\"{log.Schema}\".\"{log.Table}\"";
+        _completeJobsSql = $@"
+            WITH done AS (
+                UPDATE {table} AS t
+                SET ""{_n.CurrentState}"" = c.state,
+                    ""{_n.CancellationMode}"" = c.cancel,
+                    ""{_n.CurrentWorkerId}"" = c.worker,
+                    ""{_n.LastKeepAlive}"" = c.keepalive,
+                    ""{_n.ExpireAt}"" = c.expire,
+                    ""{_n.HandlerType}"" = c.handler,
+                    ""{_n.ScheduleTime}"" = c.schedule,
+                    ""{_n.Metadata}"" = c.metadata
+                FROM unnest(@ids, @states, @cancels, @workers, @keepalives, @expires, @handlers, @schedules, @metadatas)
+                    AS c(id, state, cancel, worker, keepalive, expire, handler, schedule, metadata)
+                WHERE t.""{_n.Id}"" = c.id
+                RETURNING t.""{_n.Id}"" AS id
+            ),
+            logged AS (
+            INSERT INTO {logTable} (
+                ""{log.Id}"", ""{log.JobId}"", ""{log.EventType}"", ""{log.Timestamp}"", ""{log.Level}"", ""{log.Message}"",
+                ""{log.Exception}"", ""{log.DurationMs}"", ""{log.WorkerId}"", ""{log.Name}"", ""{log.Value}"")
+            SELECT l.id, l.job_id, l.event_type, l.at, l.level, l.message, l.exception, l.duration_ms, l.worker_id, l.name, l.value
+            FROM unnest(
+                    @log_ids, @log_jobs, @log_events, @log_times, @log_levels, @log_messages,
+                    @log_exceptions, @log_durations, @log_workers, @log_names, @log_values)
+                AS l(id, job_id, event_type, at, level, message, exception, duration_ms, worker_id, name, value)
+            WHERE l.job_id IN (SELECT id FROM done)
+            )
+            SELECT id FROM done";
 
         _lockStaleProcessingJobsSql = $@"
             SELECT * FROM {table}
@@ -437,6 +474,75 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             }
         }
     }
+
+    public async Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct)
+    {
+        if (jobs.Count == 0)
+        {
+            return [];
+        }
+
+        var conn = (NpgsqlConnection)context.Database.GetDbConnection();
+        var openedHere = conn.State != System.Data.ConnectionState.Open;
+        if (openedHere)
+        {
+            await conn.OpenAsync(ct);
+        }
+
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = (NpgsqlTransaction?)context.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = _completeJobsSql;
+
+            // One array per column, one element per row: the statement unnests them back into rows.
+            cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("ids", [.. jobs.Select(x => x.Id)]));
+            cmd.Parameters.Add(new NpgsqlParameter<int[]>("states", [.. jobs.Select(x => (int)x.CurrentState)]));
+            cmd.Parameters.Add(new NpgsqlParameter<int[]>("cancels", [.. jobs.Select(x => (int)x.CancellationMode)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid?[]>("workers", [.. jobs.Select(x => x.CurrentWorkerId)]));
+            cmd.Parameters.Add(Timestamps("keepalives", jobs.Select(x => x.LastKeepAlive)));
+            cmd.Parameters.Add(Timestamps("expires", jobs.Select(x => x.ExpireAt)));
+            cmd.Parameters.Add(new NpgsqlParameter<string?[]>("handlers", [.. jobs.Select(x => x.HandlerType)]));
+            cmd.Parameters.Add(Timestamps("schedules", jobs.Select(x => (DateTime?)x.ScheduleTime)));
+            cmd.Parameters.Add(new NpgsqlParameter<string?[]>("metadatas", [.. jobs.Select(x => x.Metadata)]));
+
+            cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("log_ids", [.. logs.Select(x => x.Id)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("log_jobs", [.. logs.Select(x => x.JobId)]));
+            cmd.Parameters.Add(new NpgsqlParameter<string[]>("log_events", [.. logs.Select(x => x.EventType)]));
+            cmd.Parameters.Add(Timestamps("log_times", logs.Select(x => (DateTime?)x.Timestamp)));
+            cmd.Parameters.Add(new NpgsqlParameter<string[]>("log_levels", [.. logs.Select(x => x.Level)]));
+            cmd.Parameters.Add(new NpgsqlParameter<string[]>("log_messages", [.. logs.Select(x => x.Message)]));
+            cmd.Parameters.Add(new NpgsqlParameter<string?[]>("log_exceptions", [.. logs.Select(x => x.Exception)]));
+            cmd.Parameters.Add(new NpgsqlParameter<double?[]>("log_durations", [.. logs.Select(x => x.DurationMs)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid?[]>("log_workers", [.. logs.Select(x => x.WorkerId)]));
+            cmd.Parameters.Add(new NpgsqlParameter<string?[]>("log_names", [.. logs.Select(x => x.Name)]));
+            cmd.Parameters.Add(new NpgsqlParameter<short?[]>("log_values", [.. logs.Select(x => x.Value)]));
+
+            var written = new List<Guid>(jobs.Count);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                written.Add(reader.GetGuid(0));
+            }
+
+            return written;
+        }
+        finally
+        {
+            if (openedHere)
+            {
+                await conn.CloseAsync();
+            }
+        }
+    }
+
+    // Warp's DateTime columns are timestamptz holding UTC (rule 5.12). The kind is stated outright: the
+    // values come from the clock or back out of those columns, and Npgsql rejects an unspecified kind.
+    private static NpgsqlParameter<DateTime?[]> Timestamps(string name, IEnumerable<DateTime?> values) =>
+        new(name, [.. values.Select(x => x is { } value ? DateTime.SpecifyKind(value, DateTimeKind.Utc) : (DateTime?)null)])
+        {
+            DataTypeName = "timestamp with time zone[]",
+        };
 
     public async Task<(bool LockHeld, T? Result)> RunUnderTransactionLockAsync<T>(
         DbContext context,

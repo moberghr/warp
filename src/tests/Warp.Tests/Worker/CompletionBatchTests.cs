@@ -42,6 +42,17 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
     private static readonly IDatabaseExceptionClassifier NoDeadlocks = new NoDeadlockClassifier();
 
+    // The provider's own statement, as WarpDispatcherWorker passes it.
+    private static Task<IReadOnlyCollection<Guid>> CompleteJobs(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct) =>
+        TestTasks.QueriesFor((TestContext)context).CompleteJobsAsync(context, jobs, logs, ct);
+
+    // The statement failing for any batch that holds one particular job: what a row the database
+    // refuses looks like to the batch, which then has to isolate it.
+    private static Func<DbContext, IReadOnlyList<Job>, IReadOnlyList<JobLog>, CancellationToken, Task<IReadOnlyCollection<Guid>>> FailingOn(Guid poisonId) =>
+        (context, jobs, logs, ct) => jobs.Any(x => x.Id == poisonId)
+            ? throw new DbUpdateException("Injected failure: the database refused this job's completion")
+            : CompleteJobs(context, jobs, logs, ct);
+
     private sealed class NoDeadlockClassifier : IDatabaseExceptionClassifier
     {
         public bool IsUniqueConstraintViolation(DbUpdateException ex) => false;
@@ -129,7 +140,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 3, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 3, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
 
         var job1 = await InsertProcessingJob();
         var job2 = await InsertProcessingJob();
@@ -184,7 +195,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // and CompletionBatch persists it in the completion transaction. This was missed initially (only the
         // single-worker path was wired) and surfaced in the demo (UseDispatcher = true → zero issues).
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
 
         var job = await InsertProcessingJob();
         job.CurrentState = State.Failed;
@@ -217,7 +228,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(1), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(1), _counterBuffer, CompleteJobs);
 
         // Act
         await batch.FlushAsync();
@@ -235,7 +246,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
 
         var job = await InsertProcessingJob();
         batch.Add(MakeEntry(job));
@@ -260,7 +271,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // Arrange
         var scopeFactory = CreateScopeFactory();
         var flushInterval = TimeSpan.FromMilliseconds(100);
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 100, flushInterval: flushInterval, _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 100, flushInterval: flushInterval, _counterBuffer, CompleteJobs);
 
         // Assert empty — no timestamp yet
         batch.IsTimeElapsed.ShouldBeFalse();
@@ -286,11 +297,11 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task FlushAsync_WithPoisonEntry_DropsPoisonAndCommitsGoodEntries()
     {
-        // Arrange — one real job and one phantom. A full-batch UPDATE hits 0 rows for the phantom
-        // and EF raises DbUpdateConcurrencyException. FlushAsync must split on failure, isolate
-        // the poison entry, commit the good one, and return without surfacing the exception.
+        // Arrange — one real job and one whose row does not exist (deleted while it ran). The statement
+        // skips the missing one with its log rows, the good one commits, and the missing one counts
+        // nothing.
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
 
         var realJob = await InsertProcessingJob();
         batch.Add(MakeEntry(realJob));
@@ -340,8 +351,9 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange — four good jobs and one poison in the middle. Split-on-failure must isolate
         // the single bad entry (via recursive halving) without dropping the neighbours.
+        var poisonId = Guid.NewGuid();
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, FailingOn(poisonId));
 
         var good1 = await InsertProcessingJob();
         var good2 = await InsertProcessingJob();
@@ -353,7 +365,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         var phantom = new Job
         {
-            Id = Guid.NewGuid(),
+            Id = poisonId,
             Kind = JobKind.Job,
             CurrentState = State.Completed,
             Type = "test",
@@ -392,15 +404,16 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // and one phantom. After the budget exhausts, split-on-failure isolates the phantom
         // and commits the good entry.
         var classifier = new AlwaysTransientClassifier();
+        var poisonId = Guid.NewGuid();
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, classifier, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, classifier, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, FailingOn(poisonId));
 
         var realJob = await InsertProcessingJob();
         batch.Add(MakeEntry(realJob));
 
         var phantomJob = new Job
         {
-            Id = Guid.NewGuid(),
+            Id = poisonId,
             Kind = JobKind.Job,
             CurrentState = State.Completed,
             Type = "test",
@@ -438,12 +451,13 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // the assertion is "poison dropped, classifier called exactly twice" — no recursive
         // split to distort the call count.
         var classifier = new OnceTransientClassifier();
+        var poisonId = Guid.NewGuid();
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, classifier, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, classifier, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, FailingOn(poisonId));
 
         var phantomJob = new Job
         {
-            Id = Guid.NewGuid(),
+            Id = poisonId,
             Kind = JobKind.Job,
             CurrentState = State.Completed,
             Type = "test",
@@ -483,7 +497,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         services.AddScoped<IWarpServerContext>(_ => new TestServerContext(unreachable));
         await using var provider = services.BuildServiceProvider();
 
-        var batch = new CompletionBatch(provider.GetRequiredService<IServiceScopeFactory>(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(provider.GetRequiredService<IServiceScopeFactory>(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
         batch.Add(MakeEntry(job));
 
         // Act
@@ -510,7 +524,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // suite avoids: it runs the two callers against each other many times and counts. Every added
         // completion must come out of exactly one drain. Without the lock it loses entries or throws.
         const int total = 200_000;
-        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
         var entries = Enumerable.Range(0, total)
             .Select(_ => new PendingCompletion(new Job { Id = Guid.NewGuid() }, [], []))
             .ToArray();
@@ -548,7 +562,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     {
         // Arrange
         var scopeFactory = CreateScopeFactory();
-        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
 
         var job = await InsertProcessingJob();
 

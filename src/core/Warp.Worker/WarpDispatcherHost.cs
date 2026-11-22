@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data;
+using Warp.Core.Data.Queries;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
@@ -30,6 +31,7 @@ public class WarpDispatcherHost<TContext> : IHostedService
     private readonly ServerRegistrationState _state;
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly WarpCounterBuffer _counterBuffer;
+    private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly DispatcherRegistry _dispatcherRegistry;
     private readonly ILoggerFactory _loggerFactory;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
@@ -46,9 +48,11 @@ public class WarpDispatcherHost<TContext> : IHostedService
         DispatcherRegistry dispatcherRegistry,
         ILoggerFactory loggerFactory,
         IDatabaseExceptionClassifier exceptionClassifier,
-        WarpCounterBuffer counterBuffer)
+        WarpCounterBuffer counterBuffer,
+        IWarpSqlQueries<TContext> sqlQueries)
     {
         _counterBuffer = counterBuffer;
+        _sqlQueries = sqlQueries;
         _configuration = configuration.Value;
         _configurationOptions = configuration;
         _serviceScopeFactory = serviceScopeFactory;
@@ -85,6 +89,17 @@ public class WarpDispatcherHost<TContext> : IHostedService
             await dispatcher.StartAsync(cancellationToken);
             _workers.Add(dispatcher);
 
+            // One completion buffer for the whole group (rule 6.13).
+            var batch = new CompletionBatch(
+                _serviceScopeFactory,
+                _timeProvider,
+                _loggerFactory.CreateLogger<CompletionBatch>(),
+                _exceptionClassifier,
+                _configuration.CompletionBatchSize,
+                _configuration.CompletionFlushInterval,
+                _counterBuffer,
+                _sqlQueries.CompleteJobsAsync);
+
             foreach (var workerId in registration.WorkerIds)
             {
                 var worker = new WarpDispatcherWorker<TContext>(
@@ -96,9 +111,9 @@ public class WarpDispatcherHost<TContext> : IHostedService
                     _timeProvider,
                     _notificationTransport,
                     _signals,
-                    _exceptionClassifier,
                     dispatcher.Availability,
-                    _counterBuffer);
+                    _counterBuffer,
+                    batch);
 
                 await worker.StartAsync(cancellationToken);
                 _workers.Add(worker);

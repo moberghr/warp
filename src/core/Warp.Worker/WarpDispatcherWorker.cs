@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.ErrorGrouping;
@@ -41,12 +42,13 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
     private readonly CompletionBatch _batch;
+    private volatile bool _stopped;
     private readonly DispatcherWorkerAvailability _availability;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly WarpCounterBuffer _counterBuffer;
 
-    public WarpDispatcherWorker(
+    internal WarpDispatcherWorker(
         Guid workerId,
         ChannelReader<Job> jobReader,
         IServiceScopeFactory scopeFactory,
@@ -55,9 +57,9 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         TimeProvider timeProvider,
         IWarpNotificationTransport notificationTransport,
         ServerTaskSignals<TContext> signals,
-        IDatabaseExceptionClassifier exceptionClassifier,
         DispatcherWorkerAvailability availability,
-        WarpCounterBuffer counterBuffer)
+        WarpCounterBuffer counterBuffer,
+        CompletionBatch batch)
     {
         _counterBuffer = counterBuffer;
         _availability = availability;
@@ -69,25 +71,13 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         _timeProvider = timeProvider;
         _notificationTransport = notificationTransport;
         _signals = signals;
-        _batch = new CompletionBatch(
-            scopeFactory,
-            timeProvider,
-            logger,
-            exceptionClassifier,
-            _configuration.CompletionBatchSize,
-            _configuration.CompletionFlushInterval,
-            counterBuffer);
+        _batch = batch;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Channel-based pull: WaitToReadAsync blocks until the dispatcher produces a job.
         // No idle polling loop here — polling backoff lives in WarpDispatcher.ExecuteAsync.
-        // The hand-rolled WaitToRead/TryRead loop (vs await foreach ReadAllAsync) exists so we
-        // can flush any buffered completions BEFORE suspending on the next WaitToReadAsync —
-        // otherwise a small batch (below CompletionBatchSize) would wait for the time trigger
-        // or forever if no more jobs arrive.
-        //
         // WaitToReadAsync does NOT observe stoppingToken: if we exited on cancellation while the
         // channel still had buffered items, those jobs would be DB-orphaned as Processing (the
         // dispatcher wrote them but nobody consumed them). Instead we drain the channel fully
@@ -121,13 +111,37 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                     _availability.Release();
                 }
 
-                if (_batch.IsFull || _batch.IsTimeElapsed)
+                // The group's buffer (rule 6.13) is flushed when it is full, when it has waited
+                // CompletionFlushInterval (the timer AddCompletion starts), or here, the moment the
+                // group has nothing left claimed: the last job of a burst is written at once, and a
+                // lone job never waits for the timer. Not whenever this one worker finds the channel
+                // empty, which with several workers was after every second job.
+                if (_batch.IsFull || _batch.IsTimeElapsed || _availability.Outstanding == 0)
                 {
                     await FlushBatchSafely();
                 }
             }
+        }
+    }
 
-            // Idle — drain any buffered completions before suspending on WaitToReadAsync
+    // Buffers a finished job. The first completion of a new buffer starts the clock: whatever is still
+    // buffered CompletionFlushInterval from now is flushed then, even if every worker of the group is
+    // inside a long handler and none comes back to check.
+    private void AddCompletion(PendingCompletion completion)
+    {
+        if (_batch.Add(completion))
+        {
+            _ = FlushWhenDueAsync();
+        }
+    }
+
+    private async Task FlushWhenDueAsync()
+    {
+        await Task.Delay(_batch.FlushInterval, _timeProvider).ConfigureAwait(false);
+
+        // After StopAsync the final flush has run and the scope factory may be gone.
+        if (!_stopped && _batch.IsTimeElapsed)
+        {
             await FlushBatchSafely();
         }
     }
@@ -135,6 +149,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         await base.StopAsync(cancellationToken);
+        _stopped = true;
 
         try
         {
@@ -353,7 +368,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
             var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector, processingLog).ToArray();
-            _batch.Add(new PendingCompletion(job, counters, logs));
+            AddCompletion(new PendingCompletion(job, counters, logs));
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -404,7 +419,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 WorkerId = _workerId,
             };
             var logs = CollectLogs([cancelLog], logCollector, progressCollector, processingLog).ToArray();
-            _batch.Add(new PendingCompletion(job, cancelCounters, logs));
+            AddCompletion(new PendingCompletion(job, cancelCounters, logs));
         }
         catch (Exception e)
         {
@@ -483,7 +498,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 ? ErrorOccurrenceFactory.FromException(ErrorSource.Job, e, culprit, job.TraceId, _configuration.ApplicationName, _timeProvider.GetUtcNow().UtcDateTime, _configuration.ApplicationVersion, _configuration.ApplicationEnvironment)
                 : null;
 
-            _batch.Add(new PendingCompletion(job, counters, logs, occurrence));
+            AddCompletion(new PendingCompletion(job, counters, logs, occurrence));
         }
         finally
         {

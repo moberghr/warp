@@ -1,3 +1,6 @@
+using System.Data;
+using System.Text;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Warp.Core.Data.Entities;
@@ -25,6 +28,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
 
     private readonly string _claimEnqueuedJobsSql;
     private readonly string _claimEnqueuedMessagesSql;
+    private readonly string _completeJobsSql;
     private readonly string _lockStaleProcessingJobsSql;
     private readonly string _lockJobByIdWaitSql;
     private readonly string _lockAllServersSql;
@@ -93,6 +97,47 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             UPDATE candidates
             SET [{_n.CurrentState}] = {(int)State.Processing}
             OUTPUT INSERTED.*";
+
+        // The batched completion (rule 6.13): every finished job of a flush and its log rows in one
+        // batch of two set-based statements, fed by two JSON documents (SQL Server has no array
+        // parameters). The log rows are inserted only for jobs the update found, so a job whose row was
+        // deleted while it ran takes its log rows with it and cannot fail the insert on the foreign key.
+        // OPENJSON needs compatibility level 130, which SQL Server 2016 and Azure SQL have by default.
+        //
+        // LOOP JOIN with the JSON rows on the outer side, and ROWLOCK, are load-bearing: they make the
+        // update one primary-key seek per job. Left to choose, SQL Server scanned the job table to join
+        // it, taking locks on rows that belong to other workers' claims and flushes, and concurrent
+        // flushes deadlocked (the batched-completion tests timed out on it).
+        var log = _n.JobLog ?? throw new InvalidOperationException("The JobLog table names were not resolved from the model.");
+        var logTable = string.IsNullOrEmpty(log.Schema) ? $"[{log.Table}]" : $"[{log.Schema}].[{log.Table}]";
+        _completeJobsSql = $@"
+            DECLARE @done TABLE (id uniqueidentifier NOT NULL PRIMARY KEY);
+
+            UPDATE t
+            SET [{_n.CurrentState}] = c.s,
+                [{_n.CancellationMode}] = c.c,
+                [{_n.CurrentWorkerId}] = c.w,
+                [{_n.LastKeepAlive}] = c.k,
+                [{_n.ExpireAt}] = c.e,
+                [{_n.HandlerType}] = c.h,
+                [{_n.ScheduleTime}] = c.d,
+                [{_n.Metadata}] = c.m
+            OUTPUT INSERTED.[{_n.Id}] INTO @done
+            FROM OPENJSON(@jobs) WITH (
+                i uniqueidentifier, s int, c int, w uniqueidentifier, k datetime2, e datetime2,
+                h nvarchar(max), d datetime2, m nvarchar(max)) AS c
+            INNER LOOP JOIN {table} AS t WITH (ROWLOCK) ON t.[{_n.Id}] = c.i;
+
+            INSERT INTO {logTable} (
+                [{log.Id}], [{log.JobId}], [{log.EventType}], [{log.Timestamp}], [{log.Level}], [{log.Message}],
+                [{log.Exception}], [{log.DurationMs}], [{log.WorkerId}], [{log.Name}], [{log.Value}])
+            SELECT l.i, l.j, l.e, l.t, l.l, l.m, l.x, l.d, l.w, l.n, l.v
+            FROM OPENJSON(@logs) WITH (
+                i uniqueidentifier, j uniqueidentifier, e nvarchar(max), t datetime2, l nvarchar(max), m nvarchar(max),
+                x nvarchar(max), d float, w uniqueidentifier, n nvarchar(100), v smallint) AS l
+            WHERE l.j IN (SELECT id FROM @done);
+
+            SELECT id FROM @done;";
 
         _lockStaleProcessingJobsSql = $@"
             SELECT *
@@ -438,6 +483,130 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         {
             await tx.RollbackAsync(ct);
             throw;
+        }
+    }
+
+    public async Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct)
+    {
+        if (jobs.Count == 0)
+        {
+            return [];
+        }
+
+        var conn = context.Database.GetDbConnection();
+        var openedHere = conn.State != ConnectionState.Open;
+        if (openedHere)
+        {
+            await conn.OpenAsync(ct);
+        }
+
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = _completeJobsSql;
+            AddJson(cmd, "@jobs", WriteJson(jobs, WriteJob));
+            AddJson(cmd, "@logs", WriteJson(logs, WriteLog));
+
+            var written = new List<Guid>(jobs.Count);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                written.Add(reader.GetGuid(0));
+            }
+
+            return written;
+        }
+        finally
+        {
+            if (openedHere)
+            {
+                await conn.CloseAsync();
+            }
+        }
+    }
+
+    private static void AddJson(System.Data.Common.DbCommand cmd, string name, string json)
+    {
+        var parameter = cmd.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.DbType = DbType.String;
+        parameter.Size = -1;
+        parameter.Value = json;
+        cmd.Parameters.Add(parameter);
+    }
+
+    // One short key per column: these documents are read once by the statement above and by nothing else.
+    private static string WriteJson<T>(IReadOnlyList<T> rows, Action<Utf8JsonWriter, T> writeRow)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartArray();
+            foreach (var row in rows)
+            {
+                writer.WriteStartObject();
+                writeRow(writer, row);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+        }
+
+        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    }
+
+    private static void WriteJob(Utf8JsonWriter writer, Job job)
+    {
+        writer.WriteString("i", job.Id);
+        writer.WriteNumber("s", (int)job.CurrentState);
+        writer.WriteNumber("c", (int)job.CancellationMode);
+        WriteNullable(writer, "w", job.CurrentWorkerId);
+        WriteNullable(writer, "k", job.LastKeepAlive);
+        WriteNullable(writer, "e", job.ExpireAt);
+        writer.WriteString("h", job.HandlerType);
+        WriteNullable(writer, "d", job.ScheduleTime);
+        writer.WriteString("m", job.Metadata);
+    }
+
+    private static void WriteLog(Utf8JsonWriter writer, JobLog log)
+    {
+        writer.WriteString("i", log.Id);
+        writer.WriteString("j", log.JobId);
+        writer.WriteString("e", log.EventType);
+        WriteNullable(writer, "t", log.Timestamp);
+        writer.WriteString("l", log.Level);
+        writer.WriteString("m", log.Message);
+        writer.WriteString("x", log.Exception);
+        if (log.DurationMs is { } duration)
+        {
+            writer.WriteNumber("d", duration);
+        }
+
+        WriteNullable(writer, "w", log.WorkerId);
+        writer.WriteString("n", log.Name);
+        if (log.Value is { } value)
+        {
+            writer.WriteNumber("v", value);
+        }
+    }
+
+    // An absent key reads as NULL in OPENJSON ... WITH, so a null is simply not written.
+    private static void WriteNullable(Utf8JsonWriter writer, string key, Guid? value)
+    {
+        if (value is { } id)
+        {
+            writer.WriteString(key, id);
+        }
+    }
+
+    // Warp's DateTime columns hold UTC (rule 5.12). Written without an offset, so datetime2 takes the
+    // value as it stands.
+    private static void WriteNullable(Utf8JsonWriter writer, string key, DateTime? value)
+    {
+        if (value is { } instant)
+        {
+            writer.WriteString(key, instant.ToString("yyyy-MM-ddTHH:mm:ss.fffffff", System.Globalization.CultureInfo.InvariantCulture));
         }
     }
 

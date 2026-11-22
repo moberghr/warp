@@ -882,6 +882,11 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             workerContext.Set<JobLog>().Add(processing);
         }
 
+        // No savepoint around the finalizing save (rule 6.12): a save that fails abandons this transaction,
+        // and the arm that finalizes again opens a new one. The SAVEPOINT / RELEASE pair EF adds by
+        // default was two statements on every job.
+        workerContext.Database.AutoSavepointsEnabled = false;
+
         return await workerContext.Database.BeginTransactionAsync(default);
     }
 

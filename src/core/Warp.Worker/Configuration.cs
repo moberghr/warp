@@ -352,6 +352,8 @@ public class WarpServerConfiguration : WarpConfiguration
     /// <summary>
     /// Dispatcher-mode only. Maximum time a buffered completion may wait before being flushed.
     /// The timer starts when the first entry is added to an empty buffer. Defaults to 100ms.
+    /// The buffer is shared by the workers of a group, and is also flushed as soon as the group has no job
+    /// left running, so a lone job does not wait for this.
     /// <para>
     /// A longer interval batches more completions (lower DB overhead) but widens the duplicate-execution
     /// window on worker crash. See <see cref="CompletionBatchSize"/> for the crash-safety trade-off.
