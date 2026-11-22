@@ -20,19 +20,26 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// limit, bounds throughput, and a change that helps the first can hurt the second.
 /// </para>
 /// <para>
+/// <b>The clock is scaled down, the shape is not.</b> What costs is how many windows deep the backlog is
+/// and which of window and activation interval is the longer, not how many seconds a window lasts. So the
+/// windows are 2 s and 1 s, with the activation interval set per shape to sit on the right side of them,
+/// and a run takes about 18 s. With the production-sized 10 s on both it took 90 s per run to wait out the
+/// same nine windows, 41 minutes for the CI job, measuring the wall clock.
+/// </para>
+/// <para>
 /// Each iteration publishes onto a fresh key, so no iteration opens inside the previous one's spent window
 /// and no process-local memory of an earlier key carries over.
 /// </para>
 /// </summary>
 [CiScenario(
     "Rate limit under a backlog",
-    "16 workers drain jobs over one rate-limit key. Backlog: 1,000 Wait-mode jobs at 100 per 10 s, ten windows deep. ShortWindow: 500 Wait-mode jobs at 50 per 2 s. Skip: 2,000 Skip-mode jobs at 50 per 2 s.",
+    "16 workers drain jobs over one rate-limit key. Backlog: 1,000 Wait-mode jobs at 100 per 2 s, ten windows deep, activation every 1 s. ShortWindow: 500 Wait-mode jobs at 50 per 1 s, activation every 2 s. Skip: 2,000 Skip-mode jobs at 50 per 2 s.",
     "The cost of every throttled execution, and how many times a backlog re-executes before it drains.",
     Order = 41)]
-[CaseLabel(nameof(Shape), "Backlog", "Wait, 1,000 jobs at 100/10s")]
-[CaseLabel(nameof(Shape), "ShortWindow", "Wait, 500 jobs at 50/2s")]
+[CaseLabel(nameof(Shape), "Backlog", "Wait, 1,000 jobs at 100/2s")]
+[CaseLabel(nameof(Shape), "ShortWindow", "Wait, 500 jobs at 50/1s")]
 [CaseLabel(nameof(Shape), "Skip", "Skip, 2,000 jobs at 50/2s")]
-[Config(typeof(ServerBenchmarkConfig))]
+[Config(typeof(ClockBoundBenchmarkConfig))]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public class RateLimitBenchmark
 {
@@ -48,7 +55,17 @@ public class RateLimitBenchmark
     public async Task Setup()
     {
         _fixture = new PostgresServerFixture();
-        await _fixture.InitializeAsync(workerCount: 16, configure: x => x.AddRateLimit());
+        // Backlog: window (2 s) longer than activation. ShortWindow: window (1 s) shorter than it.
+        var activationInterval = string.Equals(Shape, "ShortWindow", StringComparison.Ordinal)
+            ? TimeSpan.FromSeconds(2)
+            : TimeSpan.FromSeconds(1);
+        await _fixture.InitializeAsync(
+            workerCount: 16,
+            configure: x =>
+            {
+                x.AddRateLimit();
+                x.ScheduledActivationInterval = activationInterval;
+            });
 
         // JIT the policy pipeline, the lock provider and the reject path outside the measured window: a
         // limit low enough that most of the warm-up is refused, on a key no iteration uses.
@@ -81,13 +98,13 @@ public class RateLimitBenchmark
         var key = $"rl-{Shape}-{_iteration}";
         var (jobs, count, window, mode) = Shape switch
         {
-            "ShortWindow" => (500, 50, TimeSpan.FromSeconds(2), RateLimitMode.Wait),
+            "ShortWindow" => (500, 50, TimeSpan.FromSeconds(1), RateLimitMode.Wait),
             "Skip" => (2000, 50, TimeSpan.FromSeconds(2), RateLimitMode.Skip),
-            _ => (1000, 100, TimeSpan.FromSeconds(10), RateLimitMode.Wait),
+            _ => (1000, 100, TimeSpan.FromSeconds(2), RateLimitMode.Wait),
         };
 
         await PublishAsync(jobs, key, count, window, mode);
-        await _fixture.WaitForCompletion(TimeSpan.FromMinutes(10));
+        await _fixture.WaitForCompletion(TimeSpan.FromMinutes(3));
     }
 
     private async Task PublishAsync(int count, string key, int limit, TimeSpan window, RateLimitMode mode)

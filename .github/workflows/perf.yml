@@ -395,7 +395,7 @@ jobs:
           fi
 
           # Matrix order, so the page reads the same way every run.
-          scenarios="dispatcher completion-batch payload concurrency failure-path retries publish message-routing scheduled-activation large-table batches fan-out idle"
+          scenarios="dispatcher completion-batch payload concurrency rate-limit failure-path retries publish message-routing scheduled-activation large-table batches fan-out idle"
 
           passed=0; failed=0; missing=0
           for name in $scenarios; do
