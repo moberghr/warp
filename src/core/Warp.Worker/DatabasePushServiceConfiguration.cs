@@ -73,27 +73,19 @@ public static class DatabasePushServiceConfiguration
                 ?? throw new InvalidOperationException(
                     "UseDatabasePush requires a provider package. Call opt.UsePostgreSql() or opt.UseSqlServer() inside the AddWarp/AddWarpServer lambda before opt.UseDatabasePush().");
 
-            // AddDbContext registers DbContextOptions<TContext> as Scoped, so the singleton
-            // factory must resolve it inside a scope — otherwise ValidateScopes=true rejects
-            // the resolution from the root provider (silently broken in Dev environments).
-            using var scope = sp.CreateScope();
-            var dbOptions = scope.ServiceProvider.GetRequiredService<DbContextOptions<TContext>>();
-            var relationalExtension = dbOptions.Extensions.OfType<RelationalOptionsExtension>().FirstOrDefault();
-            var connectionString = relationalExtension?.ConnectionString;
-
-            // Factory-configured DbContexts (UseNpgsql(sp => ...)) have the extension present but
-            // with a null connection string — fall back to the scoped context.
-            if (string.IsNullOrEmpty(connectionString))
-            {
-                var context = scope.ServiceProvider.GetRequiredService<TContext>();
-                connectionString = context.Database.GetConnectionString()
-                    ?? throw new InvalidOperationException("Cannot resolve connection string for Warp DB push.");
-            }
+            // The stored connection, not TContext's options: building those adds the enqueue
+            // interceptor, and a transport factory that triggers that is one cycle away from a
+            // startup deadlock (#322).
+            var connectionString = sp.GetRequiredService<Warp.Core.WarpDatabaseConnection<TContext>>().ConnectionString;
 
             return factory.Create(connectionString, options, sp.GetRequiredService<ILoggerFactory>());
         });
 
         builder.Services.AddHostedService<NotificationListenerTask<TContext>>();
+
+        // Publishes, off the saving thread, the notifications the enqueue interceptor announces for
+        // jobs committed by any TContext save (#322).
+        EnqueueNotificationRelay.Register(builder.Services);
 
         return builder;
     }

@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Warp.Core.Buffering;
 
 namespace Warp.Core.Endpoints;
 
@@ -15,7 +16,7 @@ public sealed class DbEndpointCallRecorder : IEndpointCallRecorder
     /// <summary>Default channel capacity — generous headroom before back-pressure drops kick in.</summary>
     internal const int DefaultCapacity = 10_000;
 
-    private readonly Channel<EndpointCallRecord> _channel;
+    private readonly DrainQueue<EndpointCallRecord> _queue;
 
     public DbEndpointCallRecorder()
         : this(DefaultCapacity)
@@ -28,19 +29,12 @@ public sealed class DbEndpointCallRecorder : IEndpointCallRecorder
     /// </summary>
     public DbEndpointCallRecorder(int capacity)
     {
-        // SingleReader: only the flusher drains. FullMode.DropWrite would silently discard and report
-        // success; we want TryWrite to return false on a full channel so the caller can count the drop.
-        _channel = Channel.CreateBounded<EndpointCallRecord>(new BoundedChannelOptions(capacity)
-        {
-            SingleReader = true,
-            SingleWriter = false,
-            FullMode = BoundedChannelFullMode.Wait,
-        });
+        _queue = new DrainQueue<EndpointCallRecord>(capacity);
     }
 
-    internal ChannelReader<EndpointCallRecord> Reader => _channel.Reader;
+    internal ChannelReader<EndpointCallRecord> Reader => _queue.Reader;
 
-    public bool Record(EndpointCallRecord record) => _channel.Writer.TryWrite(record);
+    public bool Record(EndpointCallRecord record) => _queue.TryAdd(record);
 
-    internal void Complete() => _channel.Writer.TryComplete();
+    internal void Complete() => _queue.Complete();
 }

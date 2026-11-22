@@ -35,6 +35,26 @@ export default function BatchesPage() {
         meta: { headerClassName: 'w-[100px]' },
       },
       {
+        // The batch's name is stored in Type (IBatchPublisher.StartNew's optional `name`). It is a
+        // free-form label, not a CLR type, so it is shown as-is rather than through shortType.
+        accessorKey: 'type',
+        header: 'Name',
+        cell: ({ row }) =>
+          row.original.type ? (
+            <span className="block max-w-[320px] truncate" title={row.original.type}>
+              {row.original.type}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+      },
+      {
+        accessorKey: 'queue',
+        header: 'Queue',
+        cell: ({ row }) => <span className="text-sm text-muted-foreground">{row.original.queue ?? '—'}</span>,
+        meta: { headerClassName: 'w-[110px]' },
+      },
+      {
         id: 'progress',
         header: 'Progress',
         cell: ({ row }) => {

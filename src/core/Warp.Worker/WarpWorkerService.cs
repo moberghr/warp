@@ -218,11 +218,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             handlerStopwatch.Stop();
 
             // Commit handler's work (outbox: published jobs + business entities) before disposing.
-            // Capture pending push notifications for any child jobs the handler added, fire post-commit.
+            // Jobs the handler staged are announced by the enqueue interceptor on this save, like any other
+            // TContext save: local workers inline, other servers through the relay (#322).
             var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
-            var handlerPending = NotificationDispatch.CapturePending(handlerContext);
             await handlerContext.SaveChangesAsync(default);
-            await NotificationDispatch.DispatchAsync(handlerPending, _signals, _notificationTransport, cancellationToken);
 
             // Read metadata and outcome from handler scope before disposing
             JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);

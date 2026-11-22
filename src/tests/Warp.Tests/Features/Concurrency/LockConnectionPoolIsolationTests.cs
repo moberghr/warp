@@ -1,15 +1,12 @@
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using Shouldly;
 using Warp.Provider.PostgreSql;
-using Warp.Tests.TestData;
 
 namespace Warp.Tests.Features.Concurrency;
 
 /// <summary>
 /// Rot guard for the advisory-lock pool split. The lock providers must NOT be handed
-/// <typeparamref name="TContext"/>'s connection string verbatim — they get one carrying a distinct
+/// the DbContext's connection string verbatim — they get one carrying a distinct
 /// <c>Application Name</c>, which is part of Npgsql's pool key and is therefore the whole of the
 /// separation.
 /// <para>
@@ -36,9 +33,7 @@ public class LockConnectionPoolIsolationTests
     [TimedFact]
     public void LockConnectionString_DiffersFromContextOnlyByApplicationName()
     {
-        using var provider = BuildProvider(BaseConnectionString);
-
-        var lockConnectionString = PostgreSqlServiceConfiguration.ResolveLockConnectionString<TestContext>(provider);
+        var lockConnectionString = PostgreSqlServiceConfiguration.BuildLockConnectionString(BaseConnectionString);
 
         var context = new NpgsqlConnectionStringBuilder(BaseConnectionString);
         var locks = new NpgsqlConnectionStringBuilder(lockConnectionString);
@@ -62,9 +57,9 @@ public class LockConnectionPoolIsolationTests
         // Hosts key pg_stat_activity dashboards and connection-level monitoring off Application Name,
         // so it is suffixed rather than overwritten — replacing it would make Warp's lock sessions
         // anonymous in exactly the tooling an operator uses to find them.
-        using var provider = BuildProvider($"{BaseConnectionString};Application Name=checkout-api");
+        var contextConnectionString = $"{BaseConnectionString};Application Name=checkout-api";
 
-        var lockConnectionString = PostgreSqlServiceConfiguration.ResolveLockConnectionString<TestContext>(provider);
+        var lockConnectionString = PostgreSqlServiceConfiguration.BuildLockConnectionString(contextConnectionString);
 
         var applicationName = new NpgsqlConnectionStringBuilder(lockConnectionString).ApplicationName;
 
@@ -78,10 +73,10 @@ public class LockConnectionPoolIsolationTests
         // MinPoolSize is a per-pool floor. Inheriting a host that pre-warms its DbContext pool would
         // hold that many idle connections a SECOND time, for locks that mostly need one — and would
         // make the doc's "active use is close to unchanged" false.
-        using var provider = BuildProvider($"{BaseConnectionString};Minimum Pool Size=25");
+        var contextConnectionString = $"{BaseConnectionString};Minimum Pool Size=25";
 
         var locks = new NpgsqlConnectionStringBuilder(
-            PostgreSqlServiceConfiguration.ResolveLockConnectionString<TestContext>(provider));
+            PostgreSqlServiceConfiguration.BuildLockConnectionString(contextConnectionString));
 
         locks.MinPoolSize.ShouldBe(0);
         new NpgsqlConnectionStringBuilder($"{BaseConnectionString};Minimum Pool Size=25").MinPoolSize.ShouldBe(25);
@@ -94,22 +89,14 @@ public class LockConnectionPoolIsolationTests
         // near that length would drop the suffix server-side, and the lock sessions would show up in
         // pg_stat_activity as indistinguishable from the DbContext's — the opposite of the point.
         var longName = new string('a', 80);
-        using var provider = BuildProvider($"{BaseConnectionString};Application Name={longName}");
+        var contextConnectionString = $"{BaseConnectionString};Application Name={longName}";
 
         var applicationName = new NpgsqlConnectionStringBuilder(
-            PostgreSqlServiceConfiguration.ResolveLockConnectionString<TestContext>(provider)).ApplicationName;
+            PostgreSqlServiceConfiguration.BuildLockConnectionString(contextConnectionString)).ApplicationName;
 
         applicationName.ShouldNotBeNull();
         applicationName.Length.ShouldBeLessThanOrEqualTo(63);
         applicationName.ShouldEndWith(":warp-locks");
         applicationName.ShouldStartWith("aaaa");
-    }
-
-    private static ServiceProvider BuildProvider(string connectionString)
-    {
-        var services = new ServiceCollection();
-        services.AddDbContext<TestContext>(options => options.UseNpgsql(connectionString));
-
-        return services.BuildServiceProvider();
     }
 }

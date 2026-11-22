@@ -46,6 +46,31 @@ public abstract class BatchIntegrationTestsBase : IntegrationTestBase
     }
 
     [TimedFact]
+    public async Task GivenBatchOnBulkQueue_WhenWorkerListensOnBulk_ThenBatchAndDefaultQueueContinuationComplete()
+    {
+        await using var server = await WarpTestServer.StartAsync(Fixture, opt => opt.Queues = ["default", "bulk"]);
+        var batchPublisher = server.CreateBatchPublisher();
+
+        var batchId = await batchPublisher.StartNew(Enumerable.Range(0, 3).Select(_ => new UnitRequest()).ToList(), queue: "bulk");
+        var continuationId = await batchPublisher.ContinueBatchWith(Enumerable.Range(0, 2).Select(_ => new UnitRequest()).ToList(), batchId);
+        await batchPublisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        await server.WaitForCompletion();
+
+        var ctx = Fixture.CreateContext();
+        var batch = await ctx.Set<Job>().FirstAsync(j => j.Id == batchId, Xunit.TestContext.Current.CancellationToken);
+        var continuation = await ctx.Set<Job>().FirstAsync(j => j.Id == continuationId, Xunit.TestContext.Current.CancellationToken);
+        var bulkChildren = await ctx.Set<Job>()
+            .Where(j => j.ParentJobId == batchId && j.Kind == JobKind.Job)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        batch.CurrentState.ShouldBe(State.Completed);
+        bulkChildren.ShouldAllBe(j => j.Queue == "bulk" && j.CurrentState == State.Completed);
+        continuation.CurrentState.ShouldBe(State.Completed);
+        continuation.Queue.ShouldBe("default");
+    }
+
+    [TimedFact]
     public async Task GivenBatchWithContinuation_WhenFirstBatchCompletes_ThenContinuationActivatesAndCompletes()
     {
         await using var server = await WarpTestServer.StartAsync(Fixture);

@@ -128,15 +128,30 @@ Batch continuation options control when continuations activate:
 
 ```csharp
 // Default: continuation only fires when ALL jobs succeed
-await batchPublisher.StartNew(jobs, ContinuationOptions.OnlyOnSucceeded);
+await batchPublisher.StartNew(jobs, options: ContinuationOptions.OnlyOnSucceeded);
 
 // Fire when all jobs finish, regardless of success/failure
-await batchPublisher.StartNew(jobs, ContinuationOptions.OnAnyFinishedState);
+await batchPublisher.StartNew(jobs, options: ContinuationOptions.OnAnyFinishedState);
 ```
 
 With `OnlyOnSucceeded` (default): if any job in the batch fails, the batch itself transitions to `Failed` and continuations stay in `Awaiting` state indefinitely. You can requeue the failed jobs from the dashboard — if they succeed on retry and the batch completes, continuations will activate normally.
 
 With `OnAnyFinishedState`: continuations fire as soon as all jobs reach a terminal state (Completed or Failed), regardless of outcome. Use this when the continuation needs to run even if some jobs failed (e.g., sending a summary report).
+
+Give a batch a `name` so you can tell it apart in the dashboard's batch list. It's optional; a batch without one shows `—`.
+
+### Batches on a named queue
+
+Pass `queue` to put the batch and every job in it on that queue, for example to keep a large fan-out from delaying jobs on `default`:
+
+```csharp
+var batchId = await batchPublisher.StartNew(jobs, name: "Departure seat sync", queue: "bulk");
+
+// A continuation does not inherit the parent's queue. Without `queue` it uses DefaultQueue.
+await batchPublisher.ContinueBatchWith(followUps, batchId, queue: "bulk");
+```
+
+Leaving `queue` out uses `DefaultQueue`, the same as `Enqueue`. A worker must subscribe to the queue (see [Named Queues](#named-queues)), or the batch's jobs wait in `Enqueued`.
 
 ## Recurring Jobs
 

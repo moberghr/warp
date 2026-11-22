@@ -156,6 +156,8 @@ jobs:
             filter: '*.LargeTableBenchmark.*'
           - name: batches
             filter: '*.BatchBenchmark.*'
+          - name: fan-out
+            filter: '*.FanOutBenchmark.*'
           - name: idle
             filter: '*.IdleServerBenchmark.*'
             sqlserver: true
@@ -172,33 +174,10 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      # One fresh container per side (the script replaces any previous one): see the script for why
+      # sharing one between the two runs biased the comparison.
       - name: Start PostgreSQL
-        run: |
-          docker run -d --name warpbench -p 5432:5432 \
-            -e POSTGRES_PASSWORD=postgres \
-            postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db \
-            -c shared_preload_libraries=pg_stat_statements \
-            -c pg_stat_statements.track=top
-
-          # Not pg_isready. The image initialises on a TEMPORARY server, then stops it and starts the
-          # real one, and pg_isready answers yes for the temporary one: a CREATE EXTENSION sent then
-          # was cut off by the shutdown ("terminating connection due to administrator command") and
-          # failed the job before any benchmark ran. So retry the step that matters until it succeeds,
-          # and only accept a server that can then read the extension's view.
-          # The init-complete line marks the end of the temporary phase, so nothing below can land on it.
-          for i in $(seq 1 90); do
-            if docker logs warpbench 2>&1 | grep -q "PostgreSQL init process complete" \
-              && docker exec warpbench psql -U postgres -q -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" > /dev/null 2>&1 \
-              && docker exec warpbench psql -U postgres -tAc "SELECT count(*) FROM pg_stat_statements" > /dev/null 2>&1; then
-              echo "postgres ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-
-          echo "::error::PostgreSQL did not become ready"
-          docker logs warpbench
-          exit 1
+        run: bash .github/scripts/start-bench-postgres.sh
 
       # Started for every benchmark job, because the provider sweep is a benchmark PARAMETER and not a
       # matrix dimension: one BenchmarkDotNet process runs both sides, so both servers must be up.
@@ -244,6 +223,10 @@ jobs:
       # take away the comparison for exactly the PR that patches it. The head build and the Test
       # workflow keep the full audit. MSBuild reads the variable as a property, so it reaches
       # BenchmarkDotNet's child builds too.
+      - name: Start a fresh PostgreSQL for the base commit
+        if: needs.refs.outputs.record == ''
+        run: bash .github/scripts/start-bench-postgres.sh
+
       - name: Run benchmarks on the base commit
         id: basebench
         if: needs.refs.outputs.record == ''
@@ -412,7 +395,7 @@ jobs:
           fi
 
           # Matrix order, so the page reads the same way every run.
-          scenarios="dispatcher completion-batch payload concurrency failure-path retries publish message-routing scheduled-activation large-table batches idle"
+          scenarios="dispatcher completion-batch payload concurrency failure-path retries publish message-routing scheduled-activation large-table batches fan-out idle"
 
           passed=0; failed=0; missing=0
           for name in $scenarios; do

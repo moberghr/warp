@@ -1,3 +1,4 @@
+using Warp.Core;
 using Warp.Core.Handlers;
 
 namespace Warp.Core.Handlers;
@@ -8,6 +9,27 @@ public class EmptyCommand : IJobHandler<EmptyRequest>
 }
 
 public class EmptyRequest : IJob;
+
+/// <summary>
+/// Stages one <see cref="EmptyRequest"/> and does not save, so the worker's handler-scope save is what
+/// commits it. The LoadLab FanOut arm uses it to measure the cost of announcing handler-staged jobs.
+/// </summary>
+public class SpawnOneChildRequest : IJob;
+
+public class SpawnOneChildCommand : IJobHandler<SpawnOneChildRequest>
+{
+    private readonly IPublisher _publisher;
+
+    public SpawnOneChildCommand(IPublisher publisher)
+    {
+        _publisher = publisher;
+    }
+
+    public async Task HandleAsync(SpawnOneChildRequest message, CancellationToken cancellationToken)
+    {
+        await _publisher.Enqueue(new EmptyRequest());
+    }
+}
 
 public class EmptyMessage : IMessage;
 

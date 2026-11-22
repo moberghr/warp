@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Warp.Core.Buffering;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.ErrorGrouping;
@@ -19,7 +20,7 @@ namespace Warp.Core.ClientObservability;
 /// and applies the <see cref="ClientEventCardinality"/> guard to the counter names (never the stored row). A
 /// failed flush degrades to per-record persistence; the caller never observes recording failures.
 /// </summary>
-public sealed class ClientEventFlusher<TContext> : BackgroundService
+public sealed class ClientEventFlusher<TContext> : DrainService<ClientEventRecord>
     where TContext : DbContext
 {
     private readonly DbClientEventRecorder _recorder;
@@ -42,81 +43,16 @@ public sealed class ClientEventFlusher<TContext> : BackgroundService
         _logger = logger;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var reader = _recorder.Reader;
+    // The loop and the budgeted shutdown drain live in DrainService; this class only persists a batch.
+    protected override ChannelReader<ClientEventRecord> Reader => _recorder.Reader;
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                if (!await reader.WaitToReadAsync(stoppingToken))
-                {
-                    break;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
+    protected override int BatchSize => _configuration.CallLogFlushBatchSize;
 
-            var batch = new List<ClientEventRecord>();
-            while (batch.Count < _configuration.CallLogFlushBatchSize && reader.TryRead(out var record))
-            {
-                batch.Add(record);
-            }
+    protected override TimeSpan ShutdownDrainBudget => ClientEventFlush.ShutdownDrainBudget;
 
-            if (batch.Count == 0)
-            {
-                continue;
-            }
+    protected override void CompleteWriting() => _recorder.Complete();
 
-            await FlushBatchAsync(batch, stoppingToken);
-        }
-    }
-
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        _recorder.Complete();
-        await base.StopAsync(cancellationToken);
-        await DrainRemainingAsync();
-    }
-
-    private Task DrainRemainingAsync()
-        => DrainRemainingAsync(_recorder.Reader, FlushBatchAsync, ClientEventFlush.ShutdownDrainBudget, _configuration.CallLogFlushBatchSize);
-
-    // Internal so tests can prove the drain budget bounds a hanging persist without a real database.
-    internal static async Task DrainRemainingAsync(
-        ChannelReader<ClientEventRecord> reader,
-        Func<List<ClientEventRecord>, CancellationToken, Task> flush,
-        TimeSpan budget,
-        int batchSize = ClientEventFlush.BatchSize)
-    {
-        using var cts = new CancellationTokenSource(budget);
-
-        while (!cts.IsCancellationRequested)
-        {
-            var batch = new List<ClientEventRecord>();
-            while (batch.Count < batchSize && reader.TryRead(out var record))
-            {
-                batch.Add(record);
-            }
-
-            if (batch.Count == 0)
-            {
-                break;
-            }
-
-            try
-            {
-                await flush(batch, cts.Token);
-            }
-            catch (OperationCanceledException) when (cts.IsCancellationRequested)
-            {
-                return;
-            }
-        }
-    }
+    protected override Task FlushAsync(List<ClientEventRecord> batch, CancellationToken cancellationToken) => FlushBatchAsync(batch, cancellationToken);
 
     private async Task FlushBatchAsync(List<ClientEventRecord> batch, CancellationToken ct)
     {

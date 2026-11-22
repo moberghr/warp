@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Warp.Core.Buffering;
 
 namespace Warp.Core.ClientObservability;
 
@@ -13,23 +14,18 @@ public sealed class DbClientEventRecorder : IClientEventRecorder
 {
     internal const int DefaultCapacity = 10_000;
 
-    private readonly Channel<ClientEventRecord> _channel;
+    private readonly DrainQueue<ClientEventRecord> _queue;
 
     public DbClientEventRecorder(int capacity)
     {
-        _channel = Channel.CreateBounded<ClientEventRecord>(new BoundedChannelOptions(capacity <= 0 ? DefaultCapacity : capacity)
-        {
-            SingleReader = true,
-            SingleWriter = false,
-            FullMode = BoundedChannelFullMode.Wait,
-        });
+        _queue = new DrainQueue<ClientEventRecord>(capacity <= 0 ? DefaultCapacity : capacity);
     }
 
-    internal ChannelReader<ClientEventRecord> Reader => _channel.Reader;
+    internal ChannelReader<ClientEventRecord> Reader => _queue.Reader;
 
-    // TryWrite (not a Wait-mode write) so a full buffer drops immediately and the caller can count it — the
-    // browser ingest path must never await a persist.
-    public bool Record(ClientEventRecord record) => _channel.Writer.TryWrite(record);
+    // Never waits: a full buffer drops immediately and the caller counts it — the browser ingest path must
+    // never await a persist.
+    public bool Record(ClientEventRecord record) => _queue.TryAdd(record);
 
-    internal void Complete() => _channel.Writer.TryComplete();
+    internal void Complete() => _queue.Complete();
 }

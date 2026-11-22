@@ -210,6 +210,80 @@ public abstract class BatchPublisherUnitTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task StartNew_WithQueue_PutsBatchAndEveryItemOnThatQueue()
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var publisher = CreateBatchPublisher(ctx);
+        var jobs = new List<UnitRequest> { new(), new() };
+
+        // Act
+        var batchId = await publisher.StartNew(jobs, name: "seat-sync", queue: "bulk");
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Assert
+        var readCtx = _fixture.CreateContext();
+        var batch = await readCtx.Set<Job>().FindAsync([batchId], Xunit.TestContext.Current.CancellationToken);
+        var children = await readCtx.Set<Job>().Where(j => j.ParentJobId == batchId).ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        batch.ShouldNotBeNull();
+        batch.Queue.ShouldBe("bulk");
+        children.Count.ShouldBe(2);
+        children.ShouldAllBe(c => c.Queue == "bulk");
+    }
+
+    [TimedFact]
+    public async Task ContinueBatchWith_WithoutQueue_UsesDefaultQueueNotTheParentsQueue()
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var publisher = CreateBatchPublisher(ctx);
+        var parentId = await publisher.StartNew(new List<UnitRequest> { new() }, queue: "bulk");
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var ctx2 = _fixture.CreateContext();
+        var publisher2 = CreateBatchPublisher(ctx2);
+        var continuationId = await publisher2.ContinueBatchWith(new List<UnitRequest> { new(), new() }, parentId);
+        await ctx2.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Assert: same fallback as IPublisher.Enqueue; the parent's queue is not inherited.
+        var readCtx = _fixture.CreateContext();
+        var continuation = await readCtx.Set<Job>().FindAsync([continuationId], Xunit.TestContext.Current.CancellationToken);
+        var children = await readCtx.Set<Job>().Where(j => j.ParentJobId == continuationId).ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        continuation.ShouldNotBeNull();
+        continuation.Queue.ShouldBe("default");
+        children.ShouldAllBe(c => c.Queue == "default");
+    }
+
+    [TimedFact]
+    public async Task ContinueBatchWith_WithQueue_PutsContinuationAndItemsOnThatQueue()
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var publisher = CreateBatchPublisher(ctx);
+        var parentId = await publisher.StartNew(new List<UnitRequest> { new() });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        var ctx2 = _fixture.CreateContext();
+        var publisher2 = CreateBatchPublisher(ctx2);
+        var continuationId = await publisher2.ContinueBatchWith(new List<UnitRequest> { new(), new() }, parentId, queue: "bulk");
+        await ctx2.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Assert
+        var readCtx = _fixture.CreateContext();
+        var continuation = await readCtx.Set<Job>().FindAsync([continuationId], Xunit.TestContext.Current.CancellationToken);
+        var children = await readCtx.Set<Job>().Where(j => j.ParentJobId == continuationId).ToListAsync(Xunit.TestContext.Current.CancellationToken);
+
+        continuation.ShouldNotBeNull();
+        continuation.Queue.ShouldBe("bulk");
+        children.Count.ShouldBe(2);
+        children.ShouldAllBe(c => c.Queue == "bulk");
+    }
+
+    [TimedFact]
     public async Task StartNew_GetsOwnTrace()
     {
         // Arrange

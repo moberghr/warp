@@ -83,6 +83,17 @@ public sealed class InMemoryPublisherTests
         batch.Kind.ShouldBe(PublishedBatchKind.StartNew);
         batch.Name.ShouldBe("import");
         batch.Children.Count.ShouldBe(2);
+        batch.Queue.ShouldBeNull();
+    }
+
+    [TimedFact]
+    public async Task StartNew_WithQueue_RecordsTheQueue()
+    {
+        var publisher = new InMemoryPublisher();
+
+        await publisher.StartNew([new SampleJob("a")], queue: "bulk");
+
+        publisher.Batches.ShouldHaveSingleItem().Queue.ShouldBe("bulk");
     }
 
     [TimedFact]

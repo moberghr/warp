@@ -9,6 +9,12 @@ public class WarpConfiguration
     public string DefaultQueue { get; set; } = "default";
 
     /// <summary>
+    /// In-memory mediator settings, for example <c>opt.Mediator.ScopePerSend = true</c> to run every
+    /// <c>IMediator.Send</c> in its own DI scope (Blazor Server). See <see cref="Handlers.WarpMediatorOptions"/>.
+    /// </summary>
+    public Handlers.WarpMediatorOptions Mediator { get; set; } = new();
+
+    /// <summary>
     /// Assemblies whose IRequestHandler / IJobHandler / IMessageHandler /
     /// IStreamRequestHandler registrations should be removed after the source generator
     /// applies them. The generator unconditionally registers every handler it discovers

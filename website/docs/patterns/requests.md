@@ -54,6 +54,47 @@ public class UserController : ControllerBase
 3. Executes in-process, returns `TResponse` directly
 4. No database, no Job entity, no worker involved
 
+## A scope per send (Blazor Server)
+
+By default a handler runs in the DI scope `IMediator` was resolved from. In an HTTP request that is one scope per request. In Blazor Server it is the circuit's scope, which lives as long as the browser tab, so every send from a page shares one scoped `DbContext`: concurrent component work throws "A second operation was started on this context instance", and tracked entities pile up.
+
+Turn on a scope per send to give each `Send` and `CreateStream` its own scope, disposed when the send returns or the stream finishes:
+
+```csharp
+builder.Services.AddWarp<AppDbContext>(opt =>
+{
+    opt.Mediator.ScopePerSend = true;
+});
+```
+
+The handler's `DbContext` and `IPublisher` then belong to the same short-lived scope, so one `SaveChangesAsync` commits the business rows and the jobs together.
+
+State bound to the outer scope (tenant, acting user) does not follow automatically. Register an `ISendScopeInitializer` for each piece; all of them run before the handler is resolved:
+
+```csharp
+public sealed class TenantScopeInitializer : ISendScopeInitializer
+{
+    public void Initialize(IServiceProvider parent, IServiceProvider child)
+    {
+        var tenant = parent.GetRequiredService<TenantScope>();
+        if (tenant.IsSet)
+        {
+            child.GetRequiredService<TenantScope>().Set(tenant.Id);
+        }
+    }
+}
+
+builder.Services.AddSingleton<ISendScopeInitializer, TenantScopeInitializer>();
+```
+
+What to know:
+
+- **Nested sends get their own scope too.** A handler that calls `mediator.Send` does not share its `DbContext` with the inner handler; each commits its own work.
+- **Warp HTTP endpoints keep the request's scope.** A request already has one scope, so an endpoint's handler still shares the request's `DbContext`.
+- **Streams:** the scope is created when enumeration starts and disposed when it ends or is abandoned.
+- **Jobs are unaffected.** A worker already runs each job in its own scope.
+- The option is read from `AddWarp` / `AddWarpServer`. A mediator registered only through the generated `AddWarpMediator()` does not use it.
+
 ## Key differences from Jobs/Messages
 
 | | Jobs/Messages | Requests |

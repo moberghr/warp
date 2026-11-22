@@ -100,7 +100,7 @@ public class CompleteOrderHandler(
 
 `CreateBatch(db)` does the same for `IBatchPublisher`. The bound publisher runs the same `IPublishPipelineBehavior<T>` chain as the scoped one. You own the context: the publisher never disposes it.
 
-Commit through the publisher's `SaveChangesAsync`, not `db.SaveChangesAsync()`. Both commit the job, but only the publisher's sends the enqueue notification. Without it, a worker finds the job on its next poll, which can take up to 5 minutes with `UseDatabasePush()`.
+Commit through either the publisher's `SaveChangesAsync` or `db.SaveChangesAsync()`. Both commit the job and wake a worker for it, as long as the context comes from `AddDbContext`/`AddDbContextFactory` registered alongside `AddWarp`. Inside an explicit transaction (`db.Database.BeginTransactionAsync`) the wake-up waits for the commit and is dropped on rollback.
 
 `IPublisherFactory<TContext>` is registered by `AddWarp`, so it resolves in any process that publishes.
 

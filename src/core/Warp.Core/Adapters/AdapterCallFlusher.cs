@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Warp.Core.Buffering;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Core.ErrorGrouping;
@@ -22,7 +23,7 @@ namespace Warp.Core.Adapters;
 /// lazy <see cref="AdapterDefinition.LastSeenAt"/> refresh. A failed flush is logged at Warning and the
 /// batch is dropped; the caller never observes recording failures.
 /// </summary>
-internal sealed class AdapterCallFlusher<TContext> : BackgroundService
+internal sealed class AdapterCallFlusher<TContext> : DrainService<AdapterCallRecord>
     where TContext : DbContext
 {
     private readonly DbAdapterCallRecorder _recorder;
@@ -48,103 +49,16 @@ internal sealed class AdapterCallFlusher<TContext> : BackgroundService
         _logger = logger;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var reader = _recorder.Reader;
+    // The loop and the budgeted shutdown drain live in DrainService; this class only persists a batch.
+    protected override ChannelReader<AdapterCallRecord> Reader => _recorder.Reader;
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                if (!await reader.WaitToReadAsync(stoppingToken))
-                {
-                    break;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
+    protected override int BatchSize => _configuration.CallLogFlushBatchSize;
 
-            var batchSize = _configuration.CallLogFlushBatchSize;
-            var batch = new List<AdapterCallRecord>();
-            while (batch.Count < batchSize && reader.TryRead(out var record))
-            {
-                batch.Add(record);
-            }
+    protected override TimeSpan ShutdownDrainBudget => AdapterFlush.ShutdownDrainBudget;
 
-            if (batch.Count == 0)
-            {
-                continue;
-            }
+    protected override void CompleteWriting() => _recorder.Complete();
 
-            await FlushBatchAsync(batch, stoppingToken);
-        }
-    }
-
-    // On shutdown the base cancels stoppingToken, which breaks the ExecuteAsync drain loop and would discard
-    // records still buffered in the channel — leaving Delivered deliveries with missing final attempt rows.
-    // Instead: stop accepting new records (Complete → recorder-side TryWrite now fails and counts as
-    // records_dropped, as designed), stop the reader loop (base.StopAsync), then drain whatever is buffered
-    // on the drain budget's own token — independent of shutdown cancellation (graceful shutdown cannot
-    // discard the CHANNEL tail) but bounding even an in-flight persist (a hung database cannot hang
-    // shutdown). Honest scope: one batch already read out of the channel and mid-SaveChanges at the cancel
-    // instant is still dropped by the persist's own cancellation guard — accepted, same lossy-diagnostics
-    // stance as a full channel.
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        _recorder.Complete();
-
-        // base.StopAsync signals stoppingToken and awaits ExecuteAsync, so the channel's single reader has
-        // stopped before we drain from here (the bounded channel is SingleReader — no concurrent readers).
-        await base.StopAsync(cancellationToken);
-
-        await DrainRemainingAsync();
-    }
-
-    private Task DrainRemainingAsync()
-        => DrainRemainingAsync(_recorder.Reader, FlushBatchAsync, AdapterFlush.ShutdownDrainBudget, _configuration.CallLogFlushBatchSize);
-
-    // Extracted + internal so tests can prove the drain budget bounds a HANGING persist (a slow or
-    // unreachable database at shutdown) without a real database. The budget token is independent of the
-    // host's shutdown cancellation (so graceful shutdown cannot discard the buffered tail) but is passed
-    // INTO the flush, not just checked between batches — an in-flight persist is cancelled when the budget
-    // elapses and the remaining tail is dropped (diagnostics, not an audit trail).
-    internal static async Task DrainRemainingAsync(
-        ChannelReader<AdapterCallRecord> reader,
-        Func<List<AdapterCallRecord>, CancellationToken, Task> flush,
-        TimeSpan budget,
-        int batchSize = AdapterFlush.BatchSize)
-    {
-        using var cts = new CancellationTokenSource(budget);
-
-        while (!cts.IsCancellationRequested)
-        {
-            var batch = new List<AdapterCallRecord>();
-            while (batch.Count < batchSize && reader.TryRead(out var record))
-            {
-                batch.Add(record);
-            }
-
-            if (batch.Count == 0)
-            {
-                break;
-            }
-
-            try
-            {
-                // The budget token (never the host's shutdown token) bounds the persist: graceful shutdown
-                // cannot discard the tail, but a hung database gives up at the budget, not the DB timeout.
-                await flush(batch, cts.Token);
-            }
-            catch (OperationCanceledException) when (cts.IsCancellationRequested)
-            {
-                // Budget elapsed mid-persist — stop draining. The production flush swallows this itself,
-                // but the guard keeps the returns-within-budget contract independent of the flush impl.
-                return;
-            }
-        }
-    }
+    protected override Task FlushAsync(List<AdapterCallRecord> batch, CancellationToken cancellationToken) => FlushBatchAsync(batch, cancellationToken);
 
     private async Task FlushBatchAsync(List<AdapterCallRecord> batch, CancellationToken ct)
     {
@@ -466,7 +380,7 @@ internal static class AdapterFlush
     internal const int BatchSize = 500;
 
     /// <summary>
-    /// Upper bound on the shutdown drain: <see cref="AdapterCallFlusher{TContext}.StopAsync"/> persists
+    /// Upper bound on the shutdown drain: <c>DrainService.StopAsync</c> persists
     /// records still buffered at shutdown on <c>CancellationToken.None</c>, stopping once this budget elapses
     /// so a slow/unreachable database cannot hang host shutdown indefinitely.
     /// </summary>
