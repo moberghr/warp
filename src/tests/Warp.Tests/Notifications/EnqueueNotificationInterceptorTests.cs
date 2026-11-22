@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Core;
+using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
@@ -164,6 +165,59 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task SaveChangesAsync_SaveFails_SendsNothingAndTheNextSaveIsNotAffected()
+    {
+        // A job row that already exists, so inserting it again fails the save in the database.
+        var existingId = Guid.NewGuid();
+        await using (var seed = _fixture.CreateContext())
+        {
+            seed.Set<Job>().Add(NewJob(existingId));
+            await seed.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        }
+
+        await using var provider = BuildProvider();
+        await using var scope = provider.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TestContext>();
+        var local = CountLocalSignals(provider);
+        db.Set<Job>().Add(NewJob(existingId));
+
+        await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken));
+
+        Announced(provider).ShouldBe(0);
+        local.Count.ShouldBe(0);
+
+        // What the failed save captured must not leak into a later, unrelated save.
+        db.ChangeTracker.Clear();
+        db.TestLogs.Add(new TestLog { ProcessedTime = DateTime.UtcNow });
+        await db.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        Announced(provider).ShouldBe(0);
+        local.Count.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task SaveChanges_SyncInsideSyncTransaction_AnnouncesOnCommit()
+    {
+        await using var provider = BuildProvider();
+        await using var scope = provider.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TestContext>();
+        await scope.ServiceProvider.GetRequiredService<IPublisher>().Enqueue(new UnitRequest(), Queue);
+
+        // The synchronous transaction and save paths are what this test covers.
+#pragma warning disable MA0042, S6966, CA1849, RCS1261
+        using (var tx = db.Database.BeginTransaction())
+        {
+            db.SaveChanges();
+            Announced(provider, Queue).ShouldBe(0);
+
+            tx.Commit();
+        }
+#pragma warning restore MA0042, S6966, CA1849, RCS1261
+
+        Announced(provider, Queue).ShouldBe(1);
+    }
+
+    [TimedFact]
     public async Task SaveChangesAsync_WithoutStagedJobs_SendsNothing()
     {
         await using var provider = BuildProvider();
@@ -247,6 +301,17 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
         resolvedTransport.ShouldNotBeOfType<NullNotificationTransport>();
         resolvedContext.ShouldNotBeNull();
     }
+
+    private static Job NewJob(Guid id) =>
+        new()
+        {
+            Id = id,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = Queue,
+        };
 
     private static LocalSignalCounter CountLocalSignals(ServiceProvider provider)
     {

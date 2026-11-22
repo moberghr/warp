@@ -23,13 +23,21 @@ public abstract class HandlerStagedWakeUpTestsBase : IntegrationTestBase
     {
     }
 
-    [TimedFact]
-    public async Task WorkerSave_HandlerStagedChild_SendsExactlyOneWakeUp()
+    // Both worker paths save the handler's context themselves (WarpWorkerService and
+    // WarpDispatcherWorker keep separate copies of that code), so both are covered.
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WorkerSave_HandlerStagedChild_SendsExactlyOneWakeUp(bool useDispatcher)
     {
         var transport = new RecordingTransport();
         var server = await WarpTestServer.StartAsync(
             Fixture,
-            opt => opt.Queues = ["default", ChildQueue],
+            opt =>
+            {
+                opt.Queues = ["default", ChildQueue];
+                opt.UseDispatcher = useDispatcher;
+            },
             services =>
             {
                 // What UseDatabasePush() wires for the send side, with a recording transport.
@@ -46,8 +54,8 @@ public abstract class HandlerStagedWakeUpTestsBase : IntegrationTestBase
         }
         finally
         {
-            // Variant B publishes through the relay, off the saving thread. Stopping the host makes the
-            // relay publish everything still queued, so a missing OR a duplicate wake-up shows below.
+            // The relay publishes off the saving thread. Stopping the host makes it publish everything
+            // still queued, so a missing OR a duplicate wake-up shows below.
             await server.DisposeAsync();
         }
 

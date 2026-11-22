@@ -25,6 +25,57 @@ public abstract class OrchestrationBacklogDrainTestsBase : IAsyncLifetime
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
+    // FinalizeParents reads ready parents as one branch per kind (rule 6.11). Both kinds must be
+    // found in the same pass, and the batch size must cap the two branches TOGETHER, not each.
+    [TimedFact]
+    public async Task FinalizeParents_MessageAndBatchParentsReady_FinalizesBothKindsWithinOneBatchSize()
+    {
+        const int batchSize = 3;
+        var ct = Xunit.TestContext.Current.CancellationToken;
+
+        var seedCtx = _fixture.CreateContext();
+        foreach (var kind in new[] { JobKind.Message, JobKind.Message, JobKind.Batch, JobKind.Batch })
+        {
+            var parentId = Guid.NewGuid();
+            seedCtx.Set<Job>().Add(new Job
+            {
+                Id = parentId,
+                Kind = kind,
+                CurrentState = State.Processing,
+                CreateTime = DateTime.UtcNow,
+                ScheduleTime = DateTime.UtcNow,
+                Queue = "default",
+            });
+            seedCtx.Set<Job>().Add(new Job
+            {
+                Id = Guid.NewGuid(),
+                Kind = JobKind.Job,
+                CurrentState = State.Completed,
+                CreateTime = DateTime.UtcNow,
+                ScheduleTime = DateTime.UtcNow,
+                Queue = "default",
+                ParentJobId = parentId,
+            });
+        }
+
+        await seedCtx.SaveChangesAsync(ct);
+
+        await TestTasks.CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), serverTaskBatchSize: batchSize)
+            .RunOrchestrationCoreAsync(CancellationToken.None);
+
+        var afterPass1 = await CompletedParentKinds(ct);
+        afterPass1.Count.ShouldBe(batchSize);
+        afterPass1.ShouldContain(JobKind.Message);
+        afterPass1.ShouldContain(JobKind.Batch);
+
+        await TestTasks.CreateOrchestrator(_fixture.CreateContext(), TimeProvider.System, TimeSpan.FromDays(1), serverTaskBatchSize: batchSize)
+            .RunOrchestrationCoreAsync(CancellationToken.None);
+
+        var afterPass2 = await CompletedParentKinds(ct);
+        afterPass2.Count(x => x == JobKind.Message).ShouldBe(2);
+        afterPass2.Count(x => x == JobKind.Batch).ShouldBe(2);
+    }
+
     [TimedFact]
     public async Task FinalizeParents_BacklogLargerThanBatchSize_DrainsAcrossIterations()
     {
@@ -224,5 +275,17 @@ public abstract class OrchestrationBacklogDrainTestsBase : IAsyncLifetime
 
         failedAfterPass1.ShouldBe(orphanCount);
         totalPasses.ShouldBeLessThanOrEqualTo(4);
+    }
+
+    private async Task<List<JobKind>> CompletedParentKinds(CancellationToken ct)
+    {
+        var ctx = _fixture.CreateContext();
+
+        return await ctx.Set<Job>()
+            .AsNoTracking()
+            .Where(x => x.Kind == JobKind.Message || x.Kind == JobKind.Batch)
+            .Where(x => x.CurrentState == State.Completed)
+            .Select(x => x.Kind)
+            .ToListAsync(ct);
     }
 }

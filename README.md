@@ -426,7 +426,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 {
     opt.UsePostgreSql();         // or opt.UseSqlServer()
 
-    // Push benefits the dispatcher's batch-fetch path; individual workers still poll.
+    // Optional: one fetch hands out the work instead of every bare worker waking at once.
     opt.UseDispatcher = true;
     opt.PollingInterval = TimeSpan.FromSeconds(5); // loose polling is fine when push is on
 
@@ -444,7 +444,9 @@ The provider-specific transport is wired by whichever `UsePostgreSql()` / `UseSq
 ALTER DATABASE [YourDb] SET ENABLE_BROKER WITH ROLLBACK IMMEDIATE;
 ```
 
-**Observability**: transport failures are logged at Warning and incremented on `warp.notifications.publish_failures` (OpenTelemetry counter). Successful publishes increment `warp.notifications.published`. Alert on the failure counter if push health matters to your SLOs.
+**Which saves notify**: any save of your `DbContext` that commits new jobs, whether through `IPublisher.SaveChangesAsync()` or a plain `db.SaveChangesAsync()` after `Enqueue`. Inside an explicit transaction the notification waits for the commit. It is published by a background relay right after the save, so the sending process needs a running host.
+
+**Observability**: transport failures are logged at Warning and incremented on `warp.notifications.publish_failures` (OpenTelemetry counter). Successful publishes increment `warp.notifications.published`. Alert on the failure counter if push health matters to your SLOs. Notifications dropped because the relay's queue was full increment `warp.notifications.dropped`.
 
 **Upgrading from <0.9**: the `Scheduled` state was introduced alongside DB push. Future-dated jobs published on the old codebase land in `Enqueued` with `ScheduleTime > now` and are correctly gated by a defensive predicate in worker queries — but they won't appear in the dashboard's Scheduled list until their time arrives. To migrate them eagerly, run once after upgrade:
 

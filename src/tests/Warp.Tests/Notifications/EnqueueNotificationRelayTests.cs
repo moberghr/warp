@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using Shouldly;
 using Warp.Core.Enums;
 using Warp.Core.Notifications;
@@ -58,6 +59,38 @@ public class EnqueueNotificationRelayTests
         await stopping;
 
         transport.Published.ShouldBe([(NotificationKind.JobEnqueued, "first"), (NotificationKind.JobEnqueued, "queued")]);
+    }
+
+    [TimedFact]
+    public void Announce_QueueFull_CountsTheDropsAndKeepsTheRest()
+    {
+        var announcements = new EnqueueAnnouncements([new EnqueueNotificationRelayMarker()]);
+        long dropped = 0;
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, x) =>
+        {
+            if (string.Equals(instrument.Name, "warp.notifications.dropped", StringComparison.Ordinal))
+            {
+                x.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, _, _) => Interlocked.Add(ref dropped, value));
+        listener.Start();
+
+        // Nothing drains the queue here, so everything past its capacity is refused.
+        var batch = Enumerable.Range(0, EnqueueAnnouncements.Capacity + 3)
+            .Select(x => new Notification(NotificationKind.JobEnqueued, "q"))
+            .ToList();
+        announcements.Announce(batch);
+
+        Interlocked.Read(ref dropped).ShouldBe(3);
+        var kept = 0;
+        while (announcements.Reader.TryRead(out _))
+        {
+            kept++;
+        }
+
+        kept.ShouldBe(EnqueueAnnouncements.Capacity);
     }
 
     [TimedFact]
