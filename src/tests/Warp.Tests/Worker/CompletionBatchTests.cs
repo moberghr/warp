@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -466,6 +467,38 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             .ShouldBeFalse();
 
         batch.Count.ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task FlushAsync_WhenTheDatabaseIsUnreachable_ThrowsAndLeavesTheRowsProcessing()
+    {
+        // Not a DbUpdateException, so there is nothing to split or retry: the failure reaches the
+        // caller, the buffer is already drained, and the rows stay Processing for StaleJobRecovery.
+        // A disposed context stands in for a connection that cannot be opened.
+        var job = await InsertProcessingJob();
+        var unreachable = _fixture.CreateContext();
+        await unreachable.DisposeAsync();
+
+        var services = new ServiceCollection();
+        services.AddScoped<IWarpServerContext>(_ => new TestServerContext(unreachable));
+        await using var provider = services.BuildServiceProvider();
+
+        var batch = new CompletionBatch(provider.GetRequiredService<IServiceScopeFactory>(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer);
+        batch.Add(MakeEntry(job));
+
+        // Act
+        await Should.ThrowAsync<ObjectDisposedException>(batch.FlushAsync);
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
+        // Assert
+        batch.Count.ShouldBe(0);
+
+        var ctx = _fixture.CreateContext();
+        var persisted = await ctx.Set<Job>().FirstAsync(x => x.Id == job.Id, Xunit.TestContext.Current.CancellationToken);
+        persisted.CurrentState.ShouldBe(State.Processing);
+
+        // Nothing committed, so nothing was counted.
+        (await ctx.Set<Counter>().AnyAsync(Xunit.TestContext.Current.CancellationToken)).ShouldBeFalse();
     }
 
     // FlushAsync takes no CancellationToken on purpose (PR #127): a caller that could cancel a drained
