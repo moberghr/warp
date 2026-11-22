@@ -71,6 +71,17 @@ public static partial class PerfCompare
     // at 10x, and the over-claiming claim walked the table.
     private const double ThroughputCollapseFactor = 3.0;
 
+    // Pages read per job. Not gated on a percentage: between identical builds it moves by half again
+    // with cache state and vacuum timing. But every large jump seen so far was a real defect and none
+    // was noise: a query the planner could serve from the wrong index (10,004 pages a call against 6,
+    // rule 6.11) and a per-row check that should have been per-parent (2,948 buffers a job against
+    // 165), both of which statements, WAL and throughput let through. So a blow-up fails, like a
+    // throughput collapse does. Those two were 18x and more; 5x is far from both them and the noise.
+    //
+    // A plan flip can be intermittent. If this fires on a change that cannot have caused it, the
+    // finding is still real: some query in that scenario has a plan that depends on statistics.
+    private const double BuffersBlowUpFactor = 5.0;
+
     private static readonly MetricPolicy[] Policies =
     [
         new("statements_per_job", Gated: true, TolerancePct: 3.0, BadDirection: Direction.Higher),
@@ -391,8 +402,8 @@ public static partial class PerfCompare
 
             // Statements and WAL per job are the gates; see StatementTolerancePct and WalTolerancePct
             // for where the lines sit. Allocations are REPORTED, not gated: across the same no-op runs
-            // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%,
-            // with cache state and vacuum timing, and are reported for a human to read.
+            // they moved up to 4.9%, too close to any threshold worth having. Buffers moved up to 55%
+            // with cache state and vacuum timing, so only a blow-up fails (BuffersBlowUpFactor, below).
             // Per-second counters (an idle server) have not had their noise measured: a background tick
             // landing just inside or outside the window moves them. Reported until calibrated.
             if (perSecond)
@@ -433,6 +444,16 @@ public static partial class PerfCompare
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
+            }
+
+            // Pages read are too noisy to gate a small change, but a blow-up is a query plan gone wrong.
+            // See BuffersBlowUpFactor.
+            if (!perSecond && b.BuffersPerJob is > 0 && h.BuffersPerJob is not null && h.BuffersPerJob.Value > b.BuffersPerJob.Value * BuffersBlowUpFactor)
+            {
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ buffers {h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}× more (limit {BuffersBlowUpFactor:0}×)");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: buffers/job {b.BuffersPerJob:N1} -> {h.BuffersPerJob:N1} ({h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}x); a query in this scenario changed plan"));
             }
 
             var ratio = b.Mean <= 0 ? "?" : (h.Mean / b.Mean).ToString("N2", CultureInfo.InvariantCulture);
