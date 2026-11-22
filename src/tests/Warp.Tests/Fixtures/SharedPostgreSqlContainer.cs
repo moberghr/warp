@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Testcontainers.PostgreSql;
 
@@ -6,8 +7,17 @@ namespace Warp.Tests.Fixtures;
 // Process-wide shared PostgreSqlContainer. See SharedSqlServerContainer for rationale.
 // PG containers are lighter than SQL Server (~200MB vs ~2GB), but consolidating for
 // symmetry also halves container boot time (1×N seconds instead of 4×N seconds).
+//
+// The schema is built ONCE, into a template database, and every test class's database is a clone of
+// it (CREATE DATABASE ... TEMPLATE), the approach straumur-backend uses. Building it per class with
+// EnsureCreated cost ~300 ms against ~30 ms for a clone, measured on this schema, across 212 database
+// test classes. Tests within a class still share the clone and reset it with Respawn (~30 ms): a clone
+// per TEST would cost ~150 ms each with its drop, slower than the reset for tests that start from empty
+// tables.
 internal static class SharedPostgreSqlContainer
 {
+    private const string TemplateDatabaseName = "warp_template";
+
 #pragma warning disable IDE0052, S4487
     private static PostgreSqlContainer? _container;
 #pragma warning restore IDE0052, S4487
@@ -32,7 +42,7 @@ internal static class SharedPostgreSqlContainer
             var exists = await checkCmd.ExecuteScalarAsync(ct);
             if (exists == null)
             {
-                await using var createCmd = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\"", conn);
+                await using var createCmd = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\" TEMPLATE \"{TemplateDatabaseName}\"", conn);
                 await createCmd.ExecuteNonQueryAsync(ct);
             }
         }
@@ -76,6 +86,9 @@ internal static class SharedPostgreSqlContainer
                     .Build();
                 await container.StartAsync(ct);
                 _container = container;
+                await BuildTemplateAsync(container.GetConnectionString(), ct);
+
+                // Published last: a caller that sees it may clone the template straight away.
                 _adminConnectionString = container.GetConnectionString();
             }
 
@@ -85,5 +98,37 @@ internal static class SharedPostgreSqlContainer
         {
             _initLock.Release();
         }
+    }
+
+    // The same options PostgreSqlClassFixture.CreateContext uses, minus the interceptor, which does not
+    // affect the schema.
+    private static async Task BuildTemplateAsync(string adminConnectionString, CancellationToken ct)
+    {
+        await using (var admin = new NpgsqlConnection(adminConnectionString))
+        {
+            await admin.OpenAsync(ct);
+            await using var create = new NpgsqlCommand($"CREATE DATABASE \"{TemplateDatabaseName}\"", admin);
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        var templateConnectionString = new NpgsqlConnectionStringBuilder(adminConnectionString) { Database = TemplateDatabaseName }.ConnectionString;
+        await using (var context = new TestContext(new DbContextOptionsBuilder<TestContext>()
+            .UseNpgsql(templateConnectionString)
+            .UseSnakeCaseNamingConvention()
+            .Options))
+        {
+            await context.Database.EnsureCreatedAsync(ct);
+        }
+
+        // A template cannot be cloned while anyone is connected to it: drop the pooled connections the
+        // schema build left, then refuse new ones.
+        NpgsqlConnection.ClearAllPools();
+
+        await using var seal = new NpgsqlConnection(adminConnectionString);
+        await seal.OpenAsync(ct);
+        await using var sealCmd = new NpgsqlCommand(
+            $"ALTER DATABASE \"{TemplateDatabaseName}\" WITH IS_TEMPLATE true ALLOW_CONNECTIONS false",
+            seal);
+        await sealCmd.ExecuteNonQueryAsync(ct);
     }
 }
