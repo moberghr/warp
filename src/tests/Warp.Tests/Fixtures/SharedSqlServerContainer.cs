@@ -49,6 +49,15 @@ internal static class SharedSqlServerContainer
     // fixture is disposed. SET SINGLE_USER WITH ROLLBACK IMMEDIATE kills any sessions still
     // connected to the DB (the SQL Server analogue of PG's WITH (FORCE)); the subsequent
     // DROP runs cleanly. Same hygiene as the PG container — see SqlServerClassFixture.
+    //
+    // The sessions are KILLed explicitly first, and that is the difference between 3 seconds and 50 ms
+    // per test class. A class always leaves at least one idle pooled connection on its database
+    // (ClearPool on the fixture's connection string does not close it, and cannot reach the pools
+    // WarpTestServer creates under its own Application Name), and SET SINGLE_USER WITH ROLLBACK IMMEDIATE
+    // takes a flat ~3,000 ms to force even one idle session off. Measured with one idle pooled
+    // connection: 3,013 ms for the ALTER as it was, 12 ms after the KILL (which itself takes ~5 ms).
+    // With 212 database test classes that was about ten minutes of thread time per SQL Server run.
+    // SINGLE_USER stays as the backstop against a session that connects between the KILL and the DROP.
     public static async Task DropDatabaseAsync(string databaseName, CancellationToken ct)
     {
         var masterConn = await EnsureContainerAsync(ct);
@@ -59,6 +68,16 @@ internal static class SharedSqlServerContainer
         await using var cmd = new SqlCommand(
             $@"IF DB_ID('{databaseName}') IS NOT NULL
                BEGIN
+                   -- Each KILL in its own TRY: a session can end by itself between this SELECT and the
+                   -- KILL (its pool is being cleared at the same moment), and KILL on a session that is
+                   -- already gone raises 'Process ID n is not an active process ID', which would abort
+                   -- the batch and leave the database undropped.
+                   DECLARE @kill nvarchar(max) = N'';
+                   SELECT @kill += N'BEGIN TRY KILL ' + CAST(session_id AS nvarchar(10)) + N' END TRY BEGIN CATCH END CATCH;'
+                   FROM sys.dm_exec_sessions
+                   WHERE database_id = DB_ID('{databaseName}') AND session_id <> @@SPID;
+                   EXEC(@kill);
+
                    ALTER DATABASE [{databaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
                    DROP DATABASE [{databaseName}];
                END",
