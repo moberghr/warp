@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Shouldly;
@@ -9,8 +10,12 @@ namespace Warp.Tests.Worker;
 [Trait("Category", "NoDb")]
 public class WarpWorkerResilienceTests
 {
-    [TimedFact(timeout: 5_000)]
-    public async Task ExecuteAsync_WhenFetchThrows_LogsAndContinuesPolling()
+    // Two arms of the poll loop: any exception, and the optimistic-concurrency one a worker gets when
+    // another server won the row, which is routine and handled (and logged) separately.
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExecuteAsync_WhenFetchThrows_LogsAndContinuesPolling(bool lostTheRowToAnotherWorker)
     {
         // Regression for PR #123 review F2 + align with WarpDispatcher: WarpWorker had no
         // try/catch in its poll loop, so a single exception from GetAndProcessJob silently
@@ -26,7 +31,9 @@ public class WarpWorkerResilienceTests
                 var count = Interlocked.Increment(ref callCount);
                 if (count == 1)
                 {
-                    throw new InvalidOperationException("simulated transient DB failure");
+                    throw lostTheRowToAnotherWorker
+                        ? new DbUpdateConcurrencyException("another worker won the row")
+                        : new InvalidOperationException("simulated transient DB failure");
                 }
 
                 if (count == 3)

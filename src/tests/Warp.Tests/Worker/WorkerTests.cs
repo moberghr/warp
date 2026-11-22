@@ -195,6 +195,96 @@ public abstract class WorkerTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task GetAndProcessJob_HandlerThrowsItsOwnCancellation_MarksFailedNotCancelled()
+    {
+        // Nobody cancelled the job: the handler threw OperationCanceledException by itself, the way an
+        // inner timeout or a cancelled HTTP call does. That is a failure. Only a cancellation the
+        // worker itself requested (a delete while running) ends a job as Deleted.
+        var ctx = _fixture.CreateContext();
+        var jobId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = typeof(ThrowsOwnCancellationRequest).AssemblyQualifiedName,
+            Message = JsonSerializer.Serialize(new ThrowsOwnCancellationRequest()),
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var (worker, _) = CreateWorker();
+
+        // Act
+        var result = await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert
+        result.ShouldBeTrue();
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Failed);
+        job.CurrentWorkerId.ShouldBeNull();
+        job.ExpireAt.ShouldBeNull();
+
+        var logs = await readCtx.Set<JobLog>()
+            .Where(x => x.JobId == jobId)
+            .Select(x => x.EventType)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        logs.ShouldContain("Failed");
+        logs.ShouldNotContain("Cancelled");
+    }
+
+    // Rows a worker can claim but cannot run. Each must end Failed with the worker's hold released and
+    // a Failed log saying why: a row left Processing would only be found by StaleJobRecovery, which
+    // would requeue it to fail the same way again.
+    [TimedTheory]
+    [InlineData("Not.A.Real.Type, Not.A.Real.Assembly", "{}", null)]
+    [InlineData(null, "{}", null)]
+    [InlineData("unit", "this is not json", null)]
+    [InlineData("unit", "{}", "{ this is not json")]
+    public async Task GetAndProcessJob_RowThatCannotRun_IsFailedAndReleased(string? type, string message, string? metadata)
+    {
+        // Arrange
+        var ctx = _fixture.CreateContext();
+        var jobId = Guid.NewGuid();
+        ctx.Set<Job>().Add(new Job
+        {
+            Id = jobId,
+            Kind = JobKind.Job,
+            CurrentState = State.Enqueued,
+            Type = string.Equals(type, "unit", StringComparison.Ordinal) ? typeof(UnitRequest).AssemblyQualifiedName : type,
+            Message = message,
+            Metadata = metadata,
+            CreateTime = DateTime.UtcNow,
+            ScheduleTime = DateTime.UtcNow,
+            Queue = "default",
+        });
+        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var (worker, _) = CreateWorker();
+
+        // Act
+        var result = await worker.GetAndProcessJob(CancellationToken.None);
+
+        // Assert
+        result.ShouldBeTrue();
+        var readCtx = _fixture.CreateContext();
+        var job = await readCtx.Set<Job>().FirstAsync(x => x.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+        job.CurrentState.ShouldBe(State.Failed);
+        job.CurrentWorkerId.ShouldBeNull();
+        job.LastKeepAlive.ShouldBeNull();
+        job.ExpireAt.ShouldBeNull();
+
+        var logs = await readCtx.Set<JobLog>()
+            .Where(x => x.JobId == jobId)
+            .Select(x => x.EventType)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        logs.ShouldContain("Failed");
+    }
+
+    [TimedFact]
     public async Task GetAndProcessJob_SkipsScheduledStateJob()
     {
         // Future-dated jobs live in State.Scheduled and are promoted to Enqueued by
