@@ -42,6 +42,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
     private readonly CompletionBatch _batch;
+    private readonly RunningJobMonitor _monitor;
     private volatile bool _stopped;
     private readonly DispatcherWorkerAvailability _availability;
     private readonly IWarpNotificationTransport _notificationTransport;
@@ -59,8 +60,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         ServerTaskSignals<TContext> signals,
         DispatcherWorkerAvailability availability,
         WarpCounterBuffer counterBuffer,
-        CompletionBatch batch)
+        CompletionBatch batch,
+        RunningJobMonitor monitor)
     {
+        _monitor = monitor;
         _counterBuffer = counterBuffer;
         _availability = availability;
         _workerId = workerId;
@@ -228,7 +231,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         var progressCollector = new JobProgressCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
 
         using var jobCts = new CancellationTokenSource();
-        var monitorTask = RunJobMonitor(job.Id, logCollector, progressCollector, processingLog, jobCts, cancellationToken);
+        using var monitoring = _monitor.Register(job.Id, _workerId, logCollector, progressCollector, processingLog, jobCts, cancellationToken);
 
         var activity = WarpTelemetry.StartJobActivity(job.TraceId ?? job.Id, job.ParentSpanId, job.Queue);
         var jobTypeName = WarpTelemetry.GetShortTypeName(job.Type);
@@ -345,8 +348,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             _logger.LogInformation("Worker {workerId} completed job {id}", _workerId, job.Id);
 
             PerfTrace.Mark(PerfTrace.CancelKeepAlive);
-            await jobCts.CancelAsync();
-            await monitorTask;
+            monitoring.Dispose();
 
             if (successOutcome != null)
             {
@@ -383,7 +385,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
             _logger.LogInformation("Job {id} was cancelled", job.Id);
-            await monitorTask;
+            monitoring.Dispose();
 
             var cancelNow = _timeProvider.GetUtcNow().UtcDateTime;
             job.CurrentState = State.Deleted;
@@ -485,8 +487,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
             _logger.LogError(e, "Error executing job {id}", job.Id);
-            await jobCts.CancelAsync();
-            await monitorTask;
+            monitoring.Dispose();
 
             var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector, processingLog).ToArray();
@@ -531,7 +532,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     /// waited in the channel past InvisibilityTimeout is still stale the instant the check passes, so
     /// recovery could requeue it — and a second worker start it — while this one walks into the
     /// handler. Stamping a fresh LastKeepAlive under the same row lock as the check buys the full
-    /// InvisibilityTimeout, by which point RunJobMonitor is renewing on its own cadence.
+    /// InvisibilityTimeout, by which point the group's RunningJobMonitor is renewing it.
     /// </para>
     /// </summary>
     private async Task<bool> ConfirmOwnership(Job job, DeferredJobLog processingLog, CancellationToken cancellationToken)
@@ -581,7 +582,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
     // The guard for a job that waited: still Processing, still stamped by the claim that handed it to
     // this worker. The same statement renews the stamp, under the row lock the check holds, which buys
-    // a whole InvisibilityTimeout, by when RunJobMonitor is renewing on its own cadence.
+    // a whole InvisibilityTimeout, by when the group's RunningJobMonitor is renewing it.
     private async Task<bool> RenewClaim(Job job, DateTime now, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
@@ -622,120 +623,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         job.HandlerType = jobHandlerType.AssemblyQualifiedName;
         jobContext.HandlerType = jobHandlerType;
         await JobDispatcher.ExecuteJobHandler(payload, messageType, jobHandlerType, provider, cancellationToken);
-    }
-
-    private async Task RunJobMonitor(Guid jobId, JobLogCollector logCollector, JobProgressCollector progressCollector, DeferredJobLog processingLog, CancellationTokenSource jobCts, CancellationToken stoppingToken)
-    {
-        var logFlushInterval = _configuration.LogFlushInterval;
-        var cancellationCheckInterval = _configuration.CancellationCheckInterval;
-        var tickInterval = logFlushInterval < cancellationCheckInterval ? logFlushInterval : cancellationCheckInterval;
-        var timeSinceLastCheck = TimeSpan.Zero;
-
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, jobCts.Token);
-        while (!linked.IsCancellationRequested)
-        {
-            // SuppressThrowing, not try/catch: the monitor is cancelled at the end of EVERY job, so a
-            // throwing Delay cost one first-chance exception per execution — a stack capture on the hot
-            // path, and the whole of BenchmarkDotNet's `// Exceptions: N` count on a healthy run.
-            await Task.Delay(tickInterval, linked.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            if (linked.IsCancellationRequested)
-            {
-                return;
-            }
-
-            timeSinceLastCheck += tickInterval;
-
-            try
-            {
-                var pendingLogs = logCollector.Drain();
-                var pendingProgress = progressCollector.Drain();
-
-                // The first flush of a job that has run this long carries its "Processing" row.
-                if (processingLog.Take() is { } processing)
-                {
-                    pendingLogs.Insert(0, processing);
-                }
-
-                var doCancellationCheck = timeSinceLastCheck >= cancellationCheckInterval;
-
-                if (pendingLogs.Count == 0 && pendingProgress.Count == 0 && !doCancellationCheck)
-                {
-                    continue;
-                }
-
-                using var s = _scopeFactory.CreateScope();
-                var ctx = s.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-
-                if (doCancellationCheck)
-                {
-                    timeSinceLastCheck = TimeSpan.Zero;
-
-                    var cancellationMode = await ctx.Set<Job>()
-                        .Where(x => x.Id == jobId)
-                        .Select(x => x.CancellationMode)
-                        .FirstOrDefaultAsync(stoppingToken);
-
-                    if (cancellationMode != CancellationMode.None)
-                    {
-                        _logger.LogInformation("Job {jobId} cancellation requested ({mode}), cancelling handler", jobId, cancellationMode);
-
-                        // Flush any pending logs/progress before cancelling — they were already drained from the collectors
-                        if (pendingLogs.Count > 0)
-                        {
-                            ctx.Set<JobLog>().AddRange(pendingLogs);
-                        }
-
-                        if (pendingProgress.Count > 0)
-                        {
-                            ctx.Set<JobLog>().AddRange(pendingProgress);
-                        }
-
-                        if (pendingLogs.Count > 0 || pendingProgress.Count > 0)
-                        {
-                            await ctx.SaveChangesAsync(stoppingToken);
-                        }
-
-                        await jobCts.CancelAsync();
-                        return;
-                    }
-
-                    // The keep-alive also puts this worker's id on the row. The claim stamped the group's,
-                    // and a job that finishes before its first keep-alive never needed more: the row's
-                    // worker is what the dashboard shows for a job that is still running.
-                    var now = _timeProvider.GetUtcNow().UtcDateTime;
-                    await ctx.Set<Job>()
-                        .Where(x => x.Id == jobId)
-                        .ExecuteUpdateAsync(
-                            x => x
-                                .SetProperty(p => p.LastKeepAlive, now)
-                                .SetProperty(p => p.CurrentWorkerId, _workerId),
-                            stoppingToken);
-                }
-
-                if (pendingLogs.Count > 0)
-                {
-                    ctx.Set<JobLog>().AddRange(pendingLogs);
-                }
-
-                if (pendingProgress.Count > 0)
-                {
-                    ctx.Set<JobLog>().AddRange(pendingProgress);
-                }
-
-                if (pendingLogs.Count > 0 || pendingProgress.Count > 0)
-                {
-                    await ctx.SaveChangesAsync(stoppingToken);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception e)
-            {
-                _logger.LogWarning(e, "Failed job monitor for {jobId}", jobId);
-            }
-        }
     }
 
     /// <summary>

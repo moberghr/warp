@@ -100,6 +100,14 @@ public class WarpDispatcherHost<TContext> : IHostedService
                 _counterBuffer,
                 _sqlQueries.CompleteJobsAsync);
 
+            // One keep-alive and log flush loop for every job the group runs (rule 6.14).
+            var monitor = new RunningJobMonitor(
+                _serviceScopeFactory,
+                _timeProvider,
+                _configuration,
+                _sqlQueries.RenewRunningJobsAsync,
+                _loggerFactory.CreateLogger<RunningJobMonitor>());
+
             foreach (var workerId in registration.WorkerIds)
             {
                 var worker = new WarpDispatcherWorker<TContext>(
@@ -113,7 +121,8 @@ public class WarpDispatcherHost<TContext> : IHostedService
                     _signals,
                     dispatcher.Availability,
                     _counterBuffer,
-                    batch);
+                    batch,
+                    monitor);
 
                 await worker.StartAsync(cancellationToken);
                 _workers.Add(worker);

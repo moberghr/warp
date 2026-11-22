@@ -183,4 +183,17 @@ public interface IWarpSqlQueries<TContext>
     /// </para>
     /// </summary>
     Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct);
+
+    /// <summary>
+    /// Renews the keep-alive of a worker group's running jobs in one statement (rule 6.14): sets
+    /// <c>LastKeepAlive</c> to <paramref name="now"/> and <c>CurrentWorkerId</c> to the matching entry
+    /// of <paramref name="workerIds"/> on each job of <paramref name="jobIds"/> that is still
+    /// <c>Processing</c>, and returns those whose <c>CancellationMode</c> asks for cancellation.
+    /// </summary>
+    Task<IReadOnlyCollection<Guid>> RenewRunningJobsAsync(
+        DbContext context,
+        IReadOnlyList<Guid> jobIds,
+        IReadOnlyList<Guid> workerIds,
+        DateTime now,
+        CancellationToken ct);
 }

@@ -54,10 +54,18 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     // (see BeginFinalizingTransactionAsync).
     private readonly List<JobLog> _finalizationLogs = [];
     private readonly DeferredJobLog _processingLog = new();
+    private readonly RunningJobMonitor _monitor;
     private bool _finalizationAttempted;
 
     public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals, WarpCounterBuffer counterBuffer)
+        : this(workerId, serviceScopeFactory, logger, configuration, groupConfiguration, timeProvider, sqlQueries, notificationTransport, signals, counterBuffer, monitor: null)
     {
+    }
+
+    // The host passes the worker group's monitor (rule 6.14); built on its own, a worker watches its jobs alone.
+    internal WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals, WarpCounterBuffer counterBuffer, RunningJobMonitor? monitor)
+    {
+        _monitor = monitor ?? new RunningJobMonitor(serviceScopeFactory, timeProvider, configuration.Value, sqlQueries.RenewRunningJobsAsync, logger);
         _workerId = workerId;
         _serviceScopeFactory = serviceScopeFactory;
         _logger = logger;
@@ -150,7 +158,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         var logCollector = new JobLogCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
         var progressCollector = new JobProgressCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
         using var jobCts = new CancellationTokenSource();
-        var monitorTask = RunJobMonitor(job.Id, logCollector, progressCollector, jobCts, cancellationToken);
+        using var monitoring = _monitor.Register(job.Id, _workerId, logCollector, progressCollector, _processingLog, jobCts, cancellationToken);
 
         var activity = WarpTelemetry.StartJobActivity(job.TraceId ?? job.Id, job.ParentSpanId, job.Queue);
         var jobTypeName = WarpTelemetry.GetShortTypeName(job.Type);
@@ -271,8 +279,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             _logger.LogInformation("Worker {workerId} completed job {id}", _workerId, job.Id);
 
             PerfTrace.Mark(PerfTrace.CancelKeepAlive);
-            await jobCts.CancelAsync();
-            await monitorTask;
+            monitoring.Dispose();
 
             PerfTrace.Mark(PerfTrace.BeginTransaction2);
             await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
@@ -323,7 +330,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
             _logger.LogInformation("Job {id} was cancelled", job.Id);
-            await monitorTask;
+            monitoring.Dispose();
 
             var cancelNow = _timeProvider.GetUtcNow().UtcDateTime;
             await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
@@ -437,8 +444,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             // Full stack traces at Error level during dense multi-server test scenarios produce
             // many MB of log output per CI run without adding diagnostic value.
             _logger.LogInformation("Error executing job {id}: {exceptionType}: {message}", job.Id, e.GetType().Name, e.Message);
-            await jobCts.CancelAsync();
-            await monitorTask;
+            monitoring.Dispose();
 
             await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
             FinalizeJobState(workerContext, job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
@@ -502,113 +508,6 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         job.HandlerType = jobHandlerType.AssemblyQualifiedName;
         jobContext.HandlerType = jobHandlerType;
         await JobDispatcher.ExecuteJobHandler(payload, messageType, jobHandlerType, provider, cancellationToken);
-    }
-
-    private async Task RunJobMonitor(Guid jobId, JobLogCollector logCollector, JobProgressCollector progressCollector, CancellationTokenSource jobCts, CancellationToken stoppingToken)
-    {
-        var logFlushInterval = _configuration.LogFlushInterval;
-        var cancellationCheckInterval = _configuration.CancellationCheckInterval;
-        var tickInterval = logFlushInterval < cancellationCheckInterval ? logFlushInterval : cancellationCheckInterval;
-        var timeSinceLastCheck = TimeSpan.Zero;
-
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, jobCts.Token);
-        while (!linked.IsCancellationRequested)
-        {
-            // SuppressThrowing, not try/catch: the monitor is cancelled at the end of EVERY job, so a
-            // throwing Delay cost one first-chance exception per execution — a stack capture on the hot
-            // path, and the whole of BenchmarkDotNet's `// Exceptions: N` count on a healthy run.
-            await Task.Delay(tickInterval, linked.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            if (linked.IsCancellationRequested)
-            {
-                return;
-            }
-
-            timeSinceLastCheck += tickInterval;
-
-            try
-            {
-                var pendingLogs = logCollector.Drain();
-                var pendingProgress = progressCollector.Drain();
-
-                // The first flush of a job that has run this long carries its "Processing" row.
-                if (_processingLog.Take() is { } processing)
-                {
-                    pendingLogs.Insert(0, processing);
-                }
-
-                var doCancellationCheck = timeSinceLastCheck >= cancellationCheckInterval;
-
-                if (pendingLogs.Count == 0 && pendingProgress.Count == 0 && !doCancellationCheck)
-                {
-                    continue;
-                }
-
-                using var scope = _serviceScopeFactory.CreateScope();
-                var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-
-                if (doCancellationCheck)
-                {
-                    timeSinceLastCheck = TimeSpan.Zero;
-
-                    var cancellationMode = await context.Set<Job>()
-                        .Where(x => x.Id == jobId)
-                        .Select(x => x.CancellationMode)
-                        .FirstOrDefaultAsync(stoppingToken);
-
-                    if (cancellationMode != CancellationMode.None)
-                    {
-                        _logger.LogInformation("Job {jobId} cancellation requested ({mode}), cancelling handler", jobId, cancellationMode);
-
-                        // Flush any pending logs/progress before cancelling — they were already drained from the collectors
-                        if (pendingLogs.Count > 0)
-                        {
-                            context.Set<JobLog>().AddRange(pendingLogs);
-                        }
-
-                        if (pendingProgress.Count > 0)
-                        {
-                            context.Set<JobLog>().AddRange(pendingProgress);
-                        }
-
-                        if (pendingLogs.Count > 0 || pendingProgress.Count > 0)
-                        {
-                            await context.SaveChangesAsync(stoppingToken);
-                        }
-
-                        await jobCts.CancelAsync();
-                        return;
-                    }
-
-                    var now = _timeProvider.GetUtcNow().UtcDateTime;
-                    await context.Set<Job>()
-                        .Where(x => x.Id == jobId)
-                        .ExecuteUpdateAsync(x => x.SetProperty(p => p.LastKeepAlive, now), stoppingToken);
-                }
-
-                if (pendingLogs.Count > 0)
-                {
-                    context.Set<JobLog>().AddRange(pendingLogs);
-                }
-
-                if (pendingProgress.Count > 0)
-                {
-                    context.Set<JobLog>().AddRange(pendingProgress);
-                }
-
-                if (pendingLogs.Count > 0 || pendingProgress.Count > 0)
-                {
-                    await context.SaveChangesAsync(stoppingToken);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception e)
-            {
-                _logger.LogWarning(e, "Failed job monitor for {jobId}", jobId);
-            }
-        }
     }
 
     // DeleteJob sets CancellationMode on the ROW while this worker holds the entity it claimed, which

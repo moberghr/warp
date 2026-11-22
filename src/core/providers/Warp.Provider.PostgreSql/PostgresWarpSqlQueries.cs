@@ -21,6 +21,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     private readonly string _claimEnqueuedJobsSql;
     private readonly string _claimEnqueuedMessagesSql;
     private readonly string _completeJobsSql;
+    private readonly string _renewRunningJobsSql;
     private readonly string _lockStaleProcessingJobsSql;
     private readonly string _lockJobByIdWaitSql;
     private readonly string _lockAllServersSql;
@@ -154,6 +155,17 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             WHERE l.job_id IN (SELECT id FROM done)
             )
             SELECT id FROM done";
+
+        // One keep-alive for every job a worker group is running (rule 6.14). Only rows still Processing
+        // are touched, so a renewal that races a job's completion writes nothing to the finished row.
+        _renewRunningJobsSql = $@"
+            UPDATE {table} AS t
+            SET ""{_n.LastKeepAlive}"" = @now,
+                ""{_n.CurrentWorkerId}"" = beat.worker
+            FROM unnest(@ids, @workers) AS beat(id, worker)
+            WHERE t.""{_n.Id}"" = beat.id
+              AND t.""{_n.CurrentState}"" = {(int)State.Processing}
+            RETURNING t.""{_n.Id}"" AS ""Id"", t.""{_n.CancellationMode}"" AS ""Mode""";
 
         _lockStaleProcessingJobsSql = $@"
             SELECT * FROM {table}
@@ -534,6 +546,40 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 await conn.CloseAsync();
             }
         }
+    }
+
+    // Through EF's raw-SQL query, not a bare command: it runs on the context's connection and in its
+    // transaction like any other statement, and EF's command interceptors see it, which is how a test
+    // makes one renewal fail.
+    public async Task<IReadOnlyCollection<Guid>> RenewRunningJobsAsync(
+        DbContext context,
+        IReadOnlyList<Guid> jobIds,
+        IReadOnlyList<Guid> workerIds,
+        DateTime now,
+        CancellationToken ct)
+    {
+        if (jobIds.Count == 0)
+        {
+            return [];
+        }
+
+        var renewed = await context.Database
+            .SqlQueryRaw<RenewedJob>(
+                _renewRunningJobsSql,
+                new NpgsqlParameter<Guid[]>("ids", [.. jobIds]),
+                new NpgsqlParameter<Guid[]>("workers", [.. workerIds]),
+                new NpgsqlParameter<DateTime>("now", DateTime.SpecifyKind(now, DateTimeKind.Utc)))
+            .ToListAsync(ct);
+
+        return [.. renewed.Where(x => x.Mode != (int)CancellationMode.None).Select(x => x.Id)];
+    }
+
+    // One row of the keep-alive statement's result.
+    internal sealed class RenewedJob
+    {
+        public Guid Id { get; set; }
+
+        public int Mode { get; set; }
     }
 
     // Warp's DateTime columns are timestamptz holding UTC (rule 5.12). The kind is stated outright: the

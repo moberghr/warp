@@ -1,6 +1,7 @@
 using System.Data;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Warp.Core.Data.Entities;
@@ -29,6 +30,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     private readonly string _claimEnqueuedJobsSql;
     private readonly string _claimEnqueuedMessagesSql;
     private readonly string _completeJobsSql;
+    private readonly string _renewRunningJobsSql;
     private readonly string _lockStaleProcessingJobsSql;
     private readonly string _lockJobByIdWaitSql;
     private readonly string _lockAllServersSql;
@@ -138,6 +140,19 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             WHERE l.j IN (SELECT id FROM @done);
 
             SELECT id FROM @done;";
+
+        // One keep-alive for every job a worker group is running (rule 6.14). Only rows still Processing
+        // are touched, so a renewal that races a job's completion writes nothing to the finished row.
+        // LOOP JOIN with the JSON rows outermost and ROWLOCK for the same reason as the completion: one
+        // primary-key seek per job, never a scan that locks other workers' rows.
+        _renewRunningJobsSql = $@"
+            UPDATE t
+            SET [{_n.LastKeepAlive}] = @now,
+                [{_n.CurrentWorkerId}] = beat.w
+            OUTPUT INSERTED.[{_n.Id}] AS [Id], INSERTED.[{_n.CancellationMode}] AS [Mode]
+            FROM OPENJSON(@beats) WITH (i uniqueidentifier, w uniqueidentifier) AS beat
+            INNER LOOP JOIN {table} AS t WITH (ROWLOCK) ON t.[{_n.Id}] = beat.i
+            WHERE t.[{_n.CurrentState}] = {(int)State.Processing};";
 
         _lockStaleProcessingJobsSql = $@"
             SELECT *
@@ -524,6 +539,46 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
                 await conn.CloseAsync();
             }
         }
+    }
+
+    // Through EF's raw-SQL query, not a bare command: it runs on the context's connection and in its
+    // transaction like any other statement, and EF's command interceptors see it, which is how a test
+    // makes one renewal fail.
+    public async Task<IReadOnlyCollection<Guid>> RenewRunningJobsAsync(
+        DbContext context,
+        IReadOnlyList<Guid> jobIds,
+        IReadOnlyList<Guid> workerIds,
+        DateTime now,
+        CancellationToken ct)
+    {
+        if (jobIds.Count == 0)
+        {
+            return [];
+        }
+
+        var beats = jobIds.Select((x, i) => (Job: x, Worker: workerIds[i])).ToList();
+        var json = WriteJson(beats, static (writer, beat) =>
+        {
+            writer.WriteString("i", beat.Job);
+            writer.WriteString("w", beat.Worker);
+        });
+
+        var renewed = await context.Database
+            .SqlQueryRaw<RenewedJob>(
+                _renewRunningJobsSql,
+                new SqlParameter("@beats", SqlDbType.NVarChar, -1) { Value = json },
+                new SqlParameter("@now", SqlDbType.DateTime2) { Value = now })
+            .ToListAsync(ct);
+
+        return [.. renewed.Where(x => x.Mode != (int)CancellationMode.None).Select(x => x.Id)];
+    }
+
+    // One row of the keep-alive statement's result.
+    internal sealed class RenewedJob
+    {
+        public Guid Id { get; set; }
+
+        public int Mode { get; set; }
     }
 
     private static void AddJson(System.Data.Common.DbCommand cmd, string name, string json)

@@ -161,12 +161,57 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
         logs.ShouldNotContain(x => string.Equals(x.EventType, "Cancelled", StringComparison.Ordinal));
     }
 
+    // Rule 6.14: a worker group renews all its running jobs in one statement. Two jobs renewed by one
+    // statement carry the same instant, which separate per-job renewals would not.
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenTwoLongRunningHandlersInOneGroup_WhileTheyRun_ThenOneRenewalStampsBoth(bool useDispatcher)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var barrier = new BarrierSignal();
+        await using var server = await StartAsync(useDispatcher, barrier);
+        var publisher = server.CreatePublisher();
+        var first = await publisher.Enqueue(new BarrierRequest());
+        var second = await publisher.Enqueue(new BarrierRequest());
+        await publisher.SaveChangesAsync(ct);
+
+        try
+        {
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), ct)).ShouldBeTrue("the first handler never started");
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), ct)).ShouldBeTrue("the second handler never started");
+
+            var firstAtStart = (await server.GetJob(first)).LastKeepAlive;
+            var secondAtStart = (await server.GetJob(second)).LastKeepAlive;
+
+            // Once both have been renewed since they started, the latest renewal covered both.
+            await WarpTestServer.WaitUntil(
+                "Both running jobs renewed by the same statement",
+                async () =>
+                {
+                    var a = (await server.GetJob(first)).LastKeepAlive;
+                    var b = (await server.GetJob(second)).LastKeepAlive;
+
+                    return a > firstAtStart && b > secondAtStart && a == b;
+                },
+                TimeSpan.FromSeconds(5),
+                ct);
+        }
+        finally
+        {
+            barrier.CanFinish.Release(2);
+        }
+
+        await server.WaitForJobState(first, State.Completed, TimeSpan.FromSeconds(5));
+        await server.WaitForJobState(second, State.Completed, TimeSpan.FromSeconds(5));
+    }
+
     [TimedTheory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task GivenOneKeepAliveRenewalFails_WhileTheHandlerRuns_ThenLaterRenewalsStillHappen(bool useDispatcher)
     {
-        // The job monitor shares nothing with the handler but the row. One failed renewal (a dropped
+        // The group's job monitor shares nothing with the handler but the row. One failed renewal (a dropped
         // connection) must be logged and survived: a monitor that died there would leave a healthy,
         // still-running job to be requeued by StaleJobRecovery and run twice.
         var barrier = new BarrierSignal();
@@ -301,36 +346,29 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
                 configureServices?.Invoke(services);
             });
 
-    // Throws once, on the statement the job monitor uses to renew a running job's keep-alive. The claim
-    // and the dispatcher's guarded renewal also write that column, but they name the state as well, so
-    // they are left alone.
+    // Throws once, on the statement the worker group's monitor uses to renew its running jobs' keep-alive
+    // (rule 6.14). The provider SQL names its rows "beat", which nothing else does.
     private sealed class FailFirstKeepAliveInterceptor : DbCommandInterceptor
     {
         private int _failures;
 
         public int Failures => Volatile.Read(ref _failures);
 
-        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
             DbCommand command,
             CommandEventData eventData,
-            InterceptionResult<int> result,
+            InterceptionResult<DbDataReader> result,
             CancellationToken cancellationToken = default)
         {
-            var sql = command.CommandText.Replace("_", string.Empty, StringComparison.Ordinal);
+            var renewsKeepAlive = command.CommandText.Contains("UPDATE", StringComparison.OrdinalIgnoreCase)
+                && command.CommandText.Contains(" beat", StringComparison.OrdinalIgnoreCase);
 
-            // The monitor's renewal is the one update of the keep-alive that never mentions the state: the
-            // claim, the dispatcher's guarded renewal and the finalizing write all do. (In dispatcher mode
-            // it also stamps the worker's id, so that column cannot tell them apart.)
-            var renewsKeepAliveOnly = sql.Contains("UPDATE", StringComparison.OrdinalIgnoreCase)
-                && sql.Contains("lastkeepalive", StringComparison.OrdinalIgnoreCase)
-                && !sql.Contains("currentstate", StringComparison.OrdinalIgnoreCase);
-
-            if (renewsKeepAliveOnly && Interlocked.CompareExchange(ref _failures, 1, 0) == 0)
+            if (renewsKeepAlive && Interlocked.CompareExchange(ref _failures, 1, 0) == 0)
             {
                 throw new InvalidOperationException("Injected failure: the keep-alive renewal could not reach the database");
             }
 
-            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
     }
 }
