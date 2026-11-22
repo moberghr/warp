@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Notifications;
@@ -58,6 +59,28 @@ public class WarpDatabaseConnectionTests
         var connection = provider.GetRequiredService<WarpDatabaseConnection<TestContext>>();
 
         connection.ConnectionString.ShouldBeSameAs(connection.ConnectionString);
+    }
+
+    // A context configured with a data source (Aspire, managed identity, IAM tokens) has no connection
+    // string in its options, so the string is read from a short-lived context instead. That fallback
+    // once built the context on options whose scope had already been disposed and threw.
+    [TimedFact]
+    public async Task ConnectionString_ContextConfiguredWithDataSource_ReadsItFromAContext()
+    {
+        await using var dataSource = NpgsqlDataSource.Create("Host=warp-datasource-test;Database=warp;Username=u");
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddDbContext<TestContext>(x => x.UseNpgsql(dataSource).UseSnakeCaseNamingConvention());
+        services.AddWarp<TestContext>();
+        await using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var connection = provider.GetRequiredService<WarpDatabaseConnection<TestContext>>();
+
+        // The premise of the test: the options themselves carry no connection string.
+        connection.Options.Extensions.OfType<RelationalOptionsExtension>().Single().ConnectionString.ShouldBeNullOrEmpty();
+
+        var resolved = new NpgsqlConnectionStringBuilder(connection.ConnectionString);
+        resolved.Host.ShouldBe("warp-datasource-test");
+        resolved.Database.ShouldBe("warp");
     }
 
     private static List<Microsoft.EntityFrameworkCore.Diagnostics.IInterceptor> Interceptors(DbContextOptions options) =>

@@ -94,6 +94,37 @@ public sealed class Orchestrator<TContext> : IServerTask
         return finalized > 0 || activated > 0 || cleaned > 0;
     }
 
+    // Internal and static so OrchestratorReadyParentsPlanTests can measure the pages THIS query reads
+    // (rule 6.11), not a copy of it.
+    internal static IQueryable<Job> ReadyParentsQuery(DbContext context, int batchSize)
+    {
+        var settledParents = context.Set<Job>()
+            .Where(p => p.CurrentState == State.Awaiting || p.CurrentState == State.Processing)
+            .Where(p => !context.Set<Job>()
+                .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
+                    && c.CurrentState != State.Completed && c.CurrentState != State.Failed
+                    && c.CurrentState != State.Deleted && c.CurrentState != State.Awaiting))
+            .Where(p => context.Set<Job>()
+                .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
+                    && (c.CurrentState == State.Completed || c.CurrentState == State.Failed || c.CurrentState == State.Deleted)));
+
+        var readyMessages = settledParents
+            .Where(p => p.Kind == JobKind.Message)
+            .OrderBy(p => p.CurrentState)
+            .ThenBy(p => p.CreateTime)
+            .Take(batchSize);
+
+        var readyBatches = settledParents
+            .Where(p => p.Kind == JobKind.Batch)
+            .OrderBy(p => p.CurrentState)
+            .ThenBy(p => p.CreateTime)
+            .Take(batchSize);
+
+        return readyMessages
+            .Concat(readyBatches)
+            .Take(batchSize);
+    }
+
     private async Task<int> FinalizeParentsAsync(TimeSpan jobExpirationTimeout, CancellationToken ct)
     {
         // Bound the candidate set so one iteration can't churn through tens of thousands of
@@ -113,33 +144,7 @@ public sealed class Orchestrator<TContext> : IServerTask
         // vacuum catches up, and the query walked all of them to return nothing: measured 10,004 pages
         // per call against 6, on a table with no batch or message in it, up to ~100 pages per job across
         // a run since this task ticks on almost every finalization.
-        var batchSize = _configuration.ServerTaskBatchSize;
-        var settledParents = _context.Set<Job>()
-            .Where(p => p.CurrentState == State.Awaiting || p.CurrentState == State.Processing)
-            .Where(p => !_context.Set<Job>()
-                .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
-                    && c.CurrentState != State.Completed && c.CurrentState != State.Failed
-                    && c.CurrentState != State.Deleted && c.CurrentState != State.Awaiting))
-            .Where(p => _context.Set<Job>()
-                .Any(c => c.ParentJobId == p.Id && c.Kind == JobKind.Job
-                    && (c.CurrentState == State.Completed || c.CurrentState == State.Failed || c.CurrentState == State.Deleted)));
-
-        var readyMessages = settledParents
-            .Where(p => p.Kind == JobKind.Message)
-            .OrderBy(p => p.CurrentState)
-            .ThenBy(p => p.CreateTime)
-            .Take(batchSize);
-
-        var readyBatches = settledParents
-            .Where(p => p.Kind == JobKind.Batch)
-            .OrderBy(p => p.CurrentState)
-            .ThenBy(p => p.CreateTime)
-            .Take(batchSize);
-
-        var readyParents = await readyMessages
-            .Concat(readyBatches)
-            .Take(batchSize)
-            .ToListAsync(ct);
+        var readyParents = await ReadyParentsQuery(_context, _configuration.ServerTaskBatchSize).ToListAsync(ct);
 
         if (readyParents.Count == 0)
         {
