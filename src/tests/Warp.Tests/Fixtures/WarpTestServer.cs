@@ -504,9 +504,14 @@ public class WarpTestServer : IAsyncDisposable
         throw new TimeoutException($"Jobs on queue {queue} did not leave Enqueued within {timeout ?? TimeSpan.FromSeconds(15)}");
     }
 
+    // The default sits just under the 10s [TimedFact] budget on purpose. It used to be 30s, so in a
+    // default-budget test the runner cancelled the test first and the diagnostics dump below (every
+    // job, its logs, the server tasks) was never printed. A test with a raised budget passes its own.
+    private static readonly TimeSpan DefaultCompletionTimeout = TimeSpan.FromSeconds(8);
+
     public async Task WaitForCompletion(TimeSpan? timeout = null)
     {
-        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(30));
+        var deadline = DateTime.UtcNow + (timeout ?? DefaultCompletionTimeout);
         while (DateTime.UtcNow < deadline)
         {
             var ctx = CreateContext();
@@ -536,7 +541,7 @@ public class WarpTestServer : IAsyncDisposable
         }
 
         throw new TimeoutException(await _fixture.DumpDiagnosticsAsync(
-            $"Not all jobs completed within {(timeout ?? TimeSpan.FromSeconds(30)).TotalSeconds:0.#}s.",
+            $"Not all jobs completed within {(timeout ?? DefaultCompletionTimeout).TotalSeconds:0.#}s.",
             Xunit.TestContext.Current.CancellationToken));
     }
 
