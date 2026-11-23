@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -327,6 +329,55 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
             .Where(x => x.Id != jobId)
             .CountAsync(Xunit.TestContext.Current.CancellationToken);
         staged.ShouldBe(0);
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenInformationLoggingForTheWorker_WhenAJobRuns_ThenItsExecutingAndCompletedLinesAreLogged(bool useDispatcher)
+    {
+        // The per-job lines are guarded by IsEnabled (they boxed their arguments on every job even with
+        // Information off); with it on they must still be written.
+        var capture = new CapturingLoggerProvider();
+        await using var server = await StartAsync(useDispatcher, new BarrierSignal(), services =>
+        {
+            services.AddSingleton<ILoggerProvider>(capture);
+            services.Configure<LoggerFilterOptions>(x => x.AddFilter<CapturingLoggerProvider>("Warp.Worker", LogLevel.Information));
+        });
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new UnitRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        await server.WaitForJobState(jobId, State.Completed);
+
+        // Assert
+        capture.Messages.ShouldContain(x => x.Contains("executing job " + jobId, StringComparison.Ordinal));
+        capture.Messages.ShouldContain(x => x.Contains("completed job " + jobId, StringComparison.Ordinal));
+    }
+
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        public ConcurrentQueue<string> Messages { get; } = new();
+
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(Messages);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class CapturingLogger(ConcurrentQueue<string> messages) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                messages.Enqueue(formatter(state, exception));
+            }
+        }
     }
 
     private Task<WarpTestServer> StartAsync(bool useDispatcher, BarrierSignal barrier, Action<IServiceCollection>? configureServices = null) =>
