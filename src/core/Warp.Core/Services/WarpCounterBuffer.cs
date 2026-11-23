@@ -36,7 +36,8 @@ public sealed class WarpCounterBuffer
 
     public void Add(string key, long value)
     {
-        _pending.AddOrUpdate(key, value, (_, existing) => existing + value);
+        // The argument overload: the lambdas capture nothing, so an increment allocates no closure.
+        _pending.AddOrUpdate(key, static (_, v) => v, static (_, existing, v) => existing + v, value);
     }
 
     public void AddRange(IEnumerable<KeyValuePair<string, long>> increments)

@@ -273,6 +273,11 @@ internal sealed class CompletionBatch
                 // retried batch cannot leave them counted. A job the statement skipped, because its row
                 // was deleted while it ran, counts nothing either.
                 var writtenIds = written.Count == count ? null : written.ToHashSet();
+
+                // Summed here first, then added to the process-wide buffer once per key: every job of a flush
+                // increments the same ~20 keys, and adding each job's increments one by one contended on the
+                // buffer's per-key locks with every other worker of the process.
+                var totals = new Dictionary<string, long>(StringComparer.Ordinal);
                 for (var i = start; i < start + count; i++)
                 {
                     if (writtenIds != null && !writtenIds.Contains(entries[i].Job.Id))
@@ -286,8 +291,13 @@ internal sealed class CompletionBatch
 
                     foreach (var counter in entries[i].Counters)
                     {
-                        _counterBuffer.Add(counter.Key, counter.Value);
+                        totals[counter.Key] = totals.GetValueOrDefault(counter.Key) + counter.Value;
                     }
+                }
+
+                foreach (var (key, value) in totals)
+                {
+                    _counterBuffer.Add(key, value);
                 }
 
                 return;
