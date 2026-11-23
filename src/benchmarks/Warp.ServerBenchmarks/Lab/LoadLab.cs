@@ -890,7 +890,13 @@ public static class LoadLab
 
         await PublishAsync(host, jobs, payloadBytes, types, arrivalPerSecond, scenario, concurrency);
         Console.WriteLine($"  publish complete");
+
+        // Opt-in (WARP_LAB_ALLOC=1): what the workers allocate, sampled after the publish so the
+        // publisher's own allocations stay out. Jobs finished during the publish are not in the window.
+        var remaining = AllocationSampler.IsRequested ? jobs - await CountFinishedAsync(host) : 0;
+        using var allocations = AllocationSampler.IsRequested ? new AllocationSampler() : null;
         await WaitForDrainAsync(host, TimeSpan.FromMinutes(90));
+        allocations?.Report(remaining);
 
         await stopProgress.CancelAsync();
         await progress;
@@ -1217,6 +1223,18 @@ public static class LoadLab
         var effectiveLimit = scenario == LoadScenario.Mutex ? 1 : shape.Limit;
 
         return $"  keys={shape.Keys}  limit={effectiveLimit}  mode={shape.Mode}  handlerMs={shape.HandlerMs}";
+    }
+
+    private static async Task<int> CountFinishedAsync(IHost host)
+    {
+        await using var scope = host.Services.CreateAsyncScope();
+        var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
+        HarnessQueries.Count();
+
+        return await ctx.Set<Job>()
+            .Where(x => x.Kind == JobKind.Job)
+            .Where(x => x.CurrentState == State.Completed || x.CurrentState == State.Failed || x.CurrentState == State.Deleted)
+            .CountAsync();
     }
 
     private static async Task WaitForDrainAsync(IHost host, TimeSpan timeout)
