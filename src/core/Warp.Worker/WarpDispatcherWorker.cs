@@ -29,8 +29,8 @@ namespace Warp.Worker;
 /// <summary>
 /// Worker that receives pre-fetched jobs from a dispatcher channel.
 /// Pure executor — handles execution and completion only. Orchestration handled by Orchestrator.
-/// Completions are buffered in a per-worker <see cref="CompletionBatch"/> and flushed
-/// as a single multi-row transaction when any of: size threshold, time threshold, idle, or shutdown fires.
+/// Completions go to the group's <see cref="CompletionFlusher{TContext}"/>, which writes them; the worker
+/// never waits on that write (rule 6.13).
 /// </summary>
 public class WarpDispatcherWorker<TContext> : BackgroundService
     where TContext : DbContext
@@ -41,12 +41,9 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly ILogger<WarpDispatcherWorker<TContext>> _logger;
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
-    private readonly CompletionBatch _batch;
+    private readonly CompletionFlusher<TContext> _flusher;
     private readonly RunningJobMonitor _monitor;
-    private volatile bool _stopped;
     private readonly DispatcherWorkerAvailability _availability;
-    private readonly IWarpNotificationTransport _notificationTransport;
-    private readonly ServerTaskSignals<TContext> _signals;
     private readonly WarpCounterBuffer _counterBuffer;
 
     internal WarpDispatcherWorker(
@@ -56,11 +53,9 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         ILogger<WarpDispatcherWorker<TContext>> logger,
         IOptions<WarpServerConfiguration> configuration,
         TimeProvider timeProvider,
-        IWarpNotificationTransport notificationTransport,
-        ServerTaskSignals<TContext> signals,
         DispatcherWorkerAvailability availability,
         WarpCounterBuffer counterBuffer,
-        CompletionBatch batch,
+        CompletionFlusher<TContext> flusher,
         RunningJobMonitor monitor)
     {
         _monitor = monitor;
@@ -72,9 +67,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         _logger = logger;
         _configuration = configuration.Value;
         _timeProvider = timeProvider;
-        _notificationTransport = notificationTransport;
-        _signals = signals;
-        _batch = batch;
+        _flusher = flusher;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -114,92 +107,14 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                     _availability.Release();
                 }
 
-                // The group's buffer (rule 6.13) is flushed when it is full, when it has waited
-                // CompletionFlushInterval (the timer AddCompletion starts), or here, the moment the
-                // group has nothing left claimed: the last job of a burst is written at once, and a
-                // lone job never waits for the timer. Not whenever this one worker finds the channel
-                // empty, which with several workers was after every second job.
-                if (_batch.IsFull || _batch.IsTimeElapsed || _availability.Outstanding == 0)
-                {
-                    await FlushBatchSafely();
-                }
+                // The group's flusher writes the completion (rule 6.13); this worker only tells it when
+                // the group has nothing left claimed, and goes straight back to the channel.
+                _flusher.SlotReleased();
             }
         }
     }
 
-    // Buffers a finished job. The first completion of a new buffer starts the clock: whatever is still
-    // buffered CompletionFlushInterval from now is flushed then, even if every worker of the group is
-    // inside a long handler and none comes back to check.
-    private void AddCompletion(PendingCompletion completion)
-    {
-        if (_batch.Add(completion, out var generation))
-        {
-            _ = FlushWhenDueAsync(generation);
-        }
-    }
-
-    private async Task FlushWhenDueAsync(long generation)
-    {
-        await Task.Delay(_batch.FlushInterval, _timeProvider).ConfigureAwait(false);
-
-        // Flush the buffer this timer was started for if it is still waiting, by its generation and
-        // not by IsTimeElapsed: the timer and the clock that check reads are different sources, so
-        // the timer can fire a hair before the clock agrees, and that buffer would then wait for the
-        // next trigger, which may not come until a long handler returns. Nor whatever is buffered
-        // now: when the buffer was flushed early (full, or the group idle), a later buffer may be a
-        // moment old, and flushing it halved the batches under load (about 18 jobs per flush down to
-        // about 10). After StopAsync the final flush has run and the scope factory may be gone.
-        if (!_stopped && _batch.Holds(generation))
-        {
-            await FlushBatchSafely();
-        }
-    }
-
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        await base.StopAsync(cancellationToken);
-        _stopped = true;
-
-        try
-        {
-            var flushed = await _batch.FlushAsync();
-            _signals.SignalJobsFinalized(flushed.Parents, flushed.Settled);
-            await NotificationDispatch.FireAsync(
-                _notificationTransport,
-                [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(flushed.Parents, flushed.Settled))],
-                cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Final batch flush on shutdown failed");
-        }
-    }
-
-    private async Task FlushBatchSafely()
-    {
-        if (_batch.Count == 0)
-        {
-            return;
-        }
-
-        try
-        {
-            // What the flush took goes with the wake, as in WarpWorkerService (rule 6.11).
-            var flushed = await _batch.FlushAsync();
-            _signals.SignalJobsFinalized(flushed.Parents, flushed.Settled);
-            await NotificationDispatch.FireAsync(
-                _notificationTransport,
-                [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(flushed.Parents, flushed.Settled))]);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to flush completion batch");
-        }
-    }
+    private void AddCompletion(PendingCompletion completion) => _flusher.Add(completion);
 
     private async Task ProcessJob(Job job, CancellationToken cancellationToken)
     {

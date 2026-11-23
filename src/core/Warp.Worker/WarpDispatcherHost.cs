@@ -36,6 +36,7 @@ public class WarpDispatcherHost<TContext> : IHostedService
     private readonly ILoggerFactory _loggerFactory;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
     private readonly List<BackgroundService> _workers = [];
+    private readonly List<CompletionFlusher<TContext>> _flushers = [];
 
     public WarpDispatcherHost(
         IOptions<WarpServerConfiguration> configuration,
@@ -100,6 +101,17 @@ public class WarpDispatcherHost<TContext> : IHostedService
                 _counterBuffer,
                 _sqlQueries.CompleteJobsAsync);
 
+            // ... and one loop that writes it, so no worker waits on a completion write (rule 6.13).
+            var flusher = new CompletionFlusher<TContext>(
+                batch,
+                dispatcher.Availability,
+                _timeProvider,
+                _signals,
+                _notificationTransport,
+                _loggerFactory.CreateLogger<CompletionFlusher<TContext>>());
+            flusher.Start();
+            _flushers.Add(flusher);
+
             // One keep-alive and log flush loop for every job the group runs (rule 6.14).
             var monitor = new RunningJobMonitor(
                 _serviceScopeFactory,
@@ -117,11 +129,9 @@ public class WarpDispatcherHost<TContext> : IHostedService
                     _loggerFactory.CreateLogger<WarpDispatcherWorker<TContext>>(),
                     _configurationOptions,
                     _timeProvider,
-                    _notificationTransport,
-                    _signals,
                     dispatcher.Availability,
                     _counterBuffer,
-                    batch,
+                    flusher,
                     monitor);
 
                 await worker.StartAsync(cancellationToken);
@@ -134,5 +144,9 @@ public class WarpDispatcherHost<TContext> : IHostedService
     {
         var tasks = _workers.Select(x => x.StopAsync(cancellationToken));
         await Task.WhenAll(tasks);
+
+        // Only once every worker has stopped: nothing is added after this, and the final flush writes
+        // the last completions.
+        await Task.WhenAll(_flushers.Select(x => x.StopAsync(cancellationToken)));
     }
 }
