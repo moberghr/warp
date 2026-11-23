@@ -45,6 +45,7 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
     private readonly ILogger _logger;
 
     private readonly SemaphoreSlim _signal = new(0, 1);
+    private readonly TimeSpan _startupDelay;
     private readonly Lock _signalLock = new();
     private int? _serverTaskId;
 
@@ -58,8 +59,10 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
         IWarpLockProvider lockProvider,
         TimeProvider time,
         Guid serverId,
-        ILogger logger)
+        ILogger logger,
+        TimeSpan? startupDelay = null)
     {
+        _startupDelay = startupDelay ?? TimeSpan.Zero;
         _taskType = template.GetType();
         _name = template.Name;
         _lockKey = template.LockKey;
@@ -136,6 +139,13 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                     return;
                 }
             }
+        }
+
+        // The first run waits a random part of the startup delay (rule 6.18); a signal ends the wait.
+        var firstRunDelay = FirstRunDelay(_defaultInterval, _startupDelay, Random.Shared.NextDouble());
+        if (firstRunDelay > TimeSpan.Zero)
+        {
+            await WaitForNextRunAsync(firstRunDelay, ct);
         }
 
         while (!ct.IsCancellationRequested)
@@ -415,6 +425,22 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
     internal void SetServerTaskIdForTest(int id) => _serverTaskId = id;
 
     internal TimeSpan DefaultInterval => _defaultInterval;
+
+    /// <summary>
+    /// How long a task waits before its first run: <paramref name="sample"/> (0 to 1) of the smaller of its
+    /// interval and the configured startup delay, so tasks and servers starting together spread out.
+    /// </summary>
+    internal static TimeSpan FirstRunDelay(TimeSpan interval, TimeSpan startupDelay, double sample)
+    {
+        if (startupDelay <= TimeSpan.Zero || interval <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        var bound = interval < startupDelay ? interval : startupDelay;
+
+        return bound * Math.Clamp(sample, 0, 1);
+    }
 
     // Set by ServerTaskHost when it registered every task of the server in one statement; the loop then
     // skips its own registration. Must be called before RunAsync.
