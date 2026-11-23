@@ -113,11 +113,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
         var job = claimed[0];
 
-        // Guarded: the call boxes its arguments into an array on every job even when Information is off.
-        if (_logger.IsEnabled(LogLevel.Information))
-        {
-            _logger.LogInformation("Worker {workerId} fetched job {id}", _workerId, job.Id);
-        }
+        WorkerLog.FetchedJob(_logger, _workerId, job.Id);
 
         // OTel "receive" span — covers post-fetch / pre-handler bookkeeping (the Processing
         // log row + commit). Closes before the consumer span opens, so receive and process
@@ -188,11 +184,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         {
             PerfTrace.Mark(PerfTrace.ExecuteHandler);
 
-            // Guarded: the call boxes its arguments into an array on every job even when Information is off.
-            if (_logger.IsEnabled(LogLevel.Information))
-            {
-                _logger.LogInformation("Worker {workerId} executing job {id}", _workerId, job.Id);
-            }
+            WorkerLog.ExecutingJob(_logger, _workerId, job.Id);
 
             if (_configuration.EnableHandlerLogging)
             {
@@ -284,11 +276,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
 
-            // Guarded: the call boxes its arguments into an array on every job even when Information is off.
-            if (_logger.IsEnabled(LogLevel.Information))
-            {
-                _logger.LogInformation("Worker {workerId} completed job {id}", _workerId, job.Id);
-            }
+            WorkerLog.CompletedJob(_logger, _workerId, job.Id);
 
             PerfTrace.Mark(PerfTrace.CancelKeepAlive);
             monitoring.Dispose();

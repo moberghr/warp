@@ -85,6 +85,13 @@ internal static class JobDispatcher
         IServiceProvider provider,
         CancellationToken cancellationToken)
     {
+        // The generator's typed dispatch when it saw this type (the common case); reflection for a type
+        // registered by hand, or an assembly built without the generator.
+        if (WarpGeneratedHandlerRegistry.TryGetJobDispatch(messageType, out var dispatch))
+        {
+            return dispatch(message, handlerType, provider, cancellationToken);
+        }
+
         var typedMethod = _typedHandlerCoreMethodCache.GetOrAdd(
             messageType,
             t => ExecuteTypedHandlerCoreMethodInfo.MakeGenericMethod(t));

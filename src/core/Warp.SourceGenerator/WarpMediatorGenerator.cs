@@ -935,6 +935,20 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
         sb.AppendLine("        }");
         sb.AppendLine();
 
+        // Hands each typed method to Core at assembly load, so the worker calls the handler and its
+        // pipeline directly instead of through reflection. A module initializer of its own, inside this
+        // class, so it never names a GeneratedJobDispatcher another referenced assembly also declares.
+        sb.AppendLine("        [global::System.Runtime.CompilerServices.ModuleInitializer]");
+        sb.AppendLine("        internal static void RegisterJobDispatch()");
+        sb.AppendLine("        {");
+        foreach (var job in jobTypes)
+        {
+            sb.AppendLine($"            global::Warp.Core.Handlers.WarpGeneratedHandlerRegistry.AddJobDispatch(typeof({job.JobFullName}), static (message, handlerType, provider, cancellationToken) => {job.MethodName}(({job.JobFullName})message, handlerType, provider, cancellationToken));");
+        }
+
+        sb.AppendLine("        }");
+        sb.AppendLine();
+
         // Per-type execute methods
         foreach (var job in jobTypes)
         {
@@ -953,8 +967,12 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
             }
             else
             {
-                // IJob: single handler
+                // IJob: the single (last registered) handler, unless the row names another one.
                 sb.AppendLine($"            var handler = provider.GetRequiredService<global::Warp.Core.Handlers.IJobHandler<{job.JobFullName}>>();");
+                sb.AppendLine("            if (handler.GetType() != handlerType)");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                handler = provider.GetServices<global::Warp.Core.Handlers.IJobHandler<{job.JobFullName}>>().First(h => h!.GetType() == handlerType)!;");
+                sb.AppendLine("            }");
             }
 
             sb.AppendLine($"            var behaviors = provider.GetServices<global::Warp.Core.Handlers.IPipelineBehavior<{job.JobFullName}, global::Warp.Core.Handlers.Unit>>().ToArray();");
