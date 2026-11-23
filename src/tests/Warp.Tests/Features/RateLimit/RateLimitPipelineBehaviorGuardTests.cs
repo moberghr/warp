@@ -59,14 +59,11 @@ public class RateLimitPipelineBehaviorGuardTests
     private static RateLimitPipelineBehavior<TRequest, TResponse> Build<TRequest, TResponse>(JobContext ctx, IWarpLockProvider lockProvider)
         where TRequest : IRequest<TResponse>
     {
-        var manager = new Mock<IRateLimitManager>();
-        manager.Setup(x => x.GetLimit(It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((RateLimitInfo?)null);
-
         return new RateLimitPipelineBehavior<TRequest, TResponse>(
             ctx,
             lockProvider,
             Mock.Of<IRateLimitStore>(),
-            new RateLimitResolver(manager.Object),
+            new RateLimitResolver((_, _) => Task.FromResult<RateLimitInfo?>(null)),
             TimeProvider.System);
     }
 

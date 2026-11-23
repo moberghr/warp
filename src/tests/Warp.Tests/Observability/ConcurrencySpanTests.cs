@@ -31,20 +31,7 @@ public class ConcurrencySpanTests
     }
 
     private static ConcurrencyLimitResolver NoAdminResolver() =>
-        new(new NoAdminLimitManager());
-
-    private sealed class NoAdminLimitManager : IConcurrencyLimitManager
-    {
-        public Task AddOrUpdateLimit(string name, int limit, CancellationToken ct = default) => Task.CompletedTask;
-
-        public Task<bool> RemoveLimit(string name, CancellationToken ct = default) => Task.FromResult(false);
-
-        public Task<ConcurrencyLimitInfo?> GetLimit(string name, CancellationToken ct = default) =>
-            Task.FromResult<ConcurrencyLimitInfo?>(null);
-
-        public Task<IReadOnlyList<ConcurrencyLimitInfo>> ListLimits(CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<ConcurrencyLimitInfo>>([]);
-    }
+        new((_, _) => Task.FromResult<int?>(null));
 
     [TimedFact]
     public async Task HandleAsync_AcquiredPath_EmitsConcurrencyAcquireSpanWithAcquiredTrue()

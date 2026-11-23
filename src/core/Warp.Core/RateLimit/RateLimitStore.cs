@@ -1,27 +1,27 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 
 namespace Warp.Core.RateLimit;
 
-public class RateLimitStore<TContext> : IRateLimitStore
-    where TContext : DbContext
+/// <summary>
+/// The rate-limit pipeline's bucket rows, on Warp's own context opened only when a job with a rate limit
+/// asks (rule 6.17): never the application's context.
+/// </summary>
+internal sealed class RateLimitStore : IRateLimitStore
 {
-    private readonly TContext _context;
-    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly DeferredWarpContext _warp;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
 
-    public RateLimitStore(TContext context, IServiceScopeFactory scopeFactory, IDatabaseExceptionClassifier exceptionClassifier)
+    public RateLimitStore(DeferredWarpContext warp, IDatabaseExceptionClassifier exceptionClassifier)
     {
-        _context = context;
-        _scopeFactory = scopeFactory;
+        _warp = warp;
         _exceptionClassifier = exceptionClassifier;
     }
 
     public Task<RateLimitBucket?> GetAsync(string name, CancellationToken ct)
     {
-        return _context.Set<RateLimitBucket>()
+        return _warp.Context.Set<RateLimitBucket>()
             .AsNoTracking()
             .Where(x => x.Name == name)
             .FirstOrDefaultAsync(ct);
@@ -29,7 +29,7 @@ public class RateLimitStore<TContext> : IRateLimitStore
 
     public async Task<bool> SetNextSlotAsync(string name, DateTime nextSlotUtc, CancellationToken ct)
     {
-        var affected = await _context.Set<RateLimitBucket>()
+        var affected = await _warp.Context.Set<RateLimitBucket>()
             .Where(x => x.Name == name)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.NextSlotUtc, nextSlotUtc), ct);
 
@@ -40,29 +40,18 @@ public class RateLimitStore<TContext> : IRateLimitStore
     /// Persists the bucket state before the handler runs. This is one of the few places that
     /// deviates from CLAUDE.md §5.7 ("Services should not call SaveChanges — the caller saves"):
     /// the rate-limit invariant must hold across the handler boundary, so the pipeline behaviour
-    /// has to commit the increment before yielding. Uses EF Core's ExecuteUpdate (which
-    /// bypasses the scoped DbContext's change tracker) followed by a fresh-scope insert,
-    /// keeping the rate-limit write isolated from any other tracked changes the caller may have.
+    /// has to commit the increment before yielding. Uses EF Core's ExecuteUpdate followed by an
+    /// insert on an isolated context, so an insert that loses the unique-key race leaves nothing
+    /// tracked behind.
     /// </summary>
     public async Task UpsertAsync(string name, DateTime windowStartUtc, int currentCount, string? timestampsJson, DateTime updatedAt, CancellationToken ct)
     {
-        var affected = await _context.Set<RateLimitBucket>()
-            .Where(x => x.Name == name)
-            .ExecuteUpdateAsync(
-                s => s
-                    .SetProperty(x => x.WindowStartUtc, windowStartUtc)
-                    .SetProperty(x => x.CurrentCount, currentCount)
-                    .SetProperty(x => x.TimestampsJson, timestampsJson)
-                    .SetProperty(x => x.UpdatedAt, updatedAt),
-                ct);
-
-        if (affected > 0)
+        if (await UpdateAsync(name, windowStartUtc, currentCount, timestampsJson, updatedAt, ct) > 0)
         {
             return;
         }
 
-        await using var scope = _scopeFactory.CreateAsyncScope();
-        var insertContext = scope.ServiceProvider.GetRequiredService<TContext>();
+        await using var scope = _warp.CreateIsolatedScope(out var insertContext);
         try
         {
             insertContext.Set<RateLimitBucket>().Add(
@@ -78,15 +67,20 @@ public class RateLimitStore<TContext> : IRateLimitStore
         }
         catch (DbUpdateException ex) when (_exceptionClassifier.IsUniqueConstraintViolation(ex))
         {
-            await _context.Set<RateLimitBucket>()
-                .Where(x => x.Name == name)
-                .ExecuteUpdateAsync(
-                    s => s
-                        .SetProperty(x => x.WindowStartUtc, windowStartUtc)
-                        .SetProperty(x => x.CurrentCount, currentCount)
-                        .SetProperty(x => x.TimestampsJson, timestampsJson)
-                        .SetProperty(x => x.UpdatedAt, updatedAt),
-                    ct);
+            await UpdateAsync(name, windowStartUtc, currentCount, timestampsJson, updatedAt, ct);
         }
+    }
+
+    private Task<int> UpdateAsync(string name, DateTime windowStartUtc, int currentCount, string? timestampsJson, DateTime updatedAt, CancellationToken ct)
+    {
+        return _warp.Context.Set<RateLimitBucket>()
+            .Where(x => x.Name == name)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(x => x.WindowStartUtc, windowStartUtc)
+                    .SetProperty(x => x.CurrentCount, currentCount)
+                    .SetProperty(x => x.TimestampsJson, timestampsJson)
+                    .SetProperty(x => x.UpdatedAt, updatedAt),
+                ct);
     }
 }

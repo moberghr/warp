@@ -6,8 +6,6 @@ namespace Warp.Core.Concurrency;
 public class ConcurrencyLimitManager<TContext> : IConcurrencyLimitManager
     where TContext : DbContext
 {
-    private const int MaxNameLength = 200;
-
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
 
@@ -19,7 +17,7 @@ public class ConcurrencyLimitManager<TContext> : IConcurrencyLimitManager
 
     public async Task AddOrUpdateLimit(string name, int limit, CancellationToken ct = default)
     {
-        ValidateName(name);
+        ConcurrencyNames.Validate(name);
         if (limit < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(limit), limit, "Limit must be at least 1.");
@@ -53,7 +51,7 @@ public class ConcurrencyLimitManager<TContext> : IConcurrencyLimitManager
 
     public async Task<bool> RemoveLimit(string name, CancellationToken ct = default)
     {
-        ValidateName(name);
+        ConcurrencyNames.Validate(name);
 
         var existing = await _context.Set<ConcurrencyLimit>()
             .Where(x => x.Name == name)
@@ -72,7 +70,7 @@ public class ConcurrencyLimitManager<TContext> : IConcurrencyLimitManager
 
     public async Task<ConcurrencyLimitInfo?> GetLimit(string name, CancellationToken ct = default)
     {
-        ValidateName(name);
+        ConcurrencyNames.Validate(name);
 
         return await _context.Set<ConcurrencyLimit>()
             .AsNoTracking()
@@ -90,18 +88,5 @@ public class ConcurrencyLimitManager<TContext> : IConcurrencyLimitManager
             .Select(x =>
                 new ConcurrencyLimitInfo(x.Name, x.Limit, x.UpdatedAt))
             .ToListAsync(ct);
-    }
-
-    private static void ValidateName(string name)
-    {
-        if (string.IsNullOrEmpty(name))
-        {
-            throw new ArgumentException("Name must be non-empty.", nameof(name));
-        }
-
-        if (name.Length > MaxNameLength)
-        {
-            throw new ArgumentException($"Name must be at most {MaxNameLength} characters.", nameof(name));
-        }
     }
 }

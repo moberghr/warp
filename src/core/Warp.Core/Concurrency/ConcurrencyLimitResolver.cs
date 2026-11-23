@@ -1,35 +1,56 @@
-using System.Collections.Concurrent;
+using Microsoft.EntityFrameworkCore;
+using Warp.Core.Data;
+using Warp.Core.Data.Entities;
 
 namespace Warp.Core.Concurrency;
 
 /// <summary>
-/// Resolves the runtime-effective concurrency limit for a key by checking the admin
-/// row via <see cref="IConcurrencyLimitManager"/>. Scoped — caches lookups for the
-/// lifetime of one job execution scope so the pipeline doesn't re-query the DB if
-/// it is invoked more than once for the same key. Cross-scope staleness is
-/// intentional: admin updates take effect at the next pickup.
+/// Resolves the runtime-effective concurrency limit for a key by checking the admin override row, on
+/// Warp's own context opened only when a job with a concurrency key asks (rule 6.17). Scoped — caches
+/// lookups for the lifetime of one job execution scope so the pipeline doesn't re-query the DB if it is
+/// invoked more than once for the same key. Cross-scope staleness is intentional: admin updates take
+/// effect at the next pickup.
 /// </summary>
 public sealed class ConcurrencyLimitResolver
 {
-    private readonly IConcurrencyLimitManager _manager;
-    private readonly ConcurrentDictionary<string, int?> _cache = new(StringComparer.Ordinal);
+    private readonly Func<string, CancellationToken, Task<int?>> _lookup;
 
-    public ConcurrencyLimitResolver(IConcurrencyLimitManager manager)
+    // Allocated on first lookup: most jobs carry no concurrency key and never ask.
+    private Dictionary<string, int?>? _cache;
+
+    internal ConcurrencyLimitResolver(DeferredWarpContext warp)
+        : this((name, ct) => LookupAsync(warp, name, ct))
     {
-        _manager = manager;
+    }
+
+    // The admin row lookup as a function, so the pipeline's unit tests can run without a database.
+    internal ConcurrencyLimitResolver(Func<string, CancellationToken, Task<int?>> lookup)
+    {
+        _lookup = lookup;
     }
 
     public async Task<int?> GetLimit(string name, CancellationToken ct)
     {
-        if (_cache.TryGetValue(name, out var cached))
+        if (_cache != null && _cache.TryGetValue(name, out var cached))
         {
             return cached;
         }
 
-        var info = await _manager.GetLimit(name, ct);
-        var resolved = info?.Limit;
+        ConcurrencyNames.Validate(name);
+        var resolved = await _lookup(name, ct);
+
+        _cache ??= new Dictionary<string, int?>(StringComparer.Ordinal);
         _cache[name] = resolved;
 
         return resolved;
+    }
+
+    private static Task<int?> LookupAsync(DeferredWarpContext warp, string name, CancellationToken ct)
+    {
+        return warp.Context.Set<ConcurrencyLimit>()
+            .AsNoTracking()
+            .Where(x => x.Name == name)
+            .Select(x => (int?)x.Limit)
+            .FirstOrDefaultAsync(ct);
     }
 }
