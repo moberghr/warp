@@ -21,6 +21,13 @@ public class Server
 
     public int ServiceCount { get; set; }
 
+    /// <summary>
+    /// How this server coordinates cluster-wide server tasks. Null: a server from before the lease (it
+    /// takes each task's lock every interval); while one is alive, newer servers also take that lock
+    /// around each run, so a task never runs on an old and a new server at once during a deploy.
+    /// </summary>
+    public int? CoordinationVersion { get; set; }
+
     public double? CpuUsagePercent { get; set; }
 
     public long? MemoryWorkingSetBytes { get; set; }

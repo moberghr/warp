@@ -504,6 +504,7 @@ public static class ServiceConfiguration
         AddStatisticEntity(modelBuilder, schema);
         AddCounterEntity(modelBuilder, schema);
         AddServerTaskEntity(modelBuilder, schema);
+        AddClusterTaskEntity(modelBuilder, schema);
         AddServerLogEntity(modelBuilder, schema);
         AddBackgroundServiceDefinitionEntity(modelBuilder, schema);
         AddBackgroundServiceInstanceEntity(modelBuilder, schema);
@@ -690,6 +691,8 @@ public static class ServiceConfiguration
 
         server.Property(p => p.PausedAt);
 
+        server.Property(p => p.CoordinationVersion);
+
         server.Property(p => p.Application).HasMaxLength(200);
         server.Property(p => p.Version).HasMaxLength(200);
         server.Property(p => p.Environment).HasMaxLength(200);
@@ -796,6 +799,29 @@ public static class ServiceConfiguration
         counter.HasIndex(p => p.Key);
 
         counter.Metadata.SetSchema(schema);
+    }
+
+    private static void AddClusterTaskEntity(ModelBuilder modelBuilder, string? schema)
+    {
+        var task = modelBuilder.Entity<ClusterTask>();
+
+        task.Property(p => p.Name).HasMaxLength(200);
+        task.HasKey(p => p.Name);
+        task.Property(p => p.IntervalSeconds);
+        task.Property(p => p.IdleBackoffLimitSeconds);
+        task.Property(p => p.IdleStreak);
+        task.Property(p => p.NextRunAt);
+        task.Property(p => p.LeaseUntil);
+        task.Property(p => p.ClaimedBy);
+        task.Property(p => p.ClaimedAt);
+        task.Property(p => p.RunRequestedAt);
+        task.Property(p => p.LastRunAt);
+        task.Property(p => p.LastServerId);
+        task.Property(p => p.LastStatus);
+        task.Property(p => p.LastMessage);
+        task.Property(p => p.LastDurationMs);
+
+        task.Metadata.SetSchema(schema);
     }
 
     private static void AddServerTaskEntity(ModelBuilder modelBuilder, string? schema)
