@@ -226,7 +226,12 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
             }
 
             await TryUpdateServerTaskAsync("Completed", message, elapsed);
-            if (_logOnSuccess)
+
+            // Only a run that did something (returned a message) leaves a log row. A signal-driven task
+            // such as the Orchestrator is woken after every completion flush, and most of those runs find
+            // nothing: a row each was about a third of a statement per job under load, for history
+            // entries that said only "Completed". The ServerTask row still records every run.
+            if (_logOnSuccess && message != null)
             {
                 await TryWriteServerLogAsync("Completed", message, elapsed);
             }
