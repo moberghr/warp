@@ -4,8 +4,8 @@ using Warp.Core.Handlers;
 namespace Warp.Tests.TestData.Handlers;
 
 /// <summary>
-/// Stages one <see cref="UnitRequest"/> on <see cref="Queue"/> and does NOT save: the worker's
-/// handler-scope save is what commits it. Used to check that exactly one wake-up goes out for it.
+/// Stages one <see cref="UnitRequest"/> on <see cref="Queue"/> and saves it, as a handler must: the
+/// worker does not save a handler's context. Used to check that exactly one wake-up goes out for it.
 /// </summary>
 public class StageChildOnQueueRequest : IJob
 {
@@ -24,5 +24,6 @@ public class StageChildOnQueueHandler : IJobHandler<StageChildOnQueueRequest>
     public async Task HandleAsync(StageChildOnQueueRequest message, CancellationToken cancellationToken)
     {
         await _publisher.Enqueue(new UnitRequest(), message.Queue);
+        await _publisher.SaveChangesAsync(cancellationToken);
     }
 }

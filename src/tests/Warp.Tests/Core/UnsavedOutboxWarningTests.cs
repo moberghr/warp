@@ -78,14 +78,15 @@ public sealed class UnsavedOutboxWarningTests
     }
 
     [TimedFact]
-    public async Task Dispose_InsideWorkerHandlerScope_DoesNotWarn()
+    public async Task Dispose_InsideWorkerHandlerScope_LogsWarning()
     {
         var sink = new WarningSink();
         await using var ctx = NewContext();
         var publisher = NewPublisher(ctx, sink, new WarpConfiguration());
 
-        // Simulate executing inside a worker handler: the worker owns the commit, so an unsaved
-        // staged job here is not the caller's footgun and must not warn (false-positive guard).
+        // Simulate executing inside a worker handler. Since 8.0 the worker does not save a handler's
+        // context (rule 6.17), so a job staged and never saved there is lost like anywhere else, and
+        // the handler gets the same warning as any other caller.
         JobExecutionContext.Current = new JobExecutionInfo
         {
             JobId = Guid.NewGuid(),
@@ -98,7 +99,7 @@ public sealed class UnsavedOutboxWarningTests
 
             publisher.Dispose();
 
-            sink.Warnings.ShouldBeEmpty();
+            sink.Warnings.Count.ShouldBe(1);
         }
         finally
         {

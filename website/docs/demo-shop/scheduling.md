@@ -196,7 +196,7 @@ public sealed class StartMonthlySalesReportHandler(IBatchPublisher batches, Time
 
         var batchId = await batches.StartNew(regions, name: $"sales-report-{month:yyyy-MM}");
         await batches.ContinueBatchWith(new List<MergeSalesReport> { new() { Month = month } }, batchId);
-        // No SaveChangesAsync here: the worker commits the handler's batch when the handler succeeds.
+        await batches.SaveChangesAsync(ct);
     }
 }
 
@@ -218,9 +218,9 @@ The default `ContinuationOptions.OnlyOnSucceeded` is what finance wants: no repo
 - **Then** the `us` job ends `Failed`, the batch is `Failed`, and `MergeSalesReport` stays `Awaiting`.
   Fix the cause and requeue the `us` job from its detail page: the batch completes and the merge runs.
 
-Pitfall: this applies to code outside a handler, such as a controller or a console command. There,
-forgetting `batches.SaveChangesAsync(ct)` discards the batch, and Warp logs a warning when the scope ends
-with unsaved staged jobs. Inside a handler the worker saves for you.
+Pitfall: forgetting `batches.SaveChangesAsync(ct)` discards the batch, in a handler as anywhere else, and
+Warp logs a warning when the scope ends with unsaved staged jobs. Since 8.0 the worker does not save a
+handler's DbContext: the handler commits its own work.
 
 Covered by: `BatchIntegrationTestsBase`, `BatchPublisherUnitTestsBase`.
 

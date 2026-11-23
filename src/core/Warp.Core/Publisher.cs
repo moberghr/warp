@@ -411,13 +411,8 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
             return;
         }
 
-        // Inside a worker handler scope the worker owns the commit, not the caller — warning here
-        // would be a false positive. JobExecutionContext.Current is set only while a job executes.
-        if (JobExecutionContext.Current != null)
-        {
-            return;
-        }
-
+        // Handler scopes included: since 8.0 the worker no longer saves a handler's context, so a handler
+        // that stages jobs without saving loses them like any other caller.
         var unsaved = _context.ChangeTracker.Entries<Job>().Count(x => x.State == EntityState.Added);
         if (unsaved == 0)
         {

@@ -245,31 +245,6 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
         await server.WaitForJobState(jobId, State.Completed, TimeSpan.FromSeconds(3));
     }
 
-    [TimedTheory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task GivenHandlerStagesARowThatCannotBeSaved_WhenTheWorkerSavesItsContext_ThenJobFails(bool useDispatcher)
-    {
-        // The handler returns normally; the failure is in the worker's save of the handler's own
-        // context. That must fail the job like a throwing handler does, not leave it Processing.
-        var barrier = new BarrierSignal();
-        await using var server = await StartAsync(useDispatcher, barrier);
-        var publisher = server.CreatePublisher();
-        var jobId = await publisher.Enqueue(new StagesUnsavableRowRequest());
-        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Fails, is retried once by the test server's default policy, fails again.
-        await server.WaitForJobState(jobId, State.Failed, TimeSpan.FromSeconds(8));
-
-        var job = await server.GetJob(jobId);
-        job.CurrentWorkerId.ShouldBeNull();
-        job.ExpireAt.ShouldBeNull();
-
-        var logs = await server.GetJobLogs(jobId);
-        logs.ShouldContain(x => string.Equals(x.EventType, "Failed", StringComparison.Ordinal));
-        logs.ShouldNotContain(x => string.Equals(x.EventType, "Completed", StringComparison.Ordinal));
-    }
-
     [TimedFact]
     public async Task GivenSingleWorker_WhenServerStopsWhileHandlerIsRunning_ThenJobStaysProcessingForRecovery()
     {
@@ -328,6 +303,30 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
             // Let the orphaned handler end; nothing is waiting for it any more.
             barrier.CanFinish.Release();
         }
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenAHandlerThatStagesAJobWithoutSaving_WhenItCompletes_ThenTheStagedJobIsNotCommitted(bool useDispatcher)
+    {
+        // The handler owns its DbContext (rule 6.17): the worker neither resolves nor saves it, so a job
+        // the handler staged and never saved is discarded with the handler's scope, and the handler's
+        // own job still completes.
+        await using var server = await StartAsync(useDispatcher, new BarrierSignal());
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new StageChildWithoutSavingRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        await server.WaitForJobState(jobId, State.Completed);
+
+        // Assert
+        var staged = await Fixture.CreateContext().Set<Job>()
+            .AsNoTracking()
+            .Where(x => x.Id != jobId)
+            .CountAsync(Xunit.TestContext.Current.CancellationToken);
+        staged.ShouldBe(0);
     }
 
     private Task<WarpTestServer> StartAsync(bool useDispatcher, BarrierSignal barrier, Action<IServiceCollection>? configureServices = null) =>

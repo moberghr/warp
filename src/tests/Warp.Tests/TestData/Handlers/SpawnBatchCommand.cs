@@ -24,5 +24,6 @@ public class SpawnBatchHandler : IJobHandler<SpawnBatchRequest>
         var jobs = new List<UnitRequest> { new(), new(), new() };
         var batchId = await _batchPublisher.StartNew(jobs);
         await _batchPublisher.ContinueBatchWith(new List<UnitRequest> { new() }, batchId);
+        await _batchPublisher.SaveChangesAsync(cancellationToken);
     }
 }

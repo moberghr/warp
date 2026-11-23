@@ -11,8 +11,8 @@ public class EmptyCommand : IJobHandler<EmptyRequest>
 public class EmptyRequest : IJob;
 
 /// <summary>
-/// Stages one <see cref="EmptyRequest"/> and does not save, so the worker's handler-scope save is what
-/// commits it. The LoadLab FanOut arm uses it to measure the cost of announcing handler-staged jobs.
+/// Publishes one <see cref="EmptyRequest"/> and saves it, as a handler must (the worker does not save a
+/// handler's context). The LoadLab FanOut arm uses it to measure the cost of announcing handler-staged jobs.
 /// </summary>
 public class SpawnOneChildRequest : IJob;
 
@@ -28,6 +28,7 @@ public class SpawnOneChildCommand : IJobHandler<SpawnOneChildRequest>
     public async Task HandleAsync(SpawnOneChildRequest message, CancellationToken cancellationToken)
     {
         await _publisher.Enqueue(new EmptyRequest());
+        await _publisher.SaveChangesAsync(cancellationToken);
     }
 }
 

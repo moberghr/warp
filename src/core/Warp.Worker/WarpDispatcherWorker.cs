@@ -252,11 +252,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             await ExecuteJob(job, handlerScope.ServiceProvider, jobCts.Token);
             handlerStopwatch.Stop();
 
-            // Commit handler's work (outbox: published jobs + business entities) before disposing.
-            // Jobs the handler staged are announced by the enqueue interceptor on this save, like any other
-            // TContext save: local workers inline, other servers through the relay (#322).
-            var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
-            await handlerContext.SaveChangesAsync(default);
+            // The handler owns its DbContext and commits its own work (rule 6.17): the worker never
+            // resolves or saves it.
 
             // Read metadata and outcome from handler scope before disposing
             JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
