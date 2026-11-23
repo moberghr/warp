@@ -318,6 +318,9 @@ public class WarpTestServer : IAsyncDisposable
                     config.SloEvaluationInterval = null;
                     config.MetricRollupInterval = null;
 
+                    // Tests expect a woken server task to run at once (rule 6.18 folds wakes in production).
+                    config.ServerTaskSignalInterval = TimeSpan.Zero;
+
                     configure?.Invoke(config);
 
                     config.AddRetry(o =>

@@ -209,6 +209,16 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan? BacklogSampleInterval { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
+    /// The least time between two passes of a server task that a signal wakes (the orchestrator on every
+    /// completion flush, the message router on every enqueued message). Wakes within it are folded into one
+    /// pass at its end, so a continuation or a routed message waits at most this long. Every completion
+    /// flush wakes the orchestrator, about ten times a second per server under load, and each pass pays a
+    /// scope, a lock transaction and its queries. <c>null</c> or zero runs a pass on every wake. Default
+    /// 500 ms.
+    /// </summary>
+    public TimeSpan? ServerTaskSignalInterval { get; set; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
     /// How often <see cref="Services.ServerCleanup{TContext}"/> removes Server rows whose
     /// heartbeat is past <see cref="HealthCheckTimeout"/>. Set to <c>null</c> to disable.
     /// </summary>

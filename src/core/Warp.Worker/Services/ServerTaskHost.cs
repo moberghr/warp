@@ -67,7 +67,8 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
                 lockProvider,
                 time,
                 configuration.Value.ServerId,
-                loopLogger);
+                loopLogger,
+                configuration.Value.ServerTaskSignalInterval);
         }
 
         foreach (var loop in _loops.Values)

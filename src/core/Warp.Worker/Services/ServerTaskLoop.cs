@@ -46,6 +46,7 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
 
     private readonly SemaphoreSlim _signal = new(0, 1);
     private readonly Lock _signalLock = new();
+    private readonly TimeSpan _signalInterval;
     private int? _serverTaskId;
 
     private TimeSpan? _cachedInterval;
@@ -58,8 +59,10 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
         IWarpLockProvider lockProvider,
         TimeProvider time,
         Guid serverId,
-        ILogger logger)
+        ILogger logger,
+        TimeSpan? signalInterval = null)
     {
+        _signalInterval = signalInterval ?? TimeSpan.Zero;
         _taskType = template.GetType();
         _name = template.Name;
         _lockKey = template.LockKey;
@@ -157,6 +160,7 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                     continue;
                 }
 
+                var started = Stopwatch.GetTimestamp();
                 var didWork = await RunOneIterationAsync(ct);
                 if (ct.IsCancellationRequested)
                 {
@@ -166,6 +170,14 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                 if (didWork && _rerunImmediately)
                 {
                     continue;
+                }
+
+                // Wakes are folded into at most one pass per signal interval (rule 6.18): a wake that came
+                // in meanwhile is still pending on the semaphore, so the next pass starts when the hold ends.
+                var hold = HoldBeforeNextRun(_signalInterval, Stopwatch.GetElapsedTime(started), interval.Value);
+                if (hold > TimeSpan.Zero)
+                {
+                    await Task.Delay(hold, ct);
                 }
 
                 await WaitForNextRunAsync(interval.Value, ct);
@@ -409,6 +421,21 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
         _intervalCacheValid = true;
 
         return _cachedInterval;
+    }
+
+    /// <summary>
+    /// How long a loop holds after a pass before it may run again on a wake: the rest of the signal interval
+    /// since the pass started, never longer than the task's own interval.
+    /// </summary>
+    internal static TimeSpan HoldBeforeNextRun(TimeSpan signalInterval, TimeSpan sincePassStarted, TimeSpan interval)
+    {
+        var rest = signalInterval - sincePassStarted;
+        if (rest <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        return rest < interval ? rest : interval;
     }
 
     // Internal for tests: lets tests seed _serverTaskId without running EnsureRegisteredAsync.

@@ -116,6 +116,60 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
         row.LastMessage.ShouldBeNull();
     }
 
+    [TimedFact]
+    public async Task RunAsync_WokenAgainWithinTheSignalInterval_RunsAgainWhenItEnds()
+    {
+        // Wakes are folded into at most one pass per signal interval (rule 6.18), but a wake that arrives
+        // during the hold must not be lost: it is still pending, so the next pass runs when the hold ends.
+        var serverTaskId = await SeedServerTaskAsync(intervalSeconds: 3600);
+        var task = new CountingTask();
+        using var loop = new ServerTaskLoop<TestContext>(
+            task,
+            new FixtureScopeFactory(_fixture, task),
+            new NoopLockProvider(),
+            TimeProvider.System,
+            Guid.NewGuid(),
+            NullLogger.Instance,
+            signalInterval: TimeSpan.FromMilliseconds(500));
+        loop.SetServerTaskIdForTest(serverTaskId);
+
+        using var stop = new CancellationTokenSource();
+        var running = loop.RunAsync(stop.Token);
+        try
+        {
+            // The first pass runs at once.
+            (await task.Ran.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeTrue("the first pass did not run");
+
+            // Act
+            loop.Signal();
+
+            // Assert
+            (await task.Ran.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeTrue("a wake during the hold was lost");
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [TimedTheory]
+    [InlineData(500, 100, 3600, 400)]
+    [InlineData(500, 600, 3600, 0)]
+    [InlineData(500, 100, 0.2, 200)]
+    [InlineData(0, 100, 3600, 0)]
+    public void HoldBeforeNextRun_RestOfTheSignalIntervalCappedByTheTaskInterval(int signalMs, int sincePassStartedMs, double intervalSeconds, int expectedMs)
+    {
+        var hold = ServerTaskLoop<TestContext>.HoldBeforeNextRun(
+            TimeSpan.FromMilliseconds(signalMs),
+            TimeSpan.FromMilliseconds(sincePassStartedMs),
+            TimeSpan.FromSeconds(intervalSeconds));
+
+        hold.ShouldBe(TimeSpan.FromMilliseconds(expectedMs));
+    }
+
     private async Task<int> SeedServerTaskAsync(double intervalSeconds)
     {
         await using var ctx = _fixture.CreateContext();
@@ -168,6 +222,24 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
         public TimeSpan? DefaultInterval => TimeSpan.FromSeconds(1);
 
         public Task<string?> ExecuteAsync(CancellationToken ct) => Task.FromResult<string?>(null);
+    }
+
+    private sealed class CountingTask : IServerTask
+    {
+        public SemaphoreSlim Ran { get; } = new(0);
+
+        public string Name => "Counting";
+
+        public string? LockKey => null;
+
+        public TimeSpan? DefaultInterval => TimeSpan.FromHours(1);
+
+        public Task<string?> ExecuteAsync(CancellationToken ct)
+        {
+            Ran.Release();
+
+            return Task.FromResult<string?>(null);
+        }
     }
 
     private sealed class NoopLockProvider : IWarpLockProvider
