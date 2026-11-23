@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -179,6 +180,16 @@ public class WarpDispatcher<TContext> : BackgroundService
         var sqlQueries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
 
         var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var timed = DispatcherDiagnostics.ClaimDuration.Enabled;
+        var claimStart = 0L;
+        if (timed)
+        {
+            claimStart = Stopwatch.GetTimestamp();
+            if (_availability.TakeFreedAt() is var freedAt && freedAt != 0)
+            {
+                DispatcherDiagnostics.FreeSlotWait.Record(DispatcherDiagnostics.Since(freedAt));
+            }
+        }
 
         // Atomic batch claim. One round-trip, no SELECT→UPDATE window — returns up to
         // `available` rows already transitioned to Processing. Workers across servers get
@@ -194,6 +205,20 @@ public class WarpDispatcher<TContext> : BackgroundService
             available,
             _claimWatermark,
             ct);
+
+        if (timed)
+        {
+            DispatcherDiagnostics.ClaimDuration.Record(DispatcherDiagnostics.Since(claimStart));
+            DispatcherDiagnostics.ClaimSize.Record(jobs.Count);
+            if (DispatcherDiagnostics.ChannelWait.Enabled)
+            {
+                var claimedAt = Stopwatch.GetTimestamp();
+                foreach (var job in jobs)
+                {
+                    DispatcherDiagnostics.ClaimedAt[job.Id] = claimedAt;
+                }
+            }
+        }
 
         if (jobs.Count == 0)
         {

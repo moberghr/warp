@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -37,6 +38,9 @@ internal sealed class CompletionFlusher<TContext>
 
     // The generation of the buffer whose timer has fired, or -1.
     private long _dueGeneration = -1;
+
+    // When the current buffer's first completion arrived, for the opt-in flush-age timing; 0 if unknown.
+    private long _bufferStartedAt;
     private Task? _loop;
 
     public CompletionFlusher(
@@ -65,6 +69,11 @@ internal sealed class CompletionFlusher<TContext>
     {
         if (_batch.Add(completion, out var generation))
         {
+            if (DispatcherDiagnostics.FlushAge.Enabled)
+            {
+                Interlocked.Exchange(ref _bufferStartedAt, Stopwatch.GetTimestamp());
+            }
+
             _ = WakeWhenDueAsync(generation);
         }
 
@@ -144,7 +153,26 @@ internal sealed class CompletionFlusher<TContext>
     {
         try
         {
+            var timed = DispatcherDiagnostics.FlushDuration.Enabled;
+            var start = 0L;
+            if (timed)
+            {
+                // Opt-in timings (DispatcherDiagnostics). Read before the drain; a completion added in
+                // between lands in this flush and is counted with it.
+                start = Stopwatch.GetTimestamp();
+                DispatcherDiagnostics.FlushSize.Record(_batch.Count);
+                if (Interlocked.Exchange(ref _bufferStartedAt, 0) is var startedAt && startedAt != 0)
+                {
+                    DispatcherDiagnostics.FlushAge.Record(DispatcherDiagnostics.Since(startedAt));
+                }
+            }
+
             var flushed = await _batch.FlushAsync();
+            if (timed)
+            {
+                DispatcherDiagnostics.FlushDuration.Record(DispatcherDiagnostics.Since(start));
+            }
+
             await AnnounceAsync(flushed, CancellationToken.None);
         }
         catch (Exception ex)

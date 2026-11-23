@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Warp.Worker;
 
 /// <summary>
@@ -16,6 +18,7 @@ namespace Warp.Worker;
 public sealed class DispatcherWorkerAvailability
 {
     private int _outstanding;
+    private long _freedAt;
 
     public DispatcherWorkerAvailability(int workerCount, int prefetchCount)
     {
@@ -44,10 +47,23 @@ public sealed class DispatcherWorkerAvailability
     /// Returns one job's capacity. Called once per reserved job — by the worker that finishes it, or
     /// by the dispatcher for a job it claimed but could not deliver.
     /// </summary>
-    public void Release() => Interlocked.Decrement(ref _outstanding);
+    public void Release()
+    {
+        // Opt-in timing (DispatcherDiagnostics.FreeSlotWait): when the group goes from no free slot to
+        // one, remember the moment, so the next claim can record how long that slot waited for it.
+        if (Interlocked.Decrement(ref _outstanding) == Capacity - 1 && DispatcherDiagnostics.FreeSlotWait.Enabled)
+        {
+            Interlocked.CompareExchange(ref _freedAt, Stopwatch.GetTimestamp(), 0);
+        }
+    }
 
     /// <summary>
     /// Returns <paramref name="count"/> jobs' capacity in one step.
     /// </summary>
     public void Release(int count) => Interlocked.Add(ref _outstanding, -count);
+
+    /// <summary>
+    /// When a slot was freed in a group that had none, since the last call; 0 if none was.
+    /// </summary>
+    internal long TakeFreedAt() => Interlocked.Exchange(ref _freedAt, 0);
 }

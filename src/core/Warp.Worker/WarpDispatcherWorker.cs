@@ -81,10 +81,13 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         // shutdown timeout (30s default) still bounds this — a stuck handler eventually gets
         // killed — and stoppingToken is still propagated into ProcessJob so individual
         // handler-path awaits can react if they want to.
+        // When this worker last handed a slot back, for the opt-in idle timing; 0 until its first job.
+        var idleSince = 0L;
         while (await _jobReader.WaitToReadAsync(CancellationToken.None).ConfigureAwait(false))
         {
             while (_jobReader.TryRead(out var job))
             {
+                var busySince = DispatcherDiagnostics.WorkerBusy.Enabled ? RecordPickup(job, idleSince) : 0L;
                 try
                 {
                     await ProcessJob(job, stoppingToken);
@@ -110,8 +113,31 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 // The group's flusher writes the completion (rule 6.13); this worker only tells it when
                 // the group has nothing left claimed, and goes straight back to the channel.
                 _flusher.SlotReleased();
+
+                if (busySince != 0)
+                {
+                    DispatcherDiagnostics.WorkerBusy.Add(DispatcherDiagnostics.Since(busySince));
+                    idleSince = Stopwatch.GetTimestamp();
+                }
             }
         }
+    }
+
+    // Opt-in timings (DispatcherDiagnostics): how long this worker waited since its last job, and how
+    // long this job waited in the channel after its claim. Returns when the job's busy time starts.
+    private static long RecordPickup(Job job, long idleSince)
+    {
+        if (idleSince != 0)
+        {
+            DispatcherDiagnostics.WorkerIdle.Add(DispatcherDiagnostics.Since(idleSince));
+        }
+
+        if (DispatcherDiagnostics.ClaimedAt.TryRemove(job.Id, out var claimedAt))
+        {
+            DispatcherDiagnostics.ChannelWait.Record(DispatcherDiagnostics.Since(claimedAt));
+        }
+
+        return Stopwatch.GetTimestamp();
     }
 
     private void AddCompletion(PendingCompletion completion) => _flusher.Add(completion);
