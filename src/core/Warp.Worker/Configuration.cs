@@ -209,16 +209,6 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan? BacklogSampleInterval { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
-    /// The most a server task waits before its first run after the server starts. Each task waits a random
-    /// time up to the smaller of this and its own interval, so a starting server spends its first seconds
-    /// claiming jobs rather than running every task's first pass (and compiling every task's queries) at
-    /// once, and servers starting together do not all reach for the same cluster locks at the same moment.
-    /// A signal (a job finalized, a message enqueued) still wakes a task at once. <c>null</c> or zero runs
-    /// every task immediately, as before 8.0. Default 10 seconds.
-    /// </summary>
-    public TimeSpan? ServerTaskStartupDelay { get; set; } = TimeSpan.FromSeconds(10);
-
-    /// <summary>
     /// How often <see cref="Services.ServerCleanup{TContext}"/> removes Server rows whose
     /// heartbeat is past <see cref="HealthCheckTimeout"/>. Set to <c>null</c> to disable.
     /// </summary>

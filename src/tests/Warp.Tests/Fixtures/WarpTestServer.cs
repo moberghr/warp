@@ -318,9 +318,6 @@ public class WarpTestServer : IAsyncDisposable
                     config.SloEvaluationInterval = null;
                     config.MetricRollupInterval = null;
 
-                    // Tests expect a server's tasks to run as soon as it starts (rule 6.18).
-                    config.ServerTaskStartupDelay = TimeSpan.Zero;
-
                     configure?.Invoke(config);
 
                     config.AddRetry(o =>

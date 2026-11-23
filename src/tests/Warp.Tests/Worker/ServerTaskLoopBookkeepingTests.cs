@@ -116,42 +116,6 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
         row.LastMessage.ShouldBeNull();
     }
 
-    [TimedFact]
-    public async Task RunAsync_DuringItsStartupDelay_ASignalRunsTheFirstPassAtOnce()
-    {
-        // A task waits a random part of ServerTaskStartupDelay before its first run (rule 6.18), but
-        // a signal (a job finalized, a message enqueued) must still run it at once: the orchestrator
-        // and the message router are woken by job activity and must not sit out the delay.
-        var serverTaskId = await SeedServerTaskAsync(intervalSeconds: 3600);
-        var task = new CountingTask();
-        using var loop = new ServerTaskLoop<TestContext>(
-            task,
-            new FixtureScopeFactory(_fixture, task),
-            new NoopLockProvider(),
-            TimeProvider.System,
-            Guid.NewGuid(),
-            NullLogger.Instance,
-            startupDelay: TimeSpan.FromHours(1));
-        loop.SetServerTaskIdForTest(serverTaskId);
-
-        using var stop = new CancellationTokenSource();
-        var running = loop.RunAsync(stop.Token);
-        try
-        {
-            // Act
-            loop.Signal();
-
-            // Assert
-            (await task.Ran.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
-                .ShouldBeTrue("the signal did not cut the startup delay short");
-        }
-        finally
-        {
-            await stop.CancelAsync();
-            await running;
-        }
-    }
-
     private async Task<int> SeedServerTaskAsync(double intervalSeconds)
     {
         await using var ctx = _fixture.CreateContext();
@@ -204,24 +168,6 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
         public TimeSpan? DefaultInterval => TimeSpan.FromSeconds(1);
 
         public Task<string?> ExecuteAsync(CancellationToken ct) => Task.FromResult<string?>(null);
-    }
-
-    private sealed class CountingTask : IServerTask
-    {
-        public SemaphoreSlim Ran { get; } = new(0);
-
-        public string Name => "Counting";
-
-        public string? LockKey => null;
-
-        public TimeSpan? DefaultInterval => TimeSpan.FromHours(1);
-
-        public Task<string?> ExecuteAsync(CancellationToken ct)
-        {
-            Ran.Release();
-
-            return Task.FromResult<string?>(null);
-        }
     }
 
     private sealed class NoopLockProvider : IWarpLockProvider
