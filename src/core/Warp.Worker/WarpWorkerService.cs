@@ -488,14 +488,14 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
     private static async Task ExecuteJob(Job job, IServiceProvider provider, CancellationToken cancellationToken)
     {
-        var messageType = Type.GetType(job.Type!) ?? throw new WarpException($"Unknown type {job.Type}");
+        var messageType = JobTypes.Resolve(job.Type!) ?? throw new WarpException($"Unknown type {job.Type}");
         var payload = JsonSerializer.Deserialize(job.Message!, messageType) ?? throw new WarpException($"Unable to deserialize message {job.Message} to type {job.Type}");
 
         var jobContext = provider.GetRequiredService<JobContext>();
 
         if (job.HandlerType != null)
         {
-            var handlerType = Type.GetType(job.HandlerType) ?? throw new WarpException($"Unknown handler type {job.HandlerType}");
+            var handlerType = JobTypes.Resolve(job.HandlerType) ?? throw new WarpException($"Unknown handler type {job.HandlerType}");
             jobContext.HandlerType = handlerType;
             await JobDispatcher.ExecuteHandler(payload, messageType, handlerType, provider, cancellationToken);
 

@@ -128,7 +128,7 @@ public sealed class MessageRouter<TContext> : IServerTask
             {
                 var now = _time.GetUtcNow().UtcDateTime;
 
-                var messageType = Type.GetType(message.Type!);
+                var messageType = JobTypes.Resolve(message.Type!);
                 if (messageType == null)
                 {
                     message.CurrentState = State.Failed;
