@@ -16,6 +16,9 @@ namespace Warp.Provider.PostgreSql;
 public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     where TContext : DbContext
 {
+    // Prepended to the job claims (rule 6.21): within the claim's command, a plan that sorts is priced out.
+    private const string ClaimPlanGuard = "SET LOCAL enable_sort = off;\n";
+
     private readonly WarpJobTableNames _n;
 
     private readonly string _claimEnqueuedJobsSql;
@@ -84,7 +87,16 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         // and replayed by ClaimPlanStabilityTests. A MATERIALIZED CTE also runs once, but it still
         // walks the whole table to join against it. This form is a primary-key lookup whatever the
         // statistics say.
-        _claimEnqueuedJobsSql = $@"
+        //
+        // Both claims start with SET LOCAL enable_sort = off (rule 6.21), which lasts for this command
+        // only: its statements run as one implicit transaction. After a burst into a queue the last
+        // analyze saw empty, the planner expects the claim to match one row and reads the dashboard's
+        // (kind, current_state, create_time) index instead: every enqueued row of the kind, filtered
+        // by queue and sorted, to return the limit (CI: 48,020 rows, 22.8 ms and ~22,000 buffers per
+        // claim, against 0.72 ms and ~375), on every claim until autovacuum analyzes the table. With
+        // sorting priced out, the only plan left is the claim index read in schedule order. Same rows,
+        // same order: the setting changes the plan, never the result.
+        _claimEnqueuedJobsSql = ClaimPlanGuard + $@"
             UPDATE {table} AS t
             SET ""{_n.CurrentState}"" = {(int)State.Processing},
                 ""{_n.CurrentWorkerId}"" = {{0}},
@@ -102,7 +114,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
 
         // The same claim starting at a watermark (rule 6.16): the index range scan begins at that
         // schedule time, past the dead entries earlier claims left at the head of the queue.
-        _claimEnqueuedJobsFromSql = $@"
+        _claimEnqueuedJobsFromSql = ClaimPlanGuard + $@"
             UPDATE {table} AS t
             SET ""{_n.CurrentState}"" = {(int)State.Processing},
                 ""{_n.CurrentWorkerId}"" = {{0}},
