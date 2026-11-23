@@ -149,6 +149,10 @@ else if (args.Length > 0 && string.Equals(args[0], "idle", StringComparison.Ordi
 
     await IdleServerProbe.RunAsync(workers, TimeSpan.FromSeconds(settleSeconds), TimeSpan.FromSeconds(windowSeconds), track, servers);
 }
+else if (args.Length > 0 && string.Equals(args[0], "startup-models", StringComparison.OrdinalIgnoreCase))
+{
+    StartupModelProbe.Run(serverFirst: args.Any(x => string.Equals(x, "--server-first", StringComparison.OrdinalIgnoreCase)));
+}
 else if (args.Length > 0 && string.Equals(args[0], "rtt", StringComparison.OrdinalIgnoreCase))
 {
     var rttSeconds = 5;
