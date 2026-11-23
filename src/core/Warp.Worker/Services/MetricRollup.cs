@@ -71,6 +71,9 @@ public sealed class MetricRollup<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.MetricRollupInterval;
 
+    // Idle backoff (rule 6.20): while it keeps finding nothing it runs less often, up to this.
+    public TimeSpan? IdleBackoffLimit => TimeSpan.FromMinutes(10);
+
     // ServerTaskLoop re-runs only when ExecuteAsync returned a message, and this returns null when it rolled
     // nothing, so an idle rollup does not spin.
     public bool RerunImmediately => true;

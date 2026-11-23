@@ -45,6 +45,9 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.ExpirationCleanupInterval;
 
+    // Idle backoff (rule 6.20): while it keeps finding nothing it runs less often, up to this.
+    public TimeSpan? IdleBackoffLimit => TimeSpan.FromMinutes(30);
+
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
         var timeExpired = await RunCleanupAsync(ct);
@@ -144,8 +147,27 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
                 .ExecuteDeleteAsync(ct);
         }
 
+        // Runs of cluster-wide tasks (rule 6.20) have no per-server row: the same interval x 300 rule, by name.
+        var clusterTasks = await _context.Set<ClusterTask>()
+            .Select(x => new { x.Name, x.IntervalSeconds })
+            .ToListAsync(ct);
+
+        foreach (var task in clusterTasks)
+        {
+            var cutoff = now.AddSeconds(-(task.IntervalSeconds ?? 60) * 300);
+            await _context.Set<ServerLog>()
+                .Where(x => x.ServerTaskId == null)
+                .Where(x => x.TaskName == task.Name)
+                .Where(x => x.Timestamp < cutoff)
+                .ExecuteDeleteAsync(ct);
+        }
+
+        // Anything else without a per-server row (including runs of a task that no longer exists): a day.
+        var clusterTaskNames = clusterTasks.ConvertAll(x => x.Name);
         await _context.Set<ServerLog>()
-            .Where(x => x.ServerTaskId == null && x.Timestamp < now.AddDays(-1))
+            .Where(x => x.ServerTaskId == null)
+            .Where(x => x.TaskName == null || !clusterTaskNames.Contains(x.TaskName))
+            .Where(x => x.Timestamp < now.AddDays(-1))
             .ExecuteDeleteAsync(ct);
 
         return expiredJobIds.Count;

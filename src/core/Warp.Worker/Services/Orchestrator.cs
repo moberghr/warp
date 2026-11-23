@@ -60,6 +60,9 @@ public sealed class Orchestrator<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.OrchestrationInterval;
 
+    // Idle backoff (rule 6.20): while it keeps finding nothing it runs less often, up to this.
+    public TimeSpan? IdleBackoffLimit => TimeSpan.FromSeconds(60);
+
     public IEnumerable<ServerTaskSignal> Signals => [ServerTaskSignal.JobFinalized];
 
     public async Task<string?> ExecuteAsync(CancellationToken ct)

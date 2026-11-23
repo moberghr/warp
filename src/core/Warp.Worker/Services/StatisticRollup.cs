@@ -57,6 +57,9 @@ public sealed class StatisticRollup<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.StatisticRollupInterval;
 
+    // Idle backoff (rule 6.20): while it keeps finding nothing it runs less often, up to this.
+    public TimeSpan? IdleBackoffLimit => TimeSpan.FromMinutes(30);
+
     // Re-run back-to-back while a backlog remains. ServerTaskLoop re-runs only when ExecuteAsync
     // returned a message, and this returns null when it rolled nothing, so an idle rollup does not spin.
     public bool RerunImmediately => true;

@@ -30,6 +30,9 @@ public sealed class CounterAggregator<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.CounterAggregationInterval;
 
+    // Idle backoff (rule 6.20): while it keeps finding nothing it runs less often, up to this.
+    public TimeSpan? IdleBackoffLimit => TimeSpan.FromMinutes(5);
+
     // Re-run back-to-back while there is still a backlog. MaxBatchesPerTick caps how much ONE tick
     // drains, so without this a backlog would only shrink by that cap once per CounterAggregationInterval
     // (a minute by default) and could never catch up with a busy worker pool.

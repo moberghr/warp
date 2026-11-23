@@ -278,9 +278,8 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 
     public async Task<List<ServerTaskSummary>> GetServerTaskSummaries(Guid serverId)
     {
-        return await _context.Set<ServerTask>()
+        var perServer = await _context.Set<ServerTask>()
             .Where(x => x.ServerId == serverId)
-            .OrderBy(x => x.TaskName)
             .Select(x => new ServerTaskSummary
             {
                 TaskName = x.TaskName,
@@ -291,6 +290,37 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
                 LastDurationMs = x.LastDurationMs,
             })
             .ToListAsync();
+
+        // The cluster-wide tasks (rule 6.20) are shared by every server, so each server's page lists them,
+        // with the server that last ran them and the one running them now. A per-server row of the same
+        // name is left over from before the lease and is shown instead of nothing only when the cluster
+        // has no row for it.
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var cluster = await _context.Set<ClusterTask>()
+            .Select(x => new ServerTaskSummary
+            {
+                TaskName = x.Name,
+                IntervalSeconds = x.IntervalSeconds,
+                LastStatus = x.LastStatus,
+                LastMessage = x.LastMessage,
+                LastRun = x.LastRunAt,
+                LastDurationMs = x.LastDurationMs,
+                ClusterWide = true,
+                NextRunAt = x.NextRunAt,
+                LastServerId = x.LastServerId,
+                RunningOn = x.LeaseUntil > now ? x.ClaimedBy : null,
+            })
+            .ToListAsync();
+
+        var clusterNames = cluster.Select(x => x.TaskName).ToHashSet(StringComparer.Ordinal);
+
+        return
+        [
+            .. perServer
+                .Where(x => !clusterNames.Contains(x.TaskName))
+                .Concat(cluster)
+                .OrderBy(x => x.TaskName, StringComparer.Ordinal),
+        ];
     }
 
     public async Task<PagedList<ServerLogModel>> GetServerLogs(Guid serverId, BaseListRequest request, string? taskName = null)
@@ -306,12 +336,10 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
                 .Select(x => (int?)x.Id)
                 .FirstOrDefaultAsync();
 
-            if (taskId == null)
-            {
-                return new PagedList<ServerLogModel>(0, [], 0);
-            }
-
-            query = query.Where(x => x.ServerTaskId == taskId);
+            // A cluster-wide task's runs (rule 6.20) carry its name instead of a per-server row.
+            query = taskId == null
+                ? query.Where(x => x.ServerTaskId == null && x.TaskName == taskName)
+                : query.Where(x => x.ServerTaskId == taskId || (x.ServerTaskId == null && x.TaskName == taskName));
         }
 
         return await query
@@ -319,7 +347,7 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(x => new ServerLogModel
             {
                 Id = x.Id,
-                TaskName = x.ServerTask != null ? x.ServerTask.TaskName : "Server",
+                TaskName = x.ServerTask != null ? x.ServerTask.TaskName : x.TaskName ?? "Server",
                 Status = x.Status,
                 Message = x.Message,
                 Timestamp = x.Timestamp,

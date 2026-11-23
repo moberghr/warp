@@ -62,6 +62,9 @@ public sealed class ErrorGroupAggregator<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.ErrorGroupingInterval;
 
+    // Idle backoff (rule 6.20): while it keeps finding nothing it runs less often, up to this.
+    public TimeSpan? IdleBackoffLimit => TimeSpan.FromMinutes(5);
+
     // With MaxBatchesPerTick bounding one tick, a backlog has to drain across consecutive ticks
     // rather than waiting a whole ErrorGroupingInterval between slices.
     public bool RerunImmediately => true;

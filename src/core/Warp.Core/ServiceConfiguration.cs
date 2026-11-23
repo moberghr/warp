@@ -856,6 +856,7 @@ public static class ServiceConfiguration
         serverLog.HasKey(p => p.Id);
         serverLog.Property(p => p.ServerId);
         serverLog.Property(p => p.ServerTaskId);
+        serverLog.Property(p => p.TaskName).HasMaxLength(200);
         serverLog.Property(p => p.Status);
         serverLog.Property(p => p.Message);
         serverLog.Property(p => p.Timestamp);

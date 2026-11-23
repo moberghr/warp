@@ -286,6 +286,16 @@ function TaskSection({ serverId, task }: { serverId: string; task: ServerTaskSum
         <div className="flex items-center gap-3 min-w-0">
           {expanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
           <span className="font-medium text-sm">{task.taskName}</span>
+          {task.clusterWide && (
+            <Badge variant="outline" className="text-xs" title="One schedule for the whole cluster; one server runs each tick.">
+              cluster-wide
+            </Badge>
+          )}
+          {task.runningOn && (
+            <span className="text-xs px-2 py-0.5 rounded-full font-medium text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/30">
+              {task.runningOn === serverId ? 'running here' : 'running on another server'}
+            </span>
+          )}
           {task.lastStatus && (
             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColors[task.lastStatus] ?? 'text-muted-foreground'}`}>
               {task.lastStatus}
@@ -299,7 +309,15 @@ function TaskSection({ serverId, task }: { serverId: string; task: ServerTaskSum
             <span className="text-yellow-600 dark:text-yellow-400 font-medium">Disabled</span>
           )}
           {task.lastDurationMs != null && <span>took {task.lastDurationMs.toFixed(0)}ms</span>}
-          {task.lastRun && <span>ran <RelativeTime date={task.lastRun} /></span>}
+          {task.lastRun && (
+            <span>
+              ran <RelativeTime date={task.lastRun} />
+              {task.clusterWide && task.lastServerId && (task.lastServerId === serverId ? ' here' : ' elsewhere')}
+            </span>
+          )}
+          {task.clusterWide && task.nextRunAt && task.intervalSeconds != null && (
+            <span>next <RelativeTime date={task.nextRunAt} display="relative" tense="countdown" /></span>
+          )}
         </div>
       </button>
 

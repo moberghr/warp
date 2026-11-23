@@ -45,6 +45,9 @@ public sealed class ServerCleanup<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.ServerCleanupInterval;
 
+    // Idle backoff (rule 6.20): while it keeps finding nothing it runs less often, up to this.
+    public TimeSpan? IdleBackoffLimit => TimeSpan.FromMinutes(2);
+
     public bool RerunImmediately => false;
 
     public async Task<string?> ExecuteAsync(CancellationToken ct)
