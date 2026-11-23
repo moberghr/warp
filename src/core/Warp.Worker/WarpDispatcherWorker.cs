@@ -142,8 +142,13 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     {
         await Task.Delay(_batch.FlushInterval, _timeProvider).ConfigureAwait(false);
 
-        // After StopAsync the final flush has run and the scope factory may be gone.
-        if (!_stopped && _batch.IsTimeElapsed)
+        // Whatever is buffered now goes, without asking IsTimeElapsed: the timer and the clock that
+        // check reads are different sources, so the timer can fire a hair before the clock says the
+        // interval has passed, and a buffer this timer was started for would then wait for the next
+        // trigger, which may not come until a long handler returns. Flushing a buffer a later
+        // completion started a moment ago only makes that batch smaller. After StopAsync the final
+        // flush has run and the scope factory may be gone.
+        if (!_stopped)
         {
             await FlushBatchSafely();
         }
