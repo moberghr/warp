@@ -562,7 +562,9 @@ public static class ServiceConfiguration
             .WithOne(x => x.ParentJob)
             .HasForeignKey(x => x.ParentJobId);
 
-        // Worker fetch: Kind + State + Queue + ScheduleTime
+        // Worker fetch: Kind + State + Queue + ScheduleTime. This index and the next, the scheduled and
+        // the expiry ones are made PARTIAL by WarpPartialIndexes once the model is built (rule 6.15), so
+        // a state transition writes no entry into an index whose readers never look for the new state.
         job.HasIndex(p => new { p.Kind, p.CurrentState, p.Queue, p.ScheduleTime });
 
         // Child job queries + failed children check during completion
@@ -588,7 +590,8 @@ public static class ServiceConfiguration
         //
         // Measured and REFUTED as fixes for that misestimate, so they need not be retried: autovacuum
         // tuning, more frequent ANALYZE, extended statistics on (Kind, CurrentState, Queue), a partial
-        // index matching the claim predicate (verified used, ~31.5k scans, and still no change), and
+        // index matching the claim predicate (verified used, ~31.5k scans, and still no change to the
+        // misestimate; the claim index IS partial now, rule 6.15, but for write cost, not for this), and
         // plan_cache_mode = force_custom_plan. Reproduce any of it with
         // `Warp.ServerBenchmarks -- load --tune=...`.
         job.HasIndex(p => new { p.Kind, p.CurrentState, p.CreateTime });
