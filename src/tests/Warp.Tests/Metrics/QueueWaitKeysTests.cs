@@ -142,4 +142,27 @@ public class QueueWaitKeysTests
     {
         QueueWaitKeys.BucketFor(durationMs).ShouldBe(expectedBucket);
     }
+
+    [Fact]
+    public void Build_SameQueueAndBucket_ReusesTheKeyStrings()
+    {
+        // The worker builds these for every claimed job; within a tier bucket they come from the cache.
+        var first = QueueWaitKeys.Build("default", waitMs: 42, application: "shop", tierSuffix: FineSuffix);
+        var second = QueueWaitKeys.Build("default", waitMs: 43, application: "shop", tierSuffix: FineSuffix);
+
+        second.Select(x => x.Key).ShouldBe(first.Select(x => x.Key));
+        second.Zip(first).ShouldAllBe(x => ReferenceEquals(x.First.Key, x.Second.Key));
+        second.Single(x => string.Equals(x.Key, "qwait:default:dur", StringComparison.Ordinal)).Value.ShouldBe(43);
+    }
+
+    [Fact]
+    public void Build_NextTierBucket_BuildsThatBucketsKeys()
+    {
+        QueueWaitKeys.Build("default", waitMs: 1, application: null, tierSuffix: FineSuffix);
+
+        var next = QueueWaitKeys.Build("default", waitMs: 1, application: null, tierSuffix: MetricTiers.Suffix(MetricTier.Fine, Ts.AddMinutes(5), 5));
+
+        next.ShouldContain(c => c.Key == "qwait:default:hist:count:m5:2026-07-26-08-15");
+        next.ShouldNotContain(c => c.Key.Contains("08-10", StringComparison.Ordinal));
+    }
 }
