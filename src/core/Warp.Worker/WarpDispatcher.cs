@@ -197,6 +197,12 @@ public class WarpDispatcher<TContext> : BackgroundService
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var sqlQueries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
 
+        // The claimed rows are not tracked (rule 6.20): this scope ends as soon as they are handed over,
+        // and nothing writes them back through EF (completions go through the set-based statement, the
+        // ownership renewal and the unclaim through ExecuteUpdate on scopes of their own). Tracking them
+        // cost an identity-map entry and a snapshot per row on every claim.
+        context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var timed = DispatcherDiagnostics.ClaimDuration.Enabled;
         var claimStart = 0L;

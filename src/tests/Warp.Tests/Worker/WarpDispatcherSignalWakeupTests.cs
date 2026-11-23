@@ -8,6 +8,7 @@ using Warp.Core;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Events;
+using Warp.Tests.Helpers;
 using Warp.Worker;
 
 namespace Warp.Tests.Worker;
@@ -58,7 +59,7 @@ public class WarpDispatcherSignalWakeupTests
 
         var services = new ServiceCollection();
         services.AddSingleton(queries.Object);
-        services.AddSingleton(Mock.Of<IWarpServerContext>());
+        services.AddSingleton<IWarpServerContext>(new InMemoryServerContext());
         await using var provider = services.BuildServiceProvider();
 
         var groupConfig = new WorkerGroupConfiguration

@@ -266,6 +266,31 @@ public abstract class ConcurrentClaimTestsBase : IAsyncLifetime
         (await ClaimAsync(5)).ShouldBe([behind.Id, jobs[3].Id], "a second later it reads from the head again");
     }
 
+    [TimedFact]
+    public async Task ClaimEnqueuedJobs_OnANoTrackingContext_ReturnsTheClaimedRowsUntracked()
+    {
+        // The dispatcher claims on a no-tracking context (rule 6.20): the claim must return the claimed rows,
+        // in Processing, with nothing left in the change tracker.
+        var ids = await SeedJobs(3, "default");
+        await using var ctx = _fixture.CreateContext();
+        ctx.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+        // Act
+        var claimed = await Warp.Tests.Helpers.TestTasks.QueriesFor(ctx).ClaimEnqueuedJobsAsync(
+            ctx,
+            ["default"],
+            Guid.NewGuid(),
+            DateTime.UtcNow,
+            3,
+            watermark: null,
+            Xunit.TestContext.Current.CancellationToken);
+
+        // Assert
+        claimed.Select(x => x.Id).ShouldBe(ids, ignoreOrder: true);
+        claimed.ShouldAllBe(x => x.CurrentState == State.Processing);
+        ctx.ChangeTracker.Entries().ShouldBeEmpty();
+    }
+
     private async Task<List<Guid>> SeedJobs(int count, string queue)
     {
         var now = DateTime.UtcNow;
