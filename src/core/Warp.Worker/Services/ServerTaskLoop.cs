@@ -414,6 +414,12 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
     // Internal for tests: lets tests seed _serverTaskId without running EnsureRegisteredAsync.
     internal void SetServerTaskIdForTest(int id) => _serverTaskId = id;
 
+    internal TimeSpan DefaultInterval => _defaultInterval;
+
+    // Set by ServerTaskHost when it registered every task of the server in one statement; the loop then
+    // skips its own registration. Must be called before RunAsync.
+    internal void MarkRegistered(int serverTaskId) => _serverTaskId = serverTaskId;
+
     private async Task WaitForNextRunAsync(TimeSpan interval, CancellationToken ct)
     {
         try

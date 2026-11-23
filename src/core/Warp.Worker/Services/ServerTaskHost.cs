@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core;
+using Warp.Core.Data.Entities;
 using Warp.Core.Events;
 
 namespace Warp.Worker.Services;
@@ -25,6 +26,9 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
 {
     private readonly Dictionary<Type, ServerTaskLoop<TContext>> _loops = [];
     private readonly List<IDisposable> _signalSubscriptions = [];
+    private readonly IServiceScopeFactory _scopes;
+    private readonly Guid _serverId;
+    private readonly ILogger _logger;
 
     public ServerTaskHost(
         IServiceScopeFactory scopes,
@@ -35,6 +39,9 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
         ServerTaskSignals<TContext> signals)
     {
         var hostLogger = loggerFactory.CreateLogger<ServerTaskHost<TContext>>();
+        _scopes = scopes;
+        _serverId = configuration.Value.ServerId;
+        _logger = hostLogger;
 
         using var metadataScope = scopes.CreateScope();
         foreach (var task in metadataScope.ServiceProvider.GetServices<IServerTask>())
@@ -79,6 +86,8 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
             return;
         }
 
+        await RegisterAllAsync(stoppingToken);
+
         var tasks = _loops.Values.Select(loop => loop.RunAsync(stoppingToken));
         try
         {
@@ -105,6 +114,53 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
         }
 
         return loop.RunOnceAsync(ct);
+    }
+
+    // Registers every task's ServerTask row for this server in one round trip: one read of the server's
+    // rows, one save that inserts the missing ones (EF batches them into one command). Each loop used to
+    // register itself on its first tick, so a server starting fourteen tasks opened fourteen scopes and
+    // sent fourteen SELECT + INSERT pairs at once, and several servers starting together contended on
+    // them. A failure here is logged and left to the loops, which register themselves as before.
+    private async Task RegisterAllAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = _scopes.CreateScope();
+            var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+
+            var existing = await context.Set<ServerTask>()
+                .Where(x => x.ServerId == _serverId)
+                .ToListAsync(ct);
+
+            var rows = new List<(ServerTaskLoop<TContext> Loop, ServerTask Row)>(_loops.Count);
+            foreach (var loop in _loops.Values)
+            {
+                var row = existing.Find(x => string.Equals(x.TaskName, loop.Name, StringComparison.Ordinal));
+                if (row == null)
+                {
+                    row = new ServerTask { ServerId = _serverId, TaskName = loop.Name };
+                    context.Set<ServerTask>().Add(row);
+                }
+
+                row.IntervalSeconds = loop.DefaultInterval.TotalSeconds;
+                rows.Add((loop, row));
+            }
+
+            await context.SaveChangesAsync(ct);
+
+            foreach (var (loop, row) in rows)
+            {
+                loop.MarkRegistered(row.Id);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Registering the server's tasks in one batch failed; each task registers itself");
+        }
     }
 
     public override void Dispose()
