@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 
 namespace Warp.Core.Services;
 
@@ -29,15 +30,38 @@ namespace Warp.Core.Services;
 /// </summary>
 public sealed class WarpCounterBuffer
 {
-    private readonly ConcurrentDictionary<string, long> _pending = new(StringComparer.Ordinal);
+    // A cell the drain took off the dictionary. No real total comes near it.
+    private const long Retired = long.MinValue;
 
-    /// <summary>Distinct keys currently buffered. Diagnostics only.</summary>
+    // One mutable cell per key, updated with compare-and-swap. ConcurrentDictionary.AddOrUpdate takes the
+    // key's bucket lock on every update, and every worker adds to the same few keys for every job: that
+    // lock was 2% of a busy worker's CPU in contention alone.
+    private readonly ConcurrentDictionary<string, StrongBox<long>> _pending = new(StringComparer.Ordinal);
+
+    /// <summary>Distinct keys currently buffered (a drained key stays until a drain finds it idle). Diagnostics only.</summary>
     public int PendingKeyCount => _pending.Count;
 
     public void Add(string key, long value)
     {
-        // The argument overload: the lambdas capture nothing, so an increment allocates no closure.
-        _pending.AddOrUpdate(key, static (_, v) => v, static (_, existing, v) => existing + v, value);
+        var spin = default(SpinWait);
+        while (true)
+        {
+            var cell = _pending.GetOrAdd(key, static _ => new StrongBox<long>());
+            var current = Volatile.Read(ref cell.Value);
+            while (current != Retired)
+            {
+                var seen = Interlocked.CompareExchange(ref cell.Value, current + value, current);
+                if (seen == current)
+                {
+                    return;
+                }
+
+                current = seen;
+            }
+
+            // A drain retired this cell after we looked it up and is removing it: look the key up again.
+            spin.SpinOnce();
+        }
     }
 
     public void AddRange(IEnumerable<KeyValuePair<string, long>> increments)
@@ -51,16 +75,13 @@ public sealed class WarpCounterBuffer
     /// <summary>
     /// Takes everything buffered so far, leaving concurrent increments for the next drain.
     /// <para>
-    /// Drains key-by-key with <c>TryRemove</c>, which is the only shape that conserves increments.
-    /// Swapping the dictionary does NOT: <see cref="Add"/> reads the field and then calls
-    /// <c>AddOrUpdate</c> on the instance it read, so a swap landing between those two steps sends the
-    /// increment into a dictionary that has already been materialised, and it is lost with no trace.
-    /// Measured at 8.4% of increments dropped under eight concurrent writers.
-    /// </para>
-    /// <para>
-    /// <c>TryRemove</c> is atomic with respect to <c>AddOrUpdate</c> on the same key, so a racing
-    /// increment either lands before the removal (and is taken in this batch) or re-creates the key
-    /// after it (and is taken in the next). Never neither.
+    /// Each cell is emptied with a compare-and-swap, so a racing increment lands either before it (and is
+    /// taken in this batch) or after it (and is taken in the next). Never neither. A cell found already
+    /// empty, so idle since the last drain, is retired and removed so keys of past time buckets do not
+    /// accumulate; an <see cref="Add"/> that still holds it sees it retired and starts again on a new cell.
+    /// Swapping the whole dictionary instead does NOT conserve increments: an add that read the field
+    /// before the swap lands in an instance already materialised (measured at 8.4% dropped under eight
+    /// concurrent writers).
     /// </para>
     /// </summary>
     public IReadOnlyList<KeyValuePair<string, long>> Drain()
@@ -72,11 +93,29 @@ public sealed class WarpCounterBuffer
 
         var taken = new List<KeyValuePair<string, long>>();
 
-        foreach (var key in _pending.Keys)
+        foreach (var (key, cell) in _pending)
         {
-            if (_pending.TryRemove(key, out var value) && value != 0)
+            var current = Volatile.Read(ref cell.Value);
+            while (current != Retired)
             {
-                taken.Add(new KeyValuePair<string, long>(key, value));
+                var next = current == 0 ? Retired : 0;
+                var seen = Interlocked.CompareExchange(ref cell.Value, next, current);
+                if (seen != current)
+                {
+                    current = seen;
+                    continue;
+                }
+
+                if (next == Retired)
+                {
+                    _pending.TryRemove(new KeyValuePair<string, StrongBox<long>>(key, cell));
+                }
+                else
+                {
+                    taken.Add(new KeyValuePair<string, long>(key, current));
+                }
+
+                break;
             }
         }
 
