@@ -37,8 +37,6 @@ internal static class MetricTiers
     public const string HourlyFormat = "yyyy-MM-dd-HH";
     public const string DailyFormat = "yyyy-MM-dd";
 
-    private static volatile SuffixEntry? _lastSuffix;
-
     public static string Marker(MetricTier tier) => tier switch
     {
         MetricTier.Fine => FineMarker,
@@ -70,21 +68,7 @@ internal static class MetricTiers
 
     /// <summary>The trailing key suffix <c>:{marker}:{stamp}</c> for <paramref name="utc"/> at the given tier.</summary>
     public static string Suffix(MetricTier tier, DateTime utc, int fineMinutes)
-    {
-        // The worker asks for the same bucket's suffix for every job; formatting the date each time showed
-        // in its profile. Keep the last one.
-        var start = BucketStart(tier, utc, fineMinutes);
-        var last = _lastSuffix;
-        if (last is not null && last.Tier == tier && last.Start == start)
-        {
-            return last.Value;
-        }
-
-        var value = $":{Marker(tier)}:{start.ToString(Format(tier), CultureInfo.InvariantCulture)}";
-        _lastSuffix = new SuffixEntry(tier, start, value);
-
-        return value;
-    }
+        => $":{Marker(tier)}:{Stamp(tier, utc, fineMinutes)}";
 
     /// <summary>Parses a <c>{marker}</c> + <c>{stamp}</c> pair into a tier and its bucket-start instant.</summary>
     public static bool TryParse(string marker, string stamp, out MetricTier tier, out DateTime bucketStart)
@@ -163,6 +147,4 @@ internal static class MetricTiers
 
         return false;
     }
-
-    private sealed record SuffixEntry(MetricTier Tier, DateTime Start, string Value);
 }

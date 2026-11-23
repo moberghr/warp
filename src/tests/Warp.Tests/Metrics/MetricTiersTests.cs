@@ -84,17 +84,4 @@ public class MetricTiersTests
         MetricTiers.TryClassifyKey("qbacklog:default:depth", out _, out _, out _).ShouldBeFalse();    // gauge
         MetricTiers.TryClassifyKey("stats:succeeded", out _, out _, out _).ShouldBeFalse();           // no date
     }
-
-    [Fact]
-    public void Suffix_SameBucket_ReturnsTheSameStringAndTheNextBucketItsOwn()
-    {
-        var first = MetricTiers.Suffix(MetricTier.Fine, Ts, 5);
-        var sameBucket = MetricTiers.Suffix(MetricTier.Fine, Ts.AddMinutes(2), 5);
-        var hourly = MetricTiers.Suffix(MetricTier.Hourly, Ts, 5);
-        var nextBucket = MetricTiers.Suffix(MetricTier.Fine, Ts.AddMinutes(3), 5);
-
-        ReferenceEquals(sameBucket, first).ShouldBeTrue();
-        hourly.ShouldBe(":h1:2026-08-02-14");
-        nextBucket.ShouldBe(":m5:2026-08-02-14-40");
-    }
 }

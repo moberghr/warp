@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -73,7 +72,8 @@ internal static class QueueWaitKeys
     /// </summary>
     public static List<Counter> Build(string queue, double waitMs, string? application, string tierSuffix)
     {
-        var counters = new List<Counter>(application is null ? 6 : 10);
+        var counters = new List<Counter>();
+        var q = Sanitize(queue);
 
         // Clamp before the int cast: a genuinely stuck queue (the case this SLI exists to surface) can exceed
         // int.MaxValue ms (~24.8 days), and an unchecked cast would wrap to a negative value and poison the
@@ -81,24 +81,26 @@ internal static class QueueWaitKeys
         var durMs = (int)Math.Min(int.MaxValue, Math.Round(Math.Max(0, waitMs), MidpointRounding.AwayFromZero));
         var bucket = BucketFor(durMs);
 
-        counters.Add(new Counter { Key = Key(KeyKind.Total, queue, CountToken, 0, null, tierSuffix), Value = 1 });
-        counters.Add(new Counter { Key = Key(KeyKind.History, queue, CountToken, 0, null, tierSuffix), Value = 1 });
-        counters.Add(new Counter { Key = Key(KeyKind.Total, queue, DurationToken, 0, null, tierSuffix), Value = durMs });
-        counters.Add(new Counter { Key = Key(KeyKind.History, queue, DurationToken, 0, null, tierSuffix), Value = durMs });
+        counters.Add(new Counter { Key = Total(q, CountToken), Value = 1 });
+        counters.Add(new Counter { Key = History(q, CountToken, tierSuffix), Value = 1 });
+        counters.Add(new Counter { Key = Total(q, DurationToken), Value = durMs });
+        counters.Add(new Counter { Key = History(q, DurationToken, tierSuffix), Value = durMs });
 
         // Lifetime pct (dashboard all-time percentiles) + tiered pcth (windowed percentiles, §8.30).
-        counters.Add(new Counter { Key = Key(KeyKind.Pct, queue, string.Empty, bucket, null, tierSuffix), Value = 1 });
-        counters.Add(new Counter { Key = Key(KeyKind.PctHistory, queue, string.Empty, bucket, null, tierSuffix), Value = 1 });
+        counters.Add(new Counter { Key = Pct(q, bucket), Value = 1 });
+        counters.Add(new Counter { Key = PctHistory(q, bucket, tierSuffix), Value = 1 });
 
         if (application is null)
         {
             return counters;
         }
 
-        counters.Add(new Counter { Key = Key(KeyKind.AppTotal, queue, CountToken, 0, application, tierSuffix), Value = 1 });
-        counters.Add(new Counter { Key = Key(KeyKind.AppHistory, queue, CountToken, 0, application, tierSuffix), Value = 1 });
-        counters.Add(new Counter { Key = Key(KeyKind.AppTotal, queue, DurationToken, 0, application, tierSuffix), Value = durMs });
-        counters.Add(new Counter { Key = Key(KeyKind.AppHistory, queue, DurationToken, 0, application, tierSuffix), Value = durMs });
+        var app = Sanitize(application);
+
+        counters.Add(new Counter { Key = AppTotal(app, q, CountToken), Value = 1 });
+        counters.Add(new Counter { Key = AppHistory(app, q, CountToken, tierSuffix), Value = 1 });
+        counters.Add(new Counter { Key = AppTotal(app, q, DurationToken), Value = durMs });
+        counters.Add(new Counter { Key = AppHistory(app, q, DurationToken, tierSuffix), Value = durMs });
 
         return counters;
     }
@@ -216,67 +218,5 @@ internal static class QueueWaitKeys
         queue = parts[1];
 
         return true;
-    }
-
-    // Distinct keys cached within one tier bucket; past it keys are built per job, as before.
-    private const int MaxCachedKeys = 10_000;
-
-    private static volatile KeyCache _keyCache = new(string.Empty);
-
-    // Every claimed job builds these keys, and they are the same for every job of a queue within a tier
-    // bucket, so they are cached per bucket exactly like JobStatsKeys' (the cache starts over when the
-    // bucket changes, so it does not grow with time).
-    private static string Key(KeyKind kind, string queue, string token, int bucket, string? application, string tierSuffix)
-    {
-        var cache = _keyCache;
-        if (!string.Equals(cache.TierSuffix, tierSuffix, StringComparison.Ordinal))
-        {
-            cache = new KeyCache(tierSuffix);
-            _keyCache = cache;
-        }
-
-        var lookup = new KeyLookup(kind, queue, token, bucket, application);
-        if (cache.Keys.TryGetValue(lookup, out var key))
-        {
-            return key;
-        }
-
-        var q = Sanitize(queue);
-        var app = application is null ? null : Sanitize(application);
-        key = kind switch
-        {
-            KeyKind.Total => Total(q, token),
-            KeyKind.History => History(q, token, tierSuffix),
-            KeyKind.Pct => Pct(q, bucket),
-            KeyKind.PctHistory => PctHistory(q, bucket, tierSuffix),
-            KeyKind.AppTotal => AppTotal(app!, q, token),
-            _ => AppHistory(app!, q, token, tierSuffix),
-        };
-
-        if (cache.Keys.Count < MaxCachedKeys)
-        {
-            cache.Keys.TryAdd(lookup, key);
-        }
-
-        return key;
-    }
-
-    private enum KeyKind
-    {
-        Total = 1,
-        History = 2,
-        Pct = 3,
-        PctHistory = 4,
-        AppTotal = 5,
-        AppHistory = 6,
-    }
-
-    private readonly record struct KeyLookup(KeyKind Kind, string Queue, string Token, int Bucket, string? Application);
-
-    private sealed class KeyCache(string tierSuffix)
-    {
-        public string TierSuffix { get; } = tierSuffix;
-
-        public ConcurrentDictionary<KeyLookup, string> Keys { get; } = new();
     }
 }
