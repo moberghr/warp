@@ -22,6 +22,8 @@ public class WarpDispatcher<TContext> : BackgroundService
     where TContext : DbContext
 {
     // Where each queue's next claim starts reading the claim index (rule 6.16). Only the claim loop touches it.
+    private const int MaxSettleYields = 8;
+
     private readonly ClaimWatermark _claimWatermark = new();
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<WarpDispatcher<TContext>> _logger;
@@ -72,6 +74,14 @@ public class WarpDispatcher<TContext> : BackgroundService
     public ChannelReader<Job> JobReader => _jobChannel.Reader;
 
     public DispatcherWorkerAvailability Availability => _availability;
+
+    public override void Dispose()
+    {
+        _availability.Dispose();
+        _signal.Dispose();
+        base.Dispose();
+        GC.SuppressFinalize(this);
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -171,9 +181,17 @@ public class WarpDispatcher<TContext> : BackgroundService
         var available = _availability.Available;
         if (available <= 0)
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(10), ct);
+            // Wait for a worker to free a slot instead of polling (rule 6.19): with quick jobs the workers
+            // empty the group's buffer in about a millisecond, and a 10 ms sleep here left them idle for
+            // the rest of it, which capped one server at ~20 jobs per ~10 ms. The timeout is a backstop.
+            await _availability.WaitForFreeSlotAsync(TimeSpan.FromSeconds(1), ct);
             return FetchResult.ChannelFull;
         }
+
+        // Let slots that quick jobs are freeing right now come back first, so one claim covers all of them
+        // rather than the first one or two (each claim is a round trip). A handler that holds its slot ends
+        // the wait at the first yield that frees nothing.
+        available = await SettleAsync(available);
 
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
@@ -265,6 +283,24 @@ public class WarpDispatcher<TContext> : BackgroundService
         }
 
         return FetchResult.Fetched;
+    }
+
+    // Yields while the group's free capacity keeps growing, at most MaxSettleYields times.
+    private async Task<int> SettleAsync(int available)
+    {
+        for (var i = 0; i < MaxSettleYields && available < _availability.Capacity; i++)
+        {
+            await Task.Yield();
+            var now = _availability.Available;
+            if (now <= available)
+            {
+                break;
+            }
+
+            available = now;
+        }
+
+        return available;
     }
 
     /// <summary>

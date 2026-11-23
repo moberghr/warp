@@ -15,8 +15,12 @@ namespace Warp.Worker;
 /// released exactly once, when the job is finished with or handed back.
 /// </para>
 /// </summary>
-public sealed class DispatcherWorkerAvailability
+public sealed class DispatcherWorkerAvailability : IDisposable
 {
+    // Released when the group goes from no free slot to one: the dispatcher of a full group waits on it
+    // instead of polling (rule 6.19). At most one pending release; a stale one costs one extra check.
+    private readonly SemaphoreSlim _slotFreed = new(0, 1);
+    private readonly Lock _slotFreedLock = new();
     private int _outstanding;
     private long _freedAt;
 
@@ -49,21 +53,54 @@ public sealed class DispatcherWorkerAvailability
     /// </summary>
     public void Release()
     {
-        // Opt-in timing (DispatcherDiagnostics.FreeSlotWait): when the group goes from no free slot to
-        // one, remember the moment, so the next claim can record how long that slot waited for it.
-        if (Interlocked.Decrement(ref _outstanding) == Capacity - 1 && DispatcherDiagnostics.FreeSlotWait.Enabled)
+        if (Interlocked.Decrement(ref _outstanding) != Capacity - 1)
+        {
+            return;
+        }
+
+        // The group went from no free slot to one: wake its dispatcher. Opt-in timing
+        // (DispatcherDiagnostics.FreeSlotWait): remember the moment, so the next claim can record how long
+        // that slot waited for it.
+        if (DispatcherDiagnostics.FreeSlotWait.Enabled)
         {
             Interlocked.CompareExchange(ref _freedAt, Stopwatch.GetTimestamp(), 0);
         }
+
+        SignalSlotFreed();
     }
 
     /// <summary>
     /// Returns <paramref name="count"/> jobs' capacity in one step.
     /// </summary>
-    public void Release(int count) => Interlocked.Add(ref _outstanding, -count);
+    public void Release(int count)
+    {
+        var after = Interlocked.Add(ref _outstanding, -count);
+        if (after < Capacity && after + count >= Capacity)
+        {
+            SignalSlotFreed();
+        }
+    }
+
+    /// <summary>
+    /// Waits until a worker frees a slot in a full group, or <paramref name="timeout"/> (a backstop) passes.
+    /// </summary>
+    internal Task<bool> WaitForFreeSlotAsync(TimeSpan timeout, CancellationToken ct) => _slotFreed.WaitAsync(timeout, ct);
 
     /// <summary>
     /// When a slot was freed in a group that had none, since the last call; 0 if none was.
     /// </summary>
     internal long TakeFreedAt() => Interlocked.Exchange(ref _freedAt, 0);
+
+    public void Dispose() => _slotFreed.Dispose();
+
+    private void SignalSlotFreed()
+    {
+        lock (_slotFreedLock)
+        {
+            if (_slotFreed.CurrentCount == 0)
+            {
+                _slotFreed.Release();
+            }
+        }
+    }
 }
