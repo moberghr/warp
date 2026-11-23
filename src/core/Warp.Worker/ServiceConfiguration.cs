@@ -237,7 +237,14 @@ public static class ServiceConfiguration
             .Where(x => x.ServiceType == typeof(DbContextOptions))
             .ToList();
 
-        services.AddDbContext<WarpServerContext<TContext>>((sp, options) =>
+        // The options are built ONCE (optionsLifetime Singleton), not for every server context: claims,
+        // completion flushes, the job monitor and every server-task pass each create one, and rebuilding the
+        // options each time (the configurator, the interceptor, ConfigureWarnings cloning EF's options
+        // extensions) cost several KB per context, about a seventh of what the worker allocated per job.
+        // Nothing in them varies by scope: the configurator caches its connection source and opens its own
+        // scope to read it, and the interceptor and the server configuration are process-wide.
+        services.AddDbContext<WarpServerContext<TContext>>(
+            (sp, options) =>
         {
             var configurator = sp.GetService<IWarpServerContextConfigurator>()
                 ?? throw new InvalidOperationException(
@@ -248,8 +255,7 @@ public static class ServiceConfiguration
             configurator.Configure(options, sp);
             options.AddWarpInterceptors();
 
-            // One ConfigureWarnings call rather than one per setting: this callback runs for every server
-            // context created, several per job, and each call clones EF's options extensions.
+            // One ConfigureWarnings call rather than one per setting: each call clones EF's options extensions.
             var serverConfig = sp.GetService<IOptions<WarpServerConfiguration>>()?.Value;
             var demoteCommandLogging = serverConfig is null || !serverConfig.EnableServerCommandLogging;
             options.ConfigureWarnings(w =>
@@ -275,7 +281,9 @@ public static class ServiceConfiguration
                 // Skip/Take, still warns, which is where the warning earns its keep.
                 w.Ignore(CoreEventId.RowLimitingOperationWithoutOrderByWarning);
             });
-        });
+        },
+            contextLifetime: ServiceLifetime.Scoped,
+            optionsLifetime: ServiceLifetime.Singleton);
 
         // AddDbContext also appends a non-generic DbContextOptions forwarder (plain Add, not TryAdd)
         // carrying WarpServerContext<TContext> as its ContextType. That enumeration —
