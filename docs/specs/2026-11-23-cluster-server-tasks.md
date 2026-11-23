@@ -11,10 +11,12 @@
 
 Measured with the lab's idle probe (`idle --servers=N --window=120`, 5 workers per server, PostgreSQL, no jobs):
 
-| | 1 server | 4 servers |
-|---|---|---|
-| statements per minute | 389 | 1,548 |
-| per server | 389 | 387 |
+| | 1 server | 2 servers | 4 servers |
+|---|---|---|---|
+| statements per minute | 389 | 778 | 1,548 |
+| per server | 389 | 389 | 387 |
+
+Baseline for the before/after comparison: 1 and 2 servers, measured on `12f5ce8d` (server code identical to `perf/claim-path` `9a97be89`), macOS arm64, PostgreSQL in OrbStack, 45 s settle, 120 s window. The 1-server run reproduced exactly (779 statements in both 120 s windows). Per 2 servers per minute: `DISCARD ALL` 237, `server_task` status `UPDATE` 86, `BEGIN` 62, `pg_try_advisory_xact_lock` 50, `COMMIT` 50, `ROLLBACK` 12, the session-lock sequence 7 × 12, interval `SELECT` 24, heartbeat 24, worker claim polling 40.
 
 All idle load is per server. Per server per minute:
 
