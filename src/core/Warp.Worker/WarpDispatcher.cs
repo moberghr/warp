@@ -20,6 +20,8 @@ namespace Warp.Worker;
 public class WarpDispatcher<TContext> : BackgroundService
     where TContext : DbContext
 {
+    // Where each queue's next claim starts reading the claim index (rule 6.16). Only the claim loop touches it.
+    private readonly ClaimWatermark _claimWatermark = new();
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<WarpDispatcher<TContext>> _logger;
     private readonly WorkerGroupConfiguration _groupConfiguration;
@@ -190,6 +192,7 @@ public class WarpDispatcher<TContext> : BackgroundService
             _workerGroupId,
             now,
             available,
+            _claimWatermark,
             ct);
 
         if (jobs.Count == 0)

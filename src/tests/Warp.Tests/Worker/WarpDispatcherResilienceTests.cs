@@ -106,6 +106,7 @@ public class WarpDispatcherResilienceTests
                 It.IsAny<Guid>(),
                 It.IsAny<DateTime>(),
                 It.IsAny<int>(),
+                It.IsAny<ClaimWatermark?>(),
                 It.IsAny<CancellationToken>()))
             .Returns(() => Task.FromResult(claim()));
 

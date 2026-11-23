@@ -25,6 +25,10 @@ public interface IWarpSqlQueries<TContext>
     /// the worker / timestamp. Uses <c>FOR UPDATE SKIP LOCKED</c> (PG) or
     /// <c>WITH (ROWLOCK, UPDLOCK, READPAST)</c> (SQL Server) so concurrent workers get distinct
     /// rows without contention. Returns the post-update row as a tracked entity.
+    /// <para>
+    /// With a <paramref name="watermark"/> (the dispatcher's), each queue's claim starts where the
+    /// watermark says and records what it took (rule 6.16); without one it reads from the head.
+    /// </para>
     /// </summary>
     Task<List<Job>> ClaimEnqueuedJobsAsync(
         DbContext context,
@@ -32,6 +36,7 @@ public interface IWarpSqlQueries<TContext>
         Guid workerId,
         DateTime now,
         int limit,
+        ClaimWatermark? watermark,
         CancellationToken ct);
 
     /// <summary>

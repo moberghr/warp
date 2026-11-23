@@ -19,6 +19,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     private readonly WarpJobTableNames _n;
 
     private readonly string _claimEnqueuedJobsSql;
+    private readonly string _claimEnqueuedJobsFromSql;
     private readonly string _claimEnqueuedMessagesSql;
     private readonly string _completeJobsSql;
     private readonly string _renewRunningJobsSql;
@@ -94,6 +95,25 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 WHERE ""{_n.Kind}"" = {(int)JobKind.Job}
                   AND ""{_n.CurrentState}"" = {(int)State.Enqueued}
                   AND ""{_n.Queue}"" = {{2}}
+                ORDER BY ""{_n.ScheduleTime}""
+                LIMIT {{3}}
+                FOR UPDATE SKIP LOCKED))
+            RETURNING t.*";
+
+        // The same claim starting at a watermark (rule 6.16): the index range scan begins at that
+        // schedule time, past the dead entries earlier claims left at the head of the queue.
+        _claimEnqueuedJobsFromSql = $@"
+            UPDATE {table} AS t
+            SET ""{_n.CurrentState}"" = {(int)State.Processing},
+                ""{_n.CurrentWorkerId}"" = {{0}},
+                ""{_n.LastKeepAlive}"" = {{1}}
+            WHERE t.""{_n.Id}"" = ANY(ARRAY(
+                SELECT ""{_n.Id}""
+                FROM {table}
+                WHERE ""{_n.Kind}"" = {(int)JobKind.Job}
+                  AND ""{_n.CurrentState}"" = {(int)State.Enqueued}
+                  AND ""{_n.Queue}"" = {{2}}
+                  AND ""{_n.ScheduleTime}"" >= {{4}}
                 ORDER BY ""{_n.ScheduleTime}""
                 LIMIT {{3}}
                 FOR UPDATE SKIP LOCKED))
@@ -296,11 +316,12 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         Guid workerId,
         DateTime now,
         int limit,
+        ClaimWatermark? watermark,
         CancellationToken ct)
     {
         if (queues.Length == 1)
         {
-            return await ClaimFromQueueAsync(context, queues[0], workerId, now, limit, ct);
+            return await ClaimFromQueueAsync(context, queues[0], workerId, now, limit, watermark, ct);
         }
 
         var ordered = queues.OrderBy(x => x, StringComparer.Ordinal);
@@ -314,7 +335,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 break;
             }
 
-            claimed.AddRange(await ClaimFromQueueAsync(context, queue, workerId, now, remaining, ct));
+            claimed.AddRange(await ClaimFromQueueAsync(context, queue, workerId, now, remaining, watermark, ct));
         }
 
         return claimed;
@@ -731,11 +752,18 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         Guid workerId,
         DateTime now,
         int limit,
+        ClaimWatermark? watermark,
         CancellationToken ct)
     {
-        var claimed = await context.Set<Job>()
-            .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
-            .ToListAsync(ct);
+        var from = watermark?.StartFor(queue);
+        var claimed = from is { } start
+            ? await context.Set<Job>()
+                .FromSqlRaw(_claimEnqueuedJobsFromSql, workerId, now, queue, limit, start)
+                .ToListAsync(ct)
+            : await context.Set<Job>()
+                .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
+                .ToListAsync(ct);
+        watermark?.Record(queue, from, limit, claimed);
 
         // The inner SELECT picks the OLDEST rows, but UPDATE ... RETURNING gives them back in no
         // particular order (on PostgreSQL, by id). The dispatcher hands a claimed batch to its

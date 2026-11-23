@@ -103,6 +103,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             _workerId,
             now,
             limit: 1,
+            watermark: null,
             cancellationToken);
 
         if (claimed.Count == 0)

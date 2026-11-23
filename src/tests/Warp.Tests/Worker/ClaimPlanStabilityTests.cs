@@ -52,7 +52,7 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
         var claimerCtx = _fixture.CreateContext();
         var queries = Warp.Tests.Helpers.TestTasks.QueriesFor(claimerCtx);
 
-        var claimed = await queries.ClaimEnqueuedJobsAsync(claimerCtx, ["default"], Guid.NewGuid(), DateTime.UtcNow, limit: 1, ct);
+        var claimed = await queries.ClaimEnqueuedJobsAsync(claimerCtx, ["default"], Guid.NewGuid(), DateTime.UtcNow, limit: 1, watermark: null, ct);
 
         claimed.Count.ShouldBe(1);
         var processing = await _fixture.CreateContext().Set<Job>()
