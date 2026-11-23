@@ -68,6 +68,10 @@ internal sealed class CompletionBatch
     private readonly TimeSpan _flushInterval;
     private DateTimeOffset? _firstEntryTimestamp;
 
+    // Numbers each buffer: a drain ends the current one. A flush timer is started for one buffer and
+    // must not flush a later one, which may be only a moment old.
+    private long _generation;
+
     public CompletionBatch(
         IServiceScopeFactory scopeFactory,
         TimeProvider timeProvider,
@@ -101,7 +105,13 @@ internal sealed class CompletionBatch
     /// Buffers a completion. Returns <c>true</c> when it is the first of a new buffer, which is when the
     /// caller starts the clock on <see cref="FlushInterval"/>.
     /// </summary>
-    public bool Add(PendingCompletion entry)
+    public bool Add(PendingCompletion entry) => Add(entry, out _);
+
+    /// <summary>
+    /// Buffers a completion. Returns <c>true</c> when it is the first of a new buffer, with that buffer's
+    /// <paramref name="generation"/>: a flush timer started for it asks <see cref="Holds"/> before flushing.
+    /// </summary>
+    public bool Add(PendingCompletion entry, out long generation)
     {
         lock (_gate)
         {
@@ -112,8 +122,21 @@ internal sealed class CompletionBatch
             }
 
             _buffer.Add(entry);
+            generation = _generation;
 
             return first;
+        }
+    }
+
+    /// <summary>
+    /// Whether the buffer numbered <paramref name="generation"/> is still waiting to be flushed: it was
+    /// not drained since, by a full buffer, an idle group or another timer.
+    /// </summary>
+    public bool Holds(long generation)
+    {
+        lock (_gate)
+        {
+            return _generation == generation && _buffer.Count > 0;
         }
     }
 
@@ -132,6 +155,7 @@ internal sealed class CompletionBatch
             var pending = _buffer.ToArray();
             _buffer.Clear();
             _firstEntryTimestamp = null;
+            _generation++;
 
             return pending;
         }

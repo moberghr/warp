@@ -553,6 +553,27 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         batch.Count.ShouldBe(0);
     }
 
+    [TimedFact]
+    public void Holds_ABufferDrainedEarlyWhileANewOneWaits_OnlyTheNewOne()
+    {
+        // The flush timer started for a buffer must not flush the next one. Under load a buffer is
+        // usually drained early (full, or the group idle) and the next starts at once, so its
+        // predecessor's timer fired into a buffer a moment old: flushes ran twice as often with half
+        // as many jobs, and throughput fell 9-20% on the CI benchmark.
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
+        batch.Add(new PendingCompletion(new Job { Id = Guid.NewGuid() }, [], []), out var first);
+        batch.Drain();
+        batch.Add(new PendingCompletion(new Job { Id = Guid.NewGuid() }, [], []), out var second);
+
+        // Act
+        var holdsFirst = batch.Holds(first);
+        var holdsSecond = batch.Holds(second);
+
+        // Assert
+        holdsFirst.ShouldBeFalse();
+        holdsSecond.ShouldBeTrue();
+    }
+
     // FlushAsync takes no CancellationToken on purpose (PR #127): a caller that could cancel a drained
     // flush mid-commit lost the drained entries and left their jobs Processing for StaleJobRecovery.
     // The signature is the guard; a test that calls it and checks the commit was a copy of
