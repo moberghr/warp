@@ -585,7 +585,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var hourSuffix = now.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
         var tierSuffix = MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes);
-        var counters = new List<Counter>();
+
+        // The state pair, the job's stats keys and a few outcome keys: sized so the job's counters do not
+        // grow the list by doubling.
+        var counters = new List<Counter>((2 * JobStatsKeys.MaxPerDimension) + 8);
         if (state == State.Completed)
         {
             job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);

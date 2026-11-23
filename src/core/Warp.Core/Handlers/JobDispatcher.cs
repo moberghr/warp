@@ -12,6 +12,10 @@ internal static class JobDispatcher
     private static readonly ConcurrentDictionary<Type, Type> _messageHandlerTypeCache = new();
     private static readonly ConcurrentDictionary<Type, MethodInfo> _typedHandlerCoreMethodCache = new();
 
+    // IEnumerable<handler interface>, per interface. provider.GetServices(Type) builds it with MakeGenericType
+    // on every call, which a worker profile showed on every job.
+    private static readonly ConcurrentDictionary<Type, Type> _handlerEnumerableCache = new();
+
     private static readonly MethodInfo ExecuteTypedHandlerCoreMethodInfo =
         typeof(JobDispatcher).GetMethod(nameof(ExecuteTypedHandlerCore), BindingFlags.NonPublic | BindingFlags.Static)!;
 
@@ -100,7 +104,10 @@ internal static class JobDispatcher
         where TRequest : IRequest<Unit>
     {
         // Resolve handler via its interface to get the DI-registered instance
-        var allHandlers = provider.GetServices(handlerInterfaceType);
+        var enumerableType = _handlerEnumerableCache.GetOrAdd(
+            handlerInterfaceType,
+            t => typeof(IEnumerable<>).MakeGenericType(t));
+        var allHandlers = (IEnumerable<object?>)provider.GetRequiredService(enumerableType);
         var handler = allHandlers.First(h => h!.GetType() == handlerType);
 
         // Find the HandleAsync method on the handler (cached)

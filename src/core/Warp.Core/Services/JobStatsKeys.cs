@@ -104,7 +104,9 @@ internal static class JobStatsKeys
     /// </summary>
     public static List<Counter> Build(Job job, string outcomeToken, double? durationMs, string? application, string tierSuffix)
     {
-        var counters = new List<Counter>();
+        // Sized for the most a job can add (two dimensions, MaxPerDimension each): it was grown by doubling,
+        // which showed as most of this method's time on a worker profile.
+        var counters = new List<Counter>(2 * MaxPerDimension);
 
         AppendDimension(counters, TypeMarker, job.Type, outcomeToken, durationMs, application, tierSuffix);
         AppendDimension(counters, HandlerMarker, job.HandlerType, outcomeToken, durationMs, application, tierSuffix);
@@ -289,6 +291,10 @@ internal static class JobStatsKeys
 
         return true;
     }
+
+    // Total + history, the duration pair and the two percentile buckets, then the per-application total,
+    // history and duration pair.
+    internal const int MaxPerDimension = 10;
 
     private static void AppendDimension(List<Counter> counters, string dimension, string? rawId, string outcomeToken, double? durationMs, string? application, string tierSuffix)
     {

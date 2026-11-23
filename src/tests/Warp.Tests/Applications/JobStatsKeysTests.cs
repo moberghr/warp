@@ -26,6 +26,19 @@ public class JobStatsKeysTests
     private static readonly DateTime FineBucket = new(2026, 7, 20, 14, 35, 0, DateTimeKind.Utc);
 
     [TimedFact]
+    public void Build_TypeHandlerDurationAndApplication_FillsExactlyTheSizeTheListIsCreatedWith()
+    {
+        // The list is presized to 2 * MaxPerDimension so a job's keys never grow it by doubling. A new key
+        // per dimension must raise the constant, or the list grows on every job again.
+        var job = new Job { Type = TypeId, HandlerType = HandlerId };
+
+        var counters = JobStatsKeys.Build(job, JobStatsKeys.SucceededToken, durationMs: 12, application: "shop", FineSuffix);
+
+        counters.Count.ShouldBe(2 * JobStatsKeys.MaxPerDimension);
+        counters.Capacity.ShouldBe(2 * JobStatsKeys.MaxPerDimension);
+    }
+
+    [TimedFact]
     public void Total_RoundTripsDimensionIdAndToken()
     {
         var key = JobStatsKeys.Total(JobStatsKeys.TypeMarker, TypeId, JobStatsKeys.SucceededToken);
