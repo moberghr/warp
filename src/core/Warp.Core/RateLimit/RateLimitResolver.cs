@@ -17,6 +17,14 @@ public sealed class RateLimitResolver
     // Allocated on first lookup: most jobs carry no rate limit and never ask.
     private Dictionary<string, RateLimitInfo?>? _cache;
 
+    // For a host that builds the pipeline behaviour itself: overrides are read through the given manager.
+    // Warp's own registration reads its tables directly instead (rule 6.17), so a replaced IRateLimitManager
+    // is not consulted by the registered pipeline.
+    public RateLimitResolver(IRateLimitManager manager)
+        : this((name, ct) => manager.GetLimit(name, ct))
+    {
+    }
+
     internal RateLimitResolver(DeferredWarpContext warp)
         : this((name, ct) => LookupAsync(warp, name, ct))
     {
