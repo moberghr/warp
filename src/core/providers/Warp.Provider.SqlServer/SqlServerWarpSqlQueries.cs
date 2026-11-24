@@ -156,7 +156,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             FROM OPENJSON(@logs) WITH (
                 i uniqueidentifier, j uniqueidentifier, e nvarchar(max), t datetime2, l nvarchar(max), m nvarchar(max),
                 x nvarchar(max), d float, w uniqueidentifier, n nvarchar(100), v smallint) AS l
-            WHERE l.j IN (SELECT id FROM @done);
+            INNER LOOP JOIN @done AS done ON done.id = l.j;
 
             SELECT id FROM @done;";
 
