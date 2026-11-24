@@ -1,6 +1,9 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
+using Warp.Core;
 using Warp.Core.Entities;
+using Warp.Provider.PostgreSql;
 
 namespace Warp.Tests.Core;
 
@@ -51,7 +54,42 @@ public class JobPartialIndexTests
             ]);
     }
 
-    private static List<string> Filters(TestContext context)
+    [Fact]
+    public void JobIndexes_AnEntityConfiguratorRenamesAColumn_FilterOnTheNewName()
+    {
+        // The filters are SQL built from the column names. Built once inside ApplyWarpModel, a rename made
+        // afterwards left a filter naming a column that does not exist, and the migration failed.
+        var services = new ServiceCollection();
+        services.AddDbContext<TestContext>(x => x.UseNpgsql("Host=dummy"));
+        services.AddWarp<TestContext>(opt =>
+        {
+            opt.UsePostgreSql();
+            opt.EntityConfigurators.Add((modelBuilder, _) => modelBuilder.Entity<Job>().Property(x => x.CurrentState).HasColumnName("job_state"));
+        });
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+
+        var filters = Filters(scope.ServiceProvider.GetRequiredService<TestContext>());
+
+        filters.ShouldContain("Kind,CurrentState,Queue,ScheduleTime: \"job_state\" = 1");
+        filters.ShouldContain("CurrentState,ScheduleTime: \"job_state\" = 7");
+    }
+
+    [Fact]
+    public void JobIndexes_TheHostRenamesAColumnAfterApplyWarpModel_FilterOnTheNewName()
+    {
+        var services = new ServiceCollection();
+        services.AddDbContext<RenamingContext>(x => x.UseNpgsql("Host=dummy"));
+        services.AddWarp<RenamingContext>(opt => opt.UsePostgreSql());
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+
+        var filters = Filters(scope.ServiceProvider.GetRequiredService<RenamingContext>());
+
+        filters.ShouldContain("ExpireAt: \"expires\" IS NOT NULL");
+    }
+
+    private static List<string> Filters(DbContext context)
     {
         var filters = context.Model.FindEntityType(typeof(Job))!
             .GetIndexes()
@@ -60,5 +98,15 @@ public class JobPartialIndexTests
         filters.Sort(StringComparer.Ordinal);
 
         return filters;
+    }
+}
+
+public sealed class RenamingContext(DbContextOptions<RenamingContext> options) : DbContext(options)
+{
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyWarpModel("warp");
+        modelBuilder.Entity<Job>().Property(x => x.ExpireAt).HasColumnName("expires");
     }
 }

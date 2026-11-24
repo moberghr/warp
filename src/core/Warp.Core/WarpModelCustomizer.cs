@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Warp.Core.Data;
 using Warp.Core.Data.Converters;
 
 namespace Warp.Core;
@@ -41,5 +42,11 @@ internal sealed class WarpModelCustomizer : RelationalModelCustomizer
             // the UTC converter, keeping the boot-time storage contract satisfiable for addons.
             modelBuilder.PinWarpStorageTypes();
         }
+
+        // The partial indexes' filters are SQL naming columns, built inside ApplyWarpModel. A column
+        // renamed since (by a configurator above, or by the host's own OnModelCreating after its
+        // ApplyWarpModel call, which ran before this customizer) would leave a filter naming a column that
+        // does not exist, and the migration would fail. Rebuilt here, from the names as they now are.
+        WarpPartialIndexes.Apply(modelBuilder);
     }
 }

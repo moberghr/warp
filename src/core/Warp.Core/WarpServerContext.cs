@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Warp.Core.Data;
 using Warp.Core.Data.Converters;
 
 namespace Warp.Core;
@@ -47,5 +48,8 @@ internal sealed class WarpServerContext<TContext> : DbContext, IWarpServerContex
         modelBuilder.PinWarpStorageTypes();
 
         WarpServerModel.MirrorNames(modelBuilder, _modelNames);
+
+        // Like WarpModelCustomizer: the filters name columns, so they follow the names just pinned.
+        WarpPartialIndexes.Apply(modelBuilder);
     }
 }
