@@ -120,6 +120,7 @@ public static class ClusterLab
                 samples.Add((sw.Elapsed.TotalSeconds, delta.TotalExecMs, jobs));
                 lastDelta = delta;
                 sampler.Report();
+                sampler.ReportConnections();
             }
 
             ReportMedians(samples, servers, workersPerServer);
@@ -269,7 +270,7 @@ public static class ClusterLab
             .ConfigureLogging(logging => logging.SetMinimumLevel(LogLevel.Error))
             .ConfigureServices(services =>
             {
-                services.AddDbContext<TestContext>(options => options.UseNpgsql(connectionString)
+                services.AddDbContext<TestContext>(options => options.UseLabNpgsql(connectionString)
                     .UseSnakeCaseNamingConvention());
 
                 services.AddWarp<TestContext>(config => config.UsePostgreSql());
@@ -481,7 +482,7 @@ public static class ClusterLab
             .ConfigureLogging(logging => logging.SetMinimumLevel(LogLevel.Error))
             .ConfigureServices(services =>
             {
-                services.AddDbContext<TestContext>(options => options.UseNpgsql(connectionString)
+                services.AddDbContext<TestContext>(options => options.UseLabNpgsql(connectionString)
                     .UseSnakeCaseNamingConvention());
 
                 services.AddWarpServer<TestContext>(config =>

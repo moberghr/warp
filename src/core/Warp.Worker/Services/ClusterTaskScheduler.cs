@@ -103,20 +103,18 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                 var existing = await context.Set<ClusterTask>()
                     .Where(x => names.Contains(x.Name))
                     .ToDictionaryAsync(x => x.Name, StringComparer.Ordinal, ct);
-                var now = _time.GetUtcNow().UtcDateTime;
-
                 foreach (var entry in _entries.Values)
                 {
                     if (!existing.TryGetValue(entry.Name, out var row))
                     {
-                        row = new ClusterTask { Name = entry.Name, NextRunAt = now };
+                        // Due at once, whatever this server's clock says: the lease times are the database's (rule 6.20).
+                        row = new ClusterTask { Name = entry.Name, NextRunAt = DateTime.UnixEpoch };
                         context.Set<ClusterTask>().Add(row);
                     }
 
                     // The latest server to start sets the schedule, as each server set its own per-server
                     // row before; a dashboard edit holds until the next deploy.
                     row.IntervalSeconds = entry.Interval.TotalSeconds;
-                    row.IdleBackoffLimitSeconds = entry.IdleBackoffLimit?.TotalSeconds;
                 }
 
                 await context.SaveChangesAsync(ct);
@@ -134,12 +132,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     {
         await RegisterWithRetryAsync(ct);
 
-        // Spread the first claims of servers starting together (rule 6.18); a signal ends the wait.
-        var firstWait = _startupDelay * Random.Shared.NextDouble();
-        if (firstWait > TimeSpan.Zero)
-        {
-            await WaitAsync(firstWait, ct);
-        }
+        SpreadFirstRuns(Random.Shared.NextDouble);
 
         while (!ct.IsCancellationRequested)
         {
@@ -168,6 +161,21 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
 
         await Task.WhenAll(running);
+    }
+
+    // Spread the first runs (rule 6.18): each task waits its own random part of the startup delay, as its
+    // per-server loop did, and a signal ends only that task's wait. One wait shared by every task let the
+    // first job's signal run them all at once. Internal for tests, which pass the sample.
+    internal void SpreadFirstRuns(Func<double> sample)
+    {
+        var start = _time.GetUtcNow().UtcDateTime;
+        lock (_gate)
+        {
+            foreach (var entry in _entries.Values)
+            {
+                entry.NotBefore = start + ServerTaskLoop<TContext>.FirstRunDelay(entry.Interval, _startupDelay, sample());
+            }
+        }
     }
 
     // One scheduling pass: honour signals, claim every due task, start what was claimed, and say how
@@ -205,9 +213,10 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
                 entry.Signaled = false;
                 entry.LastSignalClaimAt = now;
+                entry.NotBefore = DateTime.MinValue;
             }
 
-            if (await RequestAsync(entry.Name, now, ct))
+            if (await RequestAsync(entry.Name, ct))
             {
                 Start(entry, ct);
             }
@@ -216,7 +225,11 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         string[] idle;
         lock (_gate)
         {
-            idle = [.. _entries.Values.Where(x => x.Running == null).Select(x => x.Name)];
+            idle = [.. _entries.Values.Where(x => x.Running == null && x.NotBefore <= now).Select(x => x.Name)];
+            foreach (var waiting in _entries.Values.Where(x => x.NotBefore > now))
+            {
+                sleep = Min(sleep, waiting.NotBefore - now);
+            }
         }
 
         if (idle.Length == 0)
@@ -229,7 +242,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         {
             var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
             var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
-            claims = await queries.ClaimClusterTasksAsync(context, idle, _serverId, now, now - _liveWindow, ct);
+            claims = await queries.ClaimClusterTasksAsync(context, idle, _serverId, _liveWindow, ct);
         }
 
         _legacyServersAlive = claims.LegacyServersAlive;
@@ -241,7 +254,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                 continue;
             }
 
-            sleep = Min(sleep, state.DueAt - now);
+            sleep = Min(sleep, state.DueIn);
         }
 
         return sleep < TimeSpan.Zero ? TimeSpan.Zero : sleep;
@@ -430,7 +443,6 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                 new ClusterTaskCompletion(
                     entry.Name,
                     _serverId,
-                    now.UtcDateTime,
                     didWork,
                     rerun,
                     record,
@@ -472,7 +484,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                 using var scope = _scopes.CreateScope();
                 var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
                 var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
-                var held = await queries.RenewClusterTaskLeaseAsync(context, entry.Name, _serverId, _time.GetUtcNow().UtcDateTime, stop);
+                var held = await queries.RenewClusterTaskLeaseAsync(context, entry.Name, _serverId, stop);
                 if (!held)
                 {
                     // Another server has it now (this one stalled past its lease): stop, so it is not run twice.
@@ -494,13 +506,13 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
     }
 
-    private async Task<bool> RequestAsync(string name, DateTime now, CancellationToken ct)
+    private async Task<bool> RequestAsync(string name, CancellationToken ct)
     {
         using var scope = _scopes.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
 
-        return await queries.RequestClusterTaskRunAsync(context, name, _serverId, now, ct);
+        return await queries.RequestClusterTaskRunAsync(context, name, _serverId, ct);
     }
 
     private async Task WriteServerLogAsync(string name, string status, string? message, double durationMs)
@@ -592,8 +604,6 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
         public TimeSpan Interval { get; } = template.DefaultInterval!.Value;
 
-        public TimeSpan? IdleBackoffLimit { get; } = template.IdleBackoffLimit;
-
         public bool RerunImmediately { get; } = template.RerunImmediately;
 
         public bool LogOnSuccess { get; } = template.LogOnSuccess;
@@ -607,6 +617,9 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         public bool RerunRequested { get; set; }
 
         public DateTime LastSignalClaimAt { get; set; } = DateTime.MinValue;
+
+        // Before this the task is not claimed on schedule: its share of the startup delay (rule 6.18).
+        public DateTime NotBefore { get; set; } = DateTime.MinValue;
 
         public string? LastRecordedStatus { get; set; }
 

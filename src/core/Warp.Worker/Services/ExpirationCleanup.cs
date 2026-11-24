@@ -45,9 +45,6 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.ExpirationCleanupInterval;
 
-    // Idle backoff (rule 6.20): while it keeps finding nothing it runs less often, up to this.
-    public TimeSpan? IdleBackoffLimit => TimeSpan.FromMinutes(30);
-
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
         var timeExpired = await RunCleanupAsync(ct);

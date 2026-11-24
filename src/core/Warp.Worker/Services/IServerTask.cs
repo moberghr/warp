@@ -64,14 +64,6 @@ public interface IServerTask
     IEnumerable<ServerTaskSignal> Signals => [];
 
     /// <summary>
-    /// The most an idle cluster-wide task's next run is pushed out (rule 6.20): each run that returned no
-    /// message doubles the wait from <see cref="DefaultInterval"/> up to this, and a run that did work or
-    /// a signal resets it. Null (the default): no backoff, the task runs every interval. Set it only where
-    /// running less often while idle delays nothing anyone waits on.
-    /// </summary>
-    TimeSpan? IdleBackoffLimit => null;
-
-    /// <summary>
     /// When <c>true</c> (default), the host runs this task's iteration inside a transaction
     /// that holds a transaction-scoped advisory lock (PG: <c>pg_try_advisory_xact_lock</c>;
     /// MSSQL: <c>sp_getapplock</c> with <c>@LockOwner='Transaction'</c>). The lock is released

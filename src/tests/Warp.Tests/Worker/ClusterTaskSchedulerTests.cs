@@ -54,9 +54,10 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task PassAsync_TaskThatKeepsFindingNothing_BacksOffUpToItsLimit()
+    public async Task PassAsync_TaskThatKeepsFindingNothing_StaysOnItsInterval()
     {
-        var task = new IdleTask(TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(60));
+        // No idle backoff: an idle task is claimed every interval, and its lease lapses as it falls due.
+        var task = new IdleTask(TimeSpan.FromSeconds(10));
         using var scheduler = await BuildAsync(task);
 
         // Act: two idle runs in a row.
@@ -64,10 +65,11 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         await MakeDueAsync(IdleTask.TaskName);
         await RunOnceAsync(scheduler, IdleTask.TaskName);
 
-        // Assert: the second claim pushed the next run two intervals out.
+        // Assert: the second claim moved the next run one interval out, and the lease ends with it.
+        task.Runs.ShouldBe(2);
         var row = await ReadAsync(IdleTask.TaskName);
-        row.IdleStreak.ShouldBe(2);
-        (row.NextRunAt - row.ClaimedAt!.Value).ShouldBe(TimeSpan.FromSeconds(20));
+        (row.NextRunAt - row.ClaimedAt!.Value).ShouldBe(TimeSpan.FromSeconds(10));
+        row.LeaseUntil.ShouldBe(row.NextRunAt);
     }
 
     [TimedFact]
@@ -89,6 +91,28 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
 
         // Assert: run again although its next scheduled run is an hour away.
         task.Runs.ShouldBe(2);
+    }
+
+    [TimedFact]
+    public async Task PassAsync_SignalDuringTheStartupDelay_RunsOnlyTheSignaledTask()
+    {
+        // Each task waits its own share of the startup delay (rule 6.18); a signal ends that task's wait
+        // alone. A shared wait let the first job's signal run every cluster task at once.
+        var pinned = new PinnedTask(TimeSpan.FromHours(1));
+        var idle = new IdleTask(TimeSpan.FromHours(1));
+        using var scheduler = await BuildAsync([pinned, idle], TimeSpan.FromHours(1));
+        scheduler.SpreadFirstRuns(() => 0.5);
+
+        // Act
+        scheduler.Signal(PinnedTask.TaskName);
+        await scheduler.PassAsync(Ct);
+        (await pinned.Barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the signaled task did not run");
+        pinned.Barrier.CanFinish.Release();
+        await scheduler.RunningTask(PinnedTask.TaskName)!;
+
+        // Assert
+        idle.Runs.ShouldBe(0);
+        scheduler.RunningTask(IdleTask.TaskName).ShouldBeNull();
     }
 
     [TimedFact]
@@ -119,7 +143,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
     {
         // While a server from before the lease is alive, a run also takes the task's old lock; when that
         // server holds it, this server's run does nothing (rule 6.20, rolling deploy).
-        var task = new IdleTask(TimeSpan.FromHours(1), null);
+        var task = new IdleTask(TimeSpan.FromHours(1));
         using var scheduler = await BuildAsync(task);
         await using (var ctx = _fixture.CreateContext())
         {
@@ -157,23 +181,29 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         }
     }
 
-    private async Task<ClusterTaskScheduler<TestContext>> BuildAsync(IServerTask task)
+    private Task<ClusterTaskScheduler<TestContext>> BuildAsync(IServerTask task) => BuildAsync([task], TimeSpan.Zero);
+
+    private async Task<ClusterTaskScheduler<TestContext>> BuildAsync(IServerTask[] tasks, TimeSpan startupDelay)
     {
         var services = new ServiceCollection();
         services.AddScoped(_ => _fixture.CreateContext());
         services.AddTestServerContext<TestContext>();
         services.AddSingleton(TestTasks.QueriesFor(_fixture.CreateContext()));
-        services.AddSingleton(task);
+        foreach (var task in tasks)
+        {
+            services.AddSingleton(task);
+        }
+
         var provider = services.BuildServiceProvider();
 
         var scheduler = new ClusterTaskScheduler<TestContext>(
-            [task],
+            tasks,
             provider.GetRequiredService<IServiceScopeFactory>(),
             new NoopLockProvider(),
             TimeProvider.System,
             Guid.NewGuid(),
             NullLogger.Instance,
-            TimeSpan.Zero,
+            startupDelay,
             TimeSpan.FromMinutes(5));
         if (!TestTasks.QueriesFor(_fixture.CreateContext()).SupportsClusterTaskLeases)
         {
@@ -201,7 +231,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
             .Where(x => x.Name == name)
             .ExecuteUpdateAsync(
                 x => x
-                    .SetProperty(y => y.NextRunAt, DateTime.UtcNow.AddSeconds(-1))
+                    .SetProperty(y => y.NextRunAt, DateTime.UnixEpoch)
                     .SetProperty(y => y.LeaseUntil, (DateTime?)null),
                 Ct);
     }
@@ -251,7 +281,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         }
     }
 
-    private sealed class IdleTask(TimeSpan interval, TimeSpan? backoffLimit) : IServerTask
+    private sealed class IdleTask(TimeSpan interval) : IServerTask
     {
         public const string TaskName = "idle";
 
@@ -264,8 +294,6 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         public string? LockKey => ClusterTaskSchedulerTestsBase.TaskLockKey;
 
         public TimeSpan? DefaultInterval => interval;
-
-        public TimeSpan? IdleBackoffLimit => backoffLimit;
 
         public Task<string?> ExecuteAsync(CancellationToken ct)
         {

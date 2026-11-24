@@ -14,15 +14,6 @@ public class ClusterTask
     /// <summary>Seconds between runs. Null disables the task (the dashboard can set it).</summary>
     public double? IntervalSeconds { get; set; }
 
-    /// <summary>
-    /// The most an idle task's next run is pushed out, in seconds: each run that found nothing doubles
-    /// the wait from <see cref="IntervalSeconds"/> up to this. Null or not above the interval: no backoff.
-    /// </summary>
-    public double? IdleBackoffLimitSeconds { get; set; }
-
-    /// <summary>Consecutive runs that found nothing; drives the idle backoff. Reset by a run that did work or by a signal.</summary>
-    public int IdleStreak { get; set; }
-
     /// <summary>When the task is next due.</summary>
     public DateTime NextRunAt { get; set; }
 

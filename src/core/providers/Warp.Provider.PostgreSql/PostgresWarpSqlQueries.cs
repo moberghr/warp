@@ -636,8 +636,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         DbContext context,
         IReadOnlyList<string> names,
         Guid serverId,
-        DateTime now,
-        DateTime liveSince,
+        TimeSpan liveWindow,
         CancellationToken ct)
     {
         if (names.Count == 0)
@@ -653,12 +652,11 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             [
                 new NpgsqlParameter<string[]>("names", [.. names]),
                 new NpgsqlParameter<Guid>("server", serverId),
-                new NpgsqlParameter<DateTime>("now", Utc(now)),
-                new NpgsqlParameter<DateTime>("liveSince", Utc(liveSince)),
+                new NpgsqlParameter<double>("liveWindow", liveWindow.TotalSeconds),
             ],
             x =>
             {
-                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), Utc(x.GetDateTime(2))));
+                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))));
                 legacy |= x.GetBoolean(3);
             },
             ct);
@@ -666,7 +664,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         return new ClusterTaskClaims(tasks, legacy);
     }
 
-    public async Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, DateTime now, CancellationToken ct)
+    public async Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
     {
         var claimed = false;
         await ReadAsync(
@@ -675,7 +673,6 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             [
                 new NpgsqlParameter<string>("name", name),
                 new NpgsqlParameter<Guid>("server", serverId),
-                new NpgsqlParameter<DateTime>("now", Utc(now)),
             ],
             x => claimed = x.GetInt32(0) > 0,
             ct);
@@ -683,7 +680,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         return claimed;
     }
 
-    public async Task<bool> RenewClusterTaskLeaseAsync(DbContext context, string name, Guid serverId, DateTime now, CancellationToken ct)
+    public async Task<bool> RenewClusterTaskLeaseAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
     {
         var renewed = false;
         await ReadAsync(
@@ -692,7 +689,6 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             [
                 new NpgsqlParameter<string>("name", name),
                 new NpgsqlParameter<Guid>("server", serverId),
-                new NpgsqlParameter<DateTime>("now", Utc(now)),
             ],
             _ => renewed = true,
             ct);
@@ -707,7 +703,6 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             [
                 new NpgsqlParameter<string>("name", completion.Name),
                 new NpgsqlParameter<Guid>("server", completion.ServerId),
-                new NpgsqlParameter<DateTime>("now", Utc(completion.Now)),
                 new NpgsqlParameter<bool>("didWork", completion.DidWork),
                 new NpgsqlParameter<bool>("rerun", completion.Rerun),
                 new NpgsqlParameter<bool>("record", completion.Record),
@@ -720,8 +715,6 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
 
     // Built once from the resolved model on first use, like the rate-limit lock statement.
     private PostgresClusterTaskSql ClusterTaskSql(DbContext context) => _clusterTaskSql ??= PostgresClusterTaskSql.Build(context.Model);
-
-    private static DateTime Utc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
     // Reads a cluster task statement's rows by position on the context's connection and transaction.
     // Not SqlQueryRaw: that maps result columns through the context's naming convention, and the

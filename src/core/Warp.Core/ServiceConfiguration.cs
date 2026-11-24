@@ -808,8 +808,6 @@ public static class ServiceConfiguration
         task.Property(p => p.Name).HasMaxLength(200);
         task.HasKey(p => p.Name);
         task.Property(p => p.IntervalSeconds);
-        task.Property(p => p.IdleBackoffLimitSeconds);
-        task.Property(p => p.IdleStreak);
         task.Property(p => p.NextRunAt);
         task.Property(p => p.LeaseUntil);
         task.Property(p => p.ClaimedBy);

@@ -37,8 +37,6 @@ internal sealed class PostgresClusterTaskSql
         var serverTable = Qualified(server);
         var name = Column(task, nameof(ClusterTask.Name));
         var interval = Column(task, nameof(ClusterTask.IntervalSeconds));
-        var limit = Column(task, nameof(ClusterTask.IdleBackoffLimitSeconds));
-        var streak = Column(task, nameof(ClusterTask.IdleStreak));
         var next = Column(task, nameof(ClusterTask.NextRunAt));
         var lease = Column(task, nameof(ClusterTask.LeaseUntil));
         var claimedBy = Column(task, nameof(ClusterTask.ClaimedBy));
@@ -52,39 +50,37 @@ internal sealed class PostgresClusterTaskSql
         var coordination = Column(server, nameof(Server.CoordinationVersion));
         var heartbeat = Column(server, nameof(Server.LastHeartbeatTime));
 
-        // The lease lasts one interval, so an idle run needs no completion write: it simply expires as
-        // the task falls due again. A run claimed by a schedule moves the next run on by the interval,
-        // doubled per consecutive idle run up to the task's backoff limit; one claimed by a request does
-        // not back off.
+        // Every time here is the database's own now() (rule 6.20): whether a lease is free never depends on
+        // two servers' clocks agreeing, as a lock never did. The lease lasts one interval, so an idle run needs
+        // no completion write: it lapses as the task falls due again. Due times go back as seconds from
+        // now, so a server's own clock only decides how long it sleeps.
         var leaseFor = $"make_interval(secs => GREATEST(t.{interval}, 1))";
-        var backedOff = $"LEAST(t.{interval} * POWER(2, LEAST(t.{streak}, 20)), GREATEST(t.{interval}, COALESCE(t.{limit}, 0)))";
-        var legacy = $"EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL AND s.{heartbeat} >= @liveSince)";
+        var legacy = $"EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL AND s.{heartbeat} >= now() - make_interval(secs => @liveWindow))";
 
         var claim = $@"
             WITH due AS (
                 SELECT t.{name} AS task FROM {table} t
                 WHERE t.{name} = ANY(@names)
                   AND t.{interval} IS NOT NULL
-                  AND (t.{next} <= @now OR t.{requested} IS NOT NULL)
-                  AND (t.{lease} IS NULL OR t.{lease} <= @now)
+                  AND (t.{next} <= now() OR t.{requested} IS NOT NULL)
+                  AND (t.{lease} IS NULL OR t.{lease} <= now())
                 FOR UPDATE SKIP LOCKED
             ),
             claimed AS (
                 UPDATE {table} t
-                SET {lease} = @now + {leaseFor},
+                SET {lease} = now() + {leaseFor},
                     {claimedBy} = @server,
-                    {claimedAt} = @now,
-                    {next} = @now + make_interval(secs => CASE WHEN t.{requested} IS NOT NULL THEN t.{interval} ELSE {backedOff} END),
-                    {streak} = CASE WHEN t.{requested} IS NOT NULL THEN 0 ELSE t.{streak} + 1 END,
+                    {claimedAt} = now(),
+                    {next} = now() + make_interval(secs => t.{interval}),
                     {requested} = NULL
                 FROM due
                 WHERE t.{name} = due.task
                 RETURNING t.{name} AS task, t.{next} AS due_at
             )
-            SELECT c.task AS ""Name"", TRUE AS ""Claimed"", c.due_at AS ""DueAt"", {legacy} AS ""Legacy""
+            SELECT c.task, TRUE, EXTRACT(EPOCH FROM c.due_at - now())::float8, {legacy}
             FROM claimed c
             UNION ALL
-            SELECT t.{name}, FALSE, GREATEST(t.{next}, COALESCE(t.{lease}, t.{next})), {legacy}
+            SELECT t.{name}, FALSE, EXTRACT(EPOCH FROM GREATEST(t.{next}, COALESCE(t.{lease}, t.{next})) - now())::float8, {legacy}
             FROM {table} t
             WHERE t.{name} = ANY(@names)
               AND t.{interval} IS NOT NULL
@@ -93,45 +89,43 @@ internal sealed class PostgresClusterTaskSql
         var request = $@"
             WITH claimed AS (
                 UPDATE {table} t
-                SET {lease} = @now + {leaseFor},
+                SET {lease} = now() + {leaseFor},
                     {claimedBy} = @server,
-                    {claimedAt} = @now,
-                    {next} = @now + make_interval(secs => t.{interval}),
-                    {streak} = 0,
+                    {claimedAt} = now(),
+                    {next} = now() + make_interval(secs => t.{interval}),
                     {requested} = NULL
                 WHERE t.{name} = @name
                   AND t.{interval} IS NOT NULL
-                  AND (t.{lease} IS NULL OR t.{lease} <= @now)
+                  AND (t.{lease} IS NULL OR t.{lease} <= now())
                 RETURNING t.{name}
             ),
             asked AS (
                 UPDATE {table} t
-                SET {requested} = @now
+                SET {requested} = now()
                 WHERE t.{name} = @name
                   AND NOT EXISTS (SELECT 1 FROM claimed)
                 RETURNING t.{name}
             )
-            SELECT (SELECT COUNT(*) FROM claimed)::int AS ""Value""";
+            SELECT (SELECT COUNT(*) FROM claimed)::int";
 
         var renew = $@"
             UPDATE {table} t
-            SET {lease} = @now + {leaseFor}
+            SET {lease} = now() + {leaseFor}
             WHERE t.{name} = @name
               AND t.{claimedBy} = @server
-            RETURNING 1 AS ""Value""";
+            RETURNING 1";
 
         var complete = $@"
             UPDATE {table} t
             SET {lease} = NULL,
                 {claimedBy} = NULL,
                 {claimedAt} = NULL,
-                {streak} = CASE WHEN @didWork THEN 0 ELSE t.{streak} END,
                 {next} = CASE
-                    WHEN @rerun OR t.{requested} IS NOT NULL THEN @now
-                    WHEN @didWork THEN @now + make_interval(secs => COALESCE(t.{interval}, 0))
+                    WHEN @rerun OR t.{requested} IS NOT NULL THEN now()
+                    WHEN @didWork THEN now() + make_interval(secs => COALESCE(t.{interval}, 0))
                     ELSE t.{next} END,
                 {requested} = NULL,
-                {lastRun} = CASE WHEN @record THEN @now ELSE t.{lastRun} END,
+                {lastRun} = CASE WHEN @record THEN now() ELSE t.{lastRun} END,
                 {lastServer} = CASE WHEN @record THEN @server ELSE t.{lastServer} END,
                 {lastStatus} = CASE WHEN @record THEN @status ELSE t.{lastStatus} END,
                 {lastMessage} = CASE WHEN @record THEN @message ELSE t.{lastMessage} END,
