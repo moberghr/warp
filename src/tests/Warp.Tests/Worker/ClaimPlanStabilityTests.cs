@@ -165,9 +165,10 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task SetLocalInAMultiStatementCommand_LastsForThatCommandOnly()
     {
-        // The claim guard (rule 6.21) relies on this: a SET LOCAL sent in the same command as the claim
-        // takes effect for it (the command's statements run as one implicit transaction) and is gone for
-        // the connection's next command, so it never leaks into pooled connections.
+        // The claim guard (rule 6.21) relies on this: a transaction-local setting (set_config(..., true))
+        // sent in the same command as the claim takes effect for it (the command's statements run as one
+        // implicit transaction) and is gone for the connection's next command, so it never leaks into
+        // pooled connections.
         if (await IsSqlServerAsync())
         {
             return;
@@ -179,7 +180,7 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
         await connection.OpenAsync(ct);
 
         await using var within = connection.CreateCommand();
-        within.CommandText = "SET LOCAL enable_sort = off; SHOW enable_sort;";
+        within.CommandText = "DO $$BEGIN PERFORM set_config('enable_sort', 'off', true); END$$; SHOW enable_sort;";
         var inside = (string?)await within.ExecuteScalarAsync(ct);
 
         await using var after = connection.CreateCommand();
@@ -188,6 +189,32 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
 
         inside.ShouldBe("off");
         afterwards.ShouldBe("on");
+    }
+
+    [TimedFact]
+    public async Task ClaimEnqueuedJobs_EmptyQueue_RaisesNoServerNotice()
+    {
+        // The claim guard sets a value for the claim's command only. Outside a transaction block PostgreSQL
+        // answers SET LOCAL with a WARNING; sent on every claim, empty polls included, that would put a line
+        // in the server log per claim. The claim must raise no notice at all.
+        if (await IsSqlServerAsync())
+        {
+            return;
+        }
+
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        await using var claimer = _fixture.CreateContext();
+        await claimer.Database.OpenConnectionAsync(ct);
+        var connection = (Npgsql.NpgsqlConnection)claimer.Database.GetDbConnection();
+        var notices = new List<string>();
+        connection.Notice += (_, e) => notices.Add($"{e.Notice.Severity}: {e.Notice.MessageText}");
+
+        // Act
+        await Warp.Tests.Helpers.TestTasks.QueriesFor(claimer)
+            .ClaimEnqueuedJobsAsync(claimer, ["default"], Guid.NewGuid(), DateTime.UtcNow, limit: 20, watermark: null, ct);
+
+        // Assert
+        notices.ShouldBeEmpty();
     }
 
     private const string SortNode = "\"Node Type\": \"Sort\"";
@@ -246,7 +273,8 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
 
             // Replays what the claim sent, in one transaction: any setting statements before the claim
             // run as sent (they last for the claim's command), and the claim statement is EXPLAINed.
-            var statements = _sql.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            // Split at the end of a line: the guard is a DO block with semicolons of its own.
+            var statements = _sql.Replace("\r\n", "\n", StringComparison.Ordinal).Split(";\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             await using var transaction = await connection.BeginTransactionAsync(ct);
             string? plan = null;
             foreach (var statement in statements)

@@ -17,7 +17,11 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     where TContext : DbContext
 {
     // Prepended to the job claims (rule 6.21): within the claim's command, a plan that sorts is priced out.
-    private const string ClaimPlanGuard = "SET LOCAL enable_sort = off;\n";
+    // set_config(..., true) is SET LOCAL without its WARNING: outside an explicit transaction block
+    // PostgreSQL answers SET LOCAL with one ("can only be used in transaction blocks") while still applying
+    // it, which put a line in the server log on every claim, empty polls included. In a DO block because
+    // the claim's command must not return a result set before the claim's own: EF reads the first one.
+    private const string ClaimPlanGuard = "DO $$BEGIN PERFORM set_config('enable_sort', 'off', true); END$$;\n";
 
     private readonly WarpJobTableNames _n;
 
@@ -88,7 +92,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         // walks the whole table to join against it. This form is a primary-key lookup whatever the
         // statistics say.
         //
-        // Both claims start with SET LOCAL enable_sort = off (rule 6.21), which lasts for this command
+        // Both claims start by turning enable_sort off for the transaction (rule 6.21), which lasts for this command
         // only: its statements run as one implicit transaction. After a burst into a queue the last
         // analyze saw empty, the planner expects the claim to match one row and reads the dashboard's
         // (kind, current_state, create_time) index instead: every enqueued row of the kind, filtered
