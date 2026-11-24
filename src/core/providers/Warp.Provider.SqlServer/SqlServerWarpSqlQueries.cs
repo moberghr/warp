@@ -129,6 +129,14 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         // update one primary-key seek per job. Left to choose, SQL Server scanned the job table to join
         // it, taking locks on rows that belong to other workers' claims and flushes, and concurrent
         // flushes deadlocked (the batched-completion tests timed out on it).
+        //
+        // The log insert pins its join order the same way: the JSON rows outermost, parsed once, then a seek
+        // into @done per log row. Written as WHERE l.j IN (SELECT id FROM @done), it was left to the
+        // optimizer, which on CI cached a plan with @done outermost and OPENJSON on the inner side,
+        // unspooled: the whole @logs document was parsed again for every completed job. Harmless at a few
+        // jobs per flush, quadratic once one flusher per group wrote ~60 at a time: ~85,000 pages per
+        // flush, and dispatcher mode fell from ~540 to ~120 jobs/s. Whether that plan was cached depended on
+        // the estimates at compile time, so it showed in some runs and not others.
         var log = _n.JobLog ?? throw new InvalidOperationException("The JobLog table names were not resolved from the model.");
         var logTable = string.IsNullOrEmpty(log.Schema) ? $"[{log.Table}]" : $"[{log.Schema}].[{log.Table}]";
         _completeJobsSql = $@"
@@ -156,7 +164,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             FROM OPENJSON(@logs) WITH (
                 i uniqueidentifier, j uniqueidentifier, e nvarchar(max), t datetime2, l nvarchar(max), m nvarchar(max),
                 x nvarchar(max), d float, w uniqueidentifier, n nvarchar(100), v smallint) AS l
-            WHERE l.j IN (SELECT id FROM @done);
+            INNER LOOP JOIN @done AS done ON done.id = l.j;
 
             SELECT id FROM @done;";
 
