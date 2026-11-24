@@ -32,7 +32,7 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
     public ServerTaskHost(
         IServiceScopeFactory scopes,
         IWarpLockProvider lockProvider,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         ILoggerFactory loggerFactory,
         IOptions<WarpServerConfiguration> configuration,
         ServerTaskSignals<TContext> signals)

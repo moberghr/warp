@@ -165,6 +165,11 @@ jobs:
           - name: idle
             filter: '*.IdleServerBenchmark.*'
             sqlserver: true
+          # Its own job: idle is the slowest benchmark (about 16 minutes for both providers), so the
+          # two-server case cannot share the job inside the timeout.
+          - name: idle-2-servers
+            filter: '*.IdleTwoServersBenchmark.*'
+            sqlserver: true
     env:
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
       WARP_BENCH_SQLSERVER: "Server=localhost,1433;User Id=sa;Password=Warp!Bench1;TrustServerCertificate=True;Database=master"
@@ -393,7 +398,7 @@ jobs:
           fi
 
           # Matrix order, so the page reads the same way every run.
-          scenarios="dispatcher completion-batch payload concurrency rate-limit failure-path retries publish message-routing scheduled-activation large-table batches fan-out idle"
+          scenarios="dispatcher completion-batch payload concurrency rate-limit failure-path retries publish message-routing scheduled-activation large-table batches fan-out idle idle-2-servers"
 
           passed=0; failed=0; missing=0
           for name in $scenarios; do
@@ -444,7 +449,7 @@ jobs:
             echo
             echo "- Tables follow BenchmarkDotNet's summary. Each case has two rows, **base** then **head**, the way BDN shows a benchmark beside its baseline."
             echo "- **Ratio** is head time ÷ base time: below 1.00 is faster. **Alloc Ratio** is the same for memory. **Error** is half the 99.9% confidence interval and **StdDev** the standard deviation, both over the iterations BDN ran."
-            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, **Jobs/s** collapses to a third, or **Buffers/job** rises to five times. The idle scenario, measured per second, fails on **Statements/s** rising more than 5% on PostgreSQL; its SQL Server row is reported only. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
+            echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, **Jobs/s** collapses to a third, or **Buffers/job** rises to five times. The idle scenarios (one and two servers), measured per second, fail on **Statements/s** rising more than 5% on PostgreSQL; their SQL Server rows are reported only. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
             echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. It moves up to 55% between identical builds, with cache state and vacuum timing, so only a rise to five times fails: every jump that size so far was a query whose plan had changed."
             echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
             echo "- ⚠️ in a Gate cell means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."

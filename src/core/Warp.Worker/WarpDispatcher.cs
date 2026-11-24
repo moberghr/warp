@@ -337,7 +337,8 @@ public class WarpDispatcher<TContext> : BackgroundService
                     x => x
                         .SetProperty(p => p.CurrentState, State.Enqueued)
                         .SetProperty(p => p.CurrentWorkerId, (Guid?)null)
-                        .SetProperty(p => p.LastKeepAlive, (DateTime?)null),
+                        .SetProperty(p => p.LastKeepAlive, (DateTime?)null)
+                        .SetProperty(p => p.RunId, (Guid?)null),
                     CancellationToken.None);
         }
         catch (Exception ex)

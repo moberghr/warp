@@ -63,6 +63,9 @@ public class PostgresServerFixture : IAsyncDisposable
 
     private MsSqlContainer? _sqlContainer;
     private IHost? _host;
+
+    // Servers beyond the first, sharing its database: what a cluster costs (the idle two-server scenario).
+    private readonly List<IHost> _otherHosts = [];
     private string _connectionString = null!;
     private BenchmarkProvider _provider = BenchmarkProvider.PostgreSql;
 
@@ -80,79 +83,21 @@ public class PostgresServerFixture : IAsyncDisposable
         TimeSpan? completionFlushInterval = null,
         bool addConcurrency = false,
         BenchmarkProvider provider = BenchmarkProvider.PostgreSql,
-        Action<WarpServerBuilder<TestContext>>? configure = null)
+        Action<WarpServerBuilder<TestContext>>? configure = null,
+        int serverCount = 1)
     {
         _provider = provider;
         ExceptionTally.StartIfRequested();
         _connectionString = await ResolveConnectionStringAsync();
 
-        // Boot full Warp server
-        _host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
-            .ConfigureLogging(logging => logging
-                .SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning)
-
-                // The worker loop swallows a DbUpdateConcurrencyException at Debug and claims again.
-                // Raised here so that path is visible if it is what orphans claimed jobs.
-                .AddFilter("Warp.Worker.WarpWorker", Microsoft.Extensions.Logging.LogLevel.Debug)
-
-                // Filters match by prefix, so the rule above also caught WarpWorkerService, which logs
-                // every job it runs. The longer prefix wins.
-                .AddFilter("Warp.Worker.WarpWorkerService", Microsoft.Extensions.Logging.LogLevel.Warning))
-            .ConfigureServices(services =>
-            {
-                services.AddDbContext<TestContext>(options => ConfigureProvider(options));
-
-                services.AddWarpServer<TestContext>(config =>
-                {
-                    // Registers IWarpLockProvider and IWarpSqlQueries. Without it ServerTaskHost
-                    // cannot be activated, every benchmark using this fixture reports NA, and the
-                    // failure is quiet - BenchmarkDotNet prints a table of NA rather than failing.
-                    if (_provider == BenchmarkProvider.SqlServer)
-                    {
-                        config.UseSqlServer();
-                    }
-                    else
-                    {
-                        config.UsePostgreSql();
-                    }
-
-                    // Opt-in addon (rule 8.6): without this, WithMutex stamps metadata that no
-                    // behaviour reads, so a concurrency benchmark measures the plain baseline and
-                    // reports it as the addon's cost. That is exactly what it did before this
-                    // parameter existed - 14.05 statements per job against the lab's 37.0.
-                    if (addConcurrency)
-                    {
-                        config.AddConcurrency();
-                    }
-
-                    config.WorkerCount = workerCount;
-                    config.Queues = ["default"];
-
-                    // Intervals are left at their PRODUCTION defaults on purpose. They used to be
-                    // driven 20-100x faster here (polling 100ms against 10s, orchestration 100ms
-                    // against 10s, heartbeat 200ms against 5s) for quick turnaround, and the cost was
-                    // that every background tick landed in the statement count: this fixture reported
-                    // 42 statements per job where the lab, on defaults, measured 13.6 for the same
-                    // shape of work. A/B comparisons survived that, but the absolute number was an
-                    // artefact of the harness and not comparable to anything published.
-                    //
-                    // Defaults are affordable because a same-process enqueue signals the workers
-                    // directly (SignalJobEnqueued, rule 6.3), so a drain does not wait out
-                    // PollingInterval.
-                    config.UseDispatcher = useDispatcher;
-                    config.CompletionBatchSize = completionBatchSize;
-                    config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
-
-                    // Last, so a scenario can add an addon or override any default above.
-                    configure?.Invoke(config);
-                });
-            })
-            .Build();
+        _host = BuildServerHost(workerCount, useDispatcher, completionBatchSize, completionFlushInterval, addConcurrency, configure);
 
         // Use DI-resolved context for schema creation (includes Warp entity configurations)
-        await using var scope = _host.Services.CreateAsyncScope();
-        var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-        await ctx.Database.EnsureCreatedAsync();
+        await using (var scope = _host.Services.CreateAsyncScope())
+        {
+            var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
+            await ctx.Database.EnsureCreatedAsync();
+        }
 
         if (_provider == BenchmarkProvider.PostgreSql && Environment.GetEnvironmentVariable(ClaimAuditVariable) is not null)
         {
@@ -160,6 +105,15 @@ public class PostgresServerFixture : IAsyncDisposable
         }
 
         await _host.StartAsync();
+
+        // Each further server is its own process in production: its own host, server id and pools, on the
+        // same database. Started after the first, so the schema exists.
+        for (var i = 1; i < serverCount; i++)
+        {
+            var other = BuildServerHost(workerCount, useDispatcher, completionBatchSize, completionFlushInterval, addConcurrency, configure);
+            _otherHosts.Add(other);
+            await other.StartAsync();
+        }
     }
 
     /// <summary>
@@ -708,6 +662,12 @@ public class PostgresServerFixture : IAsyncDisposable
     {
         GC.SuppressFinalize(this);
         ExceptionTally.Report();
+        foreach (var other in _otherHosts)
+        {
+            await other.StopAsync();
+            other.Dispose();
+        }
+
         if (_host != null)
         {
             await _host.StopAsync();
@@ -723,5 +683,76 @@ public class PostgresServerFixture : IAsyncDisposable
         {
             await _sqlContainer.DisposeAsync();
         }
+    }
+
+    private IHost BuildServerHost(
+        int workerCount,
+        bool useDispatcher,
+        int completionBatchSize,
+        TimeSpan? completionFlushInterval,
+        bool addConcurrency,
+        Action<WarpServerBuilder<TestContext>>? configure)
+    {
+        return Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
+            .ConfigureLogging(logging => logging
+                .SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning)
+
+                // The worker loop swallows a DbUpdateConcurrencyException at Debug and claims again.
+                // Raised here so that path is visible if it is what orphans claimed jobs.
+                .AddFilter("Warp.Worker.WarpWorker", Microsoft.Extensions.Logging.LogLevel.Debug)
+
+                // Filters match by prefix, so the rule above also caught WarpWorkerService, which logs
+                // every job it runs. The longer prefix wins.
+                .AddFilter("Warp.Worker.WarpWorkerService", Microsoft.Extensions.Logging.LogLevel.Warning))
+            .ConfigureServices(services =>
+            {
+                services.AddDbContext<TestContext>(options => ConfigureProvider(options));
+
+                services.AddWarpServer<TestContext>(config =>
+                {
+                    // Registers IWarpLockProvider and IWarpSqlQueries. Without it ServerTaskHost
+                    // cannot be activated, every benchmark using this fixture reports NA, and the
+                    // failure is quiet - BenchmarkDotNet prints a table of NA rather than failing.
+                    if (_provider == BenchmarkProvider.SqlServer)
+                    {
+                        config.UseSqlServer();
+                    }
+                    else
+                    {
+                        config.UsePostgreSql();
+                    }
+
+                    // Opt-in addon (rule 8.6): without this, WithMutex stamps metadata that no
+                    // behaviour reads, so a concurrency benchmark measures the plain baseline and
+                    // reports it as the addon's cost. That is exactly what it did before this
+                    // parameter existed - 14.05 statements per job against the lab's 37.0.
+                    if (addConcurrency)
+                    {
+                        config.AddConcurrency();
+                    }
+
+                    config.WorkerCount = workerCount;
+                    config.Queues = ["default"];
+
+                    // Intervals are left at their PRODUCTION defaults on purpose. They used to be
+                    // driven 20-100x faster here (polling 100ms against 10s, orchestration 100ms
+                    // against 10s, heartbeat 200ms against 5s) for quick turnaround, and the cost was
+                    // that every background tick landed in the statement count: this fixture reported
+                    // 42 statements per job where the lab, on defaults, measured 13.6 for the same
+                    // shape of work. A/B comparisons survived that, but the absolute number was an
+                    // artefact of the harness and not comparable to anything published.
+                    //
+                    // Defaults are affordable because a same-process enqueue signals the workers
+                    // directly (SignalJobEnqueued, rule 6.3), so a drain does not wait out
+                    // PollingInterval.
+                    config.UseDispatcher = useDispatcher;
+                    config.CompletionBatchSize = completionBatchSize;
+                    config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
+
+                    // Last, so a scenario can add an addon or override any default above.
+                    configure?.Invoke(config);
+                });
+            })
+            .Build();
     }
 }

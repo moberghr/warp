@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -44,7 +45,7 @@ public sealed class StatisticRollup<TContext> : IServerTask
     public StatisticRollup(
         IWarpServerContext serverContext,
         IOptions<WarpServerConfiguration> configuration,
-        TimeProvider timeProvider)
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider timeProvider)
     {
         _context = serverContext.Context;
         _configuration = configuration.Value;

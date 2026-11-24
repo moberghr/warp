@@ -107,7 +107,14 @@ internal sealed class CompletionBatch
         _buffer = new List<PendingCompletion>(_batchSize);
     }
 
+    // A statement writes at most this many buffers' worth of jobs, and past the same number of buffers
+    // unwritten a worker waits for the write in flight before taking its next job (#348).
+    internal const int MaxBuffersPerStatement = 4;
+
     public int Count => _buffer.Count;
+
+    // How many unwritten completions a group may hold before its workers wait for the write in flight.
+    public int BackpressureThreshold => MaxBuffersPerStatement * _batchSize;
 
     public bool IsFull => _buffer.Count >= _batchSize;
 
@@ -211,7 +218,7 @@ internal sealed class CompletionBatch
             return new FlushedJobs([], []);
         }
 
-        var perStatement = 4 * _batchSize;
+        var perStatement = MaxBuffersPerStatement * _batchSize;
         for (var start = 0; start < pending.Length; start += perStatement)
         {
             await FlushRangeAsync(pending, start, Math.Min(perStatement, pending.Length - start), cancellationToken);

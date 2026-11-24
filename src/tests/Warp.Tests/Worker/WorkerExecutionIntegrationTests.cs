@@ -428,6 +428,60 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
         }
     }
 
+    // #347: StaleJobRecovery can take a job back while its handler still runs (a long pause, lost keep-alives)
+    // and a claim can take it again, on another server or on the same worker. Only the run id tells the two
+    // runs apart: here the worker id and keep-alive are left exactly as the old run knows them, which is what a
+    // re-claim by the same worker that has since renewed looks like. Single-worker mode had no guard at all.
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenTheJobIsClaimedAgainWhileItsHandlerRuns_WhenTheOldRunFinishes_ThenItLeavesTheNewRunsRow(bool useDispatcher)
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var barrier = new BarrierSignal();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            cfg =>
+            {
+                cfg.UseDispatcher = useDispatcher;
+                cfg.WorkerCount = 1;
+                cfg.PrefetchCount = 0;
+                cfg.CompletionBatchSize = 10;
+                cfg.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
+            },
+            services => services.AddSingleton(barrier));
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new BarrierRequest());
+        await publisher.SaveChangesAsync(ct);
+
+        var newRun = Guid.NewGuid();
+        try
+        {
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), ct)).ShouldBeTrue("the handler never started");
+            (await server.GetJob(jobId)).RunId.ShouldNotBeNull("the claim stamped no run id");
+
+            // The new claim: same row, same worker stamps, another run.
+            await using var context = Fixture.CreateContext();
+            await context.Set<Job>()
+                .Where(x => x.Id == jobId)
+                .ExecuteUpdateAsync(x => x.SetProperty(p => p.RunId, newRun), ct);
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+        }
+
+        // One worker: the next job runs only once the old run's finalizing write has been made (single-worker
+        // mode) or handed to the group's flusher, which writes buffers in order (dispatcher mode).
+        var next = await publisher.Enqueue(new UnitRequest());
+        await publisher.SaveChangesAsync(ct);
+        await server.WaitForJobState(next, State.Completed, TimeSpan.FromSeconds(5));
+
+        var row = await server.GetJob(jobId);
+        row.CurrentState.ShouldBe(State.Processing);
+        row.RunId.ShouldBe(newRun);
+    }
+
     private Task<WarpTestServer> StartAsync(bool useDispatcher, BarrierSignal barrier, Action<IServiceCollection>? configureServices = null) =>
         WarpTestServer.StartAsync(
             Fixture,

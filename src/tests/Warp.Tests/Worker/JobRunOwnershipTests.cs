@@ -126,6 +126,110 @@ public abstract class JobRunOwnershipTestsBase : IAsyncLifetime
         row.LastKeepAlive.ShouldBe(now);
     }
 
+    [TimedFact]
+    public async Task CompleteJobsAsync_ClaimedAgainByTheSameWorkerAndRenewed_LeavesTheNewClaimsRow()
+    {
+        // Arrange — #347: the new claim reached the same worker, which renewed it, so the worker id and the
+        // keep-alive match the old run's renewed stamps. Only the run id tells the two runs apart.
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var run = await ClaimAsync();
+        await StampAsync(run.JobId, run.WorkerId, ClaimedAgainAt);
+        var newRun = await NewRunAsync(run.JobId);
+
+        // Act
+        IReadOnlyCollection<Guid> written;
+        await using (var context = _fixture.CreateContext())
+        {
+            written = await TestTasks.QueriesFor(context).CompleteJobsAsync(context, [Finished(run.JobId)], [run], [Log(run.JobId)], ct);
+        }
+
+        // Assert
+        written.ShouldBeEmpty();
+        var row = await ReadAsync(run.JobId);
+        row.CurrentState.ShouldBe(State.Processing);
+        row.RunId.ShouldBe(newRun);
+        (await LogCountAsync(run.JobId)).ShouldBe(0);
+    }
+
+    [TimedFact]
+    public async Task RenewRunningJobsAsync_ClaimedAgainByTheSameWorkerAndRenewed_LeavesTheNewClaimsRow()
+    {
+        // Arrange
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var run = await ClaimAsync();
+        await StampAsync(run.JobId, run.WorkerId, ClaimedAgainAt);
+        await NewRunAsync(run.JobId);
+
+        // Act
+        IReadOnlyCollection<Guid> cancelled;
+        await using (var context = _fixture.CreateContext())
+        {
+            cancelled = await TestTasks.QueriesFor(context).RenewRunningJobsAsync(context, [run], ClaimedAgainAt.AddMinutes(1), ct);
+        }
+
+        // Assert
+        cancelled.ShouldBeEmpty();
+        (await ReadAsync(run.JobId)).LastKeepAlive.ShouldBe(ClaimedAgainAt);
+    }
+
+    [TimedFact]
+    public async Task ClaimEnqueuedJobsAsync_TwoClaimsOfOneJob_StampADifferentRunIdAndTheCompletionClearsIt()
+    {
+        // Arrange
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var jobId = Guid.NewGuid();
+        await using (var insert = _fixture.CreateContext())
+        {
+            insert.Set<Job>().Add(new Job
+            {
+                Id = jobId,
+                Kind = JobKind.Job,
+                CurrentState = State.Enqueued,
+                Type = "test",
+                Message = "{}",
+                CreateTime = ClaimedAt,
+                ScheduleTime = ClaimedAt,
+                Queue = "default",
+            });
+            await insert.SaveChangesAsync(ct);
+        }
+
+        var worker = Guid.NewGuid();
+
+        // Act — claimed, put back as StaleJobRecovery would, claimed again, then completed.
+        Job first;
+        await using (var context = _fixture.CreateContext())
+        {
+            first = (await TestTasks.QueriesFor(context).ClaimEnqueuedJobsAsync(context, ["default"], worker, ClaimedAt, 1, null, ct)).Single();
+        }
+
+        await using (var context = _fixture.CreateContext())
+        {
+            await context.Set<Job>()
+                .Where(x => x.Id == jobId)
+                .ExecuteUpdateAsync(x => x.SetProperty(p => p.CurrentState, State.Enqueued).SetProperty(p => p.RunId, (Guid?)null), ct);
+        }
+
+        Job second;
+        await using (var context = _fixture.CreateContext())
+        {
+            second = (await TestTasks.QueriesFor(context).ClaimEnqueuedJobsAsync(context, ["default"], worker, ClaimedAt, 1, null, ct)).Single();
+        }
+
+        IReadOnlyCollection<Guid> written;
+        await using (var context = _fixture.CreateContext())
+        {
+            written = await TestTasks.QueriesFor(context).CompleteJobsAsync(context, [Finished(jobId)], [JobRunOwner.Of(second, Guid.NewGuid())], [Log(jobId)], ct);
+        }
+
+        // Assert
+        first.RunId.ShouldNotBeNull();
+        second.RunId.ShouldNotBeNull();
+        second.RunId.ShouldNotBe(first.RunId);
+        written.ShouldBe([jobId]);
+        (await ReadAsync(jobId)).RunId.ShouldBeNull();
+    }
+
     // A job as a claim leaves it, and the run a worker records from the row the claim returned.
     private async Task<JobRunOwner> ClaimAsync()
     {
@@ -141,6 +245,7 @@ public abstract class JobRunOwnershipTestsBase : IAsyncLifetime
             Queue = "default",
             CurrentWorkerId = Guid.NewGuid(),
             LastKeepAlive = ClaimedAt,
+            RunId = Guid.NewGuid(),
         };
         await using (var insert = _fixture.CreateContext())
         {
@@ -161,6 +266,18 @@ public abstract class JobRunOwnershipTestsBase : IAsyncLifetime
                     .SetProperty(p => p.CurrentWorkerId, workerId)
                     .SetProperty(p => p.LastKeepAlive, keepAlive),
                 Xunit.TestContext.Current.CancellationToken);
+    }
+
+    // Another claim of the same row: a fresh run id, the worker stamps left as they are.
+    private async Task<Guid> NewRunAsync(Guid jobId)
+    {
+        var runId = Guid.NewGuid();
+        await using var context = _fixture.CreateContext();
+        await context.Set<Job>()
+            .Where(x => x.Id == jobId)
+            .ExecuteUpdateAsync(x => x.SetProperty(p => p.RunId, runId), Xunit.TestContext.Current.CancellationToken);
+
+        return runId;
     }
 
     private async Task<Job> ReadAsync(Guid jobId)

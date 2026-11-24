@@ -57,6 +57,9 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     private readonly RunningJobMonitor _monitor;
     private bool _finalizationAttempted;
 
+    // The run id the claim stamped on the current job (#347): what a re-finalization's guard compares with.
+    private Guid? _claimedRunId;
+
     // Resolved from the first job's scope: the announcements are internal to Core, and this class's public
     // constructor cannot take them.
     private EnqueueAnnouncements? _announcements;
@@ -117,6 +120,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
 
         var job = claimed[0];
+        _claimedRunId = job.RunId;
 
         WorkerLog.FetchedJob(_logger, _workerId, job.Id);
 
@@ -182,6 +186,9 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         WarpTelemetry.JobsActive.Add(1, new KeyValuePair<string, object?>("queue", job.Queue));
         Stopwatch? handlerStopwatch = null;
         IServiceScope? handlerScope = null;
+
+        // False when the finalizing write found the row no longer this run's (#347): nothing to announce.
+        var written = false;
         JobContext? jobContext = null;
         DateTime? totalDeadlineUtc = null;
         var incomingAttempts = 0L;
@@ -316,11 +323,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await SaveProgressRows(workerContext, progressCollector);
 
             PerfTrace.Mark(PerfTrace.SaveCompleted);
-            await workerContext.SaveChangesAsync(default);
-
-            PerfTrace.Mark(PerfTrace.CommitTransaction2);
-            await endTransaction.CommitAsync(default);
-            CommitStagedCounters();
+            written = await CommitFinalizationAsync(workerContext, endTransaction, job);
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -346,6 +349,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             ClearCancellationMode(workerContext, job);
             job.CurrentWorkerId = null;
             job.LastKeepAlive = null;
+            job.RunId = null;
 
             // Same as the success and failure arms: the policy stamped for this attempt (§8.8) lives only
             // in the handler-scope context until a finalizing write persists it. Dropping it here would
@@ -377,9 +381,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
             await SaveProgressRows(workerContext, progressCollector);
 
-            await workerContext.SaveChangesAsync(default);
-            await endTransaction.CommitAsync(default);
-            CommitStagedCounters();
+            written = await CommitFinalizationAsync(workerContext, endTransaction, job);
         }
         catch (Exception e)
         {
@@ -463,9 +465,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
             await SaveProgressRows(workerContext, progressCollector);
 
-            await workerContext.SaveChangesAsync(default);
-            await endTransaction.CommitAsync(default);
-            CommitStagedCounters();
+            written = await CommitFinalizationAsync(workerContext, endTransaction, job);
         }
         finally
         {
@@ -475,6 +475,13 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             activity?.Dispose();
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
+        }
+
+        if (!written)
+        {
+            PerfTrace.End();
+
+            return true;
         }
 
         // SignalJobFinalized fires the in-process signal; the transport publish covers
@@ -507,6 +514,36 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
         PerfTrace.Mark(PerfTrace.Done);
         PerfTrace.End();
+
+        return true;
+    }
+
+    /// <summary>
+    /// Saves and commits a finalization; false when the row is no longer this run's (#347). The update is
+    /// guarded by the run id the claim stamped (a concurrency token): a job taken back by StaleJobRecovery and
+    /// claimed again carries another run id, so the save updates nothing and EF reports a concurrency
+    /// conflict, as it does for a row deleted while the job ran. Nothing of this attempt is then written or
+    /// counted: the row belongs to the new run, or to nobody.
+    /// </summary>
+    private async Task<bool> CommitFinalizationAsync(DbContext workerContext, IDbContextTransaction transaction, Job job)
+    {
+        try
+        {
+            await workerContext.SaveChangesAsync(default);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _stagedCounters.Clear();
+            _logger.LogInformation(
+                "Discarding the completion of job {jobId}: its row no longer exists, or was taken back and claimed again while this run held it",
+                job.Id);
+
+            return false;
+        }
+
+        PerfTrace.Mark(PerfTrace.CommitTransaction2);
+        await transaction.CommitAsync(default);
+        CommitStagedCounters();
 
         return true;
     }
@@ -554,6 +591,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         ClearCancellationMode(context, job);
         job.CurrentWorkerId = null;
         job.LastKeepAlive = null;
+        job.RunId = null;
 
         // Cleared here and set again only by the states that expire (Completed, Deleted). A job that is
         // re-finalized after a failed completion write was already given an expiry by the Completed
@@ -792,6 +830,12 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             }
 
             workerContext.Entry(job).State = EntityState.Modified;
+
+            // The run id is the concurrency token the update is guarded by (#347). When the abandoned
+            // attempt's save went through and its COMMIT threw, EF accepted the cleared run id as the row's
+            // value while the database rolled it back: guarded on null, this write would find no row and
+            // be discarded, leaving the job Processing. The row still holds the claim's run id.
+            workerContext.Entry(job).Property(x => x.RunId).OriginalValue = _claimedRunId;
         }
 
         _finalizationLogs.Clear();

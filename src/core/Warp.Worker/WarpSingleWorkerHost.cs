@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Warp.Core;
 using Warp.Core.Data.Queries;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
@@ -38,7 +39,7 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
     public WarpSingleWorkerHost(
         IOptions<WarpServerConfiguration> configuration,
         IServiceScopeFactory serviceScopeFactory,
-        TimeProvider timeProvider,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider timeProvider,
         PauseStateHolder pauseStateHolder,
         IWarpNotificationTransport notificationTransport,
         IWarpSqlQueries<TContext> sqlQueries,

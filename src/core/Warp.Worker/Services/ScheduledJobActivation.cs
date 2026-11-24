@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data.Entities;
@@ -36,7 +37,7 @@ public sealed class ScheduledJobActivation<TContext> : IServerTask
 
     public ScheduledJobActivation(
         IWarpServerContext serverContext,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         IWarpNotificationTransport transport,
         IOptions<WarpServerConfiguration> configuration,
         IWarpSqlQueries<TContext> sqlQueries,

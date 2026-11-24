@@ -36,7 +36,7 @@ public sealed class BackgroundServiceHost<TContext> : BackgroundService
 
     public BackgroundServiceHost(
         IServiceScopeFactory scopes,
-        TimeProvider time,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider time,
         ILoggerFactory loggerFactory,
         IOptions<WarpConfiguration> warpConfig,
         IOptions<WarpServerConfiguration> workerConfig,

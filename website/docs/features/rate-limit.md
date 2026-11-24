@@ -78,7 +78,7 @@ explicit metadata at publish (WithRateLimit / IRateLimitMetadata)
 Resolution happens at the job's **first execution**, and the winner is written onto the row (see
 [Contract or handler?](#contract-or-handler) below) — not at publish, which is where it happened before 6.0.
 
-An **admin override** (`IRateLimitOverrideManager`) sits above all of them, but only for the *size* of the
+An **admin override** (`IRateLimitManager`) sits above all of them, but only for the *size* of the
 bucket: it replaces `count` and `perSeconds` for a key on every check, and never changes which key a job
 uses. Overrides are read on each acquire attempt with no caching at the limit boundary, so raising or
 lowering N takes effect on the next one — including for jobs whose row was stamped long ago.
@@ -162,9 +162,11 @@ Rate-limit keys appear in `JobLog.Message` rows and on the dashboard `/warp/rate
 
 ## Admin overrides
 
-Live limits are runtime-tunable via `IRateLimitOverrideManager` and exposed on the dashboard at `/warp/ratelimits` (hide-on-404 nav probe). Set / clear / list endpoints sit under `/api/ratelimits`. An admin row replaces the `count` and `perSeconds` of whatever the job resolved — see [Precedence](#precedence).
+Live limits are runtime-tunable via `IRateLimitManager` and exposed on the dashboard at `/warp/ratelimits` (hide-on-404 nav probe). Set / clear / list endpoints sit under `/api/ratelimits`. An admin row replaces the `count` and `perSeconds` of whatever the job resolved — see [Precedence](#precedence).
 
 **When a change takes effect.** Lowering a limit applies to the next check on every server. Raising or removing one applies at once on the server that made the change, and on the others within about **5 seconds**: each server keeps refusing a key it has [already seen exhausted](#refusing-a-known-exhausted-key-from-memory) for up to that long. During those seconds, `Skip`-mode jobs on the key can be **deleted** although the new limit would have admitted them; `Wait`-mode jobs are only rescheduled. If dropped jobs matter, raise the limit before the traffic arrives rather than during it.
+
+**Your own manager.** Register your own `IRateLimitManager` (after `AddWarp`, so it is the one the container resolves) to take overrides from somewhere else, such as configuration or another store. Jobs then resolve their override through it, called only for a job that has a rate limit; the dashboard and the admin API use it too. A custom manager does not clear the remembered refusals described above, so a raised limit reaches every server within the same 5 seconds.
 
 ## OpenTelemetry
 

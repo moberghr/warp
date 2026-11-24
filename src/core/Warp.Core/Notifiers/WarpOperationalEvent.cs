@@ -153,3 +153,16 @@ public sealed record SloBreachedEvent : WarpOperationalEvent
     /// </summary>
     public string? Metric { get; init; }
 }
+
+/// <summary>
+/// A server's clock is further from the database's than its <c>ClockSkewWarningThreshold</c> (#350). The server
+/// corrects for the offset, so nothing it does is wrong; the event exists so the clock gets fixed at the source
+/// (NTP), since the correction is only as fresh as the last heartbeat.
+/// </summary>
+public sealed record ClockSkewDetectedEvent : WarpOperationalEvent
+{
+    public required Guid ServerId { get; init; }
+
+    /// <summary>The database clock minus the server's clock, in milliseconds: positive when the server is behind.</summary>
+    public required double OffsetMs { get; init; }
+}

@@ -308,6 +308,7 @@ This creates 7 workers total: 5 polling `critical` every 100ms, and 2 polling `r
 | `HealthCheckInterval` | `TimeSpan` | `5 seconds` | How often the health manager runs (heartbeat, stale job detection, cleanup) |
 | `HealthCheckTimeout` | `TimeSpan` | `5 minutes` | Time without heartbeat before a server is considered dead and removed |
 | `InvisibilityTimeout` | `TimeSpan` | `5 minutes` | Time without keep-alive before a processing job is considered stale and requeued. Workers refresh keep-alive every `InvisibilityTimeout / 5` |
+| `ClockSkewWarningThreshold` | `TimeSpan?` | `1 second` | How far a server's clock may be from the database's before it logs a Warning, raises a `ClockSkewDetected` notification and is flagged on the dashboard. Warp corrects for the offset whatever its size (see [Clock skew](crash-recovery.md#clock-skew-between-servers)); `null` turns the report off |
 
 ### Job Retention
 

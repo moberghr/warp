@@ -554,6 +554,11 @@ public static class ServiceConfiguration
         job.Property(p => p.HandlerType);
         job.Property(p => p.ExpireAt);
         job.Property(p => p.LastKeepAlive);
+
+        // A concurrency token on the SERVER context only (WarpServerContext, #347), not here: it applies to
+        // every EF update of a job in the context that has it, and on the application's context it changed
+        // how two concurrent BulkRequeueJobs interleave on SQL Server until they deadlocked.
+        job.Property(p => p.RunId);
         job.Property(p => p.TraceId);
         job.Property(p => p.SpawnedByJobId);
         job.Property(p => p.JobCount);

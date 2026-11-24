@@ -227,6 +227,8 @@ export interface ServerModel {
   serviceCount: number;
   cpuUsagePercent: number | null;
   memoryWorkingSetBytes: number | null;
+  /** The database clock minus this server's clock in ms, from its last heartbeat. */
+  clockOffsetMs?: number | null;
   pausedAt: string | null;
   workers: WorkerModel[];
 }

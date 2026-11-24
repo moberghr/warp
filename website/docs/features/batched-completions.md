@@ -23,12 +23,12 @@ Opt out by setting `CompletionBatchSize = 1` — each completion flushes immedia
 
 ## How It Works
 
-Each `WarpDispatcherWorker` owns its own in-memory batch. When a handler finishes:
+Each worker **group** has one completion buffer and one flusher that writes it. When a handler finishes:
 
-1. The worker builds a `PendingCompletion` containing the mutated `Job` row (with its new terminal state), the counters to insert, and any JobLog entries.
-2. The completion is added to the worker's batch. If the batch is full or the flush interval has elapsed, the batch commits immediately. Otherwise it waits for more completions.
-3. When the worker runs out of channel work and is about to suspend, it drains any buffered completions first. The worker never blocks on `WaitToReadAsync` with unsaved completions.
-4. On graceful shutdown, `StopAsync` calls a final `FlushAsync()` so SIGTERM doesn't strand the in-flight batch.
+1. The worker builds a `PendingCompletion` containing the mutated `Job` row (with its new terminal state), the counters to add, and any JobLog entries, adds it to the group's buffer, and goes straight back to its channel. Workers never write completions themselves.
+2. The flusher writes the buffer in one set-based statement when it is full (`CompletionBatchSize`), when its oldest entry has waited `CompletionFlushInterval`, or the moment the group has nothing left claimed, so a lone job never waits for the timer.
+3. While a write is in flight the next buffer fills behind it. **Backpressure:** once the group holds four buffers' worth of unwritten completions (4 × `CompletionBatchSize`), a worker that finishes a job waits for the write in flight to end before taking its next one. It keeps its slot while it waits, so the group claims nothing new. Under normal load the buffer never gets that far. With a slow or hung database the group slows down instead of piling up finished jobs that a crash would run again. A stopping worker stops waiting, and its completion is written by the final flush.
+4. On graceful shutdown, once every worker has stopped, the flusher writes what is left on a budget of its own, so SIGTERM doesn't strand the in-flight batch.
 
 `FlushAsync` always commits to completion — there is no caller-visible way to cancel a drained batch. The DB operations inside use `CancellationToken.None` so a shutdown mid-flush still persists. The transactional commit + split-on-poison recursion means a single bad row in a batch of 50 isolates and drops only the poison entry; the other 49 good rows still commit.
 
@@ -42,7 +42,7 @@ Non-`DbUpdateException` failures (connection drops, timeouts) propagate up and t
 
 Batched completions are a throughput optimization, not a latency optimization. Consequences:
 
-- **At-least-once semantics** — if the process crashes between handler completion and the batch flush, the job is observed as still `Processing` by the stale-recovery task and (depending on `CanBeRestarted`) requeued. For non-idempotent handlers, pair with `[NoRestart]` or a handler-internal idempotency check.
+- **At-least-once semantics** — if the process crashes between handler completion and the batch flush (at most 4 × `CompletionBatchSize` jobs per group, plus the write in flight), the job is observed as still `Processing` by the stale-recovery task and (depending on `CanBeRestarted`) requeued. For non-idempotent handlers, pair with `[NoRestart]` or a handler-internal idempotency check.
 - **Delayed visibility** — a job's terminal state doesn't appear in the dashboard until the batch commits (up to `CompletionFlushInterval`). For 100ms flush intervals this is imperceptible; if you raise it significantly, operators see stale "Processing" rows.
 - **Batch size vs. lock contention** — larger batches amortize round-trips but hold row-level locks on more rows per transaction. 50 is a sensible default for PostgreSQL and SQL Server; tune down if you see lock-wait metrics climbing.
 

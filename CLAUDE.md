@@ -75,13 +75,15 @@ Detailed rules in `.claude/rules/` (auto-loaded by Claude Code):
 | `data-layer.md` | EF Core, no raw SQL, `AsNoTracking`, `Select` over `Include`, schema | §5.x |
 | `performance.md` | Worker hot path, Counter rows, signal-driven wakeup | §6.x |
 | `git-workflow.md` | Hierarchical branches, imperative commits, analyzer-clean builds | §7.x |
-| `project-specific.md` | Recurring jobs, cancellation, addons, metadata conventions, enums-from-1 | §8.x |
+| `project-specific.md` | Recurring jobs, cancellation, addons, metadata conventions, enums-from-1, notifier post-commit rule, append-only outcome stats | §8.1–§8.18, §8.25, §8.33 |
+| `observability.md` | Adapters, webhooks, endpoints, multi-app, sinks, queue metrics, client, trace, issues, retention tiers, SLOs, custom metrics (path-scoped: loads only when touching those areas) | §8.19–§8.34 |
 
 Reference docs (read on-demand by skills and review agents):
 
 - `.claude/references/architecture-principles.md` — 16 core principles (curated)
 - `.claude/references/coding-guidelines.md` — Moberg C# coding style
 - `.claude/references/quick-check-list.md` — Reviewer fast-check list
+- `.claude/references/design-notes/` — full rationale, history, measurements and rot-guard lists behind the condensed §8.x rules (one file per section)
 
 ---
 

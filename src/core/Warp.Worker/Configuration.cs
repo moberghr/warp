@@ -161,6 +161,16 @@ public class WarpServerConfiguration : WarpConfiguration
     /// </summary>
     public TimeSpan? HealthCheckInterval { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// How far this server's clock may be from the database's before it is reported (#350). The heartbeat
+    /// measures the offset and the server corrects for it whatever its size (<see cref="Warp.Core.DatabaseClock"/>),
+    /// so this does not affect correctness: past it, the server logs a Warning, raises a
+    /// <c>ClockSkewDetected</c> operational notification once (again only after the clock has come back
+    /// within the threshold), and the dashboard flags the server, so the clock gets fixed at the source.
+    /// Default 1 second; <c>null</c> turns the report off.
+    /// </summary>
+    public TimeSpan? ClockSkewWarningThreshold { get; set; } = TimeSpan.FromSeconds(1);
+
     public TimeSpan HealthCheckTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>

@@ -34,4 +34,10 @@ public sealed record HeartbeatResult(
         : this(serverPausedAt, groupPaused, [])
     {
     }
+
+    /// <summary>
+    /// The database's clock (UTC) when the heartbeat ran: what the heartbeat wrote, and what the server
+    /// measures its own clock against (#350). Null from a provider that does not report it.
+    /// </summary>
+    public DateTime? DatabaseUtcNow { get; init; }
 }

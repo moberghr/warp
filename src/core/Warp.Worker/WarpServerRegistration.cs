@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Enums;
 
 namespace Warp.Worker;
@@ -32,7 +33,7 @@ public class WarpServerRegistration<TContext> : IHostedService
         IOptions<WarpServerConfiguration> configuration,
         IOptions<WarpConfiguration> resolvedConfiguration,
         IServiceScopeFactory serviceScopeFactory,
-        TimeProvider timeProvider,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider timeProvider,
         PauseStateHolder pauseStateHolder,
         ServerRegistrationState state,
         ILogger<WarpServerRegistration<TContext>>? logger = null)
@@ -142,6 +143,8 @@ public class WarpServerRegistration<TContext> : IHostedService
 
         await context.SaveChangesAsync(cancellationToken);
 
+        await MeasureClockAsync(scope.ServiceProvider, context, cancellationToken);
+
         await RecordDeployAsync(context, server, now, cancellationToken);
 
         _state.Set(registrations);
@@ -215,6 +218,26 @@ public class WarpServerRegistration<TContext> : IHostedService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Failed to record the deploy of application version {Version} for server {ServerId}.", _configuration.ApplicationVersion, server.Id);
+        }
+    }
+
+    // One heartbeat as soon as the row exists (#350): it stamps the database's time on the row and measures
+    // this process's clock against it, so every server component reads the database's clock from the first
+    // task, not only after the first periodic beat. Skipped with the periodic heartbeat disabled, like the
+    // correction itself (a test driving a fake clock).
+    private async Task MeasureClockAsync(IServiceProvider services, DbContext context, CancellationToken cancellationToken)
+    {
+        if (_timeProvider is not DatabaseClock clock || _configuration.HealthCheckInterval == null)
+        {
+            return;
+        }
+
+        var queries = services.GetRequiredService<IWarpSqlQueries<TContext>>();
+        var sent = clock.Local.GetUtcNow();
+        var result = await queries.HeartbeatAsync(context, _configuration.ServerId, sent.UtcDateTime, null, null, cancellationToken);
+        if (result?.DatabaseUtcNow is { } databaseNow)
+        {
+            clock.Record(sent, clock.Local.GetUtcNow(), databaseNow);
         }
     }
 }

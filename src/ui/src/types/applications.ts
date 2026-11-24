@@ -39,6 +39,8 @@ export interface InstanceView {
   lastHeartbeatAt: string;
   cpuUsagePercent: number | null;
   memoryWorkingSetBytes: number | null;
+  /** Servers only: the database clock minus the server's clock in ms, from its last heartbeat. */
+  clockOffsetMs?: number | null;
   /** True for a Server row (job worker / server-task host); false for a non-server instance. */
   isServer: boolean;
   version: string | null;

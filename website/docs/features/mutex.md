@@ -244,6 +244,8 @@ Admin rows are sticky across redeploys — they live in your application's datab
 
 `ConcurrencyLimitResolver` is scoped — admin-row lookups are cached for the lifetime of one job execution scope. Cross-job staleness is intentional; admin updates take effect at the next pickup.
 
+**Your own manager.** Register your own `IConcurrencyLimitManager` (after `AddWarp`, so it is the one the container resolves) to take limits from somewhere else, such as configuration or another store. Jobs then resolve their limit through it, called only for a job that has a concurrency key; the dashboard and the admin API use it too. With Warp's own manager, jobs read the `ConcurrencyLimit` row directly.
+
 ## Use cases
 
 **`[Mutex]` (limit = 1, default `Skip`) — deduplication:**

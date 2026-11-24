@@ -627,6 +627,12 @@ public class JobCommandService<TContext> : IJobCommandService
         // the row lock from LockJobByIdWaitAsync; this UPDATE blocks, then sees the post-Delete
         // state and excludes the row. Tie-breaker semantic — whichever writer commits first
         // wins, exactly one of {Delete, Requeue} ever wins per row.
+        //
+        // The row locks are taken first, in id order (the callers pass sorted ids): the lock order two
+        // concurrent bulk requeues agree on must not depend on the plan the database picks for the UPDATE.
+        // On a small table SQL Server ran it through a secondary index, and the two deadlocked.
+        await _sqlQueries.LockJobsByIdWaitAsync(_context, ids, default);
+
         if (clearHandler)
         {
             return await _context.Set<Job>()

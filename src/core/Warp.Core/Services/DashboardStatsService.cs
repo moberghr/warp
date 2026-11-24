@@ -196,6 +196,7 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             LastHeartbeatTime = s.LastHeartbeatTime,
             ServiceCount = s.ServiceCount,
             CpuUsagePercent = s.CpuUsagePercent,
+            ClockOffsetMs = s.ClockOffsetMs,
             MemoryWorkingSetBytes = s.MemoryWorkingSetBytes,
             PausedAt = s.PausedAt,
             Workers = workersByServer.GetValueOrDefault(s.Id, [])
@@ -255,6 +256,7 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             LastHeartbeatTime = server.LastHeartbeatTime,
             ServiceCount = server.ServiceCount,
             CpuUsagePercent = server.CpuUsagePercent,
+            ClockOffsetMs = server.ClockOffsetMs,
             MemoryWorkingSetBytes = server.MemoryWorkingSetBytes,
             PausedAt = server.PausedAt,
             Workers = workers.ConvertAll(w =>

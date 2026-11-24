@@ -19,8 +19,8 @@ public sealed class ConcurrencyLimitResolver
     private Dictionary<string, int?>? _cache;
 
     // For a host that builds the pipeline behaviour itself: limits are read through the given manager.
-    // Warp's own registration reads its tables directly instead (rule 6.17), so a replaced IConcurrencyLimitManager
-    // is not consulted by the registered pipeline.
+    // Warp's own registration does the same when the host replaced its IConcurrencyLimitManager (#349), and otherwise
+    // reads its tables directly (rule 6.17).
     public ConcurrencyLimitResolver(IConcurrencyLimitManager manager)
         : this(async (name, ct) => (await manager.GetLimit(name, ct))?.Limit)
     {

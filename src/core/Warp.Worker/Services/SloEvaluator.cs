@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core;
@@ -50,7 +51,7 @@ public sealed class SloEvaluator<TContext> : IServerTask
     public SloEvaluator(
         IWarpServerContext serverContext,
         IOptions<WarpServerConfiguration> configuration,
-        TimeProvider timeProvider,
+        [FromKeyedServices(DatabaseClock.Key)] TimeProvider timeProvider,
         WarpNotifierDispatcher notifierDispatcher,
         ILogger<SloEvaluator<TContext>> logger)
     {

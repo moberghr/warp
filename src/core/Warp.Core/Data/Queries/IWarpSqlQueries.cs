@@ -69,6 +69,16 @@ public interface IWarpSqlQueries<TContext>
     Task<Job?> LockJobByIdWaitAsync(DbContext context, Guid jobId, CancellationToken ct);
 
     /// <summary>
+    /// Locks the given jobs with a blocking lock, one primary-key lookup per job, in the order given, and
+    /// holds the locks until the ambient transaction ends. For a set-based write that follows in the same
+    /// transaction (<c>BulkRequeueJobs</c>): callers that pass their ids sorted take the row locks in one
+    /// order whatever plan the database picks for the write itself. Without it, SQL Server could run the
+    /// bulk UPDATE through a secondary index on a small table, and two concurrent bulk requeues deadlocked
+    /// (one holding the row and wanting the index key, the other the reverse). Ids with no row are skipped.
+    /// </summary>
+    Task LockJobsByIdWaitAsync(DbContext context, IReadOnlyList<Guid> jobIds, CancellationToken ct);
+
+    /// <summary>
     /// Locks every <see cref="Server"/> row with a blocking lock (WAIT — no SKIP LOCKED).
     /// Used by server cleanup to freeze the set while it decides which servers are stale.
     /// The blocking lock serializes against <c>Heartbeat</c>'s per-row update so we can't
@@ -86,6 +96,13 @@ public interface IWarpSqlQueries<TContext>
     /// <paramref name="memoryBytes"/> / <paramref name="cpuPercent"/> are nullable — the SQL keeps the
     /// existing column value when either is null (COALESCE / ISNULL). Returns <c>null</c> when
     /// the server row doesn't exist; caller treats this as the "server was cleaned up" signal.
+    /// </para>
+    /// <para>
+    /// Every time the heartbeat writes (the server's and its background-service instances' last
+    /// heartbeat, the renewed leases' expiry) is the DATABASE's clock, read once by the statement, so no
+    /// server's clock decides whether another server looks alive (#350). <paramref name="now"/> is this
+    /// process's own clock reading: the statement stores the database clock minus it as the server's
+    /// <c>ClockOffsetMs</c>, and returns the database clock as <see cref="HeartbeatResult.DatabaseUtcNow"/>.
     /// </para>
     /// </summary>
     Task<HeartbeatResult?> HeartbeatAsync(
