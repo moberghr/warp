@@ -1,3 +1,4 @@
+#pragma warning disable // bisect diagnostics, temporary branch
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using BenchmarkDotNet.Analysers;
@@ -176,6 +177,38 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// a plan gone from the second reading contributes nothing, losing only its share of the window.
     /// </para>
     /// </summary>
+    // Bisect diagnostics: the cached plan's operators for one statement (id = plan handle : start offset).
+    private static void PrintPlan(string id)
+    {
+        try
+        {
+            var split = id.LastIndexOf(':');
+            using var connection = new SqlConnection(SqlServerConnectionString);
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT query_plan FROM sys.dm_exec_text_query_plan(CONVERT(varbinary(64), @h, 1), @s, -1)";
+            command.Parameters.AddWithValue("@h", id[..split]);
+            command.Parameters.AddWithValue("@s", int.Parse(id[(split + 1)..], System.Globalization.CultureInfo.InvariantCulture));
+            var xml = command.ExecuteScalar() as string ?? string.Empty;
+            var timeout = TimeSpan.FromSeconds(2);
+            Console.WriteLine($"[sqlplan] {id} ({xml.Length} chars)");
+            foreach (System.Text.RegularExpressions.Match op in System.Text.RegularExpressions.Regex.Matches(xml, "<RelOp [^>]*>", System.Text.RegularExpressions.RegexOptions.None, timeout))
+            {
+                var tag = op.Value;
+                string Attr(string name) => System.Text.RegularExpressions.Regex.Match(tag, name + "=\"([^\"]*)\"", System.Text.RegularExpressions.RegexOptions.None, timeout).Groups[1].Value;
+                var rest = xml[(op.Index + op.Length)..];
+                var next = rest.IndexOf("<RelOp ", StringComparison.Ordinal);
+                var body = next < 0 ? rest : rest[..next];
+                var obj = System.Text.RegularExpressions.Regex.Match(body, "<Object [^>]*Table=\"([^\"]*)\"[^>]*?(Index=\"([^\"]*)\")?", System.Text.RegularExpressions.RegexOptions.None, timeout);
+                Console.WriteLine($"[sqlplan]   node {Attr("NodeId")} {Attr("PhysicalOp")} / {Attr("LogicalOp")} rows~{Attr("EstimateRows")} {(obj.Success ? obj.Groups[1].Value + " " + obj.Groups[3].Value : string.Empty)}");
+            }
+        }
+        catch (Exception ex) when (ex is SqlException or InvalidOperationException or FormatException)
+        {
+            Console.WriteLine($"[sqlplan] failed: {ex.Message}");
+        }
+    }
+
     private static Counters Delta(Reading before, Reading after)
     {
         var totals = after.Totals - before.Totals;
@@ -200,6 +233,11 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         foreach (var x in top)
         {
             Console.WriteLine($"[sqltop] exec={x.Exec} reads={x.Reads} gen={x.Plan.Generation} fresh={x.Fresh} :: {string.Join(" ", x.Plan.Text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))}");
+        }
+
+        foreach (var (id, _) in afterPlans.OrderByDescending(x => x.Value.LogicalReads).Take(2))
+        {
+            PrintPlan(id);
         }
 
         long statements = 0;
