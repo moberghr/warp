@@ -71,6 +71,11 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
     /// </summary>
     internal TimeSpan LegacyQueueCheckInterval { get; init; } = TimeSpan.FromMinutes(1);
 
+    // How many wakes a stopping relay sends into 7.7's shared queue at most, and how far apart (WakeLegacyRelayAsync).
+    private const int MaxRelayWakes = 25;
+
+    private static readonly TimeSpan RelayWakeInterval = TimeSpan.FromMilliseconds(200);
+
     /// <summary>This process's listener service, for tests.</summary>
     internal string ListenerServiceName => _ownServiceValue;
 
@@ -204,6 +209,13 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
         // reconnects rely on the listener task's drain-on-reconnect to catch up.
         _listenerReady.TrySetResult();
 
+        // SQL Server 2025 ignores a cancel that reaches a WAITFOR (RECEIVE) as it starts until the WAITFOR times
+        // out (measured: the full 30 s; 2022 stops at once), and a second cancel does not help. A wake sent into
+        // this process's own queue ends that WAITFOR whatever state it is in. Sent only on stop, off the cancelling
+        // thread, and awaited before the queue is dropped.
+        Task? ownWake = null;
+        var wakeOnStop = ct.Register(() => ownWake = Task.Run(() => SendWakeAsync(_ownServiceValue), CancellationToken.None));
+
         try
         {
             // WAITFOR RECEIVE blocks the connection until messages arrive or the TIMEOUT fires. The 30s
@@ -255,6 +267,7 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 
                         if (await reader.IsDBNullAsync(1, ct))
                         {
+                            // A wake (SendWakeAsync) carries no body: it only ends the WAITFOR.
                             continue;
                         }
 
@@ -287,6 +300,15 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
         {
             await relayStop.CancelAsync();
             await relay;
+
+            // Disposing waits for a callback already running, so a wake it started is visible here. The wake must
+            // land before the queue is dropped, or its send would fail on a missing service.
+            await wakeOnStop.DisposeAsync();
+            if (ownWake != null)
+            {
+                await ownWake;
+            }
+
             await DropOwnQueueAsync();
         }
     }
@@ -297,6 +319,11 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
     // and re-sends it to all of them, itself included. Never throws: a failure is logged and retried later.
     private async Task RelayLegacyQueueAsync(CancellationToken ct)
     {
+        // The WAITFOR on the shared queue has the SQL Server 2025 cancel problem of the listener's own (ListenAsync),
+        // so a stop wakes the shared queue too, but only while this relay is waiting on it.
+        var waiting = new StrongBox<int>();
+        Task? wake = null;
+        var wakeOnStop = ct.Register(() => wake = Task.Run(() => WakeLegacyRelayAsync(waiting), CancellationToken.None));
         SqlConnection? conn = null;
         try
         {
@@ -312,7 +339,7 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 
                     if (await LegacyQueueExistsAsync(conn, ct))
                     {
-                        await RelayLegacyBatchAsync(conn, ct);
+                        await RelayLegacyBatchAsync(conn, waiting, ct);
                         continue;
                     }
                 }
@@ -344,10 +371,59 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
         }
         finally
         {
+            await wakeOnStop.DisposeAsync();
+            if (wake != null)
+            {
+                await wake;
+            }
+
             if (conn != null)
             {
                 await conn.DisposeAsync();
             }
+        }
+    }
+
+    // The shared queue hands each message to ONE receiver, and other relays and 7.7 listeners receive from it too, so
+    // one wake may end someone else's WAITFOR instead (harmless: they discard it). Wakes are sent until this relay's
+    // wait has ended, at most MaxRelayWakes of them; past that the WAITFOR ends at its own timeout.
+    private async Task WakeLegacyRelayAsync(StrongBox<int> waiting)
+    {
+        for (var attempt = 0; attempt < MaxRelayWakes && Volatile.Read(ref waiting.Value) == 1; attempt++)
+        {
+            await SendWakeAsync(_legacyServiceValue);
+            await Task.Delay(RelayWakeInterval);
+        }
+    }
+
+    // One body-less message to a service, from this release's sender service: it ends a WAITFOR (RECEIVE) on the
+    // service's queue and is never a notification. The listener skips a message without a body, the relay keeps only
+    // bodies a 7.7 process sent (a wake has neither), and 7.7 skips a message without a body too. A body-less message
+    // of the existing type rather than a type of its own, because a new type needs a contract on 7.7's shared service.
+    // Best effort and never throws: it runs from a cancellation callback.
+    internal async Task SendWakeAsync(string targetService)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await using var conn = new SqlConnection(_connectionString);
+            await conn.OpenAsync(timeout.Token);
+            var sql = $@"
+                DECLARE @conv UNIQUEIDENTIFIER;
+                BEGIN DIALOG @conv
+                    FROM SERVICE [{_serviceValue}]
+                    TO SERVICE @target
+                    ON CONTRACT [{_contractValue}]
+                    WITH ENCRYPTION = OFF, LIFETIME = 60;
+                SEND ON CONVERSATION @conv MESSAGE TYPE [{_messageTypeValue}];
+                END CONVERSATION @conv;";
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.Add("@target", System.Data.SqlDbType.NVarChar, 256).Value = targetService;
+            await cmd.ExecuteNonQueryAsync(timeout.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Waking the Service Broker service {Service} on stop failed; its WAITFOR ends at its timeout", targetService);
         }
     }
 
@@ -363,7 +439,7 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
     // far service is the shared service; what this release sent there comes from its sender service and already
     // reached every listener directly, so it is dropped, never delivered twice), end every conversation received,
     // and send the kept messages to every listener's service, one conversation each. Never to the shared service.
-    private async Task RelayLegacyBatchAsync(SqlConnection conn, CancellationToken ct)
+    private async Task RelayLegacyBatchAsync(SqlConnection conn, StrongBox<int> waiting, CancellationToken ct)
     {
         var sql = $@"
             DECLARE @received TABLE (handle UNIQUEIDENTIFIER, type_name NVARCHAR(256), body VARBINARY(MAX));
@@ -429,7 +505,18 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
         cmd.Parameters.Add("@type", System.Data.SqlDbType.NVarChar, 256).Value = _messageTypeValue;
         cmd.Parameters.Add("@legacy", System.Data.SqlDbType.NVarChar, 256).Value = _legacyServiceValue;
         cmd.Parameters.Add("@prefix", System.Data.SqlDbType.NVarChar, 256).Value = _listenerServicePrefix;
-        await cmd.ExecuteNonQueryAsync(ct);
+
+        // Marked waiting BEFORE the token is checked, so a stop either sees the mark and wakes, or is seen here.
+        Volatile.Write(ref waiting.Value, 1);
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        finally
+        {
+            Volatile.Write(ref waiting.Value, 0);
+        }
     }
 
     /// <summary>

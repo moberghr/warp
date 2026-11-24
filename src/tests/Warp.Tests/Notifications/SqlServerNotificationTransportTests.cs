@@ -461,6 +461,107 @@ public class SqlServerNotificationTransportTests : IAsyncLifetime, IClassFixture
         }
     }
 
+    [TimedFact]
+    public async Task Stop_AsTheNextWaitStarts_EndsAtOnce()
+    {
+        // SQL Server 2025 ignores a cancel that reaches a WAITFOR (RECEIVE) as it starts until the WAITFOR times out
+        // (30 s); it happened in about 40% of stops. The stop wakes the listener's queue instead. Each round stops a
+        // listener right after asking for its next notification, which is when its next WAITFOR is being sent.
+        const string channel = "warp_notify_stop";
+        for (var round = 0; round < 10; round++)
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var listener = CreateTransport(channel);
+            var enumerator = listener.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+            Task<bool> Next() => enumerator.MoveNextAsync().AsTask();
+            var pending = Next();
+            try
+            {
+                await listener.ListenerReady.WaitAsync(cts.Token);
+                await listener.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token);
+                (await pending).ShouldBeTrue();
+
+                // Act
+                pending = Next();
+                await cts.CancelAsync();
+
+                // Assert
+                (await EndsWithinAsync(pending, TimeSpan.FromSeconds(2))).ShouldBeTrue($"round {round}: the stopped listener's WAITFOR ran on");
+            }
+            finally
+            {
+                // Bounded, so a WAITFOR that runs on fails the assertion above rather than the test budget. The
+                // iterator then stops and drops its queue by itself once that WAITFOR returns.
+                await cts.CancelAsync();
+                if (await EndsWithinAsync(pending, TimeSpan.FromSeconds(2)))
+                {
+                    await DisposeQuietlyAsync(enumerator);
+                }
+            }
+        }
+    }
+
+    [TimedFact]
+    public async Task Wake_SentToTheListenerAndToThe77SharedQueue_IsNeitherDeliveredNorRelayed()
+    {
+        // Arrange — a stop wakes the listener's own queue and, while its relay waits there, 7.7's shared queue,
+        // where another process's relay or a 7.7 listener may receive it.
+        const string channel = "warp_notify_wake";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var listener = CreateTransport(channel);
+        await CreateSharedQueueAs77DidAsync(listener, channel, cts.Token);
+        var enumerator = listener.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        Task<bool> Next() => enumerator.MoveNextAsync().AsTask();
+        var next = Next();
+        try
+        {
+            await listener.ListenerReady.WaitAsync(cts.Token);
+
+            // Act
+            await listener.SendWakeAsync(listener.ListenerServiceName);
+            await listener.SendWakeAsync($"{channel}/service");
+            await PublishAs77DidAsync(channel, "J:relayed");
+            await listener.PublishAsync(NotificationKind.JobEnqueued, "direct", cts.Token);
+
+            // Assert — exactly the two real notifications, in the order the relay and the direct send deliver them.
+            var received = new List<string?>();
+            for (var i = 0; i < 2; i++)
+            {
+                (await next).ShouldBeTrue();
+                received.Add(enumerator.Current.Queue);
+                next = Next();
+            }
+
+            received.ShouldBe(["relayed", "direct"], ignoreOrder: true);
+
+            // Nothing else was delivered in between: the next notification is the next one published.
+            await listener.PublishAsync(NotificationKind.JobEnqueued, "last", cts.Token);
+            (await next).ShouldBeTrue();
+            enumerator.Current.Queue.ShouldBe("last");
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await next.ContinueWith(_ => { }, TaskScheduler.Default);
+            await DisposeQuietlyAsync(enumerator);
+            await DropSharedQueueAsync(channel);
+        }
+    }
+
+    private static async Task<bool> EndsWithinAsync(Task pending, TimeSpan limit)
+    {
+        try
+        {
+            await pending.ContinueWith(_ => { }, TaskScheduler.Default).WaitAsync(limit);
+
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+    }
+
     // 7.7's setup of the shared objects, after this release's setup created the message type and contract (7.7
     // creates the same ones).
     private async Task CreateSharedQueueAs77DidAsync(SqlServerNotificationTransport transport, string channel, CancellationToken ct)
