@@ -252,9 +252,11 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             if (state.Claimed)
             {
                 Start(_entries[state.Name], ct);
-                continue;
             }
 
+            // A claimed task counts too: its idle run writes nothing and wakes nobody, so this pass must
+            // already know when it is next due. When every task is claimed by one pass (they share due
+            // times, rule 6.20) there is no unclaimed task to take the time from.
             sleep = Min(sleep, state.DueIn);
         }
 
@@ -327,7 +329,12 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
             if (ran && !ct.IsCancellationRequested)
             {
-                wake = await FinishAsync(entry, message, failure, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                var elapsed = Stopwatch.GetElapsedTime(started);
+                var wrote = await FinishAsync(entry, message, failure, elapsed.TotalMilliseconds);
+
+                // A run that outlasted half its interval may have been skipped by the passes it ran through
+                // (a running task is not claimed), so the loop has to look at it again.
+                wake = wrote || elapsed >= entry.Interval / 2;
             }
         }
         catch (Exception ex)

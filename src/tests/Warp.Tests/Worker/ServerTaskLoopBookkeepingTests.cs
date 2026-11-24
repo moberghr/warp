@@ -14,8 +14,8 @@ namespace Warp.Tests.Worker;
 // Bookkeeping-overhead regressions:
 //   1. GetIntervalAsync caches the interval_seconds DB read for ~1 minute so each task
 //      iteration doesn't issue a fresh SELECT when nothing has changed.
-//   2. TryUpdateServerTaskAsync flushes every call — operators want LastRun to reflect
-//      "the task is alive right now", not "the task last did real work N minutes ago".
+//   2. TryUpdateServerTaskAsync records an idle run at most once a minute; a run that did
+//      something, failed or changed status always records (rule 6.20).
 //      ExpirationCleanup keeps server_log rows bounded (interval × 300s retention).
 [GenerateDatabaseTests]
 public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
@@ -79,23 +79,51 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task TryUpdateServerTaskAsync_ConsecutiveCalls_AlwaysFlush()
+    public async Task TryUpdateServerTaskAsync_IdleRunsWithinAMinute_RecordOnlyTheFirst()
     {
+        // An idle run records itself at most once a minute; the heartbeat's row was an UPDATE per server
+        // every five seconds that said the same thing. A minute later it records again.
         var serverTaskId = await SeedServerTaskAsync(intervalSeconds: 1.0);
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-01-01T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture));
         var loop = BuildLoop(time);
         loop.SetServerTaskIdForTest(serverTaskId);
 
         await loop.TryUpdateServerTaskAsync("Completed", null, 100);
-        var afterFirst = await ReadAsync(serverTaskId);
-        afterFirst.LastStatus.ShouldBe("Completed");
-        afterFirst.LastDurationMs.ShouldBe(100);
+        (await ReadAsync(serverTaskId)).LastDurationMs.ShouldBe(100);
 
-        // Second call with no time elapsed — must still flush. Operators want LastRun
-        // to track "the task is alive right now", not "last did real work N minutes ago".
+        // Act
         await loop.TryUpdateServerTaskAsync("Completed", null, 200);
-        var afterSecond = await ReadAsync(serverTaskId);
-        afterSecond.LastDurationMs.ShouldBe(200);
+        var withinTheMinute = await ReadAsync(serverTaskId);
+        time.Advance(TimeSpan.FromMinutes(1));
+        await loop.TryUpdateServerTaskAsync("Completed", null, 300);
+
+        // Assert
+        withinTheMinute.LastDurationMs.ShouldBe(100);
+        (await ReadAsync(serverTaskId)).LastDurationMs.ShouldBe(300);
+    }
+
+    [TimedFact]
+    public async Task TryUpdateServerTaskAsync_RunThatDidWorkOrChangedStatus_AlwaysRecords()
+    {
+        var serverTaskId = await SeedServerTaskAsync(intervalSeconds: 1.0);
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-01-01T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture));
+        var loop = BuildLoop(time);
+        loop.SetServerTaskIdForTest(serverTaskId);
+        await loop.TryUpdateServerTaskAsync("Completed", null, 100);
+
+        // Act
+        await loop.TryUpdateServerTaskAsync("Completed", "did 3", 200);
+        var afterWork = await ReadAsync(serverTaskId);
+        await loop.TryUpdateServerTaskAsync("Failed", "boom", 300);
+        var afterFailure = await ReadAsync(serverTaskId);
+        await loop.TryUpdateServerTaskAsync("Completed", null, 400);
+
+        // Assert
+        afterWork.LastMessage.ShouldBe("did 3");
+        afterFailure.LastStatus.ShouldBe("Failed");
+        var recovered = await ReadAsync(serverTaskId);
+        recovered.LastStatus.ShouldBe("Completed");
+        recovered.LastDurationMs.ShouldBe(400);
     }
 
     [TimedFact]

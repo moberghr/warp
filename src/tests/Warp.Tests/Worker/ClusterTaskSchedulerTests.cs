@@ -68,8 +68,27 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         // Assert: the second claim moved the next run one interval out, and the lease ends with it.
         task.Runs.ShouldBe(2);
         var row = await ReadAsync(IdleTask.TaskName);
-        (row.NextRunAt - row.ClaimedAt!.Value).ShouldBe(TimeSpan.FromSeconds(10));
+        var fromClaim = row.NextRunAt - row.ClaimedAt!.Value;
+        fromClaim.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(5));
+        fromClaim.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(15));
         row.LeaseUntil.ShouldBe(row.NextRunAt);
+    }
+
+    [TimedFact]
+    public async Task PassAsync_EveryTaskClaimedByThePass_SleepsUntilTheNextOneIsDue()
+    {
+        // Tasks share due times, so one pass claims them all; an idle run wakes nobody, so the pass itself
+        // must return the next due time. It slept the one-minute maximum, and a 10 s task ran once a minute.
+        var task = new IdleTask(TimeSpan.FromSeconds(10));
+        using var scheduler = await BuildAsync(task);
+
+        // Act
+        var sleep = await scheduler.PassAsync(Ct);
+
+        // Assert
+        sleep.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(15));
+        sleep.ShouldBeGreaterThan(TimeSpan.FromSeconds(4));
+        await scheduler.RunningTask(IdleTask.TaskName)!;
     }
 
     [TimedFact]

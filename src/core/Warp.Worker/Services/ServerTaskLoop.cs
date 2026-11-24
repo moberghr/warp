@@ -48,6 +48,8 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
     private readonly Lock _signalLock = new();
     private readonly TimeSpan _signalInterval;
     private int? _serverTaskId;
+    private string? _lastRecordedStatus;
+    private DateTimeOffset _lastRecordedAt = DateTimeOffset.MinValue;
 
     private TimeSpan? _cachedInterval;
     private DateTimeOffset _intervalCachedAt = DateTimeOffset.MinValue;
@@ -477,6 +479,18 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
             return;
         }
 
+        // An idle run records itself at most once a minute, as a cluster task does (rule 6.20): a run that
+        // did something, failed, or changed status always does. The heartbeat's row was an UPDATE every
+        // five seconds per server that said "Completed" each time; whether the server is alive is the
+        // Server row's heartbeat time, not this.
+        var recordedAt = _time.GetUtcNow();
+        if (message == null
+            && string.Equals(status, _lastRecordedStatus, StringComparison.Ordinal)
+            && recordedAt - _lastRecordedAt < ClusterTaskTimings.IdleRecordInterval)
+        {
+            return;
+        }
+
         using var scope = _scopes.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var now = _time.GetUtcNow().UtcDateTime;
@@ -488,6 +502,9 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                 .SetProperty(x => x.LastMessage, message)
                 .SetProperty(x => x.LastRun, now)
                 .SetProperty(x => x.LastDurationMs, durationMs));
+
+        _lastRecordedStatus = status;
+        _lastRecordedAt = recordedAt;
     }
 
     // Internal for tests: exercises the wrapper directly without driving the full RunAsync loop.

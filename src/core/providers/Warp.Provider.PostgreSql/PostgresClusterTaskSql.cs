@@ -54,6 +54,15 @@ internal sealed class PostgresClusterTaskSql
         // two servers' clocks agreeing, as a lock never did. The lease lasts one interval, so an idle run needs
         // no completion write: it lapses as the task falls due again. Due times go back as seconds from
         // now, so a server's own clock only decides how long it sleeps.
+        //
+        // The next run is the next multiple of the interval (from the epoch) at least half an interval
+        // away, not "now + interval": tasks with the same or a multiple interval then fall due at the same
+        // instant and ONE claim statement covers them, where drifting due times cost a claim each. Half an
+        // interval is the shortest lease, longer than the renewal period (a third), so a run started late
+        // in a tick skips the next tick instead of losing its lease mid-run.
+        var grid = $"GREATEST(t.{interval}, 0.05)";
+        var nextRun = $"to_timestamp((floor((EXTRACT(EPOCH FROM now()) + {grid} / 2) / {grid}) + 1) * {grid})";
+        var leaseUntil = $"GREATEST({nextRun}, now() + interval '1 second')";
         var leaseFor = $"make_interval(secs => GREATEST(t.{interval}, 1))";
         var legacy = $"EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL AND s.{heartbeat} >= now() - make_interval(secs => @liveWindow))";
 
@@ -68,10 +77,10 @@ internal sealed class PostgresClusterTaskSql
             ),
             claimed AS (
                 UPDATE {table} t
-                SET {lease} = now() + {leaseFor},
+                SET {lease} = {leaseUntil},
                     {claimedBy} = @server,
                     {claimedAt} = now(),
-                    {next} = now() + make_interval(secs => t.{interval}),
+                    {next} = {nextRun},
                     {requested} = NULL
                 FROM due
                 WHERE t.{name} = due.task
@@ -89,10 +98,10 @@ internal sealed class PostgresClusterTaskSql
         var request = $@"
             WITH claimed AS (
                 UPDATE {table} t
-                SET {lease} = now() + {leaseFor},
+                SET {lease} = {leaseUntil},
                     {claimedBy} = @server,
                     {claimedAt} = now(),
-                    {next} = now() + make_interval(secs => t.{interval}),
+                    {next} = {nextRun},
                     {requested} = NULL
                 WHERE t.{name} = @name
                   AND t.{interval} IS NOT NULL
@@ -110,7 +119,7 @@ internal sealed class PostgresClusterTaskSql
 
         var renew = $@"
             UPDATE {table} t
-            SET {lease} = now() + {leaseFor}
+            SET {lease} = GREATEST(t.{lease}, now() + {leaseFor})
             WHERE t.{name} = @name
               AND t.{claimedBy} = @server
             RETURNING 1";
@@ -122,7 +131,7 @@ internal sealed class PostgresClusterTaskSql
                 {claimedAt} = NULL,
                 {next} = CASE
                     WHEN @rerun OR t.{requested} IS NOT NULL THEN now()
-                    WHEN @didWork THEN now() + make_interval(secs => COALESCE(t.{interval}, 0))
+                    WHEN @didWork AND t.{interval} IS NOT NULL THEN {nextRun}
                     ELSE t.{next} END,
                 {requested} = NULL,
                 {lastRun} = CASE WHEN @record THEN now() ELSE t.{lastRun} END,

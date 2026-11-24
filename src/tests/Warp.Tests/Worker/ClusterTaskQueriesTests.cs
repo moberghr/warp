@@ -34,7 +34,7 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     [TimedFact]
-    public async Task ClaimClusterTasks_DueTask_ClaimsItForOneIntervalAndMovesItsNextRun()
+    public async Task ClaimClusterTasks_DueTask_ClaimsItUntilItsNextRunOnTheIntervalGrid()
     {
         await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
         var server = Guid.NewGuid();
@@ -45,11 +45,35 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         // Assert
         var state = claims.Tasks.ShouldHaveSingleItem();
         state.Claimed.ShouldBeTrue();
-        state.DueIn.ShouldBe(TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(1));
         var row = await ReadAsync("a");
         row.ClaimedBy.ShouldBe(server);
-        (row.LeaseUntil - row.ClaimedAt).ShouldBe(TimeSpan.FromSeconds(10));
-        (row.NextRunAt - row.ClaimedAt!.Value).ShouldBe(TimeSpan.FromSeconds(10));
+        ShouldBeNextGridPoint(row, 10);
+        row.LeaseUntil.ShouldBe(row.NextRunAt);
+        state.DueIn.ShouldBe(row.NextRunAt - row.ClaimedAt!.Value, TimeSpan.FromSeconds(1));
+    }
+
+    [TimedFact]
+    public async Task ClaimClusterTasks_TasksClaimedAtDifferentTimes_FallDueAtTheSameInstant()
+    {
+        // Claimed by separate statements, so at different instants: with "now + interval" each would then
+        // need its own claim forever; on the grid one claim covers both (and the 20 s one every other time).
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
+        await SeedAsync(new ClusterTask { Name = "b", IntervalSeconds = 10, NextRunAt = LongAgo });
+        await SeedAsync(new ClusterTask { Name = "c", IntervalSeconds = 20, NextRunAt = LongAgo });
+
+        // Act
+        await ClaimAsync(["a"], Guid.NewGuid());
+        await ClaimAsync(["c"], Guid.NewGuid());
+        await ClaimAsync(["b"], Guid.NewGuid());
+
+        // Assert: a and b share a due time unless a tick boundary fell between their claims, in which
+        // case they are exactly one interval apart; c is due on a's grid.
+        var a = await ReadAsync("a");
+        var b = await ReadAsync("b");
+        var c = await ReadAsync("c");
+        ((b.NextRunAt - a.NextRunAt).TotalSeconds % 10).ShouldBe(0);
+        ((c.NextRunAt - a.NextRunAt).TotalSeconds % 10).ShouldBe(0);
+        (b.NextRunAt - a.NextRunAt).ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(10));
     }
 
     [TimedFact]
@@ -67,8 +91,9 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         // Assert
         var state = second.Tasks.ShouldHaveSingleItem();
         state.Claimed.ShouldBeFalse();
-        state.DueIn.ShouldBe(TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(1));
-        (await ReadAsync("a")).ClaimedBy.ShouldBe(holder);
+        var row = await ReadAsync("a");
+        row.ClaimedBy.ShouldBe(holder);
+        state.DueIn.ShouldBe(row.LeaseUntil!.Value - row.ClaimedAt!.Value, TimeSpan.FromSeconds(1));
     }
 
     [TimedFact]
@@ -118,7 +143,7 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         claimedNow.ShouldBeTrue();
         var row = await ReadAsync("a");
         row.ClaimedBy.ShouldBe(server);
-        (row.NextRunAt - row.ClaimedAt!.Value).ShouldBe(TimeSpan.FromSeconds(10));
+        ShouldBeNextGridPoint(row, 10);
     }
 
     [TimedFact]
@@ -167,7 +192,10 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         var row = await ReadAsync("a");
         row.LeaseUntil.ShouldBeNull();
         row.ClaimedBy.ShouldBeNull();
-        (row.NextRunAt - row.LastRunAt!.Value).ShouldBe(TimeSpan.FromSeconds(10));
+        var sinceRun = row.NextRunAt - row.LastRunAt!.Value;
+        sinceRun.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(5));
+        sinceRun.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(15));
+        (new DateTimeOffset(row.NextRunAt, TimeSpan.Zero).ToUnixTimeMilliseconds() % 10_000).ShouldBe(0);
         row.LastServerId.ShouldBe(server);
         row.LastMessage.ShouldBe("did 3");
         row.LastDurationMs.ShouldBe(12.5);
@@ -220,6 +248,16 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         // Assert
         live.LegacyServersAlive.ShouldBeTrue();
         gone.LegacyServersAlive.ShouldBeFalse();
+    }
+
+    // The next run is a multiple of the interval, between half and one and a half intervals after the
+    // claim: tasks that share an interval fall due at the same instant, and one claim covers them.
+    private static void ShouldBeNextGridPoint(ClusterTask row, int intervalSeconds)
+    {
+        (new DateTimeOffset(row.NextRunAt, TimeSpan.Zero).ToUnixTimeMilliseconds() % (intervalSeconds * 1000)).ShouldBe(0);
+        var fromClaim = row.NextRunAt - row.ClaimedAt!.Value;
+        fromClaim.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(intervalSeconds / 2.0));
+        fromClaim.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(intervalSeconds * 1.5));
     }
 
     private IWarpSqlQueries<TestContext> Queries()
