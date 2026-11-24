@@ -8,6 +8,8 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.ErrorGrouping;
+using Warp.Core.Events;
+using Warp.Core.Notifications;
 using Warp.Core.Services;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
@@ -133,6 +135,47 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             },
         };
         return new PendingCompletion(job, counters, logs);
+    }
+
+    [TimedFact]
+    public async Task SlotReleased_GroupIdleButTheNextJobClaimedBeforeTheWorkerSaysSo_WritesTheCompletion()
+    {
+        // Arrange — one slot, no prefetch, and a flush timer far beyond the test: only the idle trigger can
+        // write this completion. Found on CI: the dispatcher, woken by the freed slot, claimed the next job
+        // before the worker told the flusher the group was idle, so the flusher read a busy group and left
+        // the completion for the timer.
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 50, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, CompleteJobs);
+        var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance);
+        flusher.Start();
+        var job = await InsertProcessingJob();
+        availability.Reserve(1);
+        flusher.Add(MakeEntry(job));
+
+        // Act — the worker returns its slot, the dispatcher claims the next job, then the worker reports.
+        var remaining = availability.Release();
+        availability.Reserve(1);
+        flusher.SlotReleased(remaining);
+
+        // Assert
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var state = State.Processing;
+        while (DateTime.UtcNow < deadline)
+        {
+            state = await _fixture.CreateContext().Set<Job>()
+                .Where(x => x.Id == job.Id)
+                .Select(x => x.CurrentState)
+                .SingleAsync(Xunit.TestContext.Current.CancellationToken);
+            if (state == State.Completed)
+            {
+                break;
+            }
+
+            await Task.Yield();
+        }
+
+        await flusher.StopAsync(Xunit.TestContext.Current.CancellationToken);
+        state.ShouldBe(State.Completed);
     }
 
     [TimedFact]

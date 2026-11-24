@@ -49,13 +49,15 @@ public sealed class DispatcherWorkerAvailability : IDisposable
 
     /// <summary>
     /// Returns one job's capacity. Called once per reserved job — by the worker that finishes it, or
-    /// by the dispatcher for a job it claimed but could not deliver.
+    /// by the dispatcher for a job it claimed but could not deliver. Returns the jobs still outstanding
+    /// right after this one was returned (the dispatcher may claim more a moment later).
     /// </summary>
-    public void Release()
+    public int Release()
     {
-        if (Interlocked.Decrement(ref _outstanding) != Capacity - 1)
+        var remaining = Interlocked.Decrement(ref _outstanding);
+        if (remaining != Capacity - 1)
         {
-            return;
+            return remaining;
         }
 
         // The group went from no free slot to one: wake its dispatcher. Opt-in timing
@@ -67,6 +69,8 @@ public sealed class DispatcherWorkerAvailability : IDisposable
         }
 
         SignalSlotFreed();
+
+        return remaining;
     }
 
     /// <summary>

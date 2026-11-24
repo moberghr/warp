@@ -142,6 +142,18 @@ internal sealed class CompletionBatch
 
     public TimeSpan FlushInterval => _flushInterval;
 
+    // The number of the buffer currently filling.
+    internal long Generation
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _generation;
+            }
+        }
+    }
+
     // Takes everything buffered so far and leaves the buffer empty, as one step.
     internal PendingCompletion[] Drain()
     {

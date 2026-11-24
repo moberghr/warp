@@ -84,13 +84,17 @@ internal sealed class CompletionFlusher<TContext>
     }
 
     /// <summary>
-    /// Called by a worker after it hands its slot back: the moment the group has nothing left claimed,
-    /// what is buffered is written, so the last job of a burst and a lone job never wait for the timer.
+    /// Called by a worker after it hands its slot back, with the jobs still outstanding at that moment:
+    /// when the group had nothing left claimed, what is buffered is written, so the last job of a burst
+    /// and a lone job never wait for the timer. The buffer is marked due here, like a timer marks its
+    /// own: by the time the loop runs, the dispatcher may have claimed the next job, and a live read of
+    /// the outstanding count would then leave this completion waiting for the timer.
     /// </summary>
-    public void SlotReleased()
+    public void SlotReleased(int remaining)
     {
-        if (_availability.Outstanding == 0)
+        if (remaining == 0)
         {
+            MarkDue(_batch.Generation);
             Wake();
         }
     }
@@ -126,8 +130,25 @@ internal sealed class CompletionFlusher<TContext>
 
         // By generation, not IsTimeElapsed: the timer and that clock are different sources, and the
         // timer may fire a hair early (rule 6.13). A buffer drained since then is not this timer's.
-        Interlocked.Exchange(ref _dueGeneration, generation);
+        MarkDue(generation);
         Wake();
+    }
+
+    // Keeps the newest generation marked due, so a late timer for a buffer already written cannot
+    // overwrite the mark of the one filling now.
+    private void MarkDue(long generation)
+    {
+        var current = Interlocked.Read(ref _dueGeneration);
+        while (generation > current)
+        {
+            var seen = Interlocked.CompareExchange(ref _dueGeneration, generation, current);
+            if (seen == current)
+            {
+                return;
+            }
+
+            current = seen;
+        }
     }
 
     private bool IsDue() =>

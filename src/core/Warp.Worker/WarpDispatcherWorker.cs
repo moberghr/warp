@@ -88,6 +88,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             while (_jobReader.TryRead(out var job))
             {
                 var busySince = DispatcherDiagnostics.WorkerBusy.Enabled ? RecordPickup(job, idleSince) : 0L;
+                var remaining = 1;
                 try
                 {
                     await ProcessJob(job, stoppingToken);
@@ -107,12 +108,14 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                     // release-only site — and it must run for every path out of ProcessJob,
                     // including the ownership guard dropping the job, or the group leaks capacity
                     // and eventually stops claiming.
-                    _availability.Release();
+                    remaining = _availability.Release();
                 }
 
                 // The group's flusher writes the completion (rule 6.13); this worker only tells it when
-                // the group has nothing left claimed, and goes straight back to the channel.
-                _flusher.SlotReleased();
+                // the group had nothing left claimed as this slot came back, and goes straight back to the
+                // channel. From the count Release returned, not a later read: the dispatcher, woken by the
+                // freed slot, may already have claimed the next job.
+                _flusher.SlotReleased(remaining);
 
                 if (busySince != 0)
                 {
