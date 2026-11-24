@@ -984,7 +984,21 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
 
             sb.AppendLine($"            var behaviors = provider.GetServices<global::Warp.Core.Handlers.IPipelineBehavior<{job.JobFullName}, global::Warp.Core.Handlers.Unit>>().ToArray();");
             sb.AppendLine();
-            sb.AppendLine($"            global::Warp.Core.Handlers.RequestHandlerDelegate<{job.JobFullName}, global::Warp.Core.Handlers.Unit> chain = (req, ct) => AsUnit(handler.HandleAsync(req, ct));");
+
+            // A handler that throws before returning its task still gives a behaviour a faulted task from
+            // next(), as the reflection path's async delegate does, without an async frame of its own in
+            // the failure's stack trace.
+            sb.AppendLine($"            global::Warp.Core.Handlers.RequestHandlerDelegate<{job.JobFullName}, global::Warp.Core.Handlers.Unit> chain = (req, ct) =>");
+            sb.AppendLine("            {");
+            sb.AppendLine("                try");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    return AsUnit(handler.HandleAsync(req, ct));");
+            sb.AppendLine("                }");
+            sb.AppendLine("                catch (global::System.Exception thrown)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    return global::System.Threading.Tasks.Task.FromException<global::Warp.Core.Handlers.Unit>(thrown);");
+            sb.AppendLine("                }");
+            sb.AppendLine("            };");
             sb.AppendLine();
             sb.AppendLine("            for (int i = behaviors.Length - 1; i >= 0; i--)");
             sb.AppendLine("            {");

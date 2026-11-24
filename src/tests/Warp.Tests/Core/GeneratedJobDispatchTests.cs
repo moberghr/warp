@@ -56,6 +56,30 @@ public sealed class GeneratedJobDispatchTests
     }
 
     [TimedFact]
+    public async Task ExecuteJobHandler_HandlerThrowsSynchronously_TheBehaviourGetsAFaultedTaskFromNext()
+    {
+        // Arrange: a behaviour that does not await next() (it attaches a continuation, or returns the task).
+        // On the reflection path the innermost delegate is async, so a handler that throws before returning
+        // its task gives the behaviour a faulted task; the generated path must give it the same.
+        var behaviour = new NonAwaitingBehaviour();
+        var services = new ServiceCollection();
+        services.AddTransient<IJobHandler<SyncThrowingRequest>, SyncThrowingHandler>();
+        services.AddSingleton<IPipelineBehavior<SyncThrowingRequest, Unit>>(behaviour);
+        await using var provider = services.BuildServiceProvider();
+
+        // Act
+        await Should.ThrowAsync<InvalidOperationException>(JobDispatcher.ExecuteJobHandler(
+            new SyncThrowingRequest(),
+            typeof(SyncThrowingRequest),
+            typeof(SyncThrowingHandler),
+            provider,
+            Xunit.TestContext.Current.CancellationToken));
+
+        // Assert
+        behaviour.NextReturnedAFaultedTask.ShouldBeTrue("next() threw into the behaviour instead of returning a faulted task");
+    }
+
+    [TimedFact]
     public async Task ExecuteHandler_RowNamesAHandlerOtherThanTheLastRegistered_RunsTheNamedOne()
     {
         // Arrange
@@ -125,5 +149,18 @@ public sealed class AsyncThrowingHandler : IJobHandler<AsyncThrowingRequest>
         await Task.Yield();
 
         throw new InvalidOperationException("failed after its first await");
+    }
+}
+
+public sealed class NonAwaitingBehaviour : IPipelineBehavior<SyncThrowingRequest, Unit>
+{
+    public bool NextReturnedAFaultedTask { get; private set; }
+
+    public Task<Unit> HandleAsync(SyncThrowingRequest request, RequestHandlerDelegate<SyncThrowingRequest, Unit> next, CancellationToken cancellationToken)
+    {
+        var handling = next(request, cancellationToken);
+        NextReturnedAFaultedTask = handling.IsFaulted;
+
+        return handling;
     }
 }
