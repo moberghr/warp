@@ -101,6 +101,28 @@ public abstract class EnqueueNotificationInterceptorTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task SaveChangesAsync_InsideATransactionTheHostHandedOverAndCommitsItself_IsAnnouncedAtTheSave()
+    {
+        // The host opens the transaction on the connection, hands it to the context with UseTransaction and
+        // commits it on the raw transaction: the context never sees that commit, so waiting for one
+        // announced nothing and the job waited for a poll.
+        await using var provider = BuildProvider();
+        await using var scope = provider.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TestContext>();
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var connection = db.Database.GetDbConnection();
+        await connection.OpenAsync(ct);
+        await using var raw = await connection.BeginTransactionAsync(ct);
+        await db.Database.UseTransactionAsync(raw, ct);
+        await scope.ServiceProvider.GetRequiredService<IPublisher>().Enqueue(new UnitRequest(), Queue);
+
+        await db.SaveChangesAsync(ct);
+
+        Announced(provider, Queue).ShouldBe(1);
+        await raw.CommitAsync(ct);
+    }
+
+    [TimedFact]
     public async Task SaveChangesAsync_TwoSavesInOneTransaction_SendOneWakeUpOnCommit()
     {
         await using var provider = BuildProvider();

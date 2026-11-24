@@ -116,6 +116,95 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task PassAsync_SignalOnAnotherServerAfterAnIdleScheduledRun_RunsTheTaskThereAtOnce()
+    {
+        // Two servers, signals in-process only. The first wins the tick and finds nothing; a job then
+        // finishes on the second. The first's lease runs to the next tick, and a held lease turns the
+        // second's signal into a request nobody reads before then: the idle run has to free it. The first
+        // idle run records itself (a completion either way), so the case is the second one.
+        var task = new SignaledTask(TimeSpan.FromHours(1));
+        using var first = await BuildAsync(task);
+        using var second = await BuildAsync(task);
+        await RunOnceAsync(first, SignaledTask.TaskName);
+        await MakeDueAsync(first, SignaledTask.TaskName);
+        await RunOnceAsync(first, SignaledTask.TaskName);
+        task.Runs.ShouldBe(2);
+
+        // Act
+        second.Signal(SignaledTask.TaskName);
+        await RunOnceAsync(second, SignaledTask.TaskName);
+
+        // Assert: run on the second server, although the first claimed the task until an hour from now.
+        task.Runs.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task RunningTask_IdleRunOfASignalTaskThatOnlyFreesItsLease_DoesNotWakeTheLoop()
+    {
+        // The release leaves the task due when it was, so a claim right after it would find nothing:
+        // the idle run of a signal task costs its one release, not a release and a claim.
+        var task = new SignaledTask(TimeSpan.FromSeconds(10));
+        using var scheduler = await BuildAsync(task);
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+        await MakeDueAsync(scheduler, SignaledTask.TaskName);
+        var before = scheduler.Wakes;
+
+        // Act
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+
+        // Assert
+        task.Runs.ShouldBe(2);
+        scheduler.Wakes.ShouldBe(before);
+        (await ReadAsync(SignaledTask.TaskName)).LeaseUntil.ShouldBeNull();
+        (await scheduler.PassAsync(Ct)).ShouldBeGreaterThan(TimeSpan.FromSeconds(4), "the pass after it should sleep until the next tick");
+    }
+
+    [TimedFact]
+    public async Task PassAsync_SignalBeforeTheFirstClaimWhileAnOldServerHoldsTheOldLock_TaskDoesNotRun()
+    {
+        // A signal that arrived during registration is honoured by the first pass before any claim has
+        // said whether a server from before the lease is alive. That run must take the old lock too
+        // (rule 6.23): started without it, the task ran beside the old server's.
+        var task = new SignaledTask(TimeSpan.FromHours(1));
+        using var scheduler = await BuildAsync(task);
+        await using (var ctx = _fixture.CreateContext())
+        {
+            ctx.Set<Server>().Add(new Server { Id = Guid.NewGuid(), StartedTime = DateTime.UtcNow, LastHeartbeatTime = DateTime.UtcNow });
+            await ctx.SaveChangesAsync(Ct);
+        }
+
+        var barrier = new BarrierSignal();
+        var holderContext = _fixture.CreateContext();
+        var holder = TestTasks.QueriesFor(holderContext).RunUnderTransactionLockAsync(
+            holderContext,
+            TaskLockKey,
+            async (_, ct) =>
+            {
+                barrier.Running.Release();
+                await barrier.CanFinish.WaitAsync(ct);
+
+                return 0;
+            },
+            Ct);
+        (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the old server's lock was not taken");
+
+        try
+        {
+            // Act: the signal claims the task and starts it; with every task running, this pass sends no claim.
+            scheduler.Signal(SignaledTask.TaskName);
+            await RunOnceAsync(scheduler, SignaledTask.TaskName);
+
+            // Assert
+            task.Runs.ShouldBe(0);
+        }
+        finally
+        {
+            barrier.CanFinish.Release();
+            await holder;
+        }
+    }
+
+    [TimedFact]
     public async Task PassAsync_SignalWhileTheTaskRunsHere_RunsItAgainRightAfter()
     {
         var task = new PinnedTask(TimeSpan.FromHours(1));

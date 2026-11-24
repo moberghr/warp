@@ -19,6 +19,12 @@ public sealed class DatabaseClock : TimeProvider
     /// <summary>The service key server components resolve their <see cref="TimeProvider"/> under.</summary>
     public const string Key = "warp:database-clock";
 
+    /// <summary>
+    /// A reading of the database clock is worth recording only when its round trip was at most this long:
+    /// the database read its clock somewhere inside it, so the error is up to half of it.
+    /// </summary>
+    public static readonly TimeSpan MaxSampleRoundTrip = TimeSpan.FromSeconds(2);
+
     private long _offsetTicks;
 
     public DatabaseClock(TimeProvider local)

@@ -69,7 +69,11 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     private readonly SemaphoreSlim _wake = new(0, 1);
     private int _wakes;
     private readonly Lock _gate = new();
-    private volatile bool _legacyServersAlive;
+
+    // True until a claim has said otherwise: a signal that arrived during registration is honoured by the
+    // first pass BEFORE its claim, and a run started then must still take the old lock, since a server
+    // from before the lease may be alive (rule 6.23, rolling deploy). Taking it needlessly costs one lock.
+    private volatile bool _legacyServersAlive = true;
 
     public ClusterTaskScheduler(
         IEnumerable<ServerTaskInfo> tasks,
@@ -399,7 +403,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             _logger.LogError(ex, "Server task {Name} failed", entry.Name);
 
             // Exception type name only on the span: messages can carry user data (rule 1.2).
-            span?.SetStatus(ActivityStatusCode.Error, WarpTelemetry.TruncateMessage(ex.Message, 256));
+            span?.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
             span?.SetTag(WarpTelemetryAttributes.ErrorType, ex.GetType().FullName);
         }
         finally
@@ -409,8 +413,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
 
         // Wake the scheduling loop only when a claim could now succeed. A run that wrote no completion
-        // still holds its lease, so a pass right after it would claim nothing: that wake doubled the
-        // idle claim statements.
+        // still holds its lease, and one that only released it left the task due when it was, so a pass
+        // right after either would claim nothing: that wake doubled the idle claim statements.
         var wake = true;
         try
         {
@@ -423,11 +427,11 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             if (ran && !ct.IsCancellationRequested)
             {
                 var elapsed = runTime ?? Stopwatch.GetElapsedTime(started);
-                var wrote = await FinishAsync(entry, message, failure, elapsed.TotalMilliseconds, held);
+                var claimable = await FinishAsync(entry, message, failure, elapsed.TotalMilliseconds, held);
 
                 // A run that outlasted half its interval may have been skipped by the passes it ran through
                 // (a running task is not claimed), so the loop has to look at it again.
-                wake = wrote || elapsed >= entry.Interval / 2;
+                wake = claimable || elapsed >= entry.Interval / 2;
             }
         }
         catch (Exception ex)
@@ -460,7 +464,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
     }
 
-    // Returns whether a completion was written: that frees the lease, and may make the task due at once.
+    // Returns whether the scheduling loop has to look at the task again: its completion moved the next
+    // run, or left the task due at once.
     private async Task<bool> FinishAsync(Entry entry, string? message, Exception? failure, double durationMs, bool held)
     {
         var now = _time.GetUtcNow();
@@ -481,13 +486,22 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
 
         // An idle run that has nothing to record writes nothing: its lease lapses as the task falls due.
-        var wrote = didWork || rerun || record || held;
-        if (wrote)
+        var changed = didWork || rerun || record || held;
+
+        // Except for a task that signals run: its lease must end with its run. A signal on ANOTHER server
+        // can claim the task only when the lease is free, and that server has no way to tell a lease an
+        // idle run left behind from a run in progress, so it could only leave a request nobody would read
+        // before the lease lapsed: a continuation or a routed message then waited up to a tick and a half
+        // instead of the signal interval (rule 6.18). One write per idle run of those tasks for the whole
+        // cluster; it leaves the next run where the claim put it, so no claim follows it.
+        var releases = entry.Signals.Count > 0;
+        var lookAgain = changed;
+        if (changed || releases)
         {
             using var scope = _scopes.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
             var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
-            await queries.CompleteClusterTaskAsync(
+            var dueNow = await queries.CompleteClusterTaskAsync(
                 context,
                 new ClusterTaskCompletion(
                     entry.Name,
@@ -500,10 +514,17 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                     durationMs),
                 CancellationToken.None);
 
+            // A run request that reached the row during the run makes the task due at once, whatever the
+            // completion itself asked for.
+            lookAgain |= dueNow;
             lock (_gate)
             {
-                // The completion may have moved the next run (a rerun, a run request): ask again.
-                entry.DueAt = DateTime.MinValue;
+                if (lookAgain)
+                {
+                    // The completion may have moved the next run (a rerun, a run request): ask again.
+                    entry.DueAt = DateTime.MinValue;
+                }
+
                 if (record)
                 {
                     entry.LastRecordedStatus = status;
@@ -518,7 +539,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             await WriteServerLogAsync(entry.Name, status, failure?.Message ?? message, durationMs);
         }
 
-        return wrote;
+        return lookAgain;
     }
 
     private async Task RenewWhileRunningAsync(Entry entry, CancellationTokenSource run, CancellationToken stop)

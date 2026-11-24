@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Shouldly;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
@@ -58,6 +59,35 @@ public class FinalizedParentHintsTests
         var signals = SignalsPastTheirFirstSweep();
 
         signals.TakeFinalizedParents(TimeSpan.Zero).Sweep.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TakeFinalizedParents_ScheduledRunAMomentSoonerAfterItsTickThanTheLast_StillSweeps()
+    {
+        // Scheduled runs are exactly one interval apart on the grid (rule 6.23), give or take the few
+        // milliseconds a run takes to start. Asked for a whole interval, a run that started 10 ms sooner
+        // than the last did not sweep, and the backstop came every second interval.
+        var every = TimeSpan.FromSeconds(10);
+        var signals = new ServerTaskSignals<TestContext>();
+        var first = Stopwatch.GetTimestamp();
+        signals.TakeFinalizedParents(every, first);
+
+        var sweep = signals.TakeFinalizedParents(every, After(first, TimeSpan.FromSeconds(9.99))).Sweep;
+
+        sweep.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void TakeFinalizedParents_SignalRunHalfwayThroughTheInterval_DoesNotSweep()
+    {
+        var every = TimeSpan.FromSeconds(10);
+        var signals = new ServerTaskSignals<TestContext>();
+        var first = Stopwatch.GetTimestamp();
+        signals.TakeFinalizedParents(every, first);
+
+        var sweep = signals.TakeFinalizedParents(every, After(first, TimeSpan.FromSeconds(5))).Sweep;
+
+        sweep.ShouldBeFalse();
     }
 
     [Fact]
@@ -274,6 +304,9 @@ public class FinalizedParentHintsTests
         postgres.ShouldBe(new Notification(NotificationKind.JobFinalized, payload));
         sqlServer.ShouldBe(new Notification(NotificationKind.JobFinalized, payload));
     }
+
+    private static long After(long timestamp, TimeSpan elapsed) =>
+        timestamp + (long)(elapsed.TotalSeconds * Stopwatch.Frequency);
 
     private static ServerTaskSignals<TestContext> SignalsPastTheirFirstSweep()
     {

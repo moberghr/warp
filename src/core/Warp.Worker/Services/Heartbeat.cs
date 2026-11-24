@@ -110,8 +110,14 @@ public sealed class Heartbeat<TContext> : IServerTask
         // heartbeat by hand), correcting the clock to the database's would undo the test's time.
         if (clock != null && result.DatabaseUtcNow is { } databaseNow && _configuration.HealthCheckInterval != null)
         {
-            var offset = clock.Record(sent, local.GetUtcNow(), databaseNow);
-            await ReportSkewAsync(offset);
+            // The database read its clock somewhere inside the round trip, so a slow one (a wait for a
+            // pooled connection, a stalled statement) says little about the offset: keep the last reading.
+            var received = local.GetUtcNow();
+            if (received - sent <= DatabaseClock.MaxSampleRoundTrip)
+            {
+                var offset = clock.Record(sent, received, databaseNow);
+                await ReportSkewAsync(offset);
+            }
         }
 
         _pauseStateHolder.Update(result.ServerPausedAt != null, new Dictionary<Guid, bool>(result.GroupPaused));

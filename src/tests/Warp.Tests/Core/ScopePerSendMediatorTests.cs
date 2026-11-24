@@ -67,6 +67,25 @@ public class ScopePerSendMediatorTests
     }
 
     [TimedFact]
+    public async Task Send_OfAStreamRequest_RunsInTheCallersScopeSoTheStreamOutlivesTheCall()
+    {
+        // Send returns the enumerable before anything is enumerated: a scope of its own would already be
+        // disposed when the caller starts reading.
+        await using var provider = BuildProvider();
+        await using var outer = provider.CreateAsyncScope();
+        var mediator = CreateMediator(outer.ServiceProvider);
+        var ct = Xunit.TestContext.Current.CancellationToken;
+
+        var stream = await mediator.Send(new ProbeStreamRequest(), ct);
+
+        await foreach (var item in stream.WithCancellation(ct))
+        {
+            item.Probe.Disposed.ShouldBeFalse();
+            item.ProbeId.ShouldBe(outer.ServiceProvider.GetRequiredService<Probe>().Id);
+        }
+    }
+
+    [TimedFact]
     public async Task CreateStream_NeverEnumerated_CreatesNoScope()
     {
         var created = new ProbeCounter();

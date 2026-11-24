@@ -648,7 +648,7 @@ mediator.CreateStream(GetUsers { Role = "Admin" })
 ```
 DeleteJob(processingJobId)
   → CancellationMode = Graceful (state stays Processing)
-  → RunJobMonitor detects CancellationMode
+  → RunningJobMonitor detects CancellationMode
   → Handler's CancellationToken cancelled
   → If handler stops: state → Deleted
   → If handler completes anyway: state → Completed

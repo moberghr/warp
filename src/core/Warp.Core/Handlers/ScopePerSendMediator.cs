@@ -26,6 +26,14 @@ internal sealed class ScopePerSendMediator : IMediator, ISendScopeBypass
 
     public async Task<TResponse> Send<TResponse>(IRequest<TResponse> request, CancellationToken cancellationToken = default)
     {
+        // A stream request sent through Send returns its enumerable before anything is enumerated, so a
+        // scope created here would be disposed under the stream. It runs in the caller's scope, like
+        // InCurrentScope; CreateStream is the way to get a scope that lives as long as the enumeration.
+        if (typeof(TResponse).IsGenericType && typeof(TResponse).GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>))
+        {
+            return await InCurrentScope.Send(request, cancellationToken);
+        }
+
         await using var scope = CreateScope();
 
         return await MediatorDispatcher.ExecuteRequestHandler<TResponse>(request, request.GetType(), scope.ServiceProvider, cancellationToken);

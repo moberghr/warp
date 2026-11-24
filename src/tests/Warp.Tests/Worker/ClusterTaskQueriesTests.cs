@@ -150,6 +150,45 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task RequestClusterTaskRun_AfterAnotherServerReleasedItsIdleRun_ClaimsItAtOnce()
+    {
+        // An idle run of a task that signals run frees its lease when it ends, so a signal on another
+        // server does not wait for the lease the claim took (rule 6.23).
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 300, NextRunAt = LongAgo });
+        var holder = Guid.NewGuid();
+        await ClaimAsync(["a"], holder);
+        await Queries().CompleteClusterTaskAsync(
+            _fixture.CreateContext(),
+            new ClusterTaskCompletion("a", holder, DidWork: false, Rerun: false, Record: false, Status: null, Message: null, DurationMs: 1),
+            Ct);
+        var other = Guid.NewGuid();
+
+        // Act
+        var claimedNow = await Queries().RequestClusterTaskRunAsync(_fixture.CreateContext(), "a", other, Ct);
+
+        // Assert
+        claimedNow.ShouldBeTrue();
+        (await ReadAsync("a")).ClaimedBy.ShouldBe(other);
+    }
+
+    [TimedFact]
+    public async Task RequestClusterTaskRun_WhileAnotherServersRunIsInProgress_DoesNotClaim()
+    {
+        // No completion yet, renewed or not: the run may still be going, so the task stays with its holder.
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 300, NextRunAt = LongAgo });
+        var holder = Guid.NewGuid();
+        await ClaimAsync(["a"], holder);
+        await Queries().RenewClusterTaskLeaseAsync(_fixture.CreateContext(), "a", holder, Ct);
+
+        // Act
+        var claimedNow = await Queries().RequestClusterTaskRunAsync(_fixture.CreateContext(), "a", Guid.NewGuid(), Ct);
+
+        // Assert
+        claimedNow.ShouldBeFalse();
+        (await ReadAsync("a")).ClaimedBy.ShouldBe(holder);
+    }
+
+    [TimedFact]
     public async Task RequestClusterTaskRun_LeaseFree_ClaimsItAtOnce()
     {
         await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = FarAhead });
@@ -179,6 +218,51 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         // Assert
         renewed.ShouldBeTrue();
         (await ReadAsync("a")).LeaseUntil!.Value.ShouldBeGreaterThanOrEqualTo(before);
+    }
+
+    [TimedFact]
+    public async Task RenewClusterTaskLease_IntervalClearedWhileTheTaskRuns_NeverShortensOrClearsTheLease()
+    {
+        // A task disabled from the dashboard mid-run has no interval. The renewal must still leave a lease:
+        // on SQL Server the NULL interval made the new lease NULL, and a free lease lets a second server
+        // claim a task that is still running.
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
+        var server = Guid.NewGuid();
+        await ClaimAsync(["a"], server);
+        var before = (await ReadAsync("a")).LeaseUntil!.Value;
+        await using (var ctx = _fixture.CreateContext())
+        {
+            await ctx.Set<ClusterTask>()
+                .Where(x => x.Name == "a")
+                .ExecuteUpdateAsync(x => x.SetProperty(y => y.IntervalSeconds, (double?)null), Ct);
+        }
+
+        // Act
+        var renewed = await Queries().RenewClusterTaskLeaseAsync(_fixture.CreateContext(), "a", server, Ct);
+
+        // Assert
+        renewed.ShouldBeTrue();
+        var lease = (await ReadAsync("a")).LeaseUntil;
+        lease.ShouldNotBeNull();
+        lease.Value.ShouldBeGreaterThanOrEqualTo(before);
+    }
+
+    [TimedFact]
+    public async Task RenewClusterTaskLease_IntervalLongerThanAMonth_ExtendsTheLease()
+    {
+        // 30 days in milliseconds does not fit the int SQL Server's DATEADD takes.
+        const int ThirtyDays = 30 * 24 * 60 * 60;
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = ThirtyDays, NextRunAt = LongAgo });
+        var server = Guid.NewGuid();
+        await ClaimAsync(["a"], server);
+
+        // Act
+        var renewed = await Queries().RenewClusterTaskLeaseAsync(_fixture.CreateContext(), "a", server, Ct);
+
+        // Assert
+        renewed.ShouldBeTrue();
+        var row = await ReadAsync("a");
+        (row.LeaseUntil!.Value - row.ClaimedAt!.Value).ShouldBeGreaterThanOrEqualTo(TimeSpan.FromDays(30) - TimeSpan.FromSeconds(1));
     }
 
     [TimedFact]
@@ -221,6 +305,31 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task CompleteClusterTask_IdleRunThatOnlyFreesTheLease_LeavesTheNextRunAndReportsNotDue()
+    {
+        // The release an idle run of a signal task writes: the schedule stays where the claim put it, and
+        // the caller is told nothing became due, so it sends no claim after it.
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
+        var server = Guid.NewGuid();
+        await ClaimAsync(["a"], server);
+        var claimed = await ReadAsync("a");
+
+        // Act
+        var dueNow = await Queries().CompleteClusterTaskAsync(
+            _fixture.CreateContext(),
+            new ClusterTaskCompletion("a", server, DidWork: false, Rerun: false, Record: false, Status: null, Message: null, DurationMs: 1),
+            Ct);
+
+        // Assert
+        dueNow.ShouldBeFalse();
+        var row = await ReadAsync("a");
+        row.LeaseUntil.ShouldBeNull();
+        row.ClaimedBy.ShouldBeNull();
+        row.NextRunAt.ShouldBe(claimed.NextRunAt);
+        row.LastRunAt.ShouldBeNull();
+    }
+
+    [TimedFact]
     public async Task CompleteClusterTask_RunRequestedMeanwhile_IsDueAtOnce()
     {
         await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
@@ -229,12 +338,13 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         await Queries().RequestClusterTaskRunAsync(_fixture.CreateContext(), "a", Guid.NewGuid(), Ct);
 
         // Act
-        await Queries().CompleteClusterTaskAsync(
+        var dueNow = await Queries().CompleteClusterTaskAsync(
             _fixture.CreateContext(),
             new ClusterTaskCompletion("a", server, DidWork: false, Rerun: false, Record: false, Status: null, Message: null, DurationMs: 1),
             Ct);
 
-        // Assert: due now, so the next claim takes it.
+        // Assert: due now, and the caller is told, so the next claim takes it.
+        dueNow.ShouldBeTrue();
         (await ReadAsync("a")).RunRequestedAt.ShouldBeNull();
         var next = await ClaimAsync(["a"], Guid.NewGuid());
         next.Tasks.ShouldHaveSingleItem().Claimed.ShouldBeTrue();

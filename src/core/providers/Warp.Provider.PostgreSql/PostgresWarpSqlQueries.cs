@@ -731,9 +731,11 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         return renewed;
     }
 
-    public async Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
+    public async Task<bool> CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
     {
-        await context.Database.ExecuteSqlRawAsync(
+        var dueNow = false;
+        await ReadAsync(
+            context,
             ClusterTaskSql(context).Complete,
             [
                 new NpgsqlParameter<string>("name", completion.Name),
@@ -745,7 +747,10 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 new NpgsqlParameter("message", (object?)completion.Message ?? DBNull.Value) { DataTypeName = "text" },
                 new NpgsqlParameter<double>("durationMs", completion.DurationMs),
             ],
+            x => dueNow = x.GetBoolean(0),
             ct);
+
+        return dueNow;
     }
 
     // Built once from the resolved model on first use, like the rate-limit lock statement.

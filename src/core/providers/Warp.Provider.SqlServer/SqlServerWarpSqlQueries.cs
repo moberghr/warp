@@ -868,9 +868,11 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         return renewed;
     }
 
-    public async Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
+    public async Task<bool> CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
     {
-        await context.Database.ExecuteSqlRawAsync(
+        var dueNow = false;
+        await ReadAsync(
+            context,
             ClusterTaskSql(context).Complete,
             [
                 new SqlParameter("@name", SqlDbType.NVarChar, 200) { Value = completion.Name },
@@ -882,7 +884,10 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
                 new SqlParameter("@message", SqlDbType.NVarChar, -1) { Value = (object?)completion.Message ?? DBNull.Value },
                 new SqlParameter("@durationMs", SqlDbType.Float) { Value = completion.DurationMs },
             ],
+            x => dueNow = x.GetBoolean(0),
             ct);
+
+        return dueNow;
     }
 
     public async Task<RateLimitBucket?> LockRateLimitBucketByKeyAsync(DbContext context, string key, CancellationToken ct)

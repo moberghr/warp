@@ -31,7 +31,7 @@ namespace Warp.Worker.Services;
 /// in five batch-and-continuation pairs took ~22 s against ~3 s for the same jobs published directly.
 /// </para>
 /// </summary>
-public sealed class Orchestrator<TContext> : IServerTask
+public sealed class Orchestrator<TContext> : IServerTask, IDisposable
     where TContext : DbContext
 {
     private readonly DbContext _context;
@@ -40,6 +40,11 @@ public sealed class Orchestrator<TContext> : IServerTask
     private readonly IWarpNotificationTransport _transport;
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly List<Notification> _pendingNotifications = [];
+
+    // What this pass took from the signals, until its work is known to be committed.
+    private Guid[] _takenParents = [];
+    private Guid[] _takenSettledJobs = [];
+    private bool _takenSweep;
 
     public Orchestrator(
         IWarpServerContext serverContext,
@@ -74,6 +79,7 @@ public sealed class Orchestrator<TContext> : IServerTask
     // rollback, which leaves the buffer to die with this scoped instance.
     public async Task OnCommittedAsync(CancellationToken ct)
     {
+        ForgetTakenWork();
         if (_pendingNotifications.Count == 0)
         {
             return;
@@ -91,19 +97,45 @@ public sealed class Orchestrator<TContext> : IServerTask
     {
         // Which parents to look at: the ones a finished job named, and all of them when a sweep is due.
         // A pass that throws gives the work back, since the signal that brought it will not come again.
+        // So does one whose work is rolled back after it returned (see Dispose).
         var (hintedParents, sweep) = _signals.TakeFinalizedParents(_configuration.OrchestrationInterval);
         var settledJobs = _signals.TakeSettledJobs();
+        _takenParents = [.. _takenParents, .. hintedParents];
+        _takenSettledJobs = [.. _takenSettledJobs, .. settledJobs];
+        _takenSweep |= sweep;
         try
         {
             return await RunOrchestrationCoreAsync(hintedParents, settledJobs, sweep, ct);
         }
         catch
         {
-            _signals.ReturnFinalizedParents(hintedParents, sweep);
-            _signals.NoteFinalized([], settledJobs);
+            ReturnTakenWork();
 
             throw;
         }
+    }
+
+    /// <summary>
+    /// Gives back the work of a pass that was never committed. The task host runs
+    /// <see cref="ExecuteAsync"/> inside a transaction and calls <see cref="OnCommittedAsync"/> only after
+    /// the commit, then disposes the pass's scope. A commit that fails, or a run cancelled because its
+    /// lease was lost, comes after <see cref="ExecuteAsync"/> returned: the work is rolled back, and the
+    /// parents it was told about would otherwise be forgotten until the next sweep.
+    /// </summary>
+    public void Dispose() => ReturnTakenWork();
+
+    private void ReturnTakenWork()
+    {
+        _signals.ReturnFinalizedParents(_takenParents, _takenSweep);
+        _signals.NoteFinalized([], _takenSettledJobs);
+        ForgetTakenWork();
+    }
+
+    private void ForgetTakenWork()
+    {
+        _takenParents = [];
+        _takenSettledJobs = [];
+        _takenSweep = false;
     }
 
     private async Task<bool> RunOrchestrationCoreAsync(Guid[] hintedParents, Guid[] settledJobs, bool sweep, CancellationToken ct)

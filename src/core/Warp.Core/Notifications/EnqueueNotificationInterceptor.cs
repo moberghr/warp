@@ -92,6 +92,7 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
     public DbTransaction TransactionStarted(DbConnection connection, TransactionEndEventData eventData, DbTransaction result)
     {
         ClearDeferred(eventData.Context);
+        SetTransactionIsExternal(eventData.Context, false);
 
         return result;
     }
@@ -99,6 +100,7 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
     public ValueTask<DbTransaction> TransactionStartedAsync(DbConnection connection, TransactionEndEventData eventData, DbTransaction result, CancellationToken cancellationToken = default)
     {
         ClearDeferred(eventData.Context);
+        SetTransactionIsExternal(eventData.Context, false);
 
         return ValueTask.FromResult(result);
     }
@@ -106,6 +108,7 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
     public DbTransaction TransactionUsed(DbConnection connection, TransactionEventData eventData, DbTransaction result)
     {
         ClearDeferred(eventData.Context);
+        SetTransactionIsExternal(eventData.Context, true);
 
         return result;
     }
@@ -113,6 +116,7 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
     public ValueTask<DbTransaction> TransactionUsedAsync(DbConnection connection, TransactionEventData eventData, DbTransaction result, CancellationToken cancellationToken = default)
     {
         ClearDeferred(eventData.Context);
+        SetTransactionIsExternal(eventData.Context, true);
 
         return ValueTask.FromResult(result);
     }
@@ -180,7 +184,11 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
             state.Deferred ??= [];
             state.Deferred.AddRange(captured);
 
-            return null;
+            // A transaction the host handed over may be committed where this context cannot see it (on the
+            // raw transaction, or through another context): waiting for a commit event then announced
+            // nothing, and the job waited for a poll. Announce now, as before the interceptor existed; a
+            // commit this context does see announces again, which costs one more wake.
+            return state.TransactionIsExternal ? captured : null;
         }
 
         return captured;
@@ -206,6 +214,14 @@ internal sealed class EnqueueNotificationInterceptor<TContext> : ISaveChangesInt
         if (context != null)
         {
             EnqueueNotificationState.For(context).Captured = null;
+        }
+    }
+
+    private static void SetTransactionIsExternal(DbContext? context, bool external)
+    {
+        if (context != null)
+        {
+            EnqueueNotificationState.For(context).TransactionIsExternal = external;
         }
     }
 

@@ -73,7 +73,7 @@ public class JobCommandService<TContext> : IJobCommandService
         var now = _timeProvider.GetUtcNow().UtcDateTime;
 
         // Processing jobs: signal graceful cancellation instead of immediate state change.
-        // The worker will detect this via RunJobMonitor and set the final state.
+        // The worker will detect this via its group's RunningJobMonitor and set the final state.
         if (job.CurrentState == State.Processing)
         {
             job.CancellationMode = CancellationMode.Graceful;
@@ -277,7 +277,7 @@ public class JobCommandService<TContext> : IJobCommandService
                 // job, with no half-updates and no log/counter rows for the loser.
                 //
                 // Processing jobs don't flip state here: we signal graceful cancellation and
-                // let RunJobMonitor pick it up — same contract as the single-job path.
+                // let RunningJobMonitor pick it up — same contract as the single-job path.
                 var affected = sourceState == State.Processing
                     ? await _context.Set<Job>()
                         .Where(x => ids.Contains(x.Id))
@@ -515,6 +515,13 @@ public class JobCommandService<TContext> : IJobCommandService
 
             await using var transaction = await _context.Database.BeginTransactionAsync();
 
+            // Every row this chunk may flip is locked first, in id order, in one statement: the order two
+            // concurrent bulk requeues (or a bulk and a single requeue) take row locks in must not depend
+            // on how they group the rows by state and parent, nor on the plan the database picks for the
+            // UPDATEs below. On a small table SQL Server ran those through a secondary index, and two bulk
+            // requeues deadlocked. Parents are locked after their children, as in the single RequeueJob.
+            await _sqlQueries.LockJobsByIdWaitAsync(_context, [.. requeueable.Select(x => x.Id).Order()], default);
+
             // (Type, Queue) of every row this chunk flips, buffered so the always-on meter fires only
             // after the commit below makes those requeues real.
             var flippedForMeter = new List<(string? Type, string Queue)>();
@@ -627,12 +634,7 @@ public class JobCommandService<TContext> : IJobCommandService
         // the row lock from LockJobByIdWaitAsync; this UPDATE blocks, then sees the post-Delete
         // state and excludes the row. Tie-breaker semantic — whichever writer commits first
         // wins, exactly one of {Delete, Requeue} ever wins per row.
-        //
-        // The row locks are taken first, in id order (the callers pass sorted ids): the lock order two
-        // concurrent bulk requeues agree on must not depend on the plan the database picks for the UPDATE.
-        // On a small table SQL Server ran it through a secondary index, and the two deadlocked.
-        await _sqlQueries.LockJobsByIdWaitAsync(_context, ids, default);
-
+        // The caller has already locked every row of the chunk in id order.
         if (clearHandler)
         {
             return await _context.Set<Job>()

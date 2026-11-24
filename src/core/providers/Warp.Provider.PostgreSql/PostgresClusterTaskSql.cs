@@ -140,7 +140,8 @@ internal sealed class PostgresClusterTaskSql
                 {lastMessage} = CASE WHEN @record THEN @message ELSE t.{lastMessage} END,
                 {lastDuration} = CASE WHEN @record THEN @durationMs ELSE t.{lastDuration} END
             WHERE t.{name} = @name
-              AND t.{claimedBy} = @server";
+              AND t.{claimedBy} = @server
+            RETURNING t.{next} <= now()";
 
         return new PostgresClusterTaskSql(claim, request, renew, complete);
     }

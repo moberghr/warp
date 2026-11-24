@@ -29,8 +29,10 @@ namespace Warp.Worker;
 /// <summary>
 /// Worker that receives pre-fetched jobs from a dispatcher channel.
 /// Pure executor — handles execution and completion only. Orchestration handled by Orchestrator.
-/// Completions go to the group's <see cref="CompletionFlusher{TContext}"/>, which writes them; the worker
-/// never waits on that write (rule 6.13).
+/// Completions go to the group's <see cref="CompletionFlusher{TContext}"/>, which writes them (rule 6.13). The
+/// worker does not wait on that write, except as backpressure: once the group holds
+/// <c>CompletionBatch.BackpressureThreshold</c> unwritten completions (4 x CompletionBatchSize, never
+/// fewer than 200), it waits for the write in flight before taking its next job.
 /// </summary>
 public class WarpDispatcherWorker<TContext> : BackgroundService
     where TContext : DbContext

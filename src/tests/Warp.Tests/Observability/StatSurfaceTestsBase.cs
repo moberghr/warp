@@ -439,7 +439,7 @@ public abstract class StatSurfaceTestsBase : IAsyncLifetime
             ServerId = ServerId,
             Queues = queues,
 
-            // Drives RunJobMonitor's tick — the graceful-cancellation case waits on it.
+            // Drives RunningJobMonitor's tick — the graceful-cancellation case waits on it.
             CancellationCheckInterval = TimeSpan.FromMilliseconds(100),
             LogFlushInterval = TimeSpan.FromMilliseconds(100),
         });

@@ -26,6 +26,10 @@ public sealed class ServerTaskSignals<TContext>
     private readonly List<Action<string>> _backgroundServiceLeaseLostWakers = [];
     private const int MaxFinalizedParents = 10_000;
 
+    // The share of the sweep interval after which a sweep is due: enough under one that the jitter of a
+    // scheduled run cannot skip a tick, enough over a half that a busy server does not sweep twice a tick.
+    private const double SweepDueAfter = 0.9;
+
     private readonly Lock _gate = new();
 
     // What the Orchestrator has to look at on its next pass (rule 6.11): the parents whose child just
@@ -149,15 +153,22 @@ public sealed class ServerTaskSignals<TContext>
     // parent whose child was finished by something that names no parent (a dashboard delete, crash
     // recovery, a worker of a server that could not take the lock). Measured on the stopwatch, not the
     // TimeProvider: this is a cadence, and a test's frozen clock must not switch it off.
-    internal (Guid[] Parents, bool Sweep) TakeFinalizedParents(TimeSpan? sweepEvery)
+    internal (Guid[] Parents, bool Sweep) TakeFinalizedParents(TimeSpan? sweepEvery) =>
+        TakeFinalizedParents(sweepEvery, Stopwatch.GetTimestamp());
+
+    // The same at a given stopwatch timestamp, for tests of the cadence.
+    internal (Guid[] Parents, bool Sweep) TakeFinalizedParents(TimeSpan? sweepEvery, long now)
     {
         lock (_gate)
         {
-            var now = Stopwatch.GetTimestamp();
+            // Due a little before a whole interval has passed. The Orchestrator's scheduled runs sit on a
+            // grid exactly one interval apart (rule 6.23), so a run that started a few milliseconds
+            // sooner after its tick than the one before had not yet waited a whole interval, did not
+            // sweep, and the backstop came every second interval.
             var sweep = _parentSweepRequested
                 || _lastParentSweep == 0
                 || sweepEvery is not { } every
-                || Stopwatch.GetElapsedTime(_lastParentSweep, now) >= every;
+                || Stopwatch.GetElapsedTime(_lastParentSweep, now) >= every * SweepDueAfter;
 
             if (sweep)
             {

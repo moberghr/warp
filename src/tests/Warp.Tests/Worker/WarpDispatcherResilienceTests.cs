@@ -82,7 +82,8 @@ public class WarpDispatcherResilienceTests
         await dispatcher.StartAsync(CancellationToken.None);
         try
         {
-            // Twenty loop iterations at the 10ms floor, none of which may claim.
+            // A paused dispatcher waits one PollingInterval (10 ms here) and checks its pause state again,
+            // so 200 ms covers about twenty checks, none of which may claim.
             var claimedWhilePaused = await claimSeen.WaitAsync(TimeSpan.FromMilliseconds(200), Xunit.TestContext.Current.CancellationToken);
             claimedWhilePaused.ShouldBeFalse("a paused group must not claim jobs");
 

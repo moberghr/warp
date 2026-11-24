@@ -147,7 +147,7 @@ internal sealed class PerServerTaskLoop<TContext> : IDisposable
             _logger.LogError(ex, "Server task {Name} failed", _info.Name);
 
             // Exception type name only on the span: messages can carry user data (rule 1.2).
-            span?.SetStatus(ActivityStatusCode.Error, WarpTelemetry.TruncateMessage(ex.Message, 256));
+            span?.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
             span?.SetTag(WarpTelemetryAttributes.ErrorType, ex.GetType().FullName);
             await WriteServerLogAsync("Failed", ex.Message, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
 

@@ -69,7 +69,13 @@ internal sealed class SqlServerClusterTaskSql
         var nextMs = $"CAST(ROUND((FLOOR(({nowSeconds} + {grid} / 2) / {grid}) + 1) * {grid} * 1000, 0) AS bigint)";
         var nextRun = $"DATEADD(MILLISECOND, CAST({nextMs} % 86400000 AS int), DATEADD(DAY, CAST({nextMs} / 86400000 AS int), {Epoch}))";
         var leaseUntil = $"(CASE WHEN {nextRun} > DATEADD(SECOND, 1, @now) THEN {nextRun} ELSE DATEADD(SECOND, 1, @now) END)";
-        var renewedUntil = $"DATEADD(MILLISECOND, CAST((CASE WHEN t.{interval} < 1 THEN 1 ELSE t.{interval} END) * 1000 AS int), @now)";
+
+        // One interval from now, at least a second. A task disabled mid-run has no interval: it renews by
+        // the second, as GREATEST ignores the NULL on PostgreSQL, where a NULL here cleared the lease and
+        // let a second server claim a task still running. Whole days and the milliseconds within the day,
+        // as above: the milliseconds of an interval longer than 24.8 days overflow DATEADD's int.
+        var renewMs = $"CAST(ROUND((CASE WHEN t.{interval} IS NULL OR t.{interval} < 1 THEN 1 ELSE t.{interval} END) * 1000, 0) AS bigint)";
+        var renewedUntil = $"DATEADD(MILLISECOND, CAST({renewMs} % 86400000 AS int), DATEADD(DAY, CAST({renewMs} / 86400000 AS int), @now))";
         var legacy = $"CASE WHEN EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL AND s.{heartbeat} >= DATEADD(MILLISECOND, -@liveWindowMs, @now)) THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END";
         const string Names = "SELECT value FROM STRING_SPLIT(@names, NCHAR(31))";
 
@@ -131,7 +137,7 @@ internal sealed class SqlServerClusterTaskSql
         var renew = $@"
             {Now}
             UPDATE t
-            SET {lease} = CASE WHEN t.{lease} > {renewedUntil} THEN t.{lease} ELSE {renewedUntil} END
+            SET {lease} = CASE WHEN t.{lease} IS NOT NULL AND t.{lease} > {renewedUntil} THEN t.{lease} ELSE {renewedUntil} END
             OUTPUT 1
             FROM {table} t WITH (ROWLOCK)
             WHERE t.{name} = @name
@@ -153,6 +159,7 @@ internal sealed class SqlServerClusterTaskSql
                 {lastStatus} = CASE WHEN @record = 1 THEN @status ELSE t.{lastStatus} END,
                 {lastMessage} = CASE WHEN @record = 1 THEN @message ELSE t.{lastMessage} END,
                 {lastDuration} = CASE WHEN @record = 1 THEN @durationMs ELSE t.{lastDuration} END
+            OUTPUT CAST(CASE WHEN INSERTED.{next} <= @now THEN 1 ELSE 0 END AS bit)
             FROM {table} t WITH (ROWLOCK)
             WHERE t.{name} = @name
               AND t.{claimedBy} = @server;";

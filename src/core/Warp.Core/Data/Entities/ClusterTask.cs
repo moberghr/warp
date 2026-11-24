@@ -4,7 +4,8 @@ namespace Warp.Core.Data.Entities;
 /// One cluster-wide server task (one with a lock key): its schedule and its last run, shared by every
 /// server. A server runs the task only while it holds the row's lease, taken by one statement for every
 /// due task, so the cluster runs each task once per tick instead of every server attempting a lock.
-/// Per-server tasks (the heartbeat) keep their <see cref="ServerTask"/> rows.
+/// The heartbeat, the one per-server task, has no row here or anywhere: <c>Server.LastHeartbeatTime</c> is its
+/// record. The <see cref="ServerTask"/> table stays in the schema and is no longer read or written.
 /// </summary>
 public class ClusterTask
 {

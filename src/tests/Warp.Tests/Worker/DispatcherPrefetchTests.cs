@@ -15,7 +15,7 @@ namespace Warp.Tests.Worker;
 // channel to run them — so buffer occupancy alone cannot tell busy from free, and the claim is sized
 // by the reserve/release capacity counter instead. A buffered job is already Processing but nothing
 // has started it, and its LastKeepAlive is only stamped at claim time (renewal begins at ownership,
-// then in RunJobMonitor). A job that waits in the channel longer than InvisibilityTimeout is
+// then in RunningJobMonitor). A job that waits in the channel longer than InvisibilityTimeout is
 // therefore visible to StaleJobRecovery as stale while a healthy server still intends to run it.
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
@@ -126,7 +126,7 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
     //
     // Deterministic by construction, no wall-clock sleeps (§4.5): the claim ages by ADVANCING the fake
     // clock while the job waits in the channel, recovery is driven by hand (StartWithFakeTime disables
-    // the auto sweep), and CancellationCheckInterval is longer than the test so RunJobMonitor's periodic
+    // the auto sweep), and CancellationCheckInterval is longer than the test so RunningJobMonitor's periodic
     // renewal never fires. The ONLY thing that can refresh the token before the sweep is the ownership
     // mark itself.
     [TimedFact]
@@ -145,7 +145,7 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
                 config.PrefetchCount = 1;
                 config.InvisibilityTimeout = TimeSpan.FromMilliseconds(500);
 
-                // Keep RunJobMonitor's keep-alive renewal out of the window under test.
+                // Keep RunningJobMonitor's keep-alive renewal out of the window under test.
                 config.CancellationCheckInterval = TimeSpan.FromMinutes(5);
             },
             configureServices: services => services.AddSingleton(barrier));

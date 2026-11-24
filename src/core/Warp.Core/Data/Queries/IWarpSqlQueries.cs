@@ -255,6 +255,9 @@ public interface IWarpSqlQueries<TContext>
     /// Ends this server's run of a task: frees the lease; makes the task due at its next grid point when
     /// the run did work, or at once when <see cref="ClusterTaskCompletion.Rerun"/> is set or a run request
     /// arrived meanwhile; and records the run when <see cref="ClusterTaskCompletion.Record"/> is set.
+    /// Returns whether the task is then due at once, so the caller knows to claim again; false also when
+    /// this server no longer held the task. A completion that only frees the lease leaves the next run
+    /// where the claim put it.
     /// </summary>
-    Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct);
+    Task<bool> CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct);
 }

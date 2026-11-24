@@ -30,10 +30,10 @@
 
 - **Active stack:** dotnet (`net10.0` + `netstandard2.0` for source generators)
 - **Build:** `dotnet build src/Warp.slnx`
-- **Test (all):** `dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj` (~9-11 min, ~4,300 tests)
-- **Test (no DB):** `... -- --filter-trait "Category=NoDb"` (~1,520 tests)
-- **Test (PG):** `... -- --filter-trait "Category=PostgreSql"` (~1,394 tests)
-- **Test (SQL Server):** `... -- --filter-trait "Category=SqlServer"` (~1,384 tests)
+- **Test (all):** `dotnet test --project src/tests/Warp.Tests/Warp.Tests.csproj` (about 4–5 min locally, ~6,000 tests)
+- **Test (no DB):** `... -- --filter-trait "Category=NoDb"` (~2,170 tests)
+- **Test (PG):** `... -- --filter-trait "Category=PostgreSql"` (~1,910 tests)
+- **Test (SQL Server):** `... -- --filter-trait "Category=SqlServer"` (~1,910 tests)
 - **Format:** `dotnet format --verbosity quiet`
 - **Frontend (from `src/ui/`):** `npm install && npm run dev` (Vite on :5173, proxies `/api` → :5000)
 
@@ -44,7 +44,7 @@ For framework-specific guidance, see `.claude/skills/tech-stack-dotnet/SKILL.md`
 ## Project Profile
 
 - **Framework:** .NET 10 (with netstandard2.0 source generators)
-- **Solution:** `src/Warp.slnx` — 19 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
+- **Solution:** `src/Warp.slnx` — 21 projects across `core/`, `core/providers/`, `tests/`, `benchmarks/`, `demo/`
 - **Data layer:** EF Core 10 (Postgres via Npgsql, SQL Server via Microsoft.EntityFrameworkCore.SqlServer); EFCore.NamingConventions for snake_case
 - **Distributed locking:** transaction-scoped by default (`RunUnderTransactionLockAsync`, pooler-safe); Medallion `DistributedLock.Postgres` + `DistributedLock.SqlServer` behind `IWarpLockProvider` for the few session-scoped sites, which need a **session-mode** connection (§2.16). Releasing a lock never throws (§2.17)
 - **Patterns:** Custom mediator (Warp's own, source-generated dispatch), unified `IRequest<T>` hierarchy, `IPipelineBehavior` chain, opt-in addons (Retry, Timeout, Concurrency, RateLimit, CircuitBreaker, NoRestart, Sagas, DatabasePush, DashboardPush, Adapters, EndpointObservability, ClientObservability — browser/frontend ingest §8.27, Webhooks, Notifiers — `AddNotifier<T>` operational-event seam §8.25, custom application metrics — `AddMetrics`, `System.Diagnostics.Metrics` collector, §8.34); `WarpBackgroundService`, queue metrics (queue-wait + backlog SLIs, always-on, §8.26), and error grouping / Issues (fingerprinted error groups across jobs/endpoints/adapters/client, always-on, §8.29), and metrics retention tiers (5-min → hourly → daily `StatisticRollup` downsampling, always-on, §8.30) are first-class base features (not addons)
