@@ -233,7 +233,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task AddAsync_GroupHoldsTheBackpressureThreshold_WaitsUntilTheWriteInFlightEnds()
     {
-        // Arrange — batch size 1, so the threshold is four unwritten completions. The first is drained into
+        // Arrange — a threshold of four unwritten completions. The first is drained into
         // a write that hangs; the next three are buffered behind it and return at once; the fourth brings the
         // group to the threshold and must wait for the hung write, not grow the buffer further (#348).
         var entered = new SemaphoreSlim(0);
@@ -246,7 +246,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             return [];
         }
 
-        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Hang);
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Hang, backpressureThreshold: 4);
         var availability = new DispatcherWorkerAvailability(workerCount: 4, prefetchCount: 0);
         var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance, DispatcherDiagnostics.GroupTag(Guid.Empty));
         flusher.Start();
@@ -290,7 +290,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             return [];
         }
 
-        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Hang);
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Hang, backpressureThreshold: 4);
         var availability = new DispatcherWorkerAvailability(workerCount: 4, prefetchCount: 0);
         var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance, DispatcherDiagnostics.GroupTag(Guid.Empty));
         flusher.Start();

@@ -94,7 +94,8 @@ internal sealed class CompletionBatch
         int batchSize,
         TimeSpan flushInterval,
         WarpCounterBuffer counterBuffer,
-        CompleteJobs completeJobs)
+        CompleteJobs completeJobs,
+        int? backpressureThreshold = null)
     {
         _counterBuffer = counterBuffer;
         _completeJobs = completeJobs;
@@ -105,6 +106,7 @@ internal sealed class CompletionBatch
         _batchSize = batchSize <= 0 ? 1 : batchSize;
         _flushInterval = flushInterval;
         _buffer = new List<PendingCompletion>(_batchSize);
+        BackpressureThreshold = backpressureThreshold ?? Math.Max(MaxBuffersPerStatement * _batchSize, MinBackpressureThreshold);
     }
 
     // A statement writes at most this many buffers' worth of jobs, and past the same number of buffers
@@ -113,8 +115,14 @@ internal sealed class CompletionBatch
 
     public int Count => _buffer.Count;
 
+    // Never below four default buffers' worth: with a small CompletionBatchSize (1 writes each completion
+    // as it comes) a threshold of 4 x the size was reached all the time under ordinary load, and the waiting
+    // workers made the flushes smaller (CI, batch size 1, 10 workers: +12.8% statements per job, -25%
+    // jobs/s). The bound is for a slow database, not for a small batch size.
+    internal const int MinBackpressureThreshold = 200;
+
     // How many unwritten completions a group may hold before its workers wait for the write in flight.
-    public int BackpressureThreshold => MaxBuffersPerStatement * _batchSize;
+    public int BackpressureThreshold { get; }
 
     public bool IsFull => _buffer.Count >= _batchSize;
 
