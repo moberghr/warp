@@ -221,7 +221,25 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                 entry.LastSignalClaimAt = now;
             }
 
-            if (await RequestAsync(entry.Name, ct))
+            bool claimed;
+            try
+            {
+                claimed = await RequestAsync(entry.Name, ct);
+            }
+            catch
+            {
+                // The signal was taken above; a request that failed has not passed it on, so put it back
+                // for the next pass instead of losing it until the task's next scheduled run.
+                lock (_gate)
+                {
+                    entry.Signaled = true;
+                    entry.LastSignalClaimAt = DateTime.MinValue;
+                }
+
+                throw;
+            }
+
+            if (claimed)
             {
                 lock (_gate)
                 {
@@ -422,6 +440,17 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             lock (_gate)
             {
                 entry.Running = null;
+
+                // A signal that arrived after the completion above read the rerun flag (or when no completion
+                // was written at all) was parked on a run that is now over: nothing would read it until the
+                // task's next run, a whole interval away, and the last finished job of a burst would wait
+                // that long. Turn it back into a signal for the next pass.
+                if (entry.RerunRequested)
+                {
+                    entry.RerunRequested = false;
+                    entry.Signaled = true;
+                    wake = true;
+                }
             }
 
             if (wake)
@@ -505,28 +534,33 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             while (true)
             {
                 await Task.Delay(every, _time, stop);
-                using var scope = _scopes.CreateScope();
-                var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-                var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
-                var held = await queries.RenewClusterTaskLeaseAsync(context, entry.Name, _serverId, stop);
-                if (!held)
+                try
                 {
-                    // Another server has it now (this one stalled past its lease): stop, so it is not run twice.
-                    _logger.LogWarning("Server task {Name} lost its lease while running; cancelling this run", entry.Name);
-                    await run.CancelAsync();
+                    using var scope = _scopes.CreateScope();
+                    var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+                    var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
+                    var held = await queries.RenewClusterTaskLeaseAsync(context, entry.Name, _serverId, stop);
+                    if (!held)
+                    {
+                        // Another server has it now (this one stalled past its lease): stop, so it is not run twice.
+                        _logger.LogWarning("Server task {Name} lost its lease while running; cancelling this run", entry.Name);
+                        await run.CancelAsync();
 
-                    return;
+                        return;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Inside the loop, so the next renewal retries: one transient failure used to end the
+                    // renewals for the rest of the run, and a long run then outlived its lease while another
+                    // server ran the same task, with nothing left to notice and cancel this one.
+                    _logger.LogWarning(ex, "Failed to renew the lease of server task {Name}", entry.Name);
                 }
             }
         }
         catch (OperationCanceledException)
         {
             // The run ended.
-        }
-        catch (Exception ex)
-        {
-            // The next renewal retries; if every one fails the lease lapses and another server takes over.
-            _logger.LogWarning(ex, "Failed to renew the lease of server task {Name}", entry.Name);
         }
     }
 

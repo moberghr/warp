@@ -59,9 +59,12 @@ public class JobPartialIndexTests
     {
         // The filters are SQL built from the column names. Built once inside ApplyWarpModel, a rename made
         // afterwards left a filter naming a column that does not exist, and the migration failed.
+        // A context type of its own: EF caches one model per context type and provider for the whole
+        // process, so on TestContext this test read whichever model another test had built first, without
+        // the rename, and failed depending on the order the classes ran in.
         var services = new ServiceCollection();
-        services.AddDbContext<TestContext>(x => x.UseNpgsql("Host=dummy"));
-        services.AddWarp<TestContext>(opt =>
+        services.AddDbContext<ConfiguratorContext>(x => x.UseNpgsql("Host=dummy"));
+        services.AddWarp<ConfiguratorContext>(opt =>
         {
             opt.UsePostgreSql();
             opt.EntityConfigurators.Add((modelBuilder, _) => modelBuilder.Entity<Job>().Property(x => x.CurrentState).HasColumnName("job_state"));
@@ -69,7 +72,7 @@ public class JobPartialIndexTests
         using var provider = services.BuildServiceProvider();
         using var scope = provider.CreateScope();
 
-        var filters = Filters(scope.ServiceProvider.GetRequiredService<TestContext>());
+        var filters = Filters(scope.ServiceProvider.GetRequiredService<ConfiguratorContext>());
 
         filters.ShouldContain("Kind,CurrentState,Queue,ScheduleTime: \"job_state\" = 1");
         filters.ShouldContain("CurrentState,ScheduleTime: \"job_state\" = 7");
@@ -110,3 +113,5 @@ public sealed class RenamingContext(DbContextOptions<RenamingContext> options) :
         modelBuilder.Entity<Job>().Property(x => x.ExpireAt).HasColumnName("expires");
     }
 }
+
+public sealed class ConfiguratorContext(DbContextOptions<ConfiguratorContext> options) : DbContext(options);

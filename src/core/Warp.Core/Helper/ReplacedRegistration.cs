@@ -14,7 +14,9 @@ internal sealed class ReplacedRegistration
     {
         _replaced = new Lazy<bool>(() =>
         {
-            var last = services.LastOrDefault(x => x.ServiceType == serviceType);
+            // Unkeyed only: a keyed registration is not what an unkeyed resolve returns, and reading
+            // ImplementationType on one throws.
+            var last = services.LastOrDefault(x => !x.IsKeyedService && x.ServiceType == serviceType);
 
             return last != null && last.ImplementationType != warpImplementation;
         });

@@ -52,6 +52,10 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
 
     // Cancelled when StopAsync's token fires with a write still running.
     private readonly CancellationTokenSource _lifetime = new();
+
+    // Read once: a handler that outlived the shutdown adds its completion after the host has disposed
+    // this flusher, and reading the token of a disposed source throws before anything is written.
+    private readonly CancellationToken _lifetimeToken;
     private readonly Lock _stopGate = new();
     private bool _stopped;
 
@@ -64,6 +68,7 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
         ILogger logger,
         KeyValuePair<string, object?> diagnosticsTag)
     {
+        _lifetimeToken = _lifetime.Token;
         _batch = batch;
         _diagnosticsTag = diagnosticsTag;
         _availability = availability;
@@ -217,7 +222,7 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
     {
         try
         {
-            await Task.Delay(_batch.FlushInterval, _timeProvider, _lifetime.Token).ConfigureAwait(false);
+            await Task.Delay(_batch.FlushInterval, _timeProvider, _lifetimeToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -272,7 +277,7 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
     {
         try
         {
-            return await _wake.Reader.WaitToReadAsync(_lifetime.Token).ConfigureAwait(false);
+            return await _wake.Reader.WaitToReadAsync(_lifetimeToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -298,13 +303,13 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
                 }
             }
 
-            var flushed = await _batch.FlushAsync(_lifetime.Token);
+            var flushed = await _batch.FlushAsync(_lifetimeToken);
             if (timed)
             {
                 DispatcherDiagnostics.FlushDuration.Record(DispatcherDiagnostics.Since(start), _diagnosticsTag);
             }
 
-            await AnnounceAsync(flushed, _lifetime.Token);
+            await AnnounceAsync(flushed, _lifetimeToken);
         }
         catch (Exception ex)
         {
