@@ -54,6 +54,7 @@ public class WarpDispatcher<TContext> : BackgroundService
         _timeProvider = timeProvider;
         _pauseStateHolder = pauseStateHolder;
         _workerGroupId = workerGroupId;
+        DiagnosticsTag = DispatcherDiagnostics.GroupTag(workerGroupId);
 
         // Null means "the depth this has always buffered" — WorkerCount (§ back-compat).
         var prefetchCount = Math.Max(0, groupConfiguration.PrefetchCount ?? groupConfiguration.WorkerCount);
@@ -74,6 +75,9 @@ public class WarpDispatcher<TContext> : BackgroundService
     public ChannelReader<Job> JobReader => _jobChannel.Reader;
 
     public DispatcherWorkerAvailability Availability => _availability;
+
+    // The group's tag on the opt-in timings (DispatcherDiagnostics), shared with its workers and flusher.
+    internal KeyValuePair<string, object?> DiagnosticsTag { get; }
 
     public override void Dispose()
     {
@@ -211,7 +215,7 @@ public class WarpDispatcher<TContext> : BackgroundService
             claimStart = Stopwatch.GetTimestamp();
             if (_availability.TakeFreedAt() is var freedAt && freedAt != 0)
             {
-                DispatcherDiagnostics.FreeSlotWait.Record(DispatcherDiagnostics.Since(freedAt));
+                DispatcherDiagnostics.FreeSlotWait.Record(DispatcherDiagnostics.Since(freedAt), DiagnosticsTag);
             }
         }
 
@@ -232,8 +236,8 @@ public class WarpDispatcher<TContext> : BackgroundService
 
         if (timed)
         {
-            DispatcherDiagnostics.ClaimDuration.Record(DispatcherDiagnostics.Since(claimStart));
-            DispatcherDiagnostics.ClaimSize.Record(jobs.Count);
+            DispatcherDiagnostics.ClaimDuration.Record(DispatcherDiagnostics.Since(claimStart), DiagnosticsTag);
+            DispatcherDiagnostics.ClaimSize.Record(jobs.Count, DiagnosticsTag);
         }
 
         // On its own switch, like the worker's pickup that removes each entry: tied to the claim timings

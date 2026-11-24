@@ -56,9 +56,13 @@ public abstract class CompletionPlanStabilityTestsBase : IAsyncLifetime
         }
 
         // Act: the real completion, its command captured (and rolled back) to replay it under STATISTICS XML.
-        using var capture = new CompletionCommandCapture();
-        await using (var transaction = await context.Database.BeginTransactionAsync(ct))
+        // Only this context's connection is captured (the listener is process-wide and other classes run
+        // completions in parallel), and the capture ends before the replay.
+        await context.Database.OpenConnectionAsync(ct);
+        var capture = new CompletionCommandCapture(context.Database.GetDbConnection());
+        using (capture)
         {
+            await using var transaction = await context.Database.BeginTransactionAsync(ct);
             await TestTasks.QueriesFor(context).CompleteJobsAsync(context, jobs, [.. jobs.SelectMany(x => Logs(x.Id))], ct);
             await transaction.RollbackAsync(ct);
         }
@@ -101,12 +105,17 @@ public abstract class CompletionPlanStabilityTestsBase : IAsyncLifetime
     // STATISTICS XML in a transaction that is rolled back, without copying the provider's SQL here.
     private sealed class CompletionCommandCapture : IObserver<DiagnosticListener>, IObserver<KeyValuePair<string, object?>>, IDisposable
     {
+        private readonly System.Data.Common.DbConnection _connection;
         private readonly List<IDisposable> _subscriptions = [];
         private readonly IDisposable _all;
         private string? _sql;
         private List<(string Name, object? Value)> _parameters = [];
 
-        public CompletionCommandCapture() => _all = DiagnosticListener.AllListeners.Subscribe(this);
+        public CompletionCommandCapture(System.Data.Common.DbConnection connection)
+        {
+            _connection = connection;
+            _all = DiagnosticListener.AllListeners.Subscribe(this);
+        }
 
         public async Task<List<XDocument>> ActualPlansAsync(TestContext context, CancellationToken ct)
         {
@@ -159,6 +168,7 @@ public abstract class CompletionPlanStabilityTestsBase : IAsyncLifetime
         {
             if (!value.Key.EndsWith("WriteCommandBefore", StringComparison.Ordinal)
                 || value.Value?.GetType().GetProperty("Command")?.GetValue(value.Value) is not SqlCommand command
+                || !ReferenceEquals(command.Connection, _connection)
                 || !command.CommandText.Contains("OPENJSON(@logs)", StringComparison.Ordinal))
             {
                 return;

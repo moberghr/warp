@@ -11,7 +11,7 @@ namespace Warp.Worker;
 /// subscribed to the meter (<c>dotnet-counters --counters Warp.Diagnostics.Dispatcher</c>, a
 /// <see cref="MeterListener"/>): each site asks its instrument's <c>Enabled</c> first, so the cost on
 /// the worker path otherwise is one field read. Separate from the always-on <c>Warp</c> meter: these are
-/// diagnostics, not product metrics. All times are milliseconds.
+/// diagnostics, not product metrics. All times are milliseconds, tagged with the worker group (<see cref="GroupTagName"/>).
 /// </summary>
 internal static class DispatcherDiagnostics
 {
@@ -52,6 +52,14 @@ internal static class DispatcherDiagnostics
     /// listener detached mid-run strands at most the jobs claimed in that moment.
     /// </summary>
     public static readonly ConcurrentDictionary<Guid, long> ClaimedAt = new();
+
+    /// <summary>
+    /// Every measurement carries the worker group it was taken in, so a reading can be split per group
+    /// (and a test can tell its own group from another one in the same process).
+    /// </summary>
+    public const string GroupTagName = "warp.worker_group";
+
+    public static KeyValuePair<string, object?> GroupTag(Guid workerGroupId) => new(GroupTagName, workerGroupId.ToString());
 
     public static double Since(long timestamp) => Stopwatch.GetElapsedTime(timestamp).TotalMilliseconds;
 }

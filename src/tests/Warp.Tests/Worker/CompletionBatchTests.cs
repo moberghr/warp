@@ -146,7 +146,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // the completion for the timer.
         var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 50, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, CompleteJobs);
         var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
-        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance, DispatcherDiagnostics.GroupTag(Guid.Empty));
         flusher.Start();
         var job = await InsertProcessingJob();
         availability.Reserve(1);
@@ -195,7 +195,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 50, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Hang);
         var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
-        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance, DispatcherDiagnostics.GroupTag(Guid.Empty));
         flusher.Start();
         try
         {
@@ -223,7 +223,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // has a budget of its own, or every completion still buffered is dropped.
         var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 50, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, CompleteJobs);
         var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
-        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance, DispatcherDiagnostics.GroupTag(Guid.Empty));
         flusher.Start();
         var job = await InsertProcessingJob();
         await flusher.AddAsync(MakeEntry(job));
@@ -246,7 +246,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // not land in a buffer nothing will write.
         var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 50, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, CompleteJobs);
         var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
-        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance, DispatcherDiagnostics.GroupTag(Guid.Empty));
         flusher.Start();
         await flusher.StopAsync(Xunit.TestContext.Current.CancellationToken);
         var job = await InsertProcessingJob();

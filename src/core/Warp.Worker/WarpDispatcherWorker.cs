@@ -45,6 +45,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly RunningJobMonitor _monitor;
     private readonly DispatcherWorkerAvailability _availability;
     private readonly WarpCounterBuffer _counterBuffer;
+    private readonly KeyValuePair<string, object?> _diagnosticsTag;
 
     internal WarpDispatcherWorker(
         Guid workerId,
@@ -56,9 +57,11 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         DispatcherWorkerAvailability availability,
         WarpCounterBuffer counterBuffer,
         CompletionFlusher<TContext> flusher,
-        RunningJobMonitor monitor)
+        RunningJobMonitor monitor,
+        KeyValuePair<string, object?> diagnosticsTag)
     {
         _monitor = monitor;
+        _diagnosticsTag = diagnosticsTag;
         _counterBuffer = counterBuffer;
         _availability = availability;
         _workerId = workerId;
@@ -119,7 +122,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
                 if (busySince != 0)
                 {
-                    DispatcherDiagnostics.WorkerBusy.Add(DispatcherDiagnostics.Since(busySince));
+                    DispatcherDiagnostics.WorkerBusy.Add(DispatcherDiagnostics.Since(busySince), _diagnosticsTag);
                     idleSince = Stopwatch.GetTimestamp();
                 }
             }
@@ -128,16 +131,16 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
     // Opt-in timings (DispatcherDiagnostics): how long this worker waited since its last job, and how
     // long this job waited in the channel after its claim. Returns when the job's busy time starts.
-    private static long RecordPickup(Job job, long idleSince)
+    private long RecordPickup(Job job, long idleSince)
     {
         if (idleSince != 0)
         {
-            DispatcherDiagnostics.WorkerIdle.Add(DispatcherDiagnostics.Since(idleSince));
+            DispatcherDiagnostics.WorkerIdle.Add(DispatcherDiagnostics.Since(idleSince), _diagnosticsTag);
         }
 
         if (DispatcherDiagnostics.ClaimedAt.TryRemove(job.Id, out var claimedAt))
         {
-            DispatcherDiagnostics.ChannelWait.Record(DispatcherDiagnostics.Since(claimedAt));
+            DispatcherDiagnostics.ChannelWait.Record(DispatcherDiagnostics.Since(claimedAt), _diagnosticsTag);
         }
 
         return Stopwatch.GetTimestamp();

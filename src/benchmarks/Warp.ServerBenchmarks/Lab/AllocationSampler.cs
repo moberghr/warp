@@ -23,6 +23,10 @@ internal sealed class AllocationSampler : EventListener
     private readonly ConcurrentDictionary<string, int> _contextsByType = new(StringComparer.Ordinal);
     private readonly long _allocatedAtStart = GC.GetTotalAllocatedBytes(precise: false);
     private readonly IDisposable _contexts;
+
+    // One subscription per EF listener: disposing only the AllListeners one left each EF listener holding
+    // this sampler, so repeated scenarios accumulated callbacks and kept old samples alive.
+    private readonly List<IDisposable> _listeners = [];
     private volatile bool _sampling = true;
 
     public AllocationSampler()
@@ -53,7 +57,7 @@ internal sealed class AllocationSampler : EventListener
                 $"  {100.0 * bytes / Math.Max(1, sampled),5:N1}%  {bytes / 1024.0 / Math.Max(1, jobs),7:N2} KB/job  {type}"));
         }
 
-        _contexts.Dispose();
+        StopListening();
         foreach (var (type, count) in _contextsByType.OrderByDescending(x => x.Value))
         {
             Console.WriteLine(string.Create(
@@ -64,8 +68,22 @@ internal sealed class AllocationSampler : EventListener
 
     public override void Dispose()
     {
-        _contexts.Dispose();
+        StopListening();
         base.Dispose();
+    }
+
+    private void StopListening()
+    {
+        _contexts.Dispose();
+        lock (_listeners)
+        {
+            foreach (var listener in _listeners)
+            {
+                listener.Dispose();
+            }
+
+            _listeners.Clear();
+        }
     }
 
     private sealed class ListenerObserver(AllocationSampler sampler) : IObserver<DiagnosticListener>
@@ -74,7 +92,10 @@ internal sealed class AllocationSampler : EventListener
         {
             if (string.Equals(value.Name, DbLoggerCategory.Name, StringComparison.Ordinal))
             {
-                value.Subscribe(new EventObserver(sampler));
+                lock (sampler._listeners)
+                {
+                    sampler._listeners.Add(value.Subscribe(new EventObserver(sampler)));
+                }
             }
         }
 

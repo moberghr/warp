@@ -28,6 +28,7 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ILogger _logger;
+    private readonly KeyValuePair<string, object?> _diagnosticsTag;
 
     // Coalescing wake: one pending wake is enough, the loop re-reads the triggers itself.
     private readonly Channel<bool> _wake = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
@@ -56,9 +57,11 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
         TimeProvider timeProvider,
         ServerTaskSignals<TContext> signals,
         IWarpNotificationTransport notificationTransport,
-        ILogger logger)
+        ILogger logger,
+        KeyValuePair<string, object?> diagnosticsTag)
     {
         _batch = batch;
+        _diagnosticsTag = diagnosticsTag;
         _availability = availability;
         _timeProvider = timeProvider;
         _signals = signals;
@@ -251,17 +254,17 @@ internal sealed class CompletionFlusher<TContext> : IDisposable
                 // Opt-in timings (DispatcherDiagnostics). Read before the drain; a completion added in
                 // between lands in this flush and is counted with it.
                 start = Stopwatch.GetTimestamp();
-                DispatcherDiagnostics.FlushSize.Record(_batch.Count);
+                DispatcherDiagnostics.FlushSize.Record(_batch.Count, _diagnosticsTag);
                 if (Interlocked.Exchange(ref _bufferStartedAt, 0) is var startedAt && startedAt != 0)
                 {
-                    DispatcherDiagnostics.FlushAge.Record(DispatcherDiagnostics.Since(startedAt));
+                    DispatcherDiagnostics.FlushAge.Record(DispatcherDiagnostics.Since(startedAt), _diagnosticsTag);
                 }
             }
 
             var flushed = await _batch.FlushAsync(_lifetime.Token);
             if (timed)
             {
-                DispatcherDiagnostics.FlushDuration.Record(DispatcherDiagnostics.Since(start));
+                DispatcherDiagnostics.FlushDuration.Record(DispatcherDiagnostics.Since(start), _diagnosticsTag);
             }
 
             await AnnounceAsync(flushed, _lifetime.Token);

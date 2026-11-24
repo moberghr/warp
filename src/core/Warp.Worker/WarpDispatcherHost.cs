@@ -108,7 +108,8 @@ public class WarpDispatcherHost<TContext> : IHostedService
                 _timeProvider,
                 _signals,
                 _notificationTransport,
-                _loggerFactory.CreateLogger<CompletionFlusher<TContext>>());
+                _loggerFactory.CreateLogger<CompletionFlusher<TContext>>(),
+                dispatcher.DiagnosticsTag);
             flusher.Start();
             _flushers.Add(flusher);
 
@@ -132,7 +133,8 @@ public class WarpDispatcherHost<TContext> : IHostedService
                     dispatcher.Availability,
                     _counterBuffer,
                     flusher,
-                    monitor);
+                    monitor,
+                    dispatcher.DiagnosticsTag);
 
                 await worker.StartAsync(cancellationToken);
                 _workers.Add(worker);

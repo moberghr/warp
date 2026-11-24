@@ -9,7 +9,7 @@ namespace Warp.Tests.Notifications;
 // UseDatabasePush end to end, on PostgreSQL (LISTEN/NOTIFY) and SQL Server (Service Broker). Each test
 // starts a server whose poll interval is 10s, so work that completes within the waits below (all well
 // under 10s) was woken by push, not found by a poll. The wait IS the assertion: it throws on timeout.
-[GenerateDatabaseTests(WithPush = true)]
+[GenerateDatabaseTests(WithPush = true, SerializeInCollection = "HeavyIntegration")]
 public abstract class DatabasePushIntegrationTestsBase : IntegrationTestBase
 {
     // Service Broker delivers more slowly than NOTIFY; one limit that both meet, half the poll interval.
