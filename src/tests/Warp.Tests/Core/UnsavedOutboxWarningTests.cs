@@ -78,18 +78,48 @@ public sealed class UnsavedOutboxWarningTests
     }
 
     [TimedFact]
-    public async Task Dispose_InsideWorkerHandlerScope_DoesNotWarn()
+    public async Task Dispose_InsideWorkerHandlerScope_LogsWarning()
     {
         var sink = new WarningSink();
         await using var ctx = NewContext();
         var publisher = NewPublisher(ctx, sink, new WarpConfiguration());
 
-        // Simulate executing inside a worker handler: the worker owns the commit, so an unsaved
-        // staged job here is not the caller's footgun and must not warn (false-positive guard).
+        // Simulate executing inside a worker handler. Since 8.0 the worker does not save a handler's
+        // context (rule 6.17), so a job staged and never saved there is lost like anywhere else, and
+        // the handler gets the same warning as any other caller.
         JobExecutionContext.Current = new JobExecutionInfo
         {
             JobId = Guid.NewGuid(),
             TraceId = Guid.NewGuid(),
+        };
+
+        try
+        {
+            await publisher.Publish(new SingleHandlerMessage());
+
+            publisher.Dispose();
+
+            sink.Warnings.Count.ShouldBe(1);
+        }
+        finally
+        {
+            JobExecutionContext.Current = null;
+        }
+    }
+
+    [TimedFact]
+    public async Task Dispose_InsideAHandlerScopeWhoseHandlerThrew_DoesNotWarn()
+    {
+        // A handler that staged a job and then threw: the job was rightly discarded with the failed
+        // attempt, and telling the user to call SaveChangesAsync, on every retry, would be wrong.
+        var sink = new WarningSink();
+        await using var ctx = NewContext();
+        var publisher = NewPublisher(ctx, sink, new WarpConfiguration());
+        JobExecutionContext.Current = new JobExecutionInfo
+        {
+            JobId = Guid.NewGuid(),
+            TraceId = Guid.NewGuid(),
+            HandlerFailed = true,
         };
 
         try
@@ -104,6 +134,32 @@ public sealed class UnsavedOutboxWarningTests
         {
             JobExecutionContext.Current = null;
         }
+    }
+
+    [TimedFact]
+    public async Task ScopeEnds_WithUnsavedStagedJobs_LogsTheWarning()
+    {
+        // The real shape: the publisher is disposed BY its scope. A scope that is being disposed resolves
+        // nothing, so a logger looked up inside Dispose was never found and the warning never logged.
+        var sink = new WarningSink();
+        var services = new ServiceCollection();
+        services.AddLogging(x => x.AddProvider(new CapturingLoggerProvider(sink)));
+        services.AddScoped(_ => NewContext());
+        services.AddScoped(x => new Publisher<TestContext>(x.GetRequiredService<TestContext>(), Options.Create(new WarpConfiguration()), TimeProvider.System, x, TestTasks.NullTransport, TestTasks.NullSignals));
+        services.AddScoped(x => new BatchPublisher<TestContext>(x.GetRequiredService<TestContext>(), Options.Create(new WarpConfiguration()), TimeProvider.System, x, TestTasks.NullTransport, TestTasks.NullSignals));
+        await using var provider = services.BuildServiceProvider();
+
+        await using (var scope = provider.CreateAsyncScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<Publisher<TestContext>>().Publish(new SingleHandlerMessage());
+        }
+
+        await using (var scope = provider.CreateAsyncScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<BatchPublisher<TestContext>>().StartNew([new SingleHandlerJob()]);
+        }
+
+        sink.Warnings.Count.ShouldBe(2);
     }
 
     [TimedFact]

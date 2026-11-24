@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
@@ -129,6 +130,7 @@ public abstract class ConcurrentClaimTestsBase : IAsyncLifetime
             Guid.NewGuid(),
             DateTime.UtcNow,
             limit: rowCount,
+            watermark: null,
             ct);
 
         claimed.Any(j => j.Id == lockedId).ShouldBeFalse("claimer must skip the locked row, not claim it");
@@ -201,10 +203,92 @@ public abstract class ConcurrentClaimTestsBase : IAsyncLifetime
             Guid.NewGuid(),
             DateTime.UtcNow,
             5,
+            watermark: null,
             Xunit.TestContext.Current.CancellationToken);
 
         // Assert
         claimed.Select(x => x.Id).ShouldBe(jobs.Take(5).Select(x => x.Id));
+    }
+
+    // Rule 6.16. While claims come back full, the next one starts at the newest schedule time the last
+    // one took, so it skips the dead entries at the head of the claim index. A job that becomes
+    // claimable BEHIND that point (an older schedule time, as a scheduled job activated with its
+    // original due time has) is not lost: the claim reads from the head again once a second.
+    [TimedFact]
+    public async Task ClaimEnqueuedJobs_WithAWatermark_SkipsTheEmptiedHeadAndStillReachesAnOlderJob()
+    {
+        var ct = Xunit.TestContext.Current.CancellationToken;
+        var oldest = DateTime.UtcNow.AddMinutes(-1);
+        Job Row(DateTime scheduleTime) =>
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Kind = JobKind.Job,
+                CurrentState = State.Enqueued,
+                Type = typeof(UnitRequest).AssemblyQualifiedName,
+                Message = "{}",
+                CreateTime = scheduleTime,
+                ScheduleTime = scheduleTime,
+                Queue = "default",
+            };
+
+        var jobs = Enumerable.Range(0, 4).Select(x => Row(oldest.AddSeconds(x))).ToList();
+        await using (var arrange = _fixture.CreateContext())
+        {
+            arrange.Set<Job>().AddRange(jobs);
+            await arrange.SaveChangesAsync(ct);
+        }
+
+        var time = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var watermark = new ClaimWatermark(time);
+        async Task<List<Guid>> ClaimAsync(int limit)
+        {
+            await using var ctx = _fixture.CreateContext();
+            var claimed = await Warp.Tests.Helpers.TestTasks.QueriesFor(ctx)
+                .ClaimEnqueuedJobsAsync(ctx, ["default"], Guid.NewGuid(), DateTime.UtcNow, limit, watermark, ct);
+
+            return claimed.ConvertAll(x => x.Id);
+        }
+
+        // A full claim of the two oldest sets the watermark at the second one.
+        (await ClaimAsync(2)).ShouldBe([jobs[0].Id, jobs[1].Id]);
+
+        var behind = Row(oldest.AddHours(-1));
+        await using (var arrange = _fixture.CreateContext())
+        {
+            arrange.Set<Job>().Add(behind);
+            await arrange.SaveChangesAsync(ct);
+        }
+
+        (await ClaimAsync(1)).ShouldBe([jobs[2].Id], "the claim starts at the watermark, after the older job");
+
+        time.Advance(ClaimWatermark.HeadClaimInterval);
+        (await ClaimAsync(5)).ShouldBe([behind.Id, jobs[3].Id], "a second later it reads from the head again");
+    }
+
+    [TimedFact]
+    public async Task ClaimEnqueuedJobs_OnANoTrackingContext_ReturnsTheClaimedRowsUntracked()
+    {
+        // The dispatcher claims on a no-tracking context (rule 6.20): the claim must return the claimed rows,
+        // in Processing, with nothing left in the change tracker.
+        var ids = await SeedJobs(3, "default");
+        await using var ctx = _fixture.CreateContext();
+        ctx.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
+        // Act
+        var claimed = await Warp.Tests.Helpers.TestTasks.QueriesFor(ctx).ClaimEnqueuedJobsAsync(
+            ctx,
+            ["default"],
+            Guid.NewGuid(),
+            DateTime.UtcNow,
+            3,
+            watermark: null,
+            Xunit.TestContext.Current.CancellationToken);
+
+        // Assert
+        claimed.Select(x => x.Id).ShouldBe(ids, ignoreOrder: true);
+        claimed.ShouldAllBe(x => x.CurrentState == State.Processing);
+        ctx.ChangeTracker.Entries().ShouldBeEmpty();
     }
 
     private async Task<List<Guid>> SeedJobs(int count, string queue)
@@ -250,6 +334,7 @@ public abstract class ConcurrentClaimTestsBase : IAsyncLifetime
                     workerId,
                     DateTime.UtcNow,
                     limit,
+                    watermark: null,
                     Xunit.TestContext.Current.CancellationToken);
 
                 foreach (var job in claimed)

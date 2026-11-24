@@ -101,6 +101,7 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
     private readonly IWarpNotificationTransport _notificationTransport;
     private readonly ServerTaskSignals<TContext> _signals;
     private bool _staged;
+    private ILogger? _unsavedWarningLogger;
 
     public Publisher(TContext context, IOptions<WarpConfiguration> configuration, TimeProvider timeProvider, IServiceProvider serviceProvider, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals)
     {
@@ -202,7 +203,7 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
         WarpTelemetry.JobsEnqueued.Add(1, new KeyValuePair<string, object?>("queue", msg.Queue), new KeyValuePair<string, object?>("kind", "message"));
 
         await _context.Set<Job>().AddAsync(msg);
-        _staged = true;
+        MarkStaged();
 
         return msg.Id;
     }
@@ -326,7 +327,7 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
             Timestamp = now,
             Message = $"Job created in queue \"{newJob.Queue}\"",
         });
-        _staged = true;
+        MarkStaged();
 
         return newJob.Id;
     }
@@ -400,10 +401,21 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
         return (now, State.Enqueued);
     }
 
-    // Development-time diagnostic for the silent outbox footgun: jobs/messages staged via
-    // IPublisher are discarded without a trace if the scope ends before SaveChangesAsync. Reuses
-    // the already-injected IServiceProvider to resolve the logger, deliberately avoiding a ctor
-    // parameter (which would ripple to ~40 test construction sites) for a dev-only check.
+    // Development-time diagnostic for the silent outbox footgun: jobs staged via IPublisher are
+    // discarded without a trace if the scope ends before SaveChangesAsync. The logger comes from the
+    // already-injected IServiceProvider (a constructor parameter would ripple to ~40 test construction sites),
+    // and is looked up here, while the scope is alive: the warning is raised from Dispose, and a scope
+    // that is disposing its services resolves nothing, so a lookup there never found one and the
+    // warning never logged for a publisher disposed by its scope.
+    private void MarkStaged()
+    {
+        _staged = true;
+        if (_configuration.WarnOnUnsavedStagedJobs)
+        {
+            _unsavedWarningLogger ??= _serviceProvider.GetService<ILogger<Publisher<TContext>>>();
+        }
+    }
+
     private void WarnIfUnsavedStagedJobs()
     {
         if (!_configuration.WarnOnUnsavedStagedJobs || !_staged)
@@ -411,25 +423,20 @@ public sealed class Publisher<TContext> : IPublisher, IDisposable
             return;
         }
 
-        // Inside a worker handler scope the worker owns the commit, not the caller — warning here
-        // would be a false positive. JobExecutionContext.Current is set only while a job executes.
-        if (JobExecutionContext.Current != null)
+        // An attempt whose handler threw or was cancelled: what it staged is discarded on purpose.
+        if (JobExecutionContext.Current is { HandlerFailed: true })
         {
             return;
         }
 
+        // Handler scopes included: since 8.0 the worker no longer saves a handler's context, so a handler
+        // that stages jobs without saving loses them like any other caller.
         var unsaved = _context.ChangeTracker.Entries<Job>().Count(x => x.State == EntityState.Added);
         if (unsaved == 0)
         {
             return;
         }
 
-        var logger = _serviceProvider.GetService<ILogger<Publisher<TContext>>>();
-        if (logger == null)
-        {
-            return;
-        }
-
-        logger.LogWarning("Warp: {Count} job(s)/message(s) were staged via IPublisher but the scope ended without SaveChangesAsync — they were discarded and will not run. Call 'await publisher.SaveChangesAsync(ct)'. (Disable this check with WarpConfiguration.WarnOnUnsavedStagedJobs = false.)", unsaved);
+        _unsavedWarningLogger?.LogWarning("Warp: {Count} job(s)/message(s) were staged via IPublisher but the scope ended without SaveChangesAsync — they were discarded and will not run. Call 'await publisher.SaveChangesAsync(ct)'. (Disable this check with WarpConfiguration.WarnOnUnsavedStagedJobs = false.)", unsaved);
     }
 }

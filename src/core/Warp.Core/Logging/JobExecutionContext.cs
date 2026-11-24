@@ -5,6 +5,10 @@ internal class JobExecutionInfo
     public Guid JobId { get; set; }
 
     public Guid TraceId { get; set; }
+
+    // Set by the worker when the handler threw or was cancelled, before its scope is disposed: what the
+    // attempt staged is then discarded on purpose, and the unsaved-staged-jobs warning stays quiet.
+    public bool HandlerFailed { get; set; }
 }
 
 internal static class JobExecutionContext

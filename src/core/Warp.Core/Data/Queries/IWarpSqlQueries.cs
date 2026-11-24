@@ -25,6 +25,10 @@ public interface IWarpSqlQueries<TContext>
     /// the worker / timestamp. Uses <c>FOR UPDATE SKIP LOCKED</c> (PG) or
     /// <c>WITH (ROWLOCK, UPDLOCK, READPAST)</c> (SQL Server) so concurrent workers get distinct
     /// rows without contention. Returns the post-update row as a tracked entity.
+    /// <para>
+    /// With a <paramref name="watermark"/> (the dispatcher's), each queue's claim starts where the
+    /// watermark says and records what it took (rule 6.16); without one it reads from the head.
+    /// </para>
     /// </summary>
     Task<List<Job>> ClaimEnqueuedJobsAsync(
         DbContext context,
@@ -32,6 +36,7 @@ public interface IWarpSqlQueries<TContext>
         Guid workerId,
         DateTime now,
         int limit,
+        ClaimWatermark? watermark,
         CancellationToken ct);
 
     /// <summary>
@@ -169,4 +174,36 @@ public interface IWarpSqlQueries<TContext>
     /// transaction before calling this method.
     /// </summary>
     Task<RateLimitBucket?> LockRateLimitBucketByKeyAsync(DbContext context, string key, CancellationToken ct);
+
+    /// <summary>
+    /// Writes a batch of finished jobs in one set-based statement (rule 6.13): the columns finalization
+    /// assigns (<c>CurrentState</c>, <c>CancellationMode</c>, <c>CurrentWorkerId</c>,
+    /// <c>LastKeepAlive</c>, <c>ExpireAt</c>, <c>HandlerType</c>, <c>ScheduleTime</c>, <c>Metadata</c>),
+    /// taken from each <paramref name="jobs"/> entry, and the <paramref name="logs"/> rows of the jobs
+    /// that were updated. A job whose row no longer exists is skipped together with its log rows.
+    /// Returns the ids of the jobs it wrote, so the caller can tell which were skipped.
+    /// <para>
+    /// A job is written only while its row is still <c>Processing</c> and still held by the run in
+    /// <paramref name="owners"/> (the entry at the same index; see <see cref="JobRunOwner"/>): a run whose job
+    /// <c>StaleJobRecovery</c> took back, and another claim then took, is skipped like a deleted row, so it
+    /// cannot finish the new run's row.
+    /// </para>
+    /// <para>
+    /// Through the change tracker the same flush is one UPDATE and one INSERT per row. Runs on the
+    /// context's connection and joins its current transaction; the caller owns the transaction.
+    /// </para>
+    /// </summary>
+    Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct);
+
+    /// <summary>
+    /// Renews the keep-alive of a worker group's running jobs in one statement (rule 6.14): sets
+    /// <c>LastKeepAlive</c> to <paramref name="now"/> and <c>CurrentWorkerId</c> to the run's worker on
+    /// each job of <paramref name="runs"/> that is still <c>Processing</c> and still held by that run
+    /// (<see cref="JobRunOwner"/>), and returns those whose <c>CancellationMode</c> asks for cancellation.
+    /// </summary>
+    Task<IReadOnlyCollection<Guid>> RenewRunningJobsAsync(
+        DbContext context,
+        IReadOnlyList<JobRunOwner> runs,
+        DateTime now,
+        CancellationToken ct);
 }

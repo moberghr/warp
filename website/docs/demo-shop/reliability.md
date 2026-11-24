@@ -144,6 +144,7 @@ public class ReserveStock(IPublisher publisher) : IMessageHandler<OrderPlaced>
     {
         // call Stockroom, then:
         await publisher.Publish(new StockReserved { OrderId = message.OrderId });
+        await publisher.SaveChangesAsync(ct);
     }
 }
 ```

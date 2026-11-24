@@ -174,6 +174,10 @@ public sealed class SagaHandlerProxy<TSaga, TMessage> : IMessageHandler<TMessage
     {
         _jobContext.Outcome = BuildNotFoundOutcome(correlationKey);
         await _inner.NotFoundAsync(message, _jobContext, cancellationToken);
+
+        // The proxy saves for a saga handler, and the worker does not save a handler's context (rule 6.17):
+        // whatever NotFoundAsync staged (a job, a message) is committed here, as on the other paths.
+        await _store.SaveChangesAsync(cancellationToken);
     }
 
     // Returns whether the saga reached the IsCompleted state inside this invocation.

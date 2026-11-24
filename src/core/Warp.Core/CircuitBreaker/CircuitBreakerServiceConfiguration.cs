@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Warp.Core.Data;
 using Warp.Core.Handlers;
 
 namespace Warp.Core.CircuitBreaker;
@@ -21,7 +23,8 @@ public static class CircuitBreakerServiceConfiguration
         // regardless of whether this opt-in was called — the schema is always present so
         // multi-host migrations don't have to mirror addon opt-ins across hosts. Behaviors
         // and services below remain opt-in.
-        builder.Services.AddScoped<ICircuitBreakerStore, CircuitBreakerStore<TContext>>();
+        builder.Services.TryAddScoped<DeferredWarpContext>();
+        builder.Services.AddScoped<ICircuitBreakerStore, CircuitBreakerStore>();
 
         // Constraint-split shims: only job and message pipelines compose the breaker. In-memory sends
         // never resolve ICircuitBreakerStore (see CircuitBreakerJobPipelineBehavior).

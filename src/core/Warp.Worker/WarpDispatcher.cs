@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,6 +21,10 @@ namespace Warp.Worker;
 public class WarpDispatcher<TContext> : BackgroundService
     where TContext : DbContext
 {
+    // Where each queue's next claim starts reading the claim index (rule 6.16). Only the claim loop touches it.
+    private const int MaxSettleYields = 8;
+
+    private readonly ClaimWatermark _claimWatermark = new();
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<WarpDispatcher<TContext>> _logger;
     private readonly WorkerGroupConfiguration _groupConfiguration;
@@ -49,6 +54,7 @@ public class WarpDispatcher<TContext> : BackgroundService
         _timeProvider = timeProvider;
         _pauseStateHolder = pauseStateHolder;
         _workerGroupId = workerGroupId;
+        DiagnosticsTag = DispatcherDiagnostics.GroupTag(workerGroupId);
 
         // Null means "the depth this has always buffered" — WorkerCount (§ back-compat).
         var prefetchCount = Math.Max(0, groupConfiguration.PrefetchCount ?? groupConfiguration.WorkerCount);
@@ -69,6 +75,17 @@ public class WarpDispatcher<TContext> : BackgroundService
     public ChannelReader<Job> JobReader => _jobChannel.Reader;
 
     public DispatcherWorkerAvailability Availability => _availability;
+
+    // The group's tag on the opt-in timings (DispatcherDiagnostics), shared with its workers and flusher.
+    internal KeyValuePair<string, object?> DiagnosticsTag { get; }
+
+    public override void Dispose()
+    {
+        _availability.Dispose();
+        _signal.Dispose();
+        base.Dispose();
+        GC.SuppressFinalize(this);
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -168,15 +185,39 @@ public class WarpDispatcher<TContext> : BackgroundService
         var available = _availability.Available;
         if (available <= 0)
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(10), ct);
+            // Wait for a worker to free a slot instead of polling (rule 6.19): with quick jobs the workers
+            // empty the group's buffer in about a millisecond, and a 10 ms sleep here left them idle for
+            // the rest of it, which capped one server at ~20 jobs per ~10 ms. The timeout is a backstop.
+            await _availability.WaitForFreeSlotAsync(TimeSpan.FromSeconds(1), ct);
             return FetchResult.ChannelFull;
         }
+
+        // Let slots that quick jobs are freeing right now come back first, so one claim covers all of them
+        // rather than the first one or two (each claim is a round trip). A handler that holds its slot ends
+        // the wait at the first yield that frees nothing.
+        available = await SettleAsync(available);
 
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
         var sqlQueries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
 
+        // The claimed rows are not tracked (rule 6.20): this scope ends as soon as they are handed over,
+        // and nothing writes them back through EF (completions go through the set-based statement, the
+        // ownership renewal and the unclaim through ExecuteUpdate on scopes of their own). Tracking them
+        // cost an identity-map entry and a snapshot per row on every claim.
+        context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
+
         var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var timed = DispatcherDiagnostics.ClaimDuration.Enabled;
+        var claimStart = 0L;
+        if (timed)
+        {
+            claimStart = Stopwatch.GetTimestamp();
+            if (_availability.TakeFreedAt() is var freedAt && freedAt != 0)
+            {
+                DispatcherDiagnostics.FreeSlotWait.Record(DispatcherDiagnostics.Since(freedAt), DiagnosticsTag);
+            }
+        }
 
         // Atomic batch claim. One round-trip, no SELECT→UPDATE window — returns up to
         // `available` rows already transitioned to Processing. Workers across servers get
@@ -190,7 +231,25 @@ public class WarpDispatcher<TContext> : BackgroundService
             _workerGroupId,
             now,
             available,
+            _claimWatermark,
             ct);
+
+        if (timed)
+        {
+            DispatcherDiagnostics.ClaimDuration.Record(DispatcherDiagnostics.Since(claimStart), DiagnosticsTag);
+            DispatcherDiagnostics.ClaimSize.Record(jobs.Count, DiagnosticsTag);
+        }
+
+        // On its own switch, like the worker's pickup that removes each entry: tied to the claim timings
+        // here and to worker-busy there, a listener on channel-wait alone recorded nothing or leaked.
+        if (DispatcherDiagnostics.ChannelWait.Enabled)
+        {
+            var claimedAt = Stopwatch.GetTimestamp();
+            foreach (var job in jobs)
+            {
+                DispatcherDiagnostics.ClaimedAt[job.Id] = claimedAt;
+            }
+        }
 
         if (jobs.Count == 0)
         {
@@ -237,6 +296,24 @@ public class WarpDispatcher<TContext> : BackgroundService
         }
 
         return FetchResult.Fetched;
+    }
+
+    // Yields while the group's free capacity keeps growing, at most MaxSettleYields times.
+    private async Task<int> SettleAsync(int available)
+    {
+        for (var i = 0; i < MaxSettleYields && available < _availability.Capacity; i++)
+        {
+            await Task.Yield();
+            var now = _availability.Available;
+            if (now <= available)
+            {
+                break;
+            }
+
+            available = now;
+        }
+
+        return available;
     }
 
     /// <summary>

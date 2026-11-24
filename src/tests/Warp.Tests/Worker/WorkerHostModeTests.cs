@@ -137,7 +137,8 @@ public abstract class WorkerHostModeTestsBase : IAsyncLifetime
             new DispatcherRegistry(),
             NullLoggerFactory.Instance,
             NullExceptionClassifier.Instance,
-            new WarpCounterBuffer());
+            new WarpCounterBuffer(),
+            Moq.Mock.Of<Warp.Core.Data.Queries.IWarpSqlQueries<TestContext>>());
     }
 
     private sealed class NullExceptionClassifier : IDatabaseExceptionClassifier

@@ -26,6 +26,42 @@ public class JobStatsKeysTests
     private static readonly DateTime FineBucket = new(2026, 7, 20, 14, 35, 0, DateTimeKind.Utc);
 
     [TimedFact]
+    public void Build_TypeHandlerDurationAndApplication_FillsExactlyTheSizeTheListIsCreatedWith()
+    {
+        // The list is presized to 2 * MaxPerDimension so a job's keys never grow it by doubling. A new key
+        // per dimension must raise the constant, or the list grows on every job again.
+        var job = new Job { Type = TypeId, HandlerType = HandlerId };
+
+        var counters = JobStatsKeys.Build(job, JobStatsKeys.SucceededToken, durationMs: 12, application: "shop", FineSuffix);
+
+        counters.Count.ShouldBe(2 * JobStatsKeys.MaxPerDimension);
+        counters.Capacity.ShouldBe(2 * JobStatsKeys.MaxPerDimension);
+    }
+
+    [TimedFact]
+    public void Build_KeysAreThePublicBuildersKeysAndRepeatWithinATierBucket()
+    {
+        // Build caches its keys per tier bucket; a cached key must be exactly what the public builders
+        // (and so the parsers) produce, a later job of the same type must get the same strings, and a new
+        // bucket must get its own history keys.
+        var job = new Job { Type = TypeId, HandlerType = HandlerId };
+        var id = JobStatsKeys.Sanitize(TypeId);
+        var nextSuffix = MetricTiers.Suffix(MetricTier.Fine, Ts.AddMinutes(5), 5);
+
+        var first = JobStatsKeys.Build(job, JobStatsKeys.SucceededToken, durationMs: 12, application: "shop", FineSuffix);
+        var second = JobStatsKeys.Build(job, JobStatsKeys.SucceededToken, durationMs: 12, application: "shop", FineSuffix);
+        var nextBucket = JobStatsKeys.Build(job, JobStatsKeys.SucceededToken, durationMs: 12, application: "shop", nextSuffix);
+
+        first.Select(x => x.Key).ShouldContain(JobStatsKeys.Total(JobStatsKeys.TypeMarker, id, JobStatsKeys.SucceededToken));
+        first.Select(x => x.Key).ShouldContain(JobStatsKeys.History(JobStatsKeys.TypeMarker, id, JobStatsKeys.SucceededToken, FineSuffix));
+        first.Select(x => x.Key).ShouldContain(JobStatsKeys.AppHistory("shop", JobStatsKeys.TypeMarker, id, JobStatsKeys.DurationToken, FineSuffix));
+        second.Select(x => x.Key).ShouldBe(first.Select(x => x.Key));
+        ReferenceEquals(first[0].Key, second[0].Key).ShouldBeTrue("a repeated key was built again instead of reused");
+        nextBucket.Select(x => x.Key).ShouldContain(JobStatsKeys.History(JobStatsKeys.TypeMarker, id, JobStatsKeys.SucceededToken, nextSuffix));
+        nextBucket.Select(x => x.Key).ShouldNotContain(JobStatsKeys.History(JobStatsKeys.TypeMarker, id, JobStatsKeys.SucceededToken, FineSuffix));
+    }
+
+    [TimedFact]
     public void Total_RoundTripsDimensionIdAndToken()
     {
         var key = JobStatsKeys.Total(JobStatsKeys.TypeMarker, TypeId, JobStatsKeys.SucceededToken);

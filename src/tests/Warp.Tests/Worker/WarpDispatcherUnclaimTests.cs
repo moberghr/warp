@@ -69,6 +69,7 @@ public abstract class WarpDispatcherUnclaimTestsBase : IAsyncLifetime
                 It.IsAny<Guid>(),
                 It.IsAny<DateTime>(),
                 It.IsAny<int>(),
+                It.IsAny<ClaimWatermark?>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(() => Interlocked.Increment(ref claims) == 1 ? claimed : []);
 

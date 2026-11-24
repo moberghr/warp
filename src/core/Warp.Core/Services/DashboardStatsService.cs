@@ -178,7 +178,11 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(x => new { x.CurrentWorkerId, x.Id, x.Type })
             .ToListAsync();
 
-        var jobByWorker = processingJobs.ToDictionary(j => j.CurrentWorkerId!.Value);
+        // Not ToDictionary: in dispatcher mode a job carries its worker GROUP's id from the claim until
+        // its first keep-alive, so several running jobs can share one id (and none of them is a worker's).
+        var jobByWorker = processingJobs
+            .DistinctBy(j => j.CurrentWorkerId)
+            .ToDictionary(j => j.CurrentWorkerId!.Value);
 
         var workersByServer = workers
             .GroupBy(w => w.ServerId)
@@ -237,7 +241,11 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(x => new { x.CurrentWorkerId, x.Id, x.Type })
             .ToListAsync();
 
-        var jobByWorker = processingJobs.ToDictionary(j => j.CurrentWorkerId!.Value);
+        // Not ToDictionary: in dispatcher mode a job carries its worker GROUP's id from the claim until
+        // its first keep-alive, so several running jobs can share one id (and none of them is a worker's).
+        var jobByWorker = processingJobs
+            .DistinctBy(j => j.CurrentWorkerId)
+            .ToDictionary(j => j.CurrentWorkerId!.Value);
 
         return new ServerModel
         {

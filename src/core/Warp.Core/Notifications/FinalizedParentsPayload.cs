@@ -44,18 +44,7 @@ internal static class FinalizedParentsPayload
     internal static void Signal<TContext>(ServerTaskSignals<TContext> signals, string? payload)
         where TContext : DbContext
     {
-        if (string.IsNullOrEmpty(payload))
-        {
-            signals.SignalJobFinalized();
-
-            return;
-        }
-
-        var separator = payload.IndexOf(';', StringComparison.Ordinal);
-        var parentsPart = separator < 0 ? payload : payload[..separator];
-        var settledPart = separator < 0 ? None : payload[(separator + 1)..];
-
-        if (!TryDecode(parentsPart, out var parents) || !TryDecode(settledPart, out var settled))
+        if (!TryParse(payload, out var parents, out var settled))
         {
             signals.SignalJobFinalized();
 
@@ -63,6 +52,61 @@ internal static class FinalizedParentsPayload
         }
 
         signals.SignalJobsFinalized(parents, settled);
+    }
+
+    /// <summary>
+    /// Folds many payloads into as few as carry the same ids: the parents and the settled jobs of all of
+    /// them, each once, split so no payload names more than <see cref="MaxIds"/>. A payload that says
+    /// "unknown" (empty, or one this version cannot read) asks the receiver to check everything, which
+    /// covers every other payload too, so the result is then that one "unknown" (null).
+    /// </summary>
+    internal static List<string?> Merge(IEnumerable<string?> payloads)
+    {
+        var parents = new HashSet<Guid>();
+        var settled = new HashSet<Guid>();
+        foreach (var payload in payloads)
+        {
+            if (!TryParse(payload, out var someParents, out var someSettled))
+            {
+                return [null];
+            }
+
+            parents.UnionWith(someParents);
+            settled.UnionWith(someSettled);
+        }
+
+        var merged = new List<string?>();
+        var parentList = parents.ToList();
+        var settledList = settled.ToList();
+        var p = 0;
+        var s = 0;
+        do
+        {
+            var takeParents = Math.Min(MaxIds, parentList.Count - p);
+            var takeSettled = Math.Min(MaxIds - takeParents, settledList.Count - s);
+            merged.Add(Encode(parentList.GetRange(p, takeParents), settledList.GetRange(s, takeSettled)));
+            p += takeParents;
+            s += takeSettled;
+        }
+        while (p < parentList.Count || s < settledList.Count);
+
+        return merged;
+    }
+
+    private static bool TryParse(string? payload, out List<Guid> parents, out List<Guid> settled)
+    {
+        parents = [];
+        settled = [];
+        if (string.IsNullOrEmpty(payload))
+        {
+            return false;
+        }
+
+        var separator = payload.IndexOf(';', StringComparison.Ordinal);
+        var parentsPart = separator < 0 ? payload : payload[..separator];
+        var settledPart = separator < 0 ? None : payload[(separator + 1)..];
+
+        return TryDecode(parentsPart, out parents) && TryDecode(settledPart, out settled);
     }
 
     private static string Format(Guid id) => id.ToString(IdFormat, CultureInfo.InvariantCulture);

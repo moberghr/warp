@@ -72,6 +72,14 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
         // to, as well as the dispatcher wake (§2.9).
         foreach (var registration in _state.Groups)
         {
+            // One keep-alive and log flush loop for every job the group runs (rule 6.14).
+            var monitor = new RunningJobMonitor(
+                _serviceScopeFactory,
+                _timeProvider,
+                _configuration,
+                _sqlQueries.RenewRunningJobsAsync,
+                _loggerFactory.CreateLogger<RunningJobMonitor>());
+
             foreach (var workerId in registration.WorkerIds)
             {
                 var workerService = new WarpWorkerService<TContext>(
@@ -84,7 +92,8 @@ public class WarpSingleWorkerHost<TContext> : IHostedService
                     _sqlQueries,
                     _notificationTransport,
                     _signals,
-                    _counterBuffer);
+                    _counterBuffer,
+                    monitor);
 
                 var worker = new WarpWorker<TContext>(
                     workerService,

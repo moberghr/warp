@@ -1,27 +1,27 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 
 namespace Warp.Core.CircuitBreaker;
 
-public class CircuitBreakerStore<TContext> : ICircuitBreakerStore
-    where TContext : DbContext
+/// <summary>
+/// The circuit breaker's state rows, on Warp's own context opened only when a job asks (rule 6.17):
+/// never the application's context.
+/// </summary>
+internal sealed class CircuitBreakerStore : ICircuitBreakerStore
 {
-    private readonly TContext _context;
-    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly DeferredWarpContext _warp;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
 
-    public CircuitBreakerStore(TContext context, IServiceScopeFactory scopeFactory, IDatabaseExceptionClassifier exceptionClassifier)
+    public CircuitBreakerStore(DeferredWarpContext warp, IDatabaseExceptionClassifier exceptionClassifier)
     {
-        _context = context;
-        _scopeFactory = scopeFactory;
+        _warp = warp;
         _exceptionClassifier = exceptionClassifier;
     }
 
     public Task<CircuitBreakerState?> GetAsync(string groupKey, CancellationToken cancellationToken)
     {
-        return _context.Set<CircuitBreakerState>()
+        return _warp.Context.Set<CircuitBreakerState>()
             .AsNoTracking()
             .Where(x => x.GroupKey == groupKey)
             .FirstOrDefaultAsync(cancellationToken);
@@ -29,7 +29,7 @@ public class CircuitBreakerStore<TContext> : ICircuitBreakerStore
 
     public async Task ResetAsync(string groupKey, CancellationToken cancellationToken)
     {
-        await _context.Set<CircuitBreakerState>()
+        await _warp.Context.Set<CircuitBreakerState>()
             .Where(x => x.GroupKey == groupKey)
             .Where(x => x.FailureCount > 0 || x.State != CircuitState.Closed)
             .ExecuteUpdateAsync(
@@ -43,7 +43,7 @@ public class CircuitBreakerStore<TContext> : ICircuitBreakerStore
     public async Task RecordFailureAsync(string groupKey, int threshold, TimeSpan duration, DateTime now, CancellationToken cancellationToken)
     {
         var openUntilIfThreshold = now + duration;
-        var affected = await _context.Set<CircuitBreakerState>()
+        var affected = await _warp.Context.Set<CircuitBreakerState>()
             .Where(x => x.GroupKey == groupKey)
             .ExecuteUpdateAsync(
                 s => s
@@ -58,8 +58,7 @@ public class CircuitBreakerStore<TContext> : ICircuitBreakerStore
             return;
         }
 
-        await using var scope = _scopeFactory.CreateAsyncScope();
-        var insertContext = scope.ServiceProvider.GetRequiredService<TContext>();
+        await using var scope = _warp.CreateIsolatedScope(out var insertContext);
         try
         {
             var trips = threshold <= 1;
@@ -79,7 +78,7 @@ public class CircuitBreakerStore<TContext> : ICircuitBreakerStore
             // Concurrent worker inserted the row first — fall back to ExecuteUpdate.
             // Non-unique DbUpdateException (CHECK, FK, column-length) skips this catch
             // and propagates so the operator sees the real constraint violation.
-            await _context.Set<CircuitBreakerState>()
+            await _warp.Context.Set<CircuitBreakerState>()
                 .Where(x => x.GroupKey == groupKey)
                 .ExecuteUpdateAsync(
                     s => s
@@ -97,7 +96,7 @@ public class CircuitBreakerStore<TContext> : ICircuitBreakerStore
         // affects a row; every other caller observes the row already in HalfOpen and returns
         // false. No distributed lock — Postgres and SQL Server both guarantee per-row
         // serialization on UPDATE.
-        var affected = await _context.Set<CircuitBreakerState>()
+        var affected = await _warp.Context.Set<CircuitBreakerState>()
             .Where(x => x.GroupKey == groupKey)
             .Where(x => x.State == CircuitState.Open)
             .Where(x => x.OpenUntil != null && x.OpenUntil <= now)

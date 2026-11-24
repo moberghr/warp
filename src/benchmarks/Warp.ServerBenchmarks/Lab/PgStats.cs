@@ -34,7 +34,7 @@ public sealed class PgStats
 
     public required Dictionary<string, TableStat> Tables { get; init; }
 
-    public sealed record StatementStat(long Calls, double TotalExecMs, long Rows, long Blocks, string Query);
+    public sealed record StatementStat(long Calls, double TotalExecMs, long Rows, long Blocks, string Query, long WalBytes = 0);
 
     public sealed record DatabaseStat(
         long XactCommit,
@@ -153,7 +153,8 @@ public sealed class PgStats
                    SUM(total_exec_time) AS total_exec_time,
                    SUM(rows) AS rows,
                    SUM(COALESCE(shared_blks_hit, 0) + COALESCE(shared_blks_read, 0)) AS blocks,
-                   MIN(query) AS query
+                   MIN(query) AS query,
+                   SUM(COALESCE(wal_bytes, 0))::bigint AS wal_bytes
             FROM pg_stat_statements
             WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
               AND query NOT LIKE '%pg_stat_%'
@@ -166,7 +167,7 @@ public sealed class PgStats
         while (await reader.ReadAsync())
         {
             result[reader.GetInt64(0)] = new StatementStat(
-                reader.GetInt64(1), reader.GetDouble(2), reader.GetInt64(3), reader.GetInt64(4), reader.GetString(5));
+                reader.GetInt64(1), reader.GetDouble(2), reader.GetInt64(3), reader.GetInt64(4), reader.GetString(5), reader.GetInt64(6));
         }
 
         return result;
@@ -257,7 +258,8 @@ public sealed class PgStats
                 after.TotalExecMs - (baseline?.TotalExecMs ?? 0),
                 after.Rows - (baseline?.Rows ?? 0),
                 after.Blocks - (baseline?.Blocks ?? 0),
-                after.Query));
+                after.Query,
+                after.WalBytes - (baseline?.WalBytes ?? 0)));
         }
 
         var tables = new Dictionary<string, TableStat>(StringComparer.Ordinal);
@@ -312,6 +314,8 @@ public sealed class PgStatsDelta
     public long TotalCalls => Statements.Sum(x => x.Calls);
 
     public double TotalExecMs => Statements.Sum(x => x.TotalExecMs);
+
+    public long TotalWalBytes => Statements.Sum(x => x.WalBytes);
 
     public long TotalTransactions => Database.XactCommit + Database.XactRollback;
 }

@@ -1,11 +1,13 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.Notifications;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
 using Warp.Worker;
@@ -148,13 +150,12 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
     public async Task GivenShutdown_WhenServerStops_ThenPendingCompletionsAreFlushed()
     {
         // Arrange — single-worker, isolated queue, with a barrier handler queued behind 4 short
-        // ones. The single worker pulls them from the dispatcher channel back-to-back: short
-        // jobs 1..4 each call _batch.Add and TryRead returns true for the next one — so the inner
-        // loop never exits and the idle-drain at WarpDispatcherWorker line 107 does NOT run.
-        // When the worker enters the barrier handler it parks inside ProcessJob, leaving 4
-        // PendingCompletion entries sitting in _batch. With a short HostOptions.ShutdownTimeout,
-        // base.StopAsync returns before the parked handler completes; the worker's StopAsync
-        // override then runs _batch.FlushAsync() — that is the load-bearing path under test.
+        // ones, a batch far larger than the workload and a flush interval far beyond the test.
+        // The group still holds the barrier job, so the idle trigger never fires either: when the
+        // worker parks inside the barrier handler, 4 completions sit in the group's buffer. With a
+        // short HostOptions.ShutdownTimeout the worker stops before the parked handler completes,
+        // and the host then stops the group's CompletionFlusher, whose final flush writes them —
+        // that is the load-bearing path under test.
         // The 5th (barrier) job stays in Processing and would be recovered by StaleJobRecovery
         // in production; that's the realistic outcome of a shutdown mid-handler.
         const string isolatedQueue = "batch-shutdown-flush";
@@ -186,8 +187,8 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         }
         finally
         {
-            // StopAsync override is the only path that can persist the 4 buffered completions —
-            // the parked handler prevents idle-drain from running.
+            // The flusher's final flush is the only path that can persist the 4 buffered
+            // completions — the parked handler keeps the idle trigger from firing.
             await server.DisposeAsync();
 
             // Release the orphaned handler so its task doesn't keep waiting after the host is
@@ -335,6 +336,81 @@ public abstract class BatchedCompletionIntegrationTestsBase : IntegrationTestBas
         }
 
         await server.WaitForJobState(barrierJobId, State.Completed, TimeSpan.FromSeconds(5));
+    }
+
+    [TimedFact]
+    public async Task GivenACompletionWriteThatHangs_WhenTheWorkerHasAnotherJob_ThenItRunsIt()
+    {
+        // Arrange — one worker, no prefetch: the first job is claimed alone, and when it finishes the
+        // group has nothing claimed, so its completion is written at once. That write is held where it
+        // announces itself (the notification transport, the last step of a flush). The worker must not
+        // be the one waiting on it: the second job, claimed once the first one's slot is free, has to
+        // start while the write is still held. When the worker wrote completions itself, it sat in that
+        // write and the second job waited.
+        const string isolatedQueue = "batch-flusher-off-worker";
+        var barrier = new BarrierSignal();
+        var transport = new HoldFirstFinalizedTransport();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            config =>
+            {
+                config.UseDispatcher = true;
+                config.WorkerCount = 1;
+                config.PrefetchCount = 0;
+                config.Queues = [isolatedQueue];
+                config.CompletionBatchSize = 50;
+                config.CompletionFlushInterval = TimeSpan.FromMinutes(5);
+            },
+            services =>
+            {
+                services.AddSingleton(barrier);
+                services.Replace(ServiceDescriptor.Singleton<IWarpNotificationTransport>(transport));
+            });
+
+        var ids = await InsertInOrderAsync(isolatedQueue, new UnitRequest(), new BarrierRequest());
+
+        try
+        {
+            (await transport.Held.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeTrue("the first completion was never written");
+
+            // Act + Assert
+            (await barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeTrue("the worker did not start its next job while a completion write was held");
+        }
+        finally
+        {
+            transport.Release.Release();
+            barrier.CanFinish.Release();
+        }
+
+        await server.WaitForJobState(ids[0], State.Completed, TimeSpan.FromSeconds(5));
+        await server.WaitForJobState(ids[1], State.Completed, TimeSpan.FromSeconds(5));
+    }
+
+    // Holds the first JobFinalized publish (the end of the first completion flush) until released.
+    private sealed class HoldFirstFinalizedTransport : IWarpNotificationTransport
+    {
+        private int _held;
+
+        public SemaphoreSlim Held { get; } = new(0);
+
+        public SemaphoreSlim Release { get; } = new(0);
+
+        public async Task PublishAsync(NotificationKind kind, string? queue, CancellationToken ct)
+        {
+            if (kind == NotificationKind.JobFinalized && Interlocked.CompareExchange(ref _held, 1, 0) == 0)
+            {
+                Held.Release();
+                await Release.WaitAsync(CancellationToken.None);
+            }
+        }
+
+        public async IAsyncEnumerable<Notification> ListenAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            yield break;
+        }
     }
 
     // Enqueued rows with explicit, ascending schedule times, inserted in one save. The claim orders by

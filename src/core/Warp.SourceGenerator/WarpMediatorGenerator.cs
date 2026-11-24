@@ -914,6 +914,11 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
 
     private static void GenerateJobDispatcherCode(StringBuilder sb, List<JobTypeInfo> jobTypes)
     {
+        // Plumbing between the worker and the handler, kept out of a failed job's stack trace as far as it
+        // can be: that trace is stored per failure (its log row and its error-grouping entry), and these
+        // frames carried the job type's full name and the generated file's path. The per-type methods are
+        // not async, so they add no frame; #line hidden drops the path from the one frame left (AsUnit).
+        sb.AppendLine("#line hidden");
         sb.AppendLine("    public static class GeneratedJobDispatcher");
         sb.AppendLine("    {");
 
@@ -935,15 +940,31 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
         sb.AppendLine("        }");
         sb.AppendLine();
 
+        // Hands each typed method to Core at assembly load, so the worker calls the handler and its
+        // pipeline directly instead of through reflection. A module initializer of its own, inside this
+        // class, so it never names a GeneratedJobDispatcher another referenced assembly also declares.
+        sb.AppendLine("        [global::System.Runtime.CompilerServices.ModuleInitializer]");
+        sb.AppendLine("        internal static void RegisterJobDispatch()");
+        sb.AppendLine("        {");
+        foreach (var job in jobTypes)
+        {
+            sb.AppendLine($"            global::Warp.Core.Handlers.WarpGeneratedHandlerRegistry.AddJobDispatch(typeof({job.JobFullName}), static (message, handlerType, provider, cancellationToken) => {job.MethodName}(({job.JobFullName})message, handlerType, provider, cancellationToken));");
+        }
+
+        sb.AppendLine("        }");
+        sb.AppendLine();
+
         // Per-type execute methods
         foreach (var job in jobTypes)
         {
-            sb.AppendLine($"        private static async global::System.Threading.Tasks.Task {job.MethodName}(");
+            sb.AppendLine($"        private static global::System.Threading.Tasks.Task {job.MethodName}(");
             sb.AppendLine($"            {job.JobFullName} message,");
             sb.AppendLine($"            global::System.Type handlerType,");
             sb.AppendLine($"            global::System.IServiceProvider provider,");
             sb.AppendLine($"            global::System.Threading.CancellationToken cancellationToken)");
             sb.AppendLine("        {");
+            sb.AppendLine("            try");
+            sb.AppendLine("            {");
 
             if (job.IsMessage)
             {
@@ -953,16 +974,30 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
             }
             else
             {
-                // IJob: single handler
+                // IJob: the single (last registered) handler, unless the row names another one.
                 sb.AppendLine($"            var handler = provider.GetRequiredService<global::Warp.Core.Handlers.IJobHandler<{job.JobFullName}>>();");
+                sb.AppendLine("            if (handler.GetType() != handlerType)");
+                sb.AppendLine("            {");
+                sb.AppendLine($"                handler = provider.GetServices<global::Warp.Core.Handlers.IJobHandler<{job.JobFullName}>>().First(h => h!.GetType() == handlerType)!;");
+                sb.AppendLine("            }");
             }
 
             sb.AppendLine($"            var behaviors = provider.GetServices<global::Warp.Core.Handlers.IPipelineBehavior<{job.JobFullName}, global::Warp.Core.Handlers.Unit>>().ToArray();");
             sb.AppendLine();
-            sb.AppendLine($"            global::Warp.Core.Handlers.RequestHandlerDelegate<{job.JobFullName}, global::Warp.Core.Handlers.Unit> chain = async (req, ct) =>");
+
+            // A handler that throws before returning its task still gives a behaviour a faulted task from
+            // next(), as the reflection path's async delegate does, without an async frame of its own in
+            // the failure's stack trace.
+            sb.AppendLine($"            global::Warp.Core.Handlers.RequestHandlerDelegate<{job.JobFullName}, global::Warp.Core.Handlers.Unit> chain = (req, ct) =>");
             sb.AppendLine("            {");
-            sb.AppendLine("                await handler.HandleAsync(req, ct);");
-            sb.AppendLine("                return global::Warp.Core.Handlers.Unit.Value;");
+            sb.AppendLine("                try");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    return AsUnit(handler.HandleAsync(req, ct));");
+            sb.AppendLine("                }");
+            sb.AppendLine("                catch (global::System.Exception thrown)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    return global::System.Threading.Tasks.Task.FromException<global::Warp.Core.Handlers.Unit>(thrown);");
+            sb.AppendLine("                }");
             sb.AppendLine("            };");
             sb.AppendLine();
             sb.AppendLine("            for (int i = behaviors.Length - 1; i >= 0; i--)");
@@ -972,12 +1007,29 @@ public sealed class WarpMediatorGenerator : IIncrementalGenerator
             sb.AppendLine("                chain = (req, ct) => b.HandleAsync(req, next, ct);");
             sb.AppendLine("            }");
             sb.AppendLine();
-            sb.AppendLine("            await chain(message, cancellationToken);");
+            sb.AppendLine("            return chain(message, cancellationToken);");
+            sb.AppendLine("            }");
+            sb.AppendLine("            catch (global::System.Exception exception)");
+            sb.AppendLine("            {");
+
+            // A synchronous throw (a missing handler, a pipeline that throws before its first await)
+            // still reaches the caller as a faulted task, as it did when this method was async.
+            sb.AppendLine("                return global::System.Threading.Tasks.Task.FromException(exception);");
+            sb.AppendLine("            }");
             sb.AppendLine("        }");
             sb.AppendLine();
         }
 
+        // Turns the handler's Task into the pipeline's Task<Unit>. A named method rather than an async
+        // lambda, whose frame would carry a compiler-generated display-class name.
+        sb.AppendLine("        private static async global::System.Threading.Tasks.Task<global::Warp.Core.Handlers.Unit> AsUnit(global::System.Threading.Tasks.Task handling)");
+        sb.AppendLine("        {");
+        sb.AppendLine("            await handling;");
+        sb.AppendLine();
+        sb.AppendLine("            return global::Warp.Core.Handlers.Unit.Value;");
+        sb.AppendLine("        }");
         sb.AppendLine("    }");
+        sb.AppendLine("#line default");
         sb.AppendLine();
     }
 

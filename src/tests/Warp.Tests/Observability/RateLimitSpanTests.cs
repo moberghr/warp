@@ -25,20 +25,7 @@ public class RateLimitSpanTests
 
     private sealed class NotAJobRequest : IRequest<Unit>;
 
-    private static RateLimitResolver NoAdminResolver() => new(new NoAdminManager());
-
-    private sealed class NoAdminManager : IRateLimitManager
-    {
-        public Task AddOrUpdateLimit(string name, int count, int windowSeconds, CancellationToken ct = default) => Task.CompletedTask;
-
-        public Task<bool> RemoveLimit(string name, CancellationToken ct = default) => Task.FromResult(false);
-
-        public Task<RateLimitInfo?> GetLimit(string name, CancellationToken ct = default) =>
-            Task.FromResult<RateLimitInfo?>(null);
-
-        public Task<IReadOnlyList<RateLimitInfo>> ListLimits(CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<RateLimitInfo>>([]);
-    }
+    private static RateLimitResolver NoAdminResolver() => new((_, _) => Task.FromResult<RateLimitInfo?>(null));
 
     private sealed class InMemoryStore : IRateLimitStore
     {

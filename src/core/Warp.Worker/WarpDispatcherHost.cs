@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warp.Core.Data;
+using Warp.Core.Data.Queries;
 using Warp.Core.Events;
 using Warp.Core.Notifications;
 using Warp.Core.Services;
@@ -30,10 +31,12 @@ public class WarpDispatcherHost<TContext> : IHostedService
     private readonly ServerRegistrationState _state;
     private readonly ServerTaskSignals<TContext> _signals;
     private readonly WarpCounterBuffer _counterBuffer;
+    private readonly IWarpSqlQueries<TContext> _sqlQueries;
     private readonly DispatcherRegistry _dispatcherRegistry;
     private readonly ILoggerFactory _loggerFactory;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
     private readonly List<BackgroundService> _workers = [];
+    private readonly List<CompletionFlusher<TContext>> _flushers = [];
 
     public WarpDispatcherHost(
         IOptions<WarpServerConfiguration> configuration,
@@ -46,9 +49,11 @@ public class WarpDispatcherHost<TContext> : IHostedService
         DispatcherRegistry dispatcherRegistry,
         ILoggerFactory loggerFactory,
         IDatabaseExceptionClassifier exceptionClassifier,
-        WarpCounterBuffer counterBuffer)
+        WarpCounterBuffer counterBuffer,
+        IWarpSqlQueries<TContext> sqlQueries)
     {
         _counterBuffer = counterBuffer;
+        _sqlQueries = sqlQueries;
         _configuration = configuration.Value;
         _configurationOptions = configuration;
         _serviceScopeFactory = serviceScopeFactory;
@@ -85,6 +90,37 @@ public class WarpDispatcherHost<TContext> : IHostedService
             await dispatcher.StartAsync(cancellationToken);
             _workers.Add(dispatcher);
 
+            // One completion buffer for the whole group (rule 6.13).
+            var batch = new CompletionBatch(
+                _serviceScopeFactory,
+                _timeProvider,
+                _loggerFactory.CreateLogger<CompletionBatch>(),
+                _exceptionClassifier,
+                _configuration.CompletionBatchSize,
+                _configuration.CompletionFlushInterval,
+                _counterBuffer,
+                _sqlQueries.CompleteJobsAsync);
+
+            // ... and one loop that writes it, so no worker waits on a completion write (rule 6.13).
+            var flusher = new CompletionFlusher<TContext>(
+                batch,
+                dispatcher.Availability,
+                _timeProvider,
+                _signals,
+                _notificationTransport,
+                _loggerFactory.CreateLogger<CompletionFlusher<TContext>>(),
+                dispatcher.DiagnosticsTag);
+            flusher.Start();
+            _flushers.Add(flusher);
+
+            // One keep-alive and log flush loop for every job the group runs (rule 6.14).
+            var monitor = new RunningJobMonitor(
+                _serviceScopeFactory,
+                _timeProvider,
+                _configuration,
+                _sqlQueries.RenewRunningJobsAsync,
+                _loggerFactory.CreateLogger<RunningJobMonitor>());
+
             foreach (var workerId in registration.WorkerIds)
             {
                 var worker = new WarpDispatcherWorker<TContext>(
@@ -94,11 +130,11 @@ public class WarpDispatcherHost<TContext> : IHostedService
                     _loggerFactory.CreateLogger<WarpDispatcherWorker<TContext>>(),
                     _configurationOptions,
                     _timeProvider,
-                    _notificationTransport,
-                    _signals,
-                    _exceptionClassifier,
                     dispatcher.Availability,
-                    _counterBuffer);
+                    _counterBuffer,
+                    flusher,
+                    monitor,
+                    dispatcher.DiagnosticsTag);
 
                 await worker.StartAsync(cancellationToken);
                 _workers.Add(worker);
@@ -110,5 +146,13 @@ public class WarpDispatcherHost<TContext> : IHostedService
     {
         var tasks = _workers.Select(x => x.StopAsync(cancellationToken));
         await Task.WhenAll(tasks);
+
+        // Only once every worker has stopped: nothing is added after this, and the final flush writes
+        // the last completions.
+        await Task.WhenAll(_flushers.Select(x => x.StopAsync(cancellationToken)));
+        foreach (var flusher in _flushers)
+        {
+            flusher.Dispose();
+        }
     }
 }

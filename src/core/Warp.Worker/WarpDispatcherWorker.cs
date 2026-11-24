@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.ErrorGrouping;
@@ -28,8 +29,8 @@ namespace Warp.Worker;
 /// <summary>
 /// Worker that receives pre-fetched jobs from a dispatcher channel.
 /// Pure executor — handles execution and completion only. Orchestration handled by Orchestrator.
-/// Completions are buffered in a per-worker <see cref="CompletionBatch"/> and flushed
-/// as a single multi-row transaction when any of: size threshold, time threshold, idle, or shutdown fires.
+/// Completions go to the group's <see cref="CompletionFlusher{TContext}"/>, which writes them; the worker
+/// never waits on that write (rule 6.13).
 /// </summary>
 public class WarpDispatcherWorker<TContext> : BackgroundService
     where TContext : DbContext
@@ -40,25 +41,27 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     private readonly ILogger<WarpDispatcherWorker<TContext>> _logger;
     private readonly WarpServerConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
-    private readonly CompletionBatch _batch;
+    private readonly CompletionFlusher<TContext> _flusher;
+    private readonly RunningJobMonitor _monitor;
     private readonly DispatcherWorkerAvailability _availability;
-    private readonly IWarpNotificationTransport _notificationTransport;
-    private readonly ServerTaskSignals<TContext> _signals;
     private readonly WarpCounterBuffer _counterBuffer;
+    private readonly KeyValuePair<string, object?> _diagnosticsTag;
 
-    public WarpDispatcherWorker(
+    internal WarpDispatcherWorker(
         Guid workerId,
         ChannelReader<Job> jobReader,
         IServiceScopeFactory scopeFactory,
         ILogger<WarpDispatcherWorker<TContext>> logger,
         IOptions<WarpServerConfiguration> configuration,
         TimeProvider timeProvider,
-        IWarpNotificationTransport notificationTransport,
-        ServerTaskSignals<TContext> signals,
-        IDatabaseExceptionClassifier exceptionClassifier,
         DispatcherWorkerAvailability availability,
-        WarpCounterBuffer counterBuffer)
+        WarpCounterBuffer counterBuffer,
+        CompletionFlusher<TContext> flusher,
+        RunningJobMonitor monitor,
+        KeyValuePair<string, object?> diagnosticsTag)
     {
+        _monitor = monitor;
+        _diagnosticsTag = diagnosticsTag;
         _counterBuffer = counterBuffer;
         _availability = availability;
         _workerId = workerId;
@@ -67,27 +70,13 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         _logger = logger;
         _configuration = configuration.Value;
         _timeProvider = timeProvider;
-        _notificationTransport = notificationTransport;
-        _signals = signals;
-        _batch = new CompletionBatch(
-            scopeFactory,
-            timeProvider,
-            logger,
-            exceptionClassifier,
-            _configuration.CompletionBatchSize,
-            _configuration.CompletionFlushInterval,
-            counterBuffer);
+        _flusher = flusher;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Channel-based pull: WaitToReadAsync blocks until the dispatcher produces a job.
         // No idle polling loop here — polling backoff lives in WarpDispatcher.ExecuteAsync.
-        // The hand-rolled WaitToRead/TryRead loop (vs await foreach ReadAllAsync) exists so we
-        // can flush any buffered completions BEFORE suspending on the next WaitToReadAsync —
-        // otherwise a small batch (below CompletionBatchSize) would wait for the time trigger
-        // or forever if no more jobs arrive.
-        //
         // WaitToReadAsync does NOT observe stoppingToken: if we exited on cancellation while the
         // channel still had buffered items, those jobs would be DB-orphaned as Processing (the
         // dispatcher wrote them but nobody consumed them). Instead we drain the channel fully
@@ -95,10 +84,14 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         // shutdown timeout (30s default) still bounds this — a stuck handler eventually gets
         // killed — and stoppingToken is still propagated into ProcessJob so individual
         // handler-path awaits can react if they want to.
+        // When this worker last handed a slot back, for the opt-in idle timing; 0 until its first job.
+        var idleSince = 0L;
         while (await _jobReader.WaitToReadAsync(CancellationToken.None).ConfigureAwait(false))
         {
             while (_jobReader.TryRead(out var job))
             {
+                var busySince = DispatcherDiagnostics.WorkerBusy.Enabled || DispatcherDiagnostics.ChannelWait.Enabled ? RecordPickup(job, idleSince) : 0L;
+                var remaining = 1;
                 try
                 {
                     await ProcessJob(job, stoppingToken);
@@ -118,68 +111,51 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                     // release-only site — and it must run for every path out of ProcessJob,
                     // including the ownership guard dropping the job, or the group leaks capacity
                     // and eventually stops claiming.
-                    _availability.Release();
+                    remaining = _availability.Release();
                 }
 
-                if (_batch.IsFull || _batch.IsTimeElapsed)
+                // The group's flusher writes the completion (rule 6.13); this worker only tells it when
+                // the group had nothing left claimed as this slot came back, and goes straight back to the
+                // channel. From the count Release returned, not a later read: the dispatcher, woken by the
+                // freed slot, may already have claimed the next job.
+                _flusher.SlotReleased(remaining);
+
+                if (busySince != 0)
                 {
-                    await FlushBatchSafely();
+                    DispatcherDiagnostics.WorkerBusy.Add(DispatcherDiagnostics.Since(busySince), _diagnosticsTag);
+                    idleSince = Stopwatch.GetTimestamp();
                 }
             }
-
-            // Idle — drain any buffered completions before suspending on WaitToReadAsync
-            await FlushBatchSafely();
         }
     }
 
-    public override async Task StopAsync(CancellationToken cancellationToken)
+    // Opt-in timings (DispatcherDiagnostics): how long this worker waited since its last job, and how
+    // long this job waited in the channel after its claim. Returns when the job's busy time starts.
+    private long RecordPickup(Job job, long idleSince)
     {
-        await base.StopAsync(cancellationToken);
+        if (idleSince != 0)
+        {
+            DispatcherDiagnostics.WorkerIdle.Add(DispatcherDiagnostics.Since(idleSince), _diagnosticsTag);
+        }
 
-        try
+        if (DispatcherDiagnostics.ClaimedAt.TryRemove(job.Id, out var claimedAt))
         {
-            var flushed = await _batch.FlushAsync();
-            _signals.SignalJobsFinalized(flushed.Parents, flushed.Settled);
-            await NotificationDispatch.FireAsync(
-                _notificationTransport,
-                [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(flushed.Parents, flushed.Settled))],
-                cancellationToken);
+            DispatcherDiagnostics.ChannelWait.Record(DispatcherDiagnostics.Since(claimedAt), _diagnosticsTag);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Final batch flush on shutdown failed");
-        }
+
+        return Stopwatch.GetTimestamp();
     }
 
-    private async Task FlushBatchSafely()
-    {
-        if (_batch.Count == 0)
-        {
-            return;
-        }
-
-        try
-        {
-            // What the flush took goes with the wake, as in WarpWorkerService (rule 6.11).
-            var flushed = await _batch.FlushAsync();
-            _signals.SignalJobsFinalized(flushed.Parents, flushed.Settled);
-            await NotificationDispatch.FireAsync(
-                _notificationTransport,
-                [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(flushed.Parents, flushed.Settled))]);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to flush completion batch");
-        }
-    }
+    private ValueTask AddCompletionAsync(PendingCompletion completion) => _flusher.AddAsync(completion);
 
     private async Task ProcessJob(Job job, CancellationToken cancellationToken)
     {
         PerfTrace.Begin();
+        var processingLog = new DeferredJobLog();
+
+        // As the claim stamped the row, before this worker changes it: every later write for this run is
+        // guarded by it, so a run whose job was taken back and claimed again cannot write the new run's row.
+        var owner = JobRunOwner.Of(job, _workerId);
 
         // OTel "receive" span — covers post-fetch / pre-handler bookkeeping (mark worker ownership).
         // Closes before the consumer span opens, so receive and process are siblings under the
@@ -194,7 +170,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             // CancellationToken.None: the claim already committed State=Processing, so aborting this
             // UPDATE on shutdown would orphan the row without clearing the worker stamp. Fast UPDATE,
             // uncancellable is cheap insurance.
-            if (!await MarkWorkerOwnership(job, CancellationToken.None))
+            if (!await ConfirmOwnership(job, processingLog, CancellationToken.None))
             {
                 // Reclaimed while it waited in the channel — another claim owns it now, and may
                 // already have run it. Drop it: no execution, no completion, no log rows.
@@ -212,7 +188,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         var progressCollector = new JobProgressCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
 
         using var jobCts = new CancellationTokenSource();
-        var monitorTask = RunJobMonitor(job.Id, logCollector, progressCollector, jobCts, cancellationToken);
+        using var monitoring = _monitor.Register(owner, logCollector, progressCollector, processingLog, jobCts, cancellationToken);
 
         var activity = WarpTelemetry.StartJobActivity(job.TraceId ?? job.Id, job.ParentSpanId, job.Queue);
         var jobTypeName = WarpTelemetry.GetShortTypeName(job.Type);
@@ -234,7 +210,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         try
         {
             PerfTrace.Mark(PerfTrace.ExecuteHandler);
-            _logger.LogInformation("Worker {workerId} executing job {id}", _workerId, job.Id);
+
+            WorkerLog.ExecutingJob(_logger, _workerId, job.Id);
 
             if (_configuration.EnableHandlerLogging)
             {
@@ -286,11 +263,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             await ExecuteJob(job, handlerScope.ServiceProvider, jobCts.Token);
             handlerStopwatch.Stop();
 
-            // Commit handler's work (outbox: published jobs + business entities) before disposing.
-            // Jobs the handler staged are announced by the enqueue interceptor on this save, like any other
-            // TContext save: local workers inline, other servers through the relay (#322).
-            var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
-            await handlerContext.SaveChangesAsync(default);
+            // The handler owns its DbContext and commits its own work (rule 6.17): the worker never
+            // resolves or saves it.
 
             // Read metadata and outcome from handler scope before disposing
             JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
@@ -326,11 +300,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
 
-            _logger.LogInformation("Worker {workerId} completed job {id}", _workerId, job.Id);
+            WorkerLog.CompletedJob(_logger, _workerId, job.Id);
 
             PerfTrace.Mark(PerfTrace.CancelKeepAlive);
-            await jobCts.CancelAsync();
-            await monitorTask;
+            monitoring.Dispose();
 
             if (successOutcome != null)
             {
@@ -351,11 +324,13 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             }
 
             var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc, incomingAttempts);
-            var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
-            _batch.Add(new PendingCompletion(job, counters, logs));
+            var logs = CollectLogs(finalLogs, logCollector, progressCollector, processingLog).ToArray();
+            await AddCompletionAsync(new PendingCompletion(job, owner, counters, logs));
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
+            MarkHandlerFailed();
+
             // Job was cancelled (deleted while running) — dispose handler scope first
             handlerScope?.Dispose();
             handlerScope = null;
@@ -367,7 +342,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
             _logger.LogInformation("Job {id} was cancelled", job.Id);
-            await monitorTask;
+            monitoring.Dispose();
 
             var cancelNow = _timeProvider.GetUtcNow().UtcDateTime;
             job.CurrentState = State.Deleted;
@@ -402,11 +377,12 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 DurationMs = handlerStopwatch?.Elapsed.TotalMilliseconds,
                 WorkerId = _workerId,
             };
-            var logs = CollectLogs([cancelLog], logCollector, progressCollector).ToArray();
-            _batch.Add(new PendingCompletion(job, cancelCounters, logs));
+            var logs = CollectLogs([cancelLog], logCollector, progressCollector, processingLog).ToArray();
+            await AddCompletionAsync(new PendingCompletion(job, owner, cancelCounters, logs));
         }
         catch (Exception e)
         {
+            MarkHandlerFailed();
             handlerStopwatch?.Stop();
             var errorDurationMs = handlerStopwatch?.Elapsed.TotalMilliseconds;
 
@@ -469,11 +445,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
             _logger.LogError(e, "Error executing job {id}", job.Id);
-            await jobCts.CancelAsync();
-            await monitorTask;
+            monitoring.Dispose();
 
             var (counters, finalLogs) = BuildFinalization(job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
-            var logs = CollectLogs(finalLogs, logCollector, progressCollector).ToArray();
+            var logs = CollectLogs(finalLogs, logCollector, progressCollector, processingLog).ToArray();
 
             // Every caught exception (retry or terminal) feeds the error-grouping inbox — no fingerprint on the
             // hot path (§8.29). Persisted in the same batch completion as the counters/logs.
@@ -482,7 +457,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 ? ErrorOccurrenceFactory.FromException(ErrorSource.Job, e, culprit, job.TraceId, _configuration.ApplicationName, _timeProvider.GetUtcNow().UtcDateTime, _configuration.ApplicationVersion, _configuration.ApplicationEnvironment)
                 : null;
 
-            _batch.Add(new PendingCompletion(job, counters, logs, occurrence));
+            await AddCompletionAsync(new PendingCompletion(job, owner, counters, logs, occurrence));
         }
         finally
         {
@@ -515,42 +490,30 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
     /// waited in the channel past InvisibilityTimeout is still stale the instant the check passes, so
     /// recovery could requeue it — and a second worker start it — while this one walks into the
     /// handler. Stamping a fresh LastKeepAlive under the same row lock as the check buys the full
-    /// InvisibilityTimeout, by which point RunJobMonitor is renewing on its own cadence.
+    /// InvisibilityTimeout, by which point the group's RunningJobMonitor is renewing it.
     /// </para>
     /// </summary>
-    private async Task<bool> MarkWorkerOwnership(Job job, CancellationToken cancellationToken)
+    private async Task<bool> ConfirmOwnership(Job job, DeferredJobLog processingLog, CancellationToken cancellationToken)
     {
-        using var scope = _scopeFactory.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-        var handlerTypeToSet = job.HandlerType;
-        var claimedWorkerId = job.CurrentWorkerId;
-        var claimedKeepAlive = job.LastKeepAlive;
         var now = _timeProvider.GetUtcNow().UtcDateTime;
-        var stillOurs = await context.Set<Job>()
-            .Where(x => x.Id == job.Id)
-            .Where(x => x.CurrentState == State.Processing)
-            .Where(x => x.CurrentWorkerId == claimedWorkerId)
-            .Where(x => x.LastKeepAlive == claimedKeepAlive)
-            .ExecuteUpdateAsync(
-                x => x
-                    .SetProperty(p => p.CurrentWorkerId, _workerId)
-                    .SetProperty(p => p.LastKeepAlive, now)
-                    .SetProperty(p => p.HandlerType, handlerTypeToSet),
-                cancellationToken);
 
-        if (stillOurs == 0)
+        // A job claimed a moment ago cannot have been reclaimed: StaleJobRecovery takes a job back only
+        // once its LastKeepAlive is a whole InvisibilityTimeout old, and the claim stamped it just now.
+        // So the guarded update below, a statement and a commit for every job before its handler runs,
+        // is spent only on a job that sat in the channel long enough for a reclaim to be possible
+        // (rule 6.12). The window is half the timeout, less the time the monitor takes to send the first
+        // keep-alive: the other half is margin for two servers' clocks disagreeing.
+        var waited = job.LastKeepAlive is { } claimedAt ? now - claimedAt : TimeSpan.MaxValue;
+        var freshFor = (_configuration.InvisibilityTimeout / 2) - _configuration.CancellationCheckInterval;
+        if ((waited < TimeSpan.Zero || waited >= freshFor) && !await RenewClaim(job, now, cancellationToken))
         {
             return false;
         }
 
-        // The "Processing" JobLog is written here, not in WarpDispatcher.FetchAndDistribute.
-        // Writing it dispatcher-side would orphan log rows for jobs whose channel-write got
-        // cancelled at shutdown (UnclaimUndelivered reverts the row to Enqueued, but the log
-        // entry would remain). Writing it on receipt by the actual worker keeps the audit
-        // trail truthful and lets us tag the entry with the specific WorkerId, matching
-        // single-worker-mode semantics. Reuses the ownership instant so the log timestamp and the
-        // renewed keep-alive agree.
-        context.Set<JobLog>().Add(new JobLog
+        // Written with the monitor's first flush or the completion, not here on its own (DeferredJobLog).
+        // It is still the receiving worker's row, stamped with the instant it took the job: a job handed
+        // back at shutdown before any worker received it has no such row.
+        processingLog.Set(new JobLog
         {
             JobId = job.Id,
             EventType = "Processing",
@@ -560,41 +523,54 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
             WorkerId = _workerId,
         });
 
-        // Queue-wait SLI (§8.26): always-on meter + (sink-gated) Counter rows batched into the ownership-mark
-        // SaveChanges below — no extra round-trip (§0.2/§6.1). Measured at ownership (the per-worker receipt
-        // point); a sub-second skew vs the group claim is acceptable for a wait SLI.
+        // Queue-wait SLI (§8.26): always-on meter + (sink-gated) increments. The claim that made this job
+        // ours is already committed, so they go straight to the buffer.
         var waitMs = Math.Max(0, (now - job.ScheduleTime).TotalMilliseconds);
         WarpTelemetry.RecordQueueWait(job.Queue, waitMs, _configuration.ApplicationName);
-        Counter[] staged = [];
         if (_configuration.JobMetricsSink is RecordingSink.Database or RecordingSink.Both)
         {
-            // Staged, published after the claim commits. Adding straight to the shared buffer here
-            // would count the sample even when this SaveChanges throws — the claim rolls back, the job
-            // is requeued by StaleJobRecovery, and the next claim records a SECOND sample for the same
-            // wait. The single-worker path stages the same way (§8.33 lockstep).
-            staged = [.. QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes))];
-        }
-
-        await context.SaveChangesAsync(cancellationToken);
-
-        foreach (var counter in staged)
-        {
-            _counterBuffer.Add(counter.Key, counter.Value);
+            foreach (var counter in QueueWaitKeys.Build(job.Queue, waitMs, _configuration.ApplicationName, MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes)))
+            {
+                _counterBuffer.Add(counter.Key, counter.Value);
+            }
         }
 
         return true;
     }
 
+    // The guard for a job that waited: still Processing, still stamped by the claim that handed it to
+    // this worker. The same statement renews the stamp, under the row lock the check holds, which buys
+    // a whole InvisibilityTimeout, by when the group's RunningJobMonitor is renewing it.
+    private async Task<bool> RenewClaim(Job job, DateTime now, CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+        var claimedWorkerId = job.CurrentWorkerId;
+        var claimedKeepAlive = job.LastKeepAlive;
+        var stillOurs = await context.Set<Job>()
+            .Where(x => x.Id == job.Id)
+            .Where(x => x.CurrentState == State.Processing)
+            .Where(x => x.CurrentWorkerId == claimedWorkerId)
+            .Where(x => x.LastKeepAlive == claimedKeepAlive)
+            .ExecuteUpdateAsync(
+                x => x
+                    .SetProperty(p => p.CurrentWorkerId, _workerId)
+                    .SetProperty(p => p.LastKeepAlive, now),
+                cancellationToken);
+
+        return stillOurs > 0;
+    }
+
     private static async Task ExecuteJob(Job job, IServiceProvider provider, CancellationToken cancellationToken)
     {
-        var messageType = Type.GetType(job.Type!) ?? throw new WarpException($"Unknown type {job.Type}");
+        var messageType = JobTypes.Resolve(job.Type!) ?? throw new WarpException($"Unknown type {job.Type}");
         var payload = JsonSerializer.Deserialize(job.Message!, messageType) ?? throw new WarpException($"Unable to deserialize message {job.Message} to type {job.Type}");
 
         var jobContext = provider.GetRequiredService<JobContext>();
 
         if (job.HandlerType != null)
         {
-            var handlerType = Type.GetType(job.HandlerType) ?? throw new WarpException($"Unknown handler type {job.HandlerType}");
+            var handlerType = JobTypes.Resolve(job.HandlerType) ?? throw new WarpException($"Unknown handler type {job.HandlerType}");
             jobContext.HandlerType = handlerType;
             await JobDispatcher.ExecuteHandler(payload, messageType, handlerType, provider, cancellationToken);
 
@@ -605,106 +581,6 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         job.HandlerType = jobHandlerType.AssemblyQualifiedName;
         jobContext.HandlerType = jobHandlerType;
         await JobDispatcher.ExecuteJobHandler(payload, messageType, jobHandlerType, provider, cancellationToken);
-    }
-
-    private async Task RunJobMonitor(Guid jobId, JobLogCollector logCollector, JobProgressCollector progressCollector, CancellationTokenSource jobCts, CancellationToken stoppingToken)
-    {
-        var logFlushInterval = _configuration.LogFlushInterval;
-        var cancellationCheckInterval = _configuration.CancellationCheckInterval;
-        var tickInterval = logFlushInterval < cancellationCheckInterval ? logFlushInterval : cancellationCheckInterval;
-        var timeSinceLastCheck = TimeSpan.Zero;
-
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, jobCts.Token);
-        while (!linked.IsCancellationRequested)
-        {
-            // SuppressThrowing, not try/catch: the monitor is cancelled at the end of EVERY job, so a
-            // throwing Delay cost one first-chance exception per execution — a stack capture on the hot
-            // path, and the whole of BenchmarkDotNet's `// Exceptions: N` count on a healthy run.
-            await Task.Delay(tickInterval, linked.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            if (linked.IsCancellationRequested)
-            {
-                return;
-            }
-
-            timeSinceLastCheck += tickInterval;
-
-            try
-            {
-                var pendingLogs = logCollector.Drain();
-                var pendingProgress = progressCollector.Drain();
-                var doCancellationCheck = timeSinceLastCheck >= cancellationCheckInterval;
-
-                if (pendingLogs.Count == 0 && pendingProgress.Count == 0 && !doCancellationCheck)
-                {
-                    continue;
-                }
-
-                using var s = _scopeFactory.CreateScope();
-                var ctx = s.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-
-                if (doCancellationCheck)
-                {
-                    timeSinceLastCheck = TimeSpan.Zero;
-
-                    var cancellationMode = await ctx.Set<Job>()
-                        .Where(x => x.Id == jobId)
-                        .Select(x => x.CancellationMode)
-                        .FirstOrDefaultAsync(stoppingToken);
-
-                    if (cancellationMode != CancellationMode.None)
-                    {
-                        _logger.LogInformation("Job {jobId} cancellation requested ({mode}), cancelling handler", jobId, cancellationMode);
-
-                        // Flush any pending logs/progress before cancelling — they were already drained from the collectors
-                        if (pendingLogs.Count > 0)
-                        {
-                            ctx.Set<JobLog>().AddRange(pendingLogs);
-                        }
-
-                        if (pendingProgress.Count > 0)
-                        {
-                            ctx.Set<JobLog>().AddRange(pendingProgress);
-                        }
-
-                        if (pendingLogs.Count > 0 || pendingProgress.Count > 0)
-                        {
-                            await ctx.SaveChangesAsync(stoppingToken);
-                        }
-
-                        await jobCts.CancelAsync();
-                        return;
-                    }
-
-                    var now = _timeProvider.GetUtcNow().UtcDateTime;
-                    await ctx.Set<Job>()
-                        .Where(x => x.Id == jobId)
-                        .ExecuteUpdateAsync(x => x.SetProperty(p => p.LastKeepAlive, now), stoppingToken);
-                }
-
-                if (pendingLogs.Count > 0)
-                {
-                    ctx.Set<JobLog>().AddRange(pendingLogs);
-                }
-
-                if (pendingProgress.Count > 0)
-                {
-                    ctx.Set<JobLog>().AddRange(pendingProgress);
-                }
-
-                if (pendingLogs.Count > 0 || pendingProgress.Count > 0)
-                {
-                    await ctx.SaveChangesAsync(stoppingToken);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception e)
-            {
-                _logger.LogWarning(e, "Failed job monitor for {jobId}", jobId);
-            }
-        }
     }
 
     /// <summary>
@@ -723,7 +599,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var hourSuffix = now.ToString("yyyy-MM-dd-HH", CultureInfo.InvariantCulture);
         var tierSuffix = MetricTiers.Suffix(MetricTier.Fine, now, _configuration.FineResolutionMinutes);
-        var counters = new List<Counter>();
+
+        // The state pair, the job's stats keys and a few outcome keys: sized so the job's counters do not
+        // grow the list by doubling.
+        var counters = new List<Counter>((2 * JobStatsKeys.MaxPerDimension) + 8);
         if (state == State.Completed)
         {
             job.ExpireAt = now.Add(_configuration.JobExpirationTimeout);
@@ -845,8 +724,14 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         return (counters, logs.ToList());
     }
 
-    private IEnumerable<JobLog> CollectLogs(IReadOnlyList<JobLog> finalLogs, JobLogCollector collector, JobProgressCollector progressCollector)
+    private IEnumerable<JobLog> CollectLogs(IReadOnlyList<JobLog> finalLogs, JobLogCollector collector, JobProgressCollector progressCollector, DeferredJobLog processingLog)
     {
+        // Still here when the job finished before the monitor's first flush: it goes with the completion.
+        if (processingLog.Take() is { } processing)
+        {
+            yield return processing;
+        }
+
         foreach (var log in finalLogs)
         {
             yield return log;
@@ -864,6 +749,16 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         foreach (var drained in progressCollector.Drain())
         {
             yield return drained;
+        }
+    }
+
+    // Before the handler scope is disposed: what a failed or cancelled attempt staged is discarded on
+    // purpose, so the publishers' unsaved-staged-jobs warning stays quiet for it.
+    private static void MarkHandlerFailed()
+    {
+        if (JobExecutionContext.Current is { } execution)
+        {
+            execution.HandlerFailed = true;
         }
     }
 }

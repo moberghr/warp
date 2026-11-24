@@ -119,6 +119,9 @@ public sealed class WarpJobTableNames
     /// </summary>
     public int LeaseTtlSeconds { get; init; } = 30;
 
+    /// <summary>The <c>JobLog</c> table, for the batched completion statement. Set by <see cref="FromModel"/>.</summary>
+    public WarpJobLogTableNames? JobLog { get; init; }
+
     public static WarpJobTableNames FromModel(IModel model, int leaseTtlSeconds = 30)
     {
         var entity = model.FindEntityType(typeof(Job))
@@ -232,6 +235,7 @@ public sealed class WarpJobTableNames
             BackgroundServiceLeaseExpiresAt = LeaseCol(nameof(BackgroundServiceLease.LeaseExpiresAt)),
             BackgroundServiceLeaseServiceName = LeaseCol(nameof(BackgroundServiceLease.ServiceName)),
             LeaseTtlSeconds = leaseTtlSeconds,
+            JobLog = WarpJobLogTableNames.FromModel(model),
         };
     }
 }

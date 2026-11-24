@@ -49,6 +49,9 @@ public static class SqlServerServiceConfiguration
                 ResolveConnectionString<TContext>(sp),
                 sp.GetRequiredService<ILogger<SqlServerSemaphoreProvider>>()));
 
+        // A server refuses to start on a database below the compatibility level its statements need.
+        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<Microsoft.Extensions.Hosting.IHostedService, SqlServerCompatibilityCheckService<TContext>>());
+
         // Points the Warp server context at the same database as TContext.
         builder.Services.TryAddSingleton<IWarpServerContextConfigurator>(new SqlServerServerContextConfigurator<TContext>());
 

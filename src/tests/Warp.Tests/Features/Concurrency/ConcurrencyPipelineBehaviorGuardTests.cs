@@ -111,13 +111,10 @@ public class ConcurrencyPipelineBehaviorGuardTests
     private static ConcurrencyPipelineBehavior<TRequest, TResponse> Build<TRequest, TResponse>(JobContext ctx, IWarpSemaphoreProvider semaphore)
         where TRequest : IRequest<TResponse>
     {
-        var manager = new Mock<IConcurrencyLimitManager>();
-        manager.Setup(x => x.GetLimit(It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((ConcurrencyLimitInfo?)null);
-
         return new ConcurrencyPipelineBehavior<TRequest, TResponse>(
             ctx,
             semaphore,
-            new ConcurrencyLimitResolver(manager.Object),
+            new ConcurrencyLimitResolver((_, _) => Task.FromResult<int?>(null)),
             TimeProvider.System);
     }
 

@@ -43,6 +43,9 @@ public class ProcessOrderHandler : IJobHandler<ProcessOrderRequest>
         };
         await _batchPublisher.ContinueBatchWith(invoiceJobs, batchId);
 
+        // The handler saves what it stages: the worker does not save a handler's context.
+        await _batchPublisher.SaveChangesAsync(cancellationToken);
+
         _logger.LogInformation("Created batch of {Count} shipments with invoice continuation", shipItems.Count);
     }
 }

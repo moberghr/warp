@@ -69,6 +69,14 @@ await context.Database.EnsureCreatedAsync();
 `EnsureCreatedAsync()` creates the schema from scratch but cannot apply incremental changes. Use EF migrations for production deployments where you need to upgrade Warp versions without dropping the database.
 :::
 
+:::note[SQL Server: compatibility level 130 or higher]
+Warp reads JSON with `OPENJSON`, which needs database compatibility level 130 (SQL Server 2016 and later, and Azure SQL, default to it or higher). A Warp server checks the level when it starts and refuses to start below 130, naming the statement that fixes it. A database restored or upgraded from an older server can keep an older level:
+
+```sql
+ALTER DATABASE [YourDatabase] SET COMPATIBILITY_LEVEL = 130;
+```
+:::
+
 ### 3. Register Warp
 
 ```csharp

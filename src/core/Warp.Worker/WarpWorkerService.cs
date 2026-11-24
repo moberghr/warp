@@ -53,10 +53,24 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     // the handler ran, where the failure arm finalizes the SAME tracked job again
     // (see BeginFinalizingTransactionAsync).
     private readonly List<JobLog> _finalizationLogs = [];
+    private readonly DeferredJobLog _processingLog = new();
+    private readonly RunningJobMonitor _monitor;
     private bool _finalizationAttempted;
 
+    // Resolved from the first job's scope: the announcements are internal to Core, and this class's public
+    // constructor cannot take them.
+    private EnqueueAnnouncements? _announcements;
+    private bool _announcementsResolved;
+
     public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals, WarpCounterBuffer counterBuffer)
+        : this(workerId, serviceScopeFactory, logger, configuration, groupConfiguration, timeProvider, sqlQueries, notificationTransport, signals, counterBuffer, monitor: null)
     {
+    }
+
+    // The host passes the worker group's monitor (rule 6.14); built on its own, a worker watches its jobs alone.
+    internal WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals, WarpCounterBuffer counterBuffer, RunningJobMonitor? monitor)
+    {
+        _monitor = monitor ?? new RunningJobMonitor(serviceScopeFactory, timeProvider, configuration.Value, sqlQueries.RenewRunningJobsAsync, logger);
         _workerId = workerId;
         _serviceScopeFactory = serviceScopeFactory;
         _logger = logger;
@@ -94,6 +108,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             _workerId,
             now,
             limit: 1,
+            watermark: null,
             cancellationToken);
 
         if (claimed.Count == 0)
@@ -102,7 +117,8 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
 
         var job = claimed[0];
-        _logger.LogInformation("Worker {workerId} fetched job {id}", _workerId, job.Id);
+
+        WorkerLog.FetchedJob(_logger, _workerId, job.Id);
 
         // OTel "receive" span — covers post-fetch / pre-handler bookkeeping (the Processing
         // log row + commit). Closes before the consumer span opens, so receive and process
@@ -112,10 +128,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             receiveSpan?.SetTag(WarpTelemetryAttributes.MessagingMessageId, job.Id.ToString());
             receiveSpan?.SetTag(WarpTelemetryAttributes.WarpWorkerId, _workerId.ToString());
 
-            // The claim itself is committed atomically via UPDATE RETURNING. Persist the Processing
-            // log entry in a separate round-trip; failure here leaves the job Processing with
-            // LastKeepAlive set, which is fine — the worker carries on and the log is cosmetic.
-            workerContext.Set<JobLog>().Add(new JobLog
+            // The claim itself is committed atomically via UPDATE RETURNING. The "Processing" log row is
+            // not written here on its own, which cost every job a statement and a commit before its
+            // handler started: it goes with the monitor's first flush or the finalizing write (rule 6.12).
+            _processingLog.Set(new JobLog
             {
                 JobId = job.Id,
                 EventType = "Processing",
@@ -138,9 +154,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 }
             }
 
-            PerfTrace.Mark(PerfTrace.SaveProcessing);
-            await workerContext.SaveChangesAsync(cancellationToken);
-            PerfTrace.Mark(PerfTrace.CommitTransaction1);
+            // The claim is committed, so the queue-wait increments staged above are real.
             CommitStagedCounters();
         }
 
@@ -151,7 +165,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         var logCollector = new JobLogCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
         var progressCollector = new JobProgressCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
         using var jobCts = new CancellationTokenSource();
-        var monitorTask = RunJobMonitor(job.Id, logCollector, progressCollector, jobCts, cancellationToken);
+        using var monitoring = _monitor.Register(JobRunOwner.Of(job, _workerId), logCollector, progressCollector, _processingLog, jobCts, cancellationToken);
 
         var activity = WarpTelemetry.StartJobActivity(job.TraceId ?? job.Id, job.ParentSpanId, job.Queue);
         var jobTypeName = WarpTelemetry.GetShortTypeName(job.Type);
@@ -174,7 +188,8 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         try
         {
             PerfTrace.Mark(PerfTrace.ExecuteHandler);
-            _logger.LogInformation("Worker {workerId} executing job {id}", _workerId, job.Id);
+
+            WorkerLog.ExecutingJob(_logger, _workerId, job.Id);
 
             if (_configuration.EnableHandlerLogging)
             {
@@ -228,11 +243,8 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             await ExecuteJob(job, handlerScope.ServiceProvider, jobCts.Token);
             handlerStopwatch.Stop();
 
-            // Commit handler's work (outbox: published jobs + business entities) before disposing.
-            // Jobs the handler staged are announced by the enqueue interceptor on this save, like any other
-            // TContext save: local workers inline, other servers through the relay (#322).
-            var handlerContext = handlerScope.ServiceProvider.GetRequiredService<TContext>();
-            await handlerContext.SaveChangesAsync(default);
+            // The handler owns its DbContext and commits its own work (rule 6.17): the worker never
+            // resolves or saves it.
 
             // Read metadata and outcome from handler scope before disposing
             JobSpanTags.SetMaxAttempts(activity, jobContext.Metadata);
@@ -269,11 +281,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
 
-            _logger.LogInformation("Worker {workerId} completed job {id}", _workerId, job.Id);
+            WorkerLog.CompletedJob(_logger, _workerId, job.Id);
 
             PerfTrace.Mark(PerfTrace.CancelKeepAlive);
-            await jobCts.CancelAsync();
-            await monitorTask;
+            monitoring.Dispose();
 
             PerfTrace.Mark(PerfTrace.BeginTransaction2);
             await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
@@ -313,6 +324,8 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
+            MarkHandlerFailed();
+
             // Job was cancelled (deleted while running) — dispose handler scope first
             handlerScope?.Dispose();
             handlerScope = null;
@@ -324,7 +337,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             JobLogContext.Current = null;
             JobExecutionContext.Current = null;
             _logger.LogInformation("Job {id} was cancelled", job.Id);
-            await monitorTask;
+            monitoring.Dispose();
 
             var cancelNow = _timeProvider.GetUtcNow().UtcDateTime;
             await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
@@ -370,6 +383,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
         catch (Exception e)
         {
+            MarkHandlerFailed();
             handlerStopwatch?.Stop();
             var errorDurationMs = handlerStopwatch?.Elapsed.TotalMilliseconds;
 
@@ -438,8 +452,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
             // Full stack traces at Error level during dense multi-server test scenarios produce
             // many MB of log output per CI run without adding diagnostic value.
             _logger.LogInformation("Error executing job {id}: {exceptionType}: {message}", job.Id, e.GetType().Name, e.Message);
-            await jobCts.CancelAsync();
-            await monitorTask;
+            monitoring.Dispose();
 
             await using var endTransaction = await BeginFinalizingTransactionAsync(workerContext, job);
             FinalizeJobState(workerContext, job, e, errorDurationMs, outcome, totalDeadlineUtc, incomingAttempts);
@@ -472,10 +485,25 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         // 6.11). Both ids are on the claimed row: no query, no extra statement.
         Guid? settled = job.CurrentState is State.Completed or State.Failed or State.Deleted ? job.Id : null;
         _signals.SignalJobFinalized(job.ParentJobId, settled);
-        await NotificationDispatch.FireAsync(
-            _notificationTransport,
-            [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(job.ParentJobId, settled))],
-            cancellationToken);
+
+        // With push on, the cross-process half goes through the relay, which merges a batch of these into
+        // one notification: published here, it was one round trip per job on this path, and on SQL Server
+        // a fan-out to every listening process per job (~2 statements per job more than one per batch).
+        var finalized = new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(job.ParentJobId, settled));
+        if (!_announcementsResolved)
+        {
+            _announcements = workerScope.ServiceProvider.GetService<EnqueueAnnouncements>();
+            _announcementsResolved = true;
+        }
+
+        if (_announcements is { IsActive: true })
+        {
+            _announcements.Announce([finalized]);
+        }
+        else
+        {
+            await NotificationDispatch.FireAsync(_notificationTransport, [finalized], cancellationToken);
+        }
 
         PerfTrace.Mark(PerfTrace.Done);
         PerfTrace.End();
@@ -485,14 +513,14 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
 
     private static async Task ExecuteJob(Job job, IServiceProvider provider, CancellationToken cancellationToken)
     {
-        var messageType = Type.GetType(job.Type!) ?? throw new WarpException($"Unknown type {job.Type}");
+        var messageType = JobTypes.Resolve(job.Type!) ?? throw new WarpException($"Unknown type {job.Type}");
         var payload = JsonSerializer.Deserialize(job.Message!, messageType) ?? throw new WarpException($"Unable to deserialize message {job.Message} to type {job.Type}");
 
         var jobContext = provider.GetRequiredService<JobContext>();
 
         if (job.HandlerType != null)
         {
-            var handlerType = Type.GetType(job.HandlerType) ?? throw new WarpException($"Unknown handler type {job.HandlerType}");
+            var handlerType = JobTypes.Resolve(job.HandlerType) ?? throw new WarpException($"Unknown handler type {job.HandlerType}");
             jobContext.HandlerType = handlerType;
             await JobDispatcher.ExecuteHandler(payload, messageType, handlerType, provider, cancellationToken);
 
@@ -503,106 +531,6 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         job.HandlerType = jobHandlerType.AssemblyQualifiedName;
         jobContext.HandlerType = jobHandlerType;
         await JobDispatcher.ExecuteJobHandler(payload, messageType, jobHandlerType, provider, cancellationToken);
-    }
-
-    private async Task RunJobMonitor(Guid jobId, JobLogCollector logCollector, JobProgressCollector progressCollector, CancellationTokenSource jobCts, CancellationToken stoppingToken)
-    {
-        var logFlushInterval = _configuration.LogFlushInterval;
-        var cancellationCheckInterval = _configuration.CancellationCheckInterval;
-        var tickInterval = logFlushInterval < cancellationCheckInterval ? logFlushInterval : cancellationCheckInterval;
-        var timeSinceLastCheck = TimeSpan.Zero;
-
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, jobCts.Token);
-        while (!linked.IsCancellationRequested)
-        {
-            // SuppressThrowing, not try/catch: the monitor is cancelled at the end of EVERY job, so a
-            // throwing Delay cost one first-chance exception per execution — a stack capture on the hot
-            // path, and the whole of BenchmarkDotNet's `// Exceptions: N` count on a healthy run.
-            await Task.Delay(tickInterval, linked.Token).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            if (linked.IsCancellationRequested)
-            {
-                return;
-            }
-
-            timeSinceLastCheck += tickInterval;
-
-            try
-            {
-                var pendingLogs = logCollector.Drain();
-                var pendingProgress = progressCollector.Drain();
-                var doCancellationCheck = timeSinceLastCheck >= cancellationCheckInterval;
-
-                if (pendingLogs.Count == 0 && pendingProgress.Count == 0 && !doCancellationCheck)
-                {
-                    continue;
-                }
-
-                using var scope = _serviceScopeFactory.CreateScope();
-                var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-
-                if (doCancellationCheck)
-                {
-                    timeSinceLastCheck = TimeSpan.Zero;
-
-                    var cancellationMode = await context.Set<Job>()
-                        .Where(x => x.Id == jobId)
-                        .Select(x => x.CancellationMode)
-                        .FirstOrDefaultAsync(stoppingToken);
-
-                    if (cancellationMode != CancellationMode.None)
-                    {
-                        _logger.LogInformation("Job {jobId} cancellation requested ({mode}), cancelling handler", jobId, cancellationMode);
-
-                        // Flush any pending logs/progress before cancelling — they were already drained from the collectors
-                        if (pendingLogs.Count > 0)
-                        {
-                            context.Set<JobLog>().AddRange(pendingLogs);
-                        }
-
-                        if (pendingProgress.Count > 0)
-                        {
-                            context.Set<JobLog>().AddRange(pendingProgress);
-                        }
-
-                        if (pendingLogs.Count > 0 || pendingProgress.Count > 0)
-                        {
-                            await context.SaveChangesAsync(stoppingToken);
-                        }
-
-                        await jobCts.CancelAsync();
-                        return;
-                    }
-
-                    var now = _timeProvider.GetUtcNow().UtcDateTime;
-                    await context.Set<Job>()
-                        .Where(x => x.Id == jobId)
-                        .ExecuteUpdateAsync(x => x.SetProperty(p => p.LastKeepAlive, now), stoppingToken);
-                }
-
-                if (pendingLogs.Count > 0)
-                {
-                    context.Set<JobLog>().AddRange(pendingLogs);
-                }
-
-                if (pendingProgress.Count > 0)
-                {
-                    context.Set<JobLog>().AddRange(pendingProgress);
-                }
-
-                if (pendingLogs.Count > 0 || pendingProgress.Count > 0)
-                {
-                    await context.SaveChangesAsync(stoppingToken);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception e)
-            {
-                _logger.LogWarning(e, "Failed job monitor for {jobId}", jobId);
-            }
-        }
     }
 
     // DeleteJob sets CancellationMode on the ROW while this worker holds the entity it claimed, which
@@ -869,6 +797,18 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         _finalizationLogs.Clear();
         _finalizationAttempted = true;
 
+        // Still here when the job finished before the monitor's first flush: it goes with this write.
+        // Not one of _finalizationLogs, so an attempt that fails leaves it in place for the next.
+        if (_processingLog.Take() is { } processing)
+        {
+            workerContext.Set<JobLog>().Add(processing);
+        }
+
+        // No savepoint around the finalizing save (rule 6.12): a save that fails abandons this transaction,
+        // and the arm that finalizes again opens a new one. The SAVEPOINT / RELEASE pair EF adds by
+        // default was two statements on every job.
+        workerContext.Database.AutoSavepointsEnabled = false;
+
         return await workerContext.Database.BeginTransactionAsync(default);
     }
 
@@ -908,6 +848,16 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         foreach (var counter in JobStatsKeys.Build(job, outcomeToken, durationMs, _configuration.ApplicationName, tierSuffix))
         {
             EmitCounter(counter.Key, counter.Value);
+        }
+    }
+
+    // Before the handler scope is disposed: what a failed or cancelled attempt staged is discarded on
+    // purpose, so the publishers' unsaved-staged-jobs warning stays quiet for it.
+    private static void MarkHandlerFailed()
+    {
+        if (JobExecutionContext.Current is { } execution)
+        {
+            execution.HandlerFailed = true;
         }
     }
 }

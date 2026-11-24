@@ -60,38 +60,3 @@ public class DeleteByOutcomeCommand : IJobHandler<DeleteByOutcomeRequest>
         return Task.CompletedTask;
     }
 }
-
-public class StagesUnsavableRowRequest : IJob;
-
-/// <summary>
-/// Stages a row that cannot be saved (a second job with this job's own id) and returns normally, so the
-/// failure happens in the worker's save of the handler's context, not in the handler.
-/// </summary>
-public class StagesUnsavableRowCommand : IJobHandler<StagesUnsavableRowRequest>
-{
-    private readonly TestContext _context;
-    private readonly IJobContext _jobContext;
-
-    public StagesUnsavableRowCommand(TestContext context, IJobContext jobContext)
-    {
-        _context = context;
-        _jobContext = jobContext;
-    }
-
-    public Task HandleAsync(StagesUnsavableRowRequest message, CancellationToken cancellationToken)
-    {
-        _context.Set<Job>().Add(new Job
-        {
-            Id = _jobContext.JobId,
-            Kind = JobKind.Job,
-            CurrentState = State.Enqueued,
-            Type = "duplicate",
-            Message = "{}",
-            CreateTime = DateTime.UtcNow,
-            ScheduleTime = DateTime.UtcNow,
-            Queue = "default",
-        });
-
-        return Task.CompletedTask;
-    }
-}

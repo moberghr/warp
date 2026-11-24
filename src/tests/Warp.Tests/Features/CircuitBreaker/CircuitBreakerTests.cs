@@ -8,6 +8,7 @@ using Shouldly;
 using Warp.Core;
 using Warp.Core.CircuitBreaker;
 using Warp.Core.Concurrency;
+using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
@@ -371,9 +372,8 @@ public abstract class CircuitBreakerTestsBase : IAsyncLifetime
         using var barrier = new Barrier(2);
         var tasks = Enumerable.Range(0, 2).Select(_ => Task.Run(async () =>
         {
-            var store = new CircuitBreakerStore<TestContext>(
-                _fixture.CreateContext(),
-                scopeFactory,
+            var store = new CircuitBreakerStore(
+                new DeferredWarpContext(scopeFactory),
                 Warp.Tests.Helpers.TestTasks.ClassifierFor(_fixture.CreateContext()));
             barrier.SignalAndWait();
             await store.RecordFailureAsync(key, threshold: 100, duration: TimeSpan.FromMinutes(1), now, CancellationToken.None);
@@ -514,9 +514,8 @@ public abstract class CircuitBreakerTestsBase : IAsyncLifetime
         using var barrier = new Barrier(2);
         var tasks = Enumerable.Range(0, 2).Select(_ => Task.Run(async () =>
         {
-            var store = new CircuitBreakerStore<TestContext>(
-                _fixture.CreateContext(),
-                scopeFactory,
+            var store = new CircuitBreakerStore(
+                new DeferredWarpContext(scopeFactory),
                 Warp.Tests.Helpers.TestTasks.ClassifierFor(_fixture.CreateContext()));
             barrier.SignalAndWait();
             return await store.TryBeginProbeAsync(key, now, CancellationToken.None);
@@ -550,7 +549,9 @@ public abstract class CircuitBreakerTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var scopeFactory = CreateStoreScopeFactory();
-        var store = new CircuitBreakerStore<TestContext>(_fixture.CreateContext(), scopeFactory, Warp.Tests.Helpers.TestTasks.ClassifierFor(_fixture.CreateContext()));
+        var store = new CircuitBreakerStore(
+                new DeferredWarpContext(scopeFactory),
+                Warp.Tests.Helpers.TestTasks.ClassifierFor(_fixture.CreateContext()));
 
         var won = await store.TryBeginProbeAsync(key, now, CancellationToken.None);
 
@@ -580,7 +581,9 @@ public abstract class CircuitBreakerTestsBase : IAsyncLifetime
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         var scopeFactory = CreateStoreScopeFactory();
-        var store = new CircuitBreakerStore<TestContext>(_fixture.CreateContext(), scopeFactory, Warp.Tests.Helpers.TestTasks.ClassifierFor(_fixture.CreateContext()));
+        var store = new CircuitBreakerStore(
+                new DeferredWarpContext(scopeFactory),
+                Warp.Tests.Helpers.TestTasks.ClassifierFor(_fixture.CreateContext()));
 
         var won = await store.TryBeginProbeAsync(key, now, CancellationToken.None);
 

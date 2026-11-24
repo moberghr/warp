@@ -209,6 +209,16 @@ public class WarpServerConfiguration : WarpConfiguration
     public TimeSpan? BacklogSampleInterval { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
+    /// The least time between two passes of a server task that a signal wakes (the orchestrator on every
+    /// completion flush, the message router on every enqueued message). Wakes within it are folded into one
+    /// pass at its end, so a continuation or a routed message waits at most this long. Every completion
+    /// flush wakes the orchestrator, about ten times a second per server under load, and each pass pays a
+    /// scope, a lock transaction and its queries. <c>null</c> or zero runs a pass on every wake. Default
+    /// 500 ms.
+    /// </summary>
+    public TimeSpan? ServerTaskSignalInterval { get; set; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
     /// How often <see cref="Services.ServerCleanup{TContext}"/> removes Server rows whose
     /// heartbeat is past <see cref="HealthCheckTimeout"/>. Set to <c>null</c> to disable.
     /// </summary>
@@ -336,12 +346,19 @@ public class WarpServerConfiguration : WarpConfiguration
     public bool UseDispatcher { get; set; }
 
     /// <summary>
-    /// Dispatcher-mode only. Maximum number of job completions each worker buffers in memory
-    /// before flushing them to the database in a single transaction. Defaults to 50.
-    /// Set to 1 to disable batching (every completion commits in its own transaction).
+    /// Dispatcher-mode only. The completions of a worker group's jobs are buffered together and written
+    /// by one flusher per group; the buffer is written once it holds this many, when its oldest entry
+    /// has waited <see cref="CompletionFlushInterval"/>, or as soon as the group has nothing left
+    /// running. Defaults to 50.
     /// <para>
-    /// Trade-off: batching widens the at-least-once duplicate-execution window. If a worker
-    /// crashes with buffered completions that have not yet been flushed, those jobs stay in
+    /// Completions that arrive while a write is in flight wait for the next one, so a buffer can hold
+    /// more than this; it is then written in statements of at most four times this many jobs. Set to 1
+    /// to start a write as soon as anything is buffered (completions arriving during a write are still
+    /// written together afterwards).
+    /// </para>
+    /// <para>
+    /// Trade-off: batching widens the at-least-once duplicate-execution window. If a process
+    /// crashes with buffered completions that have not yet been written, those jobs stay in
     /// <c>Processing</c> and <c>StaleJobRecovery</c> will requeue them per the
     /// <c>[NoRestart]</c> setting. Handlers with side effects should be idempotent or marked
     /// <c>[NoRestart]</c>.
@@ -352,6 +369,8 @@ public class WarpServerConfiguration : WarpConfiguration
     /// <summary>
     /// Dispatcher-mode only. Maximum time a buffered completion may wait before being flushed.
     /// The timer starts when the first entry is added to an empty buffer. Defaults to 100ms.
+    /// The buffer is shared by the workers of a group, and is also flushed as soon as the group has no job
+    /// left running, so a lone job does not wait for this.
     /// <para>
     /// A longer interval batches more completions (lower DB overhead) but widens the duplicate-execution
     /// window on worker crash. See <see cref="CompletionBatchSize"/> for the crash-safety trade-off.

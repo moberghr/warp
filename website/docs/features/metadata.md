@@ -101,6 +101,7 @@ public class ProcessOrderHandler : IJobHandler<ProcessOrder>
     {
         // Child job automatically inherits parent's metadata (e.g., tenant=acme-corp)
         await _publisher.Enqueue(new SendReceipt { OrderId = message.OrderId });
+        await _publisher.SaveChangesAsync(ct);
     }
 }
 ```

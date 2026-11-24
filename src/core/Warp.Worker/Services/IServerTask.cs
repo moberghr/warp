@@ -51,7 +51,8 @@ public interface IServerTask
 
     /// <summary>
     /// When <c>true</c> (default), the host writes a <c>ServerLog</c> row on each
-    /// successful run. Override to <c>false</c> for high-frequency tasks like heartbeat.
+    /// successful run that did work, i.e. returned a message (a run that returns <c>null</c> writes
+    /// none). Override to <c>false</c> for high-frequency tasks like heartbeat.
     /// </summary>
     bool LogOnSuccess => true;
 

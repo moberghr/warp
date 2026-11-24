@@ -2,7 +2,7 @@ namespace Warp.Core.Data.Entities;
 
 public class JobLog
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid Id { get; set; } = WarpId.Next();
 
     public Guid JobId { get; set; }
 

@@ -20,6 +20,19 @@ internal class JobProgressCollector
         _current[name] = percent;
     }
 
+    // A failed save lost these rows: forget that they were drained, so the next drain writes each again
+    // with its current value.
+    public void Forget(IEnumerable<JobLog> rows)
+    {
+        lock (_drainLock)
+        {
+            foreach (var name in rows.Select(x => x.Name).OfType<string>())
+            {
+                _lastDrained.Remove(name);
+            }
+        }
+    }
+
     public List<JobLog> Drain()
     {
         // Hot path: jobs that don't call ReportProgress hit this every monitor tick.

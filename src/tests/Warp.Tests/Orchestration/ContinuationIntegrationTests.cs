@@ -7,6 +7,7 @@ using Warp.Core.Helper;
 using Warp.Core.Retry;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
+using Warp.Worker;
 
 namespace Warp.Tests.Orchestration;
 
@@ -140,5 +141,37 @@ public abstract class ContinuationIntegrationTestsBase : IntegrationTestBase
 
         var child = await ctx.Set<Job>().FirstAsync(j => j.Id == childId, Xunit.TestContext.Current.CancellationToken);
         child.CurrentState.ShouldBe(State.Completed);
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenTheProductionSignalInterval_WhenAContinuationChainRuns_ThenEachHopIsWokenWithoutTheSweep(bool useDispatcher)
+    {
+        // Arrange — the test server normally runs a woken task at once; here the orchestrator holds for the
+        // default interval after each pass (rule 6.18), and its own sweep is minutes away, so only a wake
+        // kept through the hold can activate each link of the chain within the budget.
+        await using var server = await WarpTestServer.StartAsync(Fixture, config =>
+        {
+            config.UseDispatcher = useDispatcher;
+            config.ServerTaskSignalInterval = new WarpServerConfiguration().ServerTaskSignalInterval;
+            config.OrchestrationInterval = TimeSpan.FromMinutes(5);
+        });
+        var publisher = server.CreatePublisher();
+        var grandparentId = await publisher.Enqueue(new UnitRequest());
+        var parentId = await publisher.Enqueue(new UnitRequest(), grandparentId);
+        var childId = await publisher.Enqueue(new UnitRequest(), parentId);
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        await server.WaitForCompletion(TimeSpan.FromSeconds(8));
+
+        // Assert
+        await using var ctx = Fixture.CreateContext();
+        var states = await ctx.Set<Job>()
+            .Where(x => x.Id == grandparentId || x.Id == parentId || x.Id == childId)
+            .Select(x => x.CurrentState)
+            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+        states.ShouldBe([State.Completed, State.Completed, State.Completed]);
     }
 }

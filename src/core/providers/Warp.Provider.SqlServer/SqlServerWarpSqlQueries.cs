@@ -1,3 +1,7 @@
+using System.Data;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Warp.Core.Data.Entities;
@@ -24,7 +28,10 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     private readonly WarpJobTableNames _n;
 
     private readonly string _claimEnqueuedJobsSql;
+    private readonly string _claimEnqueuedJobsFromSql;
     private readonly string _claimEnqueuedMessagesSql;
+    private readonly string _completeJobsSql;
+    private readonly string _renewRunningJobsSql;
     private readonly string _lockStaleProcessingJobsSql;
     private readonly string _lockJobByIdWaitSql;
     private readonly string _lockAllServersSql;
@@ -76,6 +83,24 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
                 [{_n.LastKeepAlive}] = {{1}}
             OUTPUT INSERTED.*";
 
+        // The same claim starting at a watermark (rule 6.16): the index range scan begins at that
+        // schedule time, past the dead entries earlier claims left at the head of the queue.
+        _claimEnqueuedJobsFromSql = $@"
+            WITH candidates AS (
+                SELECT TOP ({{3}}) *
+                FROM {table} WITH (ROWLOCK, UPDLOCK, READPAST)
+                WHERE [{_n.Kind}] = {(int)JobKind.Job}
+                  AND [{_n.CurrentState}] = {(int)State.Enqueued}
+                  AND [{_n.Queue}] = {{2}}
+                  AND [{_n.ScheduleTime}] >= {{4}}
+                ORDER BY [{_n.ScheduleTime}]
+            )
+            UPDATE candidates
+            SET [{_n.CurrentState}] = {(int)State.Processing},
+                [{_n.CurrentWorkerId}] = {{0}},
+                [{_n.LastKeepAlive}] = {{1}}
+            OUTPUT INSERTED.*";
+
         // Atomic batch-claim for the message router. Mirrors _claimEnqueuedJobsSql shape: a CTE
         // picks up to N eligible message rows under ROWLOCK+UPDLOCK+READPAST, the UPDATE flips
         // them to Processing in one round-trip and OUTPUT INSERTED.* streams the post-update
@@ -93,6 +118,74 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             UPDATE candidates
             SET [{_n.CurrentState}] = {(int)State.Processing}
             OUTPUT INSERTED.*";
+
+        // The batched completion (rule 6.13): every finished job of a flush and its log rows in one
+        // batch of two set-based statements, fed by two JSON documents (SQL Server has no array
+        // parameters). The log rows are inserted only for jobs the update found, so a job whose row was
+        // deleted while it ran takes its log rows with it and cannot fail the insert on the foreign key.
+        // OPENJSON needs compatibility level 130, which SQL Server 2016 and Azure SQL have by default.
+        //
+        // LOOP JOIN with the JSON rows on the outer side, and ROWLOCK, are load-bearing: they make the
+        // update one primary-key seek per job. Left to choose, SQL Server scanned the job table to join
+        // it, taking locks on rows that belong to other workers' claims and flushes, and concurrent
+        // flushes deadlocked (the batched-completion tests timed out on it).
+        //
+        // The log insert pins its join order the same way: the JSON rows outermost, parsed once, then a seek
+        // into @done per log row. Written as WHERE l.j IN (SELECT id FROM @done), it was left to the
+        // optimizer, which on CI cached a plan with @done outermost and OPENJSON on the inner side,
+        // unspooled: the whole @logs document was parsed again for every completed job. Harmless at a few
+        // jobs per flush, quadratic once one flusher per group wrote ~60 at a time: ~85,000 pages per
+        // flush, and dispatcher mode fell from ~540 to ~120 jobs/s. Whether that plan was cached depended on
+        // the estimates at compile time, so it showed in some runs and not others.
+        var log = _n.JobLog ?? throw new InvalidOperationException("The JobLog table names were not resolved from the model.");
+        var logTable = string.IsNullOrEmpty(log.Schema) ? $"[{log.Table}]" : $"[{log.Schema}].[{log.Table}]";
+        _completeJobsSql = $@"
+            DECLARE @done TABLE (id uniqueidentifier NOT NULL PRIMARY KEY);
+
+            UPDATE t
+            SET [{_n.CurrentState}] = c.s,
+                [{_n.CancellationMode}] = c.c,
+                [{_n.CurrentWorkerId}] = c.w,
+                [{_n.LastKeepAlive}] = c.k,
+                [{_n.ExpireAt}] = c.e,
+                [{_n.HandlerType}] = c.h,
+                [{_n.ScheduleTime}] = c.d,
+                [{_n.Metadata}] = c.m
+            OUTPUT INSERTED.[{_n.Id}] INTO @done
+            FROM OPENJSON(@jobs) WITH (
+                i uniqueidentifier, s int, c int, w uniqueidentifier, k datetime2, e datetime2,
+                h nvarchar(max), d datetime2, m nvarchar(max),
+                o uniqueidentifier, b uniqueidentifier, a datetime2) AS c
+            INNER LOOP JOIN {table} AS t WITH (ROWLOCK) ON t.[{_n.Id}] = c.i
+            WHERE t.[{_n.CurrentState}] = {(int)State.Processing}
+              AND (t.[{_n.CurrentWorkerId}] = c.o
+                   OR (t.[{_n.CurrentWorkerId}] = c.b AND t.[{_n.LastKeepAlive}] = c.a));
+
+            INSERT INTO {logTable} (
+                [{log.Id}], [{log.JobId}], [{log.EventType}], [{log.Timestamp}], [{log.Level}], [{log.Message}],
+                [{log.Exception}], [{log.DurationMs}], [{log.WorkerId}], [{log.Name}], [{log.Value}])
+            SELECT l.i, l.j, l.e, l.t, l.l, l.m, l.x, l.d, l.w, l.n, l.v
+            FROM OPENJSON(@logs) WITH (
+                i uniqueidentifier, j uniqueidentifier, e nvarchar(max), t datetime2, l nvarchar(max), m nvarchar(max),
+                x nvarchar(max), d float, w uniqueidentifier, n nvarchar(100), v smallint) AS l
+            INNER LOOP JOIN @done AS done ON done.id = l.j;
+
+            SELECT id FROM @done;";
+
+        // One keep-alive for every job a worker group is running (rule 6.14). Only rows still Processing
+        // are touched, so a renewal that races a job's completion writes nothing to the finished row, and
+        // only while still this run's (JobRunOwner), as the completion. LOOP JOIN with the JSON rows outermost and ROWLOCK for the same reason as the completion: one
+        // primary-key seek per job, never a scan that locks other workers' rows.
+        _renewRunningJobsSql = $@"
+            UPDATE t
+            SET [{_n.LastKeepAlive}] = @now,
+                [{_n.CurrentWorkerId}] = beat.w
+            OUTPUT INSERTED.[{_n.Id}] AS [Id], INSERTED.[{_n.CancellationMode}] AS [Mode]
+            FROM OPENJSON(@beats) WITH (i uniqueidentifier, w uniqueidentifier, b uniqueidentifier, a datetime2) AS beat
+            INNER LOOP JOIN {table} AS t WITH (ROWLOCK) ON t.[{_n.Id}] = beat.i
+            WHERE t.[{_n.CurrentState}] = {(int)State.Processing}
+              AND (t.[{_n.CurrentWorkerId}] = beat.w
+                   OR (t.[{_n.CurrentWorkerId}] = beat.b AND t.[{_n.LastKeepAlive}] = beat.a));";
 
         _lockStaleProcessingJobsSql = $@"
             SELECT *
@@ -197,11 +290,12 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         Guid workerId,
         DateTime now,
         int limit,
+        ClaimWatermark? watermark,
         CancellationToken ct)
     {
         if (queues.Length == 1)
         {
-            return await ClaimFromQueueAsync(context, queues[0], workerId, now, limit, ct);
+            return await ClaimFromQueueAsync(context, queues[0], workerId, now, limit, watermark, ct);
         }
 
         var ordered = queues.OrderBy(x => x, StringComparer.Ordinal);
@@ -215,7 +309,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
                 break;
             }
 
-            claimed.AddRange(await ClaimFromQueueAsync(context, queue, workerId, now, remaining, ct));
+            claimed.AddRange(await ClaimFromQueueAsync(context, queue, workerId, now, remaining, watermark, ct));
         }
 
         return claimed;
@@ -441,6 +535,174 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         }
     }
 
+    public async Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct)
+    {
+        if (jobs.Count == 0)
+        {
+            return [];
+        }
+
+        var conn = context.Database.GetDbConnection();
+        var openedHere = conn.State != ConnectionState.Open;
+        if (openedHere)
+        {
+            await conn.OpenAsync(ct);
+        }
+
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = _completeJobsSql;
+            AddJson(cmd, "@jobs", WriteJson([.. jobs.Select((x, i) => (Job: x, Owner: owners[i]))], WriteJob));
+            AddJson(cmd, "@logs", WriteJson(logs, WriteLog));
+
+            var written = new List<Guid>(jobs.Count);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                written.Add(reader.GetGuid(0));
+            }
+
+            return written;
+        }
+        finally
+        {
+            if (openedHere)
+            {
+                await conn.CloseAsync();
+            }
+        }
+    }
+
+    // Through EF's raw-SQL query, not a bare command: it runs on the context's connection and in its
+    // transaction like any other statement, and EF's command interceptors see it, which is how a test
+    // makes one renewal fail.
+    public async Task<IReadOnlyCollection<Guid>> RenewRunningJobsAsync(
+        DbContext context,
+        IReadOnlyList<JobRunOwner> runs,
+        DateTime now,
+        CancellationToken ct)
+    {
+        if (runs.Count == 0)
+        {
+            return [];
+        }
+
+        var json = WriteJson(runs, static (writer, run) =>
+        {
+            writer.WriteString("i", run.JobId);
+            writer.WriteString("w", run.WorkerId);
+            WriteNullable(writer, "b", run.ClaimedBy);
+            WriteNullable(writer, "a", run.ClaimedKeepAlive);
+        });
+
+        var renewed = await context.Database
+            .SqlQueryRaw<RenewedJob>(
+                _renewRunningJobsSql,
+                new SqlParameter("@beats", SqlDbType.NVarChar, -1) { Value = json },
+                new SqlParameter("@now", SqlDbType.DateTime2) { Value = now })
+            .ToListAsync(ct);
+
+        return [.. renewed.Where(x => x.Mode != (int)CancellationMode.None).Select(x => x.Id)];
+    }
+
+    // One row of the keep-alive statement's result.
+    internal sealed class RenewedJob
+    {
+        public Guid Id { get; set; }
+
+        public int Mode { get; set; }
+    }
+
+    private static void AddJson(System.Data.Common.DbCommand cmd, string name, string json)
+    {
+        var parameter = cmd.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.DbType = DbType.String;
+        parameter.Size = -1;
+        parameter.Value = json;
+        cmd.Parameters.Add(parameter);
+    }
+
+    // One short key per column: these documents are read once by the statement above and by nothing else.
+    private static string WriteJson<T>(IReadOnlyList<T> rows, Action<Utf8JsonWriter, T> writeRow)
+    {
+        using var buffer = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartArray();
+            foreach (var row in rows)
+            {
+                writer.WriteStartObject();
+                writeRow(writer, row);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+        }
+
+        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    }
+
+    private static void WriteJob(Utf8JsonWriter writer, (Job Job, JobRunOwner Owner) row)
+    {
+        var (job, owner) = row;
+        writer.WriteString("i", job.Id);
+        writer.WriteNumber("s", (int)job.CurrentState);
+        writer.WriteNumber("c", (int)job.CancellationMode);
+        WriteNullable(writer, "w", job.CurrentWorkerId);
+        WriteNullable(writer, "k", job.LastKeepAlive);
+        WriteNullable(writer, "e", job.ExpireAt);
+        writer.WriteString("h", job.HandlerType);
+        WriteNullable(writer, "d", job.ScheduleTime);
+        writer.WriteString("m", job.Metadata);
+        writer.WriteString("o", owner.WorkerId);
+        WriteNullable(writer, "b", owner.ClaimedBy);
+        WriteNullable(writer, "a", owner.ClaimedKeepAlive);
+    }
+
+    private static void WriteLog(Utf8JsonWriter writer, JobLog log)
+    {
+        writer.WriteString("i", log.Id);
+        writer.WriteString("j", log.JobId);
+        writer.WriteString("e", log.EventType);
+        WriteNullable(writer, "t", log.Timestamp);
+        writer.WriteString("l", log.Level);
+        writer.WriteString("m", log.Message);
+        writer.WriteString("x", log.Exception);
+        if (log.DurationMs is { } duration)
+        {
+            writer.WriteNumber("d", duration);
+        }
+
+        WriteNullable(writer, "w", log.WorkerId);
+        writer.WriteString("n", log.Name);
+        if (log.Value is { } value)
+        {
+            writer.WriteNumber("v", value);
+        }
+    }
+
+    // An absent key reads as NULL in OPENJSON ... WITH, so a null is simply not written.
+    private static void WriteNullable(Utf8JsonWriter writer, string key, Guid? value)
+    {
+        if (value is { } id)
+        {
+            writer.WriteString(key, id);
+        }
+    }
+
+    // Warp's DateTime columns hold UTC (rule 5.12). Written without an offset, so datetime2 takes the
+    // value as it stands.
+    private static void WriteNullable(Utf8JsonWriter writer, string key, DateTime? value)
+    {
+        if (value is { } instant)
+        {
+            writer.WriteString(key, instant.ToString("yyyy-MM-ddTHH:mm:ss.fffffff", System.Globalization.CultureInfo.InvariantCulture));
+        }
+    }
+
     private string QualifiedTable()
     {
         return string.IsNullOrEmpty(_n.Schema)
@@ -536,11 +798,18 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         Guid workerId,
         DateTime now,
         int limit,
+        ClaimWatermark? watermark,
         CancellationToken ct)
     {
-        var claimed = await context.Set<Job>()
-            .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
-            .ToListAsync(ct);
+        var from = watermark?.StartFor(queue);
+        var claimed = from is { } start
+            ? await context.Set<Job>()
+                .FromSqlRaw(_claimEnqueuedJobsFromSql, workerId, now, queue, limit, start)
+                .ToListAsync(ct)
+            : await context.Set<Job>()
+                .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
+                .ToListAsync(ct);
+        watermark?.Record(queue, from, limit, claimed);
 
         // The inner SELECT picks the OLDEST rows, but UPDATE ... OUTPUT gives them back in no
         // particular order (on PostgreSQL, by id). The dispatcher hands a claimed batch to its

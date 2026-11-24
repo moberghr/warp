@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
@@ -104,7 +105,9 @@ internal static class JobStatsKeys
     /// </summary>
     public static List<Counter> Build(Job job, string outcomeToken, double? durationMs, string? application, string tierSuffix)
     {
-        var counters = new List<Counter>();
+        // Sized for the most a job can add (two dimensions, MaxPerDimension each): it was grown by doubling,
+        // which showed as most of this method's time on a worker profile.
+        var counters = new List<Counter>(2 * MaxPerDimension);
 
         AppendDimension(counters, TypeMarker, job.Type, outcomeToken, durationMs, application, tierSuffix);
         AppendDimension(counters, HandlerMarker, job.HandlerType, outcomeToken, durationMs, application, tierSuffix);
@@ -290,6 +293,15 @@ internal static class JobStatsKeys
         return true;
     }
 
+    // Total + history, the duration pair and the two percentile buckets, then the per-application total,
+    // history and duration pair.
+    internal const int MaxPerDimension = 10;
+
+    // Distinct keys cached within one tier bucket; past it keys are built per job, as before.
+    private const int MaxCachedKeys = 10_000;
+
+    private static volatile KeyCache _keyCache = new(string.Empty);
+
     private static void AppendDimension(List<Counter> counters, string dimension, string? rawId, string outcomeToken, double? durationMs, string? application, string tierSuffix)
     {
         if (rawId is null)
@@ -297,22 +309,20 @@ internal static class JobStatsKeys
             return;
         }
 
-        var id = Sanitize(rawId);
-
-        counters.Add(new Counter { Key = Total(dimension, id, outcomeToken), Value = 1 });
-        counters.Add(new Counter { Key = History(dimension, id, outcomeToken, tierSuffix), Value = 1 });
+        counters.Add(new Counter { Key = Key(KeyKind.Total, dimension, rawId, outcomeToken, 0, null, tierSuffix), Value = 1 });
+        counters.Add(new Counter { Key = Key(KeyKind.History, dimension, rawId, outcomeToken, 0, null, tierSuffix), Value = 1 });
 
         if (durationMs.HasValue)
         {
             var durMs = (int)Math.Round(durationMs.Value, MidpointRounding.AwayFromZero);
             var bucket = BucketFor(durMs);
 
-            counters.Add(new Counter { Key = Total(dimension, id, DurationToken), Value = durMs });
-            counters.Add(new Counter { Key = History(dimension, id, DurationToken, tierSuffix), Value = durMs });
+            counters.Add(new Counter { Key = Key(KeyKind.Total, dimension, rawId, DurationToken, 0, null, tierSuffix), Value = durMs });
+            counters.Add(new Counter { Key = Key(KeyKind.History, dimension, rawId, DurationToken, 0, null, tierSuffix), Value = durMs });
 
             // Lifetime pct (dashboard's all-time percentiles) + the tiered pcth bucket (windowed percentiles).
-            counters.Add(new Counter { Key = Pct(dimension, id, bucket), Value = 1 });
-            counters.Add(new Counter { Key = PctHistory(dimension, id, bucket, tierSuffix), Value = 1 });
+            counters.Add(new Counter { Key = Key(KeyKind.Pct, dimension, rawId, string.Empty, bucket, null, tierSuffix), Value = 1 });
+            counters.Add(new Counter { Key = Key(KeyKind.PctHistory, dimension, rawId, string.Empty, bucket, null, tierSuffix), Value = 1 });
         }
 
         if (application is null)
@@ -320,17 +330,73 @@ internal static class JobStatsKeys
             return;
         }
 
-        var app = Sanitize(application);
-
-        counters.Add(new Counter { Key = AppTotal(app, dimension, id, outcomeToken), Value = 1 });
-        counters.Add(new Counter { Key = AppHistory(app, dimension, id, outcomeToken, tierSuffix), Value = 1 });
+        counters.Add(new Counter { Key = Key(KeyKind.AppTotal, dimension, rawId, outcomeToken, 0, application, tierSuffix), Value = 1 });
+        counters.Add(new Counter { Key = Key(KeyKind.AppHistory, dimension, rawId, outcomeToken, 0, application, tierSuffix), Value = 1 });
 
         if (durationMs.HasValue)
         {
             var durMs = (int)Math.Round(durationMs.Value, MidpointRounding.AwayFromZero);
 
-            counters.Add(new Counter { Key = AppTotal(app, dimension, id, DurationToken), Value = durMs });
-            counters.Add(new Counter { Key = AppHistory(app, dimension, id, DurationToken, tierSuffix), Value = durMs });
+            counters.Add(new Counter { Key = Key(KeyKind.AppTotal, dimension, rawId, DurationToken, 0, application, tierSuffix), Value = durMs });
+            counters.Add(new Counter { Key = Key(KeyKind.AppHistory, dimension, rawId, DurationToken, 0, application, tierSuffix), Value = durMs });
         }
+    }
+
+    // One finalized job builds ~20 keys, each embedding the job's assembly-qualified type and handler
+    // names, and they are the same for every job of that type and outcome within a tier bucket: building
+    // them per job was the largest share of the strings the worker allocated. They are cached per tier
+    // bucket (the cache starts over when the bucket changes, so it does not grow with time) and capped.
+    private static string Key(KeyKind kind, string dimension, string rawId, string token, int bucket, string? application, string tierSuffix)
+    {
+        var cache = _keyCache;
+        if (!string.Equals(cache.TierSuffix, tierSuffix, StringComparison.Ordinal))
+        {
+            cache = new KeyCache(tierSuffix);
+            _keyCache = cache;
+        }
+
+        var lookup = new KeyLookup(kind, dimension, rawId, token, bucket, application);
+        if (cache.Keys.TryGetValue(lookup, out var key))
+        {
+            return key;
+        }
+
+        var id = Sanitize(rawId);
+        var app = application is null ? null : Sanitize(application);
+        key = kind switch
+        {
+            KeyKind.Total => Total(dimension, id, token),
+            KeyKind.History => History(dimension, id, token, tierSuffix),
+            KeyKind.Pct => Pct(dimension, id, bucket),
+            KeyKind.PctHistory => PctHistory(dimension, id, bucket, tierSuffix),
+            KeyKind.AppTotal => AppTotal(app!, dimension, id, token),
+            _ => AppHistory(app!, dimension, id, token, tierSuffix),
+        };
+
+        if (cache.Keys.Count < MaxCachedKeys)
+        {
+            cache.Keys.TryAdd(lookup, key);
+        }
+
+        return key;
+    }
+
+    private enum KeyKind
+    {
+        Total = 1,
+        History = 2,
+        Pct = 3,
+        PctHistory = 4,
+        AppTotal = 5,
+        AppHistory = 6,
+    }
+
+    private readonly record struct KeyLookup(KeyKind Kind, string Dimension, string RawId, string Token, int Bucket, string? Application);
+
+    private sealed class KeyCache(string tierSuffix)
+    {
+        public string TierSuffix { get; } = tierSuffix;
+
+        public ConcurrentDictionary<KeyLookup, string> Keys { get; } = new();
     }
 }

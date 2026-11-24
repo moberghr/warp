@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Npgsql;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
@@ -15,10 +16,20 @@ namespace Warp.Provider.PostgreSql;
 public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     where TContext : DbContext
 {
+    // Prepended to the job claims (rule 6.21): within the claim's command, a plan that sorts is priced out.
+    // set_config(..., true) is SET LOCAL without its WARNING: outside an explicit transaction block
+    // PostgreSQL answers SET LOCAL with one ("can only be used in transaction blocks") while still applying
+    // it, which put a line in the server log on every claim, empty polls included. In a DO block because
+    // the claim's command must not return a result set before the claim's own: EF reads the first one.
+    private const string ClaimPlanGuard = "DO $$BEGIN PERFORM set_config('enable_sort', 'off', true); END$$;\n";
+
     private readonly WarpJobTableNames _n;
 
     private readonly string _claimEnqueuedJobsSql;
+    private readonly string _claimEnqueuedJobsFromSql;
     private readonly string _claimEnqueuedMessagesSql;
+    private readonly string _completeJobsSql;
+    private readonly string _renewRunningJobsSql;
     private readonly string _lockStaleProcessingJobsSql;
     private readonly string _lockJobByIdWaitSql;
     private readonly string _lockAllServersSql;
@@ -80,7 +91,16 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         // and replayed by ClaimPlanStabilityTests. A MATERIALIZED CTE also runs once, but it still
         // walks the whole table to join against it. This form is a primary-key lookup whatever the
         // statistics say.
-        _claimEnqueuedJobsSql = $@"
+        //
+        // Both claims start by turning enable_sort off for the transaction (rule 6.21), which lasts for this command
+        // only: its statements run as one implicit transaction. After a burst into a queue the last
+        // analyze saw empty, the planner expects the claim to match one row and reads the dashboard's
+        // (kind, current_state, create_time) index instead: every enqueued row of the kind, filtered
+        // by queue and sorted, to return the limit (CI: 48,020 rows, 22.8 ms and ~22,000 buffers per
+        // claim, against 0.72 ms and ~375), on every claim until autovacuum analyzes the table. With
+        // sorting priced out, the only plan left is the claim index read in schedule order. Same rows,
+        // same order: the setting changes the plan, never the result.
+        _claimEnqueuedJobsSql = ClaimPlanGuard + $@"
             UPDATE {table} AS t
             SET ""{_n.CurrentState}"" = {(int)State.Processing},
                 ""{_n.CurrentWorkerId}"" = {{0}},
@@ -91,6 +111,25 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 WHERE ""{_n.Kind}"" = {(int)JobKind.Job}
                   AND ""{_n.CurrentState}"" = {(int)State.Enqueued}
                   AND ""{_n.Queue}"" = {{2}}
+                ORDER BY ""{_n.ScheduleTime}""
+                LIMIT {{3}}
+                FOR UPDATE SKIP LOCKED))
+            RETURNING t.*";
+
+        // The same claim starting at a watermark (rule 6.16): the index range scan begins at that
+        // schedule time, past the dead entries earlier claims left at the head of the queue.
+        _claimEnqueuedJobsFromSql = ClaimPlanGuard + $@"
+            UPDATE {table} AS t
+            SET ""{_n.CurrentState}"" = {(int)State.Processing},
+                ""{_n.CurrentWorkerId}"" = {{0}},
+                ""{_n.LastKeepAlive}"" = {{1}}
+            WHERE t.""{_n.Id}"" = ANY(ARRAY(
+                SELECT ""{_n.Id}""
+                FROM {table}
+                WHERE ""{_n.Kind}"" = {(int)JobKind.Job}
+                  AND ""{_n.CurrentState}"" = {(int)State.Enqueued}
+                  AND ""{_n.Queue}"" = {{2}}
+                  AND ""{_n.ScheduleTime}"" >= {{4}}
                 ORDER BY ""{_n.ScheduleTime}""
                 LIMIT {{3}}
                 FOR UPDATE SKIP LOCKED))
@@ -117,6 +156,64 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 LIMIT {{0}}
                 FOR NO KEY UPDATE SKIP LOCKED))
             RETURNING t.*";
+
+        // The batched completion (rule 6.13): every finished job of a flush and its log rows in ONE
+        // statement. The arrays are unnested back into rows; the log rows are inserted only for jobs
+        // the update found, so a job whose row was deleted while it ran takes its log rows with it
+        // and cannot fail the insert on the foreign key. A row is updated only while it is still
+        // Processing and still this run's (JobRunOwner): renewed by its worker, or as its claim left it.
+        // A run whose job StaleJobRecovery took back and another claim took is skipped the same way,
+        // instead of finishing the new run's row.
+        var log = _n.JobLog ?? throw new InvalidOperationException("The JobLog table names were not resolved from the model.");
+        var logTable = string.IsNullOrEmpty(log.Schema) ? $"\"{log.Table}\"" : $"\"{log.Schema}\".\"{log.Table}\"";
+        _completeJobsSql = $@"
+            WITH done AS (
+                UPDATE {table} AS t
+                SET ""{_n.CurrentState}"" = c.state,
+                    ""{_n.CancellationMode}"" = c.cancel,
+                    ""{_n.CurrentWorkerId}"" = c.worker,
+                    ""{_n.LastKeepAlive}"" = c.keepalive,
+                    ""{_n.ExpireAt}"" = c.expire,
+                    ""{_n.HandlerType}"" = c.handler,
+                    ""{_n.ScheduleTime}"" = c.schedule,
+                    ""{_n.Metadata}"" = c.metadata
+                FROM unnest(
+                        @ids, @states, @cancels, @workers, @keepalives, @expires, @handlers, @schedules, @metadatas,
+                        @owners, @claimers, @claimed_keepalives)
+                    AS c(id, state, cancel, worker, keepalive, expire, handler, schedule, metadata, owner, claimer, claimed_keepalive)
+                WHERE t.""{_n.Id}"" = c.id
+                  AND t.""{_n.CurrentState}"" = {(int)State.Processing}
+                  AND (t.""{_n.CurrentWorkerId}"" = c.owner
+                       OR (t.""{_n.CurrentWorkerId}"" = c.claimer AND t.""{_n.LastKeepAlive}"" = c.claimed_keepalive))
+                RETURNING t.""{_n.Id}"" AS id
+            ),
+            logged AS (
+            INSERT INTO {logTable} (
+                ""{log.Id}"", ""{log.JobId}"", ""{log.EventType}"", ""{log.Timestamp}"", ""{log.Level}"", ""{log.Message}"",
+                ""{log.Exception}"", ""{log.DurationMs}"", ""{log.WorkerId}"", ""{log.Name}"", ""{log.Value}"")
+            SELECT l.id, l.job_id, l.event_type, l.at, l.level, l.message, l.exception, l.duration_ms, l.worker_id, l.name, l.value
+            FROM unnest(
+                    @log_ids, @log_jobs, @log_events, @log_times, @log_levels, @log_messages,
+                    @log_exceptions, @log_durations, @log_workers, @log_names, @log_values)
+                AS l(id, job_id, event_type, at, level, message, exception, duration_ms, worker_id, name, value)
+            WHERE l.job_id IN (SELECT id FROM done)
+            )
+            SELECT id FROM done";
+
+        // One keep-alive for every job a worker group is running (rule 6.14). Only rows still Processing
+        // are touched, so a renewal that races a job's completion writes nothing to the finished row, and
+        // only while still this run's, as the completion: renewing a row another claim now holds would
+        // keep a dead run's job from recovery and stamp the wrong worker on the live one.
+        _renewRunningJobsSql = $@"
+            UPDATE {table} AS t
+            SET ""{_n.LastKeepAlive}"" = @now,
+                ""{_n.CurrentWorkerId}"" = beat.worker
+            FROM unnest(@ids, @workers, @claimers, @claimed_keepalives) AS beat(id, worker, claimer, claimed_keepalive)
+            WHERE t.""{_n.Id}"" = beat.id
+              AND t.""{_n.CurrentState}"" = {(int)State.Processing}
+              AND (t.""{_n.CurrentWorkerId}"" = beat.worker
+                   OR (t.""{_n.CurrentWorkerId}"" = beat.claimer AND t.""{_n.LastKeepAlive}"" = beat.claimed_keepalive))
+            RETURNING t.""{_n.Id}"" AS ""Id"", t.""{_n.CancellationMode}"" AS ""Mode""";
 
         _lockStaleProcessingJobsSql = $@"
             SELECT * FROM {table}
@@ -247,11 +344,12 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         Guid workerId,
         DateTime now,
         int limit,
+        ClaimWatermark? watermark,
         CancellationToken ct)
     {
         if (queues.Length == 1)
         {
-            return await ClaimFromQueueAsync(context, queues[0], workerId, now, limit, ct);
+            return await ClaimFromQueueAsync(context, queues[0], workerId, now, limit, watermark, ct);
         }
 
         var ordered = queues.OrderBy(x => x, StringComparer.Ordinal);
@@ -265,7 +363,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                 break;
             }
 
-            claimed.AddRange(await ClaimFromQueueAsync(context, queue, workerId, now, remaining, ct));
+            claimed.AddRange(await ClaimFromQueueAsync(context, queue, workerId, now, remaining, watermark, ct));
         }
 
         return claimed;
@@ -438,6 +536,113 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         }
     }
 
+    public async Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct)
+    {
+        if (jobs.Count == 0)
+        {
+            return [];
+        }
+
+        var conn = (NpgsqlConnection)context.Database.GetDbConnection();
+        var openedHere = conn.State != System.Data.ConnectionState.Open;
+        if (openedHere)
+        {
+            await conn.OpenAsync(ct);
+        }
+
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = (NpgsqlTransaction?)context.Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = _completeJobsSql;
+
+            // One array per column, one element per row: the statement unnests them back into rows.
+            cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("ids", [.. jobs.Select(x => x.Id)]));
+            cmd.Parameters.Add(new NpgsqlParameter<int[]>("states", [.. jobs.Select(x => (int)x.CurrentState)]));
+            cmd.Parameters.Add(new NpgsqlParameter<int[]>("cancels", [.. jobs.Select(x => (int)x.CancellationMode)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid?[]>("workers", [.. jobs.Select(x => x.CurrentWorkerId)]));
+            cmd.Parameters.Add(Timestamps("keepalives", jobs.Select(x => x.LastKeepAlive)));
+            cmd.Parameters.Add(Timestamps("expires", jobs.Select(x => x.ExpireAt)));
+            cmd.Parameters.Add(new NpgsqlParameter<string?[]>("handlers", [.. jobs.Select(x => x.HandlerType)]));
+            cmd.Parameters.Add(Timestamps("schedules", jobs.Select(x => (DateTime?)x.ScheduleTime)));
+            cmd.Parameters.Add(new NpgsqlParameter<string?[]>("metadatas", [.. jobs.Select(x => x.Metadata)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("owners", [.. owners.Select(x => x.WorkerId)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid?[]>("claimers", [.. owners.Select(x => x.ClaimedBy)]));
+            cmd.Parameters.Add(Timestamps("claimed_keepalives", owners.Select(x => x.ClaimedKeepAlive)));
+
+            cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("log_ids", [.. logs.Select(x => x.Id)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("log_jobs", [.. logs.Select(x => x.JobId)]));
+            cmd.Parameters.Add(new NpgsqlParameter<string[]>("log_events", [.. logs.Select(x => x.EventType)]));
+            cmd.Parameters.Add(Timestamps("log_times", logs.Select(x => (DateTime?)x.Timestamp)));
+            cmd.Parameters.Add(new NpgsqlParameter<string[]>("log_levels", [.. logs.Select(x => x.Level)]));
+            cmd.Parameters.Add(new NpgsqlParameter<string[]>("log_messages", [.. logs.Select(x => x.Message)]));
+            cmd.Parameters.Add(new NpgsqlParameter<string?[]>("log_exceptions", [.. logs.Select(x => x.Exception)]));
+            cmd.Parameters.Add(new NpgsqlParameter<double?[]>("log_durations", [.. logs.Select(x => x.DurationMs)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid?[]>("log_workers", [.. logs.Select(x => x.WorkerId)]));
+            cmd.Parameters.Add(new NpgsqlParameter<string?[]>("log_names", [.. logs.Select(x => x.Name)]));
+            cmd.Parameters.Add(new NpgsqlParameter<short?[]>("log_values", [.. logs.Select(x => x.Value)]));
+
+            var written = new List<Guid>(jobs.Count);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                written.Add(reader.GetGuid(0));
+            }
+
+            return written;
+        }
+        finally
+        {
+            if (openedHere)
+            {
+                await conn.CloseAsync();
+            }
+        }
+    }
+
+    // Through EF's raw-SQL query, not a bare command: it runs on the context's connection and in its
+    // transaction like any other statement, and EF's command interceptors see it, which is how a test
+    // makes one renewal fail.
+    public async Task<IReadOnlyCollection<Guid>> RenewRunningJobsAsync(
+        DbContext context,
+        IReadOnlyList<JobRunOwner> runs,
+        DateTime now,
+        CancellationToken ct)
+    {
+        if (runs.Count == 0)
+        {
+            return [];
+        }
+
+        var renewed = await context.Database
+            .SqlQueryRaw<RenewedJob>(
+                _renewRunningJobsSql,
+                new NpgsqlParameter<Guid[]>("ids", [.. runs.Select(x => x.JobId)]),
+                new NpgsqlParameter<Guid[]>("workers", [.. runs.Select(x => x.WorkerId)]),
+                new NpgsqlParameter<Guid?[]>("claimers", [.. runs.Select(x => x.ClaimedBy)]),
+                Timestamps("claimed_keepalives", runs.Select(x => x.ClaimedKeepAlive)),
+                new NpgsqlParameter<DateTime>("now", DateTime.SpecifyKind(now, DateTimeKind.Utc)))
+            .ToListAsync(ct);
+
+        return [.. renewed.Where(x => x.Mode != (int)CancellationMode.None).Select(x => x.Id)];
+    }
+
+    // One row of the keep-alive statement's result.
+    internal sealed class RenewedJob
+    {
+        public Guid Id { get; set; }
+
+        public int Mode { get; set; }
+    }
+
+    // Warp's DateTime columns are timestamptz holding UTC (rule 5.12). The kind is stated outright: the
+    // values come from the clock or back out of those columns, and Npgsql rejects an unspecified kind.
+    private static NpgsqlParameter<DateTime?[]> Timestamps(string name, IEnumerable<DateTime?> values) =>
+        new(name, [.. values.Select(x => x is { } value ? DateTime.SpecifyKind(value, DateTimeKind.Utc) : (DateTime?)null)])
+        {
+            DataTypeName = "timestamp with time zone[]",
+        };
+
     public async Task<(bool LockHeld, T? Result)> RunUnderTransactionLockAsync<T>(
         DbContext context,
         string lockKey,
@@ -579,11 +784,18 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         Guid workerId,
         DateTime now,
         int limit,
+        ClaimWatermark? watermark,
         CancellationToken ct)
     {
-        var claimed = await context.Set<Job>()
-            .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
-            .ToListAsync(ct);
+        var from = watermark?.StartFor(queue);
+        var claimed = from is { } start
+            ? await context.Set<Job>()
+                .FromSqlRaw(_claimEnqueuedJobsFromSql, workerId, now, queue, limit, start)
+                .ToListAsync(ct)
+            : await context.Set<Job>()
+                .FromSqlRaw(_claimEnqueuedJobsSql, workerId, now, queue, limit)
+                .ToListAsync(ct);
+        watermark?.Record(queue, from, limit, claimed);
 
         // The inner SELECT picks the OLDEST rows, but UPDATE ... RETURNING gives them back in no
         // particular order (on PostgreSQL, by id). The dispatcher hands a claimed batch to its

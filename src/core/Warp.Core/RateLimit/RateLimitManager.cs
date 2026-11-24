@@ -6,8 +6,6 @@ namespace Warp.Core.RateLimit;
 public class RateLimitManager<TContext> : IRateLimitManager
     where TContext : DbContext
 {
-    private const int MaxNameLength = 200;
-
     private readonly TContext _context;
     private readonly TimeProvider _timeProvider;
 
@@ -19,7 +17,7 @@ public class RateLimitManager<TContext> : IRateLimitManager
 
     public async Task AddOrUpdateLimit(string name, int count, int windowSeconds, CancellationToken ct = default)
     {
-        ValidateName(name);
+        RateLimitNames.Validate(name);
         if (count < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(count), count, "Count must be at least 1.");
@@ -65,7 +63,7 @@ public class RateLimitManager<TContext> : IRateLimitManager
 
     public async Task<bool> RemoveLimit(string name, CancellationToken ct = default)
     {
-        ValidateName(name);
+        RateLimitNames.Validate(name);
 
         var existing = await _context.Set<RateLimitOverride>()
             .Where(x => x.Name == name)
@@ -84,7 +82,7 @@ public class RateLimitManager<TContext> : IRateLimitManager
 
     public async Task<RateLimitInfo?> GetLimit(string name, CancellationToken ct = default)
     {
-        ValidateName(name);
+        RateLimitNames.Validate(name);
 
         return await _context.Set<RateLimitOverride>()
             .AsNoTracking()
@@ -102,18 +100,5 @@ public class RateLimitManager<TContext> : IRateLimitManager
             .Select(x =>
                 new RateLimitInfo(x.Name, x.Count, x.WindowSeconds, x.UpdatedAt))
             .ToListAsync(ct);
-    }
-
-    private static void ValidateName(string name)
-    {
-        if (string.IsNullOrEmpty(name))
-        {
-            throw new ArgumentException("Name must be non-empty.", nameof(name));
-        }
-
-        if (name.Length > MaxNameLength)
-        {
-            throw new ArgumentException($"Name must be at most {MaxNameLength} characters.", nameof(name));
-        }
     }
 }

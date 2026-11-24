@@ -1,9 +1,11 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Services;
@@ -11,11 +13,13 @@ using Warp.Core.Services;
 namespace Warp.Worker;
 
 /// <summary>
-/// A single job completion waiting to be persisted: the mutated <see cref="Job"/> entity,
+/// A single job completion waiting to be persisted: the mutated <see cref="Job"/> entity, the run that
+/// finished it (the write is skipped once the row is no longer that run's, <see cref="JobRunOwner"/>),
 /// the counters to insert, and the log entries to insert (final state log + any drained handler logs).
 /// </summary>
 internal readonly record struct PendingCompletion(
     Job Job,
+    JobRunOwner Owner,
     IReadOnlyList<Counter> Counters,
     IReadOnlyList<JobLog> Logs,
     ErrorOccurrence? Occurrence = null);
@@ -27,9 +31,11 @@ internal readonly record struct PendingCompletion(
 internal readonly record struct FlushedJobs(IReadOnlyCollection<Guid> Parents, IReadOnlyCollection<Guid> Settled);
 
 /// <summary>
-/// Per-worker buffer of pending completions for dispatcher mode. Flushes all buffered entries
-/// in a single transaction when the size or time threshold is reached, when the worker is about
-/// to suspend for more work, or on shutdown.
+/// The buffer of pending completions of one dispatcher worker GROUP (rule 6.13). Flushes all buffered
+/// entries in a single transaction when the size or time threshold is reached, when the group has
+/// nothing left running, or on shutdown. One per group, not per worker: a worker's own buffer was
+/// flushed every time that worker found the channel empty for a moment, which at ten workers was a
+/// transaction for every two jobs.
 /// <para>
 /// On <see cref="DbUpdateException"/> (concurrency mismatch, phantom row, etc.) the flush
 /// recursively splits the batch in half to isolate the failing entries. A single-entry partition
@@ -39,6 +45,17 @@ internal readonly record struct FlushedJobs(IReadOnlyCollection<Guid> Parents, I
 /// </summary>
 internal sealed class CompletionBatch
 {
+    /// <summary>
+    /// Writes finished jobs, each guarded by the run at the same index, and returns the ids it wrote.
+    /// Supplied by the provider (<c>IWarpSqlQueries.CompleteJobsAsync</c>).
+    /// </summary>
+    public delegate Task<IReadOnlyCollection<Guid>> CompleteJobs(
+        DbContext context,
+        IReadOnlyList<Job> jobs,
+        IReadOnlyList<JobRunOwner> owners,
+        IReadOnlyList<JobLog> logs,
+        CancellationToken cancellationToken);
+
     // Transient-deadlock retry budget for the whole batch flush. Three attempts with a short
     // exponential backoff is enough to clear a SQL Server 1205 / PG 40P01 storm in practice
     // without masking real defects (a deadlock that survives 3 retries indicates a structural
@@ -60,9 +77,14 @@ internal sealed class CompletionBatch
     private readonly ILogger _logger;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
     private readonly WarpCounterBuffer _counterBuffer;
+    private readonly CompleteJobs _completeJobs;
     private readonly int _batchSize;
     private readonly TimeSpan _flushInterval;
     private DateTimeOffset? _firstEntryTimestamp;
+
+    // Numbers each buffer: a drain ends the current one. A flush timer is started for one buffer and
+    // must not flush a later one, which may be only a moment old.
+    private long _generation;
 
     public CompletionBatch(
         IServiceScopeFactory scopeFactory,
@@ -71,9 +93,11 @@ internal sealed class CompletionBatch
         IDatabaseExceptionClassifier exceptionClassifier,
         int batchSize,
         TimeSpan flushInterval,
-        WarpCounterBuffer counterBuffer)
+        WarpCounterBuffer counterBuffer,
+        CompleteJobs completeJobs)
     {
         _counterBuffer = counterBuffer;
+        _completeJobs = completeJobs;
         _scopeFactory = scopeFactory;
         _timeProvider = timeProvider;
         _logger = logger;
@@ -91,16 +115,56 @@ internal sealed class CompletionBatch
         _firstEntryTimestamp is { } first
         && _timeProvider.GetUtcNow() - first >= _flushInterval;
 
-    public void Add(PendingCompletion entry)
+    /// <summary>
+    /// Buffers a completion. Returns <c>true</c> when it is the first of a new buffer, which is when the
+    /// caller starts the clock on <see cref="FlushInterval"/>.
+    /// </summary>
+    public bool Add(PendingCompletion entry) => Add(entry, out _);
+
+    /// <summary>
+    /// Buffers a completion. Returns <c>true</c> when it is the first of a new buffer, with that buffer's
+    /// <paramref name="generation"/>: a flush timer started for it asks <see cref="Holds"/> before flushing.
+    /// </summary>
+    public bool Add(PendingCompletion entry, out long generation)
     {
         lock (_gate)
         {
-            if (_buffer.Count == 0)
+            var first = _buffer.Count == 0;
+            if (first)
             {
                 _firstEntryTimestamp = _timeProvider.GetUtcNow();
             }
 
             _buffer.Add(entry);
+            generation = _generation;
+
+            return first;
+        }
+    }
+
+    /// <summary>
+    /// Whether the buffer numbered <paramref name="generation"/> is still waiting to be flushed: it was
+    /// not drained since, by a full buffer, an idle group or another timer.
+    /// </summary>
+    public bool Holds(long generation)
+    {
+        lock (_gate)
+        {
+            return _generation == generation && _buffer.Count > 0;
+        }
+    }
+
+    public TimeSpan FlushInterval => _flushInterval;
+
+    // The number of the buffer currently filling.
+    internal long Generation
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _generation;
+            }
         }
     }
 
@@ -117,6 +181,7 @@ internal sealed class CompletionBatch
             var pending = _buffer.ToArray();
             _buffer.Clear();
             _firstEntryTimestamp = null;
+            _generation++;
 
             return pending;
         }
@@ -134,7 +199,11 @@ internal sealed class CompletionBatch
     /// shutdown still commits any in-flight batch.
     /// </para>
     /// </summary>
-    public async Task<FlushedJobs> FlushAsync()
+    public Task<FlushedJobs> FlushAsync() => FlushAsync(CancellationToken.None);
+
+    // Written in statements of at most four buffers' worth: completions keep arriving while a flush is in
+    // flight, so a buffer can hold more than its size, and one statement for all of them was unbounded.
+    public async Task<FlushedJobs> FlushAsync(CancellationToken cancellationToken)
     {
         var pending = Drain();
         if (pending.Length == 0)
@@ -142,7 +211,11 @@ internal sealed class CompletionBatch
             return new FlushedJobs([], []);
         }
 
-        await FlushRangeAsync(pending, 0, pending.Length, CancellationToken.None);
+        var perStatement = 4 * _batchSize;
+        for (var start = 0; start < pending.Length; start += perStatement)
+        {
+            await FlushRangeAsync(pending, start, Math.Min(perStatement, pending.Length - start), cancellationToken);
+        }
 
         return new FlushedJobs((IReadOnlyCollection<Guid>?)ParentsOf(pending) ?? [], SettledOf(pending));
     }
@@ -195,53 +268,88 @@ internal sealed class CompletionBatch
                 using var scope = _scopeFactory.CreateScope();
                 var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
 
-                await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-
-                for (var i = start; i < start + count; i++)
+                // The jobs and their log rows go in one set-based statement (rule 6.13), not through the
+                // change tracker, which writes one UPDATE and one INSERT per row. Only an error-grouping
+                // inbox row (§8.29), which a failed attempt carries, is still saved by EF, in the same
+                // transaction.
+                var finished = new PendingCompletion[count];
+                var logs = new List<JobLog>(count * 2);
+                var occurrences = false;
+                for (var i = 0; i < count; i++)
                 {
-                    var entry = entries[i];
-                    MarkFinalizedColumns(context, entry.Job);
+                    var entry = entries[start + i];
+                    finished[i] = entry;
+                    logs.AddRange(entry.Logs);
 
-                    if (entry.Logs.Count > 0)
-                    {
-                        context.Set<JobLog>().AddRange(entry.Logs);
-                    }
-
-                    // Error-grouping inbox row for a failed attempt (§8.29) — written in the same completion
-                    // transaction, off the hot path. The single-worker path does the equivalent in FinalizeJobState.
                     if (entry.Occurrence is { } occurrence)
                     {
                         context.Set<ErrorOccurrence>().Add(occurrence);
+                        occurrences = true;
                     }
                 }
 
-                await context.SaveChangesAsync(cancellationToken);
+                // No savepoint around the save (rule 6.12): a failure abandons this transaction and the
+                // split below starts new ones.
+                context.Database.AutoSavepointsEnabled = false;
+                await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
+
+                // In id order, so two statements that ever touch the same rows lock them the same way round.
+                Array.Sort(finished, static (x, y) => x.Job.Id.CompareTo(y.Job.Id));
+                var written = await _completeJobs(context, [.. finished.Select(x => x.Job)], [.. finished.Select(x => x.Owner)], logs, cancellationToken);
+                if (occurrences)
+                {
+                    await context.SaveChangesAsync(cancellationToken);
+                }
+
                 await transaction.CommitAsync(cancellationToken);
 
                 // Only once the batch has COMMITTED do its increments become real, so a rolled-back or
-                // retried batch cannot leave them counted.
+                // retried batch cannot leave them counted. A job the statement skipped, because its row
+                // was deleted while it ran or is no longer this run's, counts nothing either.
+                var writtenIds = written.Count == count ? null : written.ToHashSet();
+
+                // Summed here first, then added to the process-wide buffer once per key: every job of a flush
+                // increments the same ~20 keys, and adding each job's increments one by one contended on the
+                // buffer's per-key locks with every other worker of the process.
+                var totals = new Dictionary<string, long>(StringComparer.Ordinal);
                 for (var i = start; i < start + count; i++)
                 {
+                    if (writtenIds != null && !writtenIds.Contains(entries[i].Job.Id))
+                    {
+                        _logger.LogInformation(
+                            "Discarding the completion of job {jobId}: its row no longer exists, or was taken back and claimed again while this run held it",
+                            entries[i].Job.Id);
+
+                        continue;
+                    }
+
                     foreach (var counter in entries[i].Counters)
                     {
-                        _counterBuffer.Add(counter.Key, counter.Value);
+                        totals[counter.Key] = totals.GetValueOrDefault(counter.Key) + counter.Value;
                     }
+                }
+
+                foreach (var (key, value) in totals)
+                {
+                    _counterBuffer.Add(key, value);
                 }
 
                 return;
             }
-            catch (Exception ex) when (attempt < MaxDeadlockRetries && _exceptionClassifier.IsTransientDeadlock(ex))
+            catch (Exception ex) when (attempt < MaxDeadlockRetries && (_exceptionClassifier.IsTransientDeadlock(ex) || ex is DbException { IsTransient: true }))
             {
+                // A command timeout or a dropped connection is transient too. The completion is a raw command,
+                // so it surfaces as a DbException, not wrapped in EF's DbUpdateException as a SaveChanges was.
                 _logger.LogWarning(
                     ex,
-                    "Completion flush hit a transient deadlock (attempt {attempt}/{max}); retrying after backoff",
+                    "Completion flush hit a transient failure (attempt {attempt}/{max}); retrying after backoff",
                     attempt + 1,
                     MaxDeadlockRetries);
 
                 await Task.Delay(TimeSpan.FromMilliseconds(DeadlockRetryBaseDelayMs * (1 << attempt)), cancellationToken);
                 attempt++;
             }
-            catch (DbUpdateException ex)
+            catch (Exception ex) when (ex is DbUpdateException or DbException)
             {
                 if (count == 1)
                 {
@@ -259,40 +367,5 @@ internal sealed class CompletionBatch
                 return;
             }
         }
-    }
-
-    /// <summary>
-    /// Attaches a finalized job and marks ONLY the columns finalization can change.
-    /// <para>
-    /// The job arrives on a fresh scope's context with no original values to diff against, so
-    /// <c>Entry(job).State = Modified</c> — what this replaces — marked every one of the 21 mapped columns
-    /// dirty and EF emitted an UPDATE writing all 20 non-key ones, fifty per flush transaction. That rewrote
-    /// <c>Message</c> (the unbounded JSON payload) and twelve other columns that finalization never
-    /// touches, on every completed job: WAL, TOAST and row-width cost paid for values identical to what
-    /// was already stored.
-    /// </para>
-    /// <para>
-    /// The marked set is exactly what <c>WarpDispatcherWorker.BuildFinalization</c> and its three
-    /// outcome arms assign. It must move in lockstep with them: a new field assigned at finalization and
-    /// not listed here is silently never persisted, which is the quiet direction of this bug.
-    /// </para>
-    /// </summary>
-    private static void MarkFinalizedColumns(DbContext context, Job job)
-    {
-        var entry = context.Entry(job);
-
-        if (entry.State == EntityState.Detached)
-        {
-            context.Attach(job);
-        }
-
-        entry.Property(x => x.CurrentState).IsModified = true;
-        entry.Property(x => x.CancellationMode).IsModified = true;
-        entry.Property(x => x.CurrentWorkerId).IsModified = true;
-        entry.Property(x => x.LastKeepAlive).IsModified = true;
-        entry.Property(x => x.ExpireAt).IsModified = true;
-        entry.Property(x => x.HandlerType).IsModified = true;
-        entry.Property(x => x.ScheduleTime).IsModified = true;
-        entry.Property(x => x.Metadata).IsModified = true;
     }
 }

@@ -17,6 +17,35 @@ namespace Warp.Tests.Worker;
 public class DispatcherWorkerAvailabilityTests
 {
     [TimedFact]
+    public async Task WaitForFreeSlotAsync_AFullGroupFreesASlot_WakesTheDispatcher()
+    {
+        // The dispatcher of a full group waits for a freed slot instead of polling (rule 6.19).
+        using var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
+        availability.Reserve(1);
+        var waiting = availability.WaitForFreeSlotAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        availability.Release();
+
+        // Assert
+        (await waiting).ShouldBeTrue("freeing a slot in a full group did not wake the dispatcher");
+    }
+
+    [TimedFact]
+    public async Task WaitForFreeSlotAsync_AGroupThatWasNotFullFreesASlot_DoesNotSignal()
+    {
+        // Only the step from no free slot to one wakes: the dispatcher only waits when the group is full.
+        using var availability = new DispatcherWorkerAvailability(workerCount: 2, prefetchCount: 0);
+        availability.Reserve(1);
+
+        // Act
+        availability.Release();
+
+        // Assert
+        (await availability.WaitForFreeSlotAsync(TimeSpan.Zero, Xunit.TestContext.Current.CancellationToken)).ShouldBeFalse();
+    }
+
+    [TimedFact]
     public void Available_WithNoPrefetch_IsWorkerCount()
     {
         var availability = new DispatcherWorkerAvailability(workerCount: 3, prefetchCount: 0);

@@ -91,7 +91,7 @@ internal sealed class WebhookDispatcher<TContext> : IWebhookDispatcher
 
         var delivery = new WebhookDelivery
         {
-            Id = Guid.NewGuid(),
+            Id = Warp.Core.Data.WarpId.Next(),
             EventType = Clamp(send.EventType, WebhookColumnCaps.EventType),
             EventId = Clamp(string.IsNullOrWhiteSpace(send.EventId) ? Guid.NewGuid().ToString() : send.EventId, WebhookColumnCaps.EventId),
             Url = send.Url,

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Warp.Core.Data;
 using Warp.Core.Data.Converters;
 using Warp.Core.Entities;
 
@@ -70,6 +71,9 @@ public static class WarpModelExtensions
         modelBuilder.ReclaimWarpStorage();
         AddWarpEntities(modelBuilder, schema);
         modelBuilder.PinWarpStorageTypes();
+
+        // Last: the filters name columns, so they are written once the names are settled (rule 6.15).
+        WarpPartialIndexes.Apply(modelBuilder);
 
         return modelBuilder;
     }
