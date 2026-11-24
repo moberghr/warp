@@ -16,16 +16,15 @@ namespace Warp.Provider.SqlServer;
 /// hands each message to ONE receiver, so the single shared queue this used to have woke one random
 /// process per notification, and a wake that landed on a process without workers (a publisher or
 /// dashboard host) was lost. Queues left by a process that died without dropping them are removed by the
-/// other listeners once their oldest message is older than <see cref="StaleQueueAge"/>: a live listener
-/// drains its queue continuously, so only a dead one's backs up. <see cref="ListenAsync"/> holds a
+/// other listeners once their oldest message is older than <see cref="StaleQueueAge"/> AND their owner is
+/// gone: a listener holds a session lock named after its queue on its listening connection, so a queue
+/// whose lock is free has no process behind it, while one that is merely paused or behind keeps its queue
+/// and the wakes waiting in it. <see cref="ListenAsync"/> holds a
 /// dedicated long-lived connection and loops <c>WAITFOR (RECEIVE ...)</c> with a 30s timeout heartbeat,
 /// ending each conversation it receives in the same batch.
 /// </summary>
 public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 {
-    // Stale queues are swept when a listener starts and then every this many 30 s heartbeats (about 5 min).
-    private const int SweepEveryHeartbeats = 10;
-
     private readonly string _connectionString;
     private readonly string _channelName;
     private readonly string _messageTypeValue;
@@ -47,6 +46,12 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 
     /// <summary>A listener queue whose oldest message has waited this long belongs to a dead process.</summary>
     internal TimeSpan StaleQueueAge { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// How often a listener sweeps stale queues after its first sweep at start. Wall-clock: counted in loop
+    /// iterations it ran every ten notifications under load, since each received batch ends an iteration.
+    /// </summary>
+    internal TimeSpan SweepInterval { get; init; } = TimeSpan.FromMinutes(1);
 
     /// <summary>This process's listener service, for tests.</summary>
     internal string ListenerServiceName => _ownServiceValue;
@@ -149,9 +154,17 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
         await conn.OpenAsync(ct);
 
         // This process's own queue and service, so every publish reaches it (see the class summary), and
-        // the queues of dead processes swept before it starts listening.
+        // the queues of dead processes swept before it starts listening. The lock comes first and lives as
+        // long as this connection: it is what tells a peer's sweep that the queue has a live owner.
+        await using (var own = new SqlCommand("EXEC sp_getapplock @Resource = @queue, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0;", conn))
+        {
+            own.Parameters.Add("@queue", System.Data.SqlDbType.NVarChar, 255).Value = _ownQueueValue;
+            await own.ExecuteNonQueryAsync(ct);
+        }
+
         await ExecuteAsync(conn, CreateOwnQueueSql(), ct);
         await SweepStaleQueuesAsync(conn, ct);
+        var lastSweep = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Service Broker setup is the slow part and this process's queue now exists. From this point a
         // publish reaches it and the WAITFOR loop is the listener. Tests use this signal to gate the first
@@ -192,7 +205,6 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
 
                 SELECT type_name, body FROM @received;";
 
-            var heartbeats = 0;
             while (!ct.IsCancellationRequested)
             {
                 var batch = new List<Notification>();
@@ -232,9 +244,10 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
                     yield return notification;
                 }
 
-                if (++heartbeats % SweepEveryHeartbeats == 0)
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(lastSweep) >= SweepInterval)
                 {
                     await SweepStaleQueuesAsync(conn, ct);
+                    lastSweep = System.Diagnostics.Stopwatch.GetTimestamp();
                 }
             }
         }
@@ -313,8 +326,9 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
             EXEC('CREATE SERVICE [{_ownServiceValue}] ON QUEUE [{_ownQueueValue}] ([{_contractValue}]);');";
 
     // Drops the listener queues (and their services) of processes that died without dropping them: a queue
-    // whose oldest message has waited longer than StaleQueueAge has no listener draining it. Best effort: a
-    // failure is logged and the next sweep tries again.
+    // whose owner's session lock is free (APPLOCK_TEST = 1: its listening connection is gone) and whose
+    // oldest message has waited longer than StaleQueueAge. Best effort: a failure is logged and the next
+    // sweep tries again.
     private async Task SweepStaleQueuesAsync(SqlConnection conn, CancellationToken ct)
     {
         const string sweepSql = @"
@@ -332,6 +346,7 @@ public sealed class SqlServerNotificationTransport : IWarpNotificationTransport
                 SET @sql = N'SELECT @oldest = MIN(message_enqueue_time) FROM ' + QUOTENAME(@queue) + N';';
                 EXEC sp_executesql @sql, N'@oldest DATETIME OUTPUT', @oldest = @oldest OUTPUT;
                 IF @oldest IS NOT NULL AND @oldest < DATEADD(SECOND, -@staleSeconds, GETUTCDATE())
+                    AND APPLOCK_TEST('public', @queue, 'Exclusive', 'Session') = 1
                 BEGIN
                     SET @sql = N'DROP SERVICE ' + QUOTENAME(@service) + N'; DROP QUEUE ' + QUOTENAME(@queue) + N';';
                     EXEC (@sql);

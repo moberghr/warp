@@ -179,6 +179,129 @@ public class SqlServerNotificationTransportTests : IAsyncLifetime, IClassFixture
         (await ServiceExistsAsync(listener.ListenerServiceName)).ShouldBeFalse("the listener did not drop its own queue when it stopped");
     }
 
+    [TimedFact]
+    public async Task Listen_ManyNotificationsArrive_DoesNotSweepBeforeItsInterval()
+    {
+        // The sweep counted loop iterations, and an iteration ends whenever a notification arrives, so a busy
+        // listener swept every ten notifications instead of every few minutes. A queue left after this
+        // listener started (so its first sweep did not see it) must still be there after a burst.
+        const string channel = "warp_notify_sweep_interval";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var listener = new SqlServerNotificationTransport(_fixture.ConnectionString, new WarpDatabasePushConfiguration { ChannelName = channel })
+        {
+            StaleQueueAge = TimeSpan.Zero,
+        };
+        var enumerator = listener.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        Task<bool> Next() => enumerator.MoveNextAsync().AsTask();
+        var pending = Next();
+        try
+        {
+            await listener.ListenerReady.WaitAsync(cts.Token);
+            await ExecuteSqlAsync($@"
+                CREATE QUEUE [{channel}/queue/dead];
+                CREATE SERVICE [{channel}/service/dead] ON QUEUE [{channel}/queue/dead] ([{channel}/contract]);");
+
+            // Act: each notification is received on its own, so each ends one iteration of the loop.
+            for (var i = 0; i < 25; i++)
+            {
+                await listener.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token);
+                (await pending).ShouldBeTrue();
+                pending = Next();
+            }
+
+            // Assert
+            (await ServiceExistsAsync($"{channel}/service/dead")).ShouldBeTrue("the listener swept on a notification count, not on its interval");
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await pending.ContinueWith(_ => { }, TaskScheduler.Default);
+            await DisposeQuietlyAsync(enumerator);
+            await ExecuteSqlAsync($@"
+                IF EXISTS (SELECT 1 FROM sys.services WHERE name = N'{channel}/service/dead') DROP SERVICE [{channel}/service/dead];
+                IF EXISTS (SELECT 1 FROM sys.service_queues WHERE name = N'{channel}/queue/dead') DROP QUEUE [{channel}/queue/dead];");
+        }
+    }
+
+    [TimedFact]
+    public async Task Listen_PeerQueueWithAnOldMessageWhoseOwnerIsStillConnected_IsNotSwept()
+    {
+        // A listener that is paused or behind still owns its queue: it holds a session lock named after the
+        // queue on its listening connection. Only the age of the oldest message was checked, so a peer
+        // dropped a live listener's queue and the wakes waiting in it.
+        const string channel = "warp_notify_sweep_live";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var publisher = CreateTransport(channel);
+        await publisher.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token); // creates the contract
+        await ExecuteSqlAsync($@"
+            CREATE QUEUE [{channel}/queue/stalled];
+            CREATE SERVICE [{channel}/service/stalled] ON QUEUE [{channel}/queue/stalled] ([{channel}/contract]);");
+        await using var owner = new SqlConnection(_fixture.ConnectionString);
+        await owner.OpenAsync(cts.Token);
+        await using (var hold = new SqlCommand("EXEC sp_getapplock @Resource = @queue, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0;", owner))
+        {
+            hold.Parameters.AddWithValue("@queue", $"{channel}/queue/stalled");
+            await hold.ExecuteNonQueryAsync(cts.Token);
+        }
+
+        await publisher.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token); // waits in the stalled queue
+
+        var listener = new SqlServerNotificationTransport(_fixture.ConnectionString, new WarpDatabasePushConfiguration { ChannelName = channel })
+        {
+            StaleQueueAge = TimeSpan.Zero,
+        };
+        var enumerator = listener.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        var listening = Task.CompletedTask;
+        try
+        {
+            // Act: the new listener sweeps as it starts.
+            listening = enumerator.MoveNextAsync().AsTask();
+            await listener.ListenerReady.WaitAsync(cts.Token);
+
+            // Assert
+            (await ServiceExistsAsync($"{channel}/service/stalled")).ShouldBeTrue("a live listener's queue was swept");
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await listening.ContinueWith(_ => { }, TaskScheduler.Default);
+            await DisposeQuietlyAsync(enumerator);
+            await ExecuteSqlAsync($@"
+                IF EXISTS (SELECT 1 FROM sys.services WHERE name = N'{channel}/service/stalled') DROP SERVICE [{channel}/service/stalled];
+                IF EXISTS (SELECT 1 FROM sys.service_queues WHERE name = N'{channel}/queue/stalled') DROP QUEUE [{channel}/queue/stalled];");
+        }
+    }
+
+    [TimedFact]
+    public async Task Queue_MessageEnqueueTime_IsUtc()
+    {
+        // The sweep compares message_enqueue_time with GETUTCDATE().
+        const string channel = "warp_notify_enqueue_time";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var publisher = CreateTransport(channel);
+        await publisher.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token); // creates the contract
+        await ExecuteSqlAsync($@"
+            CREATE QUEUE [{channel}/queue/probe];
+            CREATE SERVICE [{channel}/service/probe] ON QUEUE [{channel}/queue/probe] ([{channel}/contract]);");
+        try
+        {
+            await publisher.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token);
+
+            await using var conn = new SqlConnection(_fixture.ConnectionString);
+            await conn.OpenAsync(cts.Token);
+            await using var cmd = new SqlCommand($"SELECT DATEDIFF(SECOND, MIN(message_enqueue_time), GETUTCDATE()) FROM [{channel}/queue/probe];", conn);
+            var ageSeconds = (int)(await cmd.ExecuteScalarAsync(cts.Token))!;
+
+            ageSeconds.ShouldBeInRange(-2, 30);
+        }
+        finally
+        {
+            await ExecuteSqlAsync($@"
+                DROP SERVICE [{channel}/service/probe];
+                DROP QUEUE [{channel}/queue/probe];");
+        }
+    }
+
     private static async Task DisposeQuietlyAsync(IAsyncEnumerator<Notification> enumerator)
     {
         try
