@@ -122,7 +122,7 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
         // Wakes are folded into at most one pass per signal interval (rule 6.18), but a wake that arrives
         // during the hold must not be lost: it is still pending, so the next pass runs when the hold ends.
         var serverTaskId = await SeedServerTaskAsync(intervalSeconds: 3600);
-        var task = new CountingTask();
+        var task = new CountingTask { Signals = [ServerTaskSignal.JobFinalized] };
         using var loop = new ServerTaskLoop<TestContext>(
             task,
             new FixtureScopeFactory(_fixture, task),
@@ -153,6 +153,73 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
             await stop.CancelAsync();
             await running;
         }
+    }
+
+    [TimedFact]
+    public async Task RunAsync_WokenWithinTheSignalInterval_DoesNotRunUntilTheClockPassesIt()
+    {
+        // The hold is on the loop's clock. An hour-long interval on a fake clock: nothing but advancing
+        // that clock can end the hold, so a loop without a hold, or with one on the wall clock, fails here.
+        var serverTaskId = await SeedServerTaskAsync(intervalSeconds: 36_000);
+        var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider(DateTimeOffset.UtcNow);
+        var task = new CountingTask { Signals = [ServerTaskSignal.JobFinalized] };
+        using var loop = new ServerTaskLoop<TestContext>(
+            task,
+            new FixtureScopeFactory(_fixture, task),
+            new NoopLockProvider(),
+            time,
+            Guid.NewGuid(),
+            NullLogger.Instance,
+            signalInterval: TimeSpan.FromHours(1));
+        loop.SetServerTaskIdForTest(serverTaskId);
+        using var stop = new CancellationTokenSource();
+        var running = loop.RunAsync(stop.Token);
+        try
+        {
+            (await task.Ran.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeTrue("the first pass did not run");
+
+            // Act + Assert: a wake during the hold waits for it.
+            loop.Signal();
+            (await task.Ran.WaitAsync(TimeSpan.FromMilliseconds(400), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeFalse("a wake within the signal interval ran at once");
+
+            // The clock passes the interval: the pending wake runs.
+            time.Advance(TimeSpan.FromHours(1));
+            (await task.Ran.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))
+                .ShouldBeTrue("the wake did not run when the hold ended");
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [TimedFact]
+    public void SignalHold_TaskThatNoSignalWakes_HasNone()
+    {
+        // Heartbeat, scheduled activation and the other timer-only tasks keep their configured cadence: the
+        // hold folds wakes, and nothing wakes them.
+        var timerOnly = new CountingTask();
+        using var timerLoop = new ServerTaskLoop<TestContext>(timerOnly, new FixtureScopeFactory(_fixture, timerOnly), new NoopLockProvider(), TimeProvider.System, Guid.NewGuid(), NullLogger.Instance, signalInterval: TimeSpan.FromMilliseconds(500));
+        var signalled = new CountingTask { Signals = [ServerTaskSignal.JobFinalized] };
+        using var signalledLoop = new ServerTaskLoop<TestContext>(signalled, new FixtureScopeFactory(_fixture, signalled), new NoopLockProvider(), TimeProvider.System, Guid.NewGuid(), NullLogger.Instance, signalInterval: TimeSpan.FromMilliseconds(500));
+
+        timerLoop.SignalHold.ShouldBe(TimeSpan.Zero);
+        signalledLoop.SignalHold.ShouldBe(TimeSpan.FromMilliseconds(500));
+    }
+
+    [TimedTheory]
+    [InlineData(10_000, 400, 9_600)]
+    [InlineData(200, 200, 0)]
+    [InlineData(200, 0, 200)]
+    public void WaitAfterHold_TheHoldCountsTowardsTheTasksInterval(int intervalMs, int holdMs, int expectedMs)
+    {
+        // Coalescing wakes must not lengthen the configured cadence: a pass that held for part of its
+        // interval waits only for the rest.
+        ServerTaskLoop<TestContext>.WaitAfterHold(TimeSpan.FromMilliseconds(intervalMs), TimeSpan.FromMilliseconds(holdMs))
+            .ShouldBe(TimeSpan.FromMilliseconds(expectedMs));
     }
 
     [TimedTheory]
@@ -227,6 +294,8 @@ public abstract class ServerTaskLoopBookkeepingTestsBase : IAsyncLifetime
     private sealed class CountingTask : IServerTask
     {
         public SemaphoreSlim Ran { get; } = new(0);
+
+        public IEnumerable<ServerTaskSignal> Signals { get; init; } = [];
 
         public string Name => "Counting";
 

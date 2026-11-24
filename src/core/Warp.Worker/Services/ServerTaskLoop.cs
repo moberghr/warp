@@ -62,7 +62,6 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
         ILogger logger,
         TimeSpan? signalInterval = null)
     {
-        _signalInterval = signalInterval ?? TimeSpan.Zero;
         _taskType = template.GetType();
         _name = template.Name;
         _lockKey = template.LockKey;
@@ -74,6 +73,10 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
         _rerunImmediately = template.RerunImmediately;
         _logOnSuccess = template.LogOnSuccess;
         _signals = [.. template.Signals];
+
+        // The hold folds wakes, so only a task a signal wakes has one: Heartbeat, scheduled activation and
+        // the other timer-only tasks keep their configured cadence exactly.
+        _signalInterval = _signals.Length > 0 ? signalInterval ?? TimeSpan.Zero : TimeSpan.Zero;
         _scopes = scopes;
         _lockProvider = lockProvider;
         _time = time;
@@ -160,7 +163,7 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
                     continue;
                 }
 
-                var started = Stopwatch.GetTimestamp();
+                var started = _time.GetTimestamp();
                 var didWork = await RunOneIterationAsync(ct);
                 if (ct.IsCancellationRequested)
                 {
@@ -174,13 +177,14 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
 
                 // Wakes are folded into at most one pass per signal interval (rule 6.18): a wake that came
                 // in meanwhile is still pending on the semaphore, so the next pass starts when the hold ends.
-                var hold = HoldBeforeNextRun(_signalInterval, Stopwatch.GetElapsedTime(started), interval.Value);
+                // The hold is on the loop's clock, and counts towards the task's interval.
+                var hold = HoldBeforeNextRun(_signalInterval, _time.GetElapsedTime(started), interval.Value);
                 if (hold > TimeSpan.Zero)
                 {
-                    await Task.Delay(hold, ct);
+                    await Task.Delay(hold, _time, ct);
                 }
 
-                await WaitForNextRunAsync(interval.Value, ct);
+                await WaitForNextRunAsync(WaitAfterHold(interval.Value, hold), ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -442,6 +446,13 @@ internal sealed class ServerTaskLoop<TContext> : IDisposable
     internal void SetServerTaskIdForTest(int id) => _serverTaskId = id;
 
     internal TimeSpan DefaultInterval => _defaultInterval;
+
+    internal TimeSpan SignalHold => _signalInterval;
+
+    // The timed wait that follows a hold: the rest of the task's interval, so folding wakes does not
+    // lengthen the configured cadence.
+    internal static TimeSpan WaitAfterHold(TimeSpan interval, TimeSpan hold) =>
+        hold >= interval ? TimeSpan.Zero : interval - hold;
 
     // Set by ServerTaskHost when it registered every task of the server in one statement; the loop then
     // skips its own registration. Must be called before RunAsync.
