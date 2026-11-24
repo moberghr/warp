@@ -234,13 +234,16 @@ public class WarpDispatcher<TContext> : BackgroundService
         {
             DispatcherDiagnostics.ClaimDuration.Record(DispatcherDiagnostics.Since(claimStart));
             DispatcherDiagnostics.ClaimSize.Record(jobs.Count);
-            if (DispatcherDiagnostics.ChannelWait.Enabled)
+        }
+
+        // On its own switch, like the worker's pickup that removes each entry: tied to the claim timings
+        // here and to worker-busy there, a listener on channel-wait alone recorded nothing or leaked.
+        if (DispatcherDiagnostics.ChannelWait.Enabled)
+        {
+            var claimedAt = Stopwatch.GetTimestamp();
+            foreach (var job in jobs)
             {
-                var claimedAt = Stopwatch.GetTimestamp();
-                foreach (var job in jobs)
-                {
-                    DispatcherDiagnostics.ClaimedAt[job.Id] = claimedAt;
-                }
+                DispatcherDiagnostics.ClaimedAt[job.Id] = claimedAt;
             }
         }
 

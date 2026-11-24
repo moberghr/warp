@@ -87,7 +87,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         {
             while (_jobReader.TryRead(out var job))
             {
-                var busySince = DispatcherDiagnostics.WorkerBusy.Enabled ? RecordPickup(job, idleSince) : 0L;
+                var busySince = DispatcherDiagnostics.WorkerBusy.Enabled || DispatcherDiagnostics.ChannelWait.Enabled ? RecordPickup(job, idleSince) : 0L;
                 var remaining = 1;
                 try
                 {

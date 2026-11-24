@@ -65,4 +65,47 @@ public abstract class DispatcherDiagnosticsTestsBase : IntegrationTestBase
             ],
             ignoreOrder: true);
     }
+
+    [TimedFact]
+    public async Task GivenAListenerOnChannelWaitAlone_WhenADispatcherRunsJobs_ThenItIsRecordedAndNothingIsLeftBehind()
+    {
+        // Arrange — the claim remembered when each job was claimed whenever channel-wait had a listener
+        // (and only if claim-duration had one too), but the worker forgot it only when worker-busy had
+        // one: a listener on channel-wait alone recorded nothing, or grew the map by a job per claim.
+        var waits = 0;
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (string.Equals(instrument.Meter.Name, DispatcherDiagnostics.MeterName, StringComparison.Ordinal)
+                && string.Equals(instrument.Name, "warp.dispatcher.channel.wait", StringComparison.Ordinal))
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<double>((_, _, _, _) => Interlocked.Increment(ref waits));
+        listener.Start();
+
+        await using var server = await WarpTestServer.StartAsync(Fixture, config =>
+        {
+            config.UseDispatcher = true;
+            config.WorkerCount = 1;
+            config.CompletionFlushInterval = TimeSpan.FromMilliseconds(50);
+        });
+        var publisher = server.CreatePublisher();
+        await publisher.Enqueue(new UnitRequest());
+        await publisher.Enqueue(new UnitRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        await server.WaitForCompletion(TimeSpan.FromSeconds(8));
+
+        // Assert — the map is process-wide, so only this test's jobs are looked for.
+        await using var context = Fixture.CreateContext();
+        var jobIds = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.ToListAsync(
+            System.Linq.Queryable.Select(context.Set<Warp.Core.Entities.Job>(), x => x.Id),
+            Xunit.TestContext.Current.CancellationToken);
+        jobIds.Count.ShouldBe(2);
+        Volatile.Read(ref waits).ShouldBeGreaterThanOrEqualTo(2);
+        jobIds.ShouldAllBe(x => !DispatcherDiagnostics.ClaimedAt.ContainsKey(x));
+    }
 }
