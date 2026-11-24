@@ -221,23 +221,44 @@ public class WarpServerRegistration<TContext> : IHostedService
         }
     }
 
-    // One heartbeat as soon as the row exists (#350): it stamps the database's time on the row and measures
-    // this process's clock against it, so every server component reads the database's clock from the first
-    // task, not only after the first periodic beat. Skipped with the periodic heartbeat disabled, like the
-    // correction itself (a test driving a fake clock).
+    // Before any task or worker runs, whether a server from before 8.0 is alive (rule 2.20): it writes and compares
+    // its own clock, so while one is, this server does too. The question the cluster-task claim asks (rule 6.23),
+    // on the database's clock; the claims keep it current from then on. Then one heartbeat as soon as the row
+    // exists (#350): it stamps the time on the row and measures this process's clock against the database's, so
+    // every server component reads the database's clock from the first task, not only after the first periodic
+    // beat. The heartbeat is skipped with the periodic heartbeat disabled, like the correction itself (a test
+    // driving a fake clock).
     private async Task MeasureClockAsync(IServiceProvider services, DbContext context, CancellationToken cancellationToken)
     {
-        if (_timeProvider is not DatabaseClock clock || _configuration.HealthCheckInterval == null)
+        if (_timeProvider is not DatabaseClock clock)
+        {
+            return;
+        }
+
+        clock.LegacyServers.Report(await LegacyServersAliveAsync(context, cancellationToken));
+        if (_configuration.HealthCheckInterval == null)
         {
             return;
         }
 
         var queries = services.GetRequiredService<IWarpSqlQueries<TContext>>();
         var sent = clock.Local.GetUtcNow();
-        var result = await queries.HeartbeatAsync(context, _configuration.ServerId, sent.UtcDateTime, null, null, cancellationToken);
+        var result = await queries.HeartbeatAsync(context, _configuration.ServerId, sent.UtcDateTime, null, null, clock.LegacyServers.Alive, cancellationToken);
         if (result?.DatabaseUtcNow is { } databaseNow)
         {
             clock.Record(sent, clock.Local.GetUtcNow(), databaseNow);
         }
+    }
+
+    // DateTime.UtcNow is translated to the database's clock (GETUTCDATE() / now()), as the claim compares; the window
+    // is capped like the claim's on SQL Server. REMOVE in the release after 8.x, with LegacyServerPresence.
+    private async Task<bool> LegacyServersAliveAsync(DbContext context, CancellationToken cancellationToken)
+    {
+        var windowSeconds = -Math.Min(_configuration.HealthCheckTimeout.TotalMilliseconds, int.MaxValue) / 1000;
+
+        return await context.Set<Server>()
+            .Where(x => x.CoordinationVersion == null)
+            .Where(x => x.LastHeartbeatTime >= DateTime.UtcNow.AddSeconds(windowSeconds))
+            .AnyAsync(cancellationToken);
     }
 }

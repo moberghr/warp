@@ -95,13 +95,18 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task PauseServer_Resume_JobsGetProcessed()
     {
-        await using var server = await WarpTestServer.StartAsync(Fixture);
+        // Heartbeat driven by hand: pause propagation is deterministic, and with the periodic heartbeat off the
+        // server's clock is not corrected to the database's (DatabaseClock), so the claim stamp below and
+        // resumedAt are read off the same clock. With the correction on, each beat re-measures the offset
+        // with up to half a round trip of error, which moved a claim stamp tens of ms before resumedAt on CI.
+        await using var server = await WarpTestServer.StartAsync(Fixture, configure: cfg => cfg.HealthCheckInterval = null);
         var groupId = await GetFirstGroupId(server);
         var svc = server.CreateServerCommandService();
 
         // Pause, publish, then resume
         await svc.PauseServer(server.ServerId);
-        await server.WaitForPauseState(groupId, expectedPaused: true);
+        await server.RunHeartbeatOnceAsync(Xunit.TestContext.Current.CancellationToken);
+        server.PauseState.IsPaused(groupId).ShouldBeTrue();
 
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new UnitRequest());
@@ -110,6 +115,7 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         // Resume — job should complete
         var resumedAt = DateTime.UtcNow;
         await svc.ResumeServer(server.ServerId);
+        await server.RunHeartbeatOnceAsync(Xunit.TestContext.Current.CancellationToken);
         await server.WaitForCompletion();
 
         var job = await server.GetJob(jobId);

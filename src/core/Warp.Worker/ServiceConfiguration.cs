@@ -224,7 +224,10 @@ public static class ServiceConfiguration
         // TimeProvider under DatabaseClock.Key, so a time another server reads or compares is never decided by
         // this server's own clock. It wraps whatever TimeProvider the host registered, a test's fake
         // included, and the heartbeat measures the offset.
-        services.TryAddSingleton(sp => new DatabaseClock(sp.GetRequiredService<TimeProvider>()));
+        // While a server from before 8.0 is alive the correction is suspended (rule 2.20); registration and every
+        // cluster-task claim report it. Starts as alive, until registration has looked.
+        services.TryAddSingleton(_ => new LegacyServerPresence(alive: true));
+        services.TryAddSingleton(sp => new DatabaseClock(sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<LegacyServerPresence>()));
         services.TryAddKeyedSingleton<TimeProvider>(DatabaseClock.Key, (sp, _) => sp.GetRequiredService<DatabaseClock>());
         services.TryAddSingleton<ClockSkewState>();
 

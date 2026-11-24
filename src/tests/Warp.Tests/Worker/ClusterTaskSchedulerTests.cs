@@ -145,6 +145,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         // the idle run of a signal task costs its one release, not a release and a claim.
         var task = new SignaledTask(TimeSpan.FromSeconds(10));
         using var scheduler = await BuildAsync(task);
+        await AddServerAsync();
         await RunOnceAsync(scheduler, SignaledTask.TaskName);
         await MakeDueAsync(scheduler, SignaledTask.TaskName);
         var before = scheduler.Wakes;
@@ -157,6 +158,44 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         scheduler.Wakes.ShouldBe(before);
         (await ReadAsync(SignaledTask.TaskName)).LeaseUntil.ShouldBeNull();
         (await scheduler.PassAsync(Ct)).ShouldBeGreaterThan(TimeSpan.FromSeconds(4), "the pass after it should sleep until the next tick");
+    }
+
+    [TimedFact]
+    public async Task RunningTask_IdleRunOfASignalTaskOnALoneServer_KeepsItsLease()
+    {
+        // The release is only for another server's signal; with no other server alive nobody else can claim
+        // the task, so the idle run writes nothing (the idle benchmark read the release as +6% statements).
+        var task = new SignaledTask(TimeSpan.FromSeconds(10));
+        using var scheduler = await BuildAsync(task);
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+        await MakeDueAsync(scheduler, SignaledTask.TaskName);
+
+        // Act
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+
+        // Assert: still leased to the next tick, and a signal here still runs it at once.
+        task.Runs.ShouldBe(2);
+        (await ReadAsync(SignaledTask.TaskName)).LeaseUntil.ShouldNotBeNull();
+        scheduler.Signal(SignaledTask.TaskName);
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
+        task.Runs.ShouldBe(3);
+    }
+
+    [TimedFact]
+    public async Task PassAsync_RunClaimedOnItsSchedule_TellsTheTaskItIsAScheduledRun()
+    {
+        // The Orchestrator sweeps every parent on a run its schedule started (rule 6.11), and only checks
+        // the named parents on a run a signal started.
+        var task = new ScheduleAwareTask();
+        using var scheduler = await BuildAsync(task);
+
+        // Act: the first run is the claim's (due at once); the second a signal's.
+        await RunOnceAsync(scheduler, ScheduleAwareTask.TaskName);
+        scheduler.Signal(ScheduleAwareTask.TaskName);
+        await RunOnceAsync(scheduler, ScheduleAwareTask.TaskName);
+
+        // Assert
+        task.Runs.ShouldBe([true, false]);
     }
 
     [TimedFact]
@@ -355,19 +394,32 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
 
         var provider = services.BuildServiceProvider();
 
+        // Each scheduler is a live server, so two of them see each other in the claim's liveness check.
+        var serverId = await AddServerAsync();
         var scopes = provider.GetRequiredService<IServiceScopeFactory>();
         var scheduler = new ClusterTaskScheduler<TestContext>(
             tasks.Select(ServerTaskInfo.From),
             new ServerTaskRunner<TestContext>(scopes, new NoopLockProvider()),
             scopes,
             time ?? TimeProvider.System,
-            Guid.NewGuid(),
+            serverId,
             NullLogger.Instance,
             signalInterval,
             TimeSpan.FromMinutes(5));
         await scheduler.RegisterAsync(Ct);
 
         return scheduler;
+    }
+
+    // A live server row (rule 6.23 liveness is read on the database clock; the window is five minutes).
+    private async Task<Guid> AddServerAsync()
+    {
+        var id = Guid.NewGuid();
+        await using var ctx = _fixture.CreateContext();
+        ctx.Set<Server>().Add(new Server { Id = id, StartedTime = DateTime.UtcNow, LastHeartbeatTime = DateTime.UtcNow, CoordinationVersion = ServerCoordination.LeaseVersion });
+        await ctx.SaveChangesAsync(Ct);
+
+        return id;
     }
 
     private static async Task RunOnceAsync(ClusterTaskScheduler<TestContext> scheduler, string name)
@@ -483,6 +535,33 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         {
             Interlocked.Increment(ref _runs);
             Ran.Release();
+
+            return Task.FromResult<string?>(null);
+        }
+    }
+
+    // Records, per run, whether the runner said its schedule started it.
+    private sealed class ScheduleAwareTask : IServerTask, IScheduledRunAware
+    {
+        public const string TaskName = "schedule-aware";
+
+        private bool _scheduled;
+
+        public ConcurrentQueue<bool> Runs { get; } = new();
+
+        public string Name => TaskName;
+
+        public string? LockKey => ClusterTaskSchedulerTestsBase.TaskLockKey;
+
+        public TimeSpan? DefaultInterval => TimeSpan.FromHours(1);
+
+        public IEnumerable<ServerTaskSignal> Signals => [ServerTaskSignal.JobFinalized];
+
+        public void BeginRun(bool scheduled) => _scheduled = scheduled;
+
+        public Task<string?> ExecuteAsync(CancellationToken ct)
+        {
+            Runs.Enqueue(_scheduled);
 
             return Task.FromResult<string?>(null);
         }

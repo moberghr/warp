@@ -1,11 +1,14 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
+using Warp.Core;
+using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
+using Warp.Worker;
 using Warp.Worker.Services;
 
 namespace Warp.Tests.Worker;
@@ -52,7 +55,7 @@ public abstract class ClockSkewIntegrationTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task ServerCleanup_ServerClockHoursAhead_KeepsALiveServer()
     {
-        // Arrange — another server that heartbeat a moment ago.
+        // Arrange — another 8.0 server that heartbeat a moment ago (one from before 8.0 is the next test's case).
         await using var server = await StartSkewedAsync();
         var otherId = Guid.NewGuid();
         await using (var context = Fixture.CreateContext())
@@ -62,6 +65,7 @@ public abstract class ClockSkewIntegrationTestsBase : IntegrationTestBase
                 Id = otherId,
                 StartedTime = DateTime.UtcNow,
                 LastHeartbeatTime = DateTime.UtcNow,
+                CoordinationVersion = ServerCoordination.LeaseVersion,
             });
             await context.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
         }
@@ -117,7 +121,41 @@ public abstract class ClockSkewIntegrationTestsBase : IntegrationTestBase
         row.ClockOffsetMs.Value.ShouldBe(-Skew.TotalMilliseconds, TimeSpan.FromSeconds(30).TotalMilliseconds);
     }
 
-    private Task<WarpTestServer> StartSkewedAsync() =>
+    [TimedFact]
+    public async Task Heartbeat_ServerClockHoursAheadWithAServerFromBefore80Alive_KeepsToItsOwnClockAs77Did()
+    {
+        // Arrange — a 7.7 server (no CoordinationVersion) that heartbeat a moment ago. It writes and compares its own
+        // clock, so the skewed 8.0 server must do the same while it is alive (rule 2.20). Its ServerCleanup is off:
+        // on its own clock, three hours ahead, it would remove that server, as a 7.7 server three hours ahead would.
+        await using (var context = Fixture.CreateContext())
+        {
+            context.Set<Server>().Add(new Server
+            {
+                Id = Guid.NewGuid(),
+                StartedTime = DateTime.UtcNow,
+                LastHeartbeatTime = DateTime.UtcNow,
+            });
+            await context.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        }
+
+        await using var server = await StartSkewedAsync(cfg => cfg.ServerCleanupInterval = null);
+
+        // Act
+        await server.RunHeartbeatOnceAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Assert — no correction, its own row carries its own time, and the offset is still stored.
+        server.GetService<DatabaseClock>().GetUtcNow().ShouldBe(DateTimeOffset.UtcNow + Skew, TimeSpan.FromSeconds(30));
+        await using var read = Fixture.CreateContext();
+        var row = await read.Set<Server>()
+            .AsNoTracking()
+            .Where(x => x.Id == server.ServerId)
+            .SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        row.LastHeartbeatTime.ShouldBe(DateTime.UtcNow + Skew, TimeSpan.FromSeconds(30));
+        row.ClockOffsetMs.ShouldNotBeNull();
+        row.ClockOffsetMs.Value.ShouldBe(-Skew.TotalMilliseconds, TimeSpan.FromSeconds(30).TotalMilliseconds);
+    }
+
+    private Task<WarpTestServer> StartSkewedAsync(Action<WarpServerBuilder<TestContext>>? configure = null) =>
         WarpTestServer.StartAsync(
             Fixture,
             cfg =>
@@ -125,6 +163,7 @@ public abstract class ClockSkewIntegrationTestsBase : IntegrationTestBase
                 // Driven by hand below: an hour keeps the host's own loop from running them again meanwhile.
                 cfg.StaleJobRecoveryInterval = TimeSpan.FromHours(1);
                 cfg.ServerCleanupInterval = TimeSpan.FromHours(1);
+                configure?.Invoke(cfg);
             },
             services => services.AddSingleton<TimeProvider>(new SkewedTimeProvider(Skew)));
 

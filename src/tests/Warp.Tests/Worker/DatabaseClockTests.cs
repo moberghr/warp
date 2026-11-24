@@ -42,6 +42,37 @@ public class DatabaseClockTests
     }
 
     [TimedFact]
+    public void GetUtcNow_WhileAServerFromBefore80IsAlive_IsTheLocalClockButTheOffsetIsStillMeasured()
+    {
+        // Arrange — rule 2.20: a 7.7 server compares its own clock, so this one does too while it is alive.
+        var clock = new DatabaseClock(new FakeTimeProvider(LocalNow), new LegacyServerPresence(alive: true));
+        clock.Record(LocalNow, LocalNow, LocalNow.AddHours(-3).UtcDateTime);
+
+        // Act
+        var now = clock.GetUtcNow();
+
+        // Assert
+        now.ShouldBe(LocalNow);
+        clock.Offset.ShouldBe(TimeSpan.FromHours(-3));
+    }
+
+    [TimedFact]
+    public void GetUtcNow_OnceNoServerFromBefore80IsAlive_AppliesTheOffsetMeasuredMeanwhile()
+    {
+        // Arrange — measured while the old server was alive, then a claim reported it gone.
+        var legacyServers = new LegacyServerPresence(alive: true);
+        var clock = new DatabaseClock(new FakeTimeProvider(LocalNow), legacyServers);
+        clock.Record(LocalNow, LocalNow, LocalNow.AddHours(-3).UtcDateTime);
+        legacyServers.Report(alive: false);
+
+        // Act
+        var now = clock.GetUtcNow();
+
+        // Assert
+        now.ShouldBe(LocalNow.AddHours(-3));
+    }
+
+    [TimedFact]
     public void GetTimestamp_AfterAMeasurement_StaysOnTheLocalClock()
     {
         // Arrange — durations and timers must not jump when the offset changes.

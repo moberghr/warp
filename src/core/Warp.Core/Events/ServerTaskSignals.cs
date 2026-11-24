@@ -152,20 +152,22 @@ public sealed class ServerTaskSignals<TContext>
     // for, on the first pass of the process, and once every sweepEvery: that last one is what finds a
     // parent whose child was finished by something that names no parent (a dashboard delete, crash
     // recovery, a worker of a server that could not take the lock). Measured on the stopwatch, not the
-    // TimeProvider: this is a cadence, and a test's frozen clock must not switch it off.
-    internal (Guid[] Parents, bool Sweep) TakeFinalizedParents(TimeSpan? sweepEvery) =>
-        TakeFinalizedParents(sweepEvery, Stopwatch.GetTimestamp());
+    // TimeProvider: this is a cadence, and a test's frozen clock must not switch it off. A scheduled run
+    // (the scheduler claimed the task because its tick came, not for a signal) always sweeps: that is
+    // the backstop's cadence, and timing it on the stopwatch could skip a tick.
+    internal (Guid[] Parents, bool Sweep) TakeFinalizedParents(TimeSpan? sweepEvery, bool scheduledRun = false) =>
+        TakeFinalizedParents(sweepEvery, Stopwatch.GetTimestamp(), scheduledRun);
 
     // The same at a given stopwatch timestamp, for tests of the cadence.
-    internal (Guid[] Parents, bool Sweep) TakeFinalizedParents(TimeSpan? sweepEvery, long now)
+    internal (Guid[] Parents, bool Sweep) TakeFinalizedParents(TimeSpan? sweepEvery, long now, bool scheduledRun = false)
     {
         lock (_gate)
         {
-            // Due a little before a whole interval has passed. The Orchestrator's scheduled runs sit on a
-            // grid exactly one interval apart (rule 6.23), so a run that started a few milliseconds
-            // sooner after its tick than the one before had not yet waited a whole interval, did not
-            // sweep, and the backstop came every second interval.
-            var sweep = _parentSweepRequested
+            // For a signal run, due a little before a whole interval has passed: scheduled runs sit on a
+            // grid exactly one interval apart (rule 6.23), and a signal run just before a tick then sweeps
+            // in its place. A scheduled run sweeps whatever the stopwatch says.
+            var sweep = scheduledRun
+                || _parentSweepRequested
                 || _lastParentSweep == 0
                 || sweepEvery is not { } every
                 || Stopwatch.GetElapsedTime(_lastParentSweep, now) >= every * SweepDueAfter;

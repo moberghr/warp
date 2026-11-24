@@ -72,7 +72,8 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         var ct = Xunit.TestContext.Current.CancellationToken;
         var jobId = await InsertProcessingJobAsync();
         var logger = new RecordingLogger();
-        var monitor = CreateMonitor(NoCancellations, logger);
+        using var ticks = new TickCounter();
+        var monitor = CreateMonitor(ticks.Renew(NoCancellations), logger);
         var processing = new DeferredJobLog();
         var row = ProcessingRow(jobId);
         await InsertClashingLogAsync(row.Id);
@@ -85,9 +86,10 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
 
         // Act: the clash goes away; the next tick saves again.
         await DeleteLogAsync(row.Id);
+        await ticks.WaitForTickAfterNowAsync(ct);
 
         // Assert
-        await WaitUntilAsync(async () => await CountLogsAsync(jobId) == 2, ct);
+        (await CountLogsAsync(jobId)).ShouldBe(2);
     }
 
     [TimedFact]
@@ -111,11 +113,15 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         processing.Set(row);
         using var cts = new CancellationTokenSource();
 
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var registration = cts.Token.Register(() => cancelled.TrySetResult());
+
         // Act
         using var entry = monitor.Register(Run(jobId), new JobLogCollector { JobId = jobId }, new JobProgressCollector { JobId = jobId }, processing, cts, CancellationToken.None);
 
         // Assert
-        await WaitUntilAsync(() => Task.FromResult(cts.IsCancellationRequested), ct);
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+        cts.IsCancellationRequested.ShouldBeTrue();
     }
 
     [TimedFact]
@@ -125,15 +131,8 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         var ct = Xunit.TestContext.Current.CancellationToken;
         var jobA = await InsertProcessingJobAsync();
         var jobB = await InsertProcessingJobAsync();
-        using var renewals = new SemaphoreSlim(0);
-        var monitor = CreateMonitor(
-            (_, _, _, _) =>
-            {
-                renewals.Release();
-
-                return Task.FromResult<IReadOnlyCollection<Guid>>([]);
-            },
-            new RecordingLogger());
+        using var ticks = new TickCounter();
+        var monitor = CreateMonitor(ticks.Renew(NoCancellations), new RecordingLogger());
         var holder = new DeferredJobLog();
         holder.Set(ProcessingRow(jobB));
         using var cts = new CancellationTokenSource();
@@ -143,10 +142,11 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         // Act
         using (var entry = Register(monitor, jobA, cts, holder, logs))
         {
-            await WaitUntilAsync(async () => await CountLogsAsync(jobA) == 1, ct);
+            await ticks.WaitForTickAfterNowAsync(ct);
         }
 
         // Assert
+        (await CountLogsAsync(jobA)).ShouldBe(1);
         (await CountLogsAsync(jobB)).ShouldBe(0);
         holder.Take().ShouldNotBeNull().JobId.ShouldBe(jobB);
     }
@@ -167,16 +167,6 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
 
     private static IDisposable Register(RunningJobMonitor monitor, Guid jobId, CancellationTokenSource cts, DeferredJobLog holder, JobLogCollector? logs = null) =>
         monitor.Register(Run(jobId), logs ?? new JobLogCollector { JobId = jobId }, new JobProgressCollector { JobId = jobId }, holder, cts, CancellationToken.None);
-
-    private static async Task WaitUntilAsync(Func<Task<bool>> condition, CancellationToken ct)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (!await condition())
-        {
-            DateTime.UtcNow.ShouldBeLessThan(deadline, "the condition was not met in time");
-            await Task.Delay(50, ct);
-        }
-    }
 
     private RunningJobMonitor CreateMonitor(RunningJobMonitor.RenewRunningJobs renew, ILogger logger)
     {
@@ -229,6 +219,35 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         await using var context = _fixture.CreateContext();
 
         return await context.Set<JobLog>().CountAsync(x => x.JobId == jobId, Xunit.TestContext.Current.CancellationToken);
+    }
+
+    // Counts the monitor's renewals, its first step on every tick, so a test can wait for a whole tick to
+    // have run after a point without polling: ticks run one after another, so the second renewal to START
+    // after that point follows a tick that began after it and has finished (its log save included).
+    private sealed class TickCounter : IDisposable
+    {
+        private readonly SemaphoreSlim _renewed = new(0);
+        private int _calls;
+
+        public RunningJobMonitor.RenewRunningJobs Renew(RunningJobMonitor.RenewRunningJobs inner) =>
+            (context, runs, now, ct) =>
+            {
+                Interlocked.Increment(ref _calls);
+                _renewed.Release();
+
+                return inner(context, runs, now, ct);
+            };
+
+        public async Task WaitForTickAfterNowAsync(CancellationToken ct)
+        {
+            var target = Volatile.Read(ref _calls) + 2;
+            while (Volatile.Read(ref _calls) < target)
+            {
+                (await _renewed.WaitAsync(TimeSpan.FromSeconds(5), ct)).ShouldBeTrue("the monitor stopped ticking");
+            }
+        }
+
+        public void Dispose() => _renewed.Dispose();
     }
 
     private sealed class RecordingLogger : ILogger

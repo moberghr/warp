@@ -78,6 +78,23 @@ public class FinalizedParentHintsTests
     }
 
     [Fact]
+    public void TakeFinalizedParents_ScheduledRunRightAfterASweep_SweepsAgain()
+    {
+        // A run its schedule started always sweeps: the backstop's cadence is the task's tick, not the
+        // stopwatch, so a signal run that swept a moment before the tick cannot make the tick skip it.
+        var every = TimeSpan.FromSeconds(10);
+        var signals = new ServerTaskSignals<TestContext>();
+        var first = Stopwatch.GetTimestamp();
+        signals.TakeFinalizedParents(every, first);
+
+        var signalRun = signals.TakeFinalizedParents(every, After(first, TimeSpan.FromMilliseconds(1))).Sweep;
+        var scheduledRun = signals.TakeFinalizedParents(every, After(first, TimeSpan.FromMilliseconds(2)), scheduledRun: true).Sweep;
+
+        signalRun.ShouldBeFalse();
+        scheduledRun.ShouldBeTrue();
+    }
+
+    [Fact]
     public void TakeFinalizedParents_SignalRunHalfwayThroughTheInterval_DoesNotSweep()
     {
         var every = TimeSpan.FromSeconds(10);

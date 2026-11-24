@@ -13,7 +13,7 @@ This page covers the upgrade from 7.7 to 8.0. Two things need work before you de
 3. Apply the migration before any 8.0 process starts. See [Order of the deploy](#order-of-the-deploy).
 4. PostgreSQL: make sure you do not run Npgsql in legacy timestamp mode, and check `max_connections`. See [PostgreSQL](#postgresql).
 5. SQL Server: check the database compatibility level is 130 or higher. See [SQL Server](#sql-server).
-6. SQL Server with `UseDatabasePush()`: plan to upgrade every process together, or lower the polling intervals for the deploy. See [Rolling deploy](#rolling-deploy-77-and-80-side-by-side).
+6. SQL Server with `UseDatabasePush()`: nothing to plan. 8.0 bridges to 7.7's shared Service Broker queue during the deploy. See [Rolling deploy](#rolling-deploy-77-and-80-side-by-side).
 7. Check the clock difference between your application hosts and the database.
 8. If you implement `IWarpSqlQueries`, `IBatchPublisher` or a notifier, read [API changes](#api-changes).
 
@@ -96,43 +96,28 @@ Stop the servers or pick a time with little traffic, and apply the migration as 
 
 ### Option 2: edit the migration to build the indexes online
 
-Remove the generated `DropIndex` / `CreateIndex` pairs for the four indexes and replace them with SQL that does not hold the table lock. Take the index names, the table name, the column list and the filter text from the `CreateIndex` calls in **your** generated migration. The names below are placeholders; yours depend on your schema and naming convention.
-
-Statements with `suppressTransaction: true` run outside the migration's transaction. If one fails, the steps before it stay applied. Putting the index work in a migration of its own makes that easier to recover from.
-
-**PostgreSQL.** Build the new index under a temporary name, drop the old one, rename. `CREATE INDEX CONCURRENTLY` cannot run in a transaction, and each statement needs its own `Sql` call:
+Remove the generated `DropIndex` / `CreateIndex` pairs for the four indexes and call the provider's helper in their place, passing the migration's `TargetModel`. The helper reads the index names, the table, the columns and the filters from that model, so they match your schema and naming convention; there is nothing to copy by hand.
 
 ```csharp
-// Repeat for each of the four indexes.
-// <...> are placeholders: use the names, columns and filter from your generated migration.
-migrationBuilder.Sql(
-    """CREATE INDEX CONCURRENTLY "<index_name>_new" ON <schema>.<job_table> (<columns>) WHERE <filter>;""",
-    suppressTransaction: true);
+using Warp.Provider.PostgreSql; // or Warp.Provider.SqlServer
 
-migrationBuilder.Sql(
-    """DROP INDEX CONCURRENTLY <schema>."<index_name>";""",
-    suppressTransaction: true);
+public partial class UpgradeWarpTo8 : Migration
+{
+    protected override void Up(MigrationBuilder migrationBuilder)
+    {
+        // ... the generated column and table changes stay as they are ...
 
-migrationBuilder.Sql(
-    """ALTER INDEX <schema>."<index_name>_new" RENAME TO "<index_name>";""",
-    suppressTransaction: true);
+        // In place of the four DropIndex / CreateIndex pairs on the job table:
+        migrationBuilder.RecreateWarpJobIndexesOnline(TargetModel);
+    }
+}
 ```
 
-A concurrent build that fails leaves an invalid index behind. Drop it before you run the migration again.
+Its statements run with `suppressTransaction: true`, outside the migration's transaction. If one fails, the statements before it stay applied. Putting the index work in a migration of its own makes that easier to recover from.
 
-**SQL Server.** `DROP_EXISTING` replaces the index in one statement, filter included. `ONLINE = ON` keeps the table available during the build, on editions that support online index operations (Enterprise, Azure SQL Database). On other editions leave `ONLINE = ON` out and use a quiet window.
+**PostgreSQL.** For each index: `CREATE INDEX CONCURRENTLY` under a temporary name (`<index>_warp_new`), `DROP INDEX CONCURRENTLY` of the old one, then a rename to the old name. Neither concurrent statement blocks claims, completions or publishes. A concurrent build that fails leaves an invalid index behind; the helper drops a leftover temporary index before it builds, so running the migration again is enough.
 
-```csharp
-// Repeat for each of the four indexes.
-// <...> are placeholders: use the names, columns and filter from your generated migration.
-migrationBuilder.Sql(
-    """
-    CREATE INDEX [<index_name>] ON [<schema>].[<job_table>] (<columns>)
-    WHERE <filter>
-    WITH (DROP_EXISTING = ON, ONLINE = ON);
-    """,
-    suppressTransaction: true);
-```
+**SQL Server.** For each index, one `CREATE INDEX ... WITH (DROP_EXISTING = ON, ONLINE = ON)`, which replaces the index in place, filter included, while the table stays available. Online index operations exist on Enterprise (and Developer), Azure SQL Database and Azure SQL Managed Instance. On other editions the helper builds with `ONLINE = OFF`, which locks the table for each build (but not across all four, since each statement commits on its own): use a quiet window there.
 
 Filtered indexes on SQL Server need `QUOTED_IDENTIFIER ON`, both to create them and for any session that later writes to the table. `SqlClient` and EF Core set it by default. `sqlcmd` does not: pass `-I` when you run a generated migration script with it.
 
@@ -152,13 +137,13 @@ Apply the migration first, for every tier.
 
 **Run fencing.** 8.0 stamps every claim with a run id (`Job.RunId`) and guards every write a run makes with it, so a run whose job was taken back and claimed again cannot write over the new run. 7.7 servers do not write or check the run id. The protection is complete only once every server is on 8.0.
 
-**SQL Server with `UseDatabasePush()`.** 7.7 used one shared Service Broker queue for all processes. 8.0 gives each listening process its own queue. 7.7 and 8.0 processes therefore do not wake each other. Until the last 7.7 process is gone, work enqueued by the other version is found by polling, and `UseDatabasePush()` raises the polling intervals: `MaxPollingInterval` to 5 minutes, `OrchestrationInterval` to 1 minute and `MessageRoutingInterval` to 30 seconds. Either upgrade all processes together, or set those intervals back to short values for the deploy (set them after `UseDatabasePush()` in the lambda; an explicit value wins). PostgreSQL push is not affected.
+**SQL Server with `UseDatabasePush()`.** 7.7 used one shared Service Broker queue (`{channel}/queue`, service `{channel}/service`) for all processes. 8.0 gives each listening process its own queue. So that the two versions still wake each other during the deploy, 8.0 bridges to the shared queue while it exists: every 8.0 publish is also sent to the shared service, and every 8.0 listener also receives from the shared queue and passes what a 7.7 process sent on to every 8.0 listener. The shared queue still hands each message to one receiver, as in 7.7, so a 7.7 process is woken by some notifications, not all, and finds the rest by polling, as it did before. After the last 7.7 process has stopped you can drop that service and queue (`DROP SERVICE [{channel}/service]; DROP QUEUE [{channel}/queue];`) to end the bridge; 8.0 never creates them. The bridge is removed in the release after 8.x. PostgreSQL push is not affected.
 
-**Clocks.** 8.0 servers work on the database's clock (see [Clock skew between servers](crash-recovery.md#clock-skew-between-servers)). 7.7 servers, and processes without a server on either version, use their own. Check the difference between your application hosts' clocks and the database's before the deploy. An 8.0 server logs a Warning and raises a `ClockSkewDetected` notification when its own clock is more than 1 second off. During the mix, timestamps written by 7.7 servers are read by 8.0 servers against the database clock and the other way round, so a large difference can make a live server or a held singleton background-service lease look expired, and the lease can change hands.
+**Clocks.** 8.0 servers work on the database's clock (see [Clock skew between servers](crash-recovery.md#clock-skew-between-servers)); 7.7 servers use their own. While a 7.7 server is alive, 8.0 servers keep to their own clock too, as 7.7 did: they do not apply the correction (they still measure it, store it as `Server.ClockOffsetMs` and warn), and the heartbeat writes the server's own time for itself, its background-service instances and its lease renewals. A mixed cluster is therefore no worse than a pure 7.7 one. The database clock takes over once no server without `CoordinationVersion` has a live heartbeat (checked at startup and on every cluster-task claim). Processes without a server write the database's time on their application-instance heartbeat, or their own while a 7.7 server is alive. Still check the difference between your application hosts' clocks and the database's before the deploy: 8.0 decides whether a 7.7 server is alive by comparing its heartbeat, written on the 7.7 host's clock, with the database's, so a 7.7 host behind the database by more than `HealthCheckTimeout` (5 minutes) is not seen and the 8.0 servers switch to the database clock early.
 
 ## PostgreSQL
 
-**Legacy timestamp mode is not supported.** Warp's time columns must be `timestamp with time zone`. 8.0 sends timestamps to the database typed as `timestamp with time zone` and compares them with the database's own clock. If you set the `Npgsql.EnableLegacyTimestampBehavior` AppContext switch, EF Core maps `DateTime` to `timestamp without time zone` and those comparisons depend on the session time zone. Remove the switch and migrate the columns before upgrading.
+**Legacy timestamp mode is not supported.** Warp's time columns must be `timestamp with time zone`. 8.0 sends timestamps to the database typed as `timestamp with time zone` and compares them with the database's own clock. If you set the `Npgsql.EnableLegacyTimestampBehavior` AppContext switch, EF Core maps `DateTime` to `timestamp without time zone` and those comparisons depend on the session time zone. Remove the switch and migrate the columns before upgrading. Every 8.0 process that uses the PostgreSQL provider checks its model when it starts and refuses to start, naming the columns, while any of Warp's time columns is mapped to another type. The check reads the model only, not the database.
 
 **A third connection pool.** 8.0 server work runs on a pool of its own (`Application Name` suffixed `:warp-server`), next to your `DbContext`'s pool and the lock pool (`:warp-locks`). Each pool sizes to its own demand, so peak connections per process go up. During a rolling deploy old and new pods also overlap. Check `max_connections` has room for both. See [Connection Pooling](connection-pooling.md). Hosts that register the context with their own `NpgsqlDataSource` keep the shared pool.
 
@@ -187,8 +172,9 @@ For application code:
 For custom providers (`IWarpSqlQueries<TContext>` implementations):
 
 - `ClaimEnqueuedJobsAsync` has a new `ClaimWatermark? watermark` parameter (before the `CancellationToken`).
-- New required members: `LockJobsByIdWaitAsync`, `CompleteJobsAsync`, `RenewRunningJobsAsync`, `ClaimClusterTasksAsync`, `RequestClusterTaskRunAsync`, `RenewClusterTaskLeaseAsync`, `CompleteClusterTaskAsync`.
-- `HeartbeatAsync` now writes the database's time, not the `now` argument, to the heartbeat and lease columns, stores the difference as `Server.ClockOffsetMs`, and returns the database time in `HeartbeatResult.DatabaseUtcNow`. A provider that leaves `DatabaseUtcNow` null gets no clock correction.
+- New required members: `LockJobsByIdWaitAsync`, `CompleteJobsAsync`, `RenewRunningJobsAsync`, `ClaimClusterTasksAsync`, `RequestClusterTaskRunAsync`, `RenewClusterTaskLeaseAsync`, `CompleteClusterTaskAsync`, `RegisterClusterTasksAsync` (insert-if-absent: it must not fail on a row another server inserted first).
+- The claim's result reports `ClusterTaskClaims.OtherServersAlive` (default `true`: a lone server then still releases the lease of an idle signal task's run, one write each) and, per task, `ClusterTaskState.Scheduled` (default `false`: the Orchestrator then sweeps every parent only by its stopwatch cadence, not on every scheduled run).
+- `HeartbeatAsync` takes a new `bool writeLocalTime` parameter (before the cancellation token). Without it, the heartbeat now writes the database's time, not the `now` argument, to the heartbeat and lease columns; with it (a 7.7 server is alive) it writes `now`, as 7.7 did. Either way it stores the difference as `Server.ClockOffsetMs` and returns the database time in `HeartbeatResult.DatabaseUtcNow`. A provider that leaves `DatabaseUtcNow` null gets no clock correction.
 - Every claim must write a fresh `Job.RunId`, and the completion and renewal statements must compare it.
 
 ## Dashboard during the roll

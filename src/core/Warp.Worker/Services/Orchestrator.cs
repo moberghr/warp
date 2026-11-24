@@ -18,9 +18,9 @@ namespace Warp.Worker.Services;
 /// <see cref="ServerTaskSignals{TContext}.SignalJobFinalized()"/>.
 /// <para>
 /// A wake names the parents of the jobs that finished, and a pass checks those. Every parent in flight
-/// is checked only on a sweep: once per <c>OrchestrationInterval</c>, and whenever a wake could not
-/// name its parents. The sweep is the backstop for a wake that never arrived (a crashed process, a
-/// delete from a process with no server while database push is off).
+/// is checked only on a sweep: on every run its schedule started (once per <c>OrchestrationInterval</c>),
+/// and whenever a wake could not name its parents. The sweep is the backstop for a wake that never
+/// arrived (a crashed process, a delete from a process with no server while database push is off).
 /// </para>
 /// <para>
 /// Activating a continuation is an enqueue site (rule 6.3): it flips rows from Awaiting to Enqueued, so it
@@ -31,7 +31,7 @@ namespace Warp.Worker.Services;
 /// in five batch-and-continuation pairs took ~22 s against ~3 s for the same jobs published directly.
 /// </para>
 /// </summary>
-public sealed class Orchestrator<TContext> : IServerTask, IDisposable
+public sealed class Orchestrator<TContext> : IServerTask, IScheduledRunAware, IDisposable
     where TContext : DbContext
 {
     private readonly DbContext _context;
@@ -45,6 +45,9 @@ public sealed class Orchestrator<TContext> : IServerTask, IDisposable
     private Guid[] _takenParents = [];
     private Guid[] _takenSettledJobs = [];
     private bool _takenSweep;
+
+    // Set by the runner: the scheduler started this run because its tick came, so it sweeps every parent.
+    private bool _scheduledRun;
 
     public Orchestrator(
         IWarpServerContext serverContext,
@@ -67,6 +70,8 @@ public sealed class Orchestrator<TContext> : IServerTask, IDisposable
     public TimeSpan? DefaultInterval => _configuration.OrchestrationInterval;
 
     public IEnumerable<ServerTaskSignal> Signals => [ServerTaskSignal.JobFinalized];
+
+    void IScheduledRunAware.BeginRun(bool scheduled) => _scheduledRun = scheduled;
 
     public async Task<string?> ExecuteAsync(CancellationToken ct)
     {
@@ -98,7 +103,7 @@ public sealed class Orchestrator<TContext> : IServerTask, IDisposable
         // Which parents to look at: the ones a finished job named, and all of them when a sweep is due.
         // A pass that throws gives the work back, since the signal that brought it will not come again.
         // So does one whose work is rolled back after it returned (see Dispose).
-        var (hintedParents, sweep) = _signals.TakeFinalizedParents(_configuration.OrchestrationInterval);
+        var (hintedParents, sweep) = _signals.TakeFinalizedParents(_configuration.OrchestrationInterval, _scheduledRun);
         var settledJobs = _signals.TakeSettledJobs();
         _takenParents = [.. _takenParents, .. hintedParents];
         _takenSettledJobs = [.. _takenSettledJobs, .. settledJobs];

@@ -26,6 +26,8 @@ namespace Warp.Tests.Applications;
 [GenerateDatabaseTests(SerializeInCollection = "HeavyIntegration")]
 public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
 {
+    private static readonly TimeSpan Skew = TimeSpan.FromHours(3);
+
     private readonly IDatabaseFixture _fixture;
 
     protected ApplicationRegistryTestsBase(IDatabaseFixture fixture) => _fixture = fixture;
@@ -124,6 +126,82 @@ public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
             refreshed.LastHeartbeatAt.ShouldBeGreaterThan(registered.LastHeartbeatAt);
             refreshed.MemoryWorkingSetBytes.ShouldNotBeNull();
             refreshed.CpuUsagePercent.ShouldNotBeNull();
+        }
+        finally
+        {
+            await host.StopAsync(Ct);
+        }
+    }
+
+    [TimedFact]
+    public async Task Heartbeat_ClockHoursBehindTheDatabaseWithAProvider_WritesTheDatabasesTime()
+    {
+        // Arrange — a non-server process whose clock lags the database by three hours. The servers sweep instances
+        // on the database's clock (rule 2.20), so a local time would read as three hours stale and be swept alive.
+        var host = CreateHost("publisher", timeProvider: new FakeTimeProvider(DateTimeOffset.UtcNow - Skew), heartbeatInterval: TimeSpan.FromHours(1), databaseProvider: true);
+        await host.StartAsync(Ct);
+        try
+        {
+            // Act
+            await host.HeartbeatAsync(Ct);
+
+            // Assert
+            var instance = await _fixture.CreateContext().Set<ApplicationInstance>().SingleAsync(Ct);
+            instance.LastHeartbeatAt.ShouldBe(DateTime.UtcNow, TimeSpan.FromSeconds(30));
+            instance.MemoryWorkingSetBytes.ShouldNotBeNull();
+        }
+        finally
+        {
+            await host.StopAsync(Ct);
+        }
+    }
+
+    [TimedFact]
+    public async Task Heartbeat_ClockHoursBehindWhileAServerFromBefore80IsAlive_WritesItsOwnTimeAs77Did()
+    {
+        // Arrange — a 7.7 server (no CoordinationVersion) sweeps instances on ITS clock, so the process writes its
+        // own time while one is alive, exactly as 7.7 did: never worse than a pure 7.7 cluster.
+        await using (var context = _fixture.CreateContext())
+        {
+            context.Set<Server>().Add(new Server { Id = Guid.NewGuid(), StartedTime = DateTime.UtcNow, LastHeartbeatTime = DateTime.UtcNow });
+            await context.SaveChangesAsync(Ct);
+        }
+
+        var local = DateTimeOffset.UtcNow - Skew;
+        var host = CreateHost("publisher", timeProvider: new FakeTimeProvider(local), heartbeatInterval: TimeSpan.FromHours(1), databaseProvider: true);
+        await host.StartAsync(Ct);
+        try
+        {
+            // Act
+            await host.HeartbeatAsync(Ct);
+
+            // Assert
+            var instance = await _fixture.CreateContext().Set<ApplicationInstance>().SingleAsync(Ct);
+            instance.LastHeartbeatAt.ShouldBe(local.UtcDateTime, TimeSpan.FromSeconds(1));
+        }
+        finally
+        {
+            await host.StopAsync(Ct);
+        }
+    }
+
+    [TimedFact]
+    public async Task Heartbeat_InstanceSweptWhileAliveWithAProvider_WarnsExactlyOnce()
+    {
+        // The one-statement beat finds no row to update: the same warn-once, no-recreate contract.
+        var logger = new CapturingLogger<ApplicationHeartbeatHost<TestContext>>();
+        var host = CreateHost("publisher", logger: logger, heartbeatInterval: TimeSpan.FromHours(1), databaseProvider: true);
+
+        await host.StartAsync(Ct);
+        try
+        {
+            await _fixture.CreateContext().Set<ApplicationInstance>().ExecuteDeleteAsync(Ct);
+
+            await host.HeartbeatAsync(Ct);
+            await host.HeartbeatAsync(Ct);
+
+            logger.WarningCount.ShouldBe(1);
+            (await _fixture.CreateContext().Set<ApplicationInstance>().AnyAsync(Ct)).ShouldBeFalse();
         }
         finally
         {
@@ -257,10 +335,16 @@ public abstract class ApplicationRegistryTestsBase : IAsyncLifetime
         bool serverPresent = false,
         TimeProvider? timeProvider = null,
         ILogger<ApplicationHeartbeatHost<TestContext>>? logger = null,
-        TimeSpan? heartbeatInterval = null)
+        TimeSpan? heartbeatInterval = null,
+        bool databaseProvider = false)
     {
         var services = new ServiceCollection();
         services.AddScoped<TestContext>(_ => _fixture.CreateContext());
+        if (databaseProvider)
+        {
+            services.AddSingleton(_ => TestTasks.QueriesFor(_fixture.CreateContext()));
+        }
+
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         var time = timeProvider ?? TimeProvider.System;

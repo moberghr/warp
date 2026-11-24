@@ -59,14 +59,20 @@ internal sealed class ServerTaskRunner<TContext>
     /// <summary>
     /// Runs the task once. <paramref name="underLegacyLock"/> also takes the lock servers from before the
     /// lease take (see <see cref="LegacyTaskLock{TContext}"/>); <c>Ran</c> is false only when that lock
-    /// was held elsewhere. Exceptions from the task propagate, and the hook is then not called.
+    /// was held elsewhere. <paramref name="scheduledRun"/> tells a task that cares (<see cref="IScheduledRunAware"/>)
+    /// that its schedule, not a signal, started the run. Exceptions from the task propagate, and the hook
+    /// is then not called.
     /// </summary>
-    public async Task<(bool Ran, string? Message)> RunAsync(ServerTaskInfo info, bool underLegacyLock, CancellationToken ct)
+    public async Task<(bool Ran, string? Message)> RunAsync(ServerTaskInfo info, bool underLegacyLock, CancellationToken ct, bool scheduledRun = false)
     {
         await using var scope = _scopes.CreateAsyncScope();
         var task = scope.ServiceProvider
             .GetServices<IServerTask>()
             .First(x => x.GetType() == info.TaskType);
+        if (task is IScheduledRunAware aware)
+        {
+            aware.BeginRun(scheduledRun);
+        }
 
         if (underLegacyLock && info.LockKey != null)
         {

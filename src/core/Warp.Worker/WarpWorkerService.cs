@@ -53,6 +53,11 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     // the handler ran, where the failure arm finalizes the SAME tracked job again
     // (see BeginFinalizingTransactionAsync).
     private readonly List<JobLog> _finalizationLogs = [];
+
+    // The diagnostic rows the current job's finalizing attempts added (the deferred "Processing" row, the
+    // handler's log lines, progress rows): unlike the terminal rows they belong to every attempt, so a
+    // re-finalization writes them again when the abandoned attempt's COMMIT failed after its save.
+    private readonly List<JobLog> _diagnosticLogs = [];
     private readonly DeferredJobLog _processingLog = new();
     private readonly RunningJobMonitor _monitor;
     private bool _finalizationAttempted;
@@ -165,6 +170,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         // A new job: nothing of the previous job's finalization applies to it.
         _finalizationAttempted = false;
         _finalizationLogs.Clear();
+        _diagnosticLogs.Clear();
 
         var logCollector = new JobLogCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
         var progressCollector = new JobProgressCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
@@ -742,7 +748,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
     }
 
-    private static async Task SaveJobLogs(DbContext context, JobLogCollector collector)
+    private async Task SaveJobLogs(DbContext context, JobLogCollector collector)
     {
         var entries = collector.Drain();
         if (entries.Count == 0)
@@ -751,9 +757,10 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
 
         await context.Set<JobLog>().AddRangeAsync(entries);
+        _diagnosticLogs.AddRange(entries);
     }
 
-    private static async Task SaveProgressRows(DbContext context, JobProgressCollector collector)
+    private async Task SaveProgressRows(DbContext context, JobProgressCollector collector)
     {
         var entries = collector.Drain();
         if (entries.Count == 0)
@@ -762,6 +769,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         }
 
         await context.Set<JobLog>().AddRangeAsync(entries);
+        _diagnosticLogs.AddRange(entries);
     }
 
     /// <summary>
@@ -812,7 +820,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         if (_finalizationAttempted)
         {
             // An earlier finalizing attempt on this job did not commit, and this one finalizes the same
-            // tracked job to a different outcome. Two things of the abandoned attempt would otherwise
+            // tracked job to a different outcome. Three things of the abandoned attempt would otherwise
             // leak into this write. First, its terminal log row, which is still Added when the save threw,
             // so the job would get a Completed log beside its Failed one. Second, what EF believes the
             // row holds: when the save went through and the COMMIT threw, the change tracker has accepted
@@ -826,6 +834,19 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
                 if (entry.State == EntityState.Added)
                 {
                     entry.State = EntityState.Detached;
+                }
+            }
+
+            // Third, the diagnostic rows. When the abandoned attempt's save went through and its COMMIT
+            // threw, EF accepted them as saved (Unchanged) while the database rolled them back, so this
+            // write would leave them out and the job would lose its "Processing" row, its handler's log
+            // lines and its progress. A save that threw left them Added, which this write inserts anyway.
+            foreach (var log in _diagnosticLogs)
+            {
+                var entry = workerContext.Entry(log);
+                if (entry.State == EntityState.Unchanged)
+                {
+                    entry.State = EntityState.Added;
                 }
             }
 
@@ -846,6 +867,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         if (_processingLog.Take() is { } processing)
         {
             workerContext.Set<JobLog>().Add(processing);
+            _diagnosticLogs.Add(processing);
         }
 
         // No savepoint around the finalizing save (rule 6.12): a save that fails abandons this transaction,

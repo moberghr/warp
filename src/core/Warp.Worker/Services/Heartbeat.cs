@@ -28,7 +28,9 @@ namespace Warp.Worker.Services;
 /// <para>
 /// Every time it writes is the database's (#350), and it measures this process's clock against the database's
 /// on each beat: the offset corrects the <see cref="DatabaseClock"/> every server component reads, and past
-/// <c>ClockSkewWarningThreshold</c> it is reported once per excursion (Warning log + notification).
+/// <c>ClockSkewWarningThreshold</c> it is reported once per excursion (Warning log + notification). While a
+/// server from before 8.0 is alive it writes this server's own time instead and the offset is measured but not
+/// applied, as 7.7 behaved (rule 2.20).
 /// </para>
 /// </summary>
 public sealed class Heartbeat<TContext> : IServerTask
@@ -98,12 +100,14 @@ public sealed class Heartbeat<TContext> : IServerTask
         var memoryBytes = snapshot?.WorkingSet;
         var cpuPercent = snapshot?.CpuPercent;
 
+        // While a server from before 8.0 is alive, write this server's own time as 7.7 did (rule 2.20).
         var result = await _sqlQueries.HeartbeatAsync(
             _context,
             _configuration.ServerId,
             now,
             memoryBytes,
             cpuPercent,
+            writeLocalTime: clock?.LegacyServers.Alive ?? false,
             ct) ?? throw new InvalidOperationException("Server not found in the database.");
 
         // Only on the periodic heartbeat: with it disabled (a test driving a fake clock and running the
@@ -146,7 +150,7 @@ public sealed class Heartbeat<TContext> : IServerTask
 
         var offsetMs = Math.Round(offset.TotalMilliseconds);
         _logger.LogWarning(
-            "This server's clock is {OffsetMs} ms from the database's (threshold {ThresholdMs} ms). Warp corrects for it, but fix the clock (NTP): the correction is only as fresh as the last heartbeat.",
+            "This server's clock is {OffsetMs} ms from the database's (threshold {ThresholdMs} ms). Warp corrects for it (not while a server from before 8.0 is alive), but fix the clock (NTP): the correction is only as fresh as the last heartbeat.",
             offsetMs,
             threshold!.Value.TotalMilliseconds);
 

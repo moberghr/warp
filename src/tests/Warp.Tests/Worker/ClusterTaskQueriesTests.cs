@@ -131,6 +131,36 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task ClaimClusterTasks_DueBySchedule_ReportsAScheduledClaim()
+    {
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
+
+        // Act
+        var claims = await ClaimAsync(["a"], Guid.NewGuid());
+
+        // Assert
+        var state = claims.Tasks.ShouldHaveSingleItem();
+        state.Claimed.ShouldBeTrue();
+        state.Scheduled.ShouldBeTrue();
+    }
+
+    [TimedFact]
+    public async Task ClaimClusterTasks_ClaimedOnlyForARunRequest_ReportsItIsNotScheduled()
+    {
+        // The Orchestrator sweeps every parent on a scheduled run only; a run a signal asked for (here on
+        // another server, honoured by this claim before the schedule is due) checks the named parents.
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = FarAhead, RunRequestedAt = LongAgo });
+
+        // Act
+        var claims = await ClaimAsync(["a"], Guid.NewGuid());
+
+        // Assert
+        var state = claims.Tasks.ShouldHaveSingleItem();
+        state.Claimed.ShouldBeTrue();
+        state.Scheduled.ShouldBeFalse();
+    }
+
+    [TimedFact]
     public async Task RequestClusterTaskRun_LeaseHeldByTheAskingServer_ClaimsItAtOnce()
     {
         // The scheduler asks only for a task it is not running, so its own lease is one an idle run left
@@ -379,6 +409,79 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         gone.LegacyServersAlive.ShouldBeFalse();
     }
 
+    [TimedFact]
+    public async Task ClaimClusterTasks_OtherLiveServer_ReportsItButNotTheClaimingServerItself()
+    {
+        // A lone server need not release an idle run's lease (rule 6.23): only another live server could claim it.
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
+        var self = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        await using (var ctx = _fixture.CreateContext())
+        {
+            ctx.Set<Server>().Add(new Server { Id = self, StartedTime = DateTime.UtcNow, LastHeartbeatTime = DateTime.UtcNow, CoordinationVersion = ServerCoordination.LeaseVersion });
+            ctx.Set<Server>().Add(new Server { Id = other, StartedTime = LongAgo, LastHeartbeatTime = LongAgo, CoordinationVersion = ServerCoordination.LeaseVersion });
+            await ctx.SaveChangesAsync(Ct);
+        }
+
+        // Act
+        var alone = await ClaimAsync(["a"], self);
+        await using (var ctx = _fixture.CreateContext())
+        {
+            await ctx.Set<Server>()
+                .Where(x => x.Id == other)
+                .ExecuteUpdateAsync(x => x.SetProperty(y => y.LastHeartbeatTime, DateTime.UtcNow), Ct);
+        }
+
+        var withOther = await ClaimAsync(["a"], self);
+
+        // Assert
+        alone.OtherServersAlive.ShouldBeFalse();
+        withOther.OtherServersAlive.ShouldBeTrue();
+    }
+
+    [TimedFact]
+    public async Task RegisterClusterTasks_NewAndExistingTasks_InsertsTheNewOneDueAtOnceAndSetsEveryInterval()
+    {
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = FarAhead, LastStatus = "Completed" });
+
+        // Act
+        await Queries().RegisterClusterTasksAsync(
+            _fixture.CreateContext(),
+            [new ClusterTaskRegistration("a", 20), new ClusterTaskRegistration("b", 30)],
+            Ct);
+
+        // Assert: the existing row keeps its schedule and history, the new one is due at once.
+        var a = await ReadAsync("a");
+        a.IntervalSeconds.ShouldBe(20);
+        a.NextRunAt.ShouldBe(FarAhead);
+        a.LastStatus.ShouldBe("Completed");
+        var b = await ReadAsync("b");
+        b.IntervalSeconds.ShouldBe(30);
+        b.NextRunAt.ShouldBe(LongAgo);
+    }
+
+    [TimedFact]
+    public async Task RegisterClusterTasks_AnotherServerInsertsTheRowMeanwhile_UpdatesItInsteadOfFailing()
+    {
+        // Two servers starting together: the other one's insert of the same task is still uncommitted when
+        // this registration runs, so this one waits on the key and then finds the row. EF's insert used to
+        // fail there with a duplicate key, logged at Error by EF for every lost race.
+        await using var other = _fixture.CreateContext();
+        await using var transaction = await other.Database.BeginTransactionAsync(Ct);
+        other.Set<ClusterTask>().Add(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
+        await other.SaveChangesAsync(Ct);
+
+        // Act
+        var register = Queries().RegisterClusterTasksAsync(_fixture.CreateContext(), [new ClusterTaskRegistration("a", 20)], Ct);
+        await WarpTestServer.WaitUntil("the registration to wait on the uncommitted row", async () => register.IsCompleted || await IsWaitingOnALockAsync(), ct: Ct);
+        await transaction.CommitAsync(Ct);
+        await register;
+
+        // Assert
+        var row = await ReadAsync("a");
+        row.IntervalSeconds.ShouldBe(20);
+    }
+
     // The next run is a multiple of the interval, between half and one and a half intervals after the
     // claim: tasks that share an interval fall due at the same instant, and one claim covers them.
     private static void ShouldBeNextGridPoint(ClusterTask row, int intervalSeconds)
@@ -387,6 +490,18 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         var fromClaim = row.NextRunAt - row.ClaimedAt!.Value;
         fromClaim.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(intervalSeconds / 2.0));
         fromClaim.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(intervalSeconds * 1.5));
+    }
+
+    // Whether a session of this database is waiting on a row lock: the registration under test, blocked on the
+    // other transaction's uncommitted insert.
+    private async Task<bool> IsWaitingOnALockAsync()
+    {
+        await using var ctx = _fixture.CreateContext();
+        var sql = ctx.Database.ProviderName?.Contains("SqlServer", StringComparison.Ordinal) == true
+            ? "SELECT COUNT(*) AS [Value] FROM sys.dm_exec_requests WHERE blocking_session_id <> 0 AND database_id = DB_ID()"
+            : "SELECT COUNT(*)::int AS \"Value\" FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()";
+
+        return await ctx.Database.SqlQueryRaw<int>(sql).SingleAsync(Ct) > 0;
     }
 
     private IWarpSqlQueries<TestContext> Queries() => TestTasks.QueriesFor(_fixture.CreateContext());

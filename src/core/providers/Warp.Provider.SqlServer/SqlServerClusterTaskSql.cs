@@ -14,12 +14,13 @@ internal sealed class SqlServerClusterTaskSql
     /// <summary>Separates task names in the claim's name list: a character no task name holds.</summary>
     public const char NameSeparator = '\u001f';
 
-    private SqlServerClusterTaskSql(string claim, string request, string renew, string complete)
+    private SqlServerClusterTaskSql(string claim, string request, string renew, string complete, string register)
     {
         Claim = claim;
         Request = request;
         Renew = renew;
         Complete = complete;
+        Register = register;
     }
 
     public string Claim { get; }
@@ -29,6 +30,8 @@ internal sealed class SqlServerClusterTaskSql
     public string Renew { get; }
 
     public string Complete { get; }
+
+    public string Register { get; }
 
     public static SqlServerClusterTaskSql Build(IModel model)
     {
@@ -53,6 +56,7 @@ internal sealed class SqlServerClusterTaskSql
         var lastDuration = Column(task, nameof(ClusterTask.LastDurationMs));
         var coordination = Column(server, nameof(Server.CoordinationVersion));
         var heartbeat = Column(server, nameof(Server.LastHeartbeatTime));
+        var serverId = Column(server, nameof(Server.Id));
 
         // Every time here is the database's own clock (rule 6.23), read once per statement into @now:
         // whether a lease is free never depends on two servers' clocks agreeing.
@@ -77,13 +81,14 @@ internal sealed class SqlServerClusterTaskSql
         var renewMs = $"CAST(ROUND((CASE WHEN t.{interval} IS NULL OR t.{interval} < 1 THEN 1 ELSE t.{interval} END) * 1000, 0) AS bigint)";
         var renewedUntil = $"DATEADD(MILLISECOND, CAST({renewMs} % 86400000 AS int), DATEADD(DAY, CAST({renewMs} / 86400000 AS int), @now))";
         var legacy = $"CASE WHEN EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL AND s.{heartbeat} >= DATEADD(MILLISECOND, -@liveWindowMs, @now)) THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END";
+        var others = $"CASE WHEN EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{serverId} <> @server AND s.{heartbeat} >= DATEADD(MILLISECOND, -@liveWindowMs, @now)) THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END";
         const string Names = "SELECT value FROM STRING_SPLIT(@names, NCHAR(31))";
 
         // READPAST skips a row another server is claiming this instant, as SKIP LOCKED does: that
         // server has it. The report afterwards reads every named task, claimed or not.
         var claim = $@"
             {Now}
-            DECLARE @claimed TABLE (task nvarchar(200) PRIMARY KEY, due datetime2);
+            DECLARE @claimed TABLE (task nvarchar(200) PRIMARY KEY, due datetime2, scheduled bit);
 
             UPDATE t
             SET {lease} = {leaseUntil},
@@ -91,7 +96,7 @@ internal sealed class SqlServerClusterTaskSql
                 {claimedAt} = @now,
                 {next} = {nextRun},
                 {requested} = NULL
-            OUTPUT INSERTED.{name}, INSERTED.{next} INTO @claimed
+            OUTPUT INSERTED.{name}, INSERTED.{next}, CASE WHEN DELETED.{next} <= @now THEN 1 ELSE 0 END INTO @claimed
             FROM {table} t WITH (ROWLOCK, UPDLOCK, READPAST)
             WHERE t.{name} IN ({Names})
               AND t.{interval} IS NOT NULL
@@ -104,7 +109,9 @@ internal sealed class SqlServerClusterTaskSql
                        CASE WHEN c.task IS NOT NULL THEN c.due
                             WHEN t.{lease} IS NOT NULL AND t.{lease} > t.{next} THEN t.{lease}
                             ELSE t.{next} END) AS float) / 1000.0,
-                   {legacy}
+                   {legacy},
+                   {others},
+                   CAST(COALESCE(c.scheduled, 0) AS bit)
             FROM {table} t
             LEFT JOIN @claimed c ON c.task = t.{name}
             WHERE t.{name} IN ({Names})
@@ -164,7 +171,30 @@ internal sealed class SqlServerClusterTaskSql
             WHERE t.{name} = @name
               AND t.{claimedBy} = @server;";
 
-        return new SqlServerClusterTaskSql(claim, request, renew, complete);
+        // Insert-if-absent: a row another server inserted first becomes an update of its interval, never a
+        // duplicate key (EF's insert-then-catch logged every lost race at Error). MERGE alone is not safe
+        // under concurrency, so registrations are serialized by a transaction-scoped app lock (released by the
+        // COMMIT; a few rows once per server start). A new task is due at once (the epoch).
+        var register = $@"
+            SET XACT_ABORT ON;
+            BEGIN TRANSACTION;
+            DECLARE @lock int;
+            EXEC @lock = sp_getapplock @Resource = N'warp:cluster-task-register', @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000;
+            IF @lock < 0
+            BEGIN
+                ROLLBACK TRANSACTION;
+                THROW 50000, N'Timed out waiting to register the cluster tasks.', 1;
+            END;
+
+            MERGE {table} WITH (HOLDLOCK) AS t
+            USING (SELECT n, i FROM OPENJSON(@tasks) WITH (n nvarchar(200) '$.n', i float '$.i')) AS x
+            ON t.{name} = x.n
+            WHEN MATCHED THEN UPDATE SET {interval} = x.i
+            WHEN NOT MATCHED THEN INSERT ({name}, {interval}, {next}) VALUES (x.n, x.i, {Epoch});
+
+            COMMIT TRANSACTION;";
+
+        return new SqlServerClusterTaskSql(claim, request, renew, complete, register);
     }
 
     private static string Qualified(IEntityType entity)

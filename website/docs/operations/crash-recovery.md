@@ -49,7 +49,11 @@ Warp does not trust any one server's clock for this:
 
 The correction is only as fresh as the last heartbeat, so still keep server clocks in sync with NTP. With the heartbeat disabled (`HealthCheckInterval = null`) nothing is measured and the local clock is used.
 
-**Not covered:** a process that only publishes (no `AddWarpServer`) stamps its own clock on the jobs it schedules and on its application-instance heartbeat. A future `ScheduleTime` from a skewed publisher is honoured as written.
+**During a rolling deploy from 7.7:** a 7.7 server writes and compares its own clock. While one is alive, 8.0 servers do the same: the offset is measured and stored but not applied, and the heartbeat writes the server's own time, as 7.7 did. They switch to the database's clock once no server from before 8.0 is alive. See [Upgrading to 8.0](upgrading-to-8.md#rolling-deploy-77-and-80-side-by-side).
+
+**Processes without a server** (`AddWarp` only, with `ApplicationName` set) write the database's time on their application-instance heartbeat when a database provider (`UsePostgreSql()` / `UseSqlServer()`) is registered, so a process whose clock lags the database is not swept as stale while alive; while a 7.7 server is alive they write their own time, as 7.7 did. Without a provider they write their own time.
+
+**Not covered:** a process that only publishes stamps its own clock on the jobs it schedules. A future `ScheduleTime` from a skewed publisher is honoured as written.
 
 ## Timeline Example
 

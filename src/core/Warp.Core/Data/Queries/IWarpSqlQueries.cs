@@ -104,6 +104,13 @@ public interface IWarpSqlQueries<TContext>
     /// process's own clock reading: the statement stores the database clock minus it as the server's
     /// <c>ClockOffsetMs</c>, and returns the database clock as <see cref="HeartbeatResult.DatabaseUtcNow"/>.
     /// </para>
+    /// <para>
+    /// With <paramref name="writeLocalTime"/> (a server from before 8.0 is alive, rule 2.20) the three times
+    /// written, and the lease-expiry comparison, use <paramref name="now"/> instead, as 7.7 did: that server
+    /// compares its own clock, so this one must not mix in the database's. The offset is stored and the
+    /// database clock returned either way. A separate cached statement, not a CASE: each variant keeps one
+    /// plan, and the 7.7 one is removed with the bridge in the release after 8.x.
+    /// </para>
     /// </summary>
     Task<HeartbeatResult?> HeartbeatAsync(
         DbContext context,
@@ -111,6 +118,7 @@ public interface IWarpSqlQueries<TContext>
         DateTime now,
         long? memoryBytes,
         double? cpuPercent,
+        bool writeLocalTime,
         CancellationToken ct);
 
     /// <summary>
@@ -260,4 +268,11 @@ public interface IWarpSqlQueries<TContext>
     /// where the claim put it.
     /// </summary>
     Task<bool> CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct);
+
+    /// <summary>
+    /// Creates the rows of the named tasks the cluster has not seen (due at once) and sets every named task's
+    /// interval, in one statement that never fails on a row another server inserted first: servers starting
+    /// together each register every task, and a lost insert must not surface as an error (rule 6.23).
+    /// </summary>
+    Task RegisterClusterTasksAsync(DbContext context, IReadOnlyList<ClusterTaskRegistration> tasks, CancellationToken ct);
 }

@@ -46,7 +46,7 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
     {
         if (await IsSqlServerAsync())
         {
-            return;
+            Assert.Skip("PostgreSQL planner behaviour; SQL Server's claim is a different statement.");
         }
 
         var ct = Xunit.TestContext.Current.CancellationToken;
@@ -70,7 +70,7 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
         // The message router's batch claim had the same UPDATE ... FROM (limited subquery) shape.
         if (await IsSqlServerAsync())
         {
-            return;
+            Assert.Skip("PostgreSQL planner behaviour; SQL Server's claim is a different statement.");
         }
 
         var ct = Xunit.TestContext.Current.CancellationToken;
@@ -98,7 +98,7 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
         // claim did so until an analyze, ~10 s in. A burst into a quiet queue reaches this in production.
         if (await IsSqlServerAsync())
         {
-            return;
+            Assert.Skip("PostgreSQL planner behaviour; SQL Server's claim is a different statement.");
         }
 
         var ct = Xunit.TestContext.Current.CancellationToken;
@@ -171,7 +171,7 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
         // pooled connections.
         if (await IsSqlServerAsync())
         {
-            return;
+            Assert.Skip("PostgreSQL planner behaviour; SQL Server's claim is a different statement.");
         }
 
         var ct = Xunit.TestContext.Current.CancellationToken;
@@ -199,7 +199,7 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
         // in the server log per claim. The claim must raise no notice at all.
         if (await IsSqlServerAsync())
         {
-            return;
+            Assert.Skip("PostgreSQL planner behaviour; SQL Server's claim is a different statement.");
         }
 
         var ct = Xunit.TestContext.Current.CancellationToken;

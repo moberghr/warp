@@ -13,6 +13,10 @@ namespace Warp.Core;
 /// zero until the first heartbeat measures it, and stays zero when the heartbeat is disabled
 /// (<c>HealthCheckInterval = null</c>).
 /// </para>
+/// <para>
+/// While a server from before 8.0 is alive (<see cref="LegacyServerPresence"/>) the offset is still measured
+/// but not applied: that server compares its own clock, so this one does too, as 7.7 did (rule 2.20).
+/// </para>
 /// </summary>
 public sealed class DatabaseClock : TimeProvider
 {
@@ -27,23 +31,37 @@ public sealed class DatabaseClock : TimeProvider
 
     private long _offsetTicks;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DatabaseClock"/> class that always applies the measured
+    /// offset: it knows of no server from before 8.0.
+    /// </summary>
     public DatabaseClock(TimeProvider local)
+        : this(local, new LegacyServerPresence(alive: false))
+    {
+    }
+
+    internal DatabaseClock(TimeProvider local, LegacyServerPresence legacyServers)
     {
         ArgumentNullException.ThrowIfNull(local);
+        ArgumentNullException.ThrowIfNull(legacyServers);
         Local = local;
+        LegacyServers = legacyServers;
     }
 
     /// <summary>The process's own clock, which the offset corrects.</summary>
     public TimeProvider Local { get; }
 
-    /// <summary>The database clock minus this process's clock, as last measured.</summary>
+    /// <summary>The database clock minus this process's clock, as last measured (applied or not).</summary>
     public TimeSpan Offset => TimeSpan.FromTicks(Interlocked.Read(ref _offsetTicks));
+
+    /// <summary>Whether a server from before 8.0 is alive, which suspends the correction. Removable with it.</summary>
+    internal LegacyServerPresence LegacyServers { get; }
 
     public override TimeZoneInfo LocalTimeZone => Local.LocalTimeZone;
 
     public override long TimestampFrequency => Local.TimestampFrequency;
 
-    public override DateTimeOffset GetUtcNow() => Local.GetUtcNow() + Offset;
+    public override DateTimeOffset GetUtcNow() => LegacyServers.Alive ? Local.GetUtcNow() : Local.GetUtcNow() + Offset;
 
     public override long GetTimestamp() => Local.GetTimestamp();
 

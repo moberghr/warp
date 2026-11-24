@@ -37,6 +37,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     private readonly string _lockJobsByIdWaitSql;
     private readonly string _lockAllServersSql;
     private readonly string _heartbeatSql;
+    private readonly string _heartbeatLocalTimeSql;
     private readonly string _activateScheduledJobsSql;
     private readonly string _lockLeaseByServiceNameSql;
     private readonly string _lockDefinitionByServiceNameSql;
@@ -246,26 +247,28 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
 
         // Every time written is the database's own (@now, read once): a server whose clock is wrong cannot
         // make itself or its leases look alive or dead to the others (#350). {{1}} is the server's own clock,
-        // used only to store how far it is off.
-        _heartbeatSql = $@"
+        // used only to store how far it is off — except in the variant for a cluster with a server from
+        // before 8.0 alive (rule 2.20), which writes and compares {{1}} as 7.7 did. REMOVE that variant in the
+        // release after 8.x.
+        string HeartbeatSql(string written) => $@"
             DECLARE @now datetime2 = SYSUTCDATETIME();
             DECLARE @h TABLE (server_id uniqueidentifier, paused_at datetime2);
             UPDATE {serverTable}
-            SET [{_n.ServerLastHeartbeatTime}] = @now,
+            SET [{_n.ServerLastHeartbeatTime}] = {written},
                 [{_n.ServerClockOffsetMs}] = CAST(DATEDIFF_BIG(MICROSECOND, {{1}}, @now) AS float) / 1000,
                 [{_n.ServerMemoryWorkingSetBytes}] = ISNULL({{2}}, [{_n.ServerMemoryWorkingSetBytes}]),
                 [{_n.ServerCpuUsagePercent}] = ISNULL({{3}}, [{_n.ServerCpuUsagePercent}])
             OUTPUT INSERTED.[{_n.ServerId}], INSERTED.[{_n.ServerPausedAt}] INTO @h
             WHERE [{_n.ServerId}] = {{0}};
             UPDATE {instanceTable}
-            SET [{_n.BackgroundServiceInstanceLastHeartbeatAt}] = @now
+            SET [{_n.BackgroundServiceInstanceLastHeartbeatAt}] = {written}
             WHERE [{_n.BackgroundServiceInstanceServerId}] = {{0}};
             DECLARE @renewed TABLE (service_name nvarchar(256));
             UPDATE {leaseTable}
-            SET [{_n.BackgroundServiceLeaseExpiresAt}] = DATEADD(SECOND, {ttlSeconds}, @now)
+            SET [{_n.BackgroundServiceLeaseExpiresAt}] = DATEADD(SECOND, {ttlSeconds}, {written})
             OUTPUT INSERTED.[{_n.BackgroundServiceLeaseServiceName}] INTO @renewed
             WHERE [{_n.BackgroundServiceLeaseHolderServerId}] = {{0}}
-              AND [{_n.BackgroundServiceLeaseExpiresAt}] > @now;
+              AND [{_n.BackgroundServiceLeaseExpiresAt}] > {written};
             SELECT h.paused_at AS server_paused_at,
                    w.[{_n.WorkerGroupId}] AS group_id,
                    w.[{_n.WorkerGroupPausedAt}] AS group_paused_at,
@@ -273,6 +276,9 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             FROM @h h
             LEFT JOIN {groupTable} w ON w.[{_n.WorkerGroupServerId}] = h.server_id;
             SELECT service_name FROM @renewed;";
+
+        _heartbeatSql = HeartbeatSql("@now");
+        _heartbeatLocalTimeSql = HeartbeatSql("{1}");
 
         // Atomic activation: UPDATE ... OUTPUT INSERTED.(id, queue, schedule_time) flips due rows
         // AND streams back per-row identity + queue + schedule_time. Caller fires one
@@ -387,6 +393,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         DateTime now,
         long? memoryBytes,
         double? cpuPercent,
+        bool writeLocalTime,
         CancellationToken ct)
     {
         // Raw ADO.NET: multi-statement batch (DECLARE @h + UPDATE OUTPUT INTO + SELECT JOIN
@@ -406,7 +413,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             await using var cmd = conn.CreateCommand();
 
             cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = _heartbeatSql
+            cmd.CommandText = (writeLocalTime ? _heartbeatLocalTimeSql : _heartbeatSql)
                 .Replace("{0}", "@p0", StringComparison.Ordinal)
                 .Replace("{1}", "@p1", StringComparison.Ordinal)
                 .Replace("{2}", "@p2", StringComparison.Ordinal)
@@ -818,6 +825,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
 
         var tasks = new List<ClusterTaskState>(names.Count);
         var legacy = false;
+        var others = false;
         await ReadAsync(
             context,
             ClusterTaskSql(context).Claim,
@@ -828,12 +836,13 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             ],
             x =>
             {
-                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))));
+                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))) { Scheduled = x.GetBoolean(5) });
                 legacy |= x.GetBoolean(3);
+                others |= x.GetBoolean(4);
             },
             ct);
 
-        return new ClusterTaskClaims(tasks, legacy);
+        return new ClusterTaskClaims(tasks, legacy) { OtherServersAlive = others };
     }
 
     public async Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
@@ -947,6 +956,22 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         }
 
         return claimed;
+    }
+
+    public async Task RegisterClusterTasksAsync(DbContext context, IReadOnlyList<ClusterTaskRegistration> tasks, CancellationToken ct)
+    {
+        if (tasks.Count == 0)
+        {
+            return;
+        }
+
+        var json = System.Text.Json.JsonSerializer.Serialize(tasks.Select(x => new { n = x.Name, i = x.IntervalSeconds }));
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Register,
+            [new SqlParameter("@tasks", SqlDbType.NVarChar, -1) { Value = json }],
+            _ => { },
+            ct);
     }
 
     // Built once from the resolved model on first use, like the rate-limit lock statement.

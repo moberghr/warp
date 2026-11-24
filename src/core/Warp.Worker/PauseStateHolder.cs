@@ -24,7 +24,8 @@ public class PauseStateHolder
 
     private volatile PauseSnapshot _state = new(false, []);
 
-    public bool IsPaused(Guid? workerGroupId)
+    // Virtual so a test can count the checks a worker loop makes (a deterministic "did not claim while paused").
+    public virtual bool IsPaused(Guid? workerGroupId)
     {
         var snapshot = _state;
         return snapshot.ServerPaused

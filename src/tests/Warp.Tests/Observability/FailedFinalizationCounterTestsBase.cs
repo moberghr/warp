@@ -112,6 +112,26 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
         await AssertCleanFailedRow(jobId);
     }
 
+    // The diagnostic rows of the job ride the same finalizing write: the deferred "Processing" row and the
+    // handler's log lines. When the save went through and the COMMIT threw, EF considered them saved while
+    // the database rolled them back, and the re-finalization did not write them again: the Failed job
+    // had no "Processing" row and none of its handler's lines.
+    [TimedFact]
+    public async Task CompletionCommitFails_ReFinalizedAsFailed_KeepsTheProcessingRowAndTheHandlersLogLines()
+    {
+        await using var server = await WarpTestServer.StartAsync(Fixture, config => config.WorkerCount = 1, FailTheFirstCompletionCommit);
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new LoggingRequest());
+        await publisher.SaveChangesAsync();
+
+        await server.WaitForJobState(jobId, State.Failed);
+
+        var logs = await server.GetJobLogs(jobId);
+        logs.Count(x => string.Equals(x.EventType, "Processing", StringComparison.Ordinal)).ShouldBe(1);
+        logs.Count(x => x.Message?.EndsWith("Processing logging request", StringComparison.Ordinal) == true).ShouldBe(1);
+        logs.Count(x => x.Message?.EndsWith("This is a warning", StringComparison.Ordinal) == true).ShouldBe(1);
+    }
+
     private async Task AssertCleanFailedRow(Guid jobId)
     {
         var ct = Xunit.TestContext.Current.CancellationToken;

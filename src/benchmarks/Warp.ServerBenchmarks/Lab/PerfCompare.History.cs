@@ -138,8 +138,9 @@ public static partial class PerfCompare
     }
 
     /// <summary>
-    /// Each case's change in statements per job since the latest release, for the cases both sides measured
-    /// on the same measurement version. Empty when there is no comparable release.
+    /// Each case's change in statements per job (per second for an idle case) since the latest release, for the
+    /// cases both sides measured on the same measurement version and in the same unit. Empty when there is no
+    /// comparable release.
     /// </summary>
     private static Dictionary<string, double> SinceRelease(List<BdnCase> cases, Dictionary<string, BdnResult> headRun, ReleaseBenchmarks? release)
     {
@@ -152,9 +153,12 @@ public static partial class PerfCompare
         var baseline = release.Cases.ToDictionary(x => x.FullName, StringComparer.Ordinal);
         foreach (var name in cases.Select(x => x.FullName))
         {
-            if (headRun.TryGetValue(name, out var head) && !head.PerSecond
+            // Per-second (idle) cases compare too, when the release measured them per second as well: they were
+            // left out, so the idle scenarios read "no case in common" against a release that had them.
+            if (headRun.TryGetValue(name, out var head)
                 && head.StatementsPerJob is { } now
-                && baseline.TryGetValue(name, out var then) && then.StatementsPerJob is { } before && before > 0)
+                && baseline.TryGetValue(name, out var then) && then.PerSecond == head.PerSecond
+                && then.StatementsPerJob is { } before && before > 0)
             {
                 changes[name] = (now - before) / before * 100;
             }
@@ -190,7 +194,8 @@ public static partial class PerfCompare
         {
             var change = changes[benchmark.FullName];
             var drifted = change > ReleaseCreepPct;
-            var text = string.Create(CultureInfo.InvariantCulture, $"{CaseLabelOf(benchmark)} stmt {change:+0.0;−0.0;0.0}%");
+            var unit = headRun[benchmark.FullName].PerSecond ? "stmt/s" : "stmt";
+            var text = string.Create(CultureInfo.InvariantCulture, $"{CaseLabelOf(benchmark)} {unit} {change:+0.0;−0.0;0.0}%");
             parts.Add(drifted ? "⚠️ **" + text + "**" : "✅ " + text);
 
             if (drifted)

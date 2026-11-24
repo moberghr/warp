@@ -302,6 +302,220 @@ public class SqlServerNotificationTransportTests : IAsyncLifetime, IClassFixture
         }
     }
 
+    // Rule 2.9 bridge (REMOVE in the release after 8.x): during a rolling deploy from 7.7, which sends to and listens
+    // on ONE shared service and queue that a 7.7 process creates when it starts, the two releases still wake each other.
+    [TimedFact]
+    public async Task Publish_SharedQueueCreatedBy77_AlsoSendsThereSo77ListenersWake()
+    {
+        // Arrange
+        const string channel = "warp_notify_bridge_publish";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var publisher = CreateTransport(channel);
+        await CreateSharedQueueAs77DidAsync(publisher, channel, cts.Token);
+        try
+        {
+            // Act
+            await publisher.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token);
+
+            // Assert
+            (await CountMessagesAsync($"{channel}/queue", $"{channel}/msg")).ShouldBe(1);
+        }
+        finally
+        {
+            await DropSharedQueueAsync(channel);
+        }
+    }
+
+    [TimedFact]
+    public async Task Listen_77PublisherSendsToTheSharedQueue_TheListenerReceivesIt()
+    {
+        // Arrange
+        const string channel = "warp_notify_bridge_receive";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var listener = CreateTransport(channel);
+        await CreateSharedQueueAs77DidAsync(listener, channel, cts.Token);
+        var enumerator = listener.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        var next = enumerator.MoveNextAsync().AsTask();
+        try
+        {
+            await listener.ListenerReady.WaitAsync(cts.Token);
+
+            // Act
+            await PublishAs77DidAsync(channel, "J:legacy");
+
+            // Assert
+            (await next).ShouldBeTrue();
+            enumerator.Current.Kind.ShouldBe(NotificationKind.JobEnqueued);
+            enumerator.Current.Queue.ShouldBe("legacy");
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await next.ContinueWith(_ => { }, TaskScheduler.Default);
+            await DisposeQuietlyAsync(enumerator);
+            await DropSharedQueueAsync(channel);
+        }
+    }
+
+    [TimedFact]
+    public async Task Listen_TwoListenersAndOne77Message_BothReceiveIt()
+    {
+        // Arrange — the shared queue hands the message to ONE of the two relays; it re-sends it to both listeners.
+        const string channel = "warp_notify_bridge_fanout";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var first = CreateTransport(channel);
+        var second = CreateTransport(channel);
+        await CreateSharedQueueAs77DidAsync(first, channel, cts.Token);
+        var firstEnumerator = first.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        var secondEnumerator = second.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        var firstMove = firstEnumerator.MoveNextAsync().AsTask();
+        var secondMove = secondEnumerator.MoveNextAsync().AsTask();
+        try
+        {
+            await first.ListenerReady.WaitAsync(cts.Token);
+            await second.ListenerReady.WaitAsync(cts.Token);
+
+            // Act
+            await PublishAs77DidAsync(channel, "J:legacy");
+
+            // Assert
+            (await firstMove).ShouldBeTrue("the first listener did not receive the 7.7 notification");
+            (await secondMove).ShouldBeTrue("the second listener did not receive the 7.7 notification");
+            firstEnumerator.Current.Queue.ShouldBe("legacy");
+            secondEnumerator.Current.Queue.ShouldBe("legacy");
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await firstMove.ContinueWith(_ => { }, TaskScheduler.Default);
+            await secondMove.ContinueWith(_ => { }, TaskScheduler.Default);
+            await DisposeQuietlyAsync(firstEnumerator);
+            await DisposeQuietlyAsync(secondEnumerator);
+            await DropSharedQueueAsync(channel);
+        }
+    }
+
+    [TimedFact]
+    public async Task Listen_80PublishWhileTheSharedQueueExists_IsDeliveredOnce()
+    {
+        // Arrange — the publish reaches the listener directly AND lands in the shared queue for 7.7. The relay must
+        // drop that copy: a 7.7 message sent after it is then the very next notification, not a duplicate.
+        const string channel = "warp_notify_bridge_once";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var listener = CreateTransport(channel);
+        await CreateSharedQueueAs77DidAsync(listener, channel, cts.Token);
+        var enumerator = listener.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        Task<bool> Next() => enumerator.MoveNextAsync().AsTask();
+        var next = Next();
+        try
+        {
+            await listener.ListenerReady.WaitAsync(cts.Token);
+
+            // Act
+            await listener.PublishAsync(NotificationKind.JobEnqueued, "first", cts.Token);
+            await PublishAs77DidAsync(channel, "J:second");
+
+            // Assert
+            (await next).ShouldBeTrue();
+            enumerator.Current.Queue.ShouldBe("first");
+            next = Next();
+            (await next).ShouldBeTrue();
+            enumerator.Current.Queue.ShouldBe("second");
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await next.ContinueWith(_ => { }, TaskScheduler.Default);
+            await DisposeQuietlyAsync(enumerator);
+            await DropSharedQueueAsync(channel);
+        }
+    }
+
+    [TimedFact]
+    public async Task PublishListen_No77SharedQueue_CreatesNothingAndStillDelivers()
+    {
+        // Arrange — a deployment that never ran 7.7 has no shared queue, and this release never creates it.
+        const string channel = "warp_notify_bridge_none";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var transport = CreateTransport(channel);
+        var enumerator = transport.ListenAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        var next = enumerator.MoveNextAsync().AsTask();
+        try
+        {
+            await transport.ListenerReady.WaitAsync(cts.Token);
+
+            // Act
+            await transport.PublishAsync(NotificationKind.JobEnqueued, "default", cts.Token);
+
+            // Assert
+            (await next).ShouldBeTrue();
+            enumerator.Current.Queue.ShouldBe("default");
+            (await ServiceExistsAsync($"{channel}/service")).ShouldBeFalse("the 7.7 shared service was created");
+            (await QueueExistsAsync($"{channel}/queue")).ShouldBeFalse("the 7.7 shared queue was created");
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await next.ContinueWith(_ => { }, TaskScheduler.Default);
+            await DisposeQuietlyAsync(enumerator);
+        }
+    }
+
+    // 7.7's setup of the shared objects, after this release's setup created the message type and contract (7.7
+    // creates the same ones).
+    private async Task CreateSharedQueueAs77DidAsync(SqlServerNotificationTransport transport, string channel, CancellationToken ct)
+    {
+        await transport.PublishAsync(NotificationKind.MessageEnqueued, null, ct); // runs the setup
+        await ExecuteSqlAsync($@"
+            CREATE QUEUE [{channel}/queue];
+            CREATE SERVICE [{channel}/service] ON QUEUE [{channel}/queue] ([{channel}/contract]);");
+    }
+
+    // 7.7's PublishAsync: a dialog from the shared service to itself.
+    private async Task PublishAs77DidAsync(string channel, string payload)
+    {
+        await using var conn = new SqlConnection(_fixture.ConnectionString);
+        await conn.OpenAsync(Xunit.TestContext.Current.CancellationToken);
+        await using var cmd = new SqlCommand(
+            $@"
+            DECLARE @conv UNIQUEIDENTIFIER;
+            BEGIN DIALOG @conv
+                FROM SERVICE [{channel}/service]
+                TO SERVICE '{channel}/service'
+                ON CONTRACT [{channel}/contract]
+                WITH ENCRYPTION = OFF;
+            SEND ON CONVERSATION @conv
+                MESSAGE TYPE [{channel}/msg] (@payload);
+            END CONVERSATION @conv;",
+            conn);
+        cmd.Parameters.Add("@payload", System.Data.SqlDbType.VarBinary, -1).Value = System.Text.Encoding.UTF8.GetBytes(payload);
+        await cmd.ExecuteNonQueryAsync(Xunit.TestContext.Current.CancellationToken);
+    }
+
+    private Task DropSharedQueueAsync(string channel) => ExecuteSqlAsync($@"
+        IF EXISTS (SELECT 1 FROM sys.services WHERE name = N'{channel}/service') DROP SERVICE [{channel}/service];
+        IF EXISTS (SELECT 1 FROM sys.service_queues WHERE name = N'{channel}/queue') DROP QUEUE [{channel}/queue];");
+
+    private async Task<int> CountMessagesAsync(string queue, string messageType)
+    {
+        await using var conn = new SqlConnection(_fixture.ConnectionString);
+        await conn.OpenAsync(Xunit.TestContext.Current.CancellationToken);
+        await using var cmd = new SqlCommand($"SELECT COUNT(*) FROM [{queue}] WHERE message_type_name = @type", conn);
+        cmd.Parameters.AddWithValue("@type", messageType);
+
+        return (int)(await cmd.ExecuteScalarAsync(Xunit.TestContext.Current.CancellationToken))!;
+    }
+
+    private async Task<bool> QueueExistsAsync(string name)
+    {
+        await using var conn = new SqlConnection(_fixture.ConnectionString);
+        await conn.OpenAsync(Xunit.TestContext.Current.CancellationToken);
+        await using var cmd = new SqlCommand("SELECT COUNT(*) FROM sys.service_queues WHERE name = @name", conn);
+        cmd.Parameters.AddWithValue("@name", name);
+
+        return (int)(await cmd.ExecuteScalarAsync(Xunit.TestContext.Current.CancellationToken))! > 0;
+    }
+
     private static async Task DisposeQuietlyAsync(IAsyncEnumerator<Notification> enumerator)
     {
         try

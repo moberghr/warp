@@ -75,6 +75,14 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     // from before the lease may be alive (rule 6.23, rolling deploy). Taking it needlessly costs one lock.
     private volatile bool _legacyServersAlive = true;
 
+    // Whether another server is alive, as the last claim said; true until one has. A lone server keeps the
+    // lease an idle run of a signal task leaves behind, since no other server could claim it (rule 6.23).
+    private volatile bool _otherServersAlive = true;
+
+    // The same answer, shared with the database clock and the heartbeat (rule 2.20): while a server from before
+    // 8.0 is alive they keep to this server's own clock. Null when the host's clock is not a DatabaseClock.
+    private readonly LegacyServerPresence? _legacyServers;
+
     public ClusterTaskScheduler(
         IEnumerable<ServerTaskInfo> tasks,
         ServerTaskRunner<TContext> runner,
@@ -83,8 +91,10 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         Guid serverId,
         ILogger logger,
         TimeSpan signalInterval,
-        TimeSpan liveWindow)
+        TimeSpan liveWindow,
+        LegacyServerPresence? legacyServers = null)
     {
+        _legacyServers = legacyServers;
         _entries = tasks.ToDictionary(x => x.Name, x => new Entry(x), StringComparer.Ordinal);
         _scopes = scopes;
         _runner = runner;
@@ -114,43 +124,21 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         Wake();
     }
 
-    /// <summary>Creates the rows of tasks the cluster has not seen and applies this server's interval and backoff limit to all of them.</summary>
+    /// <summary>Creates the rows of tasks the cluster has not seen and applies this server's interval to all of them.</summary>
     internal async Task RegisterAsync(CancellationToken ct)
     {
-        var attempt = 0;
-        while (true)
-        {
-            try
-            {
-                using var scope = _scopes.CreateScope();
-                var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-                var names = _entries.Keys.ToList();
-                var existing = await context.Set<ClusterTask>()
-                    .Where(x => names.Contains(x.Name))
-                    .ToDictionaryAsync(x => x.Name, StringComparer.Ordinal, ct);
-                foreach (var entry in _entries.Values)
-                {
-                    if (!existing.TryGetValue(entry.Name, out var row))
-                    {
-                        // Due at once, whatever this server's clock says: the lease times are the database's (rule 6.23).
-                        row = new ClusterTask { Name = entry.Name, NextRunAt = DateTime.UnixEpoch };
-                        context.Set<ClusterTask>().Add(row);
-                    }
-
-                    // The latest server to start sets the schedule, as each server set its own per-server
-                    // row before; a dashboard edit holds until the next deploy.
-                    row.IntervalSeconds = entry.Interval.TotalSeconds;
-                }
-
-                await context.SaveChangesAsync(ct);
-
-                return;
-            }
-            catch (DbUpdateException) when (attempt++ < 3)
-            {
-                // Another server inserted the same task row first; read it and update it instead.
-            }
-        }
+        // One insert-if-absent statement: servers starting together each register every task, and the one
+        // that loses an insert just updates the interval. The latest server to start sets the schedule, as
+        // each server set its own per-server row before; a dashboard edit holds until the next deploy. A
+        // new row is due at once, whatever this server's clock says (rule 6.23).
+        using var scope = _scopes.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+        var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
+        var tasks = _entries.Values
+            .OrderBy(x => x.Name, StringComparer.Ordinal)
+            .Select(x => new ClusterTaskRegistration(x.Name, x.Interval.TotalSeconds))
+            .ToList();
+        await queries.RegisterClusterTasksAsync(context, tasks, ct);
     }
 
     internal async Task RunAsync(CancellationToken ct)
@@ -284,6 +272,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             // nothing due and has to be sent again).
             var answered = _time.GetUtcNow().UtcDateTime;
             _legacyServersAlive = claims.LegacyServersAlive;
+            _otherServersAlive = claims.OtherServersAlive;
+            _legacyServers?.Report(claims.LegacyServersAlive);
             foreach (var state in claims.Tasks)
             {
                 var entry = _entries[state.Name];
@@ -294,6 +284,11 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
                 if (state.Claimed)
                 {
+                    lock (_gate)
+                    {
+                        entry.ScheduledRun = state.Scheduled;
+                    }
+
                     Start(entry, ct);
                 }
             }
@@ -360,10 +355,15 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     {
         var started = Stopwatch.GetTimestamp();
         bool signalStarted;
+        bool scheduledRun;
         lock (_gate)
         {
             signalStarted = entry.SignalStarted;
             entry.SignalStarted = false;
+
+            // Only a run the claim took because its tick came; a signal run or a rerun is not one.
+            scheduledRun = entry.ScheduledRun && !signalStarted;
+            entry.ScheduledRun = false;
         }
 
         using var span = WarpTelemetry.StartServerTaskActivity(entry.Name);
@@ -378,7 +378,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         var held = false;
         try
         {
-            (ran, message) = await _runner.RunAsync(entry.Info, _legacyServersAlive, run.Token);
+            (ran, message) = await _runner.RunAsync(entry.Info, _legacyServersAlive, run.Token, scheduledRun);
             runTime = Stopwatch.GetElapsedTime(started);
 
             // A run a signal started holds the lease for the rest of the signal interval before it
@@ -493,8 +493,10 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         // idle run left behind from a run in progress, so it could only leave a request nobody would read
         // before the lease lapsed: a continuation or a routed message then waited up to a tick and a half
         // instead of the signal interval (rule 6.18). One write per idle run of those tasks for the whole
-        // cluster; it leaves the next run where the claim put it, so no claim follows it.
-        var releases = entry.Signals.Count > 0;
+        // cluster; it leaves the next run where the claim put it, so no claim follows it. Skipped while the
+        // last claim saw no other server alive: nobody else could claim the task, and a signal here claims a
+        // lease of its own outright. A server that starts meanwhile waits at most until this one's next claim.
+        var releases = entry.Signals.Count > 0 && _otherServersAlive;
         var lookAgain = changed;
         if (changed || releases)
         {
@@ -692,6 +694,9 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
         // The next run of this task here was asked for by a signal, so it holds afterwards (rule 6.18).
         public bool SignalStarted { get; set; }
+
+        // The last claim took this task because its scheduled time had come (not only for a run request).
+        public bool ScheduledRun { get; set; }
 
         public DateTime LastSignalClaimAt { get; set; } = DateTime.MinValue;
 

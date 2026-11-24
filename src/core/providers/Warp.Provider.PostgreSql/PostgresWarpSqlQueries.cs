@@ -35,6 +35,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     private readonly string _lockJobsByIdWaitSql;
     private readonly string _lockAllServersSql;
     private readonly string _heartbeatSql;
+    private readonly string _heartbeatLocalTimeSql;
     private readonly string _activateScheduledJobsSql;
     private readonly string _lockLeaseByServiceNameSql;
     private readonly string _lockDefinitionByServiceNameSql;
@@ -274,11 +275,13 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
 
         // Every time written is the database's own (statement_timestamp(), one value for the whole
         // statement): a server whose clock is wrong cannot make itself or its leases look alive or dead to
-        // the others (#350). {{1}} is the server's own clock, used only to store how far it is off.
-        _heartbeatSql = $@"
+        // the others (#350). {{1}} is the server's own clock, used only to store how far it is off — except
+        // in the variant for a cluster with a server from before 8.0 alive (rule 2.20), which writes and
+        // compares {{1}} as 7.7 did. REMOVE that variant in the release after 8.x.
+        string HeartbeatSql(string written) => $@"
             WITH heartbeat AS (
                 UPDATE {serverTable}
-                SET ""{_n.ServerLastHeartbeatTime}"" = statement_timestamp(),
+                SET ""{_n.ServerLastHeartbeatTime}"" = {written},
                     ""{_n.ServerClockOffsetMs}"" = EXTRACT(EPOCH FROM (statement_timestamp() - {{1}})) * 1000,
                     ""{_n.ServerMemoryWorkingSetBytes}"" = COALESCE({{2}}, ""{_n.ServerMemoryWorkingSetBytes}""),
                     ""{_n.ServerCpuUsagePercent}"" = COALESCE({{3}}, ""{_n.ServerCpuUsagePercent}"")
@@ -287,14 +290,14 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             ),
             instance_bump AS (
                 UPDATE {instanceTable}
-                SET ""{_n.BackgroundServiceInstanceLastHeartbeatAt}"" = statement_timestamp()
+                SET ""{_n.BackgroundServiceInstanceLastHeartbeatAt}"" = {written}
                 WHERE ""{_n.BackgroundServiceInstanceServerId}"" = {{0}}
             ),
             lease_renewed AS (
                 UPDATE {leaseTable}
-                SET ""{_n.BackgroundServiceLeaseExpiresAt}"" = statement_timestamp() + interval '{ttlSeconds} seconds'
+                SET ""{_n.BackgroundServiceLeaseExpiresAt}"" = {written} + interval '{ttlSeconds} seconds'
                 WHERE ""{_n.BackgroundServiceLeaseHolderServerId}"" = {{0}}
-                  AND ""{_n.BackgroundServiceLeaseExpiresAt}"" > statement_timestamp()
+                  AND ""{_n.BackgroundServiceLeaseExpiresAt}"" > {written}
                 RETURNING ""{_n.BackgroundServiceLeaseServiceName}"" AS service_name
             )
             SELECT h.paused_at AS server_paused_at,
@@ -304,6 +307,9 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                    statement_timestamp() AS database_now
             FROM heartbeat h
             LEFT JOIN {QualifiedWorkerGroupTable()} w ON w.""{_n.WorkerGroupServerId}"" = h.id";
+
+        _heartbeatSql = HeartbeatSql("statement_timestamp()");
+        _heartbeatLocalTimeSql = HeartbeatSql("{1}");
 
         // Atomic activation: UPDATE ... RETURNING queue flips due rows AND streams back the
         // queue names so the caller can fire one JobEnqueued notification per distinct queue.
@@ -442,6 +448,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         DateTime now,
         long? memoryBytes,
         double? cpuPercent,
+        bool writeLocalTime,
         CancellationToken ct)
     {
         // Raw ADO.NET: the CTE+JOIN returns a flat (server_paused_at, group_id, group_paused_at
@@ -462,7 +469,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             await using var cmd = conn.CreateCommand();
 
             cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = _heartbeatSql
+            cmd.CommandText = (writeLocalTime ? _heartbeatLocalTimeSql : _heartbeatSql)
                 .Replace("{0}", "@p0", StringComparison.Ordinal)
                 .Replace("{1}", "@p1", StringComparison.Ordinal)
                 .Replace("{2}", "@p2", StringComparison.Ordinal)
@@ -681,6 +688,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
 
         var tasks = new List<ClusterTaskState>(names.Count);
         var legacy = false;
+        var others = false;
         await ReadAsync(
             context,
             ClusterTaskSql(context).Claim,
@@ -691,12 +699,13 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             ],
             x =>
             {
-                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))));
+                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))) { Scheduled = x.GetBoolean(5) });
                 legacy |= x.GetBoolean(3);
+                others |= x.GetBoolean(4);
             },
             ct);
 
-        return new ClusterTaskClaims(tasks, legacy);
+        return new ClusterTaskClaims(tasks, legacy) { OtherServersAlive = others };
     }
 
     public async Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
@@ -751,6 +760,24 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             ct);
 
         return dueNow;
+    }
+
+    public async Task RegisterClusterTasksAsync(DbContext context, IReadOnlyList<ClusterTaskRegistration> tasks, CancellationToken ct)
+    {
+        if (tasks.Count == 0)
+        {
+            return;
+        }
+
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Register,
+            [
+                new NpgsqlParameter<string[]>("names", [.. tasks.Select(x => x.Name)]),
+                new NpgsqlParameter<double[]>("intervals", [.. tasks.Select(x => x.IntervalSeconds)]),
+            ],
+            _ => { },
+            ct);
     }
 
     // Built once from the resolved model on first use, like the rate-limit lock statement.
