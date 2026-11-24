@@ -89,6 +89,19 @@ public class SagaHandlerProxyTests
     }
 
     [TimedFact]
+    public async Task NoSagaAndNoStartsSaga_NotFound_SavesWhatTheHandlerStaged()
+    {
+        // The proxy saves for a saga handler (rule 8.17), and the worker no longer saves a handler's
+        // context: a job or message NotFoundAsync staged was lost unless the proxy saved here too.
+        var (store, locks, jobContext, cache, time) = SetUp();
+        var proxy = new SagaHandlerProxy<OrderSaga, ContinueOrder>(new RecordingHandler(), store, locks, jobContext, time, cache);
+
+        await proxy.HandleAsync(new ContinueOrder { OrderId = "missing" }, CancellationToken.None);
+
+        store.SaveCount.ShouldBe(1);
+    }
+
+    [TimedFact]
     public async Task NoSagaAndNoStartsSaga_OverriddenNotFound_PreservesHandlerSetOutcome()
     {
         var (store, locks, jobContext, cache, time) = SetUp();

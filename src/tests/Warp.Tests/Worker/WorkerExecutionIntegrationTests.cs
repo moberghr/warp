@@ -334,6 +334,54 @@ public abstract class WorkerExecutionIntegrationTestsBase : IntegrationTestBase
     [TimedTheory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task GivenAHandlerThatStagesAJobAndThrows_WhenItFails_ThenNoUnsavedJobsWarningIsLogged(bool useDispatcher)
+    {
+        // The unsaved-staged-jobs warning is for work lost by a missing save. A failed attempt's staged
+        // jobs are meant to be discarded, so the warning must stay quiet for it.
+        var capture = new CapturingLoggerProvider();
+        await using var server = await StartAsync(useDispatcher, new BarrierSignal(), services =>
+        {
+            services.AddSingleton<ILoggerProvider>(capture);
+            services.Configure<LoggerFilterOptions>(x => x.AddFilter<CapturingLoggerProvider>("Warp", LogLevel.Information));
+        });
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new StageChildThenThrowRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        await server.WaitForJobState(jobId, State.Failed);
+
+        // Assert
+        capture.Messages.ShouldNotContain(x => x.Contains("without SaveChangesAsync", StringComparison.Ordinal));
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GivenAHandlerThatStagesAJobWithoutSaving_WhenItCompletes_ThenTheUnsavedJobsWarningIsLogged(bool useDispatcher)
+    {
+        // The worker does not save for the handler (rule 6.17), so this warning is the only sign that a
+        // staged job was lost. It is raised when the handler's scope disposes the publisher.
+        var capture = new CapturingLoggerProvider();
+        await using var server = await StartAsync(useDispatcher, new BarrierSignal(), services =>
+        {
+            services.AddSingleton<ILoggerProvider>(capture);
+            services.Configure<LoggerFilterOptions>(x => x.AddFilter<CapturingLoggerProvider>("Warp", LogLevel.Information));
+        });
+        var publisher = server.CreatePublisher();
+        var jobId = await publisher.Enqueue(new StageChildWithoutSavingRequest());
+        await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+
+        // Act
+        await server.WaitForJobState(jobId, State.Completed);
+
+        // Assert
+        capture.Messages.ShouldContain(x => x.Contains("without SaveChangesAsync", StringComparison.Ordinal));
+    }
+
+    [TimedTheory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task GivenInformationLoggingForTheWorker_WhenAJobRuns_ThenItsExecutingAndCompletedLinesAreLogged(bool useDispatcher)
     {
         // The per-job lines are guarded by IsEnabled (they boxed their arguments on every job even with

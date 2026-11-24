@@ -32,6 +32,8 @@ public class ProcessOrderHandler : IJobHandler<ProcessOrderRequest>
         await _batchPublisher.ContinueBatchWith(
             new List<SendInvoiceRequest> { new() { OrderId = message.OrderId } },
             batchId);
+
+        await _batchPublisher.SaveChangesAsync(ct);
     }
 }
 ```

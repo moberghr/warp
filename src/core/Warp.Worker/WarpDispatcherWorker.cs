@@ -322,6 +322,8 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
+            MarkHandlerFailed();
+
             // Job was cancelled (deleted while running) — dispose handler scope first
             handlerScope?.Dispose();
             handlerScope = null;
@@ -373,6 +375,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         }
         catch (Exception e)
         {
+            MarkHandlerFailed();
             handlerStopwatch?.Stop();
             var errorDurationMs = handlerStopwatch?.Elapsed.TotalMilliseconds;
 
@@ -739,6 +742,16 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         foreach (var drained in progressCollector.Drain())
         {
             yield return drained;
+        }
+    }
+
+    // Before the handler scope is disposed: what a failed or cancelled attempt staged is discarded on
+    // purpose, so the publishers' unsaved-staged-jobs warning stays quiet for it.
+    private static void MarkHandlerFailed()
+    {
+        if (JobExecutionContext.Current is { } execution)
+        {
+            execution.HandlerFailed = true;
         }
     }
 }
