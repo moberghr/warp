@@ -439,6 +439,60 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task FlushAsync_TransientDbExceptionOnTheFirstAttempt_CompletesEveryJob()
+    {
+        // Arrange: a command timeout or a dropped connection on the raw completion statement is a transient
+        // DbException, not a DbUpdateException. It escaped the batch, which abandoned every drained job.
+        var attempts = 0;
+        Task<IReadOnlyCollection<Guid>> FailOnce(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct) =>
+            Interlocked.Increment(ref attempts) == 1
+                ? throw new TransientDbException()
+                : CompleteJobs(context, jobs, logs, ct);
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, FailOnce);
+        var first = await InsertProcessingJob();
+        var second = await InsertProcessingJob();
+        batch.Add(MakeEntry(first));
+        batch.Add(MakeEntry(second));
+
+        // Act
+        await batch.FlushAsync();
+        await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
+
+        // Assert
+        var ctx = _fixture.CreateContext();
+        (await ctx.Set<Job>()
+            .Where(x => x.Id == first.Id || x.Id == second.Id)
+            .CountAsync(x => x.CurrentState == State.Completed, Xunit.TestContext.Current.CancellationToken))
+            .ShouldBe(2);
+        (await ctx.Set<Counter>().SumAsync(x => x.Value, Xunit.TestContext.Current.CancellationToken)).ShouldBe(4);
+    }
+
+    private sealed class TransientDbException : System.Data.Common.DbException
+    {
+        public TransientDbException()
+            : base("Injected transient failure: the command timed out")
+        {
+        }
+
+        public TransientDbException(string message)
+            : base(message)
+        {
+        }
+
+        public TransientDbException(string message, Exception innerException)
+            : base(message, innerException)
+        {
+        }
+
+        public TransientDbException(string message, int errorCode)
+            : base(message, errorCode)
+        {
+        }
+
+        public override bool IsTransient => true;
+    }
+
+    [TimedFact]
     public async Task FlushAsync_WhenClassifierReportsTransient_RetriesUntilBudgetExhaustedThenSplitsOnFailure()
     {
         // A classifier that always reports "transient deadlock" forces the retry loop to spin

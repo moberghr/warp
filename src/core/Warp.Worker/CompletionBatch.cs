@@ -314,18 +314,20 @@ internal sealed class CompletionBatch
 
                 return;
             }
-            catch (Exception ex) when (attempt < MaxDeadlockRetries && _exceptionClassifier.IsTransientDeadlock(ex))
+            catch (Exception ex) when (attempt < MaxDeadlockRetries && (_exceptionClassifier.IsTransientDeadlock(ex) || ex is DbException { IsTransient: true }))
             {
+                // A command timeout or a dropped connection is transient too. The completion is a raw command,
+                // so it surfaces as a DbException, not wrapped in EF's DbUpdateException as a SaveChanges was.
                 _logger.LogWarning(
                     ex,
-                    "Completion flush hit a transient deadlock (attempt {attempt}/{max}); retrying after backoff",
+                    "Completion flush hit a transient failure (attempt {attempt}/{max}); retrying after backoff",
                     attempt + 1,
                     MaxDeadlockRetries);
 
                 await Task.Delay(TimeSpan.FromMilliseconds(DeadlockRetryBaseDelayMs * (1 << attempt)), cancellationToken);
                 attempt++;
             }
-            catch (Exception ex) when (ex is DbUpdateException or DbException { IsTransient: false })
+            catch (Exception ex) when (ex is DbUpdateException or DbException)
             {
                 if (count == 1)
                 {
