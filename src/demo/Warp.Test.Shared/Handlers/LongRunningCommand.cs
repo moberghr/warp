@@ -26,21 +26,29 @@ public class LongRunningCommand : IJobHandler<LongRunningRequest>
 
     public async Task HandleAsync(LongRunningRequest message, CancellationToken cancellationToken)
     {
-        var started = Stopwatch.GetTimestamp();
-        var step = 0;
-
-        while (Stopwatch.GetElapsedTime(started).TotalMilliseconds < message.DurationMs)
+        if (message.LogIntervalMs <= 0)
         {
-            if (message.LogIntervalMs > 0)
-            {
-                _logger.LogInformation("Long-running step {Step}", step++);
-            }
+            await Task.Delay(message.DurationMs, cancellationToken);
 
-            var remaining = message.DurationMs - Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-            var wait = message.LogIntervalMs > 0 ? Math.Min(message.LogIntervalMs, remaining) : remaining;
+            return;
+        }
+
+        // A FIXED number of lines, each step sleeping until its own deadline. The loop used to run until the
+        // duration had elapsed, sleeping min(interval, remaining): when less than a millisecond remained,
+        // Task.Delay truncated it to zero and completed at once, so the job spun out up to a few hundred extra
+        // log lines in its last millisecond. Each is a job_log row (an INSERT in single-worker mode, WAL in
+        // both), so the scenario's statements and WAL per job swung by 2x between runs of the same code.
+        var started = Stopwatch.GetTimestamp();
+        var steps = Math.Max(1, message.DurationMs / message.LogIntervalMs);
+
+        for (var step = 0; step < steps; step++)
+        {
+            _logger.LogInformation("Long-running step {Step}", step);
+
+            var wait = ((step + 1) * message.LogIntervalMs) - Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             if (wait > 0)
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(wait), cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Ceiling(wait)), cancellationToken);
             }
         }
     }
