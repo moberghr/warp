@@ -186,9 +186,9 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             using var connection = new SqlConnection(SqlServerConnectionString);
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "SELECT query_plan FROM sys.dm_exec_text_query_plan(CONVERT(varbinary(64), @h, 1), @s, -1)";
+            command.CommandText = "SELECT query_plan FROM sys.dm_exec_text_query_plan(CONVERT(varbinary(64), @h, 1), DEFAULT, DEFAULT)";
             command.Parameters.AddWithValue("@h", id[..split]);
-            command.Parameters.AddWithValue("@s", int.Parse(id[(split + 1)..], System.Globalization.CultureInfo.InvariantCulture));
+            
             var xml = command.ExecuteScalar() as string ?? string.Empty;
             var timeout = TimeSpan.FromSeconds(2);
             Console.WriteLine($"[sqlplan] {id} ({xml.Length} chars)");
@@ -235,7 +235,10 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             Console.WriteLine($"[sqltop] exec={x.Exec} reads={x.Reads} gen={x.Plan.Generation} fresh={x.Fresh} :: {string.Join(" ", x.Plan.Text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))}");
         }
 
-        foreach (var (id, _) in afterPlans.OrderByDescending(x => x.Value.LogicalReads).Take(2))
+        foreach (var id in afterPlans
+            .OrderByDescending(x => beforePlans.TryGetValue(x.Key, out var e) && e.Compiled == x.Value.Compiled ? x.Value.LogicalReads - e.LogicalReads : x.Value.LogicalReads)
+            .Take(2)
+            .Select(x => x.Key))
         {
             PrintPlan(id);
         }
