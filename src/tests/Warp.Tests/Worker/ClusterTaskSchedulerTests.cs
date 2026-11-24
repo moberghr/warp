@@ -73,6 +73,26 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task RunningTask_IdleRunThatWritesNothing_DoesNotWakeTheLoop()
+    {
+        // A run that wrote no completion still holds its lease, so a pass right after it could claim
+        // nothing; waking for one doubled the idle claim statements. The first idle run records itself
+        // (a completion, so a wake); the next within a minute writes nothing.
+        var task = new IdleTask(TimeSpan.FromSeconds(10));
+        using var scheduler = await BuildAsync(task);
+        await RunOnceAsync(scheduler, IdleTask.TaskName);
+        await MakeDueAsync(IdleTask.TaskName);
+        var before = scheduler.Wakes;
+
+        // Act
+        await RunOnceAsync(scheduler, IdleTask.TaskName);
+
+        // Assert
+        task.Runs.ShouldBe(2);
+        scheduler.Wakes.ShouldBe(before);
+    }
+
+    [TimedFact]
     public async Task PassAsync_SignalWhileTheTaskRunsHere_RunsItAgainRightAfter()
     {
         var task = new PinnedTask(TimeSpan.FromHours(1));

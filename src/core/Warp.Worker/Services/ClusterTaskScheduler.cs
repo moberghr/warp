@@ -45,6 +45,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     private readonly TimeSpan _startupDelay;
     private readonly TimeSpan _liveWindow;
     private readonly SemaphoreSlim _wake = new(0, 1);
+    private int _wakes;
     private readonly Lock _gate = new();
     private volatile bool _legacyServersAlive;
 
@@ -312,6 +313,10 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             await renewal;
         }
 
+        // Wake the scheduling loop only when a claim could now succeed. A run that wrote no completion
+        // still holds its lease, so a pass right after it would claim nothing: that wake doubled the
+        // idle claim statements.
+        var wake = true;
         try
         {
             span?.SetTag(WarpTelemetryAttributes.WarpTaskLockHeld, ran);
@@ -322,7 +327,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
             if (ran && !ct.IsCancellationRequested)
             {
-                await FinishAsync(entry, message, failure, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                wake = await FinishAsync(entry, message, failure, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
             }
         }
         catch (Exception ex)
@@ -337,7 +342,10 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                 entry.Running = null;
             }
 
-            Wake();
+            if (wake)
+            {
+                Wake();
+            }
         }
     }
 
@@ -416,7 +424,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
     }
 
-    private async Task FinishAsync(Entry entry, string? message, Exception? failure, double durationMs)
+    // Returns whether a completion was written: that frees the lease, and may make the task due at once.
+    private async Task<bool> FinishAsync(Entry entry, string? message, Exception? failure, double durationMs)
     {
         var now = _time.GetUtcNow();
         var status = failure == null ? "Completed" : "Failed";
@@ -433,7 +442,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
 
         // An idle run that has nothing to record writes nothing: its lease lapses as the task falls due.
-        if (didWork || rerun || record)
+        var wrote = didWork || rerun || record;
+        if (wrote)
         {
             using var scope = _scopes.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
@@ -466,6 +476,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         {
             await WriteServerLogAsync(entry.Name, status, failure?.Message ?? message, durationMs);
         }
+
+        return wrote;
     }
 
     private async Task RenewWhileRunningAsync(Entry entry, CancellationTokenSource run, CancellationToken stop)
@@ -565,8 +577,12 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             .GetServices<IServerTask>()
             .First(x => x.GetType() == entry.TaskType);
 
+    // Internal for tests: how many times the scheduling loop was woken.
+    internal int Wakes => Volatile.Read(ref _wakes);
+
     private void Wake()
     {
+        Interlocked.Increment(ref _wakes);
         lock (_gate)
         {
             if (_wake.CurrentCount == 0)

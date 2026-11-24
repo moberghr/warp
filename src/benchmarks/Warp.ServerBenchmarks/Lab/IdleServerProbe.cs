@@ -199,6 +199,7 @@ public static class IdleServerProbe
             SELECT calls, query
             FROM pg_stat_statements
             WHERE query NOT LIKE '%pg_stat_statements%'
+              AND query NOT LIKE '%pg_stat_activity%'
             ORDER BY calls DESC;
             """,
             connection);
