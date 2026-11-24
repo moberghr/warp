@@ -134,9 +134,10 @@ jobs:
       fail-fast: false
       matrix:
         benchmark:
-          - name: dispatcher
-            filter: '*DispatcherModeBenchmark*'
-            sqlserver: true
+          - name: message-routing
+            filter: '*MessageRoutingBenchmark*'
+          - name: publish
+            filter: '*PublishBenchmark*'
     env:
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
       WARP_BENCH_SQLSERVER: "Server=localhost,1433;User Id=sa;Password=Warp!Bench1;TrustServerCertificate=True;Database=master"
