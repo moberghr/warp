@@ -244,11 +244,6 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
             NullLogger.Instance,
             startupDelay,
             TimeSpan.FromMinutes(5));
-        if (!TestTasks.QueriesFor(_fixture.CreateContext()).SupportsClusterTaskLeases)
-        {
-            Assert.Skip("Cluster task leases are not implemented for this provider yet (rule 6.20).");
-        }
-
         await scheduler.RegisterAsync(Ct);
 
         return scheduler;

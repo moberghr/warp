@@ -260,16 +260,7 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         fromClaim.ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(intervalSeconds * 1.5));
     }
 
-    private IWarpSqlQueries<TestContext> Queries()
-    {
-        var queries = TestTasks.QueriesFor(_fixture.CreateContext());
-        if (!queries.SupportsClusterTaskLeases)
-        {
-            Assert.Skip("Cluster task leases are not implemented for this provider yet (rule 6.20).");
-        }
-
-        return queries;
-    }
+    private IWarpSqlQueries<TestContext> Queries() => TestTasks.QueriesFor(_fixture.CreateContext());
 
     private Task<ClusterTaskClaims> ClaimAsync(string[] names, Guid server) =>
         Queries().ClaimClusterTasksAsync(_fixture.CreateContext(), names, server, LiveWindow, Ct);

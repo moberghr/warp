@@ -44,6 +44,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     // RateLimitBucket names (adapter rate limiting is an opt-in, cold path), so the SQL is derived
     // from context.Model once and cached. A benign double-compute under a race is harmless.
     private string? _lockRateLimitBucketSql;
+    private SqlServerClusterTaskSql? _clusterTaskSql;
 
     public SqlServerWarpSqlQueries(WarpJobTableNames names)
     {
@@ -765,6 +766,89 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             .FirstOrDefaultAsync(ct);
     }
 
+    public bool SupportsClusterTaskLeases => true;
+
+    public async Task<ClusterTaskClaims> ClaimClusterTasksAsync(
+        DbContext context,
+        IReadOnlyList<string> names,
+        Guid serverId,
+        TimeSpan liveWindow,
+        CancellationToken ct)
+    {
+        if (names.Count == 0)
+        {
+            return new ClusterTaskClaims([], LegacyServersAlive: false);
+        }
+
+        var tasks = new List<ClusterTaskState>(names.Count);
+        var legacy = false;
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Claim,
+            [
+                new SqlParameter("@names", SqlDbType.NVarChar, -1) { Value = string.Join(SqlServerClusterTaskSql.NameSeparator, names) },
+                new SqlParameter("@server", SqlDbType.UniqueIdentifier) { Value = serverId },
+                new SqlParameter("@liveWindowMs", SqlDbType.Int) { Value = (int)Math.Min(liveWindow.TotalMilliseconds, int.MaxValue) },
+            ],
+            x =>
+            {
+                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))));
+                legacy |= x.GetBoolean(3);
+            },
+            ct);
+
+        return new ClusterTaskClaims(tasks, legacy);
+    }
+
+    public async Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
+    {
+        var claimed = false;
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Request,
+            [
+                new SqlParameter("@name", SqlDbType.NVarChar, 200) { Value = name },
+                new SqlParameter("@server", SqlDbType.UniqueIdentifier) { Value = serverId },
+            ],
+            x => claimed = x.GetInt32(0) > 0,
+            ct);
+
+        return claimed;
+    }
+
+    public async Task<bool> RenewClusterTaskLeaseAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
+    {
+        var renewed = false;
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Renew,
+            [
+                new SqlParameter("@name", SqlDbType.NVarChar, 200) { Value = name },
+                new SqlParameter("@server", SqlDbType.UniqueIdentifier) { Value = serverId },
+            ],
+            _ => renewed = true,
+            ct);
+
+        return renewed;
+    }
+
+    public async Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
+    {
+        await context.Database.ExecuteSqlRawAsync(
+            ClusterTaskSql(context).Complete,
+            [
+                new SqlParameter("@name", SqlDbType.NVarChar, 200) { Value = completion.Name },
+                new SqlParameter("@server", SqlDbType.UniqueIdentifier) { Value = completion.ServerId },
+                new SqlParameter("@didWork", SqlDbType.Bit) { Value = completion.DidWork },
+                new SqlParameter("@rerun", SqlDbType.Bit) { Value = completion.Rerun },
+                new SqlParameter("@record", SqlDbType.Bit) { Value = completion.Record },
+                new SqlParameter("@status", SqlDbType.NVarChar, -1) { Value = (object?)completion.Status ?? DBNull.Value },
+                new SqlParameter("@message", SqlDbType.NVarChar, -1) { Value = (object?)completion.Message ?? DBNull.Value },
+                new SqlParameter("@durationMs", SqlDbType.Float) { Value = completion.DurationMs },
+            ],
+            ct);
+    }
+
     public async Task<RateLimitBucket?> LockRateLimitBucketByKeyAsync(DbContext context, string key, CancellationToken ct)
     {
         _lockRateLimitBucketSql ??= BuildLockRateLimitBucketSql(context.Model);
@@ -822,5 +906,39 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         }
 
         return claimed;
+    }
+
+    // Built once from the resolved model on first use, like the rate-limit lock statement.
+    private SqlServerClusterTaskSql ClusterTaskSql(DbContext context) => _clusterTaskSql ??= SqlServerClusterTaskSql.Build(context.Model);
+
+    // Reads a cluster task statement's rows by position on the context's connection and transaction.
+    // Not SqlQueryRaw: that maps result columns through the context's naming convention, and the
+    // server context (no convention) and an application context (any convention) would need different
+    // aliases for the same statement.
+    private static async Task ReadAsync(
+        DbContext context,
+        string sql,
+        SqlParameter[] parameters,
+        Action<System.Data.Common.DbDataReader> row,
+        CancellationToken ct)
+    {
+        var connection = context.Database.GetDbConnection();
+        await context.Database.OpenConnectionAsync(ct);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+            command.Parameters.AddRange(parameters);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                row(reader);
+            }
+        }
+        finally
+        {
+            await context.Database.CloseConnectionAsync();
+        }
     }
 }

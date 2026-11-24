@@ -529,6 +529,11 @@ public abstract class FullStackObservabilityTestsBase : IAsyncLifetime
             opt.PollingIntervalFactor = 1.0;
             opt.ScheduledActivationInterval = TimeSpan.FromMilliseconds(250);
 
+            // Server tasks run at once, as on WarpTestServer. With the default startup delay each task's
+            // first run lands at a random point of the first ten seconds, and when CounterAggregator's
+            // landed inside this test it folded the counter rows asserted below into statistics.
+            opt.ServerTaskStartupDelay = TimeSpan.Zero;
+
             // Multi-app observability trigger: identify this host as an application (stamps Server row +
             // provenance columns, lights up the /api/applications surface). §8.19.
             opt.ApplicationName = AppName;
