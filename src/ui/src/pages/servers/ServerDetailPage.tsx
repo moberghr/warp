@@ -146,10 +146,11 @@ export default function ServerDetailPage() {
       })()}
 
       {/* Task Sections */}
-      <h2 className="text-lg font-semibold mb-3">Server Tasks</h2>
+      <h2 className="text-lg font-semibold mb-1">Server Tasks</h2>
+      <p className="text-sm text-muted-foreground mb-3">Shared by the whole cluster: each run happens on one server.</p>
       {tasks.length === 0 ? (
         <Card>
-          <CardContent className="py-6 text-center text-muted-foreground text-sm">No task logs yet</CardContent>
+          <CardContent className="py-6 text-center text-muted-foreground text-sm">No server tasks yet</CardContent>
         </Card>
       ) : (
         <div className="space-y-2">
@@ -286,6 +287,11 @@ function TaskSection({ serverId, task }: { serverId: string; task: ServerTaskSum
         <div className="flex items-center gap-3 min-w-0">
           {expanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
           <span className="font-medium text-sm">{task.taskName}</span>
+          {task.runningOn && (
+            <span className="text-xs px-2 py-0.5 rounded-full font-medium text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/30">
+              {task.runningOn === serverId ? 'running here' : 'running on another server'}
+            </span>
+          )}
           {task.lastStatus && (
             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColors[task.lastStatus] ?? 'text-muted-foreground'}`}>
               {task.lastStatus}
@@ -299,7 +305,15 @@ function TaskSection({ serverId, task }: { serverId: string; task: ServerTaskSum
             <span className="text-yellow-600 dark:text-yellow-400 font-medium">Disabled</span>
           )}
           {task.lastDurationMs != null && <span>took {task.lastDurationMs.toFixed(0)}ms</span>}
-          {task.lastRun && <span>ran <RelativeTime date={task.lastRun} /></span>}
+          {task.lastRun && (
+            <span>
+              ran <RelativeTime date={task.lastRun} />
+              {task.lastServerId && (task.lastServerId === serverId ? ' here' : ' elsewhere')}
+            </span>
+          )}
+          {task.nextRunAt && task.intervalSeconds != null && (
+            <span>next <RelativeTime date={task.nextRunAt} display="relative" tense="countdown" /></span>
+          )}
         </div>
       </button>
 

@@ -20,7 +20,7 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
     {
         await _fixture.ResetAsync();
 
-        // Insert a server so FK constraints on ServerTask and ServerLog are satisfied
+        // Insert a server so the FK constraint on ServerLog is satisfied
         var ctx = _fixture.CreateContext();
         ctx.Set<Server>().Add(new Server
         {
@@ -128,24 +128,23 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task RunCleanup_OldServerLogs_DeletedBasedOnTaskInterval()
     {
-        // Arrange — insert a ServerTask with 60s interval, retention = 60 * 300 = 18000 seconds
+        // Arrange — a task with a 60s interval: its runs are kept 60 * 300 = 18000 seconds
         var ctx = _fixture.CreateContext();
         await InsertExpiredJob(ctx);
 
-        var serverTask = new ServerTask
+        ctx.Set<ClusterTask>().Add(new ClusterTask
         {
-            ServerId = ServerId,
-            TaskName = "TestTask",
+            Name = "TestTask",
             IntervalSeconds = 60,
-        };
-        ctx.Set<ServerTask>().Add(serverTask);
+            NextRunAt = DateTime.UtcNow,
+        });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Insert an old server log well beyond the retention window
         var oldLog = new ServerLog
         {
             ServerId = ServerId,
-            ServerTaskId = serverTask.Id,
+            TaskName = "TestTask",
             Status = "Success",
             Message = "Old log",
             Timestamp = DateTime.UtcNow.AddSeconds(-20000), // Older than 18000s retention
@@ -171,20 +170,19 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
         var ctx = _fixture.CreateContext();
         await InsertExpiredJob(ctx);
 
-        var serverTask = new ServerTask
+        ctx.Set<ClusterTask>().Add(new ClusterTask
         {
-            ServerId = ServerId,
-            TaskName = "TestTask",
+            Name = "TestTask",
             IntervalSeconds = 60,
-        };
-        ctx.Set<ServerTask>().Add(serverTask);
+            NextRunAt = DateTime.UtcNow,
+        });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Insert a recent server log
         var recentLog = new ServerLog
         {
             ServerId = ServerId,
-            ServerTaskId = serverTask.Id,
+            TaskName = "TestTask",
             Status = "Success",
             Message = "Recent log",
             Timestamp = DateTime.UtcNow.AddSeconds(-10), // Very recent
@@ -331,24 +329,23 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
     [TimedFact]
     public async Task RunCleanup_ServerTaskWithNullInterval_UsesDefaultRetention()
     {
-        // Arrange — task with null IntervalSeconds should use default (60s * 300 = 18000s)
+        // Arrange — a disabled task (null IntervalSeconds) keeps its runs the default 60s * 300 = 18000s
         var ctx = _fixture.CreateContext();
         await InsertExpiredJob(ctx);
 
-        var serverTask = new ServerTask
+        ctx.Set<ClusterTask>().Add(new ClusterTask
         {
-            ServerId = ServerId,
-            TaskName = "NullIntervalTask",
+            Name = "NullIntervalTask",
             IntervalSeconds = null,
-        };
-        ctx.Set<ServerTask>().Add(serverTask);
+            NextRunAt = DateTime.UtcNow,
+        });
         await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
         // Insert a log older than default retention (18000s ≈ 5 hours)
         var oldLog = new ServerLog
         {
             ServerId = ServerId,
-            ServerTaskId = serverTask.Id,
+            TaskName = "NullIntervalTask",
             Status = "Success",
             Message = "Old log",
             Timestamp = DateTime.UtcNow.AddHours(-6),
@@ -374,7 +371,7 @@ public abstract class ExpirationEdgeCaseTestsBase : IAsyncLifetime
         var ctx = _fixture.CreateContext();
         await InsertExpiredJob(ctx);
 
-        // Insert an orphaned server log (no ServerTaskId) older than 1 day
+        // Insert a server log of no known task, older than 1 day
         var orphanedLog = new ServerLog
         {
             ServerId = ServerId,

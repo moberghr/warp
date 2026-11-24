@@ -238,6 +238,11 @@ export interface ServerTaskSummary {
   lastRun: string | null;
   lastDurationMs: number | null;
   intervalSeconds: number | null;
+  /** One schedule for the whole cluster, run by one server per tick (rule 6.23). */
+  clusterWide?: boolean;
+  nextRunAt?: string | null;
+  lastServerId?: string | null;
+  runningOn?: string | null;
 }
 
 export interface ServerLogModel {

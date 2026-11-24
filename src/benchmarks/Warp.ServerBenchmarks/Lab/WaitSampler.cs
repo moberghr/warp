@@ -19,8 +19,10 @@ public sealed class WaitSampler : IAsyncDisposable
     private readonly ConcurrentDictionary<string, int> _samples = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _loop;
+    private readonly Dictionary<string, int> _peakByApplication = new(StringComparer.Ordinal);
     private int _sweeps;
     private int _failures;
+    private int _peak;
 
     public WaitSampler(string connectionString, TimeSpan interval)
     {
@@ -46,6 +48,25 @@ public sealed class WaitSampler : IAsyncDisposable
             // `await using` in its repeat loop, takes the run's own reporting down with it.
             _stop.Dispose();
         }
+    }
+
+    /// <summary>The most backends (open connections, idle ones included) seen in one sweep.</summary>
+    public int PeakConnections => _peak;
+
+    /// <summary>
+    /// Peak connections, total and per application name. A pool is visible here by its application name
+    /// (Warp's own server pool carries a <c>:warp-server</c> suffix), and the peaks of different names
+    /// need not have been reached in the same sweep.
+    /// </summary>
+    public void ReportConnections()
+    {
+        Console.WriteLine($"   peak connections: {_peak} ({_sweeps:N0} sweeps)");
+        foreach (var entry in _peakByApplication.OrderByDescending(x => x.Value))
+        {
+            Console.WriteLine($"   {entry.Value,6}  {(entry.Key.Length == 0 ? "(no application name)" : entry.Key)}");
+        }
+
+        Console.WriteLine();
     }
 
     public void Report()
@@ -77,7 +98,7 @@ public sealed class WaitSampler : IAsyncDisposable
         await using var connection = new NpgsqlConnection(connectionString);
 
         const string Sql = """
-            SELECT state, wait_event_type, wait_event
+            SELECT state, wait_event_type, wait_event, application_name
             FROM pg_stat_activity
             WHERE datname = current_database()
               AND pid <> pg_backend_pid()
@@ -94,14 +115,26 @@ public sealed class WaitSampler : IAsyncDisposable
 
                 await using var command = new NpgsqlCommand(Sql, connection);
                 await using var reader = await command.ExecuteReaderAsync(_stop.Token);
+                var sweep = new Dictionary<string, int>(StringComparer.Ordinal);
+                var backends = 0;
 
                 while (await reader.ReadAsync(_stop.Token))
                 {
+                    backends++;
+                    var application = await reader.IsDBNullAsync(3, _stop.Token) ? string.Empty : reader.GetString(3);
+                    sweep[application] = sweep.GetValueOrDefault(application) + 1;
+
                     var state = await reader.IsDBNullAsync(0, _stop.Token) ? "?" : reader.GetString(0);
                     var type = await reader.IsDBNullAsync(1, _stop.Token) ? "Running" : reader.GetString(1);
                     var name = await reader.IsDBNullAsync(2, _stop.Token) ? string.Empty : reader.GetString(2);
 
                     _samples.AddOrUpdate($"{state,-20} {type}{(name.Length > 0 ? ":" + name : string.Empty)}", 1, (_, n) => n + 1);
+                }
+
+                _peak = Math.Max(_peak, backends);
+                foreach (var entry in sweep)
+                {
+                    _peakByApplication[entry.Key] = Math.Max(_peakByApplication.GetValueOrDefault(entry.Key), entry.Value);
                 }
 
                 _sweeps++;

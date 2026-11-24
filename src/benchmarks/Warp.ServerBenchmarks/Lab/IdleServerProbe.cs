@@ -71,8 +71,12 @@ public static class IdleServerProbe
             Console.WriteLine();
 
             var sw = Stopwatch.StartNew();
-            await Task.Delay(window);
-            sw.Stop();
+            await using (var sampler = new WaitSampler(connectionString, TimeSpan.FromMilliseconds(100)))
+            {
+                await Task.Delay(window);
+                sw.Stop();
+                sampler.ReportConnections();
+            }
 
             var rows = await ReadStatementsAsync(connectionString);
 
@@ -156,7 +160,7 @@ public static class IdleServerProbe
             .ConfigureLogging(logging => logging.SetMinimumLevel(LogLevel.Error))
             .ConfigureServices(services =>
             {
-                services.AddDbContext<TestContext>(options => options.UseNpgsql(connectionString)
+                services.AddDbContext<TestContext>(options => options.UseLabNpgsql(connectionString)
                     .UseSnakeCaseNamingConvention());
 
                 // Deliberately NOT overriding intervals: this must measure shipped defaults, not a
@@ -195,6 +199,7 @@ public static class IdleServerProbe
             SELECT calls, query
             FROM pg_stat_statements
             WHERE query NOT LIKE '%pg_stat_statements%'
+              AND query NOT LIKE '%pg_stat_activity%'
             ORDER BY calls DESC;
             """,
             connection);

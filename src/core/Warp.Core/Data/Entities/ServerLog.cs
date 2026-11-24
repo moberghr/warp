@@ -10,6 +10,9 @@ public class ServerLog
 
     public ServerTask? ServerTask { get; set; }
 
+    /// <summary>The task of a cluster-wide run (rule 6.23), which has no per-server <see cref="ServerTask"/> row.</summary>
+    public string? TaskName { get; set; }
+
     public string Status { get; set; } = string.Empty;
 
     public string? Message { get; set; }

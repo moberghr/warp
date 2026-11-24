@@ -278,17 +278,26 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 
     public async Task<List<ServerTaskSummary>> GetServerTaskSummaries(Guid serverId)
     {
-        return await _context.Set<ServerTask>()
-            .Where(x => x.ServerId == serverId)
-            .OrderBy(x => x.TaskName)
+        // The cluster-wide tasks (rule 6.23) are shared by every server, so each server's page lists them,
+        // with the server that last ran them and the one running them now. The heartbeat is not a task on
+        // this list: the server's own last-heartbeat time is its record.
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+
+        return await _context.Set<ClusterTask>()
+            .AsNoTracking()
+            .OrderBy(x => x.Name)
             .Select(x => new ServerTaskSummary
             {
-                TaskName = x.TaskName,
+                TaskName = x.Name,
                 IntervalSeconds = x.IntervalSeconds,
                 LastStatus = x.LastStatus,
                 LastMessage = x.LastMessage,
-                LastRun = x.LastRun,
+                LastRun = x.LastRunAt,
                 LastDurationMs = x.LastDurationMs,
+                ClusterWide = true,
+                NextRunAt = x.NextRunAt,
+                LastServerId = x.LastServerId,
+                RunningOn = x.LeaseUntil > now ? x.ClaimedBy : null,
             })
             .ToListAsync();
     }
@@ -300,18 +309,7 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 
         if (taskName != null)
         {
-            // Find the ServerTask ID for this task name, then filter logs
-            var taskId = await _context.Set<ServerTask>()
-                .Where(x => x.ServerId == serverId && x.TaskName == taskName)
-                .Select(x => (int?)x.Id)
-                .FirstOrDefaultAsync();
-
-            if (taskId == null)
-            {
-                return new PagedList<ServerLogModel>(0, [], 0);
-            }
-
-            query = query.Where(x => x.ServerTaskId == taskId);
+            query = query.Where(x => x.TaskName == taskName);
         }
 
         return await query
@@ -319,7 +317,7 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
             .Select(x => new ServerLogModel
             {
                 Id = x.Id,
-                TaskName = x.ServerTask != null ? x.ServerTask.TaskName : "Server",
+                TaskName = x.TaskName ?? "Server",
                 Status = x.Status,
                 Message = x.Message,
                 Timestamp = x.Timestamp,

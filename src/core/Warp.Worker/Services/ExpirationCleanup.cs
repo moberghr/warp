@@ -131,21 +131,26 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
         // Time-bucketed Statistic rows (hist/pcth) are downsampled fine→hourly→daily and pruned by
         // StatisticRollup now (§8.30), not deleted here — it retains coarse history instead of dropping it.
-        var serverTasks = await _context.Set<ServerTask>()
-            .Select(x => new { x.Id, x.IntervalSeconds })
+        // Server task runs (rule 6.23) are kept interval x 300, by task name.
+        var clusterTasks = await _context.Set<ClusterTask>()
+            .Select(x => new { x.Name, x.IntervalSeconds })
             .ToListAsync(ct);
 
-        foreach (var task in serverTasks)
+        foreach (var task in clusterTasks)
         {
-            var retentionSeconds = (task.IntervalSeconds ?? 60) * 300;
-            var cutoff = now.AddSeconds(-retentionSeconds);
+            var cutoff = now.AddSeconds(-(task.IntervalSeconds ?? 60) * 300);
             await _context.Set<ServerLog>()
-                .Where(x => x.ServerTaskId == task.Id && x.Timestamp < cutoff)
+                .Where(x => x.TaskName == task.Name)
+                .Where(x => x.Timestamp < cutoff)
                 .ExecuteDeleteAsync(ct);
         }
 
+        // Everything else (heartbeat failures, a task that no longer exists, rows from before 8.0 that
+        // carry only a per-server task id): a day.
+        var clusterTaskNames = clusterTasks.ConvertAll(x => x.Name);
         await _context.Set<ServerLog>()
-            .Where(x => x.ServerTaskId == null && x.Timestamp < now.AddDays(-1))
+            .Where(x => x.TaskName == null || !clusterTaskNames.Contains(x.TaskName))
+            .Where(x => x.Timestamp < now.AddDays(-1))
             .ExecuteDeleteAsync(ct);
 
         return expiredJobIds.Count;

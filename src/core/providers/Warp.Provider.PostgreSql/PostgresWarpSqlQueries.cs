@@ -43,6 +43,9 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     // from context.Model once and cached. A benign double-compute under a race is harmless.
     private string? _lockRateLimitBucketSql;
 
+    // The cluster-wide task statements (rule 6.23), built from the model on first use.
+    private PostgresClusterTaskSql? _clusterTaskSql;
+
     public PostgresWarpSqlQueries(WarpJobTableNames names)
     {
         _n = names;
@@ -625,6 +628,121 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             .ToListAsync(ct);
 
         return [.. renewed.Where(x => x.Mode != (int)CancellationMode.None).Select(x => x.Id)];
+    }
+
+    public async Task<ClusterTaskClaims> ClaimClusterTasksAsync(
+        DbContext context,
+        IReadOnlyList<string> names,
+        Guid serverId,
+        TimeSpan liveWindow,
+        CancellationToken ct)
+    {
+        if (names.Count == 0)
+        {
+            return new ClusterTaskClaims([], LegacyServersAlive: false);
+        }
+
+        var tasks = new List<ClusterTaskState>(names.Count);
+        var legacy = false;
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Claim,
+            [
+                new NpgsqlParameter<string[]>("names", [.. names]),
+                new NpgsqlParameter<Guid>("server", serverId),
+                new NpgsqlParameter<double>("liveWindow", liveWindow.TotalSeconds),
+            ],
+            x =>
+            {
+                tasks.Add(new ClusterTaskState(x.GetString(0), x.GetBoolean(1), TimeSpan.FromSeconds(x.GetDouble(2))));
+                legacy |= x.GetBoolean(3);
+            },
+            ct);
+
+        return new ClusterTaskClaims(tasks, legacy);
+    }
+
+    public async Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
+    {
+        var claimed = false;
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Request,
+            [
+                new NpgsqlParameter<string>("name", name),
+                new NpgsqlParameter<Guid>("server", serverId),
+            ],
+            x => claimed = x.GetInt32(0) > 0,
+            ct);
+
+        return claimed;
+    }
+
+    public async Task<bool> RenewClusterTaskLeaseAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
+    {
+        var renewed = false;
+        await ReadAsync(
+            context,
+            ClusterTaskSql(context).Renew,
+            [
+                new NpgsqlParameter<string>("name", name),
+                new NpgsqlParameter<Guid>("server", serverId),
+            ],
+            _ => renewed = true,
+            ct);
+
+        return renewed;
+    }
+
+    public async Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
+    {
+        await context.Database.ExecuteSqlRawAsync(
+            ClusterTaskSql(context).Complete,
+            [
+                new NpgsqlParameter<string>("name", completion.Name),
+                new NpgsqlParameter<Guid>("server", completion.ServerId),
+                new NpgsqlParameter<bool>("didWork", completion.DidWork),
+                new NpgsqlParameter<bool>("rerun", completion.Rerun),
+                new NpgsqlParameter<bool>("record", completion.Record),
+                new NpgsqlParameter("status", (object?)completion.Status ?? DBNull.Value) { DataTypeName = "text" },
+                new NpgsqlParameter("message", (object?)completion.Message ?? DBNull.Value) { DataTypeName = "text" },
+                new NpgsqlParameter<double>("durationMs", completion.DurationMs),
+            ],
+            ct);
+    }
+
+    // Built once from the resolved model on first use, like the rate-limit lock statement.
+    private PostgresClusterTaskSql ClusterTaskSql(DbContext context) => _clusterTaskSql ??= PostgresClusterTaskSql.Build(context.Model);
+
+    // Reads a cluster task statement's rows by position on the context's connection and transaction.
+    // Not SqlQueryRaw: that maps result columns through the context's naming convention, and the
+    // server context (no convention) and an application context (any convention) would need different
+    // aliases for the same statement.
+    private static async Task ReadAsync(
+        DbContext context,
+        string sql,
+        NpgsqlParameter[] parameters,
+        Action<System.Data.Common.DbDataReader> row,
+        CancellationToken ct)
+    {
+        var connection = context.Database.GetDbConnection();
+        await context.Database.OpenConnectionAsync(ct);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+            command.Parameters.AddRange(parameters);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                row(reader);
+            }
+        }
+        finally
+        {
+            await context.Database.CloseConnectionAsync();
+        }
     }
 
     // One row of the keep-alive statement's result.

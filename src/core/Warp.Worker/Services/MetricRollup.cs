@@ -71,7 +71,7 @@ public sealed class MetricRollup<TContext> : IServerTask
 
     public TimeSpan? DefaultInterval => _configuration.MetricRollupInterval;
 
-    // ServerTaskLoop re-runs only when ExecuteAsync returned a message, and this returns null when it rolled
+    // The scheduler re-runs only when ExecuteAsync returned a message, and this returns null when it rolled
     // nothing, so an idle rollup does not spin.
     public bool RerunImmediately => true;
 

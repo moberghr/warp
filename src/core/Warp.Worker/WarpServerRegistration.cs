@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Warp.Core;
+using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 
@@ -72,6 +73,7 @@ public class WarpServerRegistration<TContext> : IHostedService
             StartedTime = now,
             LastHeartbeatTime = now,
             ServiceCount = totalWorkerCount,
+            CoordinationVersion = ServerCoordination.LeaseVersion,
         };
         await context.Set<Server>().AddAsync(server, cancellationToken);
 

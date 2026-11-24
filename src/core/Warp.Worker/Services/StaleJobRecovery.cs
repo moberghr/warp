@@ -121,10 +121,10 @@ public sealed class StaleJobRecovery<TContext> : IServerTask
         var restartByDefault = _configuration.RestartStaleJobsByDefault;
 
         // FOR NO KEY UPDATE SKIP LOCKED requires a wrapping transaction to keep the row
-        // lock alive past the SELECT statement. ServerTaskLoop's xact-lock path provides
+        // lock alive past the SELECT statement. The task host's transaction (ServerTaskRunner) provides
         // that wrap for the production hot path, but direct callers (tests, admin triggers
         // through DI) don't get it. Detect and open one only when needed — opening a nested
-        // tx under ServerTaskLoop's xact-lock would throw InvalidOperationException.
+        // tx under the task host's transaction would throw InvalidOperationException.
         var hasOuterTx = _context.Database.CurrentTransaction != null;
         await using var ownedTx = hasOuterTx
             ? null

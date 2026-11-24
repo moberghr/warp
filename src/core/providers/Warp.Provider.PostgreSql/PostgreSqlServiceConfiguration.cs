@@ -24,6 +24,9 @@ public static class PostgreSqlServiceConfiguration
     /// <summary>Suffix appended to <c>Application Name</c> for the advisory-lock pool — see <see cref="ResolveLockConnectionString{TContext}"/>.</summary>
     private const string LockApplicationName = "warp-locks";
 
+    /// <summary>Suffix appended to <c>Application Name</c> for Warp's own server-context pool — see <see cref="BuildServerConnectionString"/>.</summary>
+    private const string ServerApplicationName = "warp-server";
+
     /// <summary>Postgres stores <c>application_name</c> in a <c>NAMEDATALEN-1</c> field and truncates past it silently.</summary>
     private const int MaxApplicationNameLength = 63;
 
@@ -199,7 +202,7 @@ public static class PostgreSqlServiceConfiguration
 
         return new NpgsqlConnectionStringBuilder(connectionString)
         {
-            ApplicationName = BuildLockApplicationName(seed.ApplicationName),
+            ApplicationName = SuffixApplicationName(seed.ApplicationName, LockApplicationName),
 
             // Explicitly 0, never the host's value. MinPoolSize is a per-pool floor, so inheriting a
             // pre-warmed DbContext pool's setting would hold that many idle connections a SECOND time
@@ -222,18 +225,41 @@ public static class PostgreSqlServiceConfiguration
     /// what an operator sees.
     /// </para>
     /// </summary>
-    private static string BuildLockApplicationName(string? hostApplicationName)
+    private static string SuffixApplicationName(string? hostApplicationName, string poolName)
     {
         if (string.IsNullOrEmpty(hostApplicationName))
         {
-            return LockApplicationName;
+            return poolName;
         }
 
-        var suffix = $":{LockApplicationName}";
+        var suffix = $":{poolName}";
         var room = MaxApplicationNameLength - suffix.Length;
         var host = hostApplicationName.Length > room ? hostApplicationName[..room] : hostApplicationName;
 
         return host + suffix;
+    }
+
+    /// <summary>
+    /// Warp's own pool for the server context (rule 6.22): the DbContext's connection string with
+    /// <c>Application Name</c> suffixed <c>:warp-server</c> (part of Npgsql's pool key, so a separate
+    /// pool) and <c>No Reset On Close</c>. Every server-task run, claim and completion opens a scope, and
+    /// on the shared pool each of those checkouts cost a <c>DISCARD ALL</c>: about a third of an idle
+    /// server's statements. Warp sets no session state on these connections (no <c>SET</c>, no temp
+    /// tables, no prepared statements; advisory locks are transaction-scoped, and the session-scoped
+    /// ones live in the lock pool), and Npgsql still rolls back a transaction left open on a returned
+    /// connection, so the reset clears nothing. <c>MinPoolSize</c> is 0 for the same reason as the lock
+    /// pool. Not applied to a host's own <c>NpgsqlDataSource</c>, which cannot be forked (rule 2.18).
+    /// </summary>
+    internal static string BuildServerConnectionString(string connectionString)
+    {
+        var seed = new NpgsqlConnectionStringBuilder(connectionString);
+
+        return new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            ApplicationName = SuffixApplicationName(seed.ApplicationName, ServerApplicationName),
+            NoResetOnClose = true,
+            MinPoolSize = 0,
+        }.ConnectionString;
     }
 
     // Read from the connection AddWarp stores, never by rebuilding TContext's options: those carry
@@ -297,7 +323,8 @@ internal sealed class PostgresServerContextConfigurator<TContext> : IWarpServerC
                 _dataSource = PostgreSqlServiceConfiguration.ResolveDataSource<TContext>(applicationServices);
                 if (_dataSource is null)
                 {
-                    _connectionString = PostgreSqlServiceConfiguration.ResolveConnectionString<TContext>(applicationServices);
+                    _connectionString = PostgreSqlServiceConfiguration.BuildServerConnectionString(
+                        PostgreSqlServiceConfiguration.ResolveConnectionString<TContext>(applicationServices));
                 }
 
                 _resolved = true;

@@ -24,7 +24,7 @@ All production code uses injectable `TimeProvider` instead of `DateTime.UtcNow`.
 DbContext must be registered as `Scoped` (not Transient). The outbox pattern requires the publisher and application code to share the same DbContext instance within a scope.
 
 ### 7. Signal-Driven Background Tasks
-Every background task implements `IServerTask` and is driven by `ServerTaskHost<TContext>`, which takes the distributed lock (when `LockKey != null`), creates a fresh DI scope per iteration, and writes ServerTask / ServerLog rows. Push-to-wake runs through `ServerTaskSignals<TContext>` (`SignalJobFinalized` / `SignalMessageEnqueued`) — workers signal the orchestrator after job completion rather than relying on polling intervals. The semaphore-per-task wake primitive is an implementation detail of `ServerTaskLoop`.
+Every background task implements `IServerTask` and is driven by `ServerTaskHost<TContext>`. A task with a `LockKey` is cluster-wide: one `ClusterTaskScheduler` per server claims it by lease so the cluster runs it once per tick. A task without one (the heartbeat) runs on its own `PerServerTaskLoop`. Both execute a task through `ServerTaskRunner` (fresh DI scope, one transaction when `LocksWithTransaction`) and write `ServerLog` rows for runs that did something or failed. Push-to-wake runs through `ServerTaskSignals<TContext>` (`SignalJobFinalized` / `SignalMessageEnqueued`) — workers signal the orchestrator after job completion rather than relying on polling intervals.
 
 ### 8. Dual-Database Support
 Every query, entity configuration, and test runs on both PostgreSQL and SQL Server. Abstract test base classes with concrete subclasses per database. No database-specific code paths in business logic.

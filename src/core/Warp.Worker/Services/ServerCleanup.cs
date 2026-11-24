@@ -73,7 +73,7 @@ public sealed class ServerCleanup<TContext> : IServerTask
         var removedCount = 0;
 
         // FOR NO KEY UPDATE requires a wrapping transaction to keep the row lock alive
-        // past the SELECT. ServerTaskLoop's xact-lock provides it on the production hot
+        // past the SELECT. The task host's transaction (ServerTaskRunner) provides it on the production hot
         // path, but direct callers (tests, admin) don't get the wrap — open one then.
         var hasOuterTx = _context.Database.CurrentTransaction != null;
         await using var ownedTx = hasOuterTx
