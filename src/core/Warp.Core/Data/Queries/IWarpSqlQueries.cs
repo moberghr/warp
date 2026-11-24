@@ -208,15 +208,9 @@ public interface IWarpSqlQueries<TContext>
         CancellationToken ct);
 
     /// <summary>
-    /// Whether this provider implements the cluster-wide task lease (rule 6.20). Without it the server
-    /// keeps a lock-taking loop per task on every server, as before 8.0.
-    /// </summary>
-    bool SupportsClusterTaskLeases => false;
-
-    /// <summary>
     /// Claims, in one statement, every task of <paramref name="names"/> that is due (or asked for by a
-    /// signal) and whose lease is free: sets its lease to one interval, stamps this server, and moves its
-    /// next run one interval on. Returns every named task with whether this call claimed it and how long
+    /// signal) and whose lease is free: stamps this server, moves its next run to the next multiple of its
+    /// interval at least half an interval away, and leases it until then. Returns every named task with whether this call claimed it and how long
     /// until it is next due, and whether a server from before the lease has heartbeated within
     /// <paramref name="liveWindow"/>. Every time is the database's own (rule 6.20): a lease never depends on
     /// two servers' clocks agreeing.
@@ -226,25 +220,21 @@ public interface IWarpSqlQueries<TContext>
         IReadOnlyList<string> names,
         Guid serverId,
         TimeSpan liveWindow,
-        CancellationToken ct)
-        => throw new NotSupportedException("This provider does not implement cluster task leases.");
+        CancellationToken ct);
 
     /// <summary>
     /// A signal asked for <paramref name="name"/> to run now: claims it if its lease is free (returns
     /// true; the caller runs it), otherwise marks a run request on the row, which the next claim honours.
     /// </summary>
-    Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
-        => throw new NotSupportedException("This provider does not implement cluster task leases.");
+    Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct);
 
-    /// <summary>Extends this server's lease on <paramref name="name"/> by one interval; false if it no longer holds it.</summary>
-    Task<bool> RenewClusterTaskLeaseAsync(DbContext context, string name, Guid serverId, CancellationToken ct)
-        => throw new NotSupportedException("This provider does not implement cluster task leases.");
+    /// <summary>Extends this server's lease on <paramref name="name"/> to at least one interval from now (never shortens it); false if it no longer holds it.</summary>
+    Task<bool> RenewClusterTaskLeaseAsync(DbContext context, string name, Guid serverId, CancellationToken ct);
 
     /// <summary>
-    /// Ends this server's run of a task: frees the lease; makes the task due one interval from now when
+    /// Ends this server's run of a task: frees the lease; makes the task due at its next grid point when
     /// the run did work, or at once when <see cref="ClusterTaskCompletion.Rerun"/> is set or a run request
     /// arrived meanwhile; and records the run when <see cref="ClusterTaskCompletion.Record"/> is set.
     /// </summary>
-    Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct)
-        => throw new NotSupportedException("This provider does not implement cluster task leases.");
+    Task CompleteClusterTaskAsync(DbContext context, ClusterTaskCompletion completion, CancellationToken ct);
 }

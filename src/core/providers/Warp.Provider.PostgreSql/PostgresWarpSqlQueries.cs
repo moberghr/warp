@@ -630,8 +630,6 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         return [.. renewed.Where(x => x.Mode != (int)CancellationMode.None).Select(x => x.Id)];
     }
 
-    public bool SupportsClusterTaskLeases => true;
-
     public async Task<ClusterTaskClaims> ClaimClusterTasksAsync(
         DbContext context,
         IReadOnlyList<string> names,

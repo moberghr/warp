@@ -27,7 +27,7 @@ public abstract class ClusterTaskDashboardTestsBase : IAsyncLifetime
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     [TimedFact]
-    public async Task GetServerTaskSummaries_ClusterTaskRunningElsewhere_ListedWithItsScheduleAndRunner()
+    public async Task GetServerTaskSummaries_ClusterTaskRunningElsewhere_ListedWithItsScheduleAndRunnerAndNoHeartbeat()
     {
         var now = DateTime.UtcNow;
         var server = await SeedServerAsync();
@@ -52,13 +52,13 @@ public abstract class ClusterTaskDashboardTestsBase : IAsyncLifetime
         // Act
         var tasks = await new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System).GetServerTaskSummaries(server);
 
-        // Assert
-        tasks.Select(x => x.TaskName).ShouldBe(["Heartbeat", "Orchestration"]);
-        var cluster = tasks[1];
+        // Assert: the heartbeat's per-server row from before 8.0 is not listed; the server's own
+        // last-heartbeat time is its record.
+        var cluster = tasks.ShouldHaveSingleItem();
+        cluster.TaskName.ShouldBe("Orchestration");
         cluster.ClusterWide.ShouldBeTrue();
         cluster.RunningOn.ShouldBe(other);
         cluster.LastServerId.ShouldBe(server);
-        tasks[0].ClusterWide.ShouldBeFalse();
     }
 
     [TimedFact]

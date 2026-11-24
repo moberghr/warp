@@ -14,7 +14,7 @@ namespace Warp.Core;
 /// has already committed. A throw there cannot un-commit anything — it can only turn a completed
 /// operation into a reported failure (<c>AddOrUpdateRecurringJob</c> taking down host startup) or
 /// <em>replace</em> the real exception the guarded body threw (<c>SagaHandlerProxy</c>,
-/// <c>ServerTaskLoop</c>), which is strictly worse than the release failure itself.
+/// the server task host), which is strictly worse than the release failure itself.
 /// </para>
 /// <para>
 /// <b>Swallowing does not change what happens to the lock.</b> Whether the release throws or not,

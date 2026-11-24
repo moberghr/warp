@@ -16,6 +16,26 @@ internal static class ClusterTaskTimings
     /// <summary>A signal claims or requests a task at most this often; signals in between fold into it.</summary>
     public static readonly TimeSpan SignalCoalescing = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>
+    /// How long a task waits before its first run (rule 6.18): <paramref name="sample"/> (0 to 1) of the
+    /// smaller of its interval and the configured startup delay, so tasks and servers starting together
+    /// spread out.
+    /// </summary>
+    public static TimeSpan FirstRunDelay(TimeSpan interval, TimeSpan startupDelay, double sample)
+    {
+        if (startupDelay <= TimeSpan.Zero || interval <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        var bound = interval < startupDelay ? interval : startupDelay;
+
+        return bound * Math.Clamp(sample, 0, 1);
+    }
+
+    /// <summary>How soon to look again at a task that was due but that this pass did not get.</summary>
+    public static readonly TimeSpan ClaimRetry = TimeSpan.FromMilliseconds(50);
+
     /// <summary>An idle run records itself on the row at most this often; a change, a message or a failure always does.</summary>
     public static readonly TimeSpan IdleRecordInterval = TimeSpan.FromMinutes(1);
 
@@ -38,7 +58,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 {
     private readonly Dictionary<string, Entry> _entries;
     private readonly IServiceScopeFactory _scopes;
-    private readonly IWarpLockProvider _lockProvider;
+    private readonly ServerTaskRunner<TContext> _runner;
     private readonly TimeProvider _time;
     private readonly Guid _serverId;
     private readonly ILogger _logger;
@@ -50,18 +70,18 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     private volatile bool _legacyServersAlive;
 
     public ClusterTaskScheduler(
-        IEnumerable<IServerTask> templates,
+        IEnumerable<ServerTaskInfo> tasks,
+        ServerTaskRunner<TContext> runner,
         IServiceScopeFactory scopes,
-        IWarpLockProvider lockProvider,
         TimeProvider time,
         Guid serverId,
         ILogger logger,
         TimeSpan startupDelay,
         TimeSpan liveWindow)
     {
-        _entries = templates.ToDictionary(x => x.Name, x => new Entry(x), StringComparer.Ordinal);
+        _entries = tasks.ToDictionary(x => x.Name, x => new Entry(x), StringComparer.Ordinal);
         _scopes = scopes;
-        _lockProvider = lockProvider;
+        _runner = runner;
         _time = time;
         _serverId = serverId;
         _logger = logger;
@@ -69,10 +89,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         _liveWindow = liveWindow;
     }
 
-    public bool HasTasks => _entries.Count > 0;
-
     public IEnumerable<(string Name, IReadOnlyList<ServerTaskSignal> Signals)> Subscriptions =>
-        _entries.Values.Select(x => (x.Name, (IReadOnlyList<ServerTaskSignal>)x.Signals));
+        _entries.Values.Select(x => (x.Name, x.Signals));
 
     /// <summary>A signal for <paramref name="name"/>: run it at once here, or ask the server holding it to run it again.</summary>
     public void Signal(string name)
@@ -174,7 +192,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         {
             foreach (var entry in _entries.Values)
             {
-                entry.NotBefore = start + ServerTaskLoop<TContext>.FirstRunDelay(entry.Interval, _startupDelay, sample());
+                entry.NotBefore = start + ClusterTaskTimings.FirstRunDelay(entry.Interval, _startupDelay, sample());
             }
         }
     }
@@ -223,44 +241,94 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
             }
         }
 
+        // The claim statement is sent only when a task is due by what the last claim reported (or its due
+        // time is unknown), so a pass woken for something else (a signal for one task, a run that just
+        // ended) does not ask the database about the others.
+        now = _time.GetUtcNow().UtcDateTime;
         string[] idle;
+        bool claimDue;
         lock (_gate)
         {
-            idle = [.. _entries.Values.Where(x => x.Running == null && x.NotBefore <= now).Select(x => x.Name)];
             foreach (var waiting in _entries.Values.Where(x => x.NotBefore > now))
             {
                 sleep = Min(sleep, waiting.NotBefore - now);
             }
+
+            var idleEntries = _entries.Values
+                .Where(x => x.Running == null)
+                .Where(x => x.NotBefore <= now)
+                .ToList();
+            idle = [.. idleEntries.Select(x => x.Name)];
+            claimDue = idleEntries.Exists(x => x.DueAt <= now);
         }
 
-        if (idle.Length == 0)
+        if (claimDue)
         {
-            return sleep;
-        }
-
-        ClusterTaskClaims claims;
-        using (var scope = _scopes.CreateScope())
-        {
-            var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-            var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
-            claims = await queries.ClaimClusterTasksAsync(context, idle, _serverId, _liveWindow, ct);
-        }
-
-        _legacyServersAlive = claims.LegacyServersAlive;
-        foreach (var state in claims.Tasks)
-        {
-            if (state.Claimed)
+            ClusterTaskClaims claims;
+            using (var scope = _scopes.CreateScope())
             {
-                Start(_entries[state.Name], ct);
+                var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+                var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
+                claims = await queries.ClaimClusterTasksAsync(context, idle, _serverId, _liveWindow, ct);
             }
 
-            // A claimed task counts too: its idle run writes nothing and wakes nobody, so this pass must
-            // already know when it is next due. When every task is claimed by one pass (they share due
-            // times, rule 6.20) there is no unclaimed task to take the time from.
-            sleep = Min(sleep, state.DueIn);
+            // Counted from the answer, not from the pass's start: the statement's own time then makes this
+            // server a moment late for the next due time, never a moment early (an early claim finds
+            // nothing due and has to be sent again).
+            var answered = _time.GetUtcNow().UtcDateTime;
+            _legacyServersAlive = claims.LegacyServersAlive;
+            foreach (var state in claims.Tasks)
+            {
+                var entry = _entries[state.Name];
+                lock (_gate)
+                {
+                    entry.DueAt = answered + state.DueIn;
+                }
+
+                if (state.Claimed)
+                {
+                    Start(entry, ct);
+                }
+            }
         }
 
-        return sleep < TimeSpan.Zero ? TimeSpan.Zero : sleep;
+        // Sleep until the next task is due. A claimed task counts too: its idle run writes nothing and
+        // wakes nobody, and when one pass claims every task (they share due times, rule 6.20) there is no
+        // unclaimed task to take the time from. A task still running past its due time is not waited for
+        // here: its run wakes the loop when it ends.
+        now = _time.GetUtcNow().UtcDateTime;
+        lock (_gate)
+        {
+            foreach (var entry in _entries.Values.Where(x => x.NotBefore <= now))
+            {
+                if (entry.DueAt > now)
+                {
+                    sleep = Min(sleep, entry.DueAt - now);
+                }
+                else if (entry.Running == null)
+                {
+                    // Due, yet not claimed by this pass: another server is claiming it this instant.
+                    sleep = Min(sleep, ClusterTaskTimings.ClaimRetry);
+                }
+            }
+        }
+
+        return sleep;
+    }
+
+    /// <summary>
+    /// Forgets the due times the last claims reported, so the next pass asks the database again. For tests
+    /// that change a task's row behind the scheduler; nothing in production does.
+    /// </summary>
+    internal void ForgetDueTimes()
+    {
+        lock (_gate)
+        {
+            foreach (var entry in _entries.Values)
+            {
+                entry.DueAt = DateTime.MinValue;
+            }
+        }
     }
 
     // Internal for tests: the run of a task started by the last pass, if it is still running.
@@ -294,7 +362,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         var ran = true;
         try
         {
-            (ran, message) = await ExecuteAsync(entry, run.Token);
+            (ran, message) = await _runner.RunAsync(entry.Info, _legacyServersAlive, run.Token);
         }
         catch (OperationCanceledException) when (run.IsCancellationRequested)
         {
@@ -356,81 +424,6 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
     }
 
-    private async Task<(bool Ran, string? Message)> ExecuteAsync(Entry entry, CancellationToken ct)
-    {
-        if (!entry.LocksWithTransaction)
-        {
-            // A task that manages its own transactions (MessageRouter). It needs no lock of its own under
-            // the lease; while an older server is alive it takes the session lock that server takes.
-            IAsyncDisposable? handle = null;
-            if (_legacyServersAlive)
-            {
-                handle = await _lockProvider.TryAcquireAsync(entry.LockKey, TimeSpan.Zero, ct);
-                if (handle == null)
-                {
-                    return (false, null);
-                }
-            }
-
-            try
-            {
-                await using var scope = _scopes.CreateAsyncScope();
-                var task = Resolve(scope, entry);
-                var message = await task.ExecuteAsync(ct);
-                await task.OnCommittedAsync(ct);
-
-                return (true, message);
-            }
-            finally
-            {
-                if (handle != null)
-                {
-                    await handle.DisposeAsync();
-                }
-            }
-        }
-
-        await using (var scope = _scopes.CreateAsyncScope())
-        {
-            var task = Resolve(scope, entry);
-            var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-
-            if (_legacyServersAlive)
-            {
-                // An older server still takes this lock every interval: take it too, around the same
-                // transaction, so the two never run the task at once.
-                var queries = scope.ServiceProvider.GetRequiredService<IWarpSqlQueries<TContext>>();
-                var outcome = await queries.RunUnderTransactionLockAsync<string?>(
-                    context,
-                    entry.LockKey,
-                    async (_, innerCt) => await task.ExecuteAsync(innerCt),
-                    ct);
-                if (!outcome.LockHeld)
-                {
-                    return (false, null);
-                }
-
-                await task.OnCommittedAsync(ct);
-
-                return (true, outcome.Result);
-            }
-
-            // The task runs in one transaction, as it did under its lock (every statement of a pass commits
-            // together, and OnCommittedAsync still runs after the commit), without the lock: the lease
-            // already keeps every other server out.
-            string? result;
-            await using (var transaction = await context.Database.BeginTransactionAsync(ct))
-            {
-                result = await task.ExecuteAsync(ct);
-                await transaction.CommitAsync(ct);
-            }
-
-            await task.OnCommittedAsync(ct);
-
-            return (true, result);
-        }
-    }
-
     // Returns whether a completion was written: that frees the lease, and may make the task due at once.
     private async Task<bool> FinishAsync(Entry entry, string? message, Exception? failure, double durationMs)
     {
@@ -468,9 +461,11 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                     durationMs),
                 CancellationToken.None);
 
-            if (record)
+            lock (_gate)
             {
-                lock (_gate)
+                // The completion may have moved the next run (a rerun, a run request): ask again.
+                entry.DueAt = DateTime.MinValue;
+                if (record)
                 {
                     entry.LastRecordedStatus = status;
                     entry.LastRecordedAt = now;
@@ -579,11 +574,6 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
     }
 
-    private static IServerTask Resolve(AsyncServiceScope scope, Entry entry) =>
-        scope.ServiceProvider
-            .GetServices<IServerTask>()
-            .First(x => x.GetType() == entry.TaskType);
-
     // Internal for tests: how many times the scheduling loop was woken.
     internal int Wakes => Volatile.Read(ref _wakes);
 
@@ -615,23 +605,19 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
     public void Dispose() => _wake.Dispose();
 
-    private sealed class Entry(IServerTask template)
+    private sealed class Entry(ServerTaskInfo info)
     {
-        public Type TaskType { get; } = template.GetType();
+        public ServerTaskInfo Info { get; } = info;
 
-        public string Name { get; } = template.Name;
+        public string Name => Info.Name;
 
-        public string LockKey { get; } = template.LockKey!;
+        public TimeSpan Interval => Info.Interval;
 
-        public bool LocksWithTransaction { get; } = template.LocksWithTransaction;
+        public bool RerunImmediately => Info.RerunImmediately;
 
-        public TimeSpan Interval { get; } = template.DefaultInterval!.Value;
+        public bool LogOnSuccess => Info.LogOnSuccess;
 
-        public bool RerunImmediately { get; } = template.RerunImmediately;
-
-        public bool LogOnSuccess { get; } = template.LogOnSuccess;
-
-        public ServerTaskSignal[] Signals { get; } = [.. template.Signals];
+        public IReadOnlyList<ServerTaskSignal> Signals => Info.Signals;
 
         public Task? Running { get; set; }
 
@@ -643,6 +629,10 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
         // Before this the task is not claimed on schedule: its share of the startup delay (rule 6.18).
         public DateTime NotBefore { get; set; } = DateTime.MinValue;
+
+        // When the task is next due, by this server's clock, as the last claim reported it. MinValue
+        // while unknown, which makes the next pass ask.
+        public DateTime DueAt { get; set; } = DateTime.MinValue;
 
         public string? LastRecordedStatus { get; set; }
 

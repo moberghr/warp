@@ -95,8 +95,8 @@ public sealed class ScheduledJobActivation<TContext> : IServerTask
 
         // Per-row JobLog "Enqueued" entry — atomic with the UPDATE via the xact-lock
         // transaction that wraps ExecuteAsync (LocksWithTransaction defaults to true on
-        // IServerTask; ServerTaskLoop.TryAcquireLockAndExecuteAsync calls
-        // RunUnderTransactionLockAsync which commits both this SaveChanges and the UPDATE
+        // IServerTask; ServerTaskRunner opens one transaction around ExecuteAsync and
+        // commits both this SaveChanges and the UPDATE
         // above together). If this insert fails the outer commit also fails — operators
         // never see "state=Enqueued with no log row" in the dashboard.
         foreach (var entry in activated)

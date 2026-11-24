@@ -169,7 +169,7 @@ public sealed class DashboardBroadcaster<TContext> : BackgroundService
     /// <summary>
     /// Releases the wake semaphore. Guarded by the gate so two concurrent signal callbacks
     /// cannot both observe <c>CurrentCount == 0</c> and both call <c>Release</c> (which would
-    /// exceed the max count of 1 and throw). Same pattern as <c>ServerTaskLoop.Signal</c>.
+    /// exceed the max count of 1 and throw). Same pattern as <c>PerServerTaskLoop.Signal</c>.
     /// </summary>
     private void Wake()
     {

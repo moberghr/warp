@@ -12,10 +12,9 @@ using Warp.Worker.Services;
 namespace Warp.Tests.Worker;
 
 /// <summary>
-/// Pins the IServerTask → ServerTaskHost contract. The <c>RunOnceAsync</c> entry point is the
-/// narrowest, cheapest way to exercise the lock + scope primitive without starting the auto-run
-/// loop (which needs a real DB for EnsureRegistered / bookkeeping). End-to-end behaviour of the
-/// loop + bookkeeping lives in the integration tests.
+/// Pins the IServerTask → ServerTaskHost contract: which tasks it runs, that <c>RunOnceAsync</c>
+/// runs one outside the schedule and lets its exceptions through, and that signals reach the loops.
+/// The schedule itself is covered by ClusterTaskSchedulerTests and PerServerTaskLoopTests.
 /// </summary>
 [Trait("Category", "NoDb")]
 public class ServerTaskHostTests
@@ -31,17 +30,7 @@ public class ServerTaskHostTests
     }
 
     [Fact]
-    public async Task RunOnceAsync_LockHeldByAnotherServer_ReturnsNull()
-    {
-        using var host = BuildHost(new NoopTask(), new FakeLockProvider { LockHeld = true });
-
-        var result = await host.RunOnceAsync<NoopTask>(CancellationToken.None);
-
-        result.ShouldBeNull();
-    }
-
-    [Fact]
-    public async Task RunOnceAsync_LockAvailable_ReturnsTaskMessage()
+    public async Task RunOnceAsync_ClusterWideTask_ReturnsTaskMessage()
     {
         using var host = BuildHost(new NoopTask());
 
@@ -57,13 +46,13 @@ public class ServerTaskHostTests
 
         var ex = await Should.ThrowAsync<InvalidOperationException>(
             () => host.RunOnceAsync<NullIntervalTask>(CancellationToken.None));
-        ex.Message.ShouldContain("No ServerTaskLoop registered for NullIntervalTask");
+        ex.Message.ShouldContain("NullIntervalTask is not run by this host");
     }
 
     [Fact]
     public async Task Signal_ConcurrentCallers_DoesNotThrow()
     {
-        // Regression test: ServerTaskLoop.Signal() previously had a check-then-act race —
+        // Regression test: a loop's Signal() once had a check-then-act race —
         // two threads both observed CurrentCount == 0 and both called Release() on a
         // SemaphoreSlim(0, 1), second throwing SemaphoreFullException. Under load in
         // dispatcher mode (many workers completing jobs in parallel, each calling
@@ -135,12 +124,11 @@ public class ServerTaskHostTests
 
     private static ServerTaskHost<StubContext> BuildHost(
         IServerTask task,
-        FakeLockProvider? lockProvider = null,
         ServerTaskSignals<StubContext>? signals = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton<IServerTask>(task);
-        services.AddSingleton<IWarpLockProvider>(lockProvider ?? new FakeLockProvider());
+        services.AddSingleton<IWarpLockProvider>(new FakeLockProvider());
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<ILoggerFactory>(_ => NullLoggerFactory.Instance);
         services.AddSingleton(Options.Create(new WarpServerConfiguration { ServerId = Guid.NewGuid() }));
@@ -173,8 +161,8 @@ public class ServerTaskHostTests
 
         public TimeSpan? DefaultInterval => TimeSpan.FromSeconds(1);
 
-        // Stay on the Medallion lock path — the NoDb harness mocks IWarpLockProvider via
-        // FakeLockProvider; the xact-lock path needs a real IWarpSqlQueries / DbContext.
+        // Manages its own transactions, so RunOnceAsync needs no database: the transaction path needs a
+        // real server context.
         public bool LocksWithTransaction => false;
 
         public Task<string?> ExecuteAsync(CancellationToken ct) =>
@@ -209,10 +197,8 @@ public class ServerTaskHostTests
 
     private sealed class FakeLockProvider : IWarpLockProvider
     {
-        public bool LockHeld { get; set; }
-
         public Task<IAsyncDisposable?> TryAcquireAsync(string name, TimeSpan timeout, CancellationToken ct) =>
-            Task.FromResult(LockHeld ? null : (IAsyncDisposable?)new FakeHandle());
+            Task.FromResult<IAsyncDisposable?>(new FakeHandle());
 
         private sealed class FakeHandle : IAsyncDisposable
         {

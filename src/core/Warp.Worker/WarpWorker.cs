@@ -38,7 +38,7 @@ public class WarpWorker<TContext> : BackgroundService
         // Subscribe to JobEnqueued so any in-process enqueue (Publisher.Publish on this server,
         // MessageRouter creating child jobs, ScheduledJobActivation flipping rows, the listener
         // receiving a cross-server push) wakes the next WaitAsync immediately. The signal lock
-        // serialises Release with the CurrentCount check — same pattern as ServerTaskLoop.Signal.
+        // serialises Release with the CurrentCount check — same pattern as PerServerTaskLoop.Signal.
         var signalLock = new Lock();
         using var subscription = _signals.Subscribe(ServerTaskSignal.JobEnqueued, () =>
         {

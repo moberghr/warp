@@ -131,20 +131,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
         // Time-bucketed Statistic rows (hist/pcth) are downsampled fine→hourly→daily and pruned by
         // StatisticRollup now (§8.30), not deleted here — it retains coarse history instead of dropping it.
-        var serverTasks = await _context.Set<ServerTask>()
-            .Select(x => new { x.Id, x.IntervalSeconds })
-            .ToListAsync(ct);
-
-        foreach (var task in serverTasks)
-        {
-            var retentionSeconds = (task.IntervalSeconds ?? 60) * 300;
-            var cutoff = now.AddSeconds(-retentionSeconds);
-            await _context.Set<ServerLog>()
-                .Where(x => x.ServerTaskId == task.Id && x.Timestamp < cutoff)
-                .ExecuteDeleteAsync(ct);
-        }
-
-        // Runs of cluster-wide tasks (rule 6.20) have no per-server row: the same interval x 300 rule, by name.
+        // Server task runs (rule 6.20) are kept interval x 300, by task name.
         var clusterTasks = await _context.Set<ClusterTask>()
             .Select(x => new { x.Name, x.IntervalSeconds })
             .ToListAsync(ct);
@@ -153,16 +140,15 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
         {
             var cutoff = now.AddSeconds(-(task.IntervalSeconds ?? 60) * 300);
             await _context.Set<ServerLog>()
-                .Where(x => x.ServerTaskId == null)
                 .Where(x => x.TaskName == task.Name)
                 .Where(x => x.Timestamp < cutoff)
                 .ExecuteDeleteAsync(ct);
         }
 
-        // Anything else without a per-server row (including runs of a task that no longer exists): a day.
+        // Everything else (heartbeat failures, a task that no longer exists, rows from before 8.0 that
+        // carry only a per-server task id): a day.
         var clusterTaskNames = clusterTasks.ConvertAll(x => x.Name);
         await _context.Set<ServerLog>()
-            .Where(x => x.ServerTaskId == null)
             .Where(x => x.TaskName == null || !clusterTaskNames.Contains(x.TaskName))
             .Where(x => x.Timestamp < now.AddDays(-1))
             .ExecuteDeleteAsync(ct);

@@ -19,13 +19,12 @@ public abstract class ServerQueryTestsBase : IAsyncLifetime
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    [TimedFact]
-    public async Task GetServerLogs_ReturnsPaginatedLogs()
-    {
-        // Arrange
-        var ctx = _fixture.CreateContext();
-        var serverId = Guid.NewGuid();
+    private static CancellationToken Ct => Xunit.TestContext.Current.CancellationToken;
 
+    private async Task<Guid> SeedServerAsync()
+    {
+        var serverId = Guid.NewGuid();
+        await using var ctx = _fixture.CreateContext();
         ctx.Set<Server>().Add(new Server
         {
             Id = serverId,
@@ -33,35 +32,36 @@ public abstract class ServerQueryTestsBase : IAsyncLifetime
             LastHeartbeatTime = DateTime.UtcNow,
             ServiceCount = 1,
         });
+        await ctx.SaveChangesAsync(Ct);
 
-        var task = new ServerTask
-        {
-            ServerId = serverId,
-            TaskName = "StaleJobRecovery",
-            IntervalSeconds = 60,
-        };
-        ctx.Set<ServerTask>().Add(task);
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+        return serverId;
+    }
 
-        // Insert 5 log entries
-        for (var i = 0; i < 5; i++)
+    [TimedFact]
+    public async Task GetServerLogs_ReturnsPaginatedLogs()
+    {
+        // Arrange
+        var serverId = await SeedServerAsync();
+        await using (var ctx = _fixture.CreateContext())
         {
-            ctx.Set<ServerLog>().Add(new ServerLog
+            for (var i = 0; i < 5; i++)
             {
-                ServerId = serverId,
-                ServerTaskId = task.Id,
-                Status = "Success",
-                Message = $"Log entry {i}",
-                Timestamp = DateTime.UtcNow.AddMinutes(-i),
-            });
-        }
+                ctx.Set<ServerLog>().Add(new ServerLog
+                {
+                    ServerId = serverId,
+                    TaskName = "StaleJobRecovery",
+                    Status = "Success",
+                    Message = $"Log entry {i}",
+                    Timestamp = DateTime.UtcNow.AddMinutes(-i),
+                });
+            }
 
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+            await ctx.SaveChangesAsync(Ct);
+        }
 
         // Act
         var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
-        var request = new BaseListRequest { Page = 0, PageSize = 3 };
-        var logs = await svc.GetServerLogs(serverId, request);
+        var logs = await svc.GetServerLogs(serverId, new BaseListRequest { Page = 0, PageSize = 3 });
 
         // Assert
         logs.TotalCount.ShouldBe(5);
@@ -73,65 +73,39 @@ public abstract class ServerQueryTestsBase : IAsyncLifetime
     public async Task GetServerLogs_FilteredByTaskName()
     {
         // Arrange
-        var ctx = _fixture.CreateContext();
-        var serverId = Guid.NewGuid();
-
-        ctx.Set<Server>().Add(new Server
+        var serverId = await SeedServerAsync();
+        await using (var ctx = _fixture.CreateContext())
         {
-            Id = serverId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-            ServiceCount = 1,
-        });
-
-        var task1 = new ServerTask
-        {
-            ServerId = serverId,
-            TaskName = "StaleJobRecovery",
-            IntervalSeconds = 60,
-        };
-        var task2 = new ServerTask
-        {
-            ServerId = serverId,
-            TaskName = "ExpirationCleanup",
-            IntervalSeconds = 120,
-        };
-        ctx.Set<ServerTask>().Add(task1);
-        ctx.Set<ServerTask>().Add(task2);
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // Insert logs for task1
-        for (var i = 0; i < 3; i++)
-        {
-            ctx.Set<ServerLog>().Add(new ServerLog
+            for (var i = 0; i < 3; i++)
             {
-                ServerId = serverId,
-                ServerTaskId = task1.Id,
-                Status = "Success",
-                Message = $"Recovery log {i}",
-                Timestamp = DateTime.UtcNow.AddMinutes(-i),
-            });
-        }
+                ctx.Set<ServerLog>().Add(new ServerLog
+                {
+                    ServerId = serverId,
+                    TaskName = "StaleJobRecovery",
+                    Status = "Success",
+                    Message = $"Recovery log {i}",
+                    Timestamp = DateTime.UtcNow.AddMinutes(-i),
+                });
+            }
 
-        // Insert logs for task2
-        for (var i = 0; i < 2; i++)
-        {
-            ctx.Set<ServerLog>().Add(new ServerLog
+            for (var i = 0; i < 2; i++)
             {
-                ServerId = serverId,
-                ServerTaskId = task2.Id,
-                Status = "Success",
-                Message = $"Cleanup log {i}",
-                Timestamp = DateTime.UtcNow.AddMinutes(-i),
-            });
-        }
+                ctx.Set<ServerLog>().Add(new ServerLog
+                {
+                    ServerId = serverId,
+                    TaskName = "ExpirationCleanup",
+                    Status = "Success",
+                    Message = $"Cleanup log {i}",
+                    Timestamp = DateTime.UtcNow.AddMinutes(-i),
+                });
+            }
 
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+            await ctx.SaveChangesAsync(Ct);
+        }
 
         // Act
         var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
-        var request = new BaseListRequest { Page = 0, PageSize = 20 };
-        var logs = await svc.GetServerLogs(serverId, request, taskName: "StaleJobRecovery");
+        var logs = await svc.GetServerLogs(serverId, new BaseListRequest { Page = 0, PageSize = 20 }, taskName: "StaleJobRecovery");
 
         // Assert
         logs.TotalCount.ShouldBe(3);
@@ -139,41 +113,35 @@ public abstract class ServerQueryTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task GetServerTaskSummaries_ReturnsRegisteredTasks()
+    public async Task GetServerTaskSummaries_ReturnsTheClusterTasks()
     {
         // Arrange
-        var ctx = _fixture.CreateContext();
-        var serverId = Guid.NewGuid();
-
-        ctx.Set<Server>().Add(new Server
+        var serverId = await SeedServerAsync();
+        await using (var ctx = _fixture.CreateContext())
         {
-            Id = serverId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-            ServiceCount = 1,
-        });
-
-        ctx.Set<ServerTask>().Add(new ServerTask
-        {
-            ServerId = serverId,
-            TaskName = "StaleJobRecovery",
-            IntervalSeconds = 60,
-            LastStatus = "Success",
-            LastMessage = "Requeued 2 stale jobs",
-            LastRun = DateTime.UtcNow.AddMinutes(-1),
-            LastDurationMs = 42.5,
-        });
-        ctx.Set<ServerTask>().Add(new ServerTask
-        {
-            ServerId = serverId,
-            TaskName = "ExpirationCleanup",
-            IntervalSeconds = 120,
-            LastStatus = "Success",
-            LastMessage = "Cleaned 0 expired jobs",
-            LastRun = DateTime.UtcNow.AddMinutes(-2),
-            LastDurationMs = 15.3,
-        });
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+            ctx.Set<ClusterTask>().Add(new ClusterTask
+            {
+                Name = "StaleJobRecovery",
+                IntervalSeconds = 60,
+                NextRunAt = DateTime.UtcNow.AddSeconds(30),
+                LastStatus = "Success",
+                LastMessage = "Requeued 2 stale jobs",
+                LastRunAt = DateTime.UtcNow.AddMinutes(-1),
+                LastServerId = serverId,
+                LastDurationMs = 42.5,
+            });
+            ctx.Set<ClusterTask>().Add(new ClusterTask
+            {
+                Name = "ExpirationCleanup",
+                IntervalSeconds = 120,
+                NextRunAt = DateTime.UtcNow.AddSeconds(60),
+                LastStatus = "Success",
+                LastMessage = "Cleaned 0 expired jobs",
+                LastRunAt = DateTime.UtcNow.AddMinutes(-2),
+                LastDurationMs = 15.3,
+            });
+            await ctx.SaveChangesAsync(Ct);
+        }
 
         // Act
         var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
@@ -181,50 +149,36 @@ public abstract class ServerQueryTestsBase : IAsyncLifetime
 
         // Assert
         summaries.Count.ShouldBe(2);
-        summaries.ShouldContain(s => string.Equals(s.TaskName, "StaleJobRecovery", StringComparison.Ordinal));
-        summaries.ShouldContain(s => string.Equals(s.TaskName, "ExpirationCleanup", StringComparison.Ordinal));
-
         var recovery = summaries.First(s => string.Equals(s.TaskName, "StaleJobRecovery", StringComparison.Ordinal));
         recovery.IntervalSeconds.ShouldBe(60);
         recovery.LastStatus.ShouldBe("Success");
         recovery.LastMessage.ShouldBe("Requeued 2 stale jobs");
         recovery.LastDurationMs.ShouldBe(42.5);
+        recovery.LastServerId.ShouldBe(serverId);
     }
 
     [TimedFact]
     public async Task GetServerTaskSummaries_OrdersByTaskName()
     {
         // Arrange
-        var ctx = _fixture.CreateContext();
-        var serverId = Guid.NewGuid();
-
-        ctx.Set<Server>().Add(new Server
+        var serverId = await SeedServerAsync();
+        await using (var ctx = _fixture.CreateContext())
         {
-            Id = serverId,
-            StartedTime = DateTime.UtcNow,
-            LastHeartbeatTime = DateTime.UtcNow,
-            ServiceCount = 1,
-        });
-
-        // Insert in deliberately non-alphabetical order
-        foreach (var name in new[] { "StaleJobRecovery", "Heartbeat", "MessageRouter", "ExpirationCleanup" })
-        {
-            ctx.Set<ServerTask>().Add(new ServerTask
+            // Inserted in deliberately non-alphabetical order.
+            foreach (var name in new[] { "StaleJobRecovery", "Orchestrator", "MessageRouter", "ExpirationCleanup" })
             {
-                ServerId = serverId,
-                TaskName = name,
-                IntervalSeconds = 60,
-            });
-        }
+                ctx.Set<ClusterTask>().Add(new ClusterTask { Name = name, IntervalSeconds = 60, NextRunAt = DateTime.UtcNow });
+            }
 
-        await ctx.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
+            await ctx.SaveChangesAsync(Ct);
+        }
 
         // Act
         var svc = new DashboardStatsService<TestContext>(_fixture.CreateContext(), TimeProvider.System);
         var summaries = await svc.GetServerTaskSummaries(serverId);
 
         // Assert
-        summaries.Select(s => s.TaskName).ShouldBe(["ExpirationCleanup", "Heartbeat", "MessageRouter", "StaleJobRecovery"]);
+        summaries.Select(s => s.TaskName).ShouldBe(["ExpirationCleanup", "MessageRouter", "Orchestrator", "StaleJobRecovery"]);
     }
 
     // In dispatcher mode a running job carries its worker GROUP's id from the claim until its first

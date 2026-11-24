@@ -181,3 +181,41 @@ Options:
 - **D1:** rolling-deploy strategy (above).
 - **D2:** coalescing window for signal-driven claims (proposed 250 ms).
 - **D3:** completion recording cadence for idle runs (proposed: on change, on message, on failure, or once a minute).
+
+## As built (2026-11-24)
+
+The sections above are the original design. What changed while building it, and where it ended up:
+
+### Structure
+
+| Piece | Job |
+|---|---|
+| `ServerTaskHost` | Splits the registered tasks once: a `LockKey` makes a task cluster-wide. |
+| `ClusterTaskScheduler` | One per server. Claims due cluster-wide tasks by lease, starts what it won, sleeps until the next due time. |
+| `PerServerTaskLoop` | One per lock-less task (the heartbeat). Wait the interval, run, log a failure. Not part of the lease machinery. |
+| `ServerTaskRunner` | The one place that executes a task: scope, transaction when `LocksWithTransaction`, `OnCommittedAsync` after the commit. |
+| `LegacyTaskLock` | The old lock, taken only while a pre-lease server is alive (rolling deploy). Remove in the release after 8.x. |
+| `PostgresClusterTaskSql`, `SqlServerClusterTaskSql` | The four statements per provider: claim, request, renew, complete. |
+
+The per-task `ServerTaskLoop` and the `SupportsClusterTaskLeases` flag are gone; both providers implement the four statements, which are required members of `IWarpSqlQueries`.
+
+### Decisions taken during the build
+
+- **Database clock (D-clock).** Every time in the statements is the database's; the claim returns due times as seconds from now. A server clock only decides how long it sleeps.
+- **No idle backoff.** Built and measured (about 70 statements a minute saved per idle cluster), then removed: it delayed the first run after a quiet spell and needed a per-task limit to reason about.
+- **Due times on a grid.** The next run is the next multiple of the interval at least half an interval away, so tasks fall due together and one claim covers them (one idle server: 39 claims a minute to 15). A renewal only extends a lease, because the grid can set one longer than an interval.
+- **Claim only when due.** The scheduler remembers each task's due time from the last claim and sends the claim statement only when one is due. A run that wrote a completion forgets that task's due time, since the completion may have moved it.
+- **Per-task startup delay.** Each task waits its own random share of `ServerTaskStartupDelay`; a signal ends only its wait. One shared wait let the first job's signal run every task at once.
+- **The heartbeat is separate.** It is not a cluster task, writes nothing on success (`Server.LastHeartbeatTime` is its record), and has no dashboard task row. The `ServerTask` table stays in the schema but is no longer read or written; dropping it would be a breaking migration.
+- **Kept for correctness:** the rolling-deploy lock, and run requests for signals that reach a server not holding the task.
+- **Considered and left out:** a single leader server doing all claiming (saves ~10 statements a minute per extra server, costs up to ~30 s of paused scheduling whenever the leader restarts).
+
+### Measured idle load (PostgreSQL, 5 workers, 120 s, default intervals)
+
+| | Before | After |
+|---|---|---|
+| 1 server | 389/min | 161/min |
+| 2 servers | 778/min | 210/min |
+| Each extra server | +389/min | +49/min |
+
+Peak connections with Warp's own server pool (rule 6.19): 6 against 7 on the shared pool idle, 8 against 9 under load with two servers. SQL Server idle load is not measured.

@@ -62,7 +62,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
 
         // Act: two idle runs in a row.
         await RunOnceAsync(scheduler, IdleTask.TaskName);
-        await MakeDueAsync(IdleTask.TaskName);
+        await MakeDueAsync(scheduler, IdleTask.TaskName);
         await RunOnceAsync(scheduler, IdleTask.TaskName);
 
         // Assert: the second claim moved the next run one interval out, and the lease ends with it.
@@ -100,7 +100,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         var task = new IdleTask(TimeSpan.FromSeconds(10));
         using var scheduler = await BuildAsync(task);
         await RunOnceAsync(scheduler, IdleTask.TaskName);
-        await MakeDueAsync(IdleTask.TaskName);
+        await MakeDueAsync(scheduler, IdleTask.TaskName);
         var before = scheduler.Wakes;
 
         // Act
@@ -235,10 +235,11 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
 
         var provider = services.BuildServiceProvider();
 
+        var scopes = provider.GetRequiredService<IServiceScopeFactory>();
         var scheduler = new ClusterTaskScheduler<TestContext>(
-            tasks,
-            provider.GetRequiredService<IServiceScopeFactory>(),
-            new NoopLockProvider(),
+            tasks.Select(ServerTaskInfo.From),
+            new ServerTaskRunner<TestContext>(scopes, new NoopLockProvider()),
+            scopes,
             TimeProvider.System,
             Guid.NewGuid(),
             NullLogger.Instance,
@@ -258,8 +259,11 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
         }
     }
 
-    private async Task MakeDueAsync(string name)
+    // Makes the task due on its row, behind the scheduler's back, and has the scheduler forget the due
+    // time it was told, as it would only after a completion.
+    private async Task MakeDueAsync(ClusterTaskScheduler<TestContext> scheduler, string name)
     {
+        scheduler.ForgetDueTimes();
         await using var ctx = _fixture.CreateContext();
         await ctx.Set<ClusterTask>()
             .Where(x => x.Name == name)

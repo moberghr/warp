@@ -766,8 +766,6 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             .FirstOrDefaultAsync(ct);
     }
 
-    public bool SupportsClusterTaskLeases => true;
-
     public async Task<ClusterTaskClaims> ClaimClusterTasksAsync(
         DbContext context,
         IReadOnlyList<string> names,
