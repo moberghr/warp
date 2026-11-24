@@ -165,7 +165,7 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         var logCollector = new JobLogCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
         var progressCollector = new JobProgressCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
         using var jobCts = new CancellationTokenSource();
-        using var monitoring = _monitor.Register(job.Id, _workerId, logCollector, progressCollector, _processingLog, jobCts, cancellationToken);
+        using var monitoring = _monitor.Register(JobRunOwner.Of(job, _workerId), logCollector, progressCollector, _processingLog, jobCts, cancellationToken);
 
         var activity = WarpTelemetry.StartJobActivity(job.TraceId ?? job.Id, job.ParentSpanId, job.Queue);
         var jobTypeName = WarpTelemetry.GetShortTypeName(job.Type);

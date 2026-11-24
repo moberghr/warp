@@ -5,6 +5,7 @@ using Shouldly;
 using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.ErrorGrouping;
@@ -45,15 +46,15 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
     private static readonly IDatabaseExceptionClassifier NoDeadlocks = new NoDeadlockClassifier();
 
     // The provider's own statement, as WarpDispatcherWorker passes it.
-    private static Task<IReadOnlyCollection<Guid>> CompleteJobs(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct) =>
-        TestTasks.QueriesFor((TestContext)context).CompleteJobsAsync(context, jobs, logs, ct);
+    private static Task<IReadOnlyCollection<Guid>> CompleteJobs(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct) =>
+        TestTasks.QueriesFor((TestContext)context).CompleteJobsAsync(context, jobs, owners, logs, ct);
 
     // The statement failing for any batch that holds one particular job: what a row the database
     // refuses looks like to the batch, which then has to isolate it.
-    private static Func<DbContext, IReadOnlyList<Job>, IReadOnlyList<JobLog>, CancellationToken, Task<IReadOnlyCollection<Guid>>> FailingOn(Guid poisonId) =>
-        (context, jobs, logs, ct) => jobs.Any(x => x.Id == poisonId)
+    private static CompletionBatch.CompleteJobs FailingOn(Guid poisonId) =>
+        (context, jobs, owners, logs, ct) => jobs.Any(x => x.Id == poisonId)
             ? throw new DbUpdateException("Injected failure: the database refused this job's completion")
-            : CompleteJobs(context, jobs, logs, ct);
+            : CompleteJobs(context, jobs, owners, logs, ct);
 
     private sealed class NoDeadlockClassifier : IDatabaseExceptionClassifier
     {
@@ -111,8 +112,21 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         return job;
     }
 
+    // The run as the worker records it before finalization clears the row's worker fields: the claim's
+    // stamps on the inserted row, and a worker of its own.
+    private static JobRunOwner OwnerOf(Job job) => JobRunOwner.Of(job, Guid.NewGuid());
+
+    // A completion for a job with no row.
+    private static PendingCompletion Phantom()
+    {
+        var job = new Job { Id = Guid.NewGuid() };
+
+        return new PendingCompletion(job, OwnerOf(job), [], []);
+    }
+
     private static PendingCompletion MakeEntry(Job job)
     {
+        var owner = OwnerOf(job);
         job.CurrentState = State.Completed;
         job.CurrentWorkerId = null;
         job.LastKeepAlive = null;
@@ -134,7 +148,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
                 Message = $"Job {job.Id} completed",
             },
         };
-        return new PendingCompletion(job, counters, logs);
+        return new PendingCompletion(job, owner, counters, logs);
     }
 
     [TimedFact]
@@ -185,7 +199,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // past the host's shutdown token.
         var entered = new SemaphoreSlim(0);
         var release = new TaskCompletionSource();
-        async Task<IReadOnlyCollection<Guid>> Hang(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct)
+        async Task<IReadOnlyCollection<Guid>> Hang(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct)
         {
             entered.Release();
             await release.Task.WaitAsync(ct);
@@ -268,11 +282,11 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // Arrange — completions keep arriving while a flush is written, so a buffer can hold more than its
         // size; one statement for all of them made the statement unbounded.
         var sizes = new List<int>();
-        Task<IReadOnlyCollection<Guid>> Record(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct)
+        Task<IReadOnlyCollection<Guid>> Record(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct)
         {
             sizes.Add(jobs.Count);
 
-            return CompleteJobs(context, jobs, logs, ct);
+            return CompleteJobs(context, jobs, owners, logs, ct);
         }
 
         var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 2, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Record);
@@ -351,6 +365,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         var batch = new CompletionBatch(scopeFactory, _time, NullLogger.Instance, NoDeadlocks, batchSize: 1, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
 
         var job = await InsertProcessingJob();
+        var owner = OwnerOf(job);
         job.CurrentState = State.Failed;
         job.CurrentWorkerId = null;
         job.LastKeepAlive = null;
@@ -363,7 +378,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             application: null,
             _time.GetUtcNow().UtcDateTime);
 
-        batch.Add(new PendingCompletion(job, [], [], occurrence));
+        batch.Add(new PendingCompletion(job, owner, [], [], occurrence));
 
         await batch.FlushAsync();
         await TestTasks.FlushCountersAsync(_counterBuffer, _fixture.CreateContext());
@@ -472,6 +487,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         };
         batch.Add(new PendingCompletion(
             phantomJob,
+            OwnerOf(phantomJob),
             [new Counter { Key = "stats:succeeded", Value = 1 }],
             [new JobLog { JobId = phantomJob.Id, EventType = "Completed", Timestamp = DateTime.UtcNow, Level = "Information", Message = "phantom" }]));
 
@@ -527,7 +543,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             ScheduleTime = _time.GetUtcNow().UtcDateTime,
             Queue = "default",
         };
-        batch.Add(new PendingCompletion(phantom, [], []));
+        batch.Add(new PendingCompletion(phantom, OwnerOf(phantom), [], []));
 
         batch.Add(MakeEntry(good3));
         batch.Add(MakeEntry(good4));
@@ -554,10 +570,10 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // Arrange: a command timeout or a dropped connection on the raw completion statement is a transient
         // DbException, not a DbUpdateException. It escaped the batch, which abandoned every drained job.
         var attempts = 0;
-        Task<IReadOnlyCollection<Guid>> FailOnce(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct) =>
+        Task<IReadOnlyCollection<Guid>> FailOnce(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct) =>
             Interlocked.Increment(ref attempts) == 1
                 ? throw new TransientDbException()
-                : CompleteJobs(context, jobs, logs, ct);
+                : CompleteJobs(context, jobs, owners, logs, ct);
         var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, FailOnce);
         var first = await InsertProcessingJob();
         var second = await InsertProcessingJob();
@@ -629,7 +645,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             ScheduleTime = _time.GetUtcNow().UtcDateTime,
             Queue = "default",
         };
-        batch.Add(new PendingCompletion(phantomJob, [], []));
+        batch.Add(new PendingCompletion(phantomJob, OwnerOf(phantomJob), [], []));
 
         // Act
         await batch.FlushAsync();
@@ -673,7 +689,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
             ScheduleTime = _time.GetUtcNow().UtcDateTime,
             Queue = "default",
         };
-        batch.Add(new PendingCompletion(phantomJob, [], []));
+        batch.Add(new PendingCompletion(phantomJob, OwnerOf(phantomJob), [], []));
 
         // Act
         await batch.FlushAsync();
@@ -733,7 +749,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         const int total = 200_000;
         var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
         var entries = Enumerable.Range(0, total)
-            .Select(_ => new PendingCompletion(new Job { Id = Guid.NewGuid() }, [], []))
+            .Select(_ => Phantom())
             .ToArray();
 
         var drained = new List<PendingCompletion>(total);
@@ -768,9 +784,9 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         // predecessor's timer fired into a buffer a moment old: flushes ran twice as often with half
         // as many jobs, and throughput fell 9-20% on the CI benchmark.
         var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 10, flushInterval: TimeSpan.FromSeconds(10), _counterBuffer, CompleteJobs);
-        batch.Add(new PendingCompletion(new Job { Id = Guid.NewGuid() }, [], []), out var first);
+        batch.Add(Phantom(), out var first);
         batch.Drain();
-        batch.Add(new PendingCompletion(new Job { Id = Guid.NewGuid() }, [], []), out var second);
+        batch.Add(Phantom(), out var second);
 
         // Act
         var holdsFirst = batch.Holds(first);

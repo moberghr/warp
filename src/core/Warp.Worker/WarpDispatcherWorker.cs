@@ -153,6 +153,10 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         PerfTrace.Begin();
         var processingLog = new DeferredJobLog();
 
+        // As the claim stamped the row, before this worker changes it: every later write for this run is
+        // guarded by it, so a run whose job was taken back and claimed again cannot write the new run's row.
+        var owner = JobRunOwner.Of(job, _workerId);
+
         // OTel "receive" span — covers post-fetch / pre-handler bookkeeping (mark worker ownership).
         // Closes before the consumer span opens, so receive and process are siblings under the
         // caller's trace, not nested.
@@ -184,7 +188,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         var progressCollector = new JobProgressCollector { JobId = job.Id, TimeProvider = _timeProvider, WorkerId = _workerId };
 
         using var jobCts = new CancellationTokenSource();
-        using var monitoring = _monitor.Register(job.Id, _workerId, logCollector, progressCollector, processingLog, jobCts, cancellationToken);
+        using var monitoring = _monitor.Register(owner, logCollector, progressCollector, processingLog, jobCts, cancellationToken);
 
         var activity = WarpTelemetry.StartJobActivity(job.TraceId ?? job.Id, job.ParentSpanId, job.Queue);
         var jobTypeName = WarpTelemetry.GetShortTypeName(job.Type);
@@ -321,7 +325,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
             var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector, processingLog).ToArray();
-            await AddCompletionAsync(new PendingCompletion(job, counters, logs));
+            await AddCompletionAsync(new PendingCompletion(job, owner, counters, logs));
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -374,7 +378,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 WorkerId = _workerId,
             };
             var logs = CollectLogs([cancelLog], logCollector, progressCollector, processingLog).ToArray();
-            await AddCompletionAsync(new PendingCompletion(job, cancelCounters, logs));
+            await AddCompletionAsync(new PendingCompletion(job, owner, cancelCounters, logs));
         }
         catch (Exception e)
         {
@@ -453,7 +457,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 ? ErrorOccurrenceFactory.FromException(ErrorSource.Job, e, culprit, job.TraceId, _configuration.ApplicationName, _timeProvider.GetUtcNow().UtcDateTime, _configuration.ApplicationVersion, _configuration.ApplicationEnvironment)
                 : null;
 
-            await AddCompletionAsync(new PendingCompletion(job, counters, logs, occurrence));
+            await AddCompletionAsync(new PendingCompletion(job, owner, counters, logs, occurrence));
         }
         finally
         {

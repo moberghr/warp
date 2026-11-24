@@ -154,8 +154,12 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             OUTPUT INSERTED.[{_n.Id}] INTO @done
             FROM OPENJSON(@jobs) WITH (
                 i uniqueidentifier, s int, c int, w uniqueidentifier, k datetime2, e datetime2,
-                h nvarchar(max), d datetime2, m nvarchar(max)) AS c
-            INNER LOOP JOIN {table} AS t WITH (ROWLOCK) ON t.[{_n.Id}] = c.i;
+                h nvarchar(max), d datetime2, m nvarchar(max),
+                o uniqueidentifier, b uniqueidentifier, a datetime2) AS c
+            INNER LOOP JOIN {table} AS t WITH (ROWLOCK) ON t.[{_n.Id}] = c.i
+            WHERE t.[{_n.CurrentState}] = {(int)State.Processing}
+              AND (t.[{_n.CurrentWorkerId}] = c.o
+                   OR (t.[{_n.CurrentWorkerId}] = c.b AND t.[{_n.LastKeepAlive}] = c.a));
 
             INSERT INTO {logTable} (
                 [{log.Id}], [{log.JobId}], [{log.EventType}], [{log.Timestamp}], [{log.Level}], [{log.Message}],
@@ -169,17 +173,19 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             SELECT id FROM @done;";
 
         // One keep-alive for every job a worker group is running (rule 6.14). Only rows still Processing
-        // are touched, so a renewal that races a job's completion writes nothing to the finished row.
-        // LOOP JOIN with the JSON rows outermost and ROWLOCK for the same reason as the completion: one
+        // are touched, so a renewal that races a job's completion writes nothing to the finished row, and
+        // only while still this run's (JobRunOwner), as the completion. LOOP JOIN with the JSON rows outermost and ROWLOCK for the same reason as the completion: one
         // primary-key seek per job, never a scan that locks other workers' rows.
         _renewRunningJobsSql = $@"
             UPDATE t
             SET [{_n.LastKeepAlive}] = @now,
                 [{_n.CurrentWorkerId}] = beat.w
             OUTPUT INSERTED.[{_n.Id}] AS [Id], INSERTED.[{_n.CancellationMode}] AS [Mode]
-            FROM OPENJSON(@beats) WITH (i uniqueidentifier, w uniqueidentifier) AS beat
+            FROM OPENJSON(@beats) WITH (i uniqueidentifier, w uniqueidentifier, b uniqueidentifier, a datetime2) AS beat
             INNER LOOP JOIN {table} AS t WITH (ROWLOCK) ON t.[{_n.Id}] = beat.i
-            WHERE t.[{_n.CurrentState}] = {(int)State.Processing};";
+            WHERE t.[{_n.CurrentState}] = {(int)State.Processing}
+              AND (t.[{_n.CurrentWorkerId}] = beat.w
+                   OR (t.[{_n.CurrentWorkerId}] = beat.b AND t.[{_n.LastKeepAlive}] = beat.a));";
 
         _lockStaleProcessingJobsSql = $@"
             SELECT *
@@ -529,7 +535,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         }
     }
 
-    public async Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct)
+    public async Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct)
     {
         if (jobs.Count == 0)
         {
@@ -548,7 +554,7 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
             await using var cmd = conn.CreateCommand();
             cmd.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
             cmd.CommandText = _completeJobsSql;
-            AddJson(cmd, "@jobs", WriteJson(jobs, WriteJob));
+            AddJson(cmd, "@jobs", WriteJson([.. jobs.Select((x, i) => (Job: x, Owner: owners[i]))], WriteJob));
             AddJson(cmd, "@logs", WriteJson(logs, WriteLog));
 
             var written = new List<Guid>(jobs.Count);
@@ -574,21 +580,21 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
     // makes one renewal fail.
     public async Task<IReadOnlyCollection<Guid>> RenewRunningJobsAsync(
         DbContext context,
-        IReadOnlyList<Guid> jobIds,
-        IReadOnlyList<Guid> workerIds,
+        IReadOnlyList<JobRunOwner> runs,
         DateTime now,
         CancellationToken ct)
     {
-        if (jobIds.Count == 0)
+        if (runs.Count == 0)
         {
             return [];
         }
 
-        var beats = jobIds.Select((x, i) => (Job: x, Worker: workerIds[i])).ToList();
-        var json = WriteJson(beats, static (writer, beat) =>
+        var json = WriteJson(runs, static (writer, run) =>
         {
-            writer.WriteString("i", beat.Job);
-            writer.WriteString("w", beat.Worker);
+            writer.WriteString("i", run.JobId);
+            writer.WriteString("w", run.WorkerId);
+            WriteNullable(writer, "b", run.ClaimedBy);
+            WriteNullable(writer, "a", run.ClaimedKeepAlive);
         });
 
         var renewed = await context.Database
@@ -639,8 +645,9 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
     }
 
-    private static void WriteJob(Utf8JsonWriter writer, Job job)
+    private static void WriteJob(Utf8JsonWriter writer, (Job Job, JobRunOwner Owner) row)
     {
+        var (job, owner) = row;
         writer.WriteString("i", job.Id);
         writer.WriteNumber("s", (int)job.CurrentState);
         writer.WriteNumber("c", (int)job.CancellationMode);
@@ -650,6 +657,9 @@ public sealed class SqlServerWarpSqlQueries<TContext> : IWarpSqlQueries<TContext
         writer.WriteString("h", job.HandlerType);
         WriteNullable(writer, "d", job.ScheduleTime);
         writer.WriteString("m", job.Metadata);
+        writer.WriteString("o", owner.WorkerId);
+        WriteNullable(writer, "b", owner.ClaimedBy);
+        WriteNullable(writer, "a", owner.ClaimedKeepAlive);
     }
 
     private static void WriteLog(Utf8JsonWriter writer, JobLog log)

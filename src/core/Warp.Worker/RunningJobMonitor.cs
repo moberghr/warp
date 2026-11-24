@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Warp.Core;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Logging;
 
 namespace Warp.Worker;
@@ -51,13 +52,13 @@ internal sealed class RunningJobMonitor
     }
 
     /// <summary>
-    /// Renews the keep-alive of the given jobs, stamping each with its worker, and returns the ones whose
-    /// cancellation was requested. Supplied by the provider (<c>IWarpSqlQueries.RenewRunningJobsAsync</c>).
+    /// Renews the keep-alive of the given runs' jobs, stamping each with its worker, and returns the ones
+    /// whose cancellation was requested; a row no longer the run's is left alone (<see cref="JobRunOwner"/>).
+    /// Supplied by the provider (<c>IWarpSqlQueries.RenewRunningJobsAsync</c>).
     /// </summary>
     public delegate Task<IReadOnlyCollection<Guid>> RenewRunningJobs(
         DbContext context,
-        IReadOnlyList<Guid> jobIds,
-        IReadOnlyList<Guid> workerIds,
+        IReadOnlyList<JobRunOwner> runs,
         DateTime now,
         CancellationToken ct);
 
@@ -66,18 +67,17 @@ internal sealed class RunningJobMonitor
     /// finalizing write: from then on the job is neither renewed nor flushed by this monitor.
     /// </summary>
     public IDisposable Register(
-        Guid jobId,
-        Guid workerId,
+        JobRunOwner run,
         JobLogCollector logs,
         JobProgressCollector progress,
         DeferredJobLog processingLog,
         CancellationTokenSource jobCts,
         CancellationToken stoppingToken)
     {
-        var entry = new Entry(this, jobId, workerId, logs, progress, processingLog, jobCts, _timeProvider.GetTimestamp(), stoppingToken);
+        var entry = new Entry(this, run, logs, progress, processingLog, jobCts, _timeProvider.GetTimestamp(), stoppingToken);
         lock (_gate)
         {
-            _entries[jobId] = entry;
+            _entries[run.JobId] = entry;
             if (_loop == null)
             {
                 _sinceRenewal = TimeSpan.Zero;
@@ -169,7 +169,7 @@ internal sealed class RunningJobMonitor
             var now = _timeProvider.GetUtcNow().UtcDateTime;
             try
             {
-                cancelled = await _renew(context, [.. ordered.Select(x => x.JobId)], [.. ordered.Select(x => x.WorkerId)], now, CancellationToken.None).ConfigureAwait(false);
+                cancelled = await _renew(context, [.. ordered.Select(x => x.Run)], now, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception e)
             {
@@ -256,8 +256,7 @@ internal sealed class RunningJobMonitor
 
         public Entry(
             RunningJobMonitor owner,
-            Guid jobId,
-            Guid workerId,
+            JobRunOwner run,
             JobLogCollector logs,
             JobProgressCollector progress,
             DeferredJobLog processingLog,
@@ -266,8 +265,7 @@ internal sealed class RunningJobMonitor
             CancellationToken stoppingToken)
         {
             _owner = owner;
-            JobId = jobId;
-            WorkerId = workerId;
+            Run = run;
             Logs = logs;
             Progress = progress;
             ProcessingLog = processingLog;
@@ -276,9 +274,9 @@ internal sealed class RunningJobMonitor
             StartedAt = startedAt;
         }
 
-        public Guid JobId { get; }
+        public JobRunOwner Run { get; }
 
-        public Guid WorkerId { get; }
+        public Guid JobId => Run.JobId;
 
         public JobLogCollector Logs { get; }
 

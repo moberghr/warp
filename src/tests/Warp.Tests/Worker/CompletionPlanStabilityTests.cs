@@ -4,6 +4,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
@@ -48,6 +49,7 @@ public abstract class CompletionPlanStabilityTestsBase : IAsyncLifetime
             await insert.SaveChangesAsync(ct);
         }
 
+        var owners = jobs.ConvertAll(x => JobRunOwner.Of(x, Guid.NewGuid()));
         foreach (var job in jobs)
         {
             job.CurrentState = State.Completed;
@@ -63,7 +65,7 @@ public abstract class CompletionPlanStabilityTestsBase : IAsyncLifetime
         using (capture)
         {
             await using var transaction = await context.Database.BeginTransactionAsync(ct);
-            await TestTasks.QueriesFor(context).CompleteJobsAsync(context, jobs, [.. jobs.SelectMany(x => Logs(x.Id))], ct);
+            await TestTasks.QueriesFor(context).CompleteJobsAsync(context, jobs, owners, [.. jobs.SelectMany(x => Logs(x.Id))], ct);
             await transaction.RollbackAsync(ct);
         }
 

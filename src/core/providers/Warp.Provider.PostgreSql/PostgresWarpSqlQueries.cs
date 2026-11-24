@@ -160,7 +160,10 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         // The batched completion (rule 6.13): every finished job of a flush and its log rows in ONE
         // statement. The arrays are unnested back into rows; the log rows are inserted only for jobs
         // the update found, so a job whose row was deleted while it ran takes its log rows with it
-        // and cannot fail the insert on the foreign key.
+        // and cannot fail the insert on the foreign key. A row is updated only while it is still
+        // Processing and still this run's (JobRunOwner): renewed by its worker, or as its claim left it.
+        // A run whose job StaleJobRecovery took back and another claim took is skipped the same way,
+        // instead of finishing the new run's row.
         var log = _n.JobLog ?? throw new InvalidOperationException("The JobLog table names were not resolved from the model.");
         var logTable = string.IsNullOrEmpty(log.Schema) ? $"\"{log.Table}\"" : $"\"{log.Schema}\".\"{log.Table}\"";
         _completeJobsSql = $@"
@@ -174,9 +177,14 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
                     ""{_n.HandlerType}"" = c.handler,
                     ""{_n.ScheduleTime}"" = c.schedule,
                     ""{_n.Metadata}"" = c.metadata
-                FROM unnest(@ids, @states, @cancels, @workers, @keepalives, @expires, @handlers, @schedules, @metadatas)
-                    AS c(id, state, cancel, worker, keepalive, expire, handler, schedule, metadata)
+                FROM unnest(
+                        @ids, @states, @cancels, @workers, @keepalives, @expires, @handlers, @schedules, @metadatas,
+                        @owners, @claimers, @claimed_keepalives)
+                    AS c(id, state, cancel, worker, keepalive, expire, handler, schedule, metadata, owner, claimer, claimed_keepalive)
                 WHERE t.""{_n.Id}"" = c.id
+                  AND t.""{_n.CurrentState}"" = {(int)State.Processing}
+                  AND (t.""{_n.CurrentWorkerId}"" = c.owner
+                       OR (t.""{_n.CurrentWorkerId}"" = c.claimer AND t.""{_n.LastKeepAlive}"" = c.claimed_keepalive))
                 RETURNING t.""{_n.Id}"" AS id
             ),
             logged AS (
@@ -193,14 +201,18 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             SELECT id FROM done";
 
         // One keep-alive for every job a worker group is running (rule 6.14). Only rows still Processing
-        // are touched, so a renewal that races a job's completion writes nothing to the finished row.
+        // are touched, so a renewal that races a job's completion writes nothing to the finished row, and
+        // only while still this run's, as the completion: renewing a row another claim now holds would
+        // keep a dead run's job from recovery and stamp the wrong worker on the live one.
         _renewRunningJobsSql = $@"
             UPDATE {table} AS t
             SET ""{_n.LastKeepAlive}"" = @now,
                 ""{_n.CurrentWorkerId}"" = beat.worker
-            FROM unnest(@ids, @workers) AS beat(id, worker)
+            FROM unnest(@ids, @workers, @claimers, @claimed_keepalives) AS beat(id, worker, claimer, claimed_keepalive)
             WHERE t.""{_n.Id}"" = beat.id
               AND t.""{_n.CurrentState}"" = {(int)State.Processing}
+              AND (t.""{_n.CurrentWorkerId}"" = beat.worker
+                   OR (t.""{_n.CurrentWorkerId}"" = beat.claimer AND t.""{_n.LastKeepAlive}"" = beat.claimed_keepalive))
             RETURNING t.""{_n.Id}"" AS ""Id"", t.""{_n.CancellationMode}"" AS ""Mode""";
 
         _lockStaleProcessingJobsSql = $@"
@@ -524,7 +536,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         }
     }
 
-    public async Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct)
+    public async Task<IReadOnlyCollection<Guid>> CompleteJobsAsync(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobRunOwner> owners, IReadOnlyList<JobLog> logs, CancellationToken ct)
     {
         if (jobs.Count == 0)
         {
@@ -554,6 +566,9 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
             cmd.Parameters.Add(new NpgsqlParameter<string?[]>("handlers", [.. jobs.Select(x => x.HandlerType)]));
             cmd.Parameters.Add(Timestamps("schedules", jobs.Select(x => (DateTime?)x.ScheduleTime)));
             cmd.Parameters.Add(new NpgsqlParameter<string?[]>("metadatas", [.. jobs.Select(x => x.Metadata)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("owners", [.. owners.Select(x => x.WorkerId)]));
+            cmd.Parameters.Add(new NpgsqlParameter<Guid?[]>("claimers", [.. owners.Select(x => x.ClaimedBy)]));
+            cmd.Parameters.Add(Timestamps("claimed_keepalives", owners.Select(x => x.ClaimedKeepAlive)));
 
             cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("log_ids", [.. logs.Select(x => x.Id)]));
             cmd.Parameters.Add(new NpgsqlParameter<Guid[]>("log_jobs", [.. logs.Select(x => x.JobId)]));
@@ -590,12 +605,11 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     // makes one renewal fail.
     public async Task<IReadOnlyCollection<Guid>> RenewRunningJobsAsync(
         DbContext context,
-        IReadOnlyList<Guid> jobIds,
-        IReadOnlyList<Guid> workerIds,
+        IReadOnlyList<JobRunOwner> runs,
         DateTime now,
         CancellationToken ct)
     {
-        if (jobIds.Count == 0)
+        if (runs.Count == 0)
         {
             return [];
         }
@@ -603,8 +617,10 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
         var renewed = await context.Database
             .SqlQueryRaw<RenewedJob>(
                 _renewRunningJobsSql,
-                new NpgsqlParameter<Guid[]>("ids", [.. jobIds]),
-                new NpgsqlParameter<Guid[]>("workers", [.. workerIds]),
+                new NpgsqlParameter<Guid[]>("ids", [.. runs.Select(x => x.JobId)]),
+                new NpgsqlParameter<Guid[]>("workers", [.. runs.Select(x => x.WorkerId)]),
+                new NpgsqlParameter<Guid?[]>("claimers", [.. runs.Select(x => x.ClaimedBy)]),
+                Timestamps("claimed_keepalives", runs.Select(x => x.ClaimedKeepAlive)),
                 new NpgsqlParameter<DateTime>("now", DateTime.SpecifyKind(now, DateTimeKind.Utc)))
             .ToListAsync(ct);
 

@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Shouldly;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Logging;
@@ -38,7 +39,7 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         using var renewals = new SemaphoreSlim(0);
         var calls = 0;
         var monitor = CreateMonitor(
-            (_, _, _, _, _) =>
+            (_, _, _, _) =>
             {
                 renewals.Release();
                 IReadOnlyCollection<Guid> cancel = Interlocked.Increment(ref calls) == 1 ? [jobA] : [];
@@ -79,7 +80,7 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         using var cts = new CancellationTokenSource();
         var logs = new JobLogCollector { JobId = jobId };
         logs.Add("Information", "handler line");
-        using var entry = monitor.Register(jobId, Guid.NewGuid(), logs, new JobProgressCollector { JobId = jobId }, processing, cts, CancellationToken.None);
+        using var entry = monitor.Register(Run(jobId), logs, new JobProgressCollector { JobId = jobId }, processing, cts, CancellationToken.None);
         (await logger.Warnings.WaitAsync(TimeSpan.FromSeconds(3), ct)).ShouldBeTrue("the save never failed");
 
         // Act: the clash goes away; the next tick saves again.
@@ -97,7 +98,7 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         var jobId = await InsertProcessingJobAsync();
         var calls = 0;
         var monitor = CreateMonitor(
-            (_, _, _, _, _) =>
+            (_, _, _, _) =>
             {
                 IReadOnlyCollection<Guid> cancel = Interlocked.Increment(ref calls) == 1 ? [jobId] : [];
 
@@ -111,7 +112,7 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         using var cts = new CancellationTokenSource();
 
         // Act
-        using var entry = monitor.Register(jobId, Guid.NewGuid(), new JobLogCollector { JobId = jobId }, new JobProgressCollector { JobId = jobId }, processing, cts, CancellationToken.None);
+        using var entry = monitor.Register(Run(jobId), new JobLogCollector { JobId = jobId }, new JobProgressCollector { JobId = jobId }, processing, cts, CancellationToken.None);
 
         // Assert
         await WaitUntilAsync(() => Task.FromResult(cts.IsCancellationRequested), ct);
@@ -126,7 +127,7 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         var jobB = await InsertProcessingJobAsync();
         using var renewals = new SemaphoreSlim(0);
         var monitor = CreateMonitor(
-            (_, _, _, _, _) =>
+            (_, _, _, _) =>
             {
                 renewals.Release();
 
@@ -150,7 +151,7 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         holder.Take().ShouldNotBeNull().JobId.ShouldBe(jobB);
     }
 
-    private static Task<IReadOnlyCollection<Guid>> NoCancellations(DbContext context, IReadOnlyList<Guid> jobIds, IReadOnlyList<Guid> workerIds, DateTime now, CancellationToken ct) =>
+    private static Task<IReadOnlyCollection<Guid>> NoCancellations(DbContext context, IReadOnlyList<JobRunOwner> runs, DateTime now, CancellationToken ct) =>
         Task.FromResult<IReadOnlyCollection<Guid>>([]);
 
     private static JobLog ProcessingRow(Guid jobId) => new()
@@ -162,8 +163,10 @@ public abstract class RunningJobMonitorFailureTestsBase : IAsyncLifetime
         Message = $"The job {jobId} is being processed",
     };
 
+    private static JobRunOwner Run(Guid jobId) => new(jobId, Guid.NewGuid(), null, null);
+
     private static IDisposable Register(RunningJobMonitor monitor, Guid jobId, CancellationTokenSource cts, DeferredJobLog holder, JobLogCollector? logs = null) =>
-        monitor.Register(jobId, Guid.NewGuid(), logs ?? new JobLogCollector { JobId = jobId }, new JobProgressCollector { JobId = jobId }, holder, cts, CancellationToken.None);
+        monitor.Register(Run(jobId), logs ?? new JobLogCollector { JobId = jobId }, new JobProgressCollector { JobId = jobId }, holder, cts, CancellationToken.None);
 
     private static async Task WaitUntilAsync(Func<Task<bool>> condition, CancellationToken ct)
     {

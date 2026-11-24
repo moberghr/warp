@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
+using Warp.Core.Data.Queries;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Services;
@@ -12,11 +13,13 @@ using Warp.Core.Services;
 namespace Warp.Worker;
 
 /// <summary>
-/// A single job completion waiting to be persisted: the mutated <see cref="Job"/> entity,
+/// A single job completion waiting to be persisted: the mutated <see cref="Job"/> entity, the run that
+/// finished it (the write is skipped once the row is no longer that run's, <see cref="JobRunOwner"/>),
 /// the counters to insert, and the log entries to insert (final state log + any drained handler logs).
 /// </summary>
 internal readonly record struct PendingCompletion(
     Job Job,
+    JobRunOwner Owner,
     IReadOnlyList<Counter> Counters,
     IReadOnlyList<JobLog> Logs,
     ErrorOccurrence? Occurrence = null);
@@ -42,6 +45,17 @@ internal readonly record struct FlushedJobs(IReadOnlyCollection<Guid> Parents, I
 /// </summary>
 internal sealed class CompletionBatch
 {
+    /// <summary>
+    /// Writes finished jobs, each guarded by the run at the same index, and returns the ids it wrote.
+    /// Supplied by the provider (<c>IWarpSqlQueries.CompleteJobsAsync</c>).
+    /// </summary>
+    public delegate Task<IReadOnlyCollection<Guid>> CompleteJobs(
+        DbContext context,
+        IReadOnlyList<Job> jobs,
+        IReadOnlyList<JobRunOwner> owners,
+        IReadOnlyList<JobLog> logs,
+        CancellationToken cancellationToken);
+
     // Transient-deadlock retry budget for the whole batch flush. Three attempts with a short
     // exponential backoff is enough to clear a SQL Server 1205 / PG 40P01 storm in practice
     // without masking real defects (a deadlock that survives 3 retries indicates a structural
@@ -63,7 +77,7 @@ internal sealed class CompletionBatch
     private readonly ILogger _logger;
     private readonly IDatabaseExceptionClassifier _exceptionClassifier;
     private readonly WarpCounterBuffer _counterBuffer;
-    private readonly Func<DbContext, IReadOnlyList<Job>, IReadOnlyList<JobLog>, CancellationToken, Task<IReadOnlyCollection<Guid>>> _completeJobs;
+    private readonly CompleteJobs _completeJobs;
     private readonly int _batchSize;
     private readonly TimeSpan _flushInterval;
     private DateTimeOffset? _firstEntryTimestamp;
@@ -80,7 +94,7 @@ internal sealed class CompletionBatch
         int batchSize,
         TimeSpan flushInterval,
         WarpCounterBuffer counterBuffer,
-        Func<DbContext, IReadOnlyList<Job>, IReadOnlyList<JobLog>, CancellationToken, Task<IReadOnlyCollection<Guid>>> completeJobs)
+        CompleteJobs completeJobs)
     {
         _counterBuffer = counterBuffer;
         _completeJobs = completeJobs;
@@ -258,13 +272,13 @@ internal sealed class CompletionBatch
                 // change tracker, which writes one UPDATE and one INSERT per row. Only an error-grouping
                 // inbox row (§8.29), which a failed attempt carries, is still saved by EF, in the same
                 // transaction.
-                var jobs = new Job[count];
+                var finished = new PendingCompletion[count];
                 var logs = new List<JobLog>(count * 2);
                 var occurrences = false;
                 for (var i = 0; i < count; i++)
                 {
                     var entry = entries[start + i];
-                    jobs[i] = entry.Job;
+                    finished[i] = entry;
                     logs.AddRange(entry.Logs);
 
                     if (entry.Occurrence is { } occurrence)
@@ -280,8 +294,8 @@ internal sealed class CompletionBatch
                 await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
 
                 // In id order, so two statements that ever touch the same rows lock them the same way round.
-                Array.Sort(jobs, static (x, y) => x.Id.CompareTo(y.Id));
-                var written = await _completeJobs(context, jobs, logs, cancellationToken);
+                Array.Sort(finished, static (x, y) => x.Job.Id.CompareTo(y.Job.Id));
+                var written = await _completeJobs(context, [.. finished.Select(x => x.Job)], [.. finished.Select(x => x.Owner)], logs, cancellationToken);
                 if (occurrences)
                 {
                     await context.SaveChangesAsync(cancellationToken);
@@ -291,7 +305,7 @@ internal sealed class CompletionBatch
 
                 // Only once the batch has COMMITTED do its increments become real, so a rolled-back or
                 // retried batch cannot leave them counted. A job the statement skipped, because its row
-                // was deleted while it ran, counts nothing either.
+                // was deleted while it ran or is no longer this run's, counts nothing either.
                 var writtenIds = written.Count == count ? null : written.ToHashSet();
 
                 // Summed here first, then added to the process-wide buffer once per key: every job of a flush
@@ -303,7 +317,7 @@ internal sealed class CompletionBatch
                     if (writtenIds != null && !writtenIds.Contains(entries[i].Job.Id))
                     {
                         _logger.LogInformation(
-                            "Discarding the completion of job {jobId}: its row no longer exists",
+                            "Discarding the completion of job {jobId}: its row no longer exists, or was taken back and claimed again while this run held it",
                             entries[i].Job.Id);
 
                         continue;
