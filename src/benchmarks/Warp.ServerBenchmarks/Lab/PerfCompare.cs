@@ -90,6 +90,19 @@ public static partial class PerfCompare
     // finding is still real: some query in that scenario has a plan that depends on statistics.
     private const double BuffersBlowUpFactor = 5.0;
 
+    // Database time per job (PostgreSQL: pg_stat_statements execution + planning time). PROVISIONAL: it is a
+    // timing, so it carries the runner's noise where statements and WAL are counts, and it has not yet been
+    // calibrated by comparing a commit with itself on CI the way the lines above were. Set generously, at
+    // roughly the band a single iteration moved locally; tighten it once three no-op runs have measured it.
+    // SQL Server's (Query Store CPU time) is reported only, like its per-second statements.
+    private const double DbTimeTolerancePct = 25.0;
+
+    /// <summary>
+    /// The database versions the run measured (<c>--database=pg17+mssql2022</c>), shown in each section's heading
+    /// and stamped on exported cases, so a release's record and the history compare like with like.
+    /// </summary>
+    public static string? DatabaseLabel { get; set; }
+
     private static readonly MetricPolicy[] Policies =
     [
         new("statements_per_job", Gated: true, TolerancePct: 3.0, BadDirection: Direction.Higher),
@@ -330,8 +343,8 @@ public static partial class PerfCompare
         // the parameter labelled its per-job numbers "per second" and exempted it from every gate.
         var perSecond = cases.All(x => headRun.TryGetValue(x.FullName, out var measured) ? measured.PerSecond : JobCountOf(x) is null);
         var per = perSecond ? "s" : "job";
-        var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | Allocated | Alloc Ratio | Gate";
-        var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
+        var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | DB ms/{per} | Round trips/{per} | Xacts/{per} | Lock wait ms/{per} | Allocated | Alloc Ratio | Gate";
+        var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
 
         // Declared order, the order BenchmarkDotNet ran them in. Sorting by name put "Keys: 10000"
         // before "Keys: 8".
@@ -354,7 +367,7 @@ public static partial class PerfCompare
             {
                 // A case only one side has is new or removed, not a regression.
                 var side = hasHead ? "head only (new)" : "base only (removed)";
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}{side} | | | | | | | | | | | ➖ |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}{side} | | | | | | | | | | | | | | | ➖ |");
                 continue;
             }
 
@@ -366,8 +379,8 @@ public static partial class PerfCompare
             if (b.Bytes is null || h.Bytes is null)
             {
                 var missing = MissingSide(b.Bytes, h.Bytes);
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {(b.Bytes is null ? "NA" : Seconds(b.Mean))} | | | | | | | | | | |");
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {(h.Bytes is null ? "NA" : Seconds(h.Mean))} | | | | | | | | | | ⚠️ no measurement from {missing} |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {(b.Bytes is null ? "NA" : Seconds(b.Mean))} | | | | | | | | | | | | | | |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {(h.Bytes is null ? "NA" : Seconds(h.Mean))} | | | | | | | | | | | | | | ⚠️ no measurement from {missing} |");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: {missing} produced no measurement, so nothing was compared"));
@@ -394,8 +407,8 @@ public static partial class PerfCompare
 
             if (unmeasured is not null)
             {
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {Seconds(b.Mean)} | | | | | | | | | | |");
-                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {Seconds(h.Mean)} | | | | | | | | | | ⚠️ {unmeasured} |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}base | {Seconds(b.Mean)} | | | | | | | | | | | | | | |");
+                rows.AppendLine(CultureInfo.InvariantCulture, $"| {prefix}head | {Seconds(h.Mean)} | | | | | | | | | | | | | | ⚠️ {unmeasured} |");
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: {unmeasured}, so nothing was compared"));
@@ -449,6 +462,19 @@ public static partial class PerfCompare
                 failures.Add(string.Create(
                     CultureInfo.InvariantCulture,
                     $"{benchmark.Short}: WAL/job {b.WalBytesPerJob:N0} -> {h.WalBytesPerJob:N0} bytes ({walChange:+0.0;-0.0;0.0}%)"));
+            }
+
+            // Database time per job, PostgreSQL per-job rows only, and only when both sides measured it: a side
+            // without the column (a record from before it existed) is "—", never a failure.
+            double? dbTimeChange = perSecond || IsSqlServer(benchmark) || b.DbTimePerJob is null or <= 0 || h.DbTimePerJob is null
+                ? null
+                : (h.DbTimePerJob.Value - b.DbTimePerJob.Value) / b.DbTimePerJob.Value * 100;
+            if (dbTimeChange > DbTimeTolerancePct)
+            {
+                gate = string.Create(CultureInfo.InvariantCulture, $"❌ DB time {dbTimeChange:+0.0;−0.0;0.0}% (limit +{DbTimeTolerancePct:0}%, provisional)");
+                failures.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{benchmark.Short}: DB ms/job {b.DbTimePerJob:N3} -> {h.DbTimePerJob:N3} ({dbTimeChange:+0.0;-0.0;0.0}%)"));
             }
 
             // Throughput is far too noisy on a shared runner to gate a small change, but a collapse is
@@ -505,7 +531,8 @@ public static partial class PerfCompare
             driftNote = string.Create(CultureInfo.InvariantCulture, $" · ⚠️ {drifted} {noun} drifted since {release!.Release}");
         }
 
-        section.AppendLine(CultureInfo.InvariantCulture, $"### {(failed ? "❌" : "✅")} {scenario?.Title ?? type?.Name ?? cases[0].TypeName}{driftNote}");
+        var database = DatabaseLabel is null ? string.Empty : $" · {DatabaseLabel}";
+        section.AppendLine(CultureInfo.InvariantCulture, $"### {(failed ? "❌" : "✅")} {scenario?.Title ?? type?.Name ?? cases[0].TypeName}{database}{driftNote}");
         section.AppendLine();
 
         if (scenario is null)
@@ -576,7 +603,21 @@ public static partial class PerfCompare
             FormatMetric(result.StatementsPerJob, "N2"),
             FormatMetric(result.BuffersPerJob, "N1"),
             result.WalBytesPerJob is null ? "—" : FormatBytes(result.WalBytesPerJob.Value),
+            FormatMetric(result.DbTimePerJob, "N3"),
+            FormatMetric(result.RoundTripsPerJob, "N2"),
+            FormatMetric(result.TransactionsPerJob, "N2"),
+            FormatLockWait(result),
             result.Bytes is null ? "NA" : FormatBytes(result.Bytes.Value));
+
+    // Lock wait, with the window's deadlocks beside it when there were any.
+    private static string FormatLockWait(BdnResult result)
+    {
+        var wait = FormatMetric(result.LockWaitMsPerJob, "N3");
+
+        return result.Deadlocks is > 0
+            ? string.Create(CultureInfo.InvariantCulture, $"{wait} ({result.Deadlocks:N0} deadlocks)")
+            : wait;
+    }
 
     private static string FormatMetric(double? value, string format) =>
         value is null ? "—" : value.Value.ToString(format, CultureInfo.InvariantCulture);
@@ -681,7 +722,12 @@ public static partial class PerfCompare
                     MetricOf(benchmark, "BuffersPerJob") ?? MetricOf(benchmark, "BuffersPerSecond"),
                     MetricOf(benchmark, "WalBytesPerJob") ?? MetricOf(benchmark, "WalBytesPerSecond"),
                     JobLine(benchmark.DisplayInfo),
-                    report?.HostEnvironmentInfo);
+                    report?.HostEnvironmentInfo,
+                    MetricOf(benchmark, "DbTimePerJob") ?? MetricOf(benchmark, "DbTimePerSecond"),
+                    MetricOf(benchmark, "RoundTripsPerJob") ?? MetricOf(benchmark, "RoundTripsPerSecond"),
+                    MetricOf(benchmark, "TransactionsPerJob") ?? MetricOf(benchmark, "TransactionsPerSecond"),
+                    MetricOf(benchmark, "LockWaitMsPerJob") ?? MetricOf(benchmark, "LockWaitMsPerSecond"),
+                    MetricOf(benchmark, "Deadlocks"));
             }
         }
 
@@ -767,7 +813,12 @@ public static partial class PerfCompare
         double? BuffersPerJob,
         double? WalBytesPerJob,
         string? Job,
-        BdnHost? Host);
+        BdnHost? Host,
+        double? DbTimePerJob = null,
+        double? RoundTripsPerJob = null,
+        double? TransactionsPerJob = null,
+        double? LockWaitMsPerJob = null,
+        double? Deadlocks = null);
 
     private sealed record BdnHost(
         string? BenchmarkDotNetVersion,

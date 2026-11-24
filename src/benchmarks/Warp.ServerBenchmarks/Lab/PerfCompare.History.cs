@@ -92,13 +92,14 @@ public static partial class PerfCompare
             .ToList();
         var skipped = releases.Count - comparable.Count;
 
-        var points = comparable.ConvertAll(x => (Label: x.Release, Cases: x.Cases.ToDictionary(y => y.FullName, StringComparer.Ordinal)));
+        // Keyed by database versions AND case, so one release's PostgreSQL 17 and 18 numbers stay two rows.
+        var points = comparable.ConvertAll(x => (Label: x.Release, Cases: x.Cases.ToDictionary(HistoryKey, StringComparer.Ordinal)));
 
         if (exportsPath is not null && Directory.Exists(exportsPath))
         {
             var current = Directory.GetFiles(exportsPath, "export.json", SearchOption.AllDirectories)
                 .SelectMany(x => JsonSerializer.Deserialize<List<ReleaseCase>>(File.ReadAllText(x), HistoryOptions) ?? [])
-                .ToDictionary(x => x.FullName, StringComparer.Ordinal);
+                .ToDictionary(HistoryKey, StringComparer.Ordinal);
             if (current.Count > 0)
             {
                 points.Add((label ?? "this run", current));
@@ -150,7 +151,10 @@ public static partial class PerfCompare
             return changes;
         }
 
-        var baseline = release.Cases.ToDictionary(x => x.FullName, StringComparer.Ordinal);
+        // Like with like: only the release's cases measured on this run's database versions.
+        var baseline = release.Cases
+            .Where(x => string.Equals(x.Database, DatabaseLabel, StringComparison.Ordinal))
+            .ToDictionary(x => x.FullName, StringComparer.Ordinal);
         foreach (var name in cases.Select(x => x.FullName))
         {
             // Per-second (idle) cases compare too, when the release measured them per second as well: they were
@@ -214,7 +218,7 @@ public static partial class PerfCompare
     {
         var scenarios = points
             .SelectMany(x => x.Cases.Values)
-            .GroupBy(x => x.Scenario, StringComparer.Ordinal)
+            .GroupBy(x => x.Database is null ? x.Scenario : $"{x.Scenario} · {x.Database}", StringComparer.Ordinal)
             .OrderBy(x => x.Key, StringComparer.Ordinal);
 
         foreach (var scenario in scenarios)
@@ -222,7 +226,7 @@ public static partial class PerfCompare
             // One row per benchmark case, keyed on its full name. The label is display only and can change
             // between releases (a clearer case name), so the most recent one wins rather than splitting the row.
             var names = scenario
-                .GroupBy(x => x.FullName, StringComparer.Ordinal)
+                .GroupBy(HistoryKey, StringComparer.Ordinal)
                 .Select(x => (FullName: x.Key, Case: x.Last().Case))
                 .OrderBy(x => x.FullName, StringComparer.Ordinal)
                 .ToList();
@@ -283,7 +287,12 @@ public static partial class PerfCompare
             result.WalBytesPerJob,
             result.BuffersPerJob,
             rate,
-            result.Bytes);
+            result.Bytes,
+            DatabaseLabel,
+            result.DbTimePerJob,
+            result.RoundTripsPerJob,
+            result.TransactionsPerJob,
+            result.LockWaitMsPerJob);
     }
 
     private static string ScenarioTitleOf(BdnCase benchmark) =>
@@ -311,6 +320,9 @@ public static partial class PerfCompare
             ? jobs.ToString("N0", CultureInfo.InvariantCulture) + " jobs"
             : "single case";
     }
+
+    // A history row: the case on one set of database versions.
+    private static string HistoryKey(ReleaseCase x) => x.Database is null ? x.FullName : x.Database + "|" + x.FullName;
 
     private static ReleaseBenchmarks? ReadRelease(string path)
     {
@@ -344,5 +356,14 @@ public static partial class PerfCompare
         double? WalBytesPerJob,
         double? BuffersPerJob,
         double? JobsPerSecond,
-        long? AllocatedBytes);
+        long? AllocatedBytes,
+
+        // Added with the database-version matrix and the load columns: absent (null) in records made before,
+        // so they read "—" and are never compared. Database is the matrix entry's versions, e.g.
+        // "pg17+mssql2022"; a case is only compared with a case measured on the same ones.
+        string? Database = null,
+        double? DbTimePerJob = null,
+        double? RoundTripsPerJob = null,
+        double? TransactionsPerJob = null,
+        double? LockWaitMsPerJob = null);
 }

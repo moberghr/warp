@@ -307,6 +307,7 @@ else if (args.Length > 0 && string.Equals(args[0], "compare-bdn", StringComparis
         }
     }
 
+    PerfCompare.DatabaseLabel = Value(args, "--database=");
     Environment.ExitCode = PerfCompare.RunBdn(bdnBase, bdnHead, bdnTolerance, bdnSummary, bdnRelease);
 }
 else if (args.Length > 0 && string.Equals(args[0], "export-bdn", StringComparison.OrdinalIgnoreCase))
@@ -314,6 +315,7 @@ else if (args.Length > 0 && string.Equals(args[0], "export-bdn", StringCompariso
     var results = Value(args, "--results=") ?? string.Empty;
     var output = Value(args, "--out=") ?? "export.json";
 
+    PerfCompare.DatabaseLabel = Value(args, "--database=");
     Environment.ExitCode = PerfCompare.ExportBdn(results, output);
 }
 else if (args.Length > 0 && string.Equals(args[0], "record-release", StringComparison.OrdinalIgnoreCase))

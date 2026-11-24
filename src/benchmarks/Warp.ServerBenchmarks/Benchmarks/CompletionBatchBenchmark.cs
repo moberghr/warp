@@ -41,11 +41,18 @@ public class CompletionBatchBenchmark
     [Params(1, 50)]
     public int CompletionBatchSize { get; set; }
 
+    /// <summary>
+    /// The database this class runs on. PostgreSQL here; the SQL Server case is a subclass with a
+    /// <c>Provider</c> parameter rather than a parameter on this class, because a parameter is part of
+    /// BenchmarkDotNet's case name and the release history compares cases by that name.
+    /// </summary>
+    protected virtual BenchmarkProvider Database => BenchmarkProvider.PostgreSql;
+
     [GlobalSetup]
     public async Task Setup()
     {
         _fixture = new PostgresServerFixture();
-        await _fixture.InitializeAsync(workerCount: 10, useDispatcher: true, completionBatchSize: CompletionBatchSize);
+        await _fixture.InitializeAsync(workerCount: 10, useDispatcher: true, completionBatchSize: CompletionBatchSize, provider: Database);
 
         // Warmup: prime JIT, type caches, connection pool, dispatcher channel.
         var publisher = _fixture.CreatePublisher();

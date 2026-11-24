@@ -4,6 +4,167 @@ sidebar_position: 6
 
 # Releases
 
+## 8.0.0
+
+*unreleased*
+
+Major release with **a much faster worker and much less database work**, **one breaking change in behaviour** (job and message handlers must save their own `DbContext`), **one migration** (additive columns, one new table, and four job indexes rebuilt as partial), and a few breaking API changes, mostly for custom providers. A rolling deploy from 7.7 is supported: the parts that changed how servers coordinate are bridged to 7.7 for one release. Read [Upgrading to 8.0](operations/upgrading-to-8.md) before you deploy.
+
+### Breaking: handlers save their own DbContext
+
+In 7.x, after a job or message handler returned, the worker resolved the handler scope's `DbContext` and called `SaveChangesAsync` on it. In 8.0 the worker never resolves or saves your `DbContext`. Building that context for every job, even for handlers that never touched the database, was most of what the worker allocated per job.
+
+A handler that changes entities, or stages jobs through `IPublisher` / `IBatchPublisher`, and returns without saving now loses that work, and the job still completes. Staged jobs that were not saved produce a Warning when the scope ends (`WarnOnUnsavedStagedJobs`, on by default, now also in handler scopes). Entity changes that were not saved are dropped with no log line.
+
+Add the save at the end of the handler:
+
+```csharp
+order!.Status = OrderStatus.Shipped;
+await publisher.Enqueue(new SendShippingEmail(message.OrderId));
+
+await publisher.SaveChangesAsync(cancellationToken); // 7.x did this for you; 8.0 does not
+```
+
+The fix is compatible with 7.x, where the worker's own save then finds nothing left to write. **Ship it on 7.7 before you deploy 8.0**: during a rolling deploy a 7.7 worker still saves for the handler and an 8.0 worker does not. Saga handlers are not affected; the saga proxy still saves for them. See [Handlers save their own DbContext](operations/upgrading-to-8.md#handlers-save-their-own-dbcontext).
+
+### A faster worker and less database work
+
+**Claiming jobs (dispatcher mode)**
+
+- A dispatcher whose worker group is full waits for a worker to free a slot instead of sleeping 10 ms and polling again, and settles briefly so one claim covers every slot a burst of quick jobs frees.
+- Claimed rows are loaded without change tracking.
+- **PostgreSQL keeps the claim on the claim index after a burst.** When a queue the last `ANALYZE` saw (nearly) empty suddenly filled, the planner chose the dashboard's index plus a sort: about 23 ms and 22,000 buffers per claim instead of 0.7 ms, until autovacuum analyzed the table. The claim now turns sorting off for its own command only. This was present in 7.7.
+- **A claim starts at a watermark while claims come back full**, so it no longer re-reads the index entries earlier claims emptied. A head read at least once a second still finds a row that became claimable behind it.
+
+**Running and finishing jobs**
+
+- **Nothing is written between a job's claim and its handler.** The "Processing" log row is written with the running-job monitor's first flush (about 1 s) or with the completion, whichever comes first.
+- **One loop per worker group watches all its running jobs**: one statement renews every running job's keep-alive and reads cancellations, where each job used to have a monitor of its own.
+- **Completions are written per worker group in one statement** (dispatcher mode). The group's workers share one buffer, written by one flusher when it holds `CompletionBatchSize` jobs, when its oldest entry has waited `CompletionFlushInterval`, or as soon as the group has nothing left running. Workers go back to their next job instead of waiting for the write. PostgreSQL writes the jobs and their log rows in one statement with arrays, SQL Server with `OPENJSON`.
+- **Jobs run through the source generator's typed dispatch** instead of reflection. Reflection stays as the fallback for types the generator did not see.
+- **The addon stores** (concurrency, rate limit, circuit breaker) use Warp's own context, opened only for a job that needs it.
+- **Job, job-log and call-log ids are time-ordered (UUID version 7).** On PostgreSQL, inserts land on the newest pages of the primary-key index instead of random ones. On SQL Server they behave like the random ids they replace.
+- **Four job indexes are partial** (see [Schema change](#schema-change-one-migration-with-four-index-rebuilds)), so most state changes write fewer index entries.
+
+**Orchestration and server tasks**
+
+- **The Orchestrator checks only the parents a finished job names.** It used to check every batch and message in flight on almost every job completion (10,924 pages per pass with 1,000 messages in flight on PostgreSQL). A finished, deleted or crash-recovered job now names its parent. Every parent is still checked once per `OrchestrationInterval`.
+- **Two Orchestrator queries no longer walk dead rows.** The "which parents are ready" query read 10,004 pages per call on a table with no batch or message in it (now 6), and continuation activation read every completed row once per awaiting row (5,063 pages per call; now each distinct parent once). Both were present in 7.7. SQL Server was not affected by the first.
+- **Cluster-wide server tasks run once per tick for the whole cluster.** Each task with a lock key has one row in the new `ClusterTask` table, and one statement per server claims every due task with a lease. Before, every server took every task's lock on every interval, so idle database load grew with the number of servers. Idle runs write nothing. Measured on PostgreSQL (idle, 5 workers, 120 s): 389 statements a minute for one idle server before, 161 after; each extra server adds about 49 instead of 389.
+- **A signal-woken server task runs at most once per `ServerTaskSignalInterval`** (new, default 500 ms). Wakes in between fold into one pass, cluster-wide.
+- **On PostgreSQL, server work opens on a pool of its own** (`Application Name` suffixed `:warp-server`) without the connection reset, so a checkout no longer costs a `DISCARD ALL`.
+
+**Waking workers**
+
+- **Any save of your `DbContext` wakes workers.** In 7.7 only `IPublisher.SaveChangesAsync` / `IBatchPublisher.SaveChangesAsync` announced new jobs; a plain `db.SaveChangesAsync()` after `Enqueue` committed them silently and workers found them on their next poll, up to 5 minutes later with `UseDatabasePush()`. An EF Core interceptor on your context now announces every committed save; inside an explicit transaction it waits for the commit, and a rollback announces nothing. With `UseDatabasePush()`, other servers are told by a hosted relay, one notification per queue per batch.
+- **SQL Server push reaches every listening process.** 7.7 used one shared Service Broker queue, which handed each notification to one random process and lost the wake when that process had no workers. Each listening process now has its own queue, conversations are ended, and queues left by dead processes are swept.
+
+**Measured against 7.7.0** by the perf workflow (CI, jobs per second and database statements per job):
+
+<!-- VERIFY: numbers from the first CI run on PR #352; update from the final run -->
+
+| Scenario | Jobs/s, 7.7.0 → 8.0 | Statements per job, 7.7.0 → 8.0 |
+|---|---|---|
+| Dispatcher · PostgreSQL | 852 → 1,031 | 10.78 → 2.27 |
+| Dispatcher · SQL Server | 608 → 634 | 3.65 → 0.15 |
+| Single-worker · PostgreSQL | 697 → 610 | 14.01 → 9.13 |
+| Single-worker · SQL Server | 480 → 370 | 4.24 → 2.19 |
+| Completion batching, batched (50) | 683 → 1,535 | 10.23 → 2.26 |
+| Completion batching, one write per job | 542 → 965 | 14.54 → 3.28 |
+| Large payloads | 669 → 1,405 | 9.80 → 2.18 |
+| Scheduled backlog | 461 → 723 | 14.10 → 9.11 |
+| Publishing, one save for 1,000 | 2,852 → 4,191 | 2.01 → 2.01 |
+| Failing jobs | 593 → 809 | 14.99 → 10.10 |
+| Large table, empty | 556 → 740 | 14.05 → 9.10 |
+| Message routing | 260 → 338 | 11.02 → 7.63 |
+| Mutex, heavy contention | 311 → 402 | 37.29 → 29.43 |
+| Retries | 306 → 387 | 42.99 → 28.17 |
+| Batches and continuations | 581 → 704 | 13.94 → 9.13 |
+
+An idle server issues 3.71 statements per second on PostgreSQL (7.92 in 7.7.0) and 3.94 on SQL Server (4.26). Two idle servers, a new scenario with no 7.7 figure, issue 5.63 (PostgreSQL) and 5.14 (SQL Server).
+
+The single-worker jobs/s rows come from a short CI benchmark whose timing is noisy; statements per job is the reliable column there.
+
+### Fixes in this release
+
+- **A run whose job was taken back can no longer write over the new run.** `StaleJobRecovery` can take a job back while its handler still runs (a long pause, lost keep-alives), and a claim can then take it again. The old run could still complete the row or renew it. Every claim now stamps a fresh `Job.RunId`, and every completion and renewal compares it, including a re-claim by the same worker and single-worker mode, which had no guard at all. Full protection needs every server on 8.0.
+- **Clock skew between servers.** A server whose clock was ahead of the others requeued their running jobs, removed live servers and fired scheduled jobs early. The heartbeat now writes the database's time and measures each server's offset from it, and server components work on the database's clock (`DatabaseClock`). Past `ClockSkewWarningThreshold` (default 1 s) the server logs a Warning, raises a `ClockSkewDetected` operational notification once per excursion, and the dashboard flags it. The offset is measured only while `HealthCheckInterval` is set. See [Clock skew between servers](operations/crash-recovery.md#clock-skew-between-servers).
+- **Bulk requeue on SQL Server could deadlock.** Two concurrent `BulkRequeueJobs` calls could take a row and an index key in opposite orders when SQL Server ran the update through a secondary index. The rows are now locked in id order first.
+- **A claimed batch starts oldest first.** The database returned a batch claim's rows in no particular order, so a newer job could start before an older one.
+- **A job ended by its total timeout always counts as a missed deadline**, whatever the clock reads at finalization.
+- **`CancellationMode` is cleared on the row** when a single-worker job finishes.
+
+### Rolling deploy from 7.7
+
+7.7 and 8.0 servers can run side by side. For this release only, 8.0 bridges what changed:
+
+- **Server tasks**: while a 7.7 server is alive, an 8.0 server also takes the task's old lock around each run, so a task never runs on an old and a new server at once.
+- **SQL Server push**: 8.0 also sends to 7.7's shared Service Broker service and passes what 7.7 processes put on the shared queue on to every 8.0 listener.
+- **Clocks**: while a 7.7 server is alive, 8.0 servers measure the offset but do not apply it, and write their own time, as 7.7 did.
+
+The bridges are removed in the release after 8.x, so do not skip 8.x when upgrading from 7.x. Apply the migration before any 8.0 process starts, for every tier: an 8.0 server fails at startup without it, and an 8.0 publisher fails every publish. On a large job table, rebuild the four indexes with `RecreateWarpJobIndexesOnline` instead of the generated drop-and-create, which locks the table for all four builds. See [Rolling deploy](operations/upgrading-to-8.md#rolling-deploy-77-and-80-side-by-side) and [The migration](operations/upgrading-to-8.md#the-migration).
+
+### Behaviour changes
+
+1. **Handlers save their own `DbContext`** (above).
+2. **A continuation or a routed message can wait up to `ServerTaskSignalInterval`** (500 ms) before the Orchestrator or the message router picks it up. Lower it, or set it to `null`, to trade database load for latency.
+3. **The "Processing" log row is deferred.** A short job's "Processing" row appears when it completes, and a job whose process dies before the first monitor flush has none. In dispatcher mode, until a running job's first keep-alive, its `CurrentWorkerId` is its worker group's id.
+4. **Dispatcher completions are written per worker group.** A finished job reads as `Processing` until its group's buffer is written (50 jobs, 100 ms, or the group going idle). A crash with completions still buffered leaves those jobs `Processing`, and `StaleJobRecovery` runs them again. A graceful shutdown writes everything buffered, within a budget of 5 s.
+5. **Dispatcher workers wait for a slow completion write.** Once a group holds 4 × `CompletionBatchSize` unwritten completions (never fewer than 200), its workers wait for the write in flight before taking the next job. With a healthy database this is not reached.
+6. **Single-worker mode discards a finalization whose row was taken back** (reclaimed or deleted while the run held it), with an Information log line, instead of recording it as a handler failure.
+7. **A handler that throws synchronously** surfaces its own exception rather than a `TargetInvocationException`.
+8. **Job, job-log and call-log ids are UUID version 7** (time-ordered) instead of random. They are still plain `Guid` values, and old and new ids mix in one table.
+9. **Server task runs are recorded differently.** A `ServerLog` row is written only for a run that did work or failed, and carries the task's name. The `ServerTask` table is no longer read or written. The heartbeat has no task row on the dashboard (`Server.LastHeartbeatTime` is its record), and the server page lists the cluster-wide tasks with their schedule and the server running them. A 7.7 dashboard shows no tasks for 8.0 servers.
+10. **Server task intervals are cluster-wide**: each task's interval is the one set by the server that registered last.
+11. **Cross-process push notifications need a running host.** With `UseDatabasePush()`, notifications for published jobs are sent by a hosted service off the saving thread. A process that publishes but never starts its hosted services sends none; other servers find its jobs by polling.
+12. **PostgreSQL: a third connection pool.** Server work uses its own pool (`:warp-server`) beside your context's pool and the lock pool (`:warp-locks`), which raises peak connections per process. Hosts that pass their own `NpgsqlDataSource` keep the shared pool. Check `max_connections` before the deploy.
+13. **PostgreSQL: legacy timestamp mode is refused.** A process using the PostgreSQL provider refuses to start, naming the columns, while any of Warp's time columns is mapped to a type other than `timestamp with time zone` (the `Npgsql.EnableLegacyTimestampBehavior` switch).
+14. **SQL Server: compatibility level 130 or higher.** An 8.0 server refuses to start below it, with the `ALTER DATABASE` statement to run. A publish-only process is not checked.
+15. **Batches**: the dashboard's batch list shows each batch's name and queue. A batch published without a name shows `—`.
+
+### Schema change: one migration, with four index rebuilds
+
+Run your normal `dotnet ef migrations add <Name>`. It contains:
+
+- **one new table:** `cluster_task` (primary key `name`);
+- **new nullable columns:** `job.run_id`, `server.coordination_version`, `server.clock_offset_ms` and `server_log.task_name`;
+- **four job indexes dropped and created again with a filter:** (`kind`, `current_state`, `queue`, `schedule_time`) for Enqueued rows, (`current_state`, `schedule_time`) for Scheduled rows, (`parent_job_id`, `current_state`) where `parent_job_id IS NOT NULL`, and (`expire_at`) where `expire_at IS NOT NULL`.
+
+The `server_task` table stays in the schema but is no longer used. Nothing is dropped or renamed, and 7.7 binaries run on the new schema.
+
+Apply the migration before any 8.0 process starts. The columns and the table are cheap; the index rebuilds are not. EF Core runs them inside the migration's transaction, so the job table stays locked through all four builds. On a large job table either apply it in a quiet window or replace the generated `DropIndex`/`CreateIndex` pairs with `migrationBuilder.RecreateWarpJobIndexesOnline(TargetModel)` (`CREATE INDEX CONCURRENTLY` on PostgreSQL, `ONLINE = ON` on SQL Server editions that support it). See [Option 2: edit the migration to build the indexes online](operations/upgrading-to-8.md#option-2-edit-the-migration-to-build-the-indexes-online).
+
+### API changes
+
+**Breaking:**
+
+- **`IBatchPublisher.StartNew` and `ContinueBatchWith` take an optional `queue`**, applied to the batch and every item (`null` keeps `DefaultQueue`). Callers compile unchanged but must be recompiled; implementations and mocks need the new parameter.
+- **`IWarpSqlQueries<TContext>`** (custom providers only): `ClaimEnqueuedJobsAsync` takes a `ClaimWatermark? watermark` and `HeartbeatAsync` a `bool writeLocalTime`, both before the cancellation token. New required members: `LockJobsByIdWaitAsync`, `CompleteJobsAsync`, `RenewRunningJobsAsync`, `ClaimClusterTasksAsync`, `RequestClusterTaskRunAsync`, `RenewClusterTaskLeaseAsync`, `CompleteClusterTaskAsync` and `RegisterClusterTasksAsync`. Every claim must write a fresh `Job.RunId`, and the completion and renewal statements must compare it. See [API changes](operations/upgrading-to-8.md#api-changes).
+- **`RateLimitStore<TContext>` and `CircuitBreakerStore<TContext>` are no longer public.** `IRateLimitStore` and `ICircuitBreakerStore` remain. A custom `IRateLimitManager` or `IConcurrencyLimitManager` you register still decides a job's limit, as in 7.x.
+- **`WarpDispatcherWorker<TContext>`'s constructor is no longer public.**
+- **`WarpEventType.ClockSkewDetected = 9`** is new. A notifier that switches over every event type needs a case for it.
+
+**Additive:**
+
+- `WarpConfiguration.Mediator` (`WarpMediatorOptions`): `opt.Mediator.ScopePerSend = true` runs every `IMediator.Send` and `CreateStream` in its own DI scope, for Blazor Server, where every send from a circuit otherwise shares one scoped `DbContext`. Off by default. `ISendScopeInitializer` carries scope-bound state (tenant, acting user) into the new scope; `ISendScopeBypass` lets `Warp.Http` keep the request's scope. See [A scope per send](patterns/requests.md#a-scope-per-send-blazor-server).
+- `WarpServerConfiguration.ServerTaskSignalInterval` (500 ms) and `ClockSkewWarningThreshold` (1 s).
+- `Job.RunId`, `Server.CoordinationVersion`, `Server.ClockOffsetMs`, `ServerLog.TaskName`, the `ClusterTask` entity, `ClockOffsetMs` on the server and instance read models, and `ClockSkewDetectedEvent`.
+- `DatabaseClock` (a `TimeProvider` corrected by the measured offset) and `HeartbeatResult.DatabaseUtcNow`.
+- `WarpJobIndexes` and the `RecreateWarpJobIndexesOnline` migration extension in both provider packages.
+- `WarpDatabaseConnection<TContext>`, `DrainService<T>` (the base of `EndpointCallFlusher` and `ClientEventFlusher`), and the provider-facing types `ClaimWatermark`, `JobRunOwner`, `ClusterTaskClaims`, `ClusterTaskState`, `ClusterTaskCompletion` and `ClusterTaskRegistration`.
+- `GeneratedJobDispatch` and `WarpGeneratedHandlerRegistry.AddJobDispatch`, called by generated code.
+- `PublishedBatch.Queue` on `InMemoryPublisher`, and the meter `warp.notifications.dropped` for notifications the relay had to drop.
+
+### Upgrading from 7.7.x
+
+1. Make every job and message handler that changes entities or stages jobs call `SaveChangesAsync`, and ship that on 7.7 first. See [Handlers save their own DbContext](operations/upgrading-to-8.md#handlers-save-their-own-dbcontext).
+2. Generate the migration and decide how to apply the four index rebuilds. See [The migration](operations/upgrading-to-8.md#the-migration).
+3. Apply it before any 8.0 process starts. See [Order of the deploy](operations/upgrading-to-8.md#order-of-the-deploy).
+4. PostgreSQL: remove Npgsql's legacy timestamp switch if you use it, and check `max_connections`. SQL Server: check the compatibility level is 130 or higher. See [PostgreSQL](operations/upgrading-to-8.md#postgresql) and [SQL Server](operations/upgrading-to-8.md#sql-server).
+5. Check the clock difference between your application hosts and the database.
+6. If you implement `IWarpSqlQueries`, `IBatchPublisher` or a notifier, read [API changes](operations/upgrading-to-8.md#api-changes).
+7. Roll the servers. Use sticky sessions for the dashboard during the roll, or reload the page once it is done.
+
 ## 7.7.0
 
 *2026-11-20*

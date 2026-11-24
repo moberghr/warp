@@ -160,7 +160,10 @@ internal sealed class ApplicationHeartbeatHost<TContext> : BackgroundService
 
         // At once, not one interval later: until then the row carries this process's own time, and a sweep in
         // between would remove an instance that lags the database by more than the grace.
-        _databaseTime = scope.ServiceProvider.GetService<IWarpSqlQueries<TContext>>() is not null;
+        // A relational provider only: the beat is an ExecuteUpdate that reads the database's clock, which a
+        // non-relational provider (EF's in-memory one, as tests use) cannot run.
+        _databaseTime = context.Database.IsRelational()
+            && scope.ServiceProvider.GetService<IWarpSqlQueries<TContext>>() is not null;
         if (_databaseTime)
         {
             await BeatAtDatabaseTimeAsync(context, now, snapshot, ct);

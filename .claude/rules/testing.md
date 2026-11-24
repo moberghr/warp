@@ -10,6 +10,8 @@
   - `NoDb` — ~2,170 tests. No container, no DB, no fixture. Examples: `PollingBackoffTests`, `MetadataSerializerTests`, `DashboardAuthTests` (uses `Microsoft.AspNetCore.TestHost`).
   - `PostgreSql` / `SqlServer` — ~1,910 each (DB-paired tests generated from a single base). The base class decides the style, not the attribute: a base that takes `IDatabaseFixture` and implements `IAsyncLifetime` is unit-style against the real DB; a base deriving from `IntegrationTestBase` boots a `WarpTestServer` (full worker + background tasks) and configures it per test (`WarpTestServer.StartAsync(Fixture, config => ...)` — batched completion, dispatcher mode and multi-server shapes are server configuration, not fixture kinds).
 
+- **§4.3.1** **Database versions.** The shared test containers default to `postgres:latest` and `mcr.microsoft.com/mssql/server:2022-latest`. Set `WARP_TEST_POSTGRES_IMAGE` / `WARP_TEST_SQLSERVER_IMAGE` to a full image reference to run against another version (e.g. `WARP_TEST_POSTGRES_IMAGE=postgres:17.12`). CI (`test.yml`) runs the PostgreSQL and SQL Server categories once per supported version, each pinned to an exact tag (PostgreSQL 17 and 18, SQL Server 2022 and 2025); NoDb runs once.
+
 ## Timing & Determinism
 
 - **§4.4** Every test-affecting attribute defaults to **10s** (`[TimedFact]`, `[TimedTheory]`). A short default surfaces deadlocks and hangs immediately. Tests exercising genuinely slow behaviour (retry chains, end-to-end workloads) opt in explicitly with `[TimedFact(N_000)]`. See `src/tests/Warp.Tests/TestData/TimedFactAttribute.cs`. **NEVER raise the budget to fix a flake** — root-cause via the diagnostics infra.

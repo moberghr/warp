@@ -97,8 +97,10 @@ internal static class SharedSqlServerContainer
         {
             if (_masterConnectionString == null)
             {
+                // WARP_TEST_SQLSERVER_IMAGE pins the server version (CI runs the suite once per supported
+                // SQL Server version); a local run keeps the default.
                 var container = new MsSqlBuilder()
-                    .WithImage("mcr.microsoft.com/mssql/server:2022-latest")
+                    .WithImage(Environment.GetEnvironmentVariable("WARP_TEST_SQLSERVER_IMAGE") is { Length: > 0 } image ? image : "mcr.microsoft.com/mssql/server:2022-latest")
                     .Build();
                 await container.StartAsync(ct);
                 _container = container;

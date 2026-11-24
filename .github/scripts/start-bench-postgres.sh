@@ -7,11 +7,16 @@
 # (fan-out 121 vs 182, concurrency 130 vs 184): a difference made by the run order, not the code.
 set -euo pipefail
 
+# The image is the version under test: BENCH_POSTGRES_IMAGE (or the first argument) names it, pinned to an
+# exact tag by the workflow's database matrix. The default is the digest every run used before that matrix.
+IMAGE="${1:-${BENCH_POSTGRES_IMAGE:-postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db}}"
+echo "starting $IMAGE"
+
 docker rm -f warpbench > /dev/null 2>&1 || true
 
 docker run -d --name warpbench -p 5432:5432 \
   -e POSTGRES_PASSWORD=postgres \
-  postgres@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db \
+  "$IMAGE" \
   -c shared_preload_libraries=pg_stat_statements \
   -c pg_stat_statements.track=top
 

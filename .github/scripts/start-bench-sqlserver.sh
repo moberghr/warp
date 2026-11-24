@@ -8,11 +8,16 @@
 # which side met the server first, not by the code.
 set -euo pipefail
 
+# The image is the version under test: BENCH_SQLSERVER_IMAGE (or the first argument) names it, pinned to an
+# exact tag by the workflow's database matrix.
+IMAGE="${1:-${BENCH_SQLSERVER_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}}"
+echo "starting $IMAGE"
+
 docker rm -f warpbench-mssql > /dev/null 2>&1 || true
 
 docker run -d --name warpbench-mssql -p 1433:1433 \
   -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=Warp!Bench1' \
-  mcr.microsoft.com/mssql/server:2022-latest
+  "$IMAGE"
 
 for i in $(seq 1 90); do
   if docker exec warpbench-mssql /opt/mssql-tools18/bin/sqlcmd \

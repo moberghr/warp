@@ -12,6 +12,7 @@ using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
 using Warp.Core.Handlers;
+using Warp.Core.Logging;
 using Warp.Provider.PostgreSql;
 using Warp.Provider.SqlServer;
 using Warp.Worker;
@@ -68,6 +69,7 @@ public class PostgresServerFixture : IAsyncDisposable
     private readonly List<IHost> _otherHosts = [];
     private string _connectionString = null!;
     private BenchmarkProvider _provider = BenchmarkProvider.PostgreSql;
+    private bool _captureHandlerLogs;
 
     public bool IsInitialized => _host != null;
 
@@ -84,10 +86,13 @@ public class PostgresServerFixture : IAsyncDisposable
         bool addConcurrency = false,
         BenchmarkProvider provider = BenchmarkProvider.PostgreSql,
         Action<WarpServerBuilder<TestContext>>? configure = null,
-        int serverCount = 1)
+        int serverCount = 1,
+        bool captureHandlerLogs = false)
     {
         _provider = provider;
+        _captureHandlerLogs = captureHandlerLogs;
         ExceptionTally.StartIfRequested();
+        RoundTripCounter.Start();
         _connectionString = await ResolveConnectionStringAsync();
 
         _host = BuildServerHost(workerCount, useDispatcher, completionBatchSize, completionFlushInterval, addConcurrency, configure);
@@ -638,7 +643,9 @@ public class PostgresServerFixture : IAsyncDisposable
             _sqlContainer = new MsSqlBuilder().Build();
             await _sqlContainer.StartAsync();
 
-            return _sqlContainer.GetConnectionString();
+            // A fresh database on the container too, not its master: Service Broker (below) cannot be
+            // enabled on master, and DB push on SQL Server needs it.
+            external = _sqlContainer.GetConnectionString();
         }
 
         var builder = new SqlConnectionStringBuilder(external);
@@ -649,7 +656,21 @@ public class PostgresServerFixture : IAsyncDisposable
         {
             await admin.OpenAsync();
             await using var create = admin.CreateCommand();
-            create.CommandText = $"CREATE DATABASE [{database}]";
+
+            // Service Broker on, so a scenario can run DB push (UseDatabasePush) on SQL Server: the transport
+            // refuses to start without it and does not enable it itself (it needs exclusive access). On a
+            // database nothing is connected to yet it is instant, and with no push it costs nothing.
+            //
+            // Query Store on, capturing everything, because it is what DatabaseStatementsDiagnoser counts
+            // SQL Server statements from: unlike the plan cache it keeps a query's count across recompiles.
+            // It is on by default for new databases from SQL Server 2022, but not with capture mode ALL, and
+            // size-based cleanup off so it never deletes counts inside a window (a full store goes read-only
+            // instead, which the diagnoser reports as an invalid reading).
+            create.CommandText = $@"CREATE DATABASE [{database}];
+                ALTER DATABASE [{database}] SET ENABLE_BROKER WITH ROLLBACK IMMEDIATE;
+                ALTER DATABASE [{database}] SET QUERY_STORE = ON (
+                    OPERATION_MODE = READ_WRITE, QUERY_CAPTURE_MODE = ALL, INTERVAL_LENGTH_MINUTES = 1,
+                    MAX_STORAGE_SIZE_MB = 2048, SIZE_BASED_CLEANUP_MODE = OFF);";
             await create.ExecuteNonQueryAsync();
         }
 
@@ -662,6 +683,7 @@ public class PostgresServerFixture : IAsyncDisposable
     {
         GC.SuppressFinalize(this);
         ExceptionTally.Report();
+        RoundTripCounter.Stop();
         foreach (var other in _otherHosts)
         {
             await other.StopAsync();
@@ -694,16 +716,29 @@ public class PostgresServerFixture : IAsyncDisposable
         Action<WarpServerBuilder<TestContext>>? configure)
     {
         return Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
-            .ConfigureLogging(logging => logging
-                .SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning)
+            .ConfigureLogging(logging =>
+            {
+                logging
+                    .SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning)
 
-                // The worker loop swallows a DbUpdateConcurrencyException at Debug and claims again.
-                // Raised here so that path is visible if it is what orphans claimed jobs.
-                .AddFilter("Warp.Worker.WarpWorker", Microsoft.Extensions.Logging.LogLevel.Debug)
+                    // The worker loop swallows a DbUpdateConcurrencyException at Debug and claims again.
+                    // Raised here so that path is visible if it is what orphans claimed jobs.
+                    .AddFilter("Warp.Worker.WarpWorker", Microsoft.Extensions.Logging.LogLevel.Debug)
 
-                // Filters match by prefix, so the rule above also caught WarpWorkerService, which logs
-                // every job it runs. The longer prefix wins.
-                .AddFilter("Warp.Worker.WarpWorkerService", Microsoft.Extensions.Logging.LogLevel.Warning))
+                    // Filters match by prefix, so the rule above also caught WarpWorkerService, which logs
+                    // every job it runs. The longer prefix wins.
+                    .AddFilter("Warp.Worker.WarpWorkerService", Microsoft.Extensions.Logging.LogLevel.Warning);
+
+                // Handler log lines are stored as JobLog rows by JobLoggerProvider, which only sees what the
+                // minimum level above lets through. A scenario measuring the log flush lowers it for that
+                // provider alone, so handler Information lines are stored without reaching the console. Only
+                // then: a provider-specific rule replaces every rule above for that provider, which would
+                // change what the other scenarios store.
+                if (_captureHandlerLogs)
+                {
+                    logging.AddFilter<JobLoggerProvider>(null, Microsoft.Extensions.Logging.LogLevel.Information);
+                }
+            })
             .ConfigureServices(services =>
             {
                 services.AddDbContext<TestContext>(options => ConfigureProvider(options));

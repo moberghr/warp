@@ -19,5 +19,9 @@ namespace Warp.ServerBenchmarks.Infrastructure;
 /// </summary>
 public static class MeasurementVersion
 {
-    public const int Current = 1;
+    // 2: SQL Server statements and buffers are counted from Query Store instead of the plan cache (which lost
+    // the executions of any plan recompiled inside the window, so SQL Server read low and unstable), and results
+    // carry the database versions they were measured on. SQL Server baselines move up: a baseline reset, not a
+    // regression. PostgreSQL's numbers are measured exactly as before.
+    public const int Current = 2;
 }
