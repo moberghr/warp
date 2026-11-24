@@ -20,6 +20,7 @@ public static class Correctness
     {
         await using var scope = host.Services.CreateAsyncScope();
         var context = scope.ServiceProvider.GetRequiredService<MatrixContext>();
+        context.Database.SetCommandTimeout(300);
 
         var groups = await context.Set<Job>()
             .AsNoTracking()

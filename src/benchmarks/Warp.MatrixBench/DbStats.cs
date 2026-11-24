@@ -131,6 +131,49 @@ public static class DbStats
     }
 
     /// <summary>
+    /// Who is blocking whom on the round's SQL Server database right now: the blocked request, the
+    /// blocker's session state, its open transactions, how long it has been idle, and its last statement.
+    /// </summary>
+    public static async Task<string> DescribeBlockingAsync(BenchTarget target)
+    {
+        try
+        {
+            await using var sql = new SqlConnection(target.ConnectionString);
+            await sql.OpenAsync();
+            await using var command = new SqlCommand(
+                """
+                SELECT TOP (5)
+                    r.session_id, r.blocking_session_id, r.wait_type, r.wait_time, r.wait_resource,
+                    s.status, s.open_transaction_count, DATEDIFF(ms, s.last_request_end_time, SYSDATETIME()),
+                    s.program_name,
+                    (SELECT TOP (1) LEFT(REPLACE(REPLACE(t.text, CHAR(13), ' '), CHAR(10), ' '), 300)
+                     FROM sys.dm_exec_sql_text(c.most_recent_sql_handle) t)
+                FROM sys.dm_exec_requests r
+                JOIN sys.dm_exec_sessions s ON s.session_id = r.blocking_session_id
+                LEFT JOIN sys.dm_exec_connections c ON c.session_id = r.blocking_session_id
+                WHERE r.blocking_session_id <> 0
+                ORDER BY r.wait_time DESC;
+                """,
+                sql);
+            await using var reader = await command.ExecuteReaderAsync();
+            var lines = new List<string>();
+            while (await reader.ReadAsync())
+            {
+                lines.Add(
+                    $"spid {reader.GetValue(0)} waits {reader.GetValue(3)}ms on {reader.GetValue(2)} ({reader.GetValue(4)}) "
+                    + $"behind spid {reader.GetValue(1)} [{reader.GetValue(5)}, open tx {reader.GetValue(6)}, idle {reader.GetValue(7)}ms, "
+                    + $"app {reader.GetValue(8)}] last: {reader.GetValue(9)}");
+            }
+
+            return lines.Count == 0 ? "timed out with no blocking chain visible afterwards" : string.Join(" ; ", lines);
+        }
+        catch (SqlException ex)
+        {
+            return $"blocking diagnosis failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
     /// CPU the database container has used so far, in milliseconds, read from its cgroup. Null when the
     /// container was not named or docker is not reachable: a missing figure, never a zero.
     /// </summary>

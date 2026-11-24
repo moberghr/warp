@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -31,11 +32,15 @@ public static class MatrixRunner
 
     private static readonly TimeSpan SettleAfterDrain = TimeSpan.FromSeconds(5);
 
+    /// <summary>Seconds a drain poll may wait on a lock before it is recorded as blocked and retried.</summary>
+    private const int BlockedPollTimeout = 10;
+
     public static async Task<int> RunAsync(CellOptions options)
     {
         Console.WriteLine($"cell {options.Name}: jobs={options.Jobs:N0} rounds={options.Rounds} workers={options.Workers} commit={options.Commit}");
 
         var rounds = new List<RoundResult>();
+        var started = DateTime.UtcNow.ToString("O");
         string? error = null;
         for (var round = 1; round <= options.Rounds; round++)
         {
@@ -51,11 +56,27 @@ public static class MatrixRunner
                 // cell failed and why instead of showing a hole.
                 error = $"round {round}: {ex.GetType().Name}: {ex.Message}";
                 Console.WriteLine(ex);
+            }
 
+            // Written after every round, so a cell that later hangs past the job's timeout still leaves the
+            // rounds it finished.
+            await WriteAsync(options, started, error, rounds);
+
+            // A round that never drained says what there is to say; repeating it would only run the job past
+            // its timeout and lose the file.
+            if (error is not null || rounds.Exists(x => x.TimedOut))
+            {
                 break;
             }
         }
 
+        // A correctness failure is a result, not a harness failure: the file says so and the job stays green
+        // so the summary still runs. Only a round that could not be run at all fails the step.
+        return error is null ? 0 : 1;
+    }
+
+    private static async Task WriteAsync(CellOptions options, string started, string? error, List<RoundResult> rounds)
+    {
         var cell = new CellResult
         {
             Name = options.Name,
@@ -68,7 +89,7 @@ public static class MatrixRunner
             Jobs = options.Jobs,
             Workers = options.Workers,
             WarmupJobs = options.WarmupJobs,
-            StartedAt = DateTime.UtcNow.ToString("O"),
+            StartedAt = started,
             Runtime = RuntimeInformation.FrameworkDescription,
             ProcessorCount = Environment.ProcessorCount,
             Error = error,
@@ -82,11 +103,7 @@ public static class MatrixRunner
         }
 
         await File.WriteAllTextAsync(options.Out, JsonSerializer.Serialize(cell, ResultJson.Options));
-        Console.WriteLine($"wrote {options.Out}");
-
-        // A correctness failure is a result, not a harness failure: the file says so and the job stays green
-        // so the summary still runs. Only a round that could not be run at all fails the step.
-        return error is null ? 0 : 1;
+        Console.WriteLine($"wrote {options.Out} ({rounds.Count} round(s))");
     }
 
     private static async Task<RoundResult> RunRoundAsync(CellOptions options, int round)
@@ -133,10 +150,12 @@ public static class MatrixRunner
             await publisher.SaveChangesAsync();
         }
 
-        var warmup = await WaitForDrainAsync(host, recorder, options.WarmupJobs, Stopwatch.GetTimestamp(), TimeSpan.FromMinutes(5));
+        var warmup = await WaitForDrainAsync(host, target, recorder, options.WarmupJobs, Stopwatch.GetTimestamp(), TimeSpan.FromMinutes(5));
         if (warmup.TimedOut)
         {
-            throw new TimeoutException($"The {options.WarmupJobs}-job warm-up did not drain within 5 minutes.");
+            throw new TimeoutException(
+                $"The {options.WarmupJobs}-job warm-up did not drain within 5 minutes ({warmup.BlockedPolls} polls blocked). "
+                + string.Join(" | ", warmup.Blocking));
         }
 
         if (string.Equals(options.JobType, Workloads.Db, StringComparison.Ordinal))
@@ -198,7 +217,7 @@ public static class MatrixRunner
             harnessStatements++;
         }
 
-        var drain = await WaitForDrainAsync(host, recorder, plan.ExpectedExecutions, marker, options.DrainTimeout);
+        var drain = await WaitForDrainAsync(host, target, recorder, plan.ExpectedExecutions, marker, options.DrainTimeout);
         harnessStatements += drain.Polls;
 
         // The cost window runs on past the drain, past the counter-buffer flush (2 s) and the log flush (1 s):
@@ -217,6 +236,15 @@ public static class MatrixRunner
         await Task.WhenAll(dbAfterTask, dbCpuAfterTask);
 
         var checks = await Correctness.CheckAsync(host, target, recorder, plan, drain.TimedOut);
+
+        // Not the library's correctness as such, but a liveness signal worth seeing beside it: a poll that
+        // waited out its timeout was blocked by a transaction Warp held open at least that long.
+        var blockedPolls = warmup.BlockedPolls + drain.BlockedPolls;
+        var blockingDetail = blockedPolls == 0
+            ? "no drain poll was blocked"
+            : $"{warmup.BlockedPolls} warm-up and {drain.BlockedPolls} measured polls blocked past {BlockedPollTimeout}s: "
+                + string.Join(" | ", warmup.Blocking.Concat(drain.Blocking));
+        checks.Add(new CorrectnessCheck("reads-unblocked", blockedPolls == 0, blockingDetail));
 
         var finished = recorder.FinishedTimestamps();
         var throughput = Throughput.From(finished, marker);
@@ -288,6 +316,8 @@ public static class MatrixRunner
             })
             .ConfigureServices(services =>
             {
+                // A stop that hangs (a worker stuck behind a lock) must not eat the job's whole timeout.
+                services.Configure<HostOptions>(x => x.ShutdownTimeout = TimeSpan.FromSeconds(30));
                 services.AddSingleton(recorder);
                 services.AddSingleton(target);
                 services.AddSingleton<BenchItemStore>();
@@ -427,46 +457,73 @@ public static class MatrixRunner
     /// Waits in process until every expected handler has started, which costs no statement, and only then
     /// polls the database for live rows, which costs one each. The drain time is that poll's.
     /// </summary>
-    private static async Task<DrainResult> WaitForDrainAsync(IHost host, ExecutionRecorder recorder, int expectedExecutions, long since, TimeSpan timeout)
+    private static async Task<DrainResult> WaitForDrainAsync(
+        IHost host, BenchTarget target, ExecutionRecorder recorder, int expectedExecutions, long since, TimeSpan timeout)
     {
+        var blocking = new List<string>();
         while (recorder.Started < expectedExecutions)
         {
             if (Stopwatch.GetElapsedTime(since) > timeout)
             {
-                return new DrainResult(true, null, 0);
+                return new DrainResult(true, null, 0, 0, blocking);
             }
 
             await Task.Delay(20);
         }
 
         var polls = 0;
+        var blocked = 0;
         while (true)
         {
             polls++;
-            if (!await AnyLiveAsync(host))
+            var live = await AnyLiveAsync(host, target, blocking);
+            if (live is null)
             {
-                return new DrainResult(false, Stopwatch.GetElapsedTime(since).TotalSeconds, polls);
+                blocked++;
+            }
+
+            if (live == false)
+            {
+                return new DrainResult(false, Stopwatch.GetElapsedTime(since).TotalSeconds, polls, blocked, blocking);
             }
 
             if (Stopwatch.GetElapsedTime(since) > timeout)
             {
-                return new DrainResult(true, null, polls);
+                return new DrainResult(true, null, polls, blocked, blocking);
             }
 
             await Task.Delay(100);
         }
     }
 
-    private static async Task<bool> AnyLiveAsync(IHost host)
+    /// <summary>
+    /// Whether any row is still live, or null when the poll could not tell. On SQL Server without read
+    /// committed snapshot a reader waits on any writer's row lock, so a transaction Warp holds open blocks
+    /// the poll; that is recorded as a blocked poll, with who blocked it, and polled again.
+    /// </summary>
+    private static async Task<bool?> AnyLiveAsync(IHost host, BenchTarget target, List<string> blocking)
     {
         await using var scope = host.Services.CreateAsyncScope();
+        var context = scope.ServiceProvider.GetRequiredService<MatrixContext>();
+        context.Database.SetCommandTimeout(BlockedPollTimeout);
 
-        return await scope.ServiceProvider.GetRequiredService<MatrixContext>()
-            .Set<Job>()
-            .AnyAsync(x => x.CurrentState == State.Enqueued
-                || x.CurrentState == State.Processing
-                || x.CurrentState == State.Awaiting
-                || x.CurrentState == State.Scheduled);
+        try
+        {
+            return await context.Set<Job>()
+                .AnyAsync(x => x.CurrentState == State.Enqueued
+                    || x.CurrentState == State.Processing
+                    || x.CurrentState == State.Awaiting
+                    || x.CurrentState == State.Scheduled);
+        }
+        catch (SqlException ex) when (ex.Number == -2)
+        {
+            if (blocking.Count < 5)
+            {
+                blocking.Add(await DbStats.DescribeBlockingAsync(target));
+            }
+
+            return null;
+        }
     }
 
     private static void Print(RoundResult result)
@@ -485,5 +542,5 @@ public static class MatrixRunner
     }
 
     [StructLayout(LayoutKind.Auto)]
-    private readonly record struct DrainResult(bool TimedOut, double? Seconds, int Polls);
+    private sealed record DrainResult(bool TimedOut, double? Seconds, int Polls, int BlockedPolls, List<string> Blocking);
 }
