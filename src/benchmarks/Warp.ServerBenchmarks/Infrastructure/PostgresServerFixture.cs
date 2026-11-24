@@ -53,12 +53,15 @@ public class PostgresServerFixture : IAsyncDisposable
             .WithImage("postgres:latest")
 
             // Loaded at startup so statement counts can be read. shared_preload_libraries cannot be
-            // switched on later; it needs a restart.
+            // switched on later; it needs a restart. Planning time is tracked too, so "DB ms" is execution +
+            // planning like CI's (start-bench-postgres.sh).
             .WithCommand(
                 "-c",
                 "shared_preload_libraries=pg_stat_statements",
                 "-c",
-                "pg_stat_statements.track=top")
+                "pg_stat_statements.track=top",
+                "-c",
+                "pg_stat_statements.track_planning=on")
             .Build()
         : null;
 
@@ -68,6 +71,9 @@ public class PostgresServerFixture : IAsyncDisposable
     // Servers beyond the first, sharing its database: what a cluster costs (the idle two-server scenario).
     private readonly List<IHost> _otherHosts = [];
     private string _connectionString = null!;
+
+    // The harness's own connection (Harness): on SQL Server a different language, which Query Store keeps apart.
+    private string _harnessConnectionString = null!;
     private BenchmarkProvider _provider = BenchmarkProvider.PostgreSql;
     private bool _captureHandlerLogs;
 
@@ -94,6 +100,7 @@ public class PostgresServerFixture : IAsyncDisposable
         ExceptionTally.StartIfRequested();
         RoundTripCounter.Start();
         _connectionString = await ResolveConnectionStringAsync();
+        _harnessConnectionString = HarnessConnectionString(_connectionString);
 
         _host = BuildServerHost(workerCount, useDispatcher, completionBatchSize, completionFlushInterval, addConcurrency, configure);
 
@@ -126,7 +133,11 @@ public class PostgresServerFixture : IAsyncDisposable
     /// </summary>
     public async Task InitializeWithoutHostedServicesAsync()
     {
+        // Counted here too: the publish scenario runs on this path, and without it its commands column was empty.
+        ExceptionTally.StartIfRequested();
+        RoundTripCounter.Start();
         _connectionString = await ResolveConnectionStringAsync();
+        _harnessConnectionString = HarnessConnectionString(_connectionString);
 
         // Build a host but don't start it — only use its DI container
         _host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
@@ -181,21 +192,20 @@ public class PostgresServerFixture : IAsyncDisposable
     }
 
     /// <summary>
-    /// Polls until all jobs reach a terminal state.
+    /// Polls until all jobs reach a terminal state. Harness work (<see cref="Harness"/>): not counted as Warp's.
     /// </summary>
     public async Task WaitForCompletion(TimeSpan? timeout = null)
     {
         var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromMinutes(5));
         while (DateTime.UtcNow < deadline)
         {
-            await using var scope = Host.Services.CreateAsyncScope();
-            var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-            var activeJobs = await ctx.Set<Job>()
-                .CountAsync(x =>
-                    x.CurrentState == State.Enqueued ||
-                    x.CurrentState == State.Processing ||
-                    x.CurrentState == State.Awaiting ||
-                    x.CurrentState == State.Scheduled);
+            var activeJobs = await HarnessAsync(x => x.Set<Job>()
+                .TagWith(Harness.Tag)
+                .CountAsync(y =>
+                    y.CurrentState == State.Enqueued ||
+                    y.CurrentState == State.Processing ||
+                    y.CurrentState == State.Awaiting ||
+                    y.CurrentState == State.Scheduled));
 
             if (activeJobs == 0)
             {
@@ -558,11 +568,8 @@ public class PostgresServerFixture : IAsyncDisposable
     /// Deletes the jobs created after <paramref name="createdAfter"/>, or every job when it is null, so a
     /// scenario that seeds a standing history can clear each iteration's jobs without deleting it.
     /// </summary>
-    public async Task CleanJobTables(DateTime? createdAfter)
+    public Task CleanJobTables(DateTime? createdAfter) => HarnessAsync(async ctx =>
     {
-        await using var scope = Host.Services.CreateAsyncScope();
-        var ctx = scope.ServiceProvider.GetRequiredService<TestContext>();
-
         // Through EF rather than raw SQL, because the two providers do not name these tables the same
         // way: PostgreSQL runs under the snake_case convention and SQL Server keeps Warp's default. The
         // raw `DELETE FROM warp.job_log` this replaces worked on one and failed on the other, and it
@@ -570,17 +577,45 @@ public class PostgresServerFixture : IAsyncDisposable
         // an error, so every SQL Server arm looked like a benchmark that would not run.
         //
         // Order matters: job_log and counter reference nothing, but job is the parent of job_log.
-        await ctx.Set<JobLog>().ExecuteDeleteAsync();
-        await ctx.Set<Counter>().ExecuteDeleteAsync();
+        //
+        // Harness work: it runs inside the measured window (IterationCleanup) and is not Warp's (Harness).
+        await ctx.Set<JobLog>().TagWith(Harness.Tag).ExecuteDeleteAsync();
+        await ctx.Set<Counter>().TagWith(Harness.Tag).ExecuteDeleteAsync();
         if (createdAfter is { } since)
         {
-            await ctx.Set<Job>().Where(x => x.CreateTime > since).ExecuteDeleteAsync();
+            await ctx.Set<Job>().TagWith(Harness.Tag).Where(x => x.CreateTime > since).ExecuteDeleteAsync();
 
-            return;
+            return true;
         }
 
-        await ctx.Set<Job>().ExecuteDeleteAsync();
+        await ctx.Set<Job>().TagWith(Harness.Tag).ExecuteDeleteAsync();
+
+        return true;
+    });
+
+    /// <summary>
+    /// Runs harness work (<see cref="Harness"/>) against the benchmark database: on a context of its own, on the
+    /// harness's connection, inside a harness scope, so none of it is reported as Warp's. Each statement it sends
+    /// must carry <c>TagWith(Harness.Tag)</c> for PostgreSQL to tell it apart.
+    /// </summary>
+    public async Task<T> HarnessAsync<T>(Func<TestContext, Task<T>> work)
+    {
+        using var harness = Harness.Begin();
+        await using var scope = Host.Services.CreateAsyncScope();
+        var context = scope.ServiceProvider.GetRequiredService<TestContext>();
+        context.Database.SetConnectionString(_harnessConnectionString);
+
+        return await work(context);
     }
+
+    /// <summary>
+    /// The server ids of every host this fixture runs, in the order the benchmark's per-server counts use
+    /// (<see cref="RoundTripCounter.Slot.FirstServerJobs"/>): ordered by id.
+    /// </summary>
+    public IReadOnlyList<Guid> ServerIds =>
+        [.. new[] { Host }.Concat(_otherHosts)
+            .Select(x => x.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<WarpServerConfiguration>>().Value.ServerId)
+            .Order(),];
 
     /// <summary>
     /// Uses the externally-provided database when there is one, otherwise starts a container.
@@ -600,6 +635,11 @@ public class PostgresServerFixture : IAsyncDisposable
 
         options.UseNpgsql(_connectionString).UseSnakeCaseNamingConvention();
     }
+
+    private string HarnessConnectionString(string connectionString) =>
+        _provider == BenchmarkProvider.SqlServer
+            ? new SqlConnectionStringBuilder(connectionString) { CurrentLanguage = Harness.SqlServerLanguage }.ConnectionString
+            : new NpgsqlConnectionStringBuilder(connectionString) { ApplicationName = Harness.Tag }.ConnectionString;
 
     private async Task<string> ResolveConnectionStringAsync()
     {

@@ -26,7 +26,7 @@ namespace Warp.Tests.Worker;
 /// <c>reltuples = 0</c> with pages still allocated and no column statistics — what autovacuum leaves
 /// after vacuuming a table whose rows were all deleted, before the next analyze. A queue that drains
 /// to empty and then takes a burst reaches it in production too. Injecting it (PostgreSQL 18's
-/// <c>pg_restore_relation_stats</c>) makes the plan deterministic instead of a race with autovacuum.
+/// <c>pg_restore_relation_stats</c>, a direct catalog write on 17) makes the plan deterministic instead of a race with autovacuum.
 /// Ids ascend with schedule time, which is the case where the faulty plan takes every row.
 /// </para>
 /// </summary>
@@ -145,10 +145,7 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
         await seed.Database.ExecuteSqlRawAsync(copySql, [template.Id], ct);
 
         // The statistics CI captured: what the last analyze saw, not the burst.
-        await seed.Database.ExecuteSqlRawAsync(
-            "SELECT pg_restore_relation_stats('schemaname', {0}::text, 'relname', {1}::text, 'relpages', 17, 'reltuples', 200::real, 'relallvisible', 17)",
-            [schema, table],
-            ct);
+        await RestoreRelationStatsAsync(seed, schema, table, relpages: 17, reltuples: 200, relallvisible: 17, ct);
 
         // Act: the real claim, whose SQL and parameters are captured to EXPLAIN it.
         await using var claimer = _fixture.CreateContext();
@@ -388,17 +385,55 @@ public abstract class ClaimPlanStabilityTestsBase : IAsyncLifetime
         var table = entity.GetTableName()!;
 
         // No column statistics, as after an analyze that found no rows.
-        await context.Database.ExecuteSqlRawAsync(
-            @"SELECT pg_clear_attribute_stats({0}, {1}, a.attname, false)
-              FROM pg_attribute a
-              WHERE a.attrelid = to_regclass(format('%I.%I', {0}, {1})) AND a.attnum > 0 AND NOT a.attisdropped",
-            [schema, table],
-            ct);
+        if (await SupportsStatsFunctionsAsync(context, ct))
+        {
+            await context.Database.ExecuteSqlRawAsync(
+                @"SELECT pg_clear_attribute_stats({0}, {1}, a.attname, false)
+                  FROM pg_attribute a
+                  WHERE a.attrelid = to_regclass(format('%I.%I', {0}, {1})) AND a.attnum > 0 AND NOT a.attisdropped",
+                [schema, table],
+                ct);
+        }
+        else
+        {
+            await context.Database.ExecuteSqlRawAsync(
+                "DELETE FROM pg_statistic WHERE starelid = to_regclass(format('%I.%I', {0}, {1}))",
+                [schema, table],
+                ct);
+        }
+
+        await RestoreRelationStatsAsync(context, schema, table, relpages: 114, reltuples: 0, relallvisible: 45, ct);
+    }
+
+    // PostgreSQL 18 sets a relation's planner statistics through pg_restore_relation_stats. 17 has no such
+    // function, so the same values are written to pg_class directly, which the superuser the test container
+    // runs as may do: a catalog update invalidates the relation's cache entry, so the next plan reads them.
+    private static async Task RestoreRelationStatsAsync(
+        DbContext context, string schema, string table, int relpages, float reltuples, int relallvisible, CancellationToken ct)
+    {
+        if (await SupportsStatsFunctionsAsync(context, ct))
+        {
+            await context.Database.ExecuteSqlRawAsync(
+                "SELECT pg_restore_relation_stats('schemaname', {0}::text, 'relname', {1}::text, "
+                + "'relpages', {2}::int, 'reltuples', {3}::real, 'relallvisible', {4}::int)",
+                [schema, table, relpages, reltuples, relallvisible],
+                ct);
+
+            return;
+        }
 
         await context.Database.ExecuteSqlRawAsync(
-            "SELECT pg_restore_relation_stats('schemaname', {0}::text, 'relname', {1}::text, "
-            + "'relpages', 114, 'reltuples', 0::real, 'relallvisible', 45)",
-            [schema, table],
+            "UPDATE pg_class SET relpages = {2}, reltuples = {3}, relallvisible = {4} WHERE oid = to_regclass(format('%I.%I', {0}, {1}))",
+            [schema, table, relpages, reltuples, relallvisible],
             ct);
+    }
+
+    private static async Task<bool> SupportsStatsFunctionsAsync(DbContext context, CancellationToken ct)
+    {
+        var version = await context.Database
+            .SqlQueryRaw<int>("SELECT current_setting('server_version_num')::int AS \"Value\"")
+            .SingleAsync(ct);
+
+        return version >= 180000;
     }
 }

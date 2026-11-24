@@ -251,20 +251,26 @@ public static partial class PerfCompare
             {
                 foreach (var (fullName, caseName) in names)
                 {
-                    var values = points.ConvertAll(x => x.Cases.TryGetValue(fullName, out var c) ? c.StatementsPerJob : null);
-                    if (values.Count(x => x is not null) < 2)
+                    // Only the points that measured this case. Mermaid's line has no gaps, and a missing value drawn
+                    // as 0 read as a release that made the case free.
+                    var measured = points
+                        .Select(x => (x.Label, Value: x.Cases.TryGetValue(fullName, out var c) ? c.StatementsPerJob : null))
+                        .Where(x => x.Value is not null)
+                        .Select(x => (x.Label, Value: x.Value!.Value))
+                        .ToList();
+                    if (measured.Count < 2)
                     {
                         continue;
                     }
 
-                    var top = Math.Ceiling((values.Max() ?? 1) * 1.2);
+                    var top = Math.Ceiling(measured.Max(x => x.Value) * 1.2);
                     report.AppendLine();
                     report.AppendLine("```mermaid");
                     report.AppendLine("xychart-beta");
                     report.AppendLine(CultureInfo.InvariantCulture, $"    title \"{scenario.Key}: {caseName}\"");
-                    report.AppendLine("    x-axis [" + string.Join(", ", points.Select(x => "\"" + x.Label + "\"")) + "]");
+                    report.AppendLine("    x-axis [" + string.Join(", ", measured.Select(x => "\"" + x.Label + "\"")) + "]");
                     report.AppendLine(CultureInfo.InvariantCulture, $"    y-axis \"{unit}\" 0 --> {top:0}");
-                    report.AppendLine("    line [" + string.Join(", ", values.Select(x => (x ?? 0).ToString("0.00", CultureInfo.InvariantCulture))) + "]");
+                    report.AppendLine("    line [" + string.Join(", ", measured.Select(x => x.Value.ToString("0.00", CultureInfo.InvariantCulture))) + "]");
                     report.AppendLine("```");
                 }
             }
@@ -275,8 +281,7 @@ public static partial class PerfCompare
 
     private static ReleaseCase ToReleaseCase(BdnCase benchmark, BdnResult result)
     {
-        var jobs = JobCountOf(benchmark);
-        double? rate = jobs is null || result.Mean <= 0 ? null : jobs.Value / (result.Mean / 1e9);
+        var rate = RateOf(result, benchmark);
 
         return new ReleaseCase(
             benchmark.FullName,

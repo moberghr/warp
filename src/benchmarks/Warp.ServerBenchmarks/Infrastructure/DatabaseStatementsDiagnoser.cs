@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using BenchmarkDotNet.Analysers;
 using BenchmarkDotNet.Columns;
@@ -31,24 +32,40 @@ namespace Warp.ServerBenchmarks.Infrastructure;
 /// Both numbers are server-wide for that instance rather than per database, because the child creates
 /// a fresh database per fixture whose name the host does not know. Benchmarks therefore have to run
 /// one at a time against a server — which they do, BenchmarkDotNet being sequential — and anything
-/// else touching it during a run would be counted in.
+/// else touching it during a run would be counted in. The harness's own statements (waiting for a drain,
+/// cleaning between iterations) are marked and left out (<see cref="Harness"/>).
+/// </para>
+/// <para>
+/// The benchmark process WAITS at each signal until the readings are taken
+/// (<see cref="RequiresBlockingAcknowledgments"/>). Without that BenchmarkDotNet runs the child without
+/// acknowledgements, so the first iteration started while the "before" reading was still being taken, and
+/// the extra iteration the memory diagnoser runs after the window started while the "after" one was.
 /// </para>
 /// </summary>
 public class DatabaseStatementsDiagnoser : IDiagnoser
 {
+    /// <summary>
+    /// How long PostgreSQL may hold a backend's table counters before publishing them: a backend that has
+    /// gone idle within a second of its last flush waits <c>PGSTAT_IDLE_INTERVAL</c> (10 s) before the next.
+    /// The job count (<c>n_tup_ins</c>) is read only after this much quiet, or the last iteration's inserts
+    /// could still be pending in the publisher's idle backend.
+    /// </summary>
+    private static readonly TimeSpan PostgresStatsSettle = TimeSpan.FromSeconds(11);
+
     private static readonly string? PostgresConnectionString =
         Environment.GetEnvironmentVariable(PostgresServerFixture.ConnectionStringVariable);
 
     private static readonly string? SqlServerConnectionString =
         Environment.GetEnvironmentVariable(PostgresServerFixture.SqlServerConnectionStringVariable);
 
-    // Where the benchmark (child) process keeps its client-side round-trip count, named before the child
-    // starts so it inherits the variable (RoundTripCounter). One file per host process.
+    // Where the benchmark (child) process keeps its client-side counts, named before the child starts so it
+    // inherits the variable (RoundTripCounter). One file per host process.
     private static readonly string RoundTripFile = NameRoundTripFile();
 
     private readonly ConcurrentDictionary<BenchmarkCase, Counters> _deltas = new();
     private readonly ConcurrentDictionary<BenchmarkCase, TimeSpan> _elapsed = new();
-    private readonly ConcurrentDictionary<BenchmarkCase, long> _roundTrips = new();
+    private readonly ConcurrentDictionary<BenchmarkCase, ClientCounts> _client = new();
+    private readonly ConcurrentDictionary<BenchmarkCase, bool> _invalid = new();
     private Reading? _before;
     private long _beforeTimestamp;
     private PostgresLockSampler? _lockSampler;
@@ -61,7 +78,17 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
     public RunMode GetRunMode(BenchmarkCase benchmarkCase) => RunMode.NoOverhead;
 
-    public bool RequiresBlockingAcknowledgments(BenchmarkCase benchmarkCase) => false;
+    // True: the benchmark waits while the readings are taken (see the class summary).
+    public bool RequiresBlockingAcknowledgments(BenchmarkCase benchmarkCase) => true;
+
+    /// <summary>
+    /// Whether a case reports its counters per second (an idle server, which writes no jobs) rather than per
+    /// job. Declared by the benchmark (<see cref="MeasuredPerSecondAttribute"/>), not inferred from a window
+    /// that wrote no jobs: that also described a draining case whose job count failed to read, which then
+    /// reported per-second figures and was compared as if nothing had gone wrong.
+    /// </summary>
+    public static bool IsPerSecond(Type? benchmarkType) =>
+        benchmarkType?.GetCustomAttribute<MeasuredPerSecondAttribute>(inherit: true) is not null;
 
     public void Handle(HostSignal signal, DiagnoserActionParameters parameters)
     {
@@ -72,10 +99,19 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             return;
         }
 
+        var countsJobs = provider == BenchmarkProvider.PostgreSql && !IsPerSecond(parameters.BenchmarkCase.Descriptor.Type);
+
         switch (signal)
         {
             case HostSignal.BeforeActualRun:
-                _before = ReadCounters(provider);
+                // Outside the window: let PostgreSQL publish the warm-up's table counters first, so they do
+                // not land inside it.
+                if (countsJobs)
+                {
+                    Thread.Sleep(PostgresStatsSettle);
+                }
+
+                _before = ReadCounters(provider, countsJobs);
                 _beforeTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                 _lockSampler = provider == BenchmarkProvider.PostgreSql ? PostgresLockSampler.Start(PostgresConnectionString!) : null;
                 break;
@@ -86,28 +122,23 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 // cumulative total, or negative.
                 var lockWaitMs = _lockSampler?.Stop();
                 _lockSampler = null;
+                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(_beforeTimestamp);
 
-                if (_before is not { } before || ReadCounters(provider) is not { } after)
+                if (_before is not { } before || ReadCounters(provider, countsJobs: false) is not { } after)
                 {
+                    _invalid[parameters.BenchmarkCase] = true;
                     break;
                 }
 
-                var delta = Delta(before, after);
-
-                // PostgreSQL keeps no cumulative lock-wait time; it is sampled across the window instead.
-                if (lockWaitMs is { } sampled)
+                // The statements are read at once, the job count after the settle (the window's statements
+                // must not include the idle server's while it waits). The benchmark is held meanwhile.
+                if (countsJobs)
                 {
-                    delta = delta with { LockWaitMs = sampled };
+                    Thread.Sleep(PostgresStatsSettle);
+                    after = after with { Totals = after.Totals with { Jobs = ReadPostgresJobs() ?? -1 } };
                 }
 
-                if (before.RoundTrips is { } tripsBefore && after.RoundTrips is { } tripsAfter && tripsAfter >= tripsBefore)
-                {
-                    _roundTrips.AddOrUpdate(parameters.BenchmarkCase, tripsAfter - tripsBefore, (_, existing) => existing + tripsAfter - tripsBefore);
-                }
-
-                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(_beforeTimestamp);
-                _deltas.AddOrUpdate(parameters.BenchmarkCase, delta, (_, existing) => existing + delta);
-                _elapsed.AddOrUpdate(parameters.BenchmarkCase, elapsed, (_, existing) => existing + elapsed);
+                RecordWindow(parameters.BenchmarkCase, before, after, lockWaitMs, elapsed);
                 break;
 
             default:
@@ -117,14 +148,16 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
     public IEnumerable<Metric> ProcessResults(DiagnoserResults results)
     {
-        if (!_deltas.TryGetValue(results.BenchmarkCase, out var delta))
+        if (_invalid.ContainsKey(results.BenchmarkCase) || !_deltas.TryGetValue(results.BenchmarkCase, out var delta))
         {
             yield break;
         }
 
-        // A window that wrote no jobs is an idle server: its cost is per second, not per job. Timed
-        // between the same two readings the counters came from, so both halves cover one window.
-        if (delta.Jobs <= 0)
+        _client.TryGetValue(results.BenchmarkCase, out var client);
+
+        // An idle server's cost is per second, not per job. Timed between the same two readings the counters
+        // came from, so both halves cover one window.
+        if (IsPerSecond(results.BenchmarkCase.Descriptor.Type))
         {
             if (_elapsed.TryGetValue(results.BenchmarkCase, out var window) && window.TotalSeconds > 0)
             {
@@ -135,7 +168,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                     yield return new Metric(PerJobDescriptor.WalBytesPerSecond, delta.WalBytes / window.TotalSeconds);
                 }
 
-                foreach (var metric in LoadMetrics(results.BenchmarkCase, delta, window.TotalSeconds, perSecond: true))
+                foreach (var metric in LoadMetrics(delta, client, window.TotalSeconds, perSecond: true))
                 {
                     yield return metric;
                 }
@@ -144,18 +177,35 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             yield break;
         }
 
+        // A draining case that wrote no job rows did not measure: its job count failed to read, or the
+        // counter went backwards (SQL Server's is reset when the table's metadata is evicted). Reported as
+        // no measurement, which the comparer fails, never as a per-second figure.
+        if (delta.Jobs <= 0)
+        {
+            yield break;
+        }
+
         yield return new Metric(PerJobDescriptor.Statements, delta.Statements / (double)delta.Jobs);
         yield return new Metric(PerJobDescriptor.Buffers, delta.Buffers / (double)delta.Jobs);
+        yield return new Metric(PerJobDescriptor.JobRows, delta.Jobs);
 
-        // SQL Server has no WAL figure in dm_exec_query_stats; a zero there is "not measured", not "none".
+        // SQL Server has no WAL figure in Query Store; a zero there is "not measured", not "none".
         if (delta.WalBytes > 0)
         {
             yield return new Metric(PerJobDescriptor.WalBytes, delta.WalBytes / (double)delta.Jobs);
         }
 
-        foreach (var metric in LoadMetrics(results.BenchmarkCase, delta, delta.Jobs, perSecond: false))
+        foreach (var metric in LoadMetrics(delta, client, delta.Jobs, perSecond: false))
         {
             yield return metric;
+        }
+
+        // Benchmarks that run two servers count the jobs each completed (TwoServersUnderLoadBenchmark).
+        var serverJobs = client.FirstServerJobs + client.SecondServerJobs;
+        if (serverJobs > 0)
+        {
+            yield return new Metric(PerJobDescriptor.SmallestServerShare, Math.Min(client.FirstServerJobs, client.SecondServerJobs) / (double)serverJobs);
+            yield return new Metric(PerJobDescriptor.ServerJobs, serverJobs);
         }
     }
 
@@ -163,41 +213,15 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     {
     }
 
-    /// <summary>
-    /// The database-load columns: time the database spent, client round trips, transactions and lock waits,
-    /// per job (or per second for an idle window). Each is left out when its source gave nothing, so it reads
-    /// "—" rather than a zero that was never measured.
-    /// </summary>
-    private IEnumerable<Metric> LoadMetrics(BenchmarkCase benchmarkCase, Counters delta, double per, bool perSecond)
+    public IEnumerable<ValidationError> Validate(ValidationParameters validationParameters)
     {
-        if (per <= 0)
+        if (PostgresConnectionString is null && SqlServerConnectionString is null)
         {
-            yield break;
-        }
+            const string Message =
+                "Neither WARP_BENCH_POSTGRES nor WARP_BENCH_SQLSERVER is set, so statements per job "
+                + "will not be reported.";
 
-        if (delta.DbTimeMs > 0)
-        {
-            yield return new Metric(perSecond ? PerJobDescriptor.DbTimePerSecond : PerJobDescriptor.DbTime, delta.DbTimeMs / per);
-        }
-
-        if (_roundTrips.TryGetValue(benchmarkCase, out var trips) && trips > 0)
-        {
-            yield return new Metric(perSecond ? PerJobDescriptor.RoundTripsPerSecond : PerJobDescriptor.RoundTrips, trips / per);
-        }
-
-        if (delta.Transactions > 0)
-        {
-            yield return new Metric(perSecond ? PerJobDescriptor.TransactionsPerSecond : PerJobDescriptor.Transactions, delta.Transactions / per);
-        }
-
-        if (delta.LockWaitMs >= 0)
-        {
-            yield return new Metric(perSecond ? PerJobDescriptor.LockWaitPerSecond : PerJobDescriptor.LockWait, delta.LockWaitMs / per);
-        }
-
-        if (delta.Deadlocks >= 0)
-        {
-            yield return new Metric(PerJobDescriptor.Deadlocks, delta.Deadlocks);
+            yield return new ValidationError(false, Message);
         }
     }
 
@@ -218,16 +242,22 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         return path;
     }
 
-    /// <summary>The child's running total, or null when it has not started counting (no fixture, no file).</summary>
-    private static long? ReadRoundTrips()
+    /// <summary>The child's running totals, or null when it has not started counting (no fixture, no file).</summary>
+    private static ClientCounts? ReadClientCounts()
     {
         try
         {
             using var stream = new FileStream(RoundTripFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            Span<byte> buffer = stackalloc byte[sizeof(long)];
+            var buffer = new byte[RoundTripCounter.FileSize];
             stream.ReadExactly(buffer);
 
-            return BitConverter.ToInt64(buffer);
+            long At(RoundTripCounter.Slot slot) => BitConverter.ToInt64(buffer, (int)slot * sizeof(long));
+
+            return new ClientCounts(
+                At(RoundTripCounter.Slot.Commands),
+                At(RoundTripCounter.Slot.HarnessCommands),
+                At(RoundTripCounter.Slot.FirstServerJobs),
+                At(RoundTripCounter.Slot.SecondServerJobs));
         }
         catch (IOException)
         {
@@ -236,18 +266,6 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         catch (UnauthorizedAccessException)
         {
             return null;
-        }
-    }
-
-    public IEnumerable<ValidationError> Validate(ValidationParameters validationParameters)
-    {
-        if (PostgresConnectionString is null && SqlServerConnectionString is null)
-        {
-            const string Message =
-                "Neither WARP_BENCH_POSTGRES nor WARP_BENCH_SQLSERVER is set, so statements per job "
-                + "will not be reported.";
-
-            yield return new ValidationError(false, Message);
         }
     }
 
@@ -267,16 +285,34 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     private static string? ConnectionStringFor(BenchmarkProvider provider) =>
         provider == BenchmarkProvider.SqlServer ? SqlServerConnectionString : PostgresConnectionString;
 
-    private static Reading? ReadCounters(BenchmarkProvider provider)
+    private static Reading? ReadCounters(BenchmarkProvider provider, bool countsJobs)
     {
-        var totals = provider == BenchmarkProvider.SqlServer ? ReadSqlServerCounters() : ReadPostgresCounters();
+        if (provider == BenchmarkProvider.SqlServer)
+        {
+            return ReadSqlServerCounters() is { } sqlServer ? new Reading(sqlServer, ReadClientCounts()) : null;
+        }
 
-        return totals is null ? null : new Reading(totals.Value, ReadRoundTrips());
+        if (ReadPostgresCounters() is not { } totals)
+        {
+            return null;
+        }
+
+        if (countsJobs)
+        {
+            if (ReadPostgresJobs() is not { } jobs)
+            {
+                return null;
+            }
+
+            totals = totals with { Jobs = jobs };
+        }
+
+        return new Reading(totals, ReadClientCounts());
     }
 
     /// <summary>
-    /// What happened between two readings. Both providers' counters now only grow inside a window, so their
-    /// totals subtract.
+    /// What happened between two readings, kept for <see cref="ProcessResults"/>. Both providers' counters only
+    /// grow inside a window, so their totals subtract.
     /// <para>
     /// SQL Server's used not to: it was read from <c>dm_exec_query_stats</c>, which forgets a plan's count
     /// when the plan is recompiled or evicted, and comparing plan by plan only stopped that from reaching
@@ -286,16 +322,97 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// 1,000 jobs between runs. Query Store keeps per-query totals across recompiles (see
     /// <see cref="ReadSqlServerCounters"/>), so the difference of two totals is the window.
     /// </para>
+    /// <para>
+    /// PostgreSQL's hold while <c>pg_stat_statements</c> keeps every entry. When it evicts some to make room
+    /// (<c>pg_stat_statements_info.dealloc</c> moved), the evicted entries' counts leave the total and the
+    /// difference reads low by an unknown amount, so the window is invalid.
+    /// </para>
     /// </summary>
-    private static Counters Delta(Reading before, Reading after) => after.Totals - before.Totals;
+    private void RecordWindow(BenchmarkCase benchmarkCase, Reading before, Reading after, double? lockWaitMs, TimeSpan elapsed)
+    {
+        if (after.Totals.Deallocations != before.Totals.Deallocations)
+        {
+            _invalid[benchmarkCase] = true;
+            Console.WriteLine($"// pg_stat_statements evicted entries inside the window of {benchmarkCase.DisplayInfo}: its database counts are not reported");
+
+            return;
+        }
+
+        var delta = after.Totals - before.Totals;
+
+        // PostgreSQL keeps no cumulative lock-wait time; it is sampled across the window instead.
+        if (lockWaitMs is { } sampled)
+        {
+            delta = delta with { LockWaitMs = sampled };
+        }
+
+        if (before.Client is { } clientBefore && after.Client is { } clientAfter)
+        {
+            var client = clientAfter - clientBefore;
+
+            // Each harness statement is a transaction of its own (no harness code opens one), so on PostgreSQL,
+            // whose count is exact, the harness's commands are its transactions. SQL Server's Transactions/sec
+            // counter did not move one for one with statements when checked, so its figure keeps them.
+            if (ProviderOf(benchmarkCase) == BenchmarkProvider.PostgreSql && client.HarnessCommands > 0)
+            {
+                delta = delta with { Transactions = Math.Max(0, delta.Transactions - client.HarnessCommands) };
+            }
+
+            _client.AddOrUpdate(benchmarkCase, client, (_, existing) => existing + client);
+        }
+
+        _deltas.AddOrUpdate(benchmarkCase, delta, (_, existing) => existing + delta);
+        _elapsed.AddOrUpdate(benchmarkCase, elapsed, (_, existing) => existing + elapsed);
+    }
 
     /// <summary>
-    /// Numerator AND denominator from the same view over the same window, which is what makes this
-    /// independent of BenchmarkDotNet's own accounting. Dividing by an invocation count was wrong twice
-    /// over: the signals bracket the whole measured phase rather than one iteration, and
-    /// <c>DiagnoserResults.TotalOperations</c> counts every phase including warmup and jitting.
-    /// Counting the job rows actually written inside the window answers it directly, and is checkable
-    /// against the lab, which measures the same thing.
+    /// The database-load columns: time the database spent, commands sent, transactions and lock waits, per job
+    /// (or per second for an idle window). Each is left out when its source gave nothing, so it reads "—"
+    /// rather than a zero that was never measured.
+    /// </summary>
+    private static IEnumerable<Metric> LoadMetrics(Counters delta, ClientCounts? client, double per, bool perSecond)
+    {
+        if (per <= 0)
+        {
+            yield break;
+        }
+
+        if (delta.DbTimeMs > 0)
+        {
+            yield return new Metric(perSecond ? PerJobDescriptor.DbTimePerSecond : PerJobDescriptor.DbTime, delta.DbTimeMs / per);
+        }
+
+        if (client is { Commands: > 0 } counted)
+        {
+            yield return new Metric(perSecond ? PerJobDescriptor.RoundTripsPerSecond : PerJobDescriptor.RoundTrips, counted.Commands / per);
+        }
+
+        if (delta.Transactions > 0)
+        {
+            yield return new Metric(perSecond ? PerJobDescriptor.TransactionsPerSecond : PerJobDescriptor.Transactions, delta.Transactions / per);
+        }
+
+        if (delta.LockWaitMs >= 0)
+        {
+            yield return new Metric(perSecond ? PerJobDescriptor.LockWaitPerSecond : PerJobDescriptor.LockWait, delta.LockWaitMs / per);
+        }
+
+        if (delta.Deadlocks >= 0)
+        {
+            yield return new Metric(PerJobDescriptor.Deadlocks, delta.Deadlocks);
+        }
+    }
+
+    /// <summary>
+    /// Numerator from <c>pg_stat_statements</c>, denominator from the job table's own insert counter
+    /// (<see cref="ReadPostgresJobs"/>), both over the same window. That is what makes this independent of
+    /// BenchmarkDotNet's own accounting: dividing by an invocation count was wrong twice over, the signals
+    /// bracketing the whole measured phase rather than one iteration, and
+    /// <c>DiagnoserResults.TotalOperations</c> counting every phase including warmup and jitting.
+    /// <para>
+    /// Every entry whose text carries <see cref="Harness.Tag"/> is the harness's and left out, as is this
+    /// read's own (it reads pg_stat_statements).
+    /// </para>
     /// </summary>
     private static Counters? ReadPostgresCounters()
     {
@@ -306,36 +423,36 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
             using var command = connection.CreateCommand();
 
-            // The read excludes itself: it is issued against pg_stat_statements, so without the filter
-            // the instrument would count its own traffic.
-            //
             // Buffers are the pages each statement touched, cached or read. They are the measure of work
             // a statement count cannot see: the PostgreSQL claim that took several jobs issued the SAME
             // number of statements while each one walked the whole table, 4.3 s a claim at 300k rows.
             // WAL bytes are the write side of the same question.
             command.CommandText = @"
+                WITH counted AS (
+                    SELECT * FROM pg_stat_statements
+                    WHERE query NOT LIKE '%pg_stat_statements%' AND query NOT LIKE '%" + Harness.Tag + @"%')
                 SELECT
-                    COALESCE(SUM(calls) FILTER (WHERE query NOT LIKE '%pg_stat_statements%'), 0) AS statements,
-                    COALESCE(SUM(rows) FILTER (WHERE query ILIKE 'INSERT INTO warp.job (%'), 0) AS jobs,
-                    COALESCE(SUM(shared_blks_hit + shared_blks_read) FILTER (WHERE query NOT LIKE '%pg_stat_statements%'), 0) AS buffers,
-                    COALESCE(SUM(wal_bytes) FILTER (WHERE query NOT LIKE '%pg_stat_statements%'), 0) AS wal,
-                    COALESCE(SUM(total_exec_time + total_plan_time) FILTER (WHERE query NOT LIKE '%pg_stat_statements%'), 0) AS db_ms,
+                    (SELECT COALESCE(SUM(calls), 0) FROM counted) AS statements,
+                    (SELECT COALESCE(SUM(shared_blks_hit + shared_blks_read), 0) FROM counted) AS buffers,
+                    (SELECT COALESCE(SUM(wal_bytes), 0) FROM counted) AS wal,
+                    (SELECT COALESCE(SUM(total_exec_time + total_plan_time), 0) FROM counted) AS db_ms,
                     (SELECT COALESCE(SUM(xact_commit + xact_rollback), 0) FROM pg_stat_database WHERE datname LIKE 'warpbench\_%') AS xacts,
-                    (SELECT COALESCE(SUM(deadlocks), 0) FROM pg_stat_database WHERE datname LIKE 'warpbench\_%') AS deadlocks
-                FROM pg_stat_statements";
+                    (SELECT COALESCE(SUM(deadlocks), 0) FROM pg_stat_database WHERE datname LIKE 'warpbench\_%') AS deadlocks,
+                    (SELECT dealloc FROM pg_stat_statements_info) AS dealloc";
 
             using var reader = command.ExecuteReader();
 
             // Lock wait is not cumulative on PostgreSQL: -1 here means "sampled separately" (PostgresLockSampler).
             return reader.Read()
                 ? new Counters(
-                    reader.GetInt64(0),
-                    reader.GetInt64(1),
-                    reader.GetInt64(2),
-                    Convert.ToInt64(reader.GetValue(3)),
-                    Convert.ToDouble(reader.GetValue(4)),
-                    Convert.ToInt64(reader.GetValue(5)),
+                    Convert.ToInt64(reader.GetValue(0)),
+                    0,
+                    Convert.ToInt64(reader.GetValue(1)),
+                    Convert.ToInt64(reader.GetValue(2)),
+                    Convert.ToDouble(reader.GetValue(3)),
+                    Convert.ToInt64(reader.GetValue(4)),
                     -1,
+                    Convert.ToInt64(reader.GetValue(5)),
                     Convert.ToInt64(reader.GetValue(6)))
                 : null;
         }
@@ -343,6 +460,53 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         {
             // A diagnoser must never take down the run it is observing: a missing extension or a
             // container already torn down is a lost measurement, not a failed benchmark.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Job rows inserted, from the job table's own counter (<c>pg_stat_user_tables.n_tup_ins</c>) in every
+    /// <c>warpbench_*</c> database, like SQL Server's <c>leaf_insert_count</c>. It replaced the rows of the
+    /// statements whose text began <c>INSERT INTO warp.job (</c>, which counted only the inserts written that
+    /// way: a job inserted by a statement of another shape (a set-based copy, a CTE) was not a job.
+    /// <para>
+    /// The counter is per database and readable only from inside one, so each is read on its own connection,
+    /// unpooled (a pooled one would leave a backend in the database). It is published by each backend at most
+    /// once a second, and by an idle one up to ten seconds late, hence <see cref="PostgresStatsSettle"/>.
+    /// </para>
+    /// </summary>
+    private static long? ReadPostgresJobs()
+    {
+        try
+        {
+            var databases = new List<string>();
+            using (var connection = new NpgsqlConnection(PostgresConnectionString))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = @"SELECT datname FROM pg_database WHERE datname LIKE 'warpbench\_%' AND datallowconn";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    databases.Add(reader.GetString(0));
+                }
+            }
+
+            long jobs = 0;
+            foreach (var database in databases)
+            {
+                var builder = new NpgsqlConnectionStringBuilder(PostgresConnectionString) { Database = database, Pooling = false };
+                using var connection = new NpgsqlConnection(builder.ConnectionString);
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT COALESCE(SUM(n_tup_ins), 0) FROM pg_stat_user_tables WHERE schemaname = 'warp' AND relname = 'job'";
+                jobs += Convert.ToInt64(command.ExecuteScalar());
+            }
+
+            return jobs;
+        }
+        catch (NpgsqlException)
+        {
             return null;
         }
     }
@@ -362,7 +526,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     /// off). Query Store is per database and the host does not know the fixture's database name, so every
     /// <c>warpbench_*</c> database with Query Store on is read with dynamic SQL, after
     /// <c>sp_query_store_flush_db</c>. The read runs in master, where Query Store is off, so it keeps itself
-    /// out of the count.
+    /// out of the count. Query Store's own internal queries (<c>is_internal_query</c>) and the harness's
+    /// (compiled under <see cref="Harness.SqlServerLanguage"/>) are left out.
     /// </para>
     /// <para>
     /// A reading is INVALID, not low, when no such database has Query Store on or one of them has left
@@ -381,6 +546,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
             using var command = connection.CreateCommand();
             command.CommandText = SqlServerReadBatch;
+            command.Parameters.AddWithValue("@harnessLanguage", Harness.SqlServerLanguage);
 
             using var reader = command.ExecuteReader();
 
@@ -416,7 +582,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 cpuMs,
                 Convert.ToInt64(reader.GetValue(0)),
                 Convert.ToDouble(reader.GetValue(1)),
-                Convert.ToInt64(reader.GetValue(2)));
+                Convert.ToInt64(reader.GetValue(2)),
+                0);
         }
         catch (SqlException)
         {
@@ -425,24 +592,30 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     }
 
     /// <summary>
-    /// The SQL Server reading, one batch with two result sets. The first: Query Store's executions and
-    /// logical reads summed over every <c>warpbench_*</c> database with Query Store on (flushed first), the
-    /// number of databases read and the number whose Query Store is not read-write. The second: job rows
-    /// written across those databases (<c>leaf_insert_count</c>, heap or clustered index only, since the
-    /// counter is per index), resolved by name per database because the connection is to master.
+    /// The SQL Server reading, one batch with three result sets. The first: Query Store's executions, logical
+    /// reads and CPU summed over every <c>warpbench_*</c> database with Query Store on (flushed first), less
+    /// internal and harness queries, the number of databases read and the number whose Query Store is not
+    /// read-write. The second: job rows written across those databases (<c>leaf_insert_count</c>, heap or
+    /// clustered index only, since the counter is per index), resolved by name per database because the
+    /// connection is to master. The third: transactions, lock waits and deadlocks.
     /// </summary>
     internal const string SqlServerReadBatch = @"
         SET NOCOUNT ON;
         DECLARE @flush nvarchar(max) = N'';
         DECLARE @read nvarchar(max) = N'';
+        DECLARE @harness smallint = (SELECT langid FROM sys.syslanguages WHERE name = @harnessLanguage);
 
         SELECT
             @flush = @flush + N'EXEC ' + QUOTENAME(name) + N'.sys.sp_query_store_flush_db; ',
             @read = @read + CASE WHEN @read = N'' THEN N'' ELSE N' UNION ALL ' END
-                + N'SELECT (SELECT SUM(rs.count_executions) FROM ' + QUOTENAME(name) + N'.sys.query_store_runtime_stats rs) AS e, '
-                + N'(SELECT SUM(rs.avg_logical_io_reads * rs.count_executions) FROM ' + QUOTENAME(name) + N'.sys.query_store_runtime_stats rs) AS r, '
+                + N'SELECT SUM(rs.count_executions) AS e, SUM(rs.avg_logical_io_reads * rs.count_executions) AS r, '
                 + N'(SELECT CASE WHEN o.actual_state = 2 THEN 0 ELSE 1 END FROM ' + QUOTENAME(name) + N'.sys.database_query_store_options o) AS bad, '
-                + N'(SELECT SUM(rs.avg_cpu_time * rs.count_executions) FROM ' + QUOTENAME(name) + N'.sys.query_store_runtime_stats rs) AS cpu'
+                + N'SUM(rs.avg_cpu_time * rs.count_executions) AS cpu '
+                + N'FROM ' + QUOTENAME(name) + N'.sys.query_store_runtime_stats rs '
+                + N'JOIN ' + QUOTENAME(name) + N'.sys.query_store_plan p ON p.plan_id = rs.plan_id '
+                + N'JOIN ' + QUOTENAME(name) + N'.sys.query_store_query q ON q.query_id = p.query_id '
+                + N'JOIN ' + QUOTENAME(name) + N'.sys.query_context_settings c ON c.context_settings_id = q.context_settings_id '
+                + N'WHERE q.is_internal_query = 0 AND c.language_id <> @harness'
         FROM sys.databases
         WHERE name LIKE N'warpbench[_]%' AND state = 0 AND is_query_store_on = 1;
 
@@ -451,7 +624,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         ELSE
         BEGIN
             EXEC (@flush);
-            EXEC (N'SELECT COALESCE(SUM(e), 0), COALESCE(SUM(r), 0), COUNT(*), COALESCE(SUM(bad), 0), COALESCE(SUM(cpu), 0) FROM (' + @read + N') t');
+            DECLARE @sum nvarchar(max) = N'SELECT COALESCE(SUM(e), 0), COALESCE(SUM(r), 0), COUNT(*), COALESCE(SUM(bad), 0), COALESCE(SUM(cpu), 0) FROM (' + @read + N') t';
+            EXEC sys.sp_executesql @sum, N'@harness smallint', @harness = @harness;
         END
 
         SELECT COALESCE(SUM(os.leaf_insert_count), 0)
@@ -470,8 +644,19 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             (SELECT COALESCE(SUM(cntr_value), 0) FROM sys.dm_os_performance_counters
              WHERE RTRIM(object_name) LIKE N'%:Locks' AND counter_name = N'Number of Deadlocks/sec' AND RTRIM(instance_name) = N'_Total');";
 
-    /// <summary>One reading: the server's totals and the benchmark process's client round trips (null when not counted).</summary>
-    private sealed record Reading(Counters Totals, long? RoundTrips);
+    /// <summary>One reading: the server's totals and the benchmark process's own counts (null when not counted).</summary>
+    private sealed record Reading(Counters Totals, ClientCounts? Client);
+
+    /// <summary>The benchmark process's counts (<see cref="RoundTripCounter"/>), and the difference between two.</summary>
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct ClientCounts(long Commands, long HarnessCommands, long FirstServerJobs, long SecondServerJobs)
+    {
+        public static ClientCounts operator -(ClientCounts a, ClientCounts b) =>
+            new(a.Commands - b.Commands, a.HarnessCommands - b.HarnessCommands, a.FirstServerJobs - b.FirstServerJobs, a.SecondServerJobs - b.SecondServerJobs);
+
+        public static ClientCounts operator +(ClientCounts a, ClientCounts b) =>
+            new(a.Commands + b.Commands, a.HarnessCommands + b.HarnessCommands, a.FirstServerJobs + b.FirstServerJobs, a.SecondServerJobs + b.SecondServerJobs);
+    }
 
     /// <summary>A server-wide counter reading, and the difference between two.</summary>
     [StructLayout(LayoutKind.Auto)]
@@ -483,7 +668,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         double DbTimeMs,
         long Transactions,
         double LockWaitMs,
-        long Deadlocks)
+        long Deadlocks,
+        long Deallocations)
     {
         // A negative lock wait is "not measured here" (PostgreSQL samples it), and stays negative through a
         // difference so the sampled value can replace it.
@@ -496,7 +682,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 a.DbTimeMs - b.DbTimeMs,
                 a.Transactions - b.Transactions,
                 a.LockWaitMs < 0 ? -1 : a.LockWaitMs - b.LockWaitMs,
-                a.Deadlocks - b.Deadlocks);
+                a.Deadlocks - b.Deadlocks,
+                a.Deallocations - b.Deallocations);
 
         public static Counters operator +(Counters a, Counters b) =>
             new(
@@ -507,7 +694,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 a.DbTimeMs + b.DbTimeMs,
                 a.Transactions + b.Transactions,
                 a.LockWaitMs < 0 || b.LockWaitMs < 0 ? -1 : a.LockWaitMs + b.LockWaitMs,
-                a.Deadlocks + b.Deadlocks);
+                a.Deadlocks + b.Deadlocks,
+                a.Deallocations + b.Deallocations);
     }
 
     private sealed class PerJobDescriptor : IMetricDescriptor
@@ -517,6 +705,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         public static readonly PerJobDescriptor Buffers = new("BuffersPerJob", "Buffers/job", "Database pages touched per job, cached or read", "blk");
 
         public static readonly PerJobDescriptor WalBytes = new("WalBytesPerJob", "WAL/job", "Write-ahead log bytes per job (PostgreSQL)", "B");
+
+        public static readonly PerJobDescriptor JobRows = new("JobRows", "Job rows", "Job rows written in the measured window, the per-job columns' divisor", "rows");
 
         public static readonly PerJobDescriptor StatementsPerSecond = new("StatementsPerSecond", "Statements/s", "Database statements per second, with no jobs running", "stmt");
 
@@ -528,9 +718,10 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
         public static readonly PerJobDescriptor DbTimePerSecond = new("DbTimePerSecond", "DB ms/s", "Database time per second (see DB ms/job)", "ms");
 
-        public static readonly PerJobDescriptor RoundTrips = new("RoundTripsPerJob", "Round trips/job", "Commands sent by the benchmark process, counted at the driver", "rt");
+        // Ids keep their old names (release records and the history read them); what is counted is commands.
+        public static readonly PerJobDescriptor RoundTrips = new("RoundTripsPerJob", "Commands/job", "Commands sent by the benchmark process, counted at the driver (transaction control not included)", "cmd");
 
-        public static readonly PerJobDescriptor RoundTripsPerSecond = new("RoundTripsPerSecond", "Round trips/s", "Commands sent by the benchmark process per second", "rt");
+        public static readonly PerJobDescriptor RoundTripsPerSecond = new("RoundTripsPerSecond", "Commands/s", "Commands sent by the benchmark process per second", "cmd");
 
         public static readonly PerJobDescriptor Transactions = new("TransactionsPerJob", "Xacts/job", "Transactions per job in the benchmark database", "tx");
 
@@ -541,6 +732,10 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         public static readonly PerJobDescriptor LockWaitPerSecond = new("LockWaitMsPerSecond", "Lock wait ms/s", "Time spent waiting for locks per second", "ms");
 
         public static readonly PerJobDescriptor Deadlocks = new("Deadlocks", "Deadlocks", "Deadlocks in the measured window", "n");
+
+        public static readonly PerJobDescriptor SmallestServerShare = new("SmallestServerShare", "Smallest server share", "Share of the jobs completed by the server that completed fewest (two-server scenarios)", "share");
+
+        public static readonly PerJobDescriptor ServerJobs = new("ServerJobs", "Server jobs", "Jobs completed by workers of either server (two-server scenarios)", "jobs");
 
         private PerJobDescriptor(string id, string displayName, string legend, string unit)
         {

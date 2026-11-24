@@ -10,6 +10,7 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// <see cref="IdleServerBenchmark"/> for why those lengths). Two classes rather than a parameter, so each runs
 /// as its own CI job inside the timeout and the one-server case keeps the name its history is recorded under.
 /// </summary>
+[MeasuredPerSecond]
 [SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable", Justification = "BenchmarkDotNet manages lifecycle via [GlobalCleanup].")]
 public abstract class IdleServerBenchmarkBase
 {

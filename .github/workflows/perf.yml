@@ -1,7 +1,9 @@
 name: Performance
 
 # Compares THIS pull request against its merge base, both measured on the SAME runner in the SAME
-# job, interleaved. Never against a stored historical number: that comparison measures the runners.
+# job, one after the other (each side on a fresh database), the order alternating from run to run so
+# neither side is always the one that runs on a warmer machine. Never against a stored historical
+# number: that comparison measures the runners.
 #
 # What is gated and what is not is a measurement question, not a policy preference — see
 # docs/plans/2026-09-22-performance-ci.md. Short version: counts are gated because they reproduce to
@@ -101,9 +103,12 @@ jobs:
   # BenchmarkDotNet, gating what was calibrated to survive a shared runner: statements per job at 5%,
   # WAL bytes per job at 10% (PostgreSQL), and throughput only on a collapse to a third. Each line is
   # three to four times the worst noise from comparing main with itself over three runs. Allocations
-  # are reported (4.9% between identical builds). Buffers per job move up to 55% between identical
-  # builds, so they fail only on a blow-up of five times or more: every jump that size so far was a
-  # query plan gone wrong, which the other three gates let through. A benchmark that produced no
+  # and database time are reported (allocations moved 4.9% between identical builds; database time has
+  # not been calibrated). Buffers per job move up to 55% between identical builds, so they fail only on
+  # a blow-up of five times or more: every jump that size so far was a query plan gone wrong, which the
+  # other three gates let through. Measurements not yet calibrated by no-op runs (SQL Server's per-job
+  # rows, now counted from Query Store; the two-server, recurring and background-load scenarios) are
+  # shown and fail nothing (.claude/rules/performance.md lists them). A benchmark that produced no
   # measurement on either side fails the job instead of passing silently.
   #
   # PostgreSQL is shared between the two runs and named in the environment rather than started per
@@ -241,6 +246,43 @@ jobs:
         if: matrix.benchmark.sqlserver
         run: bash .github/scripts/start-bench-sqlserver.sh "${{ matrix.db.sqlserver }}"
 
+      # Which side runs first. The two run one after the other on one runner, and always head first meant any
+      # effect of going first or second (a warmer disk cache, a runner that slows down as the job goes on) was
+      # always on the same side. Odd run numbers measure the base first, even ones the head.
+      - name: Choose the order of the two sides
+        id: order
+        run: |
+          if [ -z "${{ needs.refs.outputs.record }}" ] && [ $(( ${{ github.run_number }} % 2 )) -eq 1 ]; then
+            echo "base_first=true" >> "$GITHUB_OUTPUT"
+            echo "Base first (run ${{ github.run_number }})."
+          else
+            echo "base_first=false" >> "$GITHUB_OUTPUT"
+            echo "Head first (run ${{ github.run_number }})."
+          fi
+
+      # The base, when it goes first. Same step as the one after the head below; see there.
+      - name: Run benchmarks on the base commit (first)
+        id: basefirst
+        if: steps.order.outputs.base_first == 'true'
+        continue-on-error: true
+        env:
+          NuGetAudit: 'false'
+        run: |
+          trap 'git checkout --no-overlay HEAD -- src/core' EXIT
+          git checkout --no-overlay ${{ needs.refs.outputs.base }} -- src/core
+          dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
+            --filter '${{ matrix.benchmark.filter }}' \
+            --exporters json \
+            --artifacts "${{ github.workspace }}/bench/base"
+
+      - name: Start a fresh PostgreSQL for the head commit
+        if: steps.order.outputs.base_first == 'true'
+        run: bash .github/scripts/start-bench-postgres.sh "${{ matrix.db.postgres }}"
+
+      - name: Start a fresh SQL Server for the head commit
+        if: steps.order.outputs.base_first == 'true' && matrix.benchmark.sqlserver
+        run: bash .github/scripts/start-bench-sqlserver.sh "${{ matrix.db.sqlserver }}"
+
       # Only src/core is ever swapped, so the HARNESS is identical on both sides and the two numbers
       # differ by the library alone. That is what makes an arbitrary pair comparable: building each
       # side from its own commit would compare two instruments as much as two libraries, and the 7.0.0
@@ -267,16 +309,16 @@ jobs:
       # workflow keep the full audit. MSBuild reads the variable as a property, so it reaches
       # BenchmarkDotNet's child builds too.
       - name: Start a fresh PostgreSQL for the base commit
-        if: needs.refs.outputs.record == ''
+        if: needs.refs.outputs.record == '' && steps.order.outputs.base_first != 'true'
         run: bash .github/scripts/start-bench-postgres.sh "${{ matrix.db.postgres }}"
 
       - name: Start a fresh SQL Server for the base commit
-        if: needs.refs.outputs.record == '' && matrix.benchmark.sqlserver
+        if: needs.refs.outputs.record == '' && steps.order.outputs.base_first != 'true' && matrix.benchmark.sqlserver
         run: bash .github/scripts/start-bench-sqlserver.sh "${{ matrix.db.sqlserver }}"
 
       - name: Run benchmarks on the base commit
         id: basebench
-        if: needs.refs.outputs.record == ''
+        if: needs.refs.outputs.record == '' && steps.order.outputs.base_first != 'true'
         continue-on-error: true
         env:
           NuGetAudit: 'false'
@@ -298,7 +340,7 @@ jobs:
             -D "${{ github.workspace }}/release" || echo "No benchmarks.json on ${{ needs.refs.outputs.latest_release }} yet."
 
       - name: Compare
-        if: steps.basebench.outcome == 'success'
+        if: steps.basebench.outcome == 'success' || steps.basefirst.outcome == 'success'
         run: |
           dotnet run -c Release --project src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj -- \
             compare-bdn \
@@ -319,7 +361,7 @@ jobs:
           fi
 
       - name: Explain an incompatible base
-        if: steps.basebench.outcome == 'failure'
+        if: steps.basebench.outcome == 'failure' || steps.basefirst.outcome == 'failure'
         run: |
           echo "::warning::The benchmarks do not build against the base commit, so nothing was compared."
           echo "::warning::That happens when the change adds an API the benchmark uses."
@@ -517,16 +559,22 @@ jobs:
             echo
             echo "- Tables follow BenchmarkDotNet's summary. Each case has two rows, **base** then **head**, the way BDN shows a benchmark beside its baseline."
             echo "- **Ratio** is head time ÷ base time: below 1.00 is faster. **Alloc Ratio** is the same for memory. **Error** is half the 99.9% confidence interval and **StdDev** the standard deviation, both over the iterations BDN ran."
+            echo "- Base and head run one after the other on one runner, each on a fresh database. Which goes first alternates with the run number (odd: base first), so an effect of the order is not always on the same side."
             echo "- **Gate** is the verdict on the head row. A scenario fails if **Statements/job** rises more than 5%, **WAL/job** (PostgreSQL) more than 10%, **Jobs/s** collapses to a third, or **Buffers/job** rises to five times. The idle scenarios (one and two servers), measured per second, fail on **Statements/s** rising more than 5% on PostgreSQL; their SQL Server rows are reported only. Each line sits at three to four times the worst noise measured by comparing a commit with itself: statements 1.8%, WAL 2.5%, jobs/s 0.87×–1.43×."
+            echo "- **Report-only gates** (➖, or ⚠️ with \"report-only\" when a line is crossed) are on measurements not yet calibrated by comparing a commit with itself: every SQL Server per-job row (statements and buffers are counted from Query Store since measurement version 2), and the two-server, recurring and background-load scenarios. They are shown and fail nothing until no-op runs have measured their noise; .claude/rules/performance.md lists which to switch back on."
+            echo "- **Jobs/s** is job rows per second: the job rows the database counted in the window (the same rows the per-job columns divide by: 2,010 in the two-server scenario, where 10 are batch rows), per iteration, over the mean time. Scenarios whose duration a clock sets (rate limit, recurring, long-running) are not gated on it."
+            echo "- Statements the harness itself sends (polling for the end of a drain, cleaning between iterations, making recurring jobs due) are left out of every database column: tagged in the text on PostgreSQL, run under a different language on SQL Server (Query Store keeps no comments). The background-load scenario's dashboard tabs are its workload and stay counted."
+            echo "- **Two servers**: a note under the table gives the share of the jobs the less busy server completed; a case where it is under 20% fails, since it did not measure two servers."
+            echo "- **Background load**: notes under the table give each case's background work per second of drain, against the drain alone. Per job, work that runs every second shrinks when the drain gets faster; per second it does not."
             echo "- **Buffers/job** is database pages touched per job, cached or read, which catches a slower plan that issues the same statements. It moves up to 55% between identical builds, with cache state and vacuum timing, so only a rise to five times fails: every jump that size so far was a query whose plan had changed."
-            echo "- **DB ms/job** is the time the database spent per job: on PostgreSQL execution plus planning time from pg_stat_statements (not pure CPU: it includes waiting on I/O and locks inside a statement), on SQL Server CPU time from Query Store. PostgreSQL per-job rows fail above +25%, a PROVISIONAL line not yet calibrated against a commit compared with itself; SQL Server's is reported only."
-            echo "- **Round trips/job** is commands the benchmark process sent, counted at the driver on both providers (Npgsql's operation meter, SqlClient's command events), so EF, raw ADO.NET, locks and notifications all count. A batch is one. Reported, not gated."
-            echo "- **Xacts/job** is transactions in the benchmark database: committed plus rolled back from pg_stat_database on PostgreSQL, the Transactions/sec counter (transactions started) on SQL Server. Reported, not gated."
+            echo "- **DB ms/job** is the time the database spent per job: on PostgreSQL execution plus planning time from pg_stat_statements (track_planning on; not pure CPU: it includes waiting on I/O and locks inside a statement), on SQL Server CPU time from Query Store. Reported, not gated, on both providers: it is a timing and has not been calibrated against a commit compared with itself (the message-routing scenario swings ~60% between identical builds)."
+            echo "- **Commands/job** is commands the benchmark process sent, counted at the driver on both providers (Npgsql's operation meter, SqlClient's command events), so EF, raw ADO.NET, locks and notifications all count. A batch is one; transaction control (COMMIT) is not a command and is not counted. The harness's own commands are counted apart and left out. Reported, not gated."
+            echo "- **Xacts/job** is transactions in the benchmark database: committed plus rolled back from pg_stat_database on PostgreSQL (less the harness's statements, each a transaction of its own), the Transactions/sec counter (transactions started) on SQL Server, which still includes the harness's. Reported, not gated."
             echo "- **Lock wait ms/job** is time spent waiting for locks: on PostgreSQL sampled every 50 ms from pg_locks (ungranted requests × interval, so waits shorter than the interval are seen in proportion), on SQL Server the LCK wait time from sys.dm_os_wait_stats. Deadlocks in the window are shown beside it when there were any. Reported, not gated."
             echo "- A **—** in any column means that side did not measure it (a record from before the column existed, or a source that gave nothing). It is never compared and never fails."
             echo "- **SQL Server** statements and buffers are counted from Query Store since measurement version 2 (before: the plan cache, which lost a plan's executions when it was recompiled inside the window and read low and unstable). SQL Server numbers stepped up then: a baseline reset, not a regression."
             echo "- Every section names the database versions it ran on; each version pair runs as its own job, and base, head and the release history are only compared on the same versions."
-            echo "- **Allocated** is everything allocated while the case ran, background server work included. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
+            echo "- **Allocated** is BenchmarkDotNet's memory diagnoser: ONE extra iteration it runs after the measured window (not the measured iterations), allocations process-wide (background server work included, the iteration cleanup not), a single sample. Reported, not gated: it moves 2–3% between identical builds. ↑ on Alloc Ratio marks a rise over 5%."
             echo "- ⚠️ in a Gate cell means a side produced no measurement. That fails the scenario, because a comparison that never happened must not read as a pass."
             echo "- **Since** the latest release: the head's statements per job against the numbers recorded on that release. ⚠️ above +10% is reported and never fails, because it measures everything merged since the release, not this change."
             echo

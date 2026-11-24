@@ -17,10 +17,19 @@ namespace Warp.ServerBenchmarks.Infrastructure;
 /// one per command executed. A batch is one round trip on both.
 /// </para>
 /// <para>
-/// BenchmarkDotNet runs the benchmark in a child process and the diagnoser in the host, so the count crosses
+/// What is counted is COMMANDS, not every round trip: transaction control is not a command to either driver
+/// (checked: a BEGIN, a SELECT and a COMMIT count one on both, Npgsql sending BEGIN with the first command and
+/// COMMIT outside its command path, SqlClient committing through its transaction manager).
+/// </para>
+/// <para>
+/// Commands sent inside a <see cref="Harness.Begin"/> scope are counted separately, so the harness's own
+/// polling and cleanup are not reported as Warp's.
+/// </para>
+/// <para>
+/// BenchmarkDotNet runs the benchmark in a child process and the diagnoser in the host, so the counts cross
 /// the process boundary through a memory-mapped file: the diagnoser names it in
 /// <see cref="FileVariable"/> before the child starts (the child inherits the environment), the child keeps
-/// the running total in its first eight bytes, and the host reads them at the start and end of the measured
+/// running totals in it (<see cref="Slot"/>), and the host reads them at the start and end of the measured
 /// window. Without the variable (a lab run, a test) nothing is counted.
 /// </para>
 /// </summary>
@@ -28,11 +37,30 @@ public static class RoundTripCounter
 {
     public const string FileVariable = "WARP_BENCH_ROUNDTRIP_FILE";
 
+    /// <summary>The file's size: one eight-byte running total per <see cref="Slot"/>.</summary>
+    public const int FileSize = 4 * sizeof(long);
+
     private static readonly Lock Gate = new();
-    private static long _count;
+    private static readonly long[] Totals = new long[4];
     private static MemoryMappedViewAccessor? _view;
     private static MeterListener? _meters;
     private static IDisposable? _listeners;
+
+    /// <summary>The running totals the file holds, at eight bytes each.</summary>
+    public enum Slot
+    {
+        /// <summary>Commands Warp sent.</summary>
+        Commands = 0,
+
+        /// <summary>Commands the harness sent (inside a <see cref="Harness.Begin"/> scope).</summary>
+        HarnessCommands = 1,
+
+        /// <summary>Jobs completed by the first of two servers (by server id), counted by the benchmark.</summary>
+        FirstServerJobs = 2,
+
+        /// <summary>Jobs completed by the second of two servers.</summary>
+        SecondServerJobs = 3,
+    }
 
     /// <summary>Starts counting in this process, once. Called by the fixture before its hosts start.</summary>
     public static void Start()
@@ -49,9 +77,12 @@ public static class RoundTripCounter
             // Created and zeroed once per process; a restart after Stop keeps counting from where it was.
             if (_view is null)
             {
-                var file = MemoryMappedFile.CreateFromFile(path, FileMode.OpenOrCreate, null, sizeof(long), MemoryMappedFileAccess.ReadWrite);
-                _view = file.CreateViewAccessor(0, sizeof(long));
-                _view.Write(0, 0L);
+                var file = MemoryMappedFile.CreateFromFile(path, FileMode.OpenOrCreate, null, FileSize, MemoryMappedFileAccess.ReadWrite);
+                _view = file.CreateViewAccessor(0, FileSize);
+                for (var i = 0; i < Totals.Length; i++)
+                {
+                    _view.Write(i * sizeof(long), 0L);
+                }
             }
 
             _meters = new MeterListener
@@ -84,14 +115,20 @@ public static class RoundTripCounter
         }
     }
 
+    /// <summary>Adds to one of the totals the benchmark itself keeps (the two servers' completed jobs).</summary>
+    public static void Add(Slot slot, long amount) => Write(slot, Interlocked.Add(ref Totals[(int)slot], amount));
+
+    // Inside a harness scope the command is the harness's. The flag is async-local and both drivers raise their
+    // event on the flow that sent the command, so it reads the sender's scope.
     private static void Increment()
     {
-        var value = Interlocked.Increment(ref _count);
-
-        // Several threads may write out of order; the host reads only once the window has gone quiet, when the
-        // last write is the total.
-        _view?.Write(0, value);
+        var slot = Harness.IsActive ? Slot.HarnessCommands : Slot.Commands;
+        Write(slot, Interlocked.Increment(ref Totals[(int)slot]));
     }
+
+    // Several threads may write out of order; the host reads only once the window has gone quiet (it holds the
+    // benchmark at each signal), when the last write is the total.
+    private static void Write(Slot slot, long value) => _view?.Write((int)slot * sizeof(long), value);
 
     private sealed class SqlClientObserver : IObserver<DiagnosticListener>
     {

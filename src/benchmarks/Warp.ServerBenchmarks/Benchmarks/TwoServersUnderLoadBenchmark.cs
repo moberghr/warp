@@ -1,5 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using BenchmarkDotNet.Attributes;
+using Microsoft.EntityFrameworkCore;
+using Warp.Core.Data.Entities;
 using Warp.Core.Handlers;
 using Warp.ServerBenchmarks.Infrastructure;
 using Warp.Worker;
@@ -22,12 +24,19 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// polling backoff (10 s and up), and would sit out most of a drain this short, measuring one server with an
 /// idle neighbour. With push the publisher's commit wakes the other server, as in a real cluster.
 /// </para>
+/// <para>
+/// The scenario is only what it says while both servers take work, so each iteration counts the jobs each
+/// server completed (from the completion log rows' worker ids) before its cleanup, and the report shows the
+/// smaller server's share and fails the case when it is under 20%: a server that sat out the drain would
+/// otherwise read as a cheap cluster.
+/// </para>
 /// </summary>
 [CiScenario(
     "Two servers under load",
-    "Two servers with 10 workers each, DB push on, drain one queue of 2,000 jobs: 1,400 empty jobs, 100 that run 300 ms, and five batches of 50 each followed by a continuation batch of 50. Both worker modes.",
+    "Two servers with 10 workers each, DB push on, drain one queue of 2,010 job rows: 1,400 empty jobs, 100 that run 300 ms, and five batches of 50 each followed by a continuation batch of 50 (500 jobs and 10 batch rows). Both worker modes.",
     "What a second server adds per job while it competes for the same rows: claim contention, completions beside the other server's renewals, and cluster-task leases moving between servers while both signal the Orchestrator. No other draining scenario runs more than one server.",
-    Order = 15)]
+    Order = 15,
+    Calibrated = false)]
 [CaseLabel(nameof(UseDispatcher), "False", "single-worker")]
 [CaseLabel(nameof(UseDispatcher), "True", "dispatcher")]
 [CaseLabel(nameof(Provider), "PostgreSql", "PostgreSQL")]
@@ -82,6 +91,7 @@ public class TwoServersUnderLoadBenchmark
     [IterationCleanup]
     public void AfterIteration()
     {
+        CountJobsPerServerAsync().GetAwaiter().GetResult();
         _fixture.CleanJobTables().GetAwaiter().GetResult();
     }
 
@@ -90,6 +100,52 @@ public class TwoServersUnderLoadBenchmark
     {
         await PublishAsync(plainJobs: JobCount - SlowJobs - (Batches * PerBatch * 2), slowJobs: SlowJobs, batches: Batches);
         await _fixture.WaitForCompletion();
+    }
+
+    // The jobs each server completed this iteration, handed to the diagnoser (RoundTripCounter). A completion
+    // log row carries the worker that ran the job, or in dispatcher mode possibly its group; both name a server.
+    // Batch rows are completed by the Orchestrator with no worker and are left out. Harness work.
+    private async Task CountJobsPerServerAsync()
+    {
+        var perServer = await _fixture.HarnessAsync(async context =>
+        {
+            var workers = await context.Set<Warp.Core.Data.Entities.Worker>()
+                .TagWith(Harness.Tag)
+                .AsNoTracking()
+                .Select(x => new { x.Id, x.ServerId })
+                .ToListAsync();
+            var groups = await context.Set<WorkerGroup>()
+                .TagWith(Harness.Tag)
+                .AsNoTracking()
+                .Select(x => new { x.Id, x.ServerId })
+                .ToListAsync();
+            var serverOf = workers
+                .Concat(groups)
+                .ToDictionary(x => x.Id, x => x.ServerId);
+
+            var completedBy = await context.Set<JobLog>()
+                .TagWith(Harness.Tag)
+                .AsNoTracking()
+                .Where(x => x.EventType == "Completed")
+                .Where(x => x.WorkerId != null)
+                .GroupBy(x => x.WorkerId)
+                .Select(x =>
+                    new
+                    {
+                        WorkerId = x.Key!.Value,
+                        Count = x.Count(),
+                    })
+                .ToListAsync();
+
+            return completedBy
+                .Where(x => serverOf.ContainsKey(x.WorkerId))
+                .GroupBy(x => serverOf[x.WorkerId])
+                .ToDictionary(x => x.Key, x => (long)x.Sum(y => y.Count));
+        });
+
+        var servers = _fixture.ServerIds;
+        RoundTripCounter.Add(RoundTripCounter.Slot.FirstServerJobs, perServer.GetValueOrDefault(servers[0]));
+        RoundTripCounter.Add(RoundTripCounter.Slot.SecondServerJobs, perServer.GetValueOrDefault(servers[1]));
     }
 
     private async Task PublishAsync(int plainJobs, int slowJobs, int batches)

@@ -30,7 +30,9 @@ namespace Warp.ServerBenchmarks.Benchmarks;
     "Recurring jobs at scale",
     "500 recurring definitions fall due on the same tick; the scheduler (every 1 s) fires them all and 10 workers run the 500 jobs.",
     "The recurring scheduler visits every due definition in one server-task pass, so its cost grows with the number due at once. No other scenario reaches it.",
-    Order = 82)]
+    Order = 82,
+    Calibrated = false,
+    ClockBound = true)]
 [CaseLabel(nameof(Provider), "PostgreSql", "PostgreSQL")]
 [CaseLabel(nameof(Provider), "SqlServer", "SQL Server")]
 [Config(typeof(ServerBenchmarkConfig))]
@@ -107,14 +109,14 @@ public class RecurringJobsBenchmark
         await context.SaveChangesAsync();
     }
 
-    private async Task MakeAllDueAsync()
+    // Harness work (it stands in for the clock reaching the definitions' due time), not counted as Warp's.
+    private Task MakeAllDueAsync()
     {
-        await using var scope = _fixture.Host.Services.CreateAsyncScope();
-        var context = scope.ServiceProvider.GetRequiredService<TestContext>();
         var due = DateTime.UtcNow.AddMinutes(-1);
 
-        await context.Set<RecurringJob>()
-            .ExecuteUpdateAsync(x => x.SetProperty(y => y.NextExecution, due));
+        return _fixture.HarnessAsync(x => x.Set<RecurringJob>()
+            .TagWith(Harness.Tag)
+            .ExecuteUpdateAsync(y => y.SetProperty(z => z.NextExecution, due)));
     }
 
     // Every definition fired (moved off the past due time) and every job it created finished.
@@ -123,12 +125,11 @@ public class RecurringJobsBenchmark
         var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
         while (DateTime.UtcNow < deadline)
         {
-            await using var scope = _fixture.Host.Services.CreateAsyncScope();
-            var context = scope.ServiceProvider.GetRequiredService<TestContext>();
             var now = DateTime.UtcNow;
-            var pending = await context.Set<RecurringJob>()
-                .Where(x => x.NextExecution < now)
-                .CountAsync();
+            var pending = await _fixture.HarnessAsync(x => x.Set<RecurringJob>()
+                .TagWith(Harness.Tag)
+                .Where(y => y.NextExecution < now)
+                .CountAsync());
 
             if (pending == 0)
             {
@@ -146,11 +147,7 @@ public class RecurringJobsBenchmark
     // The recurring log references the jobs, so it goes first; the definitions stay for the next iteration.
     private async Task CleanAsync()
     {
-        await using (var scope = _fixture.Host.Services.CreateAsyncScope())
-        {
-            await scope.ServiceProvider.GetRequiredService<TestContext>().Set<RecurringJobLog>().ExecuteDeleteAsync();
-        }
-
+        await _fixture.HarnessAsync(x => x.Set<RecurringJobLog>().TagWith(Harness.Tag).ExecuteDeleteAsync());
         await _fixture.CleanJobTables();
     }
 }

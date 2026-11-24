@@ -90,12 +90,16 @@ public static partial class PerfCompare
     // finding is still real: some query in that scenario has a plan that depends on statistics.
     private const double BuffersBlowUpFactor = 5.0;
 
-    // Database time per job (PostgreSQL: pg_stat_statements execution + planning time). PROVISIONAL: it is a
-    // timing, so it carries the runner's noise where statements and WAL are counts, and it has not yet been
-    // calibrated by comparing a commit with itself on CI the way the lines above were. Set generously, at
-    // roughly the band a single iteration moved locally; tighten it once three no-op runs have measured it.
-    // SQL Server's (Query Store CPU time) is reported only, like its per-second statements.
-    private const double DbTimeTolerancePct = 25.0;
+    // Database time per job (PostgreSQL: pg_stat_statements execution + planning time; SQL Server: Query Store
+    // CPU time) is REPORTED, not gated. It is a timing, so it carries the runner's noise where statements and WAL
+    // are counts, and it has not been calibrated by comparing a commit with itself on CI the way the lines above
+    // were. A provisional +25% gate failed the message-routing scenario on a swing it shows between identical
+    // builds (its buffers per job read ~330 or ~600 on either side, the base side too). Gate it once no-op runs
+    // have measured its band (performance.md).
+
+    // Two-server scenarios: the server that completed fewer jobs must have done at least this share, or the
+    // case did not measure two servers (one sat the drain out) and fails as an invalid measurement.
+    private const double MinServerShare = 0.2;
 
     /// <summary>
     /// The database versions the run measured (<c>--database=pg17+mssql2022</c>), shown in each section's heading
@@ -310,6 +314,12 @@ public static partial class PerfCompare
         var labels = type?.GetCustomAttributes<CaseLabelAttribute>().ToList() ?? [];
         var failuresBefore = failures.Count;
         var rows = new StringBuilder();
+        var notes = new StringBuilder();
+
+        // Gates on a measurement not yet calibrated by comparing a commit with itself are shown, never failed
+        // (performance.md lists what to re-enable once no-op runs have measured them): a whole scenario that is
+        // new or was reworked, and SQL Server's per-job rows, recounted from Query Store.
+        var calibrated = scenario?.Calibrated ?? true;
 
         // A parameter with one value is the same on every row: it belongs to the scenario, not the case.
         var varying = cases
@@ -341,9 +351,12 @@ public static partial class PerfCompare
         // Decided by what the diagnoser measured, not by whether the benchmark declares a JobCount
         // parameter. The rate-limit scenario has none (its job count follows its Shape), and going by
         // the parameter labelled its per-job numbers "per second" and exempted it from every gate.
-        var perSecond = cases.All(x => headRun.TryGetValue(x.FullName, out var measured) ? measured.PerSecond : JobCountOf(x) is null);
+        // Declared on the benchmark where it can be read (MeasuredPerSecond), else read off the measurement.
+        var perSecond = type is not null
+            ? DatabaseStatementsDiagnoser.IsPerSecond(type)
+            : cases.All(x => headRun.TryGetValue(x.FullName, out var measured) ? measured.PerSecond : JobCountOf(x) is null);
         var per = perSecond ? "s" : "job";
-        var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | DB ms/{per} | Round trips/{per} | Xacts/{per} | Lock wait ms/{per} | Allocated | Alloc Ratio | Gate";
+        var header = string.Join(" | ", columns.Append("Commit")) + $" | Mean | Error | StdDev | Ratio | Jobs/s | Statements/{per} | Buffers/{per} | WAL/{per} | DB ms/{per} | Commands/{per} | Xacts/{per} | Lock wait ms/{per} | Allocated | Alloc Ratio | Gate";
         var alignment = string.Join(" | ", columns.Append("Commit").Select(_ => ":---")) + " | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---";
 
         // Declared order, the order BenchmarkDotNet ran them in. Sorting by name put "Keys: 10000"
@@ -391,10 +404,17 @@ public static partial class PerfCompare
             // A database figure on one side only is a measurement that failed, not a pass: the diagnoser
             // yields nothing when a counter read failed or the window wrote no job. Likewise a per-second
             // figure on one side against a per-job one on the other compares two different units.
+            //
+            // On NEITHER side is no better when the database was there to be read: a counter read that fails on
+            // both sides (Query Store off, a job count that went backwards) must not read as a pass.
             string? unmeasured = null;
             if ((b.StatementsPerJob is null) != (h.StatementsPerJob is null))
             {
                 unmeasured = "statements measured on one side only";
+            }
+            else if (b.StatementsPerJob is null && DatabaseConfigured(benchmark))
+            {
+                unmeasured = "statements measured on neither side, with the database configured";
             }
             else if (!perSecond && (b.WalBytesPerJob is null) != (h.WalBytesPerJob is null))
             {
@@ -419,10 +439,10 @@ public static partial class PerfCompare
             double? stmtChange = b.StatementsPerJob is null or 0 || h.StatementsPerJob is null
                 ? null
                 : (h.StatementsPerJob.Value - b.StatementsPerJob.Value) / b.StatementsPerJob.Value * 100;
-            var jobs = JobCountOf(benchmark);
-            double? baseRate = jobs is null || b.Mean <= 0 ? null : jobs.Value / (b.Mean / 1e9);
-            double? headRate = jobs is null || h.Mean <= 0 ? null : jobs.Value / (h.Mean / 1e9);
+            var baseRate = RateOf(b, benchmark);
+            var headRate = RateOf(h, benchmark);
             double? rateChange = baseRate is null || headRate is null ? null : (headRate.Value - baseRate.Value) / baseRate.Value * 100;
+            var reportOnly = !calibrated || (IsSqlServer(benchmark) && !perSecond);
 
             // Statements and WAL per job are the gates; see StatementTolerancePct and WalTolerancePct
             // for where the lines sit. Allocations are REPORTED, not gated: across the same no-op runs
@@ -442,15 +462,31 @@ public static partial class PerfCompare
             var gate = perSecond ? "reported" : "✅";
             if (stmtChange is not null)
             {
-                gate = string.Create(CultureInfo.InvariantCulture, $"✅ stmt {stmtChange:+0.0;−0.0;0.0}%");
+                gate = string.Create(CultureInfo.InvariantCulture, $"{(reportOnly ? "➖" : "✅")} stmt {stmtChange:+0.0;−0.0;0.0}%{(reportOnly ? " (report-only)" : string.Empty)}");
+            }
+
+            // A line crossed: fails the case, or on a report-only row is shown with ⚠️ and fails nothing.
+            void Breach(string cell, string failure)
+            {
+                if (!reportOnly)
+                {
+                    gate = "❌ " + cell;
+                    failures.Add(failure);
+
+                    return;
+                }
+
+                if (!gate.StartsWith('❌'))
+                {
+                    gate = "⚠️ " + cell + " (report-only)";
+                }
             }
 
             if (stmtChange > StatementTolerancePct)
             {
-                gate = string.Create(CultureInfo.InvariantCulture, $"❌ stmt {stmtChange:+0.0;−0.0;0.0}% (limit +{StatementTolerancePct:0}%)");
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
+                Breach(
+                    string.Create(CultureInfo.InvariantCulture, $"stmt {stmtChange:+0.0;−0.0;0.0}% (limit +{StatementTolerancePct:0}%)"),
+                    string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: statements/job {b.StatementsPerJob:N2} -> {h.StatementsPerJob:N2} ({stmtChange:+0.0;-0.0;0.0}%)"));
             }
 
             double? walChange = perSecond || b.WalBytesPerJob is null or 0 || h.WalBytesPerJob is null
@@ -458,43 +494,48 @@ public static partial class PerfCompare
                 : (h.WalBytesPerJob.Value - b.WalBytesPerJob.Value) / b.WalBytesPerJob.Value * 100;
             if (walChange > WalTolerancePct)
             {
-                gate = string.Create(CultureInfo.InvariantCulture, $"❌ WAL {walChange:+0.0;−0.0;0.0}% (limit +{WalTolerancePct:0}%)");
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{benchmark.Short}: WAL/job {b.WalBytesPerJob:N0} -> {h.WalBytesPerJob:N0} bytes ({walChange:+0.0;-0.0;0.0}%)"));
-            }
-
-            // Database time per job, PostgreSQL per-job rows only, and only when both sides measured it: a side
-            // without the column (a record from before it existed) is "—", never a failure.
-            double? dbTimeChange = perSecond || IsSqlServer(benchmark) || b.DbTimePerJob is null or <= 0 || h.DbTimePerJob is null
-                ? null
-                : (h.DbTimePerJob.Value - b.DbTimePerJob.Value) / b.DbTimePerJob.Value * 100;
-            if (dbTimeChange > DbTimeTolerancePct)
-            {
-                gate = string.Create(CultureInfo.InvariantCulture, $"❌ DB time {dbTimeChange:+0.0;−0.0;0.0}% (limit +{DbTimeTolerancePct:0}%, provisional)");
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{benchmark.Short}: DB ms/job {b.DbTimePerJob:N3} -> {h.DbTimePerJob:N3} ({dbTimeChange:+0.0;-0.0;0.0}%)"));
+                Breach(
+                    string.Create(CultureInfo.InvariantCulture, $"WAL {walChange:+0.0;−0.0;0.0}% (limit +{WalTolerancePct:0}%)"),
+                    string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: WAL/job {b.WalBytesPerJob:N0} -> {h.WalBytesPerJob:N0} bytes ({walChange:+0.0;-0.0;0.0}%)"));
             }
 
             // Throughput is far too noisy on a shared runner to gate a small change, but a collapse is
-            // not noise. See ThroughputCollapseFactor for where the line sits and why.
-            if (baseRate is not null && headRate is not null && headRate.Value * ThroughputCollapseFactor < baseRate.Value)
+            // not noise. See ThroughputCollapseFactor for where the line sits and why. Not on a scenario whose
+            // duration a clock sets (a rate-limit window, a scheduler tick, a job that sleeps a second): its
+            // rate says how long the clock ran, and a change in it is not Warp's.
+            if (scenario?.ClockBound != true && baseRate is not null && headRate is not null && headRate.Value * ThroughputCollapseFactor < baseRate.Value)
             {
-                gate = string.Create(CultureInfo.InvariantCulture, $"❌ jobs/s {baseRate.Value / headRate.Value:0.0}× slower (limit {ThroughputCollapseFactor:0}×)");
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
+                Breach(
+                    string.Create(CultureInfo.InvariantCulture, $"jobs/s {baseRate.Value / headRate.Value:0.0}× slower (limit {ThroughputCollapseFactor:0}×)"),
+                    string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: jobs/s {baseRate:N0} -> {headRate:N0} ({rateChange:+0.0;-0.0;0.0}%)"));
             }
 
             // Pages read are too noisy to gate a small change, but a blow-up is a query plan gone wrong.
             // See BuffersBlowUpFactor.
             if (!perSecond && b.BuffersPerJob is > 0 && h.BuffersPerJob is not null && h.BuffersPerJob.Value > b.BuffersPerJob.Value * BuffersBlowUpFactor)
             {
-                gate = string.Create(CultureInfo.InvariantCulture, $"❌ buffers {h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}× more (limit {BuffersBlowUpFactor:0}×)");
-                failures.Add(string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"{benchmark.Short}: buffers/job {b.BuffersPerJob:N1} -> {h.BuffersPerJob:N1} ({h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}x); a query in this scenario changed plan"));
+                Breach(
+                    string.Create(CultureInfo.InvariantCulture, $"buffers {h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}× more (limit {BuffersBlowUpFactor:0}×)"),
+                    string.Create(CultureInfo.InvariantCulture, $"{benchmark.Short}: buffers/job {b.BuffersPerJob:N1} -> {h.BuffersPerJob:N1} ({h.BuffersPerJob.Value / b.BuffersPerJob.Value:0.0}x); a query in this scenario changed plan"));
+            }
+
+            // Not a regression gate but a validity check, so it fails whatever the calibration: a two-server case
+            // in which one server completed almost nothing measured one server.
+            if (b.SmallestServerShare is not null || h.SmallestServerShare is not null)
+            {
+                notes.AppendLine(CultureInfo.InvariantCulture, $"<sub>{prefix.TrimEnd(' ', '|').Replace(" | ", ", ", StringComparison.Ordinal)}: the server that completed fewer jobs did {Share(b)} (base) and {Share(h)} (head).</sub>");
+                notes.AppendLine();
+                var lopsided = new[] { (Side: "base", Result: b), (Side: "head", Result: h) }
+                    .Where(x => x.Result.SmallestServerShare < MinServerShare)
+                    .Select(x => x.Side)
+                    .ToList();
+                if (lopsided.Count > 0)
+                {
+                    gate = string.Create(CultureInfo.InvariantCulture, $"❌ one server did under {MinServerShare * 100:0}% of the jobs ({string.Join(", ", lopsided)})");
+                    failures.Add(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"{benchmark.Short}: one server completed under {MinServerShare * 100:0}% of the jobs on {string.Join(" and ", lopsided)}, so two servers were not measured"));
+                }
             }
 
             var ratio = b.Mean <= 0 ? "?" : (h.Mean / b.Mean).ToString("N2", CultureInfo.InvariantCulture);
@@ -517,6 +558,7 @@ public static partial class PerfCompare
 
         var sinceLine = new StringBuilder();
         AppendSinceRelease(sinceLine, cases, headRun, release, sinceRelease);
+        AppendBackgroundCost(notes, type, cases, baseRun, headRun, labels);
 
         var failed = failures.Count > failuresBefore;
         var section = new StringBuilder();
@@ -572,6 +614,11 @@ public static partial class PerfCompare
         section.AppendLine("| " + alignment + " |");
         section.Append(rows);
         section.Append(sinceLine);
+        if (notes.Length > 0)
+        {
+            section.AppendLine();
+            section.Append(notes);
+        }
 
         // Without this the table invites its own misreading: a PostgreSQL row reading 14 beside a SQL
         // Server row reading 4 looks like a verdict on the providers, when the two numbers come from
@@ -664,6 +711,92 @@ public static partial class PerfCompare
             .FirstOrDefault() ?? value;
     }
 
+    /// <summary>
+    /// Job rows per second: the job rows the diagnoser counted per measured operation, over the operation's mean
+    /// time, so the rate and the per-job columns divide by the same rows. A record from before that count
+    /// falls back to the case's <c>JobCount</c> parameter.
+    /// </summary>
+    private static double? RateOf(BdnResult result, BdnCase benchmark)
+    {
+        if (result.Mean <= 0)
+        {
+            return null;
+        }
+
+        double? perOperation = result.JobRows is { } rows && result.Operations > 0 ? rows / result.Operations : JobCountOf(benchmark);
+
+        return perOperation / (result.Mean / 1e9);
+    }
+
+    private static string Share(BdnResult result) =>
+        result.SmallestServerShare is { } share
+            ? string.Create(CultureInfo.InvariantCulture, $"{share * 100:0}% of {result.ServerJobs:N0}")
+            : "—";
+
+    /// <summary>
+    /// For a scenario that adds background work to a drain (<see cref="BackgroundCostAttribute"/>): what the
+    /// background work cost PER SECOND of the drain, each case against the scenario's case without it, on each
+    /// side. Per job it is that per-second work spread over the drain, so a faster drain read as a cheaper
+    /// dashboard; per second it is what the database spends while the work runs, which a drain's speed does
+    /// not move.
+    /// </summary>
+    private static void AppendBackgroundCost(
+        StringBuilder notes,
+        Type? type,
+        List<BdnCase> cases,
+        Dictionary<string, BdnResult> baseRun,
+        Dictionary<string, BdnResult> headRun,
+        List<CaseLabelAttribute> labels)
+    {
+        if (type?.GetCustomAttribute<BackgroundCostAttribute>() is not { } background)
+        {
+            return;
+        }
+
+        var without = $"{background.Parameter}: {background.Without}";
+        foreach (var benchmark in cases)
+        {
+            var value = benchmark.Parameters.FirstOrDefault(x => string.Equals(x.Name, background.Parameter, StringComparison.Ordinal)).Value;
+            if (value is null || string.Equals(value, background.Without, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var alone = benchmark.FullName.Replace($"{background.Parameter}: {value}", without, StringComparison.Ordinal);
+            var cells = new[] { (Side: "base", Run: baseRun), (Side: "head", Run: headRun) }
+                .Select(x => (x.Side, Cost: BackgroundCostPerSecond(x.Run, benchmark.FullName, alone, benchmark)))
+                .Select(x => x.Cost is { } cost
+                    ? string.Create(CultureInfo.InvariantCulture, $"{x.Side} {cost.Statements:N0} statements/s, {cost.DbMs:N0} DB ms/s")
+                    : $"{x.Side} —");
+            var name = string.Join(", ", benchmark.Parameters
+                .Where(x => !string.Equals(x.Name, "JobCount", StringComparison.Ordinal))
+                .Select(x => ParameterCell(benchmark, x.Name, labels)));
+            notes.AppendLine(CultureInfo.InvariantCulture, $"<sub>Background work, per second of drain ({name}, beyond the drain alone): {string.Join("; ", cells)}. Reported, not gated.</sub>");
+            notes.AppendLine();
+        }
+    }
+
+    private static (double Statements, double DbMs)? BackgroundCostPerSecond(Dictionary<string, BdnResult> run, string withWork, string alone, BdnCase benchmark)
+    {
+        if (!run.TryGetValue(withWork, out var loaded) || !run.TryGetValue(alone, out var bare)
+            || loaded.StatementsPerJob is not { } loadedStatements || bare.StatementsPerJob is not { } bareStatements
+            || loaded.Mean <= 0)
+        {
+            return null;
+        }
+
+        // Per job times jobs per second of drain: per second of the loaded drain.
+        var jobsPerSecond = RateOf(loaded, benchmark) ?? 0;
+        var dbMs = (loaded.DbTimePerJob ?? 0) - (bare.DbTimePerJob ?? 0);
+
+        return ((loadedStatements - bareStatements) * jobsPerSecond, dbMs * jobsPerSecond);
+    }
+
+    private static bool DatabaseConfigured(BdnCase benchmark) =>
+        Environment.GetEnvironmentVariable(IsSqlServer(benchmark)
+            ? PostgresServerFixture.SqlServerConnectionStringVariable
+            : PostgresServerFixture.ConnectionStringVariable) is not null;
+
     private static bool IsSqlServer(BdnCase benchmark) =>
         benchmark.Parameters.Any(x =>
             string.Equals(x.Name, "Provider", StringComparison.Ordinal)
@@ -727,7 +860,11 @@ public static partial class PerfCompare
                     MetricOf(benchmark, "RoundTripsPerJob") ?? MetricOf(benchmark, "RoundTripsPerSecond"),
                     MetricOf(benchmark, "TransactionsPerJob") ?? MetricOf(benchmark, "TransactionsPerSecond"),
                     MetricOf(benchmark, "LockWaitMsPerJob") ?? MetricOf(benchmark, "LockWaitMsPerSecond"),
-                    MetricOf(benchmark, "Deadlocks"));
+                    MetricOf(benchmark, "Deadlocks"),
+                    MetricOf(benchmark, "JobRows"),
+                    MetricOf(benchmark, "SmallestServerShare"),
+                    MetricOf(benchmark, "ServerJobs"),
+                    ActualOperations(benchmark));
             }
         }
 
@@ -758,6 +895,14 @@ public static partial class PerfCompare
 
         return "Job=" + job[..open] + "  " + string.Join("  ", settings);
     }
+
+    // The operations of the measured window (the workload's actual iterations): what the diagnoser's job rows
+    // were counted over.
+    private static long ActualOperations(BdnBenchmark benchmark) =>
+        benchmark.Measurements?
+            .Where(x => string.Equals(x.IterationMode, "Workload", StringComparison.Ordinal))
+            .Where(x => string.Equals(x.IterationStage, "Actual", StringComparison.Ordinal))
+            .Sum(x => x.Operations) ?? 0;
 
     private static double? MetricOf(BdnBenchmark benchmark, string id) =>
         benchmark.Metrics
@@ -818,7 +963,11 @@ public static partial class PerfCompare
         double? RoundTripsPerJob = null,
         double? TransactionsPerJob = null,
         double? LockWaitMsPerJob = null,
-        double? Deadlocks = null);
+        double? Deadlocks = null,
+        double? JobRows = null,
+        double? SmallestServerShare = null,
+        double? ServerJobs = null,
+        long Operations = 0);
 
     private sealed record BdnHost(
         string? BenchmarkDotNetVersion,
@@ -835,7 +984,9 @@ public static partial class PerfCompare
 
     private sealed record BdnReport(List<BdnBenchmark>? Benchmarks, BdnHost? HostEnvironmentInfo);
 
-    private sealed record BdnBenchmark(string? FullName, string? DisplayInfo, BdnStatistics? Statistics, BdnMemory? Memory, List<BdnMetric>? Metrics);
+    private sealed record BdnBenchmark(string? FullName, string? DisplayInfo, BdnStatistics? Statistics, BdnMemory? Memory, List<BdnMetric>? Metrics, List<BdnMeasurement>? Measurements);
+
+    private sealed record BdnMeasurement(string? IterationMode, string? IterationStage, long Operations);
 
     private sealed record BdnMetric(double Value, BdnMetricDescriptor? Descriptor);
 

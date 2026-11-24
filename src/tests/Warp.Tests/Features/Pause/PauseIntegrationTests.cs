@@ -1,9 +1,12 @@
+using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Warp.Core.Data.Entities;
 using Warp.Core.Enums;
 using Warp.Tests.Fixtures;
 using Warp.Tests.TestData.Handlers;
+using Warp.Worker;
 
 namespace Warp.Tests.Features.Pause;
 
@@ -99,14 +102,22 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
         // server's clock is not corrected to the database's (DatabaseClock), so the claim stamp below and
         // resumedAt are read off the same clock. With the correction on, each beat re-measures the offset
         // with up to half a round trip of error, which moved a claim stamp tens of ms before resumedAt on CI.
-        await using var server = await WarpTestServer.StartAsync(Fixture, configure: cfg => cfg.HealthCheckInterval = null);
-        var groupId = await GetFirstGroupId(server);
+        using var loops = new WorkerLoopPauseTracker();
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            configure: cfg => cfg.HealthCheckInterval = null,
+            configureServices: services => services.AddSingleton<PauseStateHolder>(loops));
         var svc = server.CreateServerCommandService();
 
         // Pause, publish, then resume
         await svc.PauseServer(server.ServerId);
         await server.RunHeartbeatOnceAsync(Xunit.TestContext.Current.CancellationToken);
-        server.PauseState.IsPaused(groupId).ShouldBeTrue();
+
+        // A worker iteration that passed its pause check before the heartbeat flipped the holder still
+        // completes its claim (rule 6.8): on CI one did, claiming the job published below while the server was
+        // paused. So wait until every worker loop that has checked at all has since answered "paused"; none
+        // can claim after that.
+        await loops.WaitUntilEveryLoopSawPauseAsync(Xunit.TestContext.Current.CancellationToken);
 
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new UnitRequest());
@@ -180,5 +191,34 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
 
         var job = await server.GetJob(jobId);
         job.CurrentState.ShouldBe(State.Completed);
+    }
+
+    // Tells the worker loops apart without touching the worker: each loop is one async flow, and an AsyncLocal
+    // set inside a synchronous call (IsPaused) stays set in the caller's flow, so a loop's first check gives it
+    // an identity that its later checks see again. A loop that last answered "not paused" may be inside a claim.
+    private sealed class WorkerLoopPauseTracker : PauseStateHolder, IDisposable
+    {
+        private static readonly AsyncLocal<object?> Loop = new();
+        private readonly ConcurrentDictionary<object, bool> _lastAnswer = new(ReferenceEqualityComparer.Instance);
+        private readonly SemaphoreSlim _checked = new(0);
+
+        public override bool IsPaused(Guid? workerGroupId)
+        {
+            var paused = base.IsPaused(workerGroupId);
+            _lastAnswer[Loop.Value ??= new object()] = paused;
+            _checked.Release();
+
+            return paused;
+        }
+
+        public async Task WaitUntilEveryLoopSawPauseAsync(CancellationToken ct)
+        {
+            while (_lastAnswer.Values.Any(x => !x))
+            {
+                await _checked.WaitAsync(ct);
+            }
+        }
+
+        public void Dispose() => _checked.Dispose();
     }
 }

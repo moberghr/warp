@@ -5,6 +5,8 @@
 # base run inherited tables, indexes and statistics the head run had already filled and vacuumed.
 # Comparing a commit with itself then read ~50 buffers per job higher on "head" in most scenarios
 # (fan-out 121 vs 182, concurrency 130 vs 184): a difference made by the run order, not the code.
+#
+# track_planning is on so the "DB ms" column is execution + planning time, as it is labelled.
 set -euo pipefail
 
 # The image is the version under test: BENCH_POSTGRES_IMAGE (or the first argument) names it, pinned to an
@@ -18,7 +20,8 @@ docker run -d --name warpbench -p 5432:5432 \
   -e POSTGRES_PASSWORD=postgres \
   "$IMAGE" \
   -c shared_preload_libraries=pg_stat_statements \
-  -c pg_stat_statements.track=top
+  -c pg_stat_statements.track=top \
+  -c pg_stat_statements.track_planning=on
 
 # Not pg_isready. The image initialises on a TEMPORARY server, then stops it and starts the real one,
 # and pg_isready answers yes for the temporary one: a CREATE EXTENSION sent then was cut off by the

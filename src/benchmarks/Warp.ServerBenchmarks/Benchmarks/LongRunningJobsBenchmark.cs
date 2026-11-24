@@ -26,7 +26,8 @@ namespace Warp.ServerBenchmarks.Benchmarks;
     "Long-running jobs",
     "20 workers run 100 jobs of one second each, 20 at a time, every job logging a line every 100 ms, with the keep-alive check every 250 ms and the log flush every 100 ms, in both worker modes.",
     "Running jobs are renewed, checked for cancellation and have their logs flushed by one monitor per worker group (rule 6.14). Every other scenario's jobs finish before the monitor ticks, so only this one measures that work.",
-    Order = 85)]
+    Order = 85,
+    ClockBound = true)]
 [CaseLabel(nameof(UseDispatcher), "False", "single-worker")]
 [CaseLabel(nameof(UseDispatcher), "True", "dispatcher")]
 [CaseLabel(nameof(Provider), "PostgreSql", "PostgreSQL")]

@@ -28,15 +28,26 @@ namespace Warp.ServerBenchmarks.Benchmarks;
 /// </para>
 /// <para>
 /// <b>None</b> is the same drain with neither, for contrast within the scenario. The case is a parameter of
-/// one class because the three share everything but the background work; reading each against <b>None</b> on
-/// the same commit gives what the background work costs per job.
+/// one class because the three share everything but the background work.
+/// </para>
+/// <para>
+/// <b>Reading it.</b> The background work runs every SECOND, not per job: over a drain it adds (seconds of
+/// drain × work per second), so per job it shrinks when the drain gets faster and grows when it gets slower,
+/// with no change to what the dashboard or the folds cost. The per-job columns are therefore the drain's cost
+/// under that load, and the report adds each case's background work PER SECOND of drain, against <b>None</b>
+/// on the same side (<see cref="BackgroundCostAttribute"/>): that is the figure to read for "did the
+/// dashboard or the folds get more expensive". The dashboard tabs' queries are the workload here, so they are
+/// counted like Warp's own; only the harness's polling and cleanup are left out (<see cref="Harness"/>).
+/// Its gates are report-only until calibrated (performance.md).
 /// </para>
 /// </summary>
 [CiScenario(
     "Background load",
     "10 workers drain 2,000 empty jobs alone, while 10 dashboard tabs poll status and the job list every second, or while the counter, statistic, metric and error-group folds run every second.",
     "Dashboard reads and the aggregation tasks share the job and counter tables with the drain. Each draining scenario runs without them, and the idle scenarios run them with nothing to read or fold.",
-    Order = 92)]
+    Order = 92,
+    Calibrated = false)]
+[BackgroundCost(nameof(Load), nameof(BackgroundLoad.None))]
 [CaseLabel(nameof(Load), "None", "drain alone")]
 [CaseLabel(nameof(Load), "Dashboard", "10 dashboard tabs")]
 [CaseLabel(nameof(Load), "Rollups", "folds every second")]

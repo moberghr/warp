@@ -28,6 +28,19 @@ public sealed class CiScenarioAttribute : Attribute
 
     /// <summary>Ordering in the report; lower first.</summary>
     public int Order { get; set; } = 100;
+
+    /// <summary>
+    /// False while the scenario's gates have not been calibrated by comparing a commit with itself on CI: its
+    /// gates are then shown and fail nothing (a missing measurement still fails). New scenarios start false;
+    /// performance.md lists the ones to switch back on.
+    /// </summary>
+    public bool Calibrated { get; set; } = true;
+
+    /// <summary>
+    /// True when a clock sets the scenario's duration (a rate-limit window, a scheduler tick, a job that waits
+    /// a second), so its jobs per second say how long the clock ran and are not gated on a collapse.
+    /// </summary>
+    public bool ClockBound { get; set; }
 }
 
 /// <summary>
