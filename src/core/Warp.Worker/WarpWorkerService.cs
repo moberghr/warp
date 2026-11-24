@@ -57,6 +57,11 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
     private readonly RunningJobMonitor _monitor;
     private bool _finalizationAttempted;
 
+    // Resolved from the first job's scope: the announcements are internal to Core, and this class's public
+    // constructor cannot take them.
+    private EnqueueAnnouncements? _announcements;
+    private bool _announcementsResolved;
+
     public WarpWorkerService(Guid workerId, IServiceScopeFactory serviceScopeFactory, ILogger<WarpWorkerService<TContext>> logger, IOptions<WarpServerConfiguration> configuration, WorkerGroupConfiguration groupConfiguration, TimeProvider timeProvider, IWarpSqlQueries<TContext> sqlQueries, IWarpNotificationTransport notificationTransport, ServerTaskSignals<TContext> signals, WarpCounterBuffer counterBuffer)
         : this(workerId, serviceScopeFactory, logger, configuration, groupConfiguration, timeProvider, sqlQueries, notificationTransport, signals, counterBuffer, monitor: null)
     {
@@ -477,10 +482,25 @@ public class WarpWorkerService<TContext> : IWarpWorkerService
         // 6.11). Both ids are on the claimed row: no query, no extra statement.
         Guid? settled = job.CurrentState is State.Completed or State.Failed or State.Deleted ? job.Id : null;
         _signals.SignalJobFinalized(job.ParentJobId, settled);
-        await NotificationDispatch.FireAsync(
-            _notificationTransport,
-            [new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(job.ParentJobId, settled))],
-            cancellationToken);
+
+        // With push on, the cross-process half goes through the relay, which merges a batch of these into
+        // one notification: published here, it was one round trip per job on this path, and on SQL Server
+        // a fan-out to every listening process per job (~2 statements per job more than one per batch).
+        var finalized = new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(job.ParentJobId, settled));
+        if (!_announcementsResolved)
+        {
+            _announcements = workerScope.ServiceProvider.GetService<EnqueueAnnouncements>();
+            _announcementsResolved = true;
+        }
+
+        if (_announcements is { IsActive: true })
+        {
+            _announcements.Announce([finalized]);
+        }
+        else
+        {
+            await NotificationDispatch.FireAsync(_notificationTransport, [finalized], cancellationToken);
+        }
 
         PerfTrace.Mark(PerfTrace.Done);
         PerfTrace.End();

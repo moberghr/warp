@@ -156,6 +156,29 @@ public class FinalizedParentHintsTests
     }
 
     [Fact]
+    public void Merge_MoreJobsThanOnePayloadCarries_SplitsAndKeepsEveryId()
+    {
+        var parent = Guid.NewGuid();
+        var jobs = Enumerable.Range(0, FinalizedParentsPayload.MaxIds + 50).Select(_ => Guid.NewGuid()).ToList();
+
+        var merged = FinalizedParentsPayload.Merge(jobs.Select(x => (string?)FinalizedParentsPayload.Encode(parent, x)));
+
+        merged.Count.ShouldBe(2);
+        merged.ShouldAllBe(x => x != null);
+        var all = string.Concat(merged);
+        jobs.ShouldAllBe(x => all.Contains(x.ToString("N"), StringComparison.Ordinal));
+        merged.Count(x => x!.Contains(parent.ToString("N"), StringComparison.Ordinal)).ShouldBe(1);
+    }
+
+    [Fact]
+    public void Merge_AnUnknownPayloadAmongThem_IsOneUnknown()
+    {
+        var merged = FinalizedParentsPayload.Merge([FinalizedParentsPayload.Encode(Guid.NewGuid(), Guid.NewGuid()), null]);
+
+        merged.ShouldBe([null]);
+    }
+
+    [Fact]
     public void Payload_MoreParentsThanOneNotificationCarries_IsSentAsUnknown()
     {
         Guid[] tooMany = [.. Enumerable.Range(0, FinalizedParentsPayload.MaxIds + 1).Select(_ => Guid.NewGuid())];

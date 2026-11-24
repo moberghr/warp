@@ -47,6 +47,23 @@ internal sealed class EnqueueNotificationRelay : DrainService<Notification>
     protected override void CompleteWriting() => _announcements.Complete();
 
     // FireAsync never throws (transports log and count failures), which DrainService requires of a flush.
-    protected override Task FlushAsync(List<Notification> batch, CancellationToken cancellationToken) =>
-        NotificationDispatch.FireAsync(_transport, [.. batch.Distinct()], cancellationToken);
+    // A job-finalized notification names its own jobs, so those are merged rather than folded: one per
+    // batch (more only past the payload's id limit) instead of one per finished job.
+    protected override Task FlushAsync(List<Notification> batch, CancellationToken cancellationToken)
+    {
+        var finalized = batch
+            .Where(x => x.Kind == NotificationKind.JobFinalized)
+            .Select(x => x.Queue)
+            .ToList();
+        var notifications = batch
+            .Where(x => x.Kind != NotificationKind.JobFinalized)
+            .Distinct()
+            .ToList();
+        if (finalized.Count > 0)
+        {
+            notifications.AddRange(FinalizedParentsPayload.Merge(finalized).Select(x => new Notification(NotificationKind.JobFinalized, x)));
+        }
+
+        return NotificationDispatch.FireAsync(_transport, notifications, cancellationToken);
+    }
 }

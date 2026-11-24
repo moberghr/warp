@@ -39,6 +39,31 @@ public class EnqueueNotificationRelayTests
     }
 
     [TimedFact]
+    public async Task Relay_FinalizedJobsOfOneBatch_PublishesOneNotificationNamingEveryJob()
+    {
+        // Single-worker mode announces one per finished job; publishing each was a round trip per job.
+        var announcements = new EnqueueAnnouncements([new EnqueueNotificationRelayMarker()]);
+        using var transport = new RecordingTransport();
+        using var relay = new EnqueueNotificationRelay(announcements, transport);
+        var jobs = Enumerable.Range(0, 3).Select(_ => (Parent: Guid.NewGuid(), Job: Guid.NewGuid())).ToList();
+        announcements.Announce([.. jobs.Select(x => new Notification(NotificationKind.JobFinalized, FinalizedParentsPayload.Encode(x.Parent, x.Job)))]);
+        announcements.Announce([new Notification(NotificationKind.JobEnqueued, "a")]);
+
+        await relay.StartAsync(Xunit.TestContext.Current.CancellationToken);
+        await transport.WaitForCount(2);
+        await relay.StopAsync(Xunit.TestContext.Current.CancellationToken);
+
+        var finalized = transport.Published.Where(x => x.Kind == NotificationKind.JobFinalized).ShouldHaveSingleItem();
+        foreach (var (parent, job) in jobs)
+        {
+            finalized.Queue.ShouldNotBeNull().ShouldContain(parent.ToString("N"));
+            finalized.Queue.ShouldContain(job.ToString("N"));
+        }
+
+        transport.Published.ShouldContain((NotificationKind.JobEnqueued, (string?)"a"));
+    }
+
+    [TimedFact]
     public async Task Relay_StoppedWhilePublishing_PublishesWhatIsStillQueued()
     {
         var announcements = new EnqueueAnnouncements([new EnqueueNotificationRelayMarker()]);
