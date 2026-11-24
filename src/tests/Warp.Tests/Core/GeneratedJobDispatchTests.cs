@@ -31,6 +31,31 @@ public sealed class GeneratedJobDispatchTests
     }
 
     [TimedFact]
+    public async Task ExecuteJobHandler_HandlerFails_StackTraceCarriesNoGeneratedPlumbing()
+    {
+        // Arrange — the trace is stored for every failure (the failure log row and the error-grouping
+        // entry). The generated frames carried the job type's full name and the generated file's path:
+        // on the failure-path benchmark, ~15% more WAL per failed job than the reflection path.
+        var services = new ServiceCollection();
+        services.AddTransient<IJobHandler<AsyncThrowingRequest>, AsyncThrowingHandler>();
+        await using var provider = services.BuildServiceProvider();
+
+        // Act
+        var exception = await Should.ThrowAsync<InvalidOperationException>(JobDispatcher.ExecuteJobHandler(
+            new AsyncThrowingRequest(),
+            typeof(AsyncThrowingRequest),
+            typeof(AsyncThrowingHandler),
+            provider,
+            Xunit.TestContext.Current.CancellationToken));
+
+        // Assert
+        var trace = exception.StackTrace.ShouldNotBeNull();
+        trace.ShouldContain(nameof(AsyncThrowingHandler));
+        trace.ShouldNotContain(".g.cs", Case.Sensitive);
+        trace.ShouldNotContain(nameof(AsyncThrowingRequest) + "(", Case.Sensitive);
+    }
+
+    [TimedFact]
     public async Task ExecuteHandler_RowNamesAHandlerOtherThanTheLastRegistered_RunsTheNamedOne()
     {
         // Arrange
@@ -88,5 +113,17 @@ public sealed class SecondTwoHandler(HandlerRuns runs) : IJobHandler<TwoHandlerR
         runs.Names.Add(nameof(SecondTwoHandler));
 
         return Task.CompletedTask;
+    }
+}
+
+public sealed class AsyncThrowingRequest : IJob;
+
+public sealed class AsyncThrowingHandler : IJobHandler<AsyncThrowingRequest>
+{
+    public async Task HandleAsync(AsyncThrowingRequest message, CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+
+        throw new InvalidOperationException("failed after its first await");
     }
 }
