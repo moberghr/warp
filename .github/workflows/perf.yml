@@ -37,7 +37,7 @@ env:
   DOTNET_VERSION: '10.0'
 
 concurrency:
-  group: perf-${{ github.ref }}
+  group: perf-${{ github.ref }}-${{ inputs.head_ref }}
   cancel-in-progress: true
 
 jobs:
@@ -136,34 +136,6 @@ jobs:
         benchmark:
           - name: dispatcher
             filter: '*DispatcherModeBenchmark*'
-            sqlserver: true
-          - name: completion-batch
-            filter: '*CompletionBatchBenchmark*'
-          - name: payload
-            filter: '*PayloadSizeBenchmark*'
-          - name: concurrency
-            filter: '*ConcurrencyBenchmark*'
-          - name: rate-limit
-            filter: '*RateLimitBenchmark*'
-          - name: failure-path
-            filter: '*FailurePathBenchmark*'
-          - name: publish
-            filter: '*PublishBenchmark*'
-          - name: message-routing
-            filter: '*MessageRoutingBenchmark*'
-          - name: scheduled-activation
-            filter: '*ScheduledActivationBenchmark*'
-          # Exact class filters: '*BatchBenchmark*' also matched CompletionBatchBenchmark.
-          - name: retries
-            filter: '*.RetryBenchmark.*'
-          - name: large-table
-            filter: '*.LargeTableBenchmark.*'
-          - name: batches
-            filter: '*.BatchBenchmark.*'
-          - name: fan-out
-            filter: '*.FanOutBenchmark.*'
-          - name: idle
-            filter: '*.IdleServerBenchmark.*'
             sqlserver: true
     env:
       WARP_BENCH_POSTGRES: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
