@@ -148,5 +148,9 @@ public class WarpDispatcherHost<TContext> : IHostedService
         // Only once every worker has stopped: nothing is added after this, and the final flush writes
         // the last completions.
         await Task.WhenAll(_flushers.Select(x => x.StopAsync(cancellationToken)));
+        foreach (var flusher in _flushers)
+        {
+            flusher.Dispose();
+        }
     }
 }

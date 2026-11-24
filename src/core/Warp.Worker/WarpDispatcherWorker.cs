@@ -143,7 +143,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
         return Stopwatch.GetTimestamp();
     }
 
-    private void AddCompletion(PendingCompletion completion) => _flusher.Add(completion);
+    private ValueTask AddCompletionAsync(PendingCompletion completion) => _flusher.AddAsync(completion);
 
     private async Task ProcessJob(Job job, CancellationToken cancellationToken)
     {
@@ -318,7 +318,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
 
             var (counters, finalLogs) = BuildFinalization(job, null, durationMs, successOutcome, totalDeadlineUtc, incomingAttempts);
             var logs = CollectLogs(finalLogs, logCollector, progressCollector, processingLog).ToArray();
-            AddCompletion(new PendingCompletion(job, counters, logs));
+            await AddCompletionAsync(new PendingCompletion(job, counters, logs));
         }
         catch (OperationCanceledException) when (jobCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -371,7 +371,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 WorkerId = _workerId,
             };
             var logs = CollectLogs([cancelLog], logCollector, progressCollector, processingLog).ToArray();
-            AddCompletion(new PendingCompletion(job, cancelCounters, logs));
+            await AddCompletionAsync(new PendingCompletion(job, cancelCounters, logs));
         }
         catch (Exception e)
         {
@@ -450,7 +450,7 @@ public class WarpDispatcherWorker<TContext> : BackgroundService
                 ? ErrorOccurrenceFactory.FromException(ErrorSource.Job, e, culprit, job.TraceId, _configuration.ApplicationName, _timeProvider.GetUtcNow().UtcDateTime, _configuration.ApplicationVersion, _configuration.ApplicationEnvironment)
                 : null;
 
-            AddCompletion(new PendingCompletion(job, counters, logs, occurrence));
+            await AddCompletionAsync(new PendingCompletion(job, counters, logs, occurrence));
         }
         finally
         {

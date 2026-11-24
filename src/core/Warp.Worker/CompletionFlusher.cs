@@ -19,7 +19,7 @@ namespace Warp.Worker;
 /// loop, and the loop checks the triggers again before it writes, so a stale wake writes nothing.
 /// </para>
 /// </summary>
-internal sealed class CompletionFlusher<TContext>
+internal sealed class CompletionFlusher<TContext> : IDisposable
     where TContext : DbContext
 {
     private readonly CompletionBatch _batch;
@@ -43,6 +43,13 @@ internal sealed class CompletionFlusher<TContext>
     private long _bufferStartedAt;
     private Task? _loop;
 
+    private const int FinalFlushBudgetSeconds = 5;
+
+    // Cancelled when StopAsync's token fires with a write still running.
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly Lock _stopGate = new();
+    private bool _stopped;
+
     public CompletionFlusher(
         CompletionBatch batch,
         DispatcherWorkerAvailability availability,
@@ -61,11 +68,34 @@ internal sealed class CompletionFlusher<TContext>
 
     public void Start()
     {
-        _loop = Task.Run(RunAsync);
+        _loop = Task.Run(RunAsync, CancellationToken.None);
     }
 
-    /// <summary>Buffers a finished job. The first completion of a buffer starts its timer.</summary>
-    public void Add(PendingCompletion completion)
+    public void Dispose() => _lifetime.Dispose();
+
+    /// <summary>
+    /// Buffers a finished job; the first completion of a buffer starts its timer. After
+    /// <see cref="StopAsync"/> has made its final flush (a handler that outlived the shutdown), the
+    /// completion is written at once instead, since nothing would write the buffer any more.
+    /// </summary>
+    public ValueTask AddAsync(PendingCompletion completion)
+    {
+        lock (_stopGate)
+        {
+            if (!_stopped)
+            {
+                Buffer(completion);
+
+                return default;
+            }
+
+            _batch.Add(completion, out _);
+        }
+
+        return new ValueTask(FlushSafelyAsync());
+    }
+
+    private void Buffer(PendingCompletion completion)
     {
         if (_batch.Add(completion, out var generation))
         {
@@ -100,21 +130,40 @@ internal sealed class CompletionFlusher<TContext>
     }
 
     /// <summary>
-    /// Ends the loop and writes whatever is still buffered. Called once every worker of the group has
-    /// stopped, so nothing is added after it.
+    /// Ends the loop and writes whatever is still buffered, waiting no longer than the host's shutdown
+    /// token: a write still running when it fires is cancelled, and its jobs stay Processing for
+    /// StaleJobRecovery, the same as a crash in that window. Called once every worker of the group has
+    /// stopped; a completion added after it is written inline (<see cref="AddAsync"/>).
     /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        lock (_stopGate)
+        {
+            _stopped = true;
+        }
+
         _wake.Writer.TryComplete();
         if (_loop != null)
         {
-            await _loop.ConfigureAwait(false);
+            try
+            {
+                await _loop.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("A completion write was still running at shutdown; cancelling it");
+                await _lifetime.CancelAsync().ConfigureAwait(false);
+            }
         }
 
+        // The final flush has a budget of its own, as the other drain pipelines do (rule 2.19): the host's
+        // token may already have fired while the workers stopped, and cancelling the final write on it
+        // would drop every completion still buffered.
         try
         {
-            var flushed = await _batch.FlushAsync();
-            await AnnounceAsync(flushed, cancellationToken);
+            using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(FinalFlushBudgetSeconds));
+            var flushed = await _batch.FlushAsync(budget.Token);
+            await AnnounceAsync(flushed, budget.Token);
         }
         catch (Exception ex)
         {
@@ -126,7 +175,15 @@ internal sealed class CompletionFlusher<TContext>
 
     private async Task WakeWhenDueAsync(long generation)
     {
-        await Task.Delay(_batch.FlushInterval, _timeProvider).ConfigureAwait(false);
+        try
+        {
+            await Task.Delay(_batch.FlushInterval, _timeProvider, _lifetime.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Shut down: the final flush has taken this buffer.
+            return;
+        }
 
         // By generation, not IsTimeElapsed: the timer and that clock are different sources, and the
         // timer may fire a hair early (rule 6.13). A buffer drained since then is not this timer's.
@@ -158,7 +215,7 @@ internal sealed class CompletionFlusher<TContext>
 
     private async Task RunAsync()
     {
-        while (await _wake.Reader.WaitToReadAsync().ConfigureAwait(false))
+        while (await WaitForWakeAsync().ConfigureAwait(false))
         {
             _wake.Reader.TryRead(out _);
 
@@ -167,6 +224,19 @@ internal sealed class CompletionFlusher<TContext>
             {
                 await FlushSafelyAsync().ConfigureAwait(false);
             }
+        }
+    }
+
+    // False when the flusher stops, or is cancelled at shutdown.
+    private async Task<bool> WaitForWakeAsync()
+    {
+        try
+        {
+            return await _wake.Reader.WaitToReadAsync(_lifetime.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
         }
     }
 
@@ -188,13 +258,13 @@ internal sealed class CompletionFlusher<TContext>
                 }
             }
 
-            var flushed = await _batch.FlushAsync();
+            var flushed = await _batch.FlushAsync(_lifetime.Token);
             if (timed)
             {
                 DispatcherDiagnostics.FlushDuration.Record(DispatcherDiagnostics.Since(start));
             }
 
-            await AnnounceAsync(flushed, CancellationToken.None);
+            await AnnounceAsync(flushed, _lifetime.Token);
         }
         catch (Exception ex)
         {

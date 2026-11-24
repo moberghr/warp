@@ -150,7 +150,7 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
         flusher.Start();
         var job = await InsertProcessingJob();
         availability.Reserve(1);
-        flusher.Add(MakeEntry(job));
+        await flusher.AddAsync(MakeEntry(job));
 
         // Act — the worker returns its slot, the dispatcher claims the next job, then the worker reports.
         var remaining = availability.Release();
@@ -176,6 +176,116 @@ public abstract class CompletionBatchTestsBase : IAsyncLifetime
 
         await flusher.StopAsync(Xunit.TestContext.Current.CancellationToken);
         state.ShouldBe(State.Completed);
+    }
+
+    [TimedFact]
+    public async Task StopAsync_AWriteThatHangs_ReturnsWhenItsTokenFires()
+    {
+        // Arrange — the loop's write hangs on a database that never answers. Shutdown must not wait for it
+        // past the host's shutdown token.
+        var entered = new SemaphoreSlim(0);
+        var release = new TaskCompletionSource();
+        async Task<IReadOnlyCollection<Guid>> Hang(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct)
+        {
+            entered.Release();
+            await release.Task.WaitAsync(ct);
+
+            return [];
+        }
+
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 50, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Hang);
+        var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance);
+        flusher.Start();
+        try
+        {
+            await flusher.AddAsync(MakeEntry(await InsertProcessingJob()));
+            flusher.SlotReleased(0);
+            (await entered.WaitAsync(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken)).ShouldBeTrue("the write never started");
+
+            // Act
+            using var shutdown = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+            var stopping = flusher.StopAsync(shutdown.Token);
+
+            // Assert
+            (await Task.WhenAny(stopping, Task.Delay(TimeSpan.FromSeconds(5), Xunit.TestContext.Current.CancellationToken))).ShouldBe(stopping, "StopAsync waited for the hung write past its token");
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
+    [TimedFact]
+    public async Task StopAsync_ShutdownTokenAlreadyFired_StillWritesWhatIsBuffered()
+    {
+        // Arrange — the host's token has often fired by the time the workers have stopped; the final flush
+        // has a budget of its own, or every completion still buffered is dropped.
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 50, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, CompleteJobs);
+        var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance);
+        flusher.Start();
+        var job = await InsertProcessingJob();
+        await flusher.AddAsync(MakeEntry(job));
+
+        // Act
+        await flusher.StopAsync(new CancellationToken(canceled: true));
+
+        // Assert
+        var state = await _fixture.CreateContext().Set<Job>()
+            .Where(x => x.Id == job.Id)
+            .Select(x => x.CurrentState)
+            .SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        state.ShouldBe(State.Completed);
+    }
+
+    [TimedFact]
+    public async Task AddAsync_AfterStopAsync_WritesTheCompletion()
+    {
+        // Arrange — a handler that outlived the shutdown returns after the final flush: its completion must
+        // not land in a buffer nothing will write.
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 50, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, CompleteJobs);
+        var availability = new DispatcherWorkerAvailability(workerCount: 1, prefetchCount: 0);
+        var flusher = new CompletionFlusher<TestContext>(batch, availability, _time, new ServerTaskSignals<TestContext>(), new NullNotificationTransport(), NullLogger.Instance);
+        flusher.Start();
+        await flusher.StopAsync(Xunit.TestContext.Current.CancellationToken);
+        var job = await InsertProcessingJob();
+
+        // Act
+        await flusher.AddAsync(MakeEntry(job));
+
+        // Assert
+        var state = await _fixture.CreateContext().Set<Job>()
+            .Where(x => x.Id == job.Id)
+            .Select(x => x.CurrentState)
+            .SingleAsync(Xunit.TestContext.Current.CancellationToken);
+        state.ShouldBe(State.Completed);
+    }
+
+    [TimedFact]
+    public async Task FlushAsync_MoreThanFourBatchesBuffered_WritesStatementsOfAtMostFourBatches()
+    {
+        // Arrange — completions keep arriving while a flush is written, so a buffer can hold more than its
+        // size; one statement for all of them made the statement unbounded.
+        var sizes = new List<int>();
+        Task<IReadOnlyCollection<Guid>> Record(DbContext context, IReadOnlyList<Job> jobs, IReadOnlyList<JobLog> logs, CancellationToken ct)
+        {
+            sizes.Add(jobs.Count);
+
+            return CompleteJobs(context, jobs, logs, ct);
+        }
+
+        var batch = new CompletionBatch(CreateScopeFactory(), _time, NullLogger.Instance, NoDeadlocks, batchSize: 2, flushInterval: TimeSpan.FromMinutes(5), _counterBuffer, Record);
+        for (var i = 0; i < 9; i++)
+        {
+            batch.Add(MakeEntry(await InsertProcessingJob()));
+        }
+
+        // Act
+        await batch.FlushAsync();
+
+        // Assert
+        sizes.ShouldBe([8, 1]);
     }
 
     [TimedFact]

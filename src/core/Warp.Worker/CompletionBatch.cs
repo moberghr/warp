@@ -185,7 +185,11 @@ internal sealed class CompletionBatch
     /// shutdown still commits any in-flight batch.
     /// </para>
     /// </summary>
-    public async Task<FlushedJobs> FlushAsync()
+    public Task<FlushedJobs> FlushAsync() => FlushAsync(CancellationToken.None);
+
+    // Written in statements of at most four buffers' worth: completions keep arriving while a flush is in
+    // flight, so a buffer can hold more than its size, and one statement for all of them was unbounded.
+    public async Task<FlushedJobs> FlushAsync(CancellationToken cancellationToken)
     {
         var pending = Drain();
         if (pending.Length == 0)
@@ -193,7 +197,11 @@ internal sealed class CompletionBatch
             return new FlushedJobs([], []);
         }
 
-        await FlushRangeAsync(pending, 0, pending.Length, CancellationToken.None);
+        var perStatement = 4 * _batchSize;
+        for (var start = 0; start < pending.Length; start += perStatement)
+        {
+            await FlushRangeAsync(pending, start, Math.Min(perStatement, pending.Length - start), cancellationToken);
+        }
 
         return new FlushedJobs((IReadOnlyCollection<Guid>?)ParentsOf(pending) ?? [], SettledOf(pending));
     }

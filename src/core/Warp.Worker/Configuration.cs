@@ -346,12 +346,19 @@ public class WarpServerConfiguration : WarpConfiguration
     public bool UseDispatcher { get; set; }
 
     /// <summary>
-    /// Dispatcher-mode only. Maximum number of job completions each worker buffers in memory
-    /// before flushing them to the database in a single transaction. Defaults to 50.
-    /// Set to 1 to disable batching (every completion commits in its own transaction).
+    /// Dispatcher-mode only. The completions of a worker group's jobs are buffered together and written
+    /// by one flusher per group; the buffer is written once it holds this many, when its oldest entry
+    /// has waited <see cref="CompletionFlushInterval"/>, or as soon as the group has nothing left
+    /// running. Defaults to 50.
     /// <para>
-    /// Trade-off: batching widens the at-least-once duplicate-execution window. If a worker
-    /// crashes with buffered completions that have not yet been flushed, those jobs stay in
+    /// Completions that arrive while a write is in flight wait for the next one, so a buffer can hold
+    /// more than this; it is then written in statements of at most four times this many jobs. Set to 1
+    /// to start a write as soon as anything is buffered (completions arriving during a write are still
+    /// written together afterwards).
+    /// </para>
+    /// <para>
+    /// Trade-off: batching widens the at-least-once duplicate-execution window. If a process
+    /// crashes with buffered completions that have not yet been written, those jobs stay in
     /// <c>Processing</c> and <c>StaleJobRecovery</c> will requeue them per the
     /// <c>[NoRestart]</c> setting. Handlers with side effects should be idempotent or marked
     /// <c>[NoRestart]</c>.
