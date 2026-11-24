@@ -6,6 +6,7 @@
   </Configurations>
   <Folder Name="/Benchmarks/">
     <Project Path="benchmarks/Warp.Benchmarks/Warp.Benchmarks.csproj" />
+    <Project Path="benchmarks/Warp.MatrixBench/Warp.MatrixBench.csproj" />
     <Project Path="benchmarks/Warp.PerfTest/Warp.PerfTest.csproj" />
     <Project Path="benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj" />
   </Folder>

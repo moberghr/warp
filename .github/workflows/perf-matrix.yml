@@ -1,0 +1,201 @@
+name: Performance matrix
+
+# Measures main against this branch across providers, worker modes, database push and three workloads,
+# one cell per job so the cells run in parallel, each on its own runner with fresh database containers.
+#
+# The harness (src/benchmarks/Warp.MatrixBench) is always this branch's; only src/core is swapped to the
+# commit a cell measures, the same way perf.yml does it, so the two sides differ by the library alone.
+# Cells for main and for this branch run on different runners: compare counts (statements, buffers,
+# allocations) with more confidence than timings.
+
+on:
+  push:
+    branches: [bench/perf-matrix]
+  workflow_dispatch:
+    inputs:
+      main_ref:
+        description: 'Baseline commit (default: the pinned main commit)'
+        required: false
+        type: string
+      branch_ref:
+        description: 'Commit or branch to measure against it (default: perf/claim-path)'
+        required: false
+        type: string
+
+env:
+  DOTNET_VERSION: '10.0'
+  MAIN_SHA: 97cbb1978c7217e47733dac734c89a35618802fb
+  BRANCH_REF: perf/claim-path
+
+concurrency:
+  group: perf-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refs:
+    name: Resolve commits
+    runs-on: ubuntu-24.04
+    outputs:
+      main: ${{ steps.refs.outputs.main }}
+      branch: ${{ steps.refs.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the two commits under comparison
+        id: refs
+        run: |
+          resolve () {
+            git rev-parse --verify --quiet "$1^{commit}" \
+              || git rev-parse --verify --quiet "origin/$1^{commit}" \
+              || { echo "::error::Cannot resolve '$1' to a commit"; exit 1; }
+          }
+
+          MAIN=$(resolve "${{ inputs.main_ref || env.MAIN_SHA }}")
+          BRANCH=$(resolve "${{ inputs.branch_ref || env.BRANCH_REF }}")
+          echo "main=$MAIN" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          echo "main:        $MAIN $(git log -1 --format=%s "$MAIN")"
+          echo "this branch: $BRANCH $(git log -1 --format=%s "$BRANCH")"
+          echo "harness:     $(git rev-parse HEAD)"
+
+  cell:
+    name: ${{ matrix.ref }} · ${{ matrix.provider }} · ${{ matrix.mode }} · push ${{ matrix.push }} · ${{ matrix.job }}
+    needs: refs
+    # Pinned, as in perf.yml: the image is part of the instrument.
+    runs-on: ubuntu-24.04
+    # Three rounds of 10,000 jobs take a few minutes at worst; the mixed cell inserts 100,000 rows in one
+    # transaction first. Past these limits a cell is hung, not slow.
+    timeout-minutes: ${{ matrix.job == 'mixed' && 75 || 50 }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [main, pr]
+        provider: [postgresql, sqlserver]
+        mode: [dispatcher, workers]
+        push: ['on', 'off']
+        job: [empty, db]
+        # The mixed workload runs in the production shape only: dispatcher with push.
+        include:
+          - { ref: main, provider: postgresql, mode: dispatcher, push: 'on', job: mixed }
+          - { ref: main, provider: sqlserver, mode: dispatcher, push: 'on', job: mixed }
+          - { ref: pr, provider: postgresql, mode: dispatcher, push: 'on', job: mixed }
+          - { ref: pr, provider: sqlserver, mode: dispatcher, push: 'on', job: mixed }
+
+    env:
+      PG_CONNECTION: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres"
+      SQL_CONNECTION: "Server=localhost,1433;User Id=sa;Password=Warp!Bench1;TrustServerCertificate=True;Database=master"
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Start PostgreSQL
+        if: matrix.provider == 'postgresql'
+        run: bash .github/scripts/start-bench-postgres.sh
+
+      - name: Start SQL Server
+        if: matrix.provider == 'sqlserver'
+        run: bash .github/scripts/start-bench-sqlserver.sh
+
+      # --no-overlay: a file that exists on only one side must not survive the swap (see perf.yml).
+      - name: Check out the measured src/core
+        run: |
+          SHA="${{ matrix.ref == 'main' && needs.refs.outputs.main || needs.refs.outputs.branch }}"
+          git checkout --no-overlay "$SHA" -- src/core
+          echo "MEASURED_SHA=$SHA" >> "$GITHUB_ENV"
+          echo "measuring src/core at $SHA"
+
+      # NuGet audit off for the baseline build only, as in perf.yml: an advisory published after main's
+      # commit must not take the comparison away.
+      - name: Build
+        env:
+          NuGetAudit: ${{ matrix.ref == 'main' && 'false' || 'true' }}
+        run: dotnet build -c Release src/benchmarks/Warp.MatrixBench/Warp.MatrixBench.csproj
+
+      - name: Run the cell
+        run: |
+          if [ "${{ matrix.provider }}" = "postgresql" ]; then
+            CONNECTION="$PG_CONNECTION"; CONTAINER=warpbench
+          else
+            CONNECTION="$SQL_CONNECTION"; CONTAINER=warpbench-mssql
+          fi
+
+          if [ "${{ matrix.job }}" = "mixed" ]; then
+            JOBS=100000; ROUNDS=1; DRAIN=40
+          else
+            JOBS=10000; ROUNDS=3; DRAIN=15
+          fi
+
+          PUSH=""
+          if [ "${{ matrix.push }}" = "on" ]; then PUSH="--push"; fi
+
+          mkdir -p out
+          dotnet run -c Release --no-build --project src/benchmarks/Warp.MatrixBench/Warp.MatrixBench.csproj -- run \
+            --provider=${{ matrix.provider }} \
+            --mode=${{ matrix.mode }} \
+            $PUSH \
+            --job=${{ matrix.job }} \
+            --jobs=$JOBS \
+            --rounds=$ROUNDS \
+            --workers=10 \
+            --warmup=200 \
+            --drain-timeout-minutes=$DRAIN \
+            "--connection=$CONNECTION" \
+            --db-container=$CONTAINER \
+            --ref=${{ matrix.ref }} \
+            --commit=$MEASURED_SHA \
+            --out=out/${{ matrix.ref }}-${{ matrix.provider }}-${{ matrix.mode }}-${{ matrix.push }}-${{ matrix.job }}.json
+
+      - name: Database container state
+        if: always()
+        run: docker stats --no-stream || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: cell-${{ matrix.ref }}-${{ matrix.provider }}-${{ matrix.mode }}-${{ matrix.push }}-${{ matrix.job }}
+          path: out
+          if-no-files-found: warn
+
+  summary:
+    name: Summary
+    needs: [refs, cell]
+    if: always() && needs.refs.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: cell-*
+          path: results
+
+      - name: Write the summary
+        run: |
+          dotnet run -c Release --project src/benchmarks/Warp.MatrixBench/Warp.MatrixBench.csproj -- summarize \
+            --in=results --markdown=perf-matrix-summary.md --json=perf-matrix.json
+          cat perf-matrix-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: perf-matrix-summary
+          path: |
+            perf-matrix-summary.md
+            perf-matrix.json

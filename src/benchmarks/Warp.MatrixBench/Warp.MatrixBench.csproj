@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The main-vs-branch matrix harness (.github/workflows/perf-matrix.yml). Its own project rather than a
+    command of Warp.ServerBenchmarks so it depends on nothing but src/core: the workflow measures main by
+    swapping src/core underneath it, and this harness must build against both sides unchanged.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);SA1600;SA1601;SA1402;SA1649;SA1502;SA1503;SA1515;SA1516;CA1001;CA1822;CA1859;S1135;S1481;S3459;MA0004;MA0006;MA0038;MA0040;MA0042;MA0048;MA0051;IDE0011</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../core/Warp.Core/Warp.Core.csproj" />
+    <ProjectReference Include="../../core/Warp.Worker/Warp.Worker.csproj" />
+    <ProjectReference Include="../../core/providers/Warp.Provider.PostgreSql/Warp.Provider.PostgreSql.csproj" />
+    <ProjectReference Include="../../core/providers/Warp.Provider.SqlServer/Warp.Provider.SqlServer.csproj" />
+    <!-- The harness declares its own handlers, so it needs the generator that registers them. -->
+    <ProjectReference Include="../../core/Warp.SourceGenerator/Warp.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
+    <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
+  </ItemGroup>
+
+</Project>
