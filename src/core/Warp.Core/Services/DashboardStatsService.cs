@@ -278,7 +278,7 @@ public class DashboardStatsService<TContext> : IDashboardStatsService
 
     public async Task<List<ServerTaskSummary>> GetServerTaskSummaries(Guid serverId)
     {
-        // The cluster-wide tasks (rule 6.20) are shared by every server, so each server's page lists them,
+        // The cluster-wide tasks (rule 6.23) are shared by every server, so each server's page lists them,
         // with the server that last ran them and the one running them now. The heartbeat is not a task on
         // this list: the server's own last-heartbeat time is its record.
         var now = _timeProvider.GetUtcNow().UtcDateTime;

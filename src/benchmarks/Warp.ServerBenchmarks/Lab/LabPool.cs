@@ -5,7 +5,7 @@ namespace Warp.ServerBenchmarks.Lab;
 
 /// <summary>
 /// How a lab server reaches PostgreSQL. By default the context takes a connection string, so Warp's
-/// server context opens on its own pool (rule 6.19). With <c>WARP_LAB_SHARED_POOL=1</c> it takes an
+/// server context opens on its own pool (rule 6.22). With <c>WARP_LAB_SHARED_POOL=1</c> it takes an
 /// <see cref="NpgsqlDataSource"/>, which Warp cannot fork, so the server context shares the
 /// application's pool: the two settings measure the separate pool against the shared one. Child node
 /// processes inherit the variable.

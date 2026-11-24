@@ -9,7 +9,7 @@ using Warp.Tests.Helpers;
 namespace Warp.Tests.Admin;
 
 /// <summary>
-/// The dashboard's view of cluster-wide tasks (rule 6.20): each server's task list shows them, and their
+/// The dashboard's view of cluster-wide tasks (rule 6.23): each server's task list shows them, and their
 /// runs, which carry a task name instead of a per-server row, appear in its logs and are kept as long
 /// as a per-server task's would be.
 /// </summary>

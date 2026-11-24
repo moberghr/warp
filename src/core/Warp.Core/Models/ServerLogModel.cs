@@ -14,7 +14,7 @@ public class ServerTaskSummary
 
     public double? IntervalSeconds { get; set; }
 
-    /// <summary>A cluster-wide task (rule 6.20): one schedule for the whole cluster, run by one server per tick.</summary>
+    /// <summary>A cluster-wide task (rule 6.23): one schedule for the whole cluster, run by one server per tick.</summary>
     public bool ClusterWide { get; set; }
 
     /// <summary>When a cluster-wide task is next due.</summary>

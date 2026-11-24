@@ -212,7 +212,7 @@ public interface IWarpSqlQueries<TContext>
     /// signal) and whose lease is free: stamps this server, moves its next run to the next multiple of its
     /// interval at least half an interval away, and leases it until then. Returns every named task with whether this call claimed it and how long
     /// until it is next due, and whether a server from before the lease has heartbeated within
-    /// <paramref name="liveWindow"/>. Every time is the database's own (rule 6.20): a lease never depends on
+    /// <paramref name="liveWindow"/>. Every time is the database's own (rule 6.23): a lease never depends on
     /// two servers' clocks agreeing.
     /// </summary>
     Task<ClusterTaskClaims> ClaimClusterTasksAsync(
@@ -223,8 +223,11 @@ public interface IWarpSqlQueries<TContext>
         CancellationToken ct);
 
     /// <summary>
-    /// A signal asked for <paramref name="name"/> to run now: claims it if its lease is free (returns
-    /// true; the caller runs it), otherwise marks a run request on the row, which the next claim honours.
+    /// A signal asked for <paramref name="name"/> to run now: claims it if its lease is free or already
+    /// this server's (returns true; the caller runs it), otherwise marks a run request on the row, which
+    /// the next claim honours. The caller asks only for a task it is not running, so a lease of its own is
+    /// one an idle run left behind without a completion (rule 6.23): it must not keep the run waiting until
+    /// the lease ends.
     /// </summary>
     Task<bool> RequestClusterTaskRunAsync(DbContext context, string name, Guid serverId, CancellationToken ct);
 

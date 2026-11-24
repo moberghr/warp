@@ -9,7 +9,7 @@ using Warp.Tests.Helpers;
 namespace Warp.Tests.Worker;
 
 /// <summary>
-/// The cluster-wide task statements (rule 6.20) against a real database: one claim for every due task,
+/// The cluster-wide task statements (rule 6.23) against a real database: one claim for every due task,
 /// the lease that keeps a second server out, run requests, renewal and completion. Every time in them
 /// is the database's own now(), so the tests compare times the statements wrote with each other, and
 /// seed "due" and "free" with times far enough away that no clock difference can matter.
@@ -131,6 +131,25 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
+    public async Task RequestClusterTaskRun_LeaseHeldByTheAskingServer_ClaimsItAtOnce()
+    {
+        // The scheduler asks only for a task it is not running, so its own lease is one an idle run left
+        // without a completion: the request must not wait for that lease to end (rule 6.23).
+        await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 300, NextRunAt = LongAgo });
+        var server = Guid.NewGuid();
+        await ClaimAsync(["a"], server);
+
+        // Act
+        var claimedNow = await Queries().RequestClusterTaskRunAsync(_fixture.CreateContext(), "a", server, Ct);
+
+        // Assert
+        claimedNow.ShouldBeTrue();
+        var row = await ReadAsync("a");
+        row.ClaimedBy.ShouldBe(server);
+        row.RunRequestedAt.ShouldBeNull();
+    }
+
+    [TimedFact]
     public async Task RequestClusterTaskRun_LeaseFree_ClaimsItAtOnce()
     {
         await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = FarAhead });
@@ -225,7 +244,7 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
     public async Task ClaimClusterTasks_ServerFromBeforeTheLeaseAlive_ReportsIt()
     {
         // A live server without a coordination version still takes each task's old lock; newer servers
-        // must take it too until it is gone (rule 6.20). Liveness is judged on the database clock.
+        // must take it too until it is gone (rule 6.23). Liveness is judged on the database clock.
         await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
         await using (var ctx = _fixture.CreateContext())
         {

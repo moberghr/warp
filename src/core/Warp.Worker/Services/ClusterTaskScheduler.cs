@@ -10,27 +10,28 @@ using Warp.Core.Logging;
 
 namespace Warp.Worker.Services;
 
-/// <summary>The cluster task scheduler's timings (rule 6.20); outside the generic type so each is one value.</summary>
+/// <summary>The cluster task scheduler's timings (rule 6.23); outside the generic type so each is one value.</summary>
 internal static class ClusterTaskTimings
 {
-    /// <summary>A signal claims or requests a task at most this often; signals in between fold into it.</summary>
-    public static readonly TimeSpan SignalCoalescing = TimeSpan.FromMilliseconds(250);
-
     /// <summary>
-    /// How long a task waits before its first run (rule 6.18): <paramref name="sample"/> (0 to 1) of the
-    /// smaller of its interval and the configured startup delay, so tasks and servers starting together
-    /// spread out.
+    /// How long a run a signal started holds before the task may run again (rule 6.18): the rest of the
+    /// signal interval since the run started, never longer than the task's own interval. Zero for a run
+    /// on schedule, and for a run that did work on a task that reruns at once.
     /// </summary>
-    public static TimeSpan FirstRunDelay(TimeSpan interval, TimeSpan startupDelay, double sample)
+    public static TimeSpan HoldAfterRun(ServerTaskInfo info, TimeSpan signalInterval, TimeSpan sinceRunStarted, bool signalStarted, bool didWork)
     {
-        if (startupDelay <= TimeSpan.Zero || interval <= TimeSpan.Zero)
+        if (!signalStarted || (didWork && info.RerunImmediately))
         {
             return TimeSpan.Zero;
         }
 
-        var bound = interval < startupDelay ? interval : startupDelay;
+        var rest = signalInterval - sinceRunStarted;
+        if (rest <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
 
-        return bound * Math.Clamp(sample, 0, 1);
+        return rest < info.Interval ? rest : info.Interval;
     }
 
     /// <summary>How soon to look again at a task that was due but that this pass did not get.</summary>
@@ -45,12 +46,13 @@ internal static class ClusterTaskTimings
 
 /// <summary>
 /// Runs the cluster-wide server tasks (those with a lock key) once per tick for the whole cluster (rule
-/// 6.20). One loop per server claims every due task in one statement with a lease on its
+/// 6.23). One loop per server claims every due task in one statement with a lease on its
 /// <see cref="ClusterTask"/> row; only the server holding a task's lease runs it, so the other servers
 /// spend nothing on it, where each used to take the task's lock every interval. A run that lasts longer
 /// than a third of its interval renews its lease; a server that dies mid-run leaves the task to the next
 /// claim once the lease lapses. Signals (a job finalized, a message enqueued) run a task at once, or ask
-/// the server holding it to run it again. While a server from before the lease is alive, each run also
+/// the server holding it to run it again; a signal-woken task runs at most once per signal interval for
+/// the whole cluster (rule 6.18). While a server from before the lease is alive, each run also
 /// takes the task's old lock, so a task never runs on an old and a new server at once during a deploy.
 /// </summary>
 internal sealed class ClusterTaskScheduler<TContext> : IDisposable
@@ -62,7 +64,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     private readonly TimeProvider _time;
     private readonly Guid _serverId;
     private readonly ILogger _logger;
-    private readonly TimeSpan _startupDelay;
+    private readonly TimeSpan _signalInterval;
     private readonly TimeSpan _liveWindow;
     private readonly SemaphoreSlim _wake = new(0, 1);
     private int _wakes;
@@ -76,7 +78,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         TimeProvider time,
         Guid serverId,
         ILogger logger,
-        TimeSpan startupDelay,
+        TimeSpan signalInterval,
         TimeSpan liveWindow)
     {
         _entries = tasks.ToDictionary(x => x.Name, x => new Entry(x), StringComparer.Ordinal);
@@ -85,7 +87,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         _time = time;
         _serverId = serverId;
         _logger = logger;
-        _startupDelay = startupDelay;
+        _signalInterval = signalInterval;
         _liveWindow = liveWindow;
     }
 
@@ -126,7 +128,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                 {
                     if (!existing.TryGetValue(entry.Name, out var row))
                     {
-                        // Due at once, whatever this server's clock says: the lease times are the database's (rule 6.20).
+                        // Due at once, whatever this server's clock says: the lease times are the database's (rule 6.23).
                         row = new ClusterTask { Name = entry.Name, NextRunAt = DateTime.UnixEpoch };
                         context.Set<ClusterTask>().Add(row);
                     }
@@ -150,8 +152,6 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     internal async Task RunAsync(CancellationToken ct)
     {
         await RegisterWithRetryAsync(ct);
-
-        SpreadFirstRuns(Random.Shared.NextDouble);
 
         while (!ct.IsCancellationRequested)
         {
@@ -182,21 +182,6 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         await Task.WhenAll(running);
     }
 
-    // Spread the first runs (rule 6.18): each task waits its own random part of the startup delay, as its
-    // per-server loop did, and a signal ends only that task's wait. One wait shared by every task let the
-    // first job's signal run them all at once. Internal for tests, which pass the sample.
-    internal void SpreadFirstRuns(Func<double> sample)
-    {
-        var start = _time.GetUtcNow().UtcDateTime;
-        lock (_gate)
-        {
-            foreach (var entry in _entries.Values)
-            {
-                entry.NotBefore = start + ClusterTaskTimings.FirstRunDelay(entry.Interval, _startupDelay, sample());
-            }
-        }
-    }
-
     // One scheduling pass: honour signals, claim every due task, start what was claimed, and say how
     // long to sleep before the next task falls due. Internal for tests, which drive passes one at a time.
     internal async Task<TimeSpan> PassAsync(CancellationToken ct)
@@ -223,20 +208,26 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
                     continue;
                 }
 
+                // Another server may hold it: ask at most once per signal interval, so a burst of signals
+                // is one request statement, not one each (rule 6.18).
                 var since = now - entry.LastSignalClaimAt;
-                if (since < ClusterTaskTimings.SignalCoalescing)
+                if (since < _signalInterval)
                 {
-                    sleep = Min(sleep, ClusterTaskTimings.SignalCoalescing - since);
+                    sleep = Min(sleep, _signalInterval - since);
                     continue;
                 }
 
                 entry.Signaled = false;
                 entry.LastSignalClaimAt = now;
-                entry.NotBefore = DateTime.MinValue;
             }
 
             if (await RequestAsync(entry.Name, ct))
             {
+                lock (_gate)
+                {
+                    entry.SignalStarted = true;
+                }
+
                 Start(entry, ct);
             }
         }
@@ -249,14 +240,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         bool claimDue;
         lock (_gate)
         {
-            foreach (var waiting in _entries.Values.Where(x => x.NotBefore > now))
-            {
-                sleep = Min(sleep, waiting.NotBefore - now);
-            }
-
             var idleEntries = _entries.Values
                 .Where(x => x.Running == null)
-                .Where(x => x.NotBefore <= now)
                 .ToList();
             idle = [.. idleEntries.Select(x => x.Name)];
             claimDue = idleEntries.Exists(x => x.DueAt <= now);
@@ -293,13 +278,13 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
 
         // Sleep until the next task is due. A claimed task counts too: its idle run writes nothing and
-        // wakes nobody, and when one pass claims every task (they share due times, rule 6.20) there is no
+        // wakes nobody, and when one pass claims every task (they share due times, rule 6.23) there is no
         // unclaimed task to take the time from. A task still running past its due time is not waited for
         // here: its run wakes the loop when it ends.
         now = _time.GetUtcNow().UtcDateTime;
         lock (_gate)
         {
-            foreach (var entry in _entries.Values.Where(x => x.NotBefore <= now))
+            foreach (var entry in _entries.Values)
             {
                 if (entry.DueAt > now)
                 {
@@ -352,6 +337,13 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     private async Task RunTaskAsync(Entry entry, CancellationToken ct)
     {
         var started = Stopwatch.GetTimestamp();
+        bool signalStarted;
+        lock (_gate)
+        {
+            signalStarted = entry.SignalStarted;
+            entry.SignalStarted = false;
+        }
+
         using var span = WarpTelemetry.StartServerTaskActivity(entry.Name);
         using var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var stopRenewing = new CancellationTokenSource();
@@ -360,9 +352,24 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         string? message = null;
         Exception? failure = null;
         var ran = true;
+        TimeSpan? runTime = null;
+        var held = false;
         try
         {
             (ran, message) = await _runner.RunAsync(entry.Info, _legacyServersAlive, run.Token);
+            runTime = Stopwatch.GetElapsedTime(started);
+
+            // A run a signal started holds the lease for the rest of the signal interval before it
+            // completes (rule 6.18), the renewal still running: a signal meanwhile, here or on another
+            // server, becomes a run request the completion turns into one rerun, so the cluster runs the
+            // task at most once per interval however many signals arrive. Its completion is then always
+            // written, so a request from another server is not left behind the lease until the next tick.
+            var hold = ClusterTaskTimings.HoldAfterRun(entry.Info, _signalInterval, runTime.Value, signalStarted, message != null);
+            if (ran && hold > TimeSpan.Zero)
+            {
+                held = true;
+                await Task.Delay(hold, _time, run.Token);
+            }
         }
         catch (OperationCanceledException) when (run.IsCancellationRequested)
         {
@@ -397,8 +404,8 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
             if (ran && !ct.IsCancellationRequested)
             {
-                var elapsed = Stopwatch.GetElapsedTime(started);
-                var wrote = await FinishAsync(entry, message, failure, elapsed.TotalMilliseconds);
+                var elapsed = runTime ?? Stopwatch.GetElapsedTime(started);
+                var wrote = await FinishAsync(entry, message, failure, elapsed.TotalMilliseconds, held);
 
                 // A run that outlasted half its interval may have been skipped by the passes it ran through
                 // (a running task is not claimed), so the loop has to look at it again.
@@ -425,7 +432,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
     }
 
     // Returns whether a completion was written: that frees the lease, and may make the task due at once.
-    private async Task<bool> FinishAsync(Entry entry, string? message, Exception? failure, double durationMs)
+    private async Task<bool> FinishAsync(Entry entry, string? message, Exception? failure, double durationMs, bool held)
     {
         var now = _time.GetUtcNow();
         var status = failure == null ? "Completed" : "Failed";
@@ -435,6 +442,9 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         lock (_gate)
         {
             rerun = entry.RerunRequested || (message != null && entry.RerunImmediately);
+
+            // A rerun a signal asked for is signal-started too, so it holds in turn while signals keep coming.
+            entry.SignalStarted = entry.RerunRequested;
             entry.RerunRequested = false;
             record = didWork
                 || !string.Equals(status, entry.LastRecordedStatus, StringComparison.Ordinal)
@@ -442,7 +452,7 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
         }
 
         // An idle run that has nothing to record writes nothing: its lease lapses as the task falls due.
-        var wrote = didWork || rerun || record;
+        var wrote = didWork || rerun || record || held;
         if (wrote)
         {
             using var scope = _scopes.CreateScope();
@@ -625,10 +635,10 @@ internal sealed class ClusterTaskScheduler<TContext> : IDisposable
 
         public bool RerunRequested { get; set; }
 
-        public DateTime LastSignalClaimAt { get; set; } = DateTime.MinValue;
+        // The next run of this task here was asked for by a signal, so it holds afterwards (rule 6.18).
+        public bool SignalStarted { get; set; }
 
-        // Before this the task is not claimed on schedule: its share of the startup delay (rule 6.18).
-        public DateTime NotBefore { get; set; } = DateTime.MinValue;
+        public DateTime LastSignalClaimAt { get; set; } = DateTime.MinValue;
 
         // When the task is next due, by this server's clock, as the last claim reported it. MinValue
         // while unknown, which makes the next pass ask.

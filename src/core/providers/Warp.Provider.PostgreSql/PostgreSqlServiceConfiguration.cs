@@ -240,7 +240,7 @@ public static class PostgreSqlServiceConfiguration
     }
 
     /// <summary>
-    /// Warp's own pool for the server context (rule 6.19): the DbContext's connection string with
+    /// Warp's own pool for the server context (rule 6.22): the DbContext's connection string with
     /// <c>Application Name</c> suffixed <c>:warp-server</c> (part of Npgsql's pool key, so a separate
     /// pool) and <c>No Reset On Close</c>. Every server-task run, claim and completion opens a scope, and
     /// on the shared pool each of those checkouts cost a <c>DISCARD ALL</c>: about a third of an idle

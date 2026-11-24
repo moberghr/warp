@@ -10,7 +10,7 @@ namespace Warp.Worker.Services;
 
 /// <summary>
 /// The one <see cref="BackgroundService"/> that drives every registered <see cref="IServerTask"/> (rule
-/// 6.20). It splits them once, at construction:
+/// 6.23). It splits them once, at construction:
 /// <list type="bullet">
 /// <item>A task with a lock key is cluster-wide: it goes to the <see cref="ClusterTaskScheduler{TContext}"/>,
 /// which claims it by lease so the cluster runs it once per tick.</item>
@@ -38,7 +38,7 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
         ServerTaskSignals<TContext> signals)
     {
         var logger = loggerFactory.CreateLogger<ServerTaskHost<TContext>>();
-        var startupDelay = configuration.Value.ServerTaskStartupDelay ?? TimeSpan.Zero;
+        var signalInterval = configuration.Value.ServerTaskSignalInterval ?? TimeSpan.Zero;
         _runner = new ServerTaskRunner<TContext>(scopes, lockProvider);
 
         using (var metadataScope = scopes.CreateScope())
@@ -70,7 +70,7 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
                 time,
                 configuration.Value.ServerId,
                 loggerFactory.CreateLogger<ClusterTaskScheduler<TContext>>(),
-                startupDelay,
+                signalInterval,
                 configuration.Value.HealthCheckTimeout);
 
             foreach (var (name, channels) in _scheduler.Subscriptions)
@@ -91,7 +91,7 @@ public sealed class ServerTaskHost<TContext> : BackgroundService
                 time,
                 configuration.Value.ServerId,
                 loggerFactory.CreateLogger($"Warp.Worker.Services.ServerTask[{info.Name}]"),
-                startupDelay);
+                signalInterval);
             _perServer.Add(loop);
             foreach (var channel in info.Signals)
             {

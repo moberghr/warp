@@ -10,8 +10,9 @@ namespace Warp.Worker.Services;
 
 /// <summary>
 /// Runs a task every server runs for itself (no lock key: the heartbeat) on its interval. It is not part
-/// of the lease scheduler (rule 6.20): there is nothing to claim, the server just does it. Wait the
-/// interval, run, and log a failure; the next interval tries again. A signal ends the wait at once.
+/// of the lease scheduler (rule 6.23): there is nothing to claim, the server just does it. Wait the
+/// interval, run, and log a failure; the next interval tries again. A signal ends the wait at once, at most
+/// once per signal interval (rule 6.18; the heartbeat has no signals).
 /// <para>
 /// Nothing is recorded for a run that succeeds: what the heartbeat does is its record
 /// (<c>Server.LastHeartbeatTime</c>). A failure, or a run that returns a message from a task that logs
@@ -27,7 +28,7 @@ internal sealed class PerServerTaskLoop<TContext> : IDisposable
     private readonly TimeProvider _time;
     private readonly Guid _serverId;
     private readonly ILogger _logger;
-    private readonly TimeSpan _startupDelay;
+    private readonly TimeSpan _signalInterval;
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly Lock _gate = new();
 
@@ -38,7 +39,7 @@ internal sealed class PerServerTaskLoop<TContext> : IDisposable
         TimeProvider time,
         Guid serverId,
         ILogger logger,
-        TimeSpan startupDelay)
+        TimeSpan signalInterval)
     {
         _info = info;
         _runner = runner;
@@ -46,7 +47,7 @@ internal sealed class PerServerTaskLoop<TContext> : IDisposable
         _time = time;
         _serverId = serverId;
         _logger = logger;
-        _startupDelay = startupDelay;
+        _signalInterval = signalInterval;
     }
 
     public IReadOnlyList<Warp.Core.Events.ServerTaskSignal> Signals => _info.Signals;
@@ -65,13 +66,17 @@ internal sealed class PerServerTaskLoop<TContext> : IDisposable
 
     public async Task RunAsync(CancellationToken ct)
     {
-        // The first run waits a random part of the startup delay (rule 6.18); a signal ends the wait.
-        var wait = ClusterTaskTimings.FirstRunDelay(_info.Interval, _startupDelay, Random.Shared.NextDouble());
+        var wait = TimeSpan.Zero;
         while (!ct.IsCancellationRequested)
         {
             if (wait > TimeSpan.Zero)
             {
                 await WaitAsync(wait, ct);
+            }
+            else
+            {
+                // Running now anyway: a signal already pending is answered by this run.
+                await _wake.WaitAsync(0, CancellationToken.None);
             }
 
             if (ct.IsCancellationRequested)
@@ -84,13 +89,30 @@ internal sealed class PerServerTaskLoop<TContext> : IDisposable
 
             // The interval runs from the start of a run, so the heartbeat keeps its cadence however long a
             // beat takes; a run that did work on a task that reruns at once does not wait at all.
-            var left = _info.Interval - Stopwatch.GetElapsedTime(started);
+            var elapsed = Stopwatch.GetElapsedTime(started);
+            var left = _info.Interval - elapsed;
             if (left < ClusterTaskTimings.ClaimRetry)
             {
                 left = ClusterTaskTimings.ClaimRetry;
             }
 
-            wait = didWork && _info.RerunImmediately ? TimeSpan.Zero : left;
+            if (didWork && _info.RerunImmediately)
+            {
+                wait = TimeSpan.Zero;
+                continue;
+            }
+
+            // A task with signals holds for the rest of the signal interval first, deaf to them (rule
+            // 6.18); a signal meanwhile stays pending and ends the wait that follows.
+            var hold = _info.Signals.Count == 0
+                ? TimeSpan.Zero
+                : ClusterTaskTimings.HoldAfterRun(_info, _signalInterval, elapsed, signalStarted: true, didWork);
+            if (hold > TimeSpan.Zero)
+            {
+                await HoldAsync(hold, ct);
+            }
+
+            wait = left > hold ? left - hold : TimeSpan.Zero;
         }
     }
 
@@ -155,6 +177,18 @@ internal sealed class PerServerTaskLoop<TContext> : IDisposable
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to write ServerLog for {Name}", _info.Name);
+        }
+    }
+
+    private async Task HoldAsync(TimeSpan hold, CancellationToken ct)
+    {
+        try
+        {
+            await Task.Delay(hold, _time, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down; the caller's token check ends the loop.
         }
     }
 

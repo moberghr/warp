@@ -9,7 +9,7 @@ using Warp.Worker;
 namespace Warp.Tests.Features.Concurrency;
 
 /// <summary>
-/// Rot guard for Warp's own server-context pool (rule 6.19). On the shared pool every checkout of a
+/// Rot guard for Warp's own server-context pool (rule 6.22). On the shared pool every checkout of a
 /// server-context connection cost a <c>DISCARD ALL</c>, about a third of an idle server's statements;
 /// nothing in behaviour shows whether the pool is split, so only these tests catch a refactor that hands
 /// the server context the DbContext's connection string again.

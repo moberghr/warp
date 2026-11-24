@@ -5,7 +5,7 @@ using Warp.Core.Data.Entities;
 namespace Warp.Provider.PostgreSql;
 
 /// <summary>
-/// The cluster-wide task statements (rule 6.20), built once from the model's resolved names, as the
+/// The cluster-wide task statements (rule 6.23), built once from the model's resolved names, as the
 /// host's naming convention and schema left them.
 /// </summary>
 internal sealed class PostgresClusterTaskSql
@@ -50,7 +50,7 @@ internal sealed class PostgresClusterTaskSql
         var coordination = Column(server, nameof(Server.CoordinationVersion));
         var heartbeat = Column(server, nameof(Server.LastHeartbeatTime));
 
-        // Every time here is the database's own now() (rule 6.20): whether a lease is free never depends on
+        // Every time here is the database's own now() (rule 6.23): whether a lease is free never depends on
         // two servers' clocks agreeing, as a lock never did. The lease lasts one interval, so an idle run needs
         // no completion write: it lapses as the task falls due again. Due times go back as seconds from
         // now, so a server's own clock only decides how long it sleeps.
@@ -105,7 +105,7 @@ internal sealed class PostgresClusterTaskSql
                     {requested} = NULL
                 WHERE t.{name} = @name
                   AND t.{interval} IS NOT NULL
-                  AND (t.{lease} IS NULL OR t.{lease} <= now())
+                  AND (t.{lease} IS NULL OR t.{lease} <= now() OR t.{claimedBy} = @server)
                 RETURNING t.{name}
             ),
             asked AS (

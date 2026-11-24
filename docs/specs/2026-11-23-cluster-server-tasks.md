@@ -3,7 +3,7 @@
 - **Date:** 2026-11-23
 - **Issue:** #345
 - **Status:** draft, for review. Nothing implemented.
-- **Branch:** `feat/cluster-server-tasks`, from `perf/claim-path` (it already batches task registration at startup and adds `ServerTaskStartupDelay`).
+- **Branch:** `feat/cluster-server-tasks`, first from `perf/claim-path`, rebased onto `main` after #346 merged (see "As built").
 - **Schema impact:** one new table; `server_task` keeps its per-server rows for per-server tasks.
 - **Behaviour impact:** server-task scheduling, the dashboard's server-task view, and how a rolling deploy coexists with older servers (open decision D1).
 
@@ -205,7 +205,9 @@ The per-task `ServerTaskLoop` and the `SupportsClusterTaskLeases` flag are gone;
 - **No idle backoff.** Built and measured (about 70 statements a minute saved per idle cluster), then removed: it delayed the first run after a quiet spell and needed a per-task limit to reason about.
 - **Due times on a grid.** The next run is the next multiple of the interval at least half an interval away, so tasks fall due together and one claim covers them (one idle server: 39 claims a minute to 15). A renewal only extends a lease, because the grid can set one longer than an interval.
 - **Claim only when due.** The scheduler remembers each task's due time from the last claim and sends the claim statement only when one is due. A run that wrote a completion forgets that task's due time, since the completion may have moved it.
-- **Per-task startup delay.** Each task waits its own random share of `ServerTaskStartupDelay`; a signal ends only its wait. One shared wait let the first job's signal run every task at once.
+- **No startup delay (after rebasing on #346).** The branch first gave each task its own random share of `ServerTaskStartupDelay`. #346 reverted that delay (on CI it moved work into the drain, ~25% of warm throughput), so tasks are claimed from the first pass.
+- **Signal hold, cluster-wide (after rebasing on #346).** #346 holds a signal-woken task for `ServerTaskSignalInterval` (500 ms) after each pass. Here a run a signal started holds its lease for the rest of that interval before completing, so signals on every server meanwhile fold into one rerun, and the completion is then always written. This replaces the branch's own 250 ms coalescing, which now uses the same interval. Runs on schedule do not hold, so idle load is unchanged.
+- **A request claims the asking server's own idle lease.** An idle run writes no completion and keeps its lease until the next tick; a signal on the same server then only marked a request, and the run waited for the lease (minutes for the orchestrator). The request statement now claims a lease the asking server holds; the scheduler asks only for a task it is not running.
 - **The heartbeat is separate.** It is not a cluster task, writes nothing on success (`Server.LastHeartbeatTime` is its record), and has no dashboard task row. The `ServerTask` table stays in the schema but is no longer read or written; dropping it would be a breaking migration.
 - **Kept for correctness:** the rolling-deploy lock, and run requests for signals that reach a server not holding the task.
 - **Considered and left out:** a single leader server doing all claiming (saves ~10 statements a minute per extra server, costs up to ~30 s of paused scheduling whenever the leader restarts).
@@ -218,4 +220,4 @@ The per-task `ServerTaskLoop` and the `SupportsClusterTaskLeases` flag are gone;
 | 2 servers | 778/min | 210/min |
 | Each extra server | +389/min | +49/min |
 
-Peak connections with Warp's own server pool (rule 6.19): 6 against 7 on the shared pool idle, 8 against 9 under load with two servers. SQL Server idle load is not measured.
+Peak connections with Warp's own server pool (rule 6.22): 6 against 7 on the shared pool idle, 8 against 9 under load with two servers. SQL Server idle load is not measured.

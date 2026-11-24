@@ -11,8 +11,8 @@ using Warp.Worker.Services;
 namespace Warp.Tests.Worker;
 
 // The loop for a task every server runs for itself (the heartbeat), outside the lease scheduler (rule
-// 6.20): a run that succeeds writes nothing, a failure leaves a ServerLog row with the task's name, and
-// a signal ends the startup delay at once.
+// 6.23): a run that succeeds writes nothing, a failure leaves a ServerLog row with the task's name, and
+// a signal ends the interval wait at once.
 [GenerateDatabaseTests]
 public abstract class PerServerTaskLoopTestsBase : IAsyncLifetime
 {
@@ -70,10 +70,10 @@ public abstract class PerServerTaskLoopTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task RunAsync_DuringItsStartupDelay_ASignalRunsTheFirstPassAtOnce()
+    public async Task RunAsync_WaitingForItsInterval_ASignalRunsItAtOnce()
     {
-        // A one-hour startup delay with a one-hour interval: the first run would wait up to an hour. The
-        // signal must end that wait at once (rule 6.18).
+        // The first run is at once; the second would wait the one-hour interval. A signal ends that wait
+        // at once (no signal interval configured here, rule 6.18).
         var ran = new SemaphoreSlim(0);
         var task = new StubTask(
             _ =>
@@ -83,16 +83,18 @@ public abstract class PerServerTaskLoopTestsBase : IAsyncLifetime
                 return Task.FromResult<string?>(null);
             },
             TimeSpan.FromHours(1));
-        using var loop = BuildLoop(task, TimeSpan.FromHours(1));
+        using var loop = BuildLoop(task, TimeSpan.Zero);
         using var stop = new CancellationTokenSource();
         var running = loop.RunAsync(stop.Token);
         try
         {
+            (await ran.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the first run did not happen at once");
+
             // Act
             loop.Signal();
 
             // Assert
-            (await ran.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the signal did not cut the startup delay short");
+            (await ran.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the signal did not cut the interval wait short");
         }
         finally
         {
@@ -101,7 +103,7 @@ public abstract class PerServerTaskLoopTestsBase : IAsyncLifetime
         }
     }
 
-    private PerServerTaskLoop<TestContext> BuildLoop(StubTask task, TimeSpan startupDelay, Guid? serverId = null)
+    private PerServerTaskLoop<TestContext> BuildLoop(StubTask task, TimeSpan signalInterval, Guid? serverId = null)
     {
         var services = new ServiceCollection();
         services.AddScoped(_ => _fixture.CreateContext());
@@ -117,7 +119,7 @@ public abstract class PerServerTaskLoopTestsBase : IAsyncLifetime
             TimeProvider.System,
             serverId ?? Guid.NewGuid(),
             NullLogger.Instance,
-            startupDelay);
+            signalInterval);
     }
 
     private sealed class StubTask(Func<CancellationToken, Task<string?>> body, TimeSpan? interval = null) : IServerTask

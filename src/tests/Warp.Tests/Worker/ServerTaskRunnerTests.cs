@@ -12,7 +12,7 @@ using Warp.Worker.Services;
 
 namespace Warp.Tests.Worker;
 
-// Pins how ServerTaskRunner executes a task (rule 6.20): a task that LocksWithTransaction runs in one
+// Pins how ServerTaskRunner executes a task (rule 6.23): a task that LocksWithTransaction runs in one
 // transaction and its post-commit hook runs after the commit; a throw rolls back and skips the hook; and
 // under the rolling-deploy lock (LegacyTaskLock), a caller that finds the lock held skips the body.
 [GenerateDatabaseTests]

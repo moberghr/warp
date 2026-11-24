@@ -131,7 +131,7 @@ public sealed class ExpirationCleanup<TContext> : IServerTask
 
         // Time-bucketed Statistic rows (hist/pcth) are downsampled fine→hourly→daily and pruned by
         // StatisticRollup now (§8.30), not deleted here — it retains coarse history instead of dropping it.
-        // Server task runs (rule 6.20) are kept interval x 300, by task name.
+        // Server task runs (rule 6.23) are kept interval x 300, by task name.
         var clusterTasks = await _context.Set<ClusterTask>()
             .Select(x => new { x.Name, x.IntervalSeconds })
             .ToListAsync(ct);

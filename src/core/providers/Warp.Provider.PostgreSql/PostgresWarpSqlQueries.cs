@@ -43,7 +43,7 @@ public sealed class PostgresWarpSqlQueries<TContext> : IWarpSqlQueries<TContext>
     // from context.Model once and cached. A benign double-compute under a race is harmless.
     private string? _lockRateLimitBucketSql;
 
-    // The cluster-wide task statements (rule 6.20), built from the model on first use.
+    // The cluster-wide task statements (rule 6.23), built from the model on first use.
     private PostgresClusterTaskSql? _clusterTaskSql;
 
     public PostgresWarpSqlQueries(WarpJobTableNames names)

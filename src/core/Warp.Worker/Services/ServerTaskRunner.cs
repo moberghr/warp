@@ -42,7 +42,7 @@ internal sealed record ServerTaskInfo(
 /// <item>A task that manages its own transactions (the message router) or has no lock key (the heartbeat)
 /// is just executed, and the hook runs after it.</item>
 /// </list>
-/// Which server may run a task is not decided here: the lease is (rule 6.20).
+/// Which server may run a task is not decided here: the lease is (rule 6.23).
 /// </summary>
 internal sealed class ServerTaskRunner<TContext>
     where TContext : DbContext
@@ -97,7 +97,7 @@ internal sealed class ServerTaskRunner<TContext>
 }
 
 /// <summary>
-/// The lock a cluster-wide task took on every server before leases (rule 6.20), kept for rolling deploys
+/// The lock a cluster-wide task took on every server before leases (rule 6.23), kept for rolling deploys
 /// only. While a server from before the lease is alive it still takes this lock every interval, so a new
 /// server takes it too around the same run and the two never run a task at once.
 /// <para>

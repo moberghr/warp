@@ -5,7 +5,7 @@ using Warp.Core.Data.Entities;
 namespace Warp.Provider.SqlServer;
 
 /// <summary>
-/// The cluster-wide task statements (rule 6.20), built once from the model's resolved names, as the
+/// The cluster-wide task statements (rule 6.23), built once from the model's resolved names, as the
 /// host's naming convention and schema left them. The SQL Server twin of the PostgreSQL statements:
 /// the same rules, in the same order.
 /// </summary>
@@ -54,7 +54,7 @@ internal sealed class SqlServerClusterTaskSql
         var coordination = Column(server, nameof(Server.CoordinationVersion));
         var heartbeat = Column(server, nameof(Server.LastHeartbeatTime));
 
-        // Every time here is the database's own clock (rule 6.20), read once per statement into @now:
+        // Every time here is the database's own clock (rule 6.23), read once per statement into @now:
         // whether a lease is free never depends on two servers' clocks agreeing.
         //
         // The next run is the next multiple of the interval (from the epoch) at least half an interval
@@ -115,7 +115,7 @@ internal sealed class SqlServerClusterTaskSql
             FROM {table} t WITH (ROWLOCK)
             WHERE t.{name} = @name
               AND t.{interval} IS NOT NULL
-              AND (t.{lease} IS NULL OR t.{lease} <= @now);
+              AND (t.{lease} IS NULL OR t.{lease} <= @now OR t.{claimedBy} = @server);
 
             IF @@ROWCOUNT > 0
             BEGIN

@@ -1,11 +1,15 @@
+using System.Collections.Concurrent;
+using System.Threading.Channels;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using Shouldly;
 using Warp.Core;
 using Warp.Core.Data;
 using Warp.Core.Data.Entities;
 using Warp.Core.Data.Queries;
+using Warp.Core.Events;
 using Warp.Tests.Fixtures;
 using Warp.Tests.Helpers;
 using Warp.Tests.TestData.Handlers;
@@ -14,7 +18,7 @@ using Warp.Worker.Services;
 namespace Warp.Tests.Worker;
 
 /// <summary>
-/// The cluster task scheduler (rule 6.20): one server per tick runs a cluster-wide task, an idle task
+/// The cluster task scheduler (rule 6.23): one server per tick runs a cluster-wide task, an idle task
 /// backs off, a signal reruns a task already running here, a run that loses its lease stops, and a
 /// server from before the lease keeps the old lock meaningful. Passes are driven one at a time and runs
 /// are pinned with <see cref="BarrierSignal"/>, so nothing waits on the clock.
@@ -133,25 +137,52 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task PassAsync_SignalDuringTheStartupDelay_RunsOnlyTheSignaledTask()
+    public async Task PassAsync_SignalsElsewhereWhileASignaledRunHolds_FoldIntoOneRerun()
     {
-        // Each task waits its own share of the startup delay (rule 6.18); a signal ends that task's wait
-        // alone. A shared wait let the first job's signal run every cluster task at once.
-        var pinned = new PinnedTask(TimeSpan.FromHours(1));
-        var idle = new IdleTask(TimeSpan.FromHours(1));
-        using var scheduler = await BuildAsync([pinned, idle], TimeSpan.FromHours(1));
-        scheduler.SpreadFirstRuns(() => 0.5);
+        // A run a signal started holds its lease for the rest of the signal interval (rule 6.18): a
+        // signal on another server meanwhile is a run request, not a second run, and the completion
+        // written when the hold ends turns it into one rerun.
+        var clock = new TimerWatchingTimeProvider();
+        var task = new SignaledTask(TimeSpan.FromHours(1));
+        using var first = await BuildAsync([task], TimeSpan.FromMinutes(30), clock);
+        using var second = await BuildAsync([task], TimeSpan.FromMinutes(30), clock);
+        first.Signal(SignaledTask.TaskName);
+        await first.PassAsync(Ct);
+        (await task.Ran.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the signal did not run the task");
+        (await clock.WaitForTimerAsync(x => x > TimeSpan.FromMinutes(25), Ct)).ShouldBeTrue("the run did not hold");
 
         // Act
-        scheduler.Signal(PinnedTask.TaskName);
-        await scheduler.PassAsync(Ct);
-        (await pinned.Barrier.Running.WaitAsync(TimeSpan.FromSeconds(5), Ct)).ShouldBeTrue("the signaled task did not run");
-        pinned.Barrier.CanFinish.Release();
-        await scheduler.RunningTask(PinnedTask.TaskName)!;
+        second.Signal(SignaledTask.TaskName);
+        await second.PassAsync(Ct);
+
+        // Assert: one run, the lease still held, the request on the row.
+        task.Runs.ShouldBe(1);
+        second.RunningTask(SignaledTask.TaskName).ShouldBeNull();
+        var held = await ReadAsync(SignaledTask.TaskName);
+        held.LeaseUntil.ShouldNotBeNull();
+        held.RunRequestedAt.ShouldNotBeNull();
+
+        // Assert: when the hold ends the completion makes the task due, and the next pass reruns it.
+        clock.Advance(TimeSpan.FromMinutes(30));
+        await first.RunningTask(SignaledTask.TaskName)!;
+        await RunOnceAsync(first, SignaledTask.TaskName);
+        task.Runs.ShouldBe(2);
+    }
+
+    [TimedFact]
+    public async Task PassAsync_RunOnSchedule_DoesNotHold()
+    {
+        // Only a run a signal started holds: a scheduled run of a task with signals ends at once.
+        var clock = new TimerWatchingTimeProvider();
+        var task = new SignaledTask(TimeSpan.FromHours(1));
+        using var scheduler = await BuildAsync([task], TimeSpan.FromMinutes(30), clock);
+
+        // Act
+        await RunOnceAsync(scheduler, SignaledTask.TaskName);
 
         // Assert
-        idle.Runs.ShouldBe(0);
-        scheduler.RunningTask(IdleTask.TaskName).ShouldBeNull();
+        task.Runs.ShouldBe(1);
+        clock.Timers.ShouldNotContain(x => x > TimeSpan.FromMinutes(25));
     }
 
     [TimedFact]
@@ -181,7 +212,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
     public async Task PassAsync_ServerFromBeforeTheLeaseHoldsTheOldLock_TaskDoesNotRun()
     {
         // While a server from before the lease is alive, a run also takes the task's old lock; when that
-        // server holds it, this server's run does nothing (rule 6.20, rolling deploy).
+        // server holds it, this server's run does nothing (rule 6.23, rolling deploy).
         var task = new IdleTask(TimeSpan.FromHours(1));
         using var scheduler = await BuildAsync(task);
         await using (var ctx = _fixture.CreateContext())
@@ -222,7 +253,7 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
 
     private Task<ClusterTaskScheduler<TestContext>> BuildAsync(IServerTask task) => BuildAsync([task], TimeSpan.Zero);
 
-    private async Task<ClusterTaskScheduler<TestContext>> BuildAsync(IServerTask[] tasks, TimeSpan startupDelay)
+    private async Task<ClusterTaskScheduler<TestContext>> BuildAsync(IServerTask[] tasks, TimeSpan signalInterval, TimeProvider? time = null)
     {
         var services = new ServiceCollection();
         services.AddScoped(_ => _fixture.CreateContext());
@@ -240,10 +271,10 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
             tasks.Select(ServerTaskInfo.From),
             new ServerTaskRunner<TestContext>(scopes, new NoopLockProvider()),
             scopes,
-            TimeProvider.System,
+            time ?? TimeProvider.System,
             Guid.NewGuid(),
             NullLogger.Instance,
-            startupDelay,
+            signalInterval,
             TimeSpan.FromMinutes(5));
         await scheduler.RegisterAsync(Ct);
 
@@ -338,6 +369,75 @@ public abstract class ClusterTaskSchedulerTestsBase : IAsyncLifetime
             Interlocked.Increment(ref _runs);
 
             return Task.FromResult<string?>(null);
+        }
+    }
+
+    private sealed class SignaledTask(TimeSpan interval) : IServerTask
+    {
+        public const string TaskName = "signaled";
+
+        private int _runs;
+
+        public SemaphoreSlim Ran { get; } = new(0);
+
+        public int Runs => Volatile.Read(ref _runs);
+
+        public string Name => TaskName;
+
+        public string? LockKey => ClusterTaskSchedulerTestsBase.TaskLockKey;
+
+        public TimeSpan? DefaultInterval => interval;
+
+        public IEnumerable<ServerTaskSignal> Signals => [ServerTaskSignal.JobFinalized];
+
+        public Task<string?> ExecuteAsync(CancellationToken ct)
+        {
+            Interlocked.Increment(ref _runs);
+            Ran.Release();
+
+            return Task.FromResult<string?>(null);
+        }
+    }
+
+    // A fake clock that reports every timer started on it, so a test can tell when a run begins its hold.
+    private sealed class TimerWatchingTimeProvider : FakeTimeProvider
+    {
+        private readonly Channel<TimeSpan> _started = Channel.CreateUnbounded<TimeSpan>();
+        private readonly ConcurrentQueue<TimeSpan> _timers = new();
+
+        public TimerWatchingTimeProvider()
+            : base(DateTimeOffset.UtcNow)
+        {
+        }
+
+        public IEnumerable<TimeSpan> Timers => _timers;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            _timers.Enqueue(dueTime);
+            _started.Writer.TryWrite(dueTime);
+
+            return base.CreateTimer(callback, state, dueTime, period);
+        }
+
+        public async Task<bool> WaitForTimerAsync(Func<TimeSpan, bool> match, CancellationToken ct)
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(5));
+            try
+            {
+                while (true)
+                {
+                    if (match(await _started.Reader.ReadAsync(timeout.Token)))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return false;
+            }
         }
     }
 
