@@ -184,6 +184,24 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             return totals;
         }
 
+        // Bisect diagnostics: where the window's reads went, and how many plans left the cache.
+        var top = afterPlans
+            .Select(x =>
+            {
+                var same = beforePlans.TryGetValue(x.Key, out var e) && e.Compiled == x.Value.Compiled && e.Executions <= x.Value.Executions;
+                return (Plan: x.Value, Exec: same ? x.Value.Executions - e.Executions : x.Value.Executions, Reads: same ? x.Value.LogicalReads - e.LogicalReads : x.Value.LogicalReads, Fresh: !same);
+            })
+            .OrderByDescending(x => x.Reads)
+            .Take(12)
+            .ToList();
+        var evicted = beforePlans.Keys.Count(x => !afterPlans.ContainsKey(x));
+        var fresh = afterPlans.Keys.Count(x => !beforePlans.ContainsKey(x));
+        Console.WriteLine($"[sqltop] plans before {beforePlans.Count}, after {afterPlans.Count}, evicted {evicted}, new {fresh}");
+        foreach (var x in top)
+        {
+            Console.WriteLine($"[sqltop] exec={x.Exec} reads={x.Reads} gen={x.Plan.Generation} fresh={x.Fresh} :: {string.Join(" ", x.Plan.Text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))}");
+        }
+
         long statements = 0;
         long buffers = 0;
         foreach (var (id, plan) in afterPlans)
@@ -287,7 +305,9 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                     CONVERT(varchar(130), qs.plan_handle, 1) + ':' + CAST(qs.statement_start_offset AS varchar(12)) AS id,
                     qs.creation_time,
                     qs.execution_count,
-                    qs.total_logical_reads
+                    qs.total_logical_reads,
+                    SUBSTRING(st.text, (qs.statement_start_offset / 2) + 1, 200) AS stmt,
+                    qs.plan_generation_num
                 FROM sys.dm_exec_query_stats qs
                 CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
                 WHERE st.text NOT LIKE '%dm_exec_query_stats%';
@@ -306,7 +326,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             long buffers = 0;
             while (reader.Read())
             {
-                var plan = new PlanStats(reader.GetDateTime(1), Convert.ToInt64(reader.GetValue(2)), Convert.ToInt64(reader.GetValue(3)));
+                var plan = new PlanStats(reader.GetDateTime(1), Convert.ToInt64(reader.GetValue(2)), Convert.ToInt64(reader.GetValue(3)), reader.GetString(4), Convert.ToInt64(reader.GetValue(5)));
 
                 // A repeated key would be the view repeating a row. Added together, so the count stays
                 // whole if it ever does.
@@ -332,7 +352,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
 
     /// <summary>One cached plan statement: when it was compiled and what it has done since.</summary>
     [StructLayout(LayoutKind.Auto)]
-    private readonly record struct PlanStats(DateTime Compiled, long Executions, long LogicalReads);
+    private readonly record struct PlanStats(DateTime Compiled, long Executions, long LogicalReads, string Text = "", long Generation = 0);
 
     /// <summary>One reading of a server: its totals, and on SQL Server the plans behind them.</summary>
     private sealed record Reading(Counters Totals, Dictionary<string, PlanStats>? Plans);
