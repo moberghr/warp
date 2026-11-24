@@ -133,65 +133,118 @@ internal sealed class RunningJobMonitor
 
     private async Task TickAsync(Entry[] running, bool renew)
     {
+        // Taken per entry under its own lock, so a job whose worker has let go (Dispose) gives up nothing,
+        // and a row a failed save took can go back to it.
+        var taken = new List<Taken>(running.Length);
         var logs = new List<JobLog>();
+        var watched = new List<Entry>(running.Length);
         foreach (var entry in running)
         {
-            // A job's "Processing" row goes out with the first flush once it has run a whole tick, so a
-            // job that finishes sooner writes it with its completion instead (rule 6.12).
-            if (_timeProvider.GetElapsedTime(entry.StartedAt) >= _tick && entry.ProcessingLog.Take() is { } processing)
+            if (entry.TryTake(_timeProvider.GetElapsedTime(entry.StartedAt) >= _tick) is not { } rows)
             {
-                logs.Add(processing);
+                continue;
             }
 
-            logs.AddRange(entry.Logs.Drain());
-            logs.AddRange(entry.Progress.Drain());
+            watched.Add(entry);
+            if (rows.Count > 0)
+            {
+                taken.Add(rows);
+                rows.AddTo(logs);
+            }
         }
 
-        if (running.Length == 0 || (!renew && logs.Count == 0))
+        if (watched.Count == 0 || (!renew && logs.Count == 0))
         {
             return;
         }
 
-        try
+        using var scope = _scopeFactory.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
+
+        IReadOnlyCollection<Guid> cancelled = [];
+        if (renew)
         {
-            using var scope = _scopeFactory.CreateScope();
-            var context = scope.ServiceProvider.GetRequiredService<IWarpServerContext>().Context;
-
-            IReadOnlyCollection<Guid> cancelled = [];
-            if (renew)
+            // In id order, as the completion writes them, so the two never lock rows the opposite way round.
+            var ordered = watched.OrderBy(x => x.JobId).ToArray();
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
+            try
             {
-                // In id order, as the completion writes them, so the two never lock rows the opposite
-                // way round.
-                var ordered = running.OrderBy(x => x.JobId).ToArray();
-                var now = _timeProvider.GetUtcNow().UtcDateTime;
-                try
-                {
-                    cancelled = await _renew(context, [.. ordered.Select(x => x.JobId)], [.. ordered.Select(x => x.WorkerId)], now, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (Exception e)
-                {
-                    // The next check renews again; a missed renewal costs nothing until InvisibilityTimeout.
-                    _logger.LogWarning(e, "Failed to renew the keep-alive of {count} running jobs", ordered.Length);
-                }
+                cancelled = await _renew(context, [.. ordered.Select(x => x.JobId)], [.. ordered.Select(x => x.WorkerId)], now, CancellationToken.None).ConfigureAwait(false);
             }
+            catch (Exception e)
+            {
+                // The next check renews again; a missed renewal costs nothing until InvisibilityTimeout.
+                _logger.LogWarning(e, "Failed to renew the keep-alive of {count} running jobs", ordered.Length);
+            }
+        }
 
-            if (logs.Count > 0)
+        if (logs.Count > 0)
+        {
+            try
             {
                 context.Set<JobLog>().AddRange(logs);
                 await context.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
             }
-
-            // After their logs are saved, as each job's own monitor did.
-            foreach (var entry in running.Where(x => cancelled.Contains(x.JobId)))
+            catch (Exception e)
             {
-                _logger.LogInformation("Job {jobId} cancellation requested, cancelling handler", entry.JobId);
-                await entry.CancelAsync().ConfigureAwait(false);
+                // Back to their jobs, for the next tick or the job's own finalizing write. Only a job that
+                // finished meanwhile has nothing to give them back to.
+                var lost = taken.Count(x => !x.PutBack());
+                _logger.LogWarning(e, "Failed to write the logs of {count} running jobs; {lost} had already finished and lose this tick's rows", taken.Count, lost);
             }
+        }
+
+        // Whether or not the logs were saved. Not awaited: CancelAsync returns only once the job token's
+        // callbacks have run, and a handler's callback that blocks would hold the whole group's tick.
+        foreach (var entry in watched.Where(x => cancelled.Contains(x.JobId)))
+        {
+            _logger.LogInformation("Job {jobId} cancellation requested, cancelling handler", entry.JobId);
+            _ = CancelAsync(entry);
+        }
+    }
+
+    private async Task CancelAsync(Entry entry)
+    {
+        try
+        {
+            await entry.CancelAsync().ConfigureAwait(false);
         }
         catch (Exception e)
         {
-            _logger.LogWarning(e, "Failed to write the logs of {count} running jobs", running.Length);
+            _logger.LogWarning(e, "Cancelling job {jobId} failed", entry.JobId);
         }
+    }
+
+    // What one tick took from one running job, so a failed save can return it.
+    private sealed class Taken
+    {
+        private readonly Entry _entry;
+        private readonly JobLog? _processing;
+        private readonly List<JobLog> _logs;
+        private readonly List<JobLog> _progress;
+
+        public Taken(Entry entry, JobLog? processing, List<JobLog> logs, List<JobLog> progress)
+        {
+            _entry = entry;
+            _processing = processing;
+            _logs = logs;
+            _progress = progress;
+        }
+
+        public int Count => (_processing == null ? 0 : 1) + _logs.Count + _progress.Count;
+
+        public void AddTo(List<JobLog> rows)
+        {
+            if (_processing != null)
+            {
+                rows.Add(_processing);
+            }
+
+            rows.AddRange(_logs);
+            rows.AddRange(_progress);
+        }
+
+        public bool PutBack() => _entry.PutBack(_processing, _logs, _progress);
     }
 
     private sealed class Entry : IDisposable
@@ -236,6 +289,45 @@ internal sealed class RunningJobMonitor
         public CancellationToken StoppingToken { get; }
 
         public long StartedAt { get; }
+
+        // This job's rows for one tick: its "Processing" row once it has run a whole tick (rule 6.12), and
+        // its drained logs and progress. Null once its worker has let go.
+        public Taken? TryTake(bool includeProcessing)
+        {
+            lock (_gate)
+            {
+                if (_released)
+                {
+                    return null;
+                }
+
+                var processing = includeProcessing ? ProcessingLog.TakeFor(JobId) : null;
+
+                return new Taken(this, processing, Logs.Drain(), Progress.Drain());
+            }
+        }
+
+        // False when the job has finished since: its own write has gone, and nothing will read these.
+        public bool PutBack(JobLog? processing, List<JobLog> logs, List<JobLog> progress)
+        {
+            lock (_gate)
+            {
+                if (_released)
+                {
+                    return false;
+                }
+
+                if (processing != null)
+                {
+                    ProcessingLog.Restore(processing);
+                }
+
+                Logs.Requeue(logs);
+                Progress.Forget(progress);
+
+                return true;
+            }
+        }
 
         // Cancels the handler unless the job has already left: its worker disposes the token source
         // soon after, so cancelling a job that has gone could touch a disposed one.

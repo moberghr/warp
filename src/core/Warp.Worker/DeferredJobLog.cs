@@ -19,4 +19,26 @@ internal sealed class DeferredJobLog
     public void Set(JobLog log) => Volatile.Write(ref _log, log);
 
     public JobLog? Take() => Interlocked.Exchange(ref _log, null);
+
+    // The row, only if it is this job's: a worker reuses one of these for every job it runs, so a monitor
+    // tick still holding a finished job must not take the next job's row.
+    public JobLog? TakeFor(Guid jobId)
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref _log);
+            if (current == null || current.JobId != jobId)
+            {
+                return null;
+            }
+
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _log, null, current), current))
+            {
+                return current;
+            }
+        }
+    }
+
+    // Puts back a row a failed save took, unless another has been set since.
+    public void Restore(JobLog log) => Interlocked.CompareExchange(ref _log, log, null);
 }

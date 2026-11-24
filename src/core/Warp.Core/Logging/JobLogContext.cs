@@ -51,6 +51,15 @@ internal class JobLogCollector
         return list;
     }
 
+    // Lines a failed save took, for the next drain. Their timestamps keep their order in the table.
+    public void Requeue(IEnumerable<JobLog> lines)
+    {
+        foreach (var line in lines)
+        {
+            _entries.Enqueue(line);
+        }
+    }
+
     /// <summary>
     /// The clock, or one microsecond past the previous stamp if the clock has not moved that far.
     /// </summary>
