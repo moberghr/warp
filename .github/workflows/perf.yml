@@ -1,21 +1,21 @@
 name: Performance
 
-# Compares THIS pull request against its merge base, both measured on the SAME runner in the SAME
-# job, one after the other (each side on a fresh database), the order alternating from run to run so
-# neither side is always the one that runs on a warmer machine. Never against a stored historical
-# number: that comparison measures the runners.
+# Run by hand (Actions > Performance > Run workflow, or `gh workflow run perf.yml --ref <branch>`), when
+# numbers are wanted. NOT on pull requests: 38 cells with several gates each went red on most pushes for
+# reasons that were not regressions (a harness query picked as a deadlock victim, WAL moved by checkpoint
+# timing, one flaky cell among 38), and every push cancelled the run before it. A red check that does not
+# mean a regression teaches people to ignore it.
+#
+# Compares the chosen head against a base (default: its merge base with main), both measured on the SAME
+# runner in the SAME job, one after the other (each side on a fresh database), the order alternating from
+# run to run so neither side is always the one that runs on a warmer machine. Never against a stored
+# historical number: that comparison measures the runners.
 #
 # What is gated and what is not is a measurement question, not a policy preference — see
 # docs/plans/2026-09-22-performance-ci.md. Short version: counts are gated because they reproduce to
 # a few percent; server-arm timings are reported because their measured spread reached 417%.
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'src/core/**'
-      - 'src/benchmarks/**'
-      - '.github/workflows/perf.yml'
   workflow_dispatch:
     inputs:
       base_ref:
@@ -38,9 +38,11 @@ on:
 env:
   DOTNET_VERSION: '10.0'
 
+# Each run is asked for by hand, so one never cancels another (two comparisons of one branch, say against
+# main and against the last release, run side by side).
 concurrency:
-  group: perf-${{ github.ref }}
-  cancel-in-progress: true
+  group: perf-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   # The two commits under comparison, resolved once. Every benchmark job measures the same pair, so
@@ -84,8 +86,6 @@ jobs:
 
           if [ -n "${{ inputs.base_ref }}" ]; then
             BASE_SHA=$(resolve "${{ inputs.base_ref }}")
-          elif [ -n "${{ github.base_ref }}" ]; then
-            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" "$HEAD_SHA")
           else
             BASE_SHA=$(git merge-base origin/main "$HEAD_SHA")
           fi
