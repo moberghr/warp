@@ -9,27 +9,6 @@
 
 Warp runs background jobs, pub/sub messages and in-process requests for .NET 10 on PostgreSQL or SQL Server, through your own EF Core `DbContext`. A job is saved in the same transaction as the data it belongs to, and there is no broker to operate.
 
-```csharp
-public async Task PlaceOrder(Order order, CancellationToken ct)
-{
-    db.Orders.Add(order);
-
-    // Saved in the same transaction as the order.
-    await publisher.Enqueue(new SendConfirmationEmail { OrderId = order.Id });
-
-    await db.SaveChangesAsync(ct);
-}
-
-public class SendConfirmationEmailHandler(IEmailSender email)
-    : IJobHandler<SendConfirmationEmail>
-{
-    public Task HandleAsync(SendConfirmationEmail job, CancellationToken ct) =>
-        email.SendConfirmation(job.OrderId, ct);
-}
-```
-
-[![The Warp dashboard](https://raw.githubusercontent.com/moberghr/warp/main/website/static/img/readme/dashboard.png)](https://moberghr.github.io/warp/docs/dashboard/overview)
-
 ## Why Warp
 
 - **Jobs commit with your data.** Warp writes to your `DbContext`, so a job and the row it belongs to are saved together or not at all.
@@ -88,6 +67,27 @@ dotnet ef migrations add AddWarp
 dotnet ef database update
 ```
 
+A job commits in the same transaction as your data:
+
+```csharp
+public async Task PlaceOrder(Order order, CancellationToken ct)
+{
+    db.Orders.Add(order);
+
+    // Saved in the same transaction as the order.
+    await publisher.Enqueue(new SendConfirmationEmail { OrderId = order.Id });
+
+    await db.SaveChangesAsync(ct);
+}
+
+public class SendConfirmationEmailHandler(IEmailSender email)
+    : IJobHandler<SendConfirmationEmail>
+{
+    public Task HandleAsync(SendConfirmationEmail job, CancellationToken ct) =>
+        email.SendConfirmation(job.OrderId, ct);
+}
+```
+
 Use `AddWarp` in place of `AddWarpServer` in a process that only publishes. The [getting started guide](https://moberghr.github.io/warp/docs/getting-started) covers the rest.
 
 ## Four patterns
@@ -119,6 +119,8 @@ await foreach (var item in mediator.CreateStream(new GetUsers { Role = "Admin" }
 ## The dashboard
 
 `app.MapWarpDashboard("/warp")` serves it from your own application. Light and dark.
+
+[![The Warp dashboard](https://raw.githubusercontent.com/moberghr/warp/main/website/static/img/readme/dashboard.png)](https://moberghr.github.io/warp/docs/dashboard/overview)
 
 | | |
 |---|---|
