@@ -98,6 +98,7 @@ public static class PostgreSqlServiceConfiguration
 
         // A process refuses to start when Warp's time columns are not timestamp with time zone (legacy mode).
         builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<Microsoft.Extensions.Hosting.IHostedService, PostgresTimestampCheckService<TContext>>());
+        builder.Services.TryAddEnumerable(ServiceDescriptor.Singleton<Microsoft.Extensions.Hosting.IHostedService, PostgresVersionCheckService<TContext>>());
 
         return builder;
     }
