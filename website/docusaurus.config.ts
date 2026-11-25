@@ -36,7 +36,7 @@ const versionAnchorPlugin = () => {
 const config: Config = {
   title: 'Warp',
   tagline: 'Distributed job processing and message queue for .NET',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/logo.svg',
 
   future: {
     v4: true,
@@ -120,7 +120,7 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/screenshots/01-dashboard.png',
+    image: 'img/showcase/dashboard-light.png',
     colorMode: {
       respectPrefersColorScheme: false,
       disableSwitch: false,
@@ -132,6 +132,7 @@ const config: Config = {
     },
     navbar: {
       title: 'Warp',
+      logo: { alt: 'Warp', src: 'img/logo.svg' },
       items: [
         {
           type: 'docSidebar',
@@ -150,7 +151,6 @@ const config: Config = {
       ],
     },
     footer: {
-      style: 'dark',
       links: [
         {
           title: 'Docs',
@@ -178,7 +178,7 @@ const config: Config = {
     },
     prism: {
       theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      darkTheme: prismThemes.vsDark,
       additionalLanguages: ['csharp'],
     },
   } satisfies Preset.ThemeConfig,
