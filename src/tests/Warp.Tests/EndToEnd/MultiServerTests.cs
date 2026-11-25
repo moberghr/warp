@@ -50,36 +50,41 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         var job2Id = await publisher.Enqueue(new BarrierRequest());
         await publisher.SaveChangesAsync(Xunit.TestContext.Current.CancellationToken);
 
-        // Both handlers must enter — proves both jobs claimed across the 6-worker pool
-        await barrier.Running.WaitAsync(Xunit.TestContext.Current.CancellationToken);
-        await barrier.Running.WaitAsync(Xunit.TestContext.Current.CancellationToken);
-
-        // No third worker can enter — only two jobs exist. Wait long enough for either server's
-        // next polling cycle (PollingInterval = 100ms in test config) to surface a duplicate
-        // cross-server claim if one were possible.
-        var spuriousEntry = await barrier.Running.WaitAsync(TimeSpan.FromMilliseconds(300), Xunit.TestContext.Current.CancellationToken);
-        spuriousEntry.ShouldBeFalse("Only two workers should be in the handler; a third entry indicates duplicate cross-server claim");
-
-        var ctx = Fixture.CreateContext();
-        foreach (var jobId in new[] { job1Id, job2Id })
+        // The handlers are released whatever the assertions say. A failed one used to leave them pinned, so
+        // disposing the server waited for them until the test's own timeout, and the run reported
+        // "timed out after 10000 milliseconds" instead of the assertion that failed.
+        try
         {
-            var job = await ctx.Set<Job>().FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
-            job.CurrentState.ShouldBe(State.Processing);
-            job.CurrentWorkerId.ShouldNotBeNull();
+            // Both handlers must enter — proves both jobs claimed across the 6-worker pool
+            await barrier.Running.WaitAsync(Xunit.TestContext.Current.CancellationToken);
+            await barrier.Running.WaitAsync(Xunit.TestContext.Current.CancellationToken);
 
-            var processingLogs = await ctx.Set<JobLog>()
-                .CountAsync(l => l.JobId == jobId && l.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
-            processingLogs.ShouldBe(1, $"Job {jobId} should have exactly one Processing log");
+            // No third worker can enter — only two jobs exist. Wait long enough for either server's
+            // next polling cycle (PollingInterval = 100ms in test config) to surface a duplicate
+            // cross-server claim if one were possible.
+            var spuriousEntry = await barrier.Running.WaitAsync(TimeSpan.FromMilliseconds(300), Xunit.TestContext.Current.CancellationToken);
+            spuriousEntry.ShouldBeFalse("Only two workers should be in the handler; a third entry indicates duplicate cross-server claim");
+
+            var ctx = Fixture.CreateContext();
+            foreach (var jobId in new[] { job1Id, job2Id })
+            {
+                var job = await ctx.Set<Job>().FirstAsync(j => j.Id == jobId, Xunit.TestContext.Current.CancellationToken);
+                job.CurrentState.ShouldBe(State.Processing);
+                job.CurrentWorkerId.ShouldNotBeNull();
+            }
+
+            // Two distinct workers hold the jobs (no single-worker double-claim)
+            var workerIds = await ctx.Set<Job>()
+                .Where(j => j.Id == job1Id || j.Id == job2Id)
+                .Select(j => j.CurrentWorkerId)
+                .ToListAsync(Xunit.TestContext.Current.CancellationToken);
+            workerIds.Distinct().Count().ShouldBe(2, "Two jobs must be processed by two distinct workers");
+        }
+        finally
+        {
+            barrier.CanFinish.Release(2);
         }
 
-        // Two distinct workers hold the jobs (no single-worker double-claim)
-        var workerIds = await ctx.Set<Job>()
-            .Where(j => j.Id == job1Id || j.Id == job2Id)
-            .Select(j => j.CurrentWorkerId)
-            .ToListAsync(Xunit.TestContext.Current.CancellationToken);
-        workerIds.Distinct().Count().ShouldBe(2, "Two jobs must be processed by two distinct workers");
-
-        barrier.CanFinish.Release(2);
         await server1.WaitForCompletion(TimeSpan.FromSeconds(30));
 
         var readCtx = Fixture.CreateContext();
@@ -91,6 +96,13 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
             var completedLogs = await readCtx.Set<JobLog>()
                 .CountAsync(l => l.JobId == jobId && l.EventType == "Completed", Xunit.TestContext.Current.CancellationToken);
             completedLogs.ShouldBe(1, $"Job {jobId} should have exactly one Completed log");
+
+            // Exactly one, read once the job is at rest: the row is deferred (rule 6.12), written by the
+            // monitor's first flush or with the completion, so mid-run it may not exist yet. Asserting it
+            // 300 ms after the handlers entered failed on CI (SQL Server 2025) when the flush came later.
+            var processingLogs = await readCtx.Set<JobLog>()
+                .CountAsync(l => l.JobId == jobId && l.EventType == "Processing", Xunit.TestContext.Current.CancellationToken);
+            processingLogs.ShouldBe(1, $"Job {jobId} should have exactly one Processing log");
         }
     }
 
