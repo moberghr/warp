@@ -10,21 +10,6 @@
 
 [Documentation](https://moberghr.github.io/warp/) · [Getting started](https://moberghr.github.io/warp/docs/getting-started) · [Performance](https://moberghr.github.io/warp/docs/performance) · [Release notes](https://moberghr.github.io/warp/docs/releases)
 
-```csharp
-// The job commits in the same transaction as the order.
-db.Orders.Add(order);
-await publisher.Enqueue(new SendConfirmationEmail { OrderId = order.Id });
-await db.SaveChangesAsync();
-
-public class SendConfirmationEmailHandler(IEmailSender email) : IJobHandler<SendConfirmationEmail>
-{
-    public Task HandleAsync(SendConfirmationEmail job, CancellationToken ct) =>
-        email.SendConfirmation(job.OrderId, ct);
-}
-```
-
-![Warp dashboard](https://raw.githubusercontent.com/moberghr/warp/main/website/static/img/screenshots/01-dashboard.png)
-
 ## Why Warp
 
 - **One library, four kinds of work.** Jobs, messages, requests and streams share one handler model and one pipeline.
@@ -75,6 +60,21 @@ Warp adds its tables to your `DbContext` model, in the `warp` schema. Create the
 ```bash
 dotnet ef migrations add AddWarp
 dotnet ef database update
+```
+
+A job commits in the same transaction as your data:
+
+```csharp
+// The job commits in the same transaction as the order.
+db.Orders.Add(order);
+await publisher.Enqueue(new SendConfirmationEmail { OrderId = order.Id });
+await db.SaveChangesAsync();
+
+public class SendConfirmationEmailHandler(IEmailSender email) : IJobHandler<SendConfirmationEmail>
+{
+    public Task HandleAsync(SendConfirmationEmail job, CancellationToken ct) =>
+        email.SendConfirmation(job.OrderId, ct);
+}
 ```
 
 Use `AddWarp` in place of `AddWarpServer` in a process that only publishes. The [getting started guide](https://moberghr.github.io/warp/docs/getting-started) covers the rest.
@@ -146,6 +146,12 @@ await foreach (var item in mediator.CreateStream(new GetUsers { Role = "Admin" }
 [Custom metrics](https://moberghr.github.io/warp/docs/features/custom-metrics) ·
 [Operational notifications](https://moberghr.github.io/warp/docs/features/operational-notifications) ·
 [Multi-application view](https://moberghr.github.io/warp/docs/features/applications)
+
+## Dashboard
+
+`app.MapWarpDashboard("/warp")` serves a dashboard with each job's state history, live handler logs, error groups, queue wait, SLOs and traces across jobs. See the [dashboard docs](https://moberghr.github.io/warp/docs/dashboard/overview).
+
+![Warp dashboard](https://raw.githubusercontent.com/moberghr/warp/main/website/static/img/screenshots/01-dashboard.png)
 
 ## Packages
 
