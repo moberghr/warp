@@ -50,7 +50,7 @@ The fix is compatible with 7.x, where the worker's own save then finds nothing l
 
 - **The Orchestrator checks only the parents a finished job names.** It used to check every batch and message in flight on almost every job completion (10,924 pages per pass with 1,000 messages in flight on PostgreSQL). A finished, deleted or crash-recovered job now names its parent. Every parent is still checked once per `OrchestrationInterval`.
 - **Two Orchestrator queries no longer walk dead rows.** The "which parents are ready" query read 10,004 pages per call on a table with no batch or message in it (now 6), and continuation activation read every completed row once per awaiting row (5,063 pages per call; now each distinct parent once). Both were present in 7.7. SQL Server was not affected by the first.
-- **Cluster-wide server tasks run once per tick for the whole cluster.** Each task with a lock key has one row in the new `ClusterTask` table, and one statement per server claims every due task with a lease. Before, every server took every task's lock on every interval, so idle database load grew with the number of servers. Idle runs write nothing. Measured on PostgreSQL (idle, 5 workers, 120 s): 389 statements a minute for one idle server before, 161 after; each extra server adds about 49 instead of 389.
+- **Cluster-wide server tasks run once per tick for the whole cluster.** Each task with a lock key has one row in the new `ClusterTask` table, and one statement per server claims every due task with a lease. Before, every server took every task's lock on every interval, so idle database load grew with the number of servers. Idle runs write nothing. An idle server issues 3.75 statements a second on PostgreSQL, against 8.14 in 7.7.0, and a second idle server adds about 2 a second where it added 8. At most two timer-driven tasks run at once on a server, so they hold at most two connections; the Orchestrator and the MessageRouter never wait for them.
 - **A signal-woken server task runs at most once per `ServerTaskSignalInterval`** (new, default 500 ms). Wakes in between fold into one pass, cluster-wide.
 - **On PostgreSQL, server work opens on a pool of its own** (`Application Name` suffixed `:warp-server`) without the connection reset, so a checkout no longer costs a `DISCARD ALL`.
 
@@ -59,31 +59,40 @@ The fix is compatible with 7.x, where the worker's own save then finds nothing l
 - **Any save of your `DbContext` wakes workers.** In 7.7 only `IPublisher.SaveChangesAsync` / `IBatchPublisher.SaveChangesAsync` announced new jobs; a plain `db.SaveChangesAsync()` after `Enqueue` committed them silently and workers found them on their next poll, up to 5 minutes later with `UseDatabasePush()`. An EF Core interceptor on your context now announces every committed save; inside an explicit transaction it waits for the commit, and a rollback announces nothing. With `UseDatabasePush()`, other servers are told by a hosted relay, one notification per queue per batch.
 - **SQL Server push reaches every listening process.** 7.7 used one shared Service Broker queue, which handed each notification to one random process and lost the wake when that process had no workers. Each listening process now has its own queue, conversations are ended, and queues left by dead processes are swept.
 
-**Measured against 7.7.0** by the perf workflow (CI, jobs per second and database statements per job):
+**Measured against 7.7.0** by the perf workflow: both versions on the same CI runner in the same job, PostgreSQL 18.7 and SQL Server 2025 in containers capped at 2 CPUs and 4 GB, each case run 3 times; the median is shown. Statements and WAL are counted by the database. Speed is 8.0's jobs per second over 7.7.0's within the same run.
 
-{/* VERIFY: numbers from the first CI run on PR #352; update from the final run */}
+| Scenario | Statements per job | WAL per job (PostgreSQL) | Speed |
+|---|---|---|---|
+| Dispatcher · PostgreSQL | 10.34 → 2.23 | 4,229 → 3,132 B | 2.89× |
+| Dispatcher · SQL Server | 3.74 → 0.21 | | 1.98× |
+| Single-worker · PostgreSQL | 13.96 → 9.11 | 4,068 → 3,088 B | 1.24× |
+| Single-worker · SQL Server | 4.45 → 3.09 | | 1.17× |
+| Completion batching, batched (50) | 10.62 → 2.24 | 4,228 → 3,123 B | 2.54× |
+| Large payloads | 9.87 → 2.16 | 9,049 → 7,945 B | 2.31× |
+| Two servers, dispatcher · PostgreSQL | 11.32 → 2.52 | 4,425 → 3,354 B | 1.36× |
+| Two servers, dispatcher · SQL Server | 4.18 → 0.57 | | 1.92× |
+| Failing jobs | 15.06 → 10.11 | 5,792 → 3,938 B | 1.20× |
+| Retries | 42.95 → 28.15 | 15,283 → 10,404 B | 1.32× |
+| Message routing | 10.97 → 7.79 | 4,060 → 3,364 B | 1.29× |
+| Batches and continuations | 13.91 → 9.13 | 4,239 → 3,692 B | 1.02× |
+| Scheduled backlog | 14.03 → 9.12 | 4,724 → 3,655 B | 1.36× |
+| Mutex, heavy contention | 39.11 → 30.42 | 6,741 → 5,766 B | 1.10× |
+| Long-running jobs, dispatcher · PostgreSQL | 50.38 → 17.51 | 10,430 → 9,214 B | time-bound |
+| Long-running jobs, single-worker · SQL Server | 21.31 → 4.64 | | time-bound |
+| Publishing, save after every job | 5.01 → 5.01 | 1,265 → 987 B | 0.96× |
 
-| Scenario | Jobs/s, 7.7.0 → 8.0 | Statements per job, 7.7.0 → 8.0 |
+Idle, per second (the cost of a running Warp that has no work):
+
+| | Statements | Peak connections |
 |---|---|---|
-| Dispatcher · PostgreSQL | 852 → 1,031 | 10.78 → 2.27 |
-| Dispatcher · SQL Server | 608 → 634 | 3.65 → 0.15 |
-| Single-worker · PostgreSQL | 697 → 610 | 14.01 → 9.13 |
-| Single-worker · SQL Server | 480 → 370 | 4.24 → 2.19 |
-| Completion batching, batched (50) | 683 → 1,535 | 10.23 → 2.26 |
-| Completion batching, one write per job | 542 → 965 | 14.54 → 3.28 |
-| Large payloads | 669 → 1,405 | 9.80 → 2.18 |
-| Scheduled backlog | 461 → 723 | 14.10 → 9.11 |
-| Publishing, one save for 1,000 | 2,852 → 4,191 | 2.01 → 2.01 |
-| Failing jobs | 593 → 809 | 14.99 → 10.10 |
-| Large table, empty | 556 → 740 | 14.05 → 9.10 |
-| Message routing | 260 → 338 | 11.02 → 7.63 |
-| Mutex, heavy contention | 311 → 402 | 37.29 → 29.43 |
-| Retries | 306 → 387 | 42.99 → 28.17 |
-| Batches and continuations | 581 → 704 | 13.94 → 9.13 |
+| One server · PostgreSQL | 8.14 → 3.75 | 24 → 12 |
+| One server · SQL Server | 4.28 → 3.28 | 10 → 8 |
+| Two servers · PostgreSQL | 16.25 → 5.73 | 47 → 13 |
+| Two servers · SQL Server | 8.46 → 5.59 | 14 → 8 |
 
-An idle server issues 3.71 statements per second on PostgreSQL (7.92 in 7.7.0) and 3.94 on SQL Server (4.26). Two idle servers, a new scenario with no 7.7 figure, issue 5.63 (PostgreSQL) and 5.14 (SQL Server).
+Under load, Warp now holds fewer database connections in every dispatcher scenario: 25 → 6 at peak in dispatcher mode on PostgreSQL, 36 → 12 with two servers. Single-worker mode still holds about one connection per worker. The runs: [3 repeats](https://github.com/moberghr/warp/actions/runs/45594802008), [connections](https://github.com/moberghr/warp/actions/runs/45609178782).
 
-The single-worker jobs/s rows come from a short CI benchmark whose timing is noisy; statements per job is the reliable column there.
+Speed on a shared CI runner moves between runs, and time-bound scenarios (long-running jobs, rate limits, recurring firings) are paced by the clock rather than by Warp; the statement and WAL columns are the reliable ones.
 
 ### Fixes in this release
 
