@@ -16,4 +16,4 @@
 
 ## Worker internals (path-scoped)
 
-- **§6.9–§6.25** (claiming, finalization, the running-job monitor, Orchestrator queries, the cluster-task lease scheduler, perf-CI gates) live in `performance-worker.md`, which loads when you touch `Warp.Worker`, the provider packages, the benchmarks or their tests. Read it before changing any of those from elsewhere.
+- **§6.9–§6.26** (claiming, finalization, the running-job monitor, Orchestrator queries, the cluster-task lease scheduler, perf-CI gates, the failed-job stack trim) live in `performance-worker.md`, which loads when you touch `Warp.Worker`, the provider packages, the benchmarks or their tests. Read it before changing any of those from elsewhere.

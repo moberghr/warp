@@ -2,6 +2,7 @@ using System.Globalization;
 using Warp.Core.Data.Entities;
 using Warp.Core.Entities;
 using Warp.Core.Enums;
+using Warp.Core.ErrorGrouping;
 using Warp.Core.Handlers;
 
 namespace Warp.Worker.Logging;
@@ -43,7 +44,7 @@ internal static class FinalizationLogs
                     Timestamp = now,
                     Level = "Error",
                     Message = outcome?.LogMessage ?? error.Message,
-                    Exception = error.ToString(),
+                    Exception = HandlerStackTrace.Trim(error.ToString()),
                     DurationMs = durationMs,
                     WorkerId = workerId,
                 },
@@ -81,7 +82,7 @@ internal static class FinalizationLogs
                 Timestamp = now,
                 Level = state == State.Failed ? "Error" : "Information",
                 Message = logMessage,
-                Exception = error?.ToString(),
+                Exception = HandlerStackTrace.Trim(error?.ToString()),
                 DurationMs = durationMs,
                 WorkerId = workerId,
             },

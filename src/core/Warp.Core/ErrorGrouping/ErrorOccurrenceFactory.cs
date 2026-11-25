@@ -40,10 +40,10 @@ public static class ErrorOccurrenceFactory
     {
         if (cause.StackTrace is { Length: > 0 } frames)
         {
-            return $"{cause.GetType().FullName}: {Cap(cause.Message, SampleHeaderMax)}\n{frames}";
+            return $"{cause.GetType().FullName}: {Cap(cause.Message, SampleHeaderMax)}\n{HandlerStackTrace.Trim(frames)}";
         }
 
-        return original.ToString();
+        return HandlerStackTrace.Trim(original.ToString())!;
     }
 
     private static Exception Unwrap(Exception error)

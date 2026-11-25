@@ -15,7 +15,7 @@ paths:
   - ".github/scripts/**"
 ---
 
-# Performance — worker internals (§6.9–§6.25)
+# Performance — worker internals (§6.9–§6.26)
 
 > Loaded only when touching the paths above. Rules only — rationale, history, measurements and full rot-guard lists live in `.claude/references/design-notes/<section>-*.md`; **read the note before changing a section's area**.
 
@@ -50,7 +50,7 @@ paths:
   - `FinalizeParentsAsync` finds ready parents with **one branch per kind** (`Kind = Message` UNION ALL `Kind = Batch`), each `ORDER BY CurrentState, CreateTime` + `Take`. A scalar `Kind` alone is not enough; it needs the `ORDER BY` only `(Kind, CurrentState, CreateTime)` can supply.
   - "Which awaiting rows can move?" is **three steps** (`AwaitedParentIdsQuery` → `AwaitedParentStatesQuery` → `AwaitingChildrenOfQuery`), each DISTINCT parent read once — never one `WHERE EXISTS(parent ...)` statement.
   - Past 1,000 awaited parents (`ServerTaskSignals.ManyAwaitedParents`) a pass asks only about jobs a wake named (`AwaitedParentIdsAmongQuery`) and reads the whole set only on a sweep, 5,000 parents at a time (`NextSweepSlice`).
-  - **A wake names the parents to check** (`SignalJobFinalized(Guid?)` / `SignalJobsFinalized`; push payload `parents[;settled]` after `F:`, `FinalizedParentsPayload`); the worker passes the claimed row's `ParentJobId` (no query, §0.2). Hinted passes run `HintedReadyParentsQuery`; the full `ReadyParentsQuery` runs only on a **sweep** (first pass, every scheduled run via the internal `IScheduledRunAware.BeginRun`, after the no-argument `SignalJobFinalized()`, on hint overflow).
+  - **A wake names the parents to check** (`SignalJobFinalized(Guid?)` / `SignalJobsFinalized`; push payload `parents[;settled]` after `F:`, `FinalizedParentsPayload`); the worker passes the claimed row's `ParentJobId` (no query, §0.2). Hinted passes find children by parent id alone (`ChildStatesOfQuery`), decide readiness in memory (`ParentsWithSettledChildren`) and load the ready parents by primary key (`ParentsByIdQuery`) — never kind/state predicates on the children in SQL (the planner found them through `(kind, state, create_time)`: 325 to 25,208 pages per call on identical code); the full `ReadyParentsQuery` runs only on a **sweep** (first pass, every scheduled run via the internal `IScheduledRunAware.BeginRun`, after the no-argument `SignalJobFinalized()`, on hint overflow).
   - **Every site that puts a child into a terminal state names its parent** (`DeleteJob`/`BulkDeleteJobs`, `StaleJobRecovery` from `OnCommittedAsync`); a new one must too. **Do not remove the sweep, and do not make a wake-only signal request one.** A pass that throws or is rolled back returns its work (`ReturnFinalizedParents`).
   - Guards: `OrchestratorReadyParentsPlanTests`, `FinalizedParentHintsTests`, `OrchestrationTaskTests`, `MessageIntegrationTests.GivenNoParentSweepDue_*`.
 
@@ -77,3 +77,7 @@ paths:
 
 - **§6.24** **Report-only perf-CI gates (TODO, until calibrated by three no-op runs)** in `PerfCompare.RenderScenario`: (1) every SQL Server per-job row, (2) the `TwoServersUnderLoad`, `RecurringJobs` and `BackgroundLoad` scenarios (`[CiScenario(Calibrated = false)]`), (3) DB ms/job on both providers. After calibration switch each back on and update "How to read this" in `.github/workflows/perf.yml`. Validity checks (a missing measurement; a two-server case where one server completed under 20% of the jobs) are NOT report-only.
 - **§6.25** **The Performance workflow runs only when someone starts it** (`workflow_dispatch`: Actions > Performance > Run workflow, or `gh workflow run perf.yml --ref <branch> [-f base_ref=7.7.0]`), plus a published release. Not on pull requests, no nightly run. **Do not put it back on `pull_request`** without first making a red check mean a confirmed regression. Run it before a release and after a change to the worker, the claim, the completion or the server tasks; read the count columns (statements, commands, transactions, WAL per job) — timings on shared runners are for the ratio within one run only. The bench PostgreSQL runs with `full_page_writes=off` (`WAL FPI/job` should read 0).
+
+## Failure path
+
+- **§6.26** **A failed job's stored stack trace ends where Warp called the handler** (`HandlerStackTrace.Trim`, applied in `FinalizationLogs.Build` and `ErrorOccurrenceFactory.FromException`). The frames from `GeneratedJobDispatcher` down (the generated call, every pipeline behaviour, the worker's `ExecuteJob`) are dropped per exception; untrimmed, 8.0 stored 1,302 characters where 7.7 stored 529 and retries wrote 6% more WAL per job than 7.7. **Do not store `error.ToString()` for a job failure anywhere else without the trim.** Guard: `HandlerStackTraceTests`.
