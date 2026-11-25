@@ -86,7 +86,7 @@ function Hero() {
               Jobs, pub/sub messages and an in-process mediator for .NET&nbsp;10,
               stored in the PostgreSQL or SQL&nbsp;Server database you already have.
               Jobs commit with your data through your own EF&nbsp;Core DbContext,
-              at about 0.24 database statements per job.
+              at as few as 0.22 database statements per job.
             </p>
             <div className={styles.heroActions}>
               <Link className={styles.btnPrimary} to="/docs/getting-started">
@@ -148,25 +148,27 @@ function Marquee() {
 }
 
 const PERF_STATS = [
-  { value: '21–34×', label: 'sooner than Hangfire to drain 50,000 empty jobs' },
-  { value: '9–11×', label: 'sooner when every job reads and updates a row' },
-  { value: '0.24', label: 'database statements per job, against 43' },
-  { value: '13.7 KB', label: 'allocated per job, against 79.7 KB' },
+  { value: '16×', label: 'sooner than Hangfire to drain 20,000 empty jobs (dispatcher mode)' },
+  { value: '7×', label: 'sooner when every job reads and updates a row' },
+  { value: '0.22', label: 'database statements per job, against 40' },
+  { value: '15 KB', label: 'allocated per job, against 75 KB' },
 ];
 
 const PERF_BARS = [
   {
-    title: 'Drain 50,000 empty jobs',
+    title: 'Drain 20,000 empty jobs, 1 server × 10 workers',
     rows: [
-      { name: 'Warp', value: '7.2–10.6 s', pct: 3.8, warp: true },
-      { name: 'Hangfire', value: '228–244 s', pct: 100, warp: false },
+      { name: 'Warp (dispatcher)', value: '2.1 s', pct: 6.1, warp: true },
+      { name: 'Warp (default)', value: '11.2 s', pct: 32.3, warp: true },
+      { name: 'Hangfire', value: '34.7 s', pct: 100, warp: false },
     ],
   },
   {
     title: 'Drain 20,000 jobs that read and update a row',
     rows: [
-      { name: 'Warp', value: '14.0–17.7 s', pct: 10.4, warp: true },
-      { name: 'Hangfire', value: '151–155 s', pct: 100, warp: false },
+      { name: 'Warp (dispatcher)', value: '5.3 s', pct: 14.6, warp: true },
+      { name: 'Warp (default)', value: '13.8 s', pct: 37.9, warp: true },
+      { name: 'Hangfire', value: '36.4 s', pct: 100, warp: false },
     ],
   },
 ];

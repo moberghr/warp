@@ -1,86 +1,78 @@
 ---
 title: Warp vs Hangfire
-description: Measured throughput, database load and memory per job for Warp 8.0 and Hangfire on PostgreSQL.
+description: Throughput, database load, CPU, memory and connections per job for Warp 8.0 and Hangfire on the same PostgreSQL, with the harness in the repository.
 ---
 
 # Warp vs Hangfire
 
-Both libraries were given the same jobs, the same worker count and the same PostgreSQL server, and each run was measured from the first job starting to the last one finishing.
+Both libraries were given the same jobs, the same server and worker count and the same PostgreSQL server, and each was measured from starting its server to the last job finishing. The harness is in the repository, [`src/benchmarks/Warp.Comparison`](https://github.com/moberghr/warp/tree/main/src/benchmarks/Warp.Comparison), and its README describes every step and every measured row. The [Comparison workflow](https://github.com/moberghr/warp/actions/workflows/comparison.yml) runs it on a GitHub runner; anyone can run it again.
 
-:::info[Preliminary figures]
+## Setup
 
-These are the first numbers from the comparison harness, measured for the unreleased 8.0. Each cell is the range across repeated runs. The full report, with hardware, versions and the harness source, will replace this page when it is finished.
+| | |
+|---|---|
+| Machine | GitHub `ubuntu-24.04` runner (4 vCPUs). PostgreSQL 18.7 in a container on the same machine, capped at 2 CPUs and 4 GB. |
+| Servers and workers | 1 server × 10 workers, for every arm |
+| Warp (default) | `AddWarpServer` with `UsePostgreSql()` and `WorkerCount = 10`. Every other setting at its default: each worker claims its own job. |
+| Warp (dispatcher) | The same, with `UseDispatcher = true`: one claim serves the worker group, and completions are written in batches. |
+| Hangfire | Hangfire 1.8.25 with Hangfire.PostgreSql 1.21.1, default filters, `WorkerCount = 10`, and `QueuePollInterval` lowered from 15 s to 1 s. |
+| Jobs | 20,000 per run, enqueued before the server starts. A warm-up of 200 jobs runs first, on servers of its own. |
+| Runs | 3 per arm, a fresh database each, the arms' order rotating between rounds. Each cell is the median; the range is in brackets. |
 
-:::
+Measured in [run 45617194190](https://github.com/moberghr/warp/actions/runs/45617194190) on 25 November 2026, on the 8.0 branch before release.
 
-{/* VERIFY: all figures on this page come from the two summary tables of 2026-11-25; replace them from the detailed report, and fill in hardware, PostgreSQL version, Hangfire and Hangfire.PostgreSql versions, Warp configuration and repeat count. */}
+## Empty jobs
 
-## Summary
+The handler does nothing, so this measures the library alone: claiming a job, running it, and recording that it finished.
 
-| | Warp 8.0 | Hangfire |
-|---|---|---|
-| Drain 50,000 empty jobs | **7.2–10.6 s** | 228–244 s |
-| Drain 20,000 jobs that read and update a row | **14.0–17.7 s** | 151–155 s |
-| Database statements per empty job | **0.23–0.24** | 42.8–43.0 |
-| Memory allocated per empty job | **13.7 KB** | 79.7 KB |
+| | Warp (default) | Warp (dispatcher) | Hangfire |
+|---|---:|---:|---:|
+| Time to drain 20,000 jobs | 11.2 s (10.9–11.3) | **2.1 s** (2.0–2.1) | 34.7 s (34.7–34.8) |
+| Jobs/s, first job to last | 1,794 | **10,388** | 577 |
+| Statements per job | 7.03 | **0.22** | 40.03 |
+| Commits per job | 2.01 | **0.09** | 21.02 |
+| WAL per job | 1,984 B | 1,993 B | 4,643 B |
+| Database time per job | 0.726 ms | **0.061 ms** | 3.444 ms |
+| Worker process CPU per job | 1.04 ms | **0.15 ms** | 2.45 ms |
+| Allocated per job | 130.2 KB | **15.2 KB** | 75.0 KB |
+| Peak connections | 14 | **5** | 13 |
+| Idle connections (average) | 8.6 | **4.0** | 6.2 |
 
-With empty jobs Warp finished the queue 21 to 34 times sooner. With jobs that do their own database work it finished 9 to 11 times sooner.
+In dispatcher mode Warp drained the queue 16 times sooner than Hangfire; with default settings, 3 times sooner. Warp's default mode allocates more memory per job than Hangfire: each worker claims and finalizes its own job, and dispatcher mode is the setting for a busy queue.
 
-## Run 1: empty jobs
+## Jobs that use the database
 
-50,000 jobs whose handler does nothing. This measures the library alone: claiming a job, running it, and recording that it finished.
+Each job reads one row and updates it, with identical SQL through Npgsql in both libraries. This is closer to a real workload, where the handler's own work shares the database with the queue.
 
-| | Warp 8.0 | Hangfire |
-|---|---|---|
-| Time to drain 50,000 jobs | **7.2–10.6 s** | 228–244 s |
-| Throughput, first job to last | **4,633–7,464 jobs/s** | 205–219 jobs/s |
-| Throughput, p10–p90 | **7,294–9,272 jobs/s** | 227–242 jobs/s |
-| Worker CPU per job | **0.12–0.13 ms** | 3.5–3.6 ms (includes enqueue) |
-| PostgreSQL CPU per job | **0.11–0.20 ms** | 4.4–4.8 ms |
-| Statements per job | **0.23–0.24** | 42.8–43.0 |
-| Commits per job | **0.17** | 19.9–20.0 |
-| WAL written per job | **~1,990 B** | ~5,920 B |
-| Allocated per job | **13.7 KB** | 79.7 KB |
-| Peak database connections | **18** | 30 |
+| | Warp (default) | Warp (dispatcher) | Hangfire |
+|---|---:|---:|---:|
+| Time to drain 20,000 jobs | 13.8 s (13.8–13.9) | **5.3 s** (5.2–5.3) | 36.4 s (36.1–36.6) |
+| Jobs/s, first job to last | 1,457 | **3,892** | 551 |
+| Statements per job (the job itself issues 2) | 10.03 | **3.39** | 43.03 |
+| Commits per job | 5.01 | **3.17** | 24.02 |
+| WAL per job | 2,070 B | 2,068 B | 4,462 B |
+| Database time per job | 0.855 ms | **0.261 ms** | 3.561 ms |
+| Worker process CPU per job | 1.21 ms | **0.41 ms** | 2.47 ms |
+| Allocated per job | 134.8 KB | **25.1 KB** | 95.4 KB |
+| Peak connections | 21 | 15 | **13** |
+| Idle connections (average) | 15.8 | 10.2 | **6.4** |
 
-Warp issues fewer than one statement per job because it claims jobs in batches and writes completions in batches, so one statement covers many jobs.
-
-The Hangfire worker CPU figure includes enqueueing the jobs; the Warp figure does not, so that row is not a like-for-like comparison.
-
-## Run 2: jobs that use the database
-
-Each job reads one row and updates it, with identical SQL in both libraries. 10 workers, warm start. This is closer to a real workload, where the handler's own work shares the database with the queue.
-
-| Time to drain | Warp 8.0 | Hangfire |
-|---|---|---|
-| 1,000 jobs | **1.5–1.9 s** | ~12 s |
-| 5,000 jobs | **5.0–5.5 s** | 56–70 s |
-| 20,000 jobs | **14.0–17.7 s** | 151–155 s |
-
-| Per job, 20,000 jobs | Warp 8.0 | Hangfire |
-|---|---|---|
-| Throughput, first job to last | **1,105–1,446 jobs/s** | 130–134 jobs/s |
-| PostgreSQL CPU | **0.49–0.53 ms** | 5.5–5.8 ms |
-| Worker CPU | **0.52–0.57 ms** | 6.0–6.4 ms |
-| Statements (the job itself issues 2) | **3.3–3.4** | 45–46 |
-| WAL written | **~2.1 KB** | ~6 KB |
-| Allocated | **19–23 KB** | ~106 KB |
-
-Of Warp's 3.3 to 3.4 statements per job, two are the handler's own read and update.
+In dispatcher mode Warp drained the queue 7 times sooner than Hangfire; with default settings, 2.6 times sooner. Hangfire held fewer connections here: Warp's handlers opened their own connection for the job's work alongside the queue's.
 
 ## What the rows mean
 
-- **Throughput, first job to last** is the job count divided by the whole run, including ramp-up. **p10–p90** is the rate over the middle of the run.
-- **Worker CPU** and **PostgreSQL CPU** are processor time divided by the job count. PostgreSQL CPU is what the queue costs the database you share with the rest of your application.
-- **Statements** and **commits** are counted by PostgreSQL, so they include everything each library sends.
-- **WAL** is the write-ahead log volume, which is what replication and backups have to carry.
-- **Allocated** is managed memory allocated by the worker process, divided by the job count.
+- **Time to drain** is the wall clock from starting the server to the last job completed. **Jobs/s, first job to last** is the job count over the time between the first and last completion, read from each library's own records.
+- **Statements**, **WAL** and **database time** come from PostgreSQL's `pg_stat_statements`, **commits** from `pg_stat_database`, both for the benchmark database only, so they include everything the library sends.
+- **Worker process CPU** and **allocated** are the process that runs the server, divided by the job count.
+- **Peak** and **idle connections** sample `pg_stat_activity` every 50 ms.
+- The harness's own queries are left out of every row.
 
 ## Reading these numbers fairly
 
 - The runs are on PostgreSQL only. Hangfire's PostgreSQL storage is a community package, and its first-party SQL Server storage may behave differently. A SQL Server comparison has not been run.
-- A benchmark of empty jobs measures overhead, not your workload. If a job takes 2 seconds of its own, both libraries finish it in about 2 seconds; the difference is in what the queue costs the database and how much throughput is left when jobs are short.
-- These are results from one machine. Run them on your own hardware before you rely on them.
+- An empty job measures overhead, not your workload. If a job takes 2 seconds of its own, both libraries finish it in about 2 seconds; the difference is in what the queue costs the database and how much throughput is left when jobs are short.
+- Hangfire's poll interval was lowered from its 15 s default, which favours Hangfire. Its default filters (automatic retry, statistics) stayed on, as they are in an application.
+- One server on one shared runner. Run the [harness](https://github.com/moberghr/warp/tree/main/src/benchmarks/Warp.Comparison) on your own hardware before you rely on the numbers.
 
 ## Why the gap is this large
 

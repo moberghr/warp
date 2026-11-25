@@ -20,7 +20,7 @@ var user = await mediator.Send(new GetUser { UserId = 1 });  // request: in-proc
 
 **Jobs commit with your data.** `Enqueue` and `Publish` write to your `DbContext`, so one `SaveChangesAsync` commits the order and the job that emails the customer, or neither. There is no broker to keep in step with the database. See the [outbox pattern](./features/outbox-pattern.md).
 
-**A queue that is light on the database.** Warp 8.0 claims jobs in batches and writes completions in batches. With empty jobs it issues about 0.24 statements per job, and it drained a 50,000-job queue 21 to 34 times sooner than Hangfire on the same PostgreSQL server. See [Performance](./performance/index.md).
+**A queue that is light on the database.** In dispatcher mode Warp 8.0 claims jobs in batches and writes completions in batches: about 0.22 statements per empty job, and a 20,000-job queue drained 16 times sooner than Hangfire with the same worker count on the same PostgreSQL server. See [Performance](./performance/index.md).
 
 **Flow control on the job or the handler.** [`[Mutex]`](./features/mutex.md), [`[Semaphore]`](./features/semaphore.md), [`[RateLimit]`](./features/rate-limit.md), [`[Timeout]`](./features/timeout.md), [`[Retry]`](./patterns/jobs.md#retries) and [`[CircuitBreaker]`](./features/circuit-breaker.md) are attributes. The policy is resolved once and written on the job row, so a redeploy does not change a job that is already waiting.
 

@@ -9,20 +9,19 @@ Warp's queue lives in your application database, so every statement the queue is
 
 ## At a glance
 
-Measured on PostgreSQL for the unreleased 8.0. Each cell is the range across repeated runs. The second column ran with 10 workers.
+Measured on PostgreSQL 18 for 8.0, 1 server × 10 workers in dispatcher mode, 20,000 jobs, the median of 3 runs on a GitHub runner ([run](https://github.com/moberghr/warp/actions/runs/45617194190)).
 
 | | Empty jobs | Jobs that read and update a row |
 |---|---|---|
-| Throughput, first job to last | 4,633–7,464 jobs/s | 1,105–1,446 jobs/s |
-| Database statements per job | 0.23–0.24 | 3.3–3.4 (2 are the job's own) |
-| PostgreSQL CPU per job | 0.11–0.20 ms | 0.49–0.53 ms |
-| Worker CPU per job | 0.12–0.13 ms | 0.52–0.57 ms |
-| Allocated per job | 13.7 KB | 19–23 KB |
+| Throughput, first job to last | 10,388 jobs/s | 3,892 jobs/s |
+| Database statements per job | 0.22 | 3.39 (2 are the job's own) |
+| Database time per job | 0.061 ms | 0.261 ms |
+| Worker CPU per job | 0.15 ms | 0.41 ms |
+| Allocated per job | 15.2 KB | 25.1 KB |
+| Peak database connections | 5 | 15 |
 
-{/* VERIFY: figures from the comparison summary of 2026-11-25; the empty-job run did not state its worker count. Update from the detailed report. */}
-
-- **[Warp vs Hangfire](./warp-vs-hangfire.md)**: the same jobs on the same database. Warp drained the queue 9 to 34 times sooner, depending on the workload.
-- **[8.0 against 7.7](../releases.md#a-faster-worker-and-less-database-work)**: jobs per second and statements per job for 15 scenarios, on both databases, from the CI perf workflow.
+- **[Warp vs Hangfire](./warp-vs-hangfire.md)**: the same jobs on the same database, with the harness in the repository. In dispatcher mode Warp drained the queue 7 to 16 times sooner; with default settings, 2.6 to 3 times sooner.
+- **[8.0 against 7.7](../releases.md#a-faster-worker-and-less-database-work)**: statements, WAL and connections per job for 19 scenarios, on both databases, from the CI perf workflow.
 - **[Memory benchmarks](../operations/benchmarks.md)**: the leak test and how to run the benchmark projects.
 
 ## How Warp keeps the database quiet
@@ -35,7 +34,7 @@ These apply to dispatcher mode (`UseDispatcher = true`) unless noted.
 - **Completions are written many at a time.** Workers hand a finished job to the group's buffer and take the next one. One statement writes the batch. See [Batched Completions](../features/batched-completions.md).
 - **Handlers are dispatched by generated code.** The source generator emits a typed call for each job type, so running a job involves no reflection. This applies in both modes.
 - **The worker never builds your `DbContext`.** A handler that does not touch the database does not pay for one. This applies in both modes.
-- **Job indexes are partial.** Four indexes cover only the rows that are waiting, so most state changes write fewer index entries.
+- **Job indexes are partial.** Four job indexes cover only the rows they are read for (waiting, scheduled, with a parent, with an expiry), so most state changes write fewer index entries.
 - **Ids are time-ordered (UUID version 7).** On PostgreSQL, inserts land on the newest index pages.
 - **Idle servers stay idle.** Cluster-wide tasks run once per tick for the whole cluster, and an idle run writes nothing.
 

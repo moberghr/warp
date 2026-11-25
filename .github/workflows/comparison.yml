@@ -6,10 +6,6 @@ name: Comparison
 # src/benchmarks/Warp.Comparison/README.md; the summary is written to this run's page.
 
 on:
-  # TEMPORARY, remove before merging: workflow_dispatch only works once this file is on main.
-  push:
-    branches: [fix/pre-8.0-issues]
-    paths: ['.github/workflows/comparison.yml']
   workflow_dispatch:
     inputs:
       jobs:
