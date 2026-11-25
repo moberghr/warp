@@ -10,14 +10,16 @@ Three arms, each with the same number of servers and workers (default 1 server Ã
 
 | Arm | Configuration |
 |---|---|
-| `warp` | `AddWarpServer` with `UsePostgreSql()` and `WorkerCount`. Every other setting at its default: each worker claims its own job. |
-| `warp-dispatcher` | The same, with `UseDispatcher = true`: one claim serves the worker group and completions are written in batches. |
+| `warp-dispatcher` | `AddWarpServer` with `UsePostgreSql()`, `WorkerCount` and `UseDispatcher = true`, every other setting at its default. Dispatcher mode is the default since 8.0: one claim serves the worker group and completions are written in batches. |
+| `warp-single-worker` | The same with `UseDispatcher = false`: each worker claims, runs and completes its own job (the default before 8.0). |
+| `warp-dispatcher-prefetch` | Dispatcher mode with `PrefetchCount = WorkerCount`: the group claims that many jobs ahead of its free workers (the default before 8.0). Not in the default set of arms. |
 | `hangfire` | Hangfire 1.8.25 with Hangfire.PostgreSql 1.21.1, its default filters (automatic retry, statistics, continuations), `WorkerCount`, and `QueuePollInterval` at 1 s instead of 15 s, so an idle worker looks again after a second. |
 
 Two jobs, identical in both libraries (`Jobs.cs`):
 
 - **noop**: an empty handler. It measures the library alone: claiming a job, running it, recording that it finished.
 - **work**: reads one row and updates it (`SELECT` then `UPDATE` on a 1,000-row table, the same SQL through Npgsql in both), so the job's own database work shares the server with the queue.
+- **jitter**: waits 10 to 300 ms (`Task.Delay`). Each job's delay is fixed by its position in the backlog, so every arm gets the same delays in the same order. Workers free up one at a time, which shows how the queue refills them. Not in the default set of kinds.
 
 ## How a run goes
 
@@ -37,6 +39,9 @@ Two jobs, identical in both libraries (`Jobs.cs`):
 | Commits | `pg_stat_database.xact_commit` for the benchmark database. |
 | Worker process CPU, allocated | `Process.TotalProcessorTime` and `GC.GetTotalAllocatedBytes` of the process running the servers. |
 | Peak and idle connections | `pg_stat_activity` for the benchmark database, sampled every 50 ms. |
+| Claim statements per job | `pg_stat_statements` calls of Warp's job claim (both modes issue the same statement). |
+| Jobs per claim, claims of 1 / 2â€“3 / 4+ jobs, empty claims | Warp's opt-in `warp.dispatcher.claim.size` histogram (dispatcher mode only), over the non-empty claims. |
+| Ideal drain, idle worker slots | Jitter only. The sum of the delays the handlers ran divided by the worker count, and the worker count minus the average number of handlers running over the window. |
 
 The harness's own work is left out of every row: its queries carry the tag `comparison-harness` (left out of the
 statements), run on a connection with that application name (left out of the connections), and are subtracted from

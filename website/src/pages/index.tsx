@@ -148,7 +148,7 @@ function Marquee() {
 }
 
 const PERF_STATS = [
-  { value: '16×', label: 'sooner than Hangfire to drain 20,000 empty jobs (dispatcher mode)' },
+  { value: '16×', label: 'sooner than Hangfire to drain 20,000 empty jobs' },
   { value: '7×', label: 'sooner when every job reads and updates a row' },
   { value: '0.22', label: 'database statements per job, against 40' },
   { value: '15 KB', label: 'allocated per job, against 75 KB' },
@@ -158,16 +158,16 @@ const PERF_BARS = [
   {
     title: 'Drain 20,000 empty jobs, 1 server × 10 workers',
     rows: [
-      { name: 'Warp (dispatcher)', value: '2.1 s', pct: 6.1, warp: true },
-      { name: 'Warp (default)', value: '11.2 s', pct: 32.3, warp: true },
+      { name: 'Warp (default)', value: '2.1 s', pct: 6.1, warp: true },
+      { name: 'Warp (single-worker)', value: '11.2 s', pct: 32.3, warp: true },
       { name: 'Hangfire', value: '34.7 s', pct: 100, warp: false },
     ],
   },
   {
     title: 'Drain 20,000 jobs that read and update a row',
     rows: [
-      { name: 'Warp (dispatcher)', value: '5.3 s', pct: 14.6, warp: true },
-      { name: 'Warp (default)', value: '13.8 s', pct: 37.9, warp: true },
+      { name: 'Warp (default)', value: '5.3 s', pct: 14.6, warp: true },
+      { name: 'Warp (single-worker)', value: '13.8 s', pct: 37.9, warp: true },
       { name: 'Hangfire', value: '36.4 s', pct: 100, warp: false },
     ],
   },

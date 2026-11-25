@@ -6,8 +6,8 @@ using Warp.Comparison;
 
 // Warp against Hangfire: one arm per run, a summary of many. README.md describes the method.
 //
-//   dotnet run -c Release -- run --engine=warp|warp-dispatcher|hangfire --conn="Host=..;Database=..;Username=..;Password=.."
-//                                [--jobs=20000] [--servers=1] [--workers=10] [--job=noop|work] [--items=1000] [--out=result.json]
+//   dotnet run -c Release -- run --engine=warp-dispatcher|warp-single-worker|hangfire --conn="Host=..;Database=..;Username=..;Password=.."
+//                                [--jobs=20000] [--servers=1] [--workers=10] [--job=noop|work|jitter] [--items=1000] [--out=result.json]
 //   dotnet run -c Release -- summarize --results=<folder of result json files> [--out=summary.md]
 var options = args
     .Skip(1)
@@ -31,12 +31,13 @@ if (args.Length > 0 && string.Equals(args[0], "summarize", StringComparison.Ordi
     return 0;
 }
 
-var engine = Option("engine", "warp");
+var engine = Option("engine", "warp-dispatcher");
 var connectionString = options.GetValueOrDefault("conn") ?? throw new ArgumentException("--conn is required", nameof(args));
 var jobs = Number("jobs", 20_000);
 var servers = Number("servers", 1);
 var workers = Number("workers", 10);
-var work = string.Equals(Option("job", "noop"), "work", StringComparison.Ordinal);
+var job = Option("job", "noop");
+var work = string.Equals(job, "work", StringComparison.Ordinal);
 var items = Number("items", 1000);
 var ct = CancellationToken.None;
 
@@ -47,8 +48,9 @@ Workload.ConnectionString = connectionString;
 
 IArm Create() => engine switch
 {
-    "warp" => new WarpArm(connectionString, harness, servers, workers, dispatcher: false),
     "warp-dispatcher" => new WarpArm(connectionString, harness, servers, workers, dispatcher: true),
+    "warp-dispatcher-prefetch" => new WarpArm(connectionString, harness, servers, workers, dispatcher: true, prefetch: workers),
+    "warp-single-worker" => new WarpArm(connectionString, harness, servers, workers, dispatcher: false),
     "hangfire" => new HangfireArm(connectionString, harness, servers, workers),
     _ => throw new NotSupportedException($"Unknown engine '{engine}'"),
 };
@@ -93,7 +95,7 @@ long warmedUp;
 await using (var warmUp = Create())
 {
     await warmUp.PrepareAsync(ct);
-    await warmUp.PreloadAsync(200, work, items, ct);
+    await warmUp.PreloadAsync(200, job, items, ct);
     await warmUp.StartAsync(ct);
     warmedUp = await WaitForAsync(warmUp, 200);
     await warmUp.StopAsync(ct);
@@ -104,7 +106,7 @@ await arm.PrepareAsync(ct);
 
 // The backlog, written with no server running.
 var preload = Stopwatch.StartNew();
-await arm.PreloadAsync(jobs, work, items, ct);
+await arm.PreloadAsync(jobs, job, items, ct);
 Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{engine}: preloaded {jobs:N0} jobs in {preload.Elapsed.TotalSeconds:0.0} s"));
 
 // Every connection the preload opened is closed, so its backends publish their counters before the first reading.
@@ -113,6 +115,8 @@ await Task.Delay(TimeSpan.FromSeconds(2), ct);
 await DatabaseCounters.ResetAsync(monitor, ct);
 var before = await DatabaseCounters.ReadAsync(monitor, database, ct);
 Harness.ResetQueries();
+Workload.ResetBusy();
+using var claimSizes = new ClaimSizes();
 
 // The window: from starting the servers to the last job completed and the servers stopped.
 await using var sampler = new ConnectionSampler(monitor, database);
@@ -129,6 +133,8 @@ process.Refresh();
 var cpuMs = (process.TotalProcessorTime - cpuBefore).TotalMilliseconds;
 var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
 var (peakConnections, idleConnections) = await sampler.StopAsync();
+var claims = claimSizes.Stop();
+var busySeconds = Workload.BusyMs / 1000.0;
 
 // The library's connections are closed so their backends publish what they counted.
 NpgsqlConnection.ClearAllPools();
@@ -154,7 +160,7 @@ await using (var connection = new NpgsqlConnection(monitor))
 
 var result = new RunResult(
     engine,
-    work ? "work" : "noop",
+    job,
     jobs,
     servers,
     workers,
@@ -172,9 +178,29 @@ var result = new RunResult(
     idleConnections,
     postgresVersion,
     Environment.GetEnvironmentVariable("GITHUB_SHA") ?? "local",
-    typeof(Hangfire.BackgroundJob).Assembly.GetName().Version?.ToString() ?? "?");
+    typeof(Hangfire.BackgroundJob).Assembly.GetName().Version?.ToString() ?? "?",
+    engine.StartsWith("warp", StringComparison.Ordinal) ? (after.ClaimStatements - before.ClaimStatements) / (double)jobs : null,
+    ClaimShare(x => x > 0, average: true),
+    ClaimShare(x => x == 1),
+    ClaimShare(x => x is 2 or 3),
+    ClaimShare(x => x >= 4),
+    claims.Count > 0 ? claims.Count(x => x == 0) / (double)jobs : null,
+    string.Equals(job, "jitter", StringComparison.Ordinal) ? busySeconds / (servers * workers) : null,
+    string.Equals(job, "jitter", StringComparison.Ordinal) ? (servers * workers) - (busySeconds / drain.Elapsed.TotalSeconds) : null);
 
 await File.WriteAllTextAsync(Option("out", "result.json"), JsonSerializer.Serialize(result, json));
 Console.WriteLine(JsonSerializer.Serialize(result, json));
 
 return 0;
+
+// Over the non-empty claims: the share whose size matches, or (average) their mean size. Null without claims.
+double? ClaimShare(Func<int, bool> match, bool average = false)
+{
+    var taken = claims.Where(x => x > 0).ToList();
+    if (taken.Count == 0)
+    {
+        return null;
+    }
+
+    return average ? taken.Average() : taken.Count(match) / (double)taken.Count;
+}

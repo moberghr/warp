@@ -25,7 +25,7 @@ internal static class Harness
 /// default database so the reads are not counted: statements, WAL and execution time from
 /// <c>pg_stat_statements</c> (harness queries left out by their tag), commits from <c>pg_stat_database</c>.
 /// </summary>
-internal sealed record DatabaseCounters(long Statements, long WalBytes, double DbMs, long Commits)
+internal sealed record DatabaseCounters(long Statements, long WalBytes, double DbMs, long Commits, long ClaimStatements)
 {
     public static async Task ResetAsync(string monitor, CancellationToken ct)
     {
@@ -48,7 +48,9 @@ internal sealed record DatabaseCounters(long Statements, long WalBytes, double D
                  WHERE d.datname = @db AND s.query NOT LIKE '%{Harness.Tag}%'),
               (SELECT coalesce(sum(total_exec_time + total_plan_time), 0) FROM pg_stat_statements s JOIN pg_database d ON d.oid = s.dbid
                  WHERE d.datname = @db AND s.query NOT LIKE '%{Harness.Tag}%'),
-              (SELECT xact_commit FROM pg_stat_database WHERE datname = @db)
+              (SELECT xact_commit FROM pg_stat_database WHERE datname = @db),
+              (SELECT coalesce(sum(calls), 0) FROM pg_stat_statements s JOIN pg_database d ON d.oid = s.dbid
+                 WHERE d.datname = @db AND s.query LIKE '%FOR UPDATE SKIP LOCKED))%RETURNING t.*%')
             """,
             connection);
         command.Parameters.AddWithValue("db", database);
@@ -59,7 +61,8 @@ internal sealed record DatabaseCounters(long Statements, long WalBytes, double D
             Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
             Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
             Convert.ToDouble(reader.GetValue(2), CultureInfo.InvariantCulture),
-            Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture));
+            Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture),
+            Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture));
     }
 }
 
@@ -156,4 +159,55 @@ internal sealed record RunResult(
     double AverageIdleConnections,
     string PostgresVersion,
     string Commit,
-    string HangfireVersion);
+    string HangfireVersion,
+    double? ClaimStatementsPerJob = null,
+    double? MeanJobsPerClaim = null,
+    double? ClaimsOfOneShare = null,
+    double? ClaimsOfTwoToThreeShare = null,
+    double? ClaimsOfFourOrMoreShare = null,
+    double? EmptyClaimsPerJob = null,
+    double? IdealDrainSeconds = null,
+    double? AverageIdleWorkerSlots = null);
+
+/// <summary>
+/// Warp's dispatcher claims inside the window, from its opt-in <c>warp.dispatcher.claim.size</c> histogram (one
+/// measurement per claim, empty ones included). Single-worker mode and Hangfire record none.
+/// </summary>
+internal sealed class ClaimSizes : IDisposable
+{
+    private readonly List<int> _sizes = [];
+    private readonly Lock _gate = new();
+    private readonly System.Diagnostics.Metrics.MeterListener _listener = new();
+
+    public ClaimSizes()
+    {
+        _listener.InstrumentPublished = (instrument, listener) =>
+        {
+            // The dispatcher records a claim's size only while its claim duration is listened to as well.
+            if (string.Equals(instrument.Name, "warp.dispatcher.claim.size", StringComparison.Ordinal)
+                || string.Equals(instrument.Name, "warp.dispatcher.claim.duration", StringComparison.Ordinal))
+            {
+                listener.EnableMeasurementEvents(instrument);
+            }
+        };
+        _listener.SetMeasurementEventCallback<int>((_, value, _, _) =>
+        {
+            lock (_gate)
+            {
+                _sizes.Add(value);
+            }
+        });
+        _listener.Start();
+    }
+
+    public List<int> Stop()
+    {
+        _listener.Dispose();
+        lock (_gate)
+        {
+            return [.. _sizes];
+        }
+    }
+
+    public void Dispose() => _listener.Dispose();
+}

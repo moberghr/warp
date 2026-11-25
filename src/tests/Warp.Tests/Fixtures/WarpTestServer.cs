@@ -306,7 +306,6 @@ public class WarpTestServer : IAsyncDisposable
                     // Tests configure short retry delays (1s); keep the Scheduled→Enqueued
                     // sweep tight so retry loops don't stall waiting for the 5s default.
                     config.ScheduledActivationInterval = TimeSpan.FromMilliseconds(250);
-                    config.UseDispatcher = false;
 
                     // Turn off the auto Counter→Statistic aggregator. No test relies on it
                     // firing automatically — tests that need aggregation invoke

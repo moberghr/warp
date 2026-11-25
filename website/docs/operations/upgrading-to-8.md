@@ -16,6 +16,7 @@ This page covers the upgrade from 7.7 to 8.0. Two things need work before you de
 6. SQL Server with `UseDatabasePush()`: the application's login now needs `CREATE QUEUE` and `CREATE SERVICE` at run time. Otherwise nothing to plan: 8.0 bridges to 7.7's shared Service Broker queue during the deploy. See [Rolling deploy](#rolling-deploy-77-and-80-side-by-side).
 7. Check the clock difference between your application hosts and the database. See [Rolling deploy](#rolling-deploy-77-and-80-side-by-side).
 8. If you implement `IWarpSqlQueries`, `IBatchPublisher` or a notifier, read [API changes](#api-changes).
+9. Decide whether to keep the new default worker mode. Dispatcher mode is on unless you set `UseDispatcher = false`. See [Dispatcher mode is the default](#dispatcher-mode-is-the-default).
 
 ## Handlers save their own DbContext
 
@@ -63,6 +64,27 @@ public class ShipOrderHandler(AppDbContext db, IPublisher publisher) : IJobHandl
 **Fix the handlers before you deploy 8.0.** During a rolling deploy the same handler behaves differently depending on which version claims the job: a 7.7 worker saves for it, an 8.0 worker does not. The fix is safe on 7.x, where the worker's own save after the handler then finds nothing to write.
 
 Saga handlers are not affected: the saga proxy still saves for them.
+
+## Dispatcher mode is the default
+
+`UseDispatcher` defaults to `true` in 8.0. Each worker group has one dispatcher that claims jobs for its free workers in one statement, and the group's completions are written in batches. Servers that set nothing switch mode with the upgrade. It cuts statements, allocations and connections per job several times over (see [Warp vs Hangfire](../performance/warp-vs-hangfire.md)), and changes these things you can observe:
+
+- A finished job shows `Processing` until its batch is written, up to `CompletionFlushInterval` (100 ms by default).
+- After a crash, jobs whose completion was still buffered run again: `StaleJobRecovery` requeues them unless they are `[NoRestart]`. Handlers must already be safe to run more than once; this widens the window.
+- **Prefetch is off by default** (`PrefetchCount` unset now means 0; in 7.x it meant `WorkerCount`). The dispatcher claims only for workers that are free, so a job never waits on one server while another server has idle workers. That includes servers that already ran with `UseDispatcher = true` on 7.x: set `PrefetchCount = WorkerCount` to keep the 7.x depth.
+- To raise throughput for many short jobs, set `PrefetchCount` to buffer jobs ahead of the workers (about 16% more empty jobs per second at `WorkerCount` on one server). The cost: a prefetched job is `Processing` on the server that claimed it, so it waits behind that server's running jobs even while another server has idle workers, and waits for crash recovery if that server dies. Leave it at 0 for long-running jobs or several servers.
+
+To keep 7.x's single-worker mode:
+
+```csharp
+builder.Services.AddWarpServer<AppDbContext>(opt =>
+{
+    opt.UsePostgreSql();
+    opt.UseDispatcher = false;
+});
+```
+
+Servers in either mode can run side by side, and 7.7 servers in either mode work with 8.0 servers in either mode. Database push (`UseDatabasePush()`) stays opt-in: it needs a session-mode connection on PostgreSQL and Service Broker on SQL Server.
 
 ## The migration
 

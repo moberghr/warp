@@ -22,7 +22,7 @@ internal interface IArm : IAsyncDisposable
 {
     Task PrepareAsync(CancellationToken ct);
 
-    Task PreloadAsync(int jobs, bool work, int items, CancellationToken ct);
+    Task PreloadAsync(int jobs, string job, int items, CancellationToken ct);
 
     Task StartAsync(CancellationToken ct);
 
@@ -35,10 +35,12 @@ internal interface IArm : IAsyncDisposable
 
 /// <summary>
 /// Warp, configured the way an application would be: <c>AddWarpServer</c> with the PostgreSQL provider, the worker
-/// count, and every other setting at its default. <paramref name="dispatcher"/> turns on dispatcher mode (one claim
-/// for the whole worker group, completions written in batches); without it each worker claims its own job.
+/// count, and every other setting at its default except <c>UseDispatcher</c>, which each arm sets explicitly so its
+/// meaning does not move with the default: true is dispatcher mode (the default since 8.0: one claim for the whole
+/// worker group, completions written in batches), false is single-worker mode (each worker claims its own job).
+/// <paramref name="prefetch"/> is <c>PrefetchCount</c>: unset is the default (no prefetch).
 /// </summary>
-internal sealed class WarpArm(string connectionString, string harnessConnectionString, int servers, int workers, bool dispatcher) : IArm
+internal sealed class WarpArm(string connectionString, string harnessConnectionString, int servers, int workers, bool dispatcher, int? prefetch = null) : IArm
 {
     private readonly List<IHost> _hosts = [];
     private ServiceProvider? _harness;
@@ -57,6 +59,7 @@ internal sealed class WarpArm(string connectionString, string harnessConnectionS
                         x.UsePostgreSql();
                         x.WorkerCount = workers;
                         x.UseDispatcher = dispatcher;
+                        x.PrefetchCount = prefetch;
                     });
                 })
                 .Build());
@@ -72,7 +75,7 @@ internal sealed class WarpArm(string connectionString, string harnessConnectionS
         await scope.ServiceProvider.GetRequiredService<ComparisonContext>().Database.EnsureCreatedAsync(ct);
     }
 
-    public async Task PreloadAsync(int jobs, bool work, int items, CancellationToken ct)
+    public async Task PreloadAsync(int jobs, string job, int items, CancellationToken ct)
     {
         // One save per thousand jobs: a host publishing a backlog would batch it the same way.
         for (var start = 0; start < jobs; start += 1000)
@@ -81,13 +84,17 @@ internal sealed class WarpArm(string connectionString, string harnessConnectionS
             var publisher = scope.ServiceProvider.GetRequiredService<IPublisher>();
             for (var i = start; i < Math.Min(jobs, start + 1000); i++)
             {
-                if (work)
+                switch (job)
                 {
-                    await publisher.Enqueue(new WorkJob { ItemId = (i % items) + 1 });
-                }
-                else
-                {
-                    await publisher.Enqueue(new NoopJob());
+                    case "work":
+                        await publisher.Enqueue(new WorkJob { ItemId = (i % items) + 1 });
+                        break;
+                    case "jitter":
+                        await publisher.Enqueue(new JitterJob { DelayMs = Workload.JitterDelayMs(i) });
+                        break;
+                    default:
+                        await publisher.Enqueue(new NoopJob());
+                        break;
                 }
             }
 
@@ -178,7 +185,7 @@ internal sealed class HangfireArm(string connectionString, string harnessConnect
         return Task.CompletedTask;
     }
 
-    public async Task PreloadAsync(int jobs, bool work, int items, CancellationToken ct)
+    public async Task PreloadAsync(int jobs, string job, int items, CancellationToken ct)
     {
         // Hangfire writes each enqueue on its own; eight publishers so the preload does not take minutes.
         var next = 0;
@@ -192,7 +199,13 @@ internal sealed class HangfireArm(string connectionString, string harnessConnect
                 while ((i = Interlocked.Increment(ref next)) <= jobs)
                 {
                     var itemId = (i % items) + 1;
-                    _ = work ? client.Enqueue(() => HangfireJobs.Work(itemId)) : client.Enqueue(() => HangfireJobs.Noop());
+                    var delayMs = Workload.JitterDelayMs(i - 1);
+                    _ = job switch
+                    {
+                        "work" => client.Enqueue(() => HangfireJobs.Work(itemId)),
+                        "jitter" => client.Enqueue(() => HangfireJobs.Jitter(delayMs)),
+                        _ => client.Enqueue(() => HangfireJobs.Noop()),
+                    };
                 }
 
                 return ValueTask.CompletedTask;

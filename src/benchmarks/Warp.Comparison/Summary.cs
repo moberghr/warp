@@ -6,7 +6,7 @@ namespace Warp.Comparison;
 /// <summary>One table per job kind: a row per measurement, a column per engine, each cell the median of the runs and their range.</summary>
 internal static class Summary
 {
-    private static readonly (string Label, Func<RunResult, double> Value, string Format)[] Rows =
+    private static readonly (string Label, Func<RunResult, double?> Value, string Format)[] Rows =
     [
         ("Time to drain (s)", x => x.DrainSeconds, "0.0"),
         ("Jobs/s, first job to last", x => x.JobsPerSecondFirstToLast, "N0"),
@@ -19,9 +19,17 @@ internal static class Summary
         ("Allocated per job (KB)", x => x.AllocatedKbPerJob, "0.0"),
         ("Peak connections", x => x.PeakConnections, "0"),
         ("Idle connections (average)", x => x.AverageIdleConnections, "0.0"),
+        ("Claim statements per job", x => x.ClaimStatementsPerJob, "0.00"),
+        ("Jobs per claim (mean of non-empty claims)", x => x.MeanJobsPerClaim, "0.00"),
+        ("Claims of 1 job", x => x.ClaimsOfOneShare, "0%"),
+        ("Claims of 2–3 jobs", x => x.ClaimsOfTwoToThreeShare, "0%"),
+        ("Claims of 4+ jobs", x => x.ClaimsOfFourOrMoreShare, "0%"),
+        ("Empty claims per job", x => x.EmptyClaimsPerJob, "0.00"),
+        ("Ideal drain, sum of delays / workers (s)", x => x.IdealDrainSeconds, "0.0"),
+        ("Idle worker slots (average)", x => x.AverageIdleWorkerSlots, "0.0"),
     ];
 
-    private static readonly string[] EngineOrder = ["warp", "warp-dispatcher", "hangfire"];
+    private static readonly string[] EngineOrder = ["warp-dispatcher", "warp-dispatcher-prefetch", "warp-single-worker", "hangfire"];
 
     public static string Render(List<RunResult> results)
     {
@@ -44,13 +52,19 @@ internal static class Summary
                 .OrderBy(x => Array.IndexOf(EngineOrder, x.Key) is var i && i < 0 ? int.MaxValue : i)
                 .ToList();
             var jobs = job.First().Jobs;
-            text.AppendLine(CultureInfo.InvariantCulture, $"### {(string.Equals(job.Key, "work", StringComparison.Ordinal) ? "Jobs that read and update a row" : "Empty jobs")} · {jobs:N0} jobs");
+            text.AppendLine(CultureInfo.InvariantCulture, $"### {job.Key switch { "work" => "Jobs that read and update a row", "jitter" => "Jobs that wait 10 to 300 ms", _ => "Empty jobs" }} · {jobs:N0} jobs");
             text.AppendLine();
             text.AppendLine("| | " + string.Join(" | ", engines.Select(x => $"{Label(x.Key)} ({x.Count()} runs)")) + " |");
             text.AppendLine("|---|" + string.Concat(engines.Select(_ => "---:|")));
             foreach (var (label, value, format) in Rows)
             {
-                text.AppendLine($"| {label} | " + string.Join(" | ", engines.Select(x => Cell([.. x.Select(value)], format))) + " |");
+                // A row no engine measured for this job kind (the claim and jitter rows) is left out.
+                if (engines.All(x => x.All(y => value(y) is null)))
+                {
+                    continue;
+                }
+
+                text.AppendLine($"| {label} | " + string.Join(" | ", engines.Select(x => Cell([.. x.Select(value).OfType<double>()], format))) + " |");
             }
 
             text.AppendLine();
@@ -61,14 +75,20 @@ internal static class Summary
 
     private static string Label(string engine) => engine switch
     {
-        "warp" => "Warp (default)",
-        "warp-dispatcher" => "Warp (dispatcher)",
+        "warp-dispatcher" => "Warp (dispatcher, the default)",
+        "warp-single-worker" => "Warp (single-worker)",
+        "warp-dispatcher-prefetch" => "Warp (dispatcher, PrefetchCount = WorkerCount)",
         "hangfire" => "Hangfire",
         _ => engine,
     };
 
     private static string Cell(List<double> values, string format)
     {
+        if (values.Count == 0)
+        {
+            return "—";
+        }
+
         List<double> sorted = [.. values.Order()];
         var median = sorted.Count % 2 == 1 ? sorted[sorted.Count / 2] : (sorted[(sorted.Count / 2) - 1] + sorted[sorted.Count / 2]) / 2;
         var text = median.ToString(format, CultureInfo.InvariantCulture);

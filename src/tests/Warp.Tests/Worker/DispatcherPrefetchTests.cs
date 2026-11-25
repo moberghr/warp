@@ -43,16 +43,16 @@ public abstract class DispatcherPrefetchTestsBase : IntegrationTestBase
         processing.ShouldBe(4);
     }
 
-    // The back-compat contract: an UNSET PrefetchCount buffers WorkerCount — the depth dispatcher mode
-    // has always claimed ahead. Every other test here sets the knob explicitly, so without this one the
-    // null-coalescing default could regress to 0 (or anything else) and the suite would stay green.
+    // The default contract (8.0): an UNSET PrefetchCount claims nothing ahead (before 8.0 it buffered
+    // WorkerCount). Every other test here sets the knob explicitly, so without this one the
+    // null-coalescing default could drift and the suite would stay green.
     [TimedFact]
-    public async Task DispatcherMode_WithPrefetchUnset_BuffersWorkerCountJobs()
+    public async Task DispatcherMode_WithPrefetchUnset_ClaimsOnlyWhatWorkersCanStart()
     {
         var processing = await RunAndCountProcessingAsync(prefetchCount: null);
 
-        // 2 executing + WorkerCount (2) buffered — the historical depth.
-        processing.ShouldBe(4);
+        // 2 workers pinned in the handler, nothing claimed speculatively.
+        processing.ShouldBe(2);
     }
 
     // Regression pin for the double-execution bug the ownership guard closed. A prefetched job sits in

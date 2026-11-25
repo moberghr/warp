@@ -47,6 +47,9 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
             {
                 config.WorkerCount = 1;
 
+                // The fault is injected into single-worker finalization (EF SaveChanges); dispatcher completions are one SQL statement.
+                config.UseDispatcher = false;
+
                 // The background flusher would otherwise drain the buffer before the assertion reads it.
                 config.CounterBufferFlushInterval = TimeSpan.FromMinutes(10);
             },
@@ -86,7 +89,16 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task CompletionSaveFails_ReFinalizedAsFailed_IsACleanFailedRow()
     {
-        await using var server = await WarpTestServer.StartAsync(Fixture, config => config.WorkerCount = 1, FailTheFirstCompletion);
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            config =>
+            {
+                config.WorkerCount = 1;
+
+                // The fault is injected into single-worker finalization (EF SaveChanges); dispatcher completions are one SQL statement.
+                config.UseDispatcher = false;
+            },
+            FailTheFirstCompletion);
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new UnitRequest());
         await publisher.SaveChangesAsync();
@@ -102,7 +114,16 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task CompletionCommitFails_ReFinalizedAsFailed_IsACleanFailedRow()
     {
-        await using var server = await WarpTestServer.StartAsync(Fixture, config => config.WorkerCount = 1, FailTheFirstCompletionCommit);
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            config =>
+            {
+                config.WorkerCount = 1;
+
+                // The fault is injected into single-worker finalization (EF SaveChanges); dispatcher completions are one SQL statement.
+                config.UseDispatcher = false;
+            },
+            FailTheFirstCompletionCommit);
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new UnitRequest());
         await publisher.SaveChangesAsync();
@@ -119,7 +140,16 @@ public abstract class FailedFinalizationCounterTestsBase : IntegrationTestBase
     [TimedFact]
     public async Task CompletionCommitFails_ReFinalizedAsFailed_KeepsTheProcessingRowAndTheHandlersLogLines()
     {
-        await using var server = await WarpTestServer.StartAsync(Fixture, config => config.WorkerCount = 1, FailTheFirstCompletionCommit);
+        await using var server = await WarpTestServer.StartAsync(
+            Fixture,
+            config =>
+            {
+                config.WorkerCount = 1;
+
+                // The fault is injected into single-worker finalization (EF SaveChanges); dispatcher completions are one SQL statement.
+                config.UseDispatcher = false;
+            },
+            FailTheFirstCompletionCommit);
         var publisher = server.CreatePublisher();
         var jobId = await publisher.Enqueue(new LoggingRequest());
         await publisher.SaveChangesAsync();

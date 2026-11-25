@@ -862,6 +862,10 @@ public class PostgresServerFixture : IAsyncDisposable
                     // directly (SignalJobEnqueued, rule 6.3), so a drain does not wait out
                     // PollingInterval.
                     config.UseDispatcher = useDispatcher;
+
+                    // Pinned to the depth 7.7 buffered (unset meant WorkerCount until 8.0 made it 0), so the
+                    // perf workflow's base-vs-head comparison measures the same claim shape on both sides.
+                    config.PrefetchCount = workerCount;
                     config.CompletionBatchSize = completionBatchSize;
                     config.CompletionFlushInterval = completionFlushInterval ?? TimeSpan.FromMilliseconds(100);
 
