@@ -13,13 +13,15 @@ Both libraries were given the same jobs, the same server and worker count and th
 |---|---|
 | Machine | GitHub `ubuntu-24.04` runner (4 vCPUs). PostgreSQL 18.7 in a container on the same machine, capped at 2 CPUs and 4 GB. |
 | Servers and workers | 1 server × 10 workers, for every arm |
-| Warp (dispatcher, default) | `AddWarpServer` with `UsePostgreSql()` and `WorkerCount = 10`, every other setting at its default. Dispatcher mode is the default since 8.0: one claim serves the worker group, and completions are written in batches. |
+| Warp (dispatcher, default) | `AddWarpServer` with `UsePostgreSql()` and `WorkerCount = 10` and `PrefetchCount = 10`, every other setting at its default. Dispatcher mode is the default since 8.0: one claim serves the worker group, and completions are written in batches. |
 | Warp (single-worker) | The same with `UseDispatcher = false`: each worker claims, runs and completes its own job. This was the default before 8.0. |
 | Hangfire | Hangfire 1.8.25 with Hangfire.PostgreSql 1.21.1, default filters, `WorkerCount = 10`, and `QueuePollInterval` lowered from 15 s to 1 s. |
 | Jobs | 20,000 per run, enqueued before the server starts. A warm-up of 200 jobs runs first, on servers of its own. |
 | Runs | 3 per arm, a fresh database each, the arms' order rotating between rounds. Each cell is the median; the range is in brackets. |
 
 Measured in [run 45617194190](https://github.com/moberghr/warp/actions/runs/45617194190) on 25 November 2026, on the 8.0 branch before release. That run still had single-worker mode as the default and labels its arms `warp` (single-worker) and `warp-dispatcher`; the harness now names them `warp-single-worker` and `warp-dispatcher`.
+
+That run also prefetched: `PrefetchCount` unset meant `WorkerCount` then, and from 8.0 it means 0 (no prefetch). With the 8.0 default an empty job costs about 0.46 statements instead of 0.22 ([run 45637906325](https://github.com/moberghr/warp/actions/runs/45637906325)), and one server drains empty jobs about 16% slower. Jobs that do real work are not affected: with jobs of 10 to 300 ms, prefetch on and off drained within 1% of each other ([run 45637900742](https://github.com/moberghr/warp/actions/runs/45637900742)).
 
 ## Empty jobs
 
