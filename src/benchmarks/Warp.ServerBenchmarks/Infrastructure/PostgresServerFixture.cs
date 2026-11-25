@@ -571,31 +571,7 @@ public class PostgresServerFixture : IAsyncDisposable
     /// Deletes the jobs created after <paramref name="createdAfter"/>, or every job when it is null, so a
     /// scenario that seeds a standing history can clear each iteration's jobs without deleting it.
     /// </summary>
-    public async Task CleanJobTables(DateTime? createdAfter)
-    {
-        // The server keeps running between iterations: its counter flusher inserts Counter rows and the
-        // aggregator folds and deletes them, so a whole-table delete here can be chosen as a deadlock victim
-        // (seen on SQL Server, error 1205). Uncaught, it failed the iteration and BenchmarkDotNet reported the
-        // whole case as NA. Each delete commits on its own, so running the cleanup again is safe.
-        const int maxAttempts = 5;
-        var attempt = 1;
-        var cleaned = false;
-        while (!cleaned)
-        {
-            try
-            {
-                await DeleteJobRowsAsync(createdAfter);
-                cleaned = true;
-            }
-            catch (Exception ex) when (attempt < maxAttempts && IsDeadlock(ex))
-            {
-                Console.WriteLine($"// Harness cleanup was a deadlock victim (attempt {attempt}); running it again.");
-                attempt++;
-            }
-        }
-    }
-
-    private Task DeleteJobRowsAsync(DateTime? createdAfter) => HarnessAsync(async ctx =>
+    public Task CleanJobTables(DateTime? createdAfter) => HarnessAsync(async ctx =>
     {
         // Through EF rather than raw SQL, because the two providers do not name these tables the same
         // way: PostgreSQL runs under the snake_case convention and SQL Server keeps Warp's default. The
@@ -620,6 +596,16 @@ public class PostgresServerFixture : IAsyncDisposable
         return true;
     });
 
+    private async Task<T> RunHarnessAsync<T>(Func<TestContext, Task<T>> work)
+    {
+        using var harness = Harness.Begin();
+        await using var scope = Host.Services.CreateAsyncScope();
+        var context = scope.ServiceProvider.GetRequiredService<TestContext>();
+        context.Database.SetConnectionString(_harnessConnectionString);
+
+        return await work(context);
+    }
+
     private static bool IsDeadlock(Exception exception)
     {
         for (var current = exception; current is not null; current = current.InnerException)
@@ -637,15 +623,30 @@ public class PostgresServerFixture : IAsyncDisposable
     /// Runs harness work (<see cref="Harness"/>) against the benchmark database: on a context of its own, on the
     /// harness's connection, inside a harness scope, so none of it is reported as Warp's. Each statement it sends
     /// must carry <c>TagWith(Harness.Tag)</c> for PostgreSQL to tell it apart.
+    /// <para>
+    /// Retried when the database picks it as a deadlock victim. The server keeps running beside it (its counter
+    /// flusher, aggregator and workers hold locks the harness's whole-table reads and deletes run into), and on
+    /// SQL Server under locking read committed a drain poll or a cleanup delete was chosen as the victim:
+    /// uncaught, it failed the iteration or the setup and BenchmarkDotNet reported the case as NA. Harness work
+    /// reads, or deletes with statements that each commit on their own, so running it again is safe.
+    /// </para>
     /// </summary>
     public async Task<T> HarnessAsync<T>(Func<TestContext, Task<T>> work)
     {
-        using var harness = Harness.Begin();
-        await using var scope = Host.Services.CreateAsyncScope();
-        var context = scope.ServiceProvider.GetRequiredService<TestContext>();
-        context.Database.SetConnectionString(_harnessConnectionString);
-
-        return await work(context);
+        const int maxAttempts = 5;
+        var attempt = 1;
+        while (true)
+        {
+            try
+            {
+                return await RunHarnessAsync(work);
+            }
+            catch (Exception ex) when (attempt < maxAttempts && IsDeadlock(ex))
+            {
+                Console.WriteLine($"// Harness work was a deadlock victim (attempt {attempt}); running it again.");
+                attempt++;
+            }
+        }
     }
 
     /// <summary>
