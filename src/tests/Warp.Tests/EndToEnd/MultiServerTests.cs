@@ -39,6 +39,9 @@ public abstract class MultiServerTestsBase : IntegrationTestBase
         void WithBarrier(WarpServerBuilder<TestContext> cfg)
         {
             Configure3Workers(cfg);
+
+            // Distinct CurrentWorkerId per running job is single-worker semantics; a dispatcher group shares one (§6.12).
+            cfg.UseDispatcher = false;
             cfg.Services.AddSingleton(barrier);
         }
 

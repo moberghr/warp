@@ -30,7 +30,12 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
         // proves the claim semantics directly.
         var barrier = new BarrierSignal();
 
-        await using var server = await WarpTestServer.StartAsync(Fixture, cfg => cfg.Services.AddSingleton(barrier));
+        await using var server = await WarpTestServer.StartAsync(Fixture, cfg =>
+        {
+            // Distinct CurrentWorkerId per running job is single-worker semantics; a dispatcher group shares one (§6.12).
+            cfg.UseDispatcher = false;
+            cfg.Services.AddSingleton(barrier);
+        });
         var publisher = server.CreatePublisher();
         var job1Id = await publisher.Enqueue(new BarrierRequest());
         var job2Id = await publisher.Enqueue(new BarrierRequest());
@@ -125,7 +130,12 @@ public abstract class ConcurrencyIntegrationTestsBase : IntegrationTestBase
         // surfaces was the previous pattern; this version forces concurrency with N=2.
         var barrier = new BarrierSignal();
 
-        await using var server = await WarpTestServer.StartAsync(Fixture, cfg => cfg.Services.AddSingleton(barrier));
+        await using var server = await WarpTestServer.StartAsync(Fixture, cfg =>
+        {
+            // Distinct CurrentWorkerId per running job is single-worker semantics; a dispatcher group shares one (§6.12).
+            cfg.UseDispatcher = false;
+            cfg.Services.AddSingleton(barrier);
+        });
         var publisher = server.CreatePublisher();
         var msg1 = await publisher.Publish(new BarrierMessage());
         var msg2 = await publisher.Publish(new BarrierMessage());
