@@ -381,14 +381,16 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
     }
 
     [TimedFact]
-    public async Task ClaimClusterTasks_ServerFromBeforeTheLeaseAlive_ReportsIt()
+    public async Task ClaimClusterTasks_ServerFromBeforeTheLeaseWithAnOldHeartbeat_IsAliveUntilItsRowIsGone()
     {
-        // A live server without a coordination version still takes each task's old lock; newer servers
-        // must take it too until it is gone (rule 6.23). Liveness is judged on the database clock.
+        // A server without a coordination version still takes each task's old lock; newer servers must take
+        // it too until it is gone (rule 6.23). It writes its heartbeat on its OWN clock, so a database running
+        // ahead of the hosts reads a live server's heartbeat as old: the row existing is what counts, never
+        // its age.
         await SeedAsync(new ClusterTask { Name = "a", IntervalSeconds = 10, NextRunAt = LongAgo });
         await using (var ctx = _fixture.CreateContext())
         {
-            ctx.Set<Server>().Add(new Server { Id = Guid.NewGuid(), StartedTime = DateTime.UtcNow, LastHeartbeatTime = DateTime.UtcNow, CoordinationVersion = null });
+            ctx.Set<Server>().Add(new Server { Id = Guid.NewGuid(), StartedTime = LongAgo, LastHeartbeatTime = LongAgo, CoordinationVersion = null });
             ctx.Set<Server>().Add(new Server { Id = Guid.NewGuid(), StartedTime = LongAgo, LastHeartbeatTime = FarAhead, CoordinationVersion = ServerCoordination.LeaseVersion });
             await ctx.SaveChangesAsync(Ct);
         }
@@ -399,7 +401,7 @@ public abstract class ClusterTaskQueriesTestsBase : IAsyncLifetime
         {
             await ctx.Set<Server>()
                 .Where(x => x.CoordinationVersion == null)
-                .ExecuteUpdateAsync(x => x.SetProperty(y => y.LastHeartbeatTime, LongAgo), Ct);
+                .ExecuteDeleteAsync(Ct);
         }
 
         var gone = await ClaimAsync(["a"], Guid.NewGuid());

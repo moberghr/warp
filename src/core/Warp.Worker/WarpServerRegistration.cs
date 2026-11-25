@@ -250,15 +250,13 @@ public class WarpServerRegistration<TContext> : IHostedService
         }
     }
 
-    // DateTime.UtcNow is translated to the database's clock (GETUTCDATE() / now()), as the claim compares; the window
-    // is capped like the claim's on SQL Server. REMOVE in the release after 8.x, with LegacyServerPresence.
-    private async Task<bool> LegacyServersAliveAsync(DbContext context, CancellationToken cancellationToken)
+    // A row without CoordinationVersion is a server from before 8.0, alive for as long as the row exists: its
+    // heartbeat is on its own clock, so it is not compared with anything here (the claim asks the same way).
+    // REMOVE in the release after 8.x, with LegacyServerPresence.
+    private static async Task<bool> LegacyServersAliveAsync(DbContext context, CancellationToken cancellationToken)
     {
-        var windowSeconds = -Math.Min(_configuration.HealthCheckTimeout.TotalMilliseconds, int.MaxValue) / 1000;
-
         return await context.Set<Server>()
             .Where(x => x.CoordinationVersion == null)
-            .Where(x => x.LastHeartbeatTime >= DateTime.UtcNow.AddSeconds(windowSeconds))
             .AnyAsync(cancellationToken);
     }
 }

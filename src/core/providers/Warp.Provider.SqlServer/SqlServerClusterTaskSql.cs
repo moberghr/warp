@@ -80,7 +80,10 @@ internal sealed class SqlServerClusterTaskSql
         // as above: the milliseconds of an interval longer than 24.8 days overflow DATEADD's int.
         var renewMs = $"CAST(ROUND((CASE WHEN t.{interval} IS NULL OR t.{interval} < 1 THEN 1 ELSE t.{interval} END) * 1000, 0) AS bigint)";
         var renewedUntil = $"DATEADD(MILLISECOND, CAST({renewMs} % 86400000 AS int), DATEADD(DAY, CAST({renewMs} / 86400000 AS int), @now))";
-        var legacy = $"CASE WHEN EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL AND s.{heartbeat} >= DATEADD(MILLISECOND, -@liveWindowMs, @now)) THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END";
+
+        // No heartbeat comparison: a server from before 8.0 writes its heartbeat on its own clock, so its row
+        // existing is what counts (see the PostgreSQL statement).
+        var legacy = $"CASE WHEN EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL) THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END";
         var others = $"CASE WHEN EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{serverId} <> @server AND s.{heartbeat} >= DATEADD(MILLISECOND, -@liveWindowMs, @now)) THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END";
         const string Names = "SELECT value FROM STRING_SPLIT(@names, NCHAR(31))";
 

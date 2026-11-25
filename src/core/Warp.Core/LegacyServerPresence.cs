@@ -1,8 +1,8 @@
 namespace Warp.Core;
 
 /// <summary>
-/// Whether a server from before 8.0 (a <c>Server</c> row without <c>CoordinationVersion</c> and a live
-/// heartbeat) is in the cluster, as server registration and then every cluster-task claim report it (rules
+/// Whether a server from before 8.0 (a <c>Server</c> row without <c>CoordinationVersion</c>; its heartbeat is on
+/// its own clock and is not compared, so the row counts until <c>ServerCleanup</c> removes it) is in the cluster, as server registration and then every cluster-task claim report it (rules
 /// 2.20, 6.23). Such a server writes and compares its OWN clock, so while one is alive an 8.0 server does the
 /// same: <see cref="DatabaseClock"/> applies no correction and the heartbeat writes the server's own time, as
 /// 7.7 did. A cluster whose hosts disagree with the database is then no worse than a pure 7.7 one; mixing the

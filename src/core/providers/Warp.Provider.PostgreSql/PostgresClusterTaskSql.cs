@@ -68,7 +68,12 @@ internal sealed class PostgresClusterTaskSql
         var nextRun = $"to_timestamp((floor((EXTRACT(EPOCH FROM now()) + {grid} / 2) / {grid}) + 1) * {grid})";
         var leaseUntil = $"GREATEST({nextRun}, now() + interval '1 second')";
         var leaseFor = $"make_interval(secs => GREATEST(t.{interval}, 1))";
-        var legacy = $"EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL AND s.{heartbeat} >= now() - make_interval(secs => @liveWindow))";
+
+        // A server from before 8.0 counts as alive for as long as its row exists, with NO comparison of its
+        // heartbeat: it writes that on its own clock, and judged against now() a database running ahead of the
+        // hosts by a health-check timeout made every 7.7 server look dead while it ran. ServerCleanup removes the
+        // row of one that really died (on the hosts' clock while this is true, as 7.7 did).
+        var legacy = $"EXISTS (SELECT 1 FROM {serverTable} s WHERE s.{coordination} IS NULL)";
 
         // Whether any other server is alive: only another server can claim a task this one leaves leased, so a
         // lone server keeps the lease an idle run of a signal task would otherwise release (rule 6.23).
