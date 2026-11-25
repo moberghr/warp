@@ -96,8 +96,11 @@ public class TwoServersUnderLoadBenchmark
         {
             InstrumentPublished = (instrument, listener) =>
             {
+                // The dispatcher records a claim's size only while claim.duration is listened to (one switch
+                // for both), so both are enabled; only the size has a callback.
                 if (string.Equals(instrument.Meter.Name, "Warp.Diagnostics.Dispatcher", StringComparison.Ordinal)
-                    && string.Equals(instrument.Name, "warp.dispatcher.claim.size", StringComparison.Ordinal))
+                    && (string.Equals(instrument.Name, "warp.dispatcher.claim.size", StringComparison.Ordinal)
+                        || string.Equals(instrument.Name, "warp.dispatcher.claim.duration", StringComparison.Ordinal)))
                 {
                     listener.EnableMeasurementEvents(instrument);
                 }

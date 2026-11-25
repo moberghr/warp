@@ -16,12 +16,19 @@ echo "starting $IMAGE"
 
 docker rm -f warpbench > /dev/null 2>&1 || true
 
+# full_page_writes=off: the first change to a page after a checkpoint writes the whole page into the WAL, and
+# how many such pages a run touches depends on where PostgreSQL's checkpoints fall, not on Warp. Runs of
+# identical work read up to 16% apart in WAL/job (WAL FPI/job told them apart exactly) and failed the WAL
+# gate. Off, WAL/job counts only the changes Warp makes. Fine for a throwaway benchmark container; never in
+# production, where it risks torn pages after a crash.
+
 docker run -d --name warpbench -p 5432:5432 \
   -e POSTGRES_PASSWORD=postgres \
   "$IMAGE" \
   -c shared_preload_libraries=pg_stat_statements \
   -c pg_stat_statements.track=top \
-  -c pg_stat_statements.track_planning=on
+  -c pg_stat_statements.track_planning=on \
+  -c full_page_writes=off
 
 # Not pg_isready. The image initialises on a TEMPORARY server, then stops it and starts the real one,
 # and pg_isready answers yes for the temporary one: a CREATE EXTENSION sent then was cut off by the

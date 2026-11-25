@@ -54,14 +54,17 @@ public class PostgresServerFixture : IAsyncDisposable
 
             // Loaded at startup so statement counts can be read. shared_preload_libraries cannot be
             // switched on later; it needs a restart. Planning time is tracked too, so "DB ms" is execution +
-            // planning like CI's (start-bench-postgres.sh).
+            // planning like CI's (start-bench-postgres.sh), and full-page writes are off as there, so WAL/job
+            // does not depend on where checkpoints fall.
             .WithCommand(
                 "-c",
                 "shared_preload_libraries=pg_stat_statements",
                 "-c",
                 "pg_stat_statements.track=top",
                 "-c",
-                "pg_stat_statements.track_planning=on")
+                "pg_stat_statements.track_planning=on",
+                "-c",
+                "full_page_writes=off")
             .Build()
         : null;
 
@@ -590,8 +593,6 @@ public class PostgresServerFixture : IAsyncDisposable
                 attempt++;
             }
         }
-
-        await CheckpointAsync();
     }
 
     private Task DeleteJobRowsAsync(DateTime? createdAfter) => HarnessAsync(async ctx =>
@@ -618,28 +619,6 @@ public class PostgresServerFixture : IAsyncDisposable
 
         return true;
     });
-
-    /// <summary>
-    /// On PostgreSQL, a checkpoint before each measured iteration. The first change to a page after a
-    /// checkpoint writes the whole page into the WAL, so WAL/job depended on whether one of PostgreSQL's own
-    /// checkpoints (every five minutes) happened to fall inside an iteration: identical work read 12% apart
-    /// between runs and failed the WAL gate. Forcing one here also restarts that five-minute timer, so every
-    /// iteration starts from a checkpoint and none lands inside one. Harness work, left out of Warp's numbers.
-    /// </summary>
-    private Task CheckpointAsync()
-    {
-        if (_provider == BenchmarkProvider.SqlServer)
-        {
-            return Task.CompletedTask;
-        }
-
-        return HarnessAsync(async ctx =>
-        {
-            await ctx.Database.ExecuteSqlRawAsync("-- " + Harness.Tag + "\nCHECKPOINT");
-
-            return true;
-        });
-    }
 
     private static bool IsDeadlock(Exception exception)
     {

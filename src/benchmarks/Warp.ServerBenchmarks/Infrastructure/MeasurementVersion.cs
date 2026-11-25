@@ -34,9 +34,8 @@ public static class MeasurementVersion
     //    time like every other window.
     //  - Results carry the database versions they were measured on.
     //
-    // 3: PostgreSQL takes a checkpoint before every measured iteration (PostgresServerFixture.CleanJobTables), so
-    // each iteration's first change to a page writes a full-page image into the WAL. WAL/job no longer depends on
-    // whether PostgreSQL's own checkpoint fell inside the window, and reads higher than on 2. A WAL FPI/job column
-    // reports that part.
+    // 3: the benchmark PostgreSQL servers run with full_page_writes off, so WAL/job no longer includes the whole
+    // pages written after a checkpoint (it swung up to 16% between runs of identical work with them). WAL/job
+    // reads lower than on 2. WAL FPI/job is reported and should read 0.
     public const int Current = 3;
 }

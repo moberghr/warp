@@ -11,7 +11,7 @@ Postgres and nothing sits in between.
 ```sh
 docker network create warplab
 docker run -d --network warplab --name warppg -e POSTGRES_PASSWORD=postgres postgres:latest \
-  -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=top
+  -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=top -c full_page_writes=off
 
 dotnet publish src/benchmarks/Warp.ServerBenchmarks/Warp.ServerBenchmarks.csproj \
   -c Release -r linux-x64 --self-contained false -o artifacts/lab-linux

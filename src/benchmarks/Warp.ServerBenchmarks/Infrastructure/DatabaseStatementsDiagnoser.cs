@@ -195,7 +195,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
             yield return new Metric(PerJobDescriptor.WalBytes, delta.WalBytes / (double)delta.Jobs);
 
             // The part of the WAL that is whole pages, written for the first change to each page after a
-            // checkpoint. It is what moves WAL/job between runs of identical work, so it is reported beside it.
+            // checkpoint. The benchmark servers run with full_page_writes off (start-bench-postgres.sh), so this
+            // reads 0; anything else means a server measured with them on, whose WAL/job swings with checkpoints.
             yield return new Metric(PerJobDescriptor.WalFullPageImages, delta.WalFullPageImages / (double)delta.Jobs);
         }
 
