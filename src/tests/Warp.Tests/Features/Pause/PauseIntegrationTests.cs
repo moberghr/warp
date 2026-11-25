@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
@@ -194,34 +193,5 @@ public abstract class PauseIntegrationTestsBase : IntegrationTestBase
 
         var job = await server.GetJob(jobId);
         job.CurrentState.ShouldBe(State.Completed);
-    }
-
-    // Tells the worker loops apart without touching the worker: each loop is one async flow, and an AsyncLocal
-    // set inside a synchronous call (IsPaused) stays set in the caller's flow, so a loop's first check gives it
-    // an identity that its later checks see again. A loop that last answered "not paused" may be inside a claim.
-    private sealed class WorkerLoopPauseTracker : PauseStateHolder, IDisposable
-    {
-        private static readonly AsyncLocal<object?> Loop = new();
-        private readonly ConcurrentDictionary<object, bool> _lastAnswer = new(ReferenceEqualityComparer.Instance);
-        private readonly SemaphoreSlim _checked = new(0);
-
-        public override bool IsPaused(Guid? workerGroupId)
-        {
-            var paused = base.IsPaused(workerGroupId);
-            _lastAnswer[Loop.Value ??= new object()] = paused;
-            _checked.Release();
-
-            return paused;
-        }
-
-        public async Task WaitUntilEveryLoopSawPauseAsync(CancellationToken ct)
-        {
-            while (_lastAnswer.Values.Any(x => !x))
-            {
-                await _checked.WaitAsync(ct);
-            }
-        }
-
-        public void Dispose() => _checked.Dispose();
     }
 }
