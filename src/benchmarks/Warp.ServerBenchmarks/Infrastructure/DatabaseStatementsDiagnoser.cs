@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using BenchmarkDotNet.Analysers;
@@ -69,6 +70,8 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
     private Reading? _before;
     private long _beforeTimestamp;
     private PostgresLockSampler? _lockSampler;
+    private ConnectionSampler? _connectionSampler;
+    private readonly ConcurrentDictionary<BenchmarkCase, ConnectionSampler.Result> _connections = new();
 
     public IEnumerable<string> Ids => ["DatabaseStatements"];
 
@@ -114,6 +117,7 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 _before = ReadCounters(provider, countsJobs);
                 _beforeTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                 _lockSampler = provider == BenchmarkProvider.PostgreSql ? PostgresLockSampler.Start(PostgresConnectionString!) : null;
+                _connectionSampler = ConnectionSampler.Start(provider, ConnectionStringFor(provider)!);
                 break;
 
             case HostSignal.AfterActualRun:
@@ -122,6 +126,15 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
                 // cumulative total, or negative.
                 var lockWaitMs = _lockSampler?.Stop();
                 _lockSampler = null;
+                if (_connectionSampler?.Stop() is { } connections)
+                {
+                    _connections[parameters.BenchmarkCase] = connections;
+                    Console.WriteLine(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"// Connections in the window of {parameters.BenchmarkCase.DisplayInfo}: peak {connections.Peak}, average open {connections.AverageOpen:0.0}, average idle {connections.AverageIdle:0.0}; peak per pool: {string.Join(", ", connections.PeakByPool.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => $"{x.Key} {x.Value}"))}"));
+                }
+
+                _connectionSampler = null;
                 var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(_beforeTimestamp);
 
                 if (_before is not { } before || ReadCounters(provider, countsJobs: false) is not { } after)
@@ -154,6 +167,13 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         }
 
         _client.TryGetValue(results.BenchmarkCase, out var client);
+
+        // Connections are a level, not a count of work: neither per job nor per second.
+        if (_connections.TryGetValue(results.BenchmarkCase, out var connections))
+        {
+            yield return new Metric(PerJobDescriptor.PeakConnections, connections.Peak);
+            yield return new Metric(PerJobDescriptor.IdleConnections, connections.AverageIdle);
+        }
 
         // An idle server's cost is per second, not per job. Timed between the same two readings the counters
         // came from, so both halves cover one window.
@@ -718,6 +738,10 @@ public class DatabaseStatementsDiagnoser : IDiagnoser
         public static readonly PerJobDescriptor WalBytes = new("WalBytesPerJob", "WAL/job", "Write-ahead log bytes per job (PostgreSQL)", "B");
 
         public static readonly PerJobDescriptor WalFullPageImages = new("WalFullPageImagesPerJob", "WAL FPI/job", "Full-page images written to the WAL per job, the first change to each page after a checkpoint (PostgreSQL)", "fpi");
+
+        public static readonly PerJobDescriptor PeakConnections = new("PeakConnections", "Peak conns", "The most database connections Warp had open at one moment in the window (sampled every 50 ms)", "conn");
+
+        public static readonly PerJobDescriptor IdleConnections = new("IdleConnections", "Idle conns", "Connections Warp kept open doing nothing, averaged over the window (sampled every 50 ms)", "conn");
 
         public static readonly PerJobDescriptor JobRows = new("JobRows", "Job rows", "Job rows written in the measured window, the per-job columns' divisor", "rows");
 
