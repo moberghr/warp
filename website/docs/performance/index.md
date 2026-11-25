@@ -53,7 +53,7 @@ builder.Services.AddWarpServer<AppDbContext>(opt =>
 
 | Setting | What it changes | Cost |
 |---|---|---|
-| [`UseDispatcher`](../operations/configuration.md#dispatcher-mode) (default `true`) | One claim serves the whole worker group, and completions are written in batches. Set it to `false` for single-worker mode, where each worker claims and completes its own job. | A finished job shows as `Processing` until its batch is written (up to 100 ms by default). After a crash, jobs whose completion was still buffered run again. |
+| [`UseDispatcher`](../operations/configuration.md#dispatcher-mode) (default `true`) | One claim serves the whole worker group, and completions are written in batches. Set it to `false` for single-worker mode, where each worker claims and completes its own job. | A finished job shows as `Processing` until its batch is written (up to 100 ms by default). After a crash, jobs whose completion was still buffered run again. Prefetched jobs wait behind their own server's running jobs even when another server is idle: for long jobs across several servers, set `PrefetchCount = 0`. |
 | [`UseDatabasePush()`](../features/db-push.md) | Workers wake within about 50 ms of an enqueue, on any server. | Needs a session-mode connection on PostgreSQL, and Service Broker on SQL Server. |
 | [`CompletionBatchSize`](../features/batched-completions.md) | How many completions one statement writes (default 50). | Larger batches lock more rows per transaction. |
 | [`AddWorkerGroup`](../operations/configuration.md#worker-groups) | Separate worker pools per queue, so a bulk queue cannot starve a critical one. | More groups to size. |

@@ -71,7 +71,7 @@ Saga handlers are not affected: the saga proxy still saves for them.
 
 - A finished job shows `Processing` until its batch is written, up to `CompletionFlushInterval` (100 ms by default).
 - After a crash, jobs whose completion was still buffered run again: `StaleJobRecovery` requeues them unless they are `[NoRestart]`. Handlers must already be safe to run more than once; this widens the window.
-- A job claimed ahead of a free worker (`PrefetchCount`) waits for crash recovery if its server dies before running it.
+- A job claimed ahead of a free worker (prefetch, on by default: `PrefetchCount` is `WorkerCount` unless set) is `Processing` on the server that claimed it. It waits behind that server's running jobs, even while another server has idle workers, and if the server dies before running it, it waits for crash recovery. For long-running jobs across several servers, set `PrefetchCount = 0`, globally or on that worker group.
 
 To keep 7.x's single-worker mode:
 
