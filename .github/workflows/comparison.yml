@@ -29,12 +29,12 @@ on:
         default: '3'
         type: string
       engines:
-        description: 'Arms: warp-dispatcher (UseDispatcher = true, the default), warp-single-worker (UseDispatcher = false), hangfire'
+        description: 'Arms: warp-dispatcher (the default), warp-dispatcher-prefetch (PrefetchCount = WorkerCount), warp-single-worker (UseDispatcher = false), hangfire'
         required: false
         default: 'warp-dispatcher warp-single-worker hangfire'
         type: string
       kinds:
-        description: 'Job kinds: noop (empty job), work (reads and updates one row)'
+        description: 'Job kinds: noop (empty job), work (reads and updates one row), jitter (waits 10 to 300 ms)'
         required: false
         default: 'noop work'
         type: string
