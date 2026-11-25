@@ -139,22 +139,6 @@ public class WebhookAddressGuardTests
     }
 
     [TimedFact]
-    public void PublicAddressesOnly_HostReplacesPrimaryHandlerWithAnotherType_FailsClosed()
-    {
-        // A guard the host asked for must never be dropped silently: a primary handler the guard cannot
-        // attach to fails the client instead of sending unguarded.
-        using var sp = BuildProvider(
-            w => w.PublicAddressesOnly = true,
-            services => services.AddHttpClient(WebhookConstants.AdapterName)
-                .ConfigurePrimaryHttpMessageHandler(() => new StubWebhookHandler(HttpStatusCode.OK)));
-
-        var factory = sp.GetRequiredService<IHttpClientFactory>();
-
-        var ex = Should.Throw<InvalidOperationException>(() => factory.CreateClient(WebhookConstants.AdapterName));
-        ex.Message.ShouldContain("UseSocketsHttpHandler");
-    }
-
-    [TimedFact]
     public async Task PublicAddressesOnly_PrimaryHandlerConfiguredBeforeAddWebhooks_GuardStillApplies()
     {
         // A host that set its primary handler BEFORE AddWebhooks gets it replaced by the guarded

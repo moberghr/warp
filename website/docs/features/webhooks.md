@@ -122,6 +122,15 @@ The executor claims each attempt atomically *before* the HTTP leg and commits th
 
 Duplicate jobs are guarded twice over. First, the sweep skips any candidate that still has a live executor job on the webhooks queue — a delivery whose workers are merely backlogged past the grace is left alone. Second, the guarded `NextAttemptAt` bump and the new executor job commit in **one transaction** — the server task's own — so a fault can never leave a bumped row without its job or a job without its bump, and consecutive sweeps never double-enqueue. Recovery is still at-least-once end to end: the recovered attempt may repeat a POST whose *outcome* was lost — the same delivery guarantee webhooks already carry.
 
+## Redirects are not followed
+
+Since 8.1 the `warp-webhooks` client does **not** follow redirects (`AllowAutoRedirect = false` on Warp's default `SocketsHttpHandler`). A `3xx` is the attempt's response: under the default success codes (any `2xx`) it is a failed attempt, retried per the schedule and recorded with its status code, and the redirect target never receives a request. Why:
+
+- **A redirect can drop the payload.** `301`, `302` and `303` turn the POST into a GET, so the receiver at the new location gets no body and the attempt can still look successful.
+- **Signature headers would be re-sent to the redirect target.** `webhook-id`, `webhook-timestamp`, `webhook-signature` and any custom headers would go to whatever host the `Location` names.
+
+Point the subscription at the final URL instead. If a receiver really needs redirects, configure the client with `UseSocketsHttpHandler((handler, _) => handler.AllowAutoRedirect = true)`: a `SocketsHttpHandler` you configure keeps your choice (with `PublicAddressesOnly` on, every hop still goes through the guard). A primary handler of your own registered with `ConfigurePrimaryHttpMessageHandler` is used as is, with its own `AllowAutoRedirect` (which defaults to `true`).
+
 ## Success codes
 
 By default any 2xx response marks the delivery `Delivered`. Pin `SuccessCodes` when the receiver's contract is narrower — e.g. a receiver that must return `200` and where a `202 Accepted` means "queued, not yet durable" and should be retried:
@@ -168,7 +177,7 @@ It is off by default so local development can send to `localhost`.
 
 **With an HTTP proxy** (an explicit `Proxy`, or the system proxy from `HTTP_PROXY` / `HTTPS_PROXY`), the client connects to the proxy, not to the destination. The guard then checks the proxy's address — a proxy on a private address is refused — and **the proxy must enforce the policy** for the destination itself.
 
-**Configuring the client yourself.** Configure the `warp-webhooks` client with `UseSocketsHttpHandler((handler, _) => ...)`; it composes with the guard. A primary handler you set with `ConfigurePrimaryHttpMessageHandler` before `AddWebhooks` is replaced by the guarded handler, and one set after it that is not a `SocketsHttpHandler` makes the client fail to build, so every attempt fails rather than sending unguarded. A `ConnectCallback` of your own is replaced by the guard.
+**Configuring the client yourself.** Configure the `warp-webhooks` client with `UseSocketsHttpHandler((handler, _) => ...)`; it composes with the guard and every setting you make is kept, except a `ConnectCallback` of your own, which the guard replaces. A primary handler of any other type (for example an `HttpClientHandler` you set with `ConfigurePrimaryHttpMessageHandler` to carry a proxy or client certificates), registered before or after `AddWebhooks`, cannot carry the guard: it is replaced by Warp's default `SocketsHttpHandler` (redirects off) and **its settings are lost**. Warp logs one Warning at startup naming the `warp-webhooks` client and the replaced handler type. Move those settings into `UseSocketsHttpHandler`.
 
 ## Signing
 

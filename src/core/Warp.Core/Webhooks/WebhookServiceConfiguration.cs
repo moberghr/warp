@@ -1,6 +1,5 @@
 using System.Net.Http;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Http;
 
 namespace Warp.Core.Webhooks;
 
@@ -51,40 +50,10 @@ public static class WebhookServiceConfiguration
 
         if (options.PublicAddressesOnly)
         {
-            AddPublicAddressGuard(builder.Services);
+            WebhookHttpClientSetup.AddPublicAddressGuard(builder.Services);
         }
 
         return builder;
-    }
-
-    // Makes the warp-webhooks primary handler a SocketsHttpHandler (composing with a host's own
-    // UseSocketsHttpHandler(...) configuration) and installs the address guard from a PostConfigure action,
-    // which runs after every Configure and so also sees a primary handler a host swapped in later: a
-    // SocketsHttpHandler gets the guard, anything else fails closed — a guard the host asked for must never
-    // be silently dropped. A non-Sockets handler registered BEFORE this call is replaced (guard wins).
-    private static void AddPublicAddressGuard(IServiceCollection services)
-    {
-        services.AddHttpClient(WebhookConstants.AdapterName)
-            .UseSocketsHttpHandler();
-
-        services.PostConfigure<HttpClientFactoryOptions>(
-            WebhookConstants.AdapterName,
-            x => x.HttpMessageHandlerBuilderActions.Add(EnforcePublicAddressGuard));
-    }
-
-    private static void EnforcePublicAddressGuard(HttpMessageHandlerBuilder builder)
-    {
-        if (builder.PrimaryHandler is SocketsHttpHandler sockets)
-        {
-            sockets.ConnectCallback = WebhookAddressGuard.ConnectAsync;
-
-            return;
-        }
-
-        throw new InvalidOperationException(
-            "AddWebhooks(w => w.PublicAddressesOnly = true) needs the \"warp-webhooks\" client's primary handler "
-            + $"to be a SocketsHttpHandler, but it is {builder.PrimaryHandler?.GetType().Name ?? "null"}. Configure "
-            + "the client with UseSocketsHttpHandler(...) instead of ConfigurePrimaryHttpMessageHandler(...).");
     }
 }
 
@@ -114,9 +83,12 @@ public sealed class WarpWebhookOptions
     /// the proxy must enforce the policy for the destination. A proxy on a private address is refused.
     /// </para>
     /// <para>
-    /// Turning it on makes the client's primary handler a <see cref="SocketsHttpHandler"/>. Configure that
-    /// client with <c>UseSocketsHttpHandler(...)</c>; replacing its primary handler with another type fails
-    /// every attempt, and a host <c>ConnectCallback</c> is replaced by the guard.
+    /// The guard needs a <see cref="SocketsHttpHandler"/> primary handler. Configure that client with
+    /// <c>UseSocketsHttpHandler(...)</c>: its settings are kept, except a host <c>ConnectCallback</c>, which the
+    /// guard replaces. A primary handler of another type (for example an <c>HttpClientHandler</c> carrying a
+    /// proxy or client certificates) is replaced by Warp's default handler, and a Warning is logged once.
+    /// Set it on <b>every server that runs a worker</b>: the attempt runs wherever the executor job is
+    /// picked up, and the guard lives on that process's client.
     /// </para>
     /// </summary>
     public bool PublicAddressesOnly { get; set; }

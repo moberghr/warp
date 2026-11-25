@@ -297,7 +297,8 @@ public static class ServiceConfiguration
         // and ASP.NET Core startup in Development (both build the provider with validation on). AddHttpClient is
         // additive/idempotent: a host that configures its own "warp-webhooks" client (resilience, proxy) keeps
         // that config; this only guarantees the factory + named client exist.
-        services.AddHttpClient(WebhookConstants.AdapterName);
+        // The default primary handler is a SocketsHttpHandler with redirects off (8.1): see WebhookHttpClientSetup.
+        WebhookHttpClientSetup.AddDefaultClient(services);
 
         // Recording config for the warp-webhooks adapter every attempt is logged under (§8.20): response
         // bodies always captured (diagnosis), request bodies never (payload is on the row), call-log
